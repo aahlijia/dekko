@@ -1,0 +1,18 @@
+{
+  "name": "lidar",
+  "owner": {
+    "name": "Austin Ahlijian",
+    "email": "aahlijia@gmail.com"
+  },
+  "metadata": {
+    "description": "lidar — static code map generator for Claude Code",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "lidar",
+      "description": "Adds /map: maps every file, function, type, and call edge without spending model tokens on parsing.",
+      "source": "./"
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+[project]
+name = "lidar-tool"
+version = "0.1.0"
+description = "Development environment for the lidar plugin tool"
+requires-python = ">=3.10"
+dependencies = [
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.6",
+    "pathspec>=0.12",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 79
+target-version = "py310"
+indent-width = 4
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "C90", "I", "N", "ANN", "B", "A", "C4", "PERF", "RUF"]
+ignore = ["I001", "ANN401", "B905", "PERF203", "RUF013"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
