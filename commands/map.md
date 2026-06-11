@@ -8,7 +8,7 @@ allowed-tools: Bash(uv run:*)
 
 The mapping tool has already run; its summary is below.
 
-!`uv run --quiet "${CLAUDE_PLUGIN_ROOT}/tool/lidar.py" --root "$(pwd)" $ARGUMENTS`
+!`uv run --quiet "${CLAUDE_PLUGIN_ROOT}/tool/lidar.py" $ARGUMENTS`
 
 ## Your task
 

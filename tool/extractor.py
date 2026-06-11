@@ -1,6 +1,7 @@
 """Tree-sitter extraction: source file → symbols, raw calls, imports."""
 
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -18,12 +19,17 @@ def _text(node: Node) -> str:
     return _WS.sub(" ", raw.decode("utf-8", "replace")).strip()
 
 
+@lru_cache(maxsize=None)
+def _compiled_query(grammar: str, query_str: str) -> Query:
+    """Compile a query once per (grammar, query) pair."""
+    return Query(get_language(grammar), query_str)
+
+
 def _run_query(
     grammar: str, query_str: str, root: Node
 ) -> list[tuple[int, dict[str, list[Node]]]]:
-    """Compile and run a query, returning its matches."""
-    query = Query(get_language(grammar), query_str)
-    return QueryCursor(query).matches(root)
+    """Run a cached compiled query, returning its matches."""
+    return QueryCursor(_compiled_query(grammar, query_str)).matches(root)
 
 
 def _one(caps: dict[str, list[Node]], name: str) -> Node | None:
