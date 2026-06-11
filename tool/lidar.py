@@ -128,19 +128,15 @@ def _summary(
 ) -> str:
     """Build the human-readable run summary."""
     by_lang = Counter(fm.language for fm in files)
-    langs = ", ".join(
-        f"{lang} {n}" 
-        for lang, n 
-        in by_lang.most_common()
-    )
-    
+    langs = ", ".join(f"{lang} {n}" for lang, n in by_lang.most_common())
+
     funcs = sum(
         1
         for fm in files
         for s in fm.symbols
         if s.kind in ("function", "method")
     )
-    
+
     classes = sum(1 for fm in files for s in fm.symbols if s.kind == "class")
     errors = sum(1 for fm in files if fm.error)
     lines = [
@@ -156,16 +152,13 @@ def _summary(
             reasons["parse error"] = errors
 
         detail = ", ".join(
-            f"{reason} {n}"
-            for reason, n
-            in reasons.most_common()
+            f"{reason} {n}" for reason, n in reasons.most_common()
         )
 
         lines.append(f"  skipped: {detail}")
 
     sizes = ", ".join(
-        f"{p.name} ({p.stat().st_size
-        / 1024:.1f} KB)" for p in outputs
+        f"{p.name} ({p.stat().st_size / 1024:.1f} KB)" for p in outputs
     )
 
     lines.append(f"  wrote {sizes}")
