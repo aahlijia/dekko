@@ -44,11 +44,14 @@ lidar map                     # map the current directory
 lidar map /path/to/repo       # map another directory
 lidar map . src               # restrict the map to a subtree
 lidar map --if-stale          # regenerate only when sources changed
+lidar map --full              # ignore the .lidar cache, re-parse everything
 lidar query callers resolve   # who calls resolve?
 lidar query callees main      # what does main call?
 lidar query symbol cli.py:run_map   # signature card for one symbol
 lidar query file walker.py    # symbols defined in a file
 lidar context run_map --budget 1500 # minimal context pack for an edit
+lidar diff                    # symbols changed since the map's commit
+lidar diff main               # ...or since any git rev, with callers
 lidar status                  # is map.json still fresh? (exit 0/1)
 lidar --claude-install        # install the Claude Code plugin
 lidar --version
@@ -56,9 +59,10 @@ lidar --version
 
 | Command | Meaning |
 | --- | --- |
-| `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
+| `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--full` forces a cold rebuild; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
 | `query ACTION TARGET` | `callers`, `callees`, `symbol`, or `file` lookups against map.json |
 | `context TARGET` | Signatures of a symbol's neighborhood (`--hops N`, `--budget TOKENS`) |
+| `diff [REV]` | Symbols added/removed/changed since a git rev (default: the map's commit), each with impacted callers (`--limit`, `--json`) |
 | `status` | Freshness report from the provenance stamp in map.json |
 
 Symbol targets accept a bare `name`, `Class.method`, or the qualified
@@ -69,9 +73,13 @@ fail instead, and `--json` anywhere for structured output. The legacy
 flags `--map [DIR] [SUBPATH]`, `--claude-install`, and `--version`
 keep working as aliases.
 
-Exit codes: `0` success/fresh, `1` failure or stale (`status`),
-`2` usage error, `3` target not found, `4` ambiguous target,
-`5` stale map with `--no-regen`.
+`map` keeps a per-file extraction cache under `.lidar/` (added to your
+`.gitignore` automatically), so re-mapping only re-parses files whose
+contents changed; `--full` ignores it.
+
+Exit codes: `0` success/fresh/no-diff, `1` failure, stale (`status`),
+or differences found (`diff`); `2` usage error, `3` target not found,
+`4` ambiguous target, `5` stale map with `--no-regen`.
 
 ## Plugin usage
 

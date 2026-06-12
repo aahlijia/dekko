@@ -15,7 +15,9 @@ from importlib.metadata import version as _pkg_version
 from importlib.resources import files as _pkg_files
 from pathlib import Path
 
+from . import cache as cache_mod
 from . import contextpack
+from . import diff
 from . import languages
 from . import mapfile
 from . import query
@@ -28,7 +30,7 @@ from .render_md import render_markdown
 from .resolver import resolve
 
 
-SUBCOMMANDS = ("map", "query", "context", "status")
+SUBCOMMANDS = ("map", "query", "context", "diff", "status")
 
 
 def build_legacy_parser() -> argparse.ArgumentParser:
@@ -158,6 +160,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip regeneration when the existing map is fresh",
     )
+    p_map.add_argument(
+        "--full",
+        action="store_true",
+        help="ignore the .lidar cache and re-parse every file",
+    )
     _add_map_options(p_map)
     p_map.set_defaults(func=_cmd_map)
 
@@ -198,6 +205,36 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     _add_read_options(p_ctx)
     p_ctx.set_defaults(func=run_context)
 
+    p_diff = sub.add_parser(
+        "diff", help="changed symbols since a git rev, with callers"
+    )
+    p_diff.add_argument(
+        "rev",
+        nargs="?",
+        default=None,
+        help="git rev to compare against (default: the commit the map "
+        "was generated at, else HEAD)",
+    )
+    p_diff.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_diff.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_diff.add_argument(
+        "--limit",
+        type=int,
+        default=8,
+        help="max impacted callers shown per symbol (default: 8)",
+    )
+    p_diff.set_defaults(func=run_diff)
+
     p_status = sub.add_parser(
         "status", help="report whether map.json is fresh"
     )
@@ -217,11 +254,32 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def extract_one(root: Path, rel: str) -> FileMap | None:
+    """Extract a single file, or ``None`` when it is unsupported.
+
+    Args:
+        root: Repository root.
+        rel: Repo-relative path of the file.
+
+    Returns:
+        The file's ``FileMap``, or ``None`` if no tier-1 spec or tier-2
+        grammar handles it.
+    """
+    spec = languages.spec_for_path(rel)
+    if spec is not None:
+        return extract_file(root, rel, spec)
+    grammar = languages.tier2_grammar_for_path(rel)
+    if grammar is not None:
+        return extract_file_generic(root, rel, grammar)
+    return None
+
+
 def map_repository(
     root: Path,
     subpath: str | None,
     excludes: tuple[str, ...],
     max_file_size: int,
+    cache: cache_mod.IncrementalCache | None = None,
 ) -> tuple[list[FileMap], list[tuple[str, str]]]:
     """Discover and extract every mappable file under a root.
 
@@ -230,6 +288,8 @@ def map_repository(
         subpath: Optional repo-relative subtree restriction.
         excludes: Extra glob patterns to skip.
         max_file_size: Size cap in bytes.
+        cache: Incremental cache to reuse unchanged files from and
+            record fresh extractions into, or ``None`` for a cold run.
 
     Returns:
         ``(file_maps, skipped)`` where ``skipped`` pairs paths with
@@ -243,15 +303,14 @@ def map_repository(
     )
     file_maps: list[FileMap] = []
     for rel in paths:
-        spec = languages.spec_for_path(rel)
-        if spec is not None:
-            file_maps.append(extract_file(root, rel, spec))
-            continue
-
-        grammar = languages.tier2_grammar_for_path(rel)
-        if grammar is not None:
-            file_maps.append(extract_file_generic(root, rel, grammar))
-
+        fm = cache.reuse(root, rel) if cache is not None else None
+        if fm is None:
+            fm = extract_one(root, rel)
+            if fm is None:
+                continue
+            if cache is not None:
+                cache.store(root, rel, fm)
+        file_maps.append(fm)
     return file_maps, skipped
 
 
@@ -404,11 +463,17 @@ def run_map(args: argparse.Namespace) -> int:
     if getattr(args, "if_stale", False) and _map_is_fresh(root, args):
         return 0
 
+    cache = None
+    if not args.no_json:
+        old = {} if getattr(args, "full", False) else cache_mod.load(root)
+        cache = cache_mod.IncrementalCache(old)
+
     files, skipped = map_repository(
         root,
         subpath=args.subpath,
         excludes=tuple(args.exclude),
         max_file_size=args.max_file_size,
+        cache=cache,
     )
     if not files:
         print(
@@ -437,6 +502,9 @@ def run_map(args: argparse.Namespace) -> int:
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(render_json(files, graph, label, provenance))
         outputs.append(json_path)
+
+    if cache is not None:
+        cache_mod.save(root, cache)
 
     if not args.quiet:
         print(
@@ -552,6 +620,17 @@ def run_context(args: argparse.Namespace) -> int:
         hops=args.hops,
         budget=args.budget,
         as_json=args.as_json,
+    )
+
+
+def run_diff(args: argparse.Namespace) -> int:
+    """Handle ``lidar diff [REV]``."""
+    root = Path(args.root).resolve()
+    return diff.run(
+        root,
+        args.rev,
+        as_json=args.as_json,
+        limit=args.limit,
     )
 
 
