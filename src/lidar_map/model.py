@@ -26,6 +26,13 @@ class Symbol:
         returns: Declared return type, or ``None``.
         start_line: 1-based first line of the definition.
         end_line: 1-based last line of the definition.
+        decorated: Whether the definition carries a decorator,
+            attribute, or annotation (used by ``unused`` to treat
+            framework-invoked symbols as roots).
+        exported: Whether the language marks the symbol as part of the
+            public surface (Rust ``pub``, Java ``public``, JS/TS
+            ``export``); language-implicit visibility (Go capitals,
+            Python dunders) is derived at analysis time, not here.
     """
 
     id: str
@@ -38,6 +45,8 @@ class Symbol:
     returns: str | None = None
     start_line: int = 0
     end_line: int = 0
+    decorated: bool = False
+    exported: bool = False
 
 
 @dataclass

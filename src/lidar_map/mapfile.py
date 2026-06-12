@@ -131,6 +131,8 @@ def _symbol_from_dict(d: dict) -> Symbol:
         returns=d.get("returns"),
         start_line=d.get("start_line", 0),
         end_line=d.get("end_line", 0),
+        decorated=d.get("decorated", False),
+        exported=d.get("exported", False),
     )
 
 

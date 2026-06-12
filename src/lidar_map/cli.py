@@ -18,10 +18,13 @@ from pathlib import Path
 from . import cache as cache_mod
 from . import contextpack
 from . import diff
+from . import export
 from . import languages
 from . import mapfile
 from . import query
 from . import server
+from . import stats
+from . import unused
 from . import walker
 from .extractor import extract_file
 from .extractor_generic import extract_file_generic
@@ -31,7 +34,17 @@ from .render_md import render_markdown
 from .resolver import resolve
 
 
-SUBCOMMANDS = ("map", "query", "context", "diff", "status", "serve")
+SUBCOMMANDS = (
+    "map",
+    "query",
+    "context",
+    "diff",
+    "status",
+    "serve",
+    "unused",
+    "stats",
+    "export",
+)
 
 
 def build_legacy_parser() -> argparse.ArgumentParser:
@@ -276,6 +289,72 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="fail instead of regenerating a stale map on reads",
     )
     p_serve.set_defaults(func=run_serve)
+
+    p_unused = sub.add_parser(
+        "unused", help="symbols with no inbound calls (dead-code leads)"
+    )
+    p_unused.add_argument(
+        "--roots",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="extra path glob whose symbols are always roots (repeatable)",
+    )
+    p_unused.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="max text result lines (default: 50)",
+    )
+    _add_read_options(p_unused)
+    p_unused.set_defaults(func=run_unused)
+
+    p_stats = sub.add_parser(
+        "stats", help="hotspots, largest files, language mix"
+    )
+    p_stats.add_argument(
+        "--top",
+        type=int,
+        default=10,
+        help="entries per ranked list (default: 10)",
+    )
+    _add_read_options(p_stats)
+    p_stats.set_defaults(func=run_stats)
+
+    p_export = sub.add_parser(
+        "export", help="render the call graph as mermaid or dot"
+    )
+    p_export.add_argument(
+        "--format",
+        dest="fmt",
+        choices=export.FORMATS,
+        required=True,
+        help="output graph format",
+    )
+    p_export.add_argument(
+        "--scope",
+        choices=export.SCOPES,
+        default="symbol",
+        help="node granularity (default: symbol)",
+    )
+    p_export.add_argument(
+        "--max-nodes",
+        type=int,
+        default=300,
+        help="refuse to render more nodes than this (default: 300)",
+    )
+    p_export.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_export.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="fail (exit 5) instead of regenerating a stale map",
+    )
+    p_export.set_defaults(func=run_export)
     return parser
 
 
@@ -702,6 +781,38 @@ def run_diff(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         limit=args.limit,
     )
+
+
+def run_unused(args: argparse.Namespace) -> int:
+    """Handle ``lidar unused``."""
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    return unused.run(
+        index,
+        tuple(args.roots),
+        as_json=args.as_json,
+        limit=args.limit,
+    )
+
+
+def run_stats(args: argparse.Namespace) -> int:
+    """Handle ``lidar stats``."""
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    return stats.run(index, args.top, as_json=args.as_json)
+
+
+def run_export(args: argparse.Namespace) -> int:
+    """Handle ``lidar export``."""
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    return export.run(index, args.fmt, args.scope, args.max_nodes)
 
 
 def run_serve(args: argparse.Namespace) -> int:
