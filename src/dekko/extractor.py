@@ -188,6 +188,7 @@ def _make_symbol(
     if count:
         sym_id = f"{sym_id}#{count + 1}"
 
+    decorated, exported = _symbol_flags(spec.name, def_node)
     return Symbol(
         id=sym_id,
         name=name,
@@ -199,7 +200,107 @@ def _make_symbol(
         returns=returns,
         start_line=def_node.start_point[0] + 1,
         end_line=def_node.end_point[0] + 1,
+        decorated=decorated,
+        exported=exported,
     )
+
+
+def _symbol_flags(language: str, def_node: Node) -> tuple[bool, bool]:
+    """Detect ``(decorated, exported)`` for a definition node.
+
+    Best-effort and language-specific; anything not recognized is
+    reported as ``(False, False)``. Implicit visibility (Go capitals,
+    Python dunders) is intentionally *not* handled here — the analyzer
+    derives it from the symbol name.
+
+    Args:
+        language: Registry language name.
+        def_node: The definition's syntax node.
+
+    Returns:
+        Whether the symbol is decorated and whether it is exported.
+    """
+    return _is_decorated(language, def_node), _is_exported(language, def_node)
+
+
+def _is_decorated(language: str, def_node: Node) -> bool:
+    """Whether a definition carries a decorator/attribute/annotation."""
+    if language == "python":
+        parent = def_node.parent
+        return parent is not None and parent.type == "decorated_definition"
+    if language == "rust":
+        return _has_prev_sibling(def_node, "attribute_item")
+    if language == "java":
+        return _modifiers_have(def_node, ("annotation", "marker_annotation"))
+    if language in ("javascript", "typescript", "tsx"):
+        return _has_child(def_node, "decorator") or _has_prev_sibling(
+            def_node, "decorator"
+        )
+    return False
+
+
+def _is_exported(language: str, def_node: Node) -> bool:
+    """Whether a definition is part of the language's public surface."""
+    if language == "rust":
+        return _has_child(def_node, "visibility_modifier")
+    if language == "java":
+        return _modifiers_keyword(def_node, "public")
+    if language in ("javascript", "typescript", "tsx"):
+        return _ancestor_is(def_node, "export_statement", depth=4)
+    return False
+
+
+def _has_child(node: Node, child_type: str) -> bool:
+    """Whether any direct child has the given node type."""
+    return any(child.type == child_type for child in node.children)
+
+
+def _has_prev_sibling(node: Node, sibling_type: str) -> bool:
+    """Whether any preceding sibling has the given node type."""
+    prev = node.prev_sibling
+    while prev is not None:
+        if prev.type == sibling_type:
+            return True
+        if prev.type != "comment":
+            return False
+        prev = prev.prev_sibling
+    return False
+
+
+def _ancestor_is(node: Node, ancestor_type: str, depth: int) -> bool:
+    """Whether an ancestor within ``depth`` hops has the given type."""
+    current = node.parent
+    for _ in range(depth):
+        if current is None:
+            return False
+        if current.type == ancestor_type:
+            return True
+        current = current.parent
+    return False
+
+
+def _modifiers_node(def_node: Node) -> Node | None:
+    """The ``modifiers`` child of a Java declaration, if present."""
+    for child in def_node.children:
+        if child.type == "modifiers":
+            return child
+    return None
+
+
+def _modifiers_have(def_node: Node, kinds: tuple[str, ...]) -> bool:
+    """Whether the Java ``modifiers`` node contains any of ``kinds``."""
+    modifiers = _modifiers_node(def_node)
+    if modifiers is None:
+        return False
+    return any(child.type in kinds for child in modifiers.children)
+
+
+def _modifiers_keyword(def_node: Node, keyword: str) -> bool:
+    """Whether the Java ``modifiers`` node contains a literal keyword."""
+    modifiers = _modifiers_node(def_node)
+    if modifiers is None:
+        return False
+    return any(child.type == keyword for child in modifiers.children)
 
 
 def _qualify(spec: LanguageSpec, def_node: Node) -> tuple[list[str], bool]:
@@ -572,8 +673,11 @@ def _imports_python(
             base = _text(from_module)
             imported = _text(name)
             local = _text(alias) if alias else imported.split(".")[-1]
+            # Relative bases ("." / "..") already end in a dot; joining
+            # with another "." would double it (e.g. ``..contextpack``).
+            sep = "" if base.endswith(".") else "."
             out.append(
-                Import(path=rel, name=local, source=f"{base}.{imported}")
+                Import(path=rel, name=local, source=f"{base}{sep}{imported}")
             )
     return out
 

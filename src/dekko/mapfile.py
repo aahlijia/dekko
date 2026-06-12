@@ -17,6 +17,7 @@ from . import walker
 from .model import Import, Param, Symbol
 
 MAP_DOC_VERSION = 2
+_MAP_DIR = ".dekko"
 
 
 def compute_provenance(
@@ -39,7 +40,7 @@ def compute_provenance(
         JSON-serializable provenance dict.
     """
     return {
-        "tool_version": _pkg_version("lidar-map"),
+        "tool_version": _pkg_version("dekko"),
         "git_commit": _git_commit(root),
         "subpath": subpath,
         "excludes": list(excludes),
@@ -131,19 +132,21 @@ def _symbol_from_dict(d: dict) -> Symbol:
         returns=d.get("returns"),
         start_line=d.get("start_line", 0),
         end_line=d.get("end_line", 0),
+        decorated=d.get("decorated", False),
+        exported=d.get("exported", False),
     )
 
 
 def load_map(root: Path) -> MapIndex | None:
-    """Load ``root/map.json`` into a ``MapIndex``.
+    """Load ``root/.dekko/map.json`` into a ``MapIndex``.
 
     Args:
-        root: Directory containing map.json.
+        root: Repository root whose ``.dekko/map.json`` should be read.
 
     Returns:
         The index, or ``None`` if the file is missing or unparsable.
     """
-    path = root / "map.json"
+    path = root / _MAP_DIR / "map.json"
     try:
         doc = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):

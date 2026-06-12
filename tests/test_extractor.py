@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from lidar_map import languages
-from lidar_map.extractor import _parse_rust_use, extract_file
-from lidar_map.model import Symbol
+from dekko import languages
+from dekko.extractor import _parse_rust_use, extract_file
+from dekko.model import Symbol
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -50,6 +50,24 @@ def test_python_splat_params_and_imports() -> None:
     imports = {(i.name, i.source) for i in fm.imports}
     assert ("util", "util") in imports
     assert ("helper", "util.helper") in imports
+
+
+def test_python_relative_import_sources(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("rel.py")
+    assert spec is not None
+    (tmp_path / "rel.py").write_text(
+        "from . import sibling\n"
+        "from .. import parent\n"
+        "from .pkg import thing\n"
+        "from ..pkg import other\n"
+    )
+    fm = extract_file(tmp_path, "rel.py", spec)
+    imports = {(i.name, i.source) for i in fm.imports}
+    # Relative dots must not be doubled.
+    assert ("sibling", ".sibling") in imports
+    assert ("parent", "..parent") in imports
+    assert ("thing", ".pkg.thing") in imports
+    assert ("other", "..pkg.other") in imports
 
 
 def test_python_calls_attributed_to_enclosing_function() -> None:

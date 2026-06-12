@@ -267,7 +267,7 @@ def run(
         if len(paths) != 1:
             if len(paths) > 1:
                 print(
-                    f"lidar: '{target}' is ambiguous; candidates:",
+                    f"dekko: '{target}' is ambiguous; candidates:",
                     file=sys.stderr,
                 )
                 for p in paths:

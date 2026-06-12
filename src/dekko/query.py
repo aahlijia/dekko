@@ -113,9 +113,9 @@ def _print_capped(lines: list[str], limit: int) -> None:
 def report_unresolved(target: str, candidates: list[Symbol]) -> int:
     """Explain a failed resolution and return the exit code."""
     if not candidates:
-        print(f"lidar: no symbol matches '{target}'", file=sys.stderr)
+        print(f"dekko: no symbol matches '{target}'", file=sys.stderr)
         return EXIT_NOT_FOUND
-    print(f"lidar: '{target}' is ambiguous; candidates:", file=sys.stderr)
+    print(f"dekko: '{target}' is ambiguous; candidates:", file=sys.stderr)
     for sym in candidates:
         print(f"  {sym.path}:{sym.qualname}", file=sys.stderr)
     return EXIT_AMBIGUOUS
@@ -171,11 +171,11 @@ def _run_file(index: MapIndex, target: str, as_json: bool, limit: int) -> int:
     """Execute the file action: list a file's symbols."""
     matches = paths_matching(index, target)
     if not matches:
-        print(f"lidar: no mapped file matches '{target}'", file=sys.stderr)
+        print(f"dekko: no mapped file matches '{target}'", file=sys.stderr)
         return EXIT_NOT_FOUND
     if len(matches) > 1:
         print(
-            f"lidar: '{target}' is ambiguous; candidates:",
+            f"dekko: '{target}' is ambiguous; candidates:",
             file=sys.stderr,
         )
         for p in matches:
