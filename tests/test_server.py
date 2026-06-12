@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from lidar_map import cli
-from lidar_map import server
+from dekko import cli
+from dekko import server
 
 from conftest import RepoFactory
 
@@ -43,7 +43,7 @@ def test_initialize_echoes_protocol_and_names() -> None:
     result = resp["result"]
     assert result["protocolVersion"] == "2025-03-26"
     assert result["capabilities"] == {"tools": {}}
-    assert result["serverInfo"]["name"] == "lidar"
+    assert result["serverInfo"]["name"] == "dekko"
 
 
 def test_initialized_notification_is_silent() -> None:
@@ -77,6 +77,9 @@ def test_tools_list_exposes_the_read_surface() -> None:
         "get_callers",
         "get_callees",
         "get_context_pack",
+        "trace_path",
+        "find_unused",
+        "stats",
         "map_status",
         "refresh_map",
     }
@@ -106,6 +109,50 @@ def test_get_context_pack_tool(make_mapped_repo: RepoFactory) -> None:
     assert "context: b.py:g" in text
 
 
+def test_trace_path_tool(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(ctx, "trace_path", {"from": "g", "to": "f"})
+    text = result["content"][0]["text"]
+    assert result["isError"] is False
+    assert "g -> " in text and text.rstrip().endswith("f")
+
+
+def test_trace_path_no_path_is_not_error(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    # f does not reach g (edge runs g -> f)
+    result = _call(ctx, "trace_path", {"from": "f", "to": "g"})
+    assert result["isError"] is False
+    assert "no call path" in result["content"][0]["text"].lower()
+
+
+def test_trace_path_missing_argument_is_error(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(ctx, "trace_path", {"from": "g"})
+    assert result["isError"] is True
+    assert "missing required argument 'to'" in result["content"][0]["text"]
+
+
+def test_find_unused_tool(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    # g has no inbound calls and is not a root → a dead-code lead
+    result = _call(ctx, "find_unused", {})
+    text = result["content"][0]["text"]
+    assert result["isError"] is False
+    assert "g" in text
+
+
+def test_stats_tool(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(ctx, "stats", {"top": 3})
+    text = result["content"][0]["text"]
+    assert result["isError"] is False
+    assert "files" in text and "symbols" in text
+
+
 def test_missing_argument_is_tool_error(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -122,7 +169,7 @@ def test_not_found_is_tool_error_not_doubled(
     result = _call(ctx, "query_symbol", {"symbol": "ghost"})
     text = result["content"][0]["text"]
     assert result["isError"] is True
-    assert text.startswith("lidar: no symbol matches")  # single prefix
+    assert text.startswith("dekko: no symbol matches")  # single prefix
 
 
 def test_unknown_tool_is_error(make_mapped_repo: RepoFactory) -> None:

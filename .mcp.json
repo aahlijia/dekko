@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "lidar": {
-      "command": "lidar",
+    "dekko": {
+      "command": "dekko",
       "args": ["serve", "--mcp"],
       "cwd": "${CLAUDE_PROJECT_DIR}"
     }

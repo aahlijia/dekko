@@ -1,8 +1,9 @@
-# lidar-map
+# dekko
 
 A code-map generator with a CLI and a Claude Code `/map` plugin —
-installed as `lidar-map`, run as `lidar`. Like its namesake, it scans the terrain programmatically — no model tokens
-are spent parsing — sweeping the repository and writing:
+installed and run as `dekko`. It scans the repo programmatically — no model tokens
+are spent parsing — sweeping the repository and writing two files (by
+default into a `.dekko/` directory at the repo root):
 
 - **`MAP.md`** — every code file, every function/method, parameters with
   types (when declared), return types, and relational call links: each
@@ -12,16 +13,14 @@ are spent parsing — sweeping the repository and writing:
 
 ## Installation
 
-Install the `lidar-map` package (the CLI command is `lidar`):
-
 ```sh
-uv tool install lidar-map     # or: pip install lidar-map / pipx install lidar-map
+uv tool install dekko     # or: pip install dekko / pipx install dekko
 ```
 
 Then, to add the `/map` command to Claude Code:
 
 ```sh
-lidar --claude-install
+dekko --claude-install
 ```
 
 Restart Claude Code after installing.
@@ -29,60 +28,107 @@ Restart Claude Code after installing.
 ### From a local clone
 
 ```sh
-git clone https://github.com/aahlijia/lidar
-cd lidar
+git clone https://github.com/aahlijia/dekko.git
+cd dekko
 ./install.sh
 ```
 
 `install.sh` installs the CLI with `uv tool install` and registers the
 plugin in one step.
 
+### Uninstall
+
+Remove the Claude Code plugin, then uninstall the CLI:
+
+```sh
+dekko --claude-uninstall   # remove the /map plugin and its marketplace
+dekko --mcp-uninstall       # only if you ran --mcp-install
+uv tool uninstall dekko     # or: pip uninstall dekko / pipx uninstall dekko
+```
+
+`--claude-uninstall` reverses `--claude-install`, undoing the bundled
+plugin (which carries the MCP server). It does not touch a standalone MCP
+registration added by `--mcp-install` — drop that with `--mcp-uninstall`
+(i.e. `claude mcp remove dekko`). To do the removals by hand instead:
+
+```sh
+claude plugin uninstall dekko@dekko        # remove the /map plugin
+claude plugin marketplace remove dekko     # drop the bundled marketplace
+claude mcp remove dekko                     # remove a standalone MCP server
+```
+
+The `.dekko/` cache directory in any mapped repo is safe to delete by
+hand; it is already git-ignored.
+
 ## CLI usage
 
 ```sh
-lidar map                     # map the current directory
-lidar map /path/to/repo       # map another directory
-lidar map . src               # restrict the map to a subtree
-lidar map --if-stale          # regenerate only when sources changed
-lidar map --full              # ignore the .lidar cache, re-parse everything
-lidar query callers resolve   # who calls resolve?
-lidar query callees main      # what does main call?
-lidar query symbol cli.py:run_map   # signature card for one symbol
-lidar query file walker.py    # symbols defined in a file
-lidar context run_map --budget 1500 # minimal context pack for an edit
-lidar diff                    # symbols changed since the map's commit
-lidar diff main               # ...or since any git rev, with callers
-lidar status                  # is map.json still fresh? (exit 0/1)
-lidar serve --mcp             # expose the map to agents over MCP (stdio)
-lidar --claude-install        # install the Claude Code plugin
-lidar --mcp-install           # register the MCP server (claude mcp add)
-lidar --version
+dekko map                     # map the current directory
+dekko map /path/to/repo       # map another directory
+dekko map . src               # restrict the map to a subtree
+dekko map --if-stale          # regenerate only when sources changed
+dekko map --full              # ignore the .dekko cache, re-parse everything
+dekko map --jobs 0            # parallel extraction (0 = all cores)
+dekko query callers resolve   # who calls resolve?
+dekko query callees main      # what does main call?
+dekko query symbol cli.py:run_map   # signature card for one symbol
+dekko query file walker.py    # symbols defined in a file
+dekko context run_map --budget 1500 # minimal context pack for an edit
+dekko trace main run_map      # shortest call path(s) between two symbols
+dekko diff                    # symbols changed since the map's commit
+dekko diff main               # ...or since any git rev, with callers
+dekko unused                  # symbols nothing calls (dead-code leads)
+dekko stats                   # hotspots, largest files, language mix
+dekko export --format mermaid # render the call graph (mermaid|dot)
+dekko status                  # is map.json still fresh? (exit 0/1)
+dekko serve --mcp             # expose the map to agents over MCP (stdio)
+dekko --claude-install        # install the Claude Code plugin
+dekko --mcp-install           # register the MCP server (claude mcp add)
+dekko --version
 ```
 
 | Command | Meaning |
 | --- | --- |
-| `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--full` forces a cold rebuild; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
+| `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--full` forces a cold rebuild; `--jobs N` parallelizes extraction, `0` = all cores; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
 | `query ACTION TARGET` | `callers`, `callees`, `symbol`, or `file` lookups against map.json |
 | `context TARGET` | Signatures of a symbol's neighborhood (`--hops N`, `--budget TOKENS`) |
+| `trace FROM TO` | Shortest call path(s) from one symbol to another (`--max-paths K`, `--json`); no path is a clean exit `1` |
 | `diff [REV]` | Symbols added/removed/changed since a git rev (default: the map's commit), each with impacted callers (`--limit`, `--json`) |
+| `unused` | Symbols with no inbound calls, minus roots (`--roots GLOB`, `--limit`, `--json`); exit 1 when any are found |
+| `stats` | Fan-in/out hotspots, largest files, language mix (`--top`, `--json`) |
+| `export` | Call graph as `--format mermaid\|dot`, `--scope symbol\|file`, capped by `--max-nodes` |
 | `status` | Freshness report from the provenance stamp in map.json |
 | `serve --mcp` | Hand-rolled MCP server (stdio) exposing the read surface as agent tools (`--root`, `--no-regen`) |
 
 Symbol targets accept a bare `name`, `Class.method`, or the qualified
 `file.py:name` / `file.py:Class.method` forms; ambiguous names list
-their candidates instead of guessing. Read commands (`query`,
-`context`) regenerate a stale map automatically — pass `--no-regen` to
-fail instead, and `--json` anywhere for structured output. The legacy
-flags `--map [DIR] [SUBPATH]`, `--claude-install`, and `--version`
-keep working as aliases.
+their candidates instead of guessing. The read commands (`query`,
+`context`, `trace`, `unused`, `stats`, `export`) regenerate a stale map
+automatically — pass `--no-regen` to fail instead, and `--json`
+anywhere for structured output. The legacy flags `--map [DIR]
+[SUBPATH]`, `--claude-install`, `--mcp-install`, and `--version` keep
+working as aliases.
 
-`map` keeps a per-file extraction cache under `.lidar/` (added to your
-`.gitignore` automatically), so re-mapping only re-parses files whose
-contents changed; `--full` ignores it.
+`map` writes `MAP.md` and `map.json` into a `.dekko/` directory at the
+repository root — override the location with `--output` — alongside a
+per-file extraction cache. `.dekko/` is added to your `.gitignore`
+automatically. The cache lets re-mapping re-parse only files whose
+contents changed (`--full` ignores it) and is tagged with the `dekko`
+version, so upgrading re-parses everything once to pick up extractor
+changes.
 
 Exit codes: `0` success/fresh/no-diff, `1` failure, stale (`status`),
-or differences found (`diff`); `2` usage error, `3` target not found,
-`4` ambiguous target, `5` stale map with `--no-regen`.
+differences found (`diff`), unused symbols found (`unused`), or no call
+path (`trace`); `2` usage error, `3` target not found, `4` ambiguous
+target, `5` stale map with `--no-regen`.
+
+`unused` is call-graph based, so it lists *leads*, not verdicts: a
+symbol reached only via subclassing, type annotations, dynamic dispatch,
+or a callback registered by reference can still surface. It already
+treats `main`, test files, decorated/annotated symbols, the language's
+public surface (Rust `pub`, Go capitals, Java `public`, JS/TS `export`),
+Python dunders, and `__init__.py` re-exports as roots; add your own with
+`--roots`.
 
 ## Plugin usage
 
@@ -91,21 +137,24 @@ or differences found (`diff`); `2` usage error, `3` target not found,
 /map src/      # map a subtree only
 ```
 
-The plugin runs the installed `lidar` CLI, so install the package first
+The plugin runs the installed `dekko` CLI, so install the package first
 (see above).
 
 ## MCP server
 
-`lidar serve --mcp` speaks the Model Context Protocol over stdio as
+`dekko serve --mcp` speaks the Model Context Protocol over stdio as
 newline-delimited JSON-RPC 2.0 — **no SDK dependency**. It lets an agent
 answer "who calls X?" with a tool call instead of reading MAP.md. The
-read commands map to six tools:
+read commands map to nine tools:
 
 | Tool | Backs |
 | --- | --- |
 | `query_symbol` | `query symbol` |
 | `get_callers` / `get_callees` | `query callers` / `callees` |
 | `get_context_pack` | `context` (`hops`, `budget`) |
+| `trace_path` | `trace` (`from`, `to`, `max_paths`) |
+| `find_unused` | `unused` (`roots`, `limit`) |
+| `stats` | `stats` (`top`) |
 | `map_status` | `status` |
 | `refresh_map` | `map` (`full` for a cold rebuild) |
 
@@ -113,10 +162,10 @@ Reads auto-regenerate a stale map (pass `--no-regen` to disable), and
 each tool accepts an optional `root` (defaults to the server's working
 directory).
 
-The plugin ships an `.mcp.json` pointing at `lidar serve --mcp` with
-`cwd` set to `${CLAUDE_PROJECT_DIR}`, so `lidar --claude-install` wires
-the server automatically. For a non-plugin setup, `lidar --mcp-install`
-runs `claude mcp add lidar -- lidar serve --mcp`.
+The plugin ships an `.mcp.json` pointing at `dekko serve --mcp` with
+`cwd` set to `${CLAUDE_PROJECT_DIR}`, so `dekko --claude-install` wires
+the server automatically. For a non-plugin setup, `dekko --mcp-install`
+runs `claude mcp add dekko -- dekko serve --mcp`.
 
 ## Language support
 
@@ -137,6 +186,19 @@ Best-effort static resolution, in order: same class/container → same file
 are marked as such rather than guessed; calls to stdlib/third-party code
 are recorded in `map.json` only.
 
+## Limitations
+
+The call graph is static and best-effort, so a few edges are invisible by
+design:
+
+- **Rust macro bodies**: tree-sitter parses macro invocations
+  (`println!`, `vec!`, custom macros) as opaque token trees, so calls
+  written inside a macro body are not seen and those edges are missed.
+- **Dynamic dispatch**: calls made through reflection, callbacks passed by
+  reference, or runtime registries have no static call site. This is why
+  `dekko unused` treats decorated/exported symbols as roots and bills its
+  output as *leads, not verdicts*.
+
 ## Development
 
 ```sh
@@ -148,4 +210,5 @@ uv build                         # sdist + wheel into dist/
 
 Releases: pushing a `v*` tag builds and publishes to PyPI via trusted
 publishing (`.github/workflows/release.yml`); configure the trusted
-publisher for `aahlijia/lidar` on PyPI first.
+publisher for `aahlijia/dekko` on PyPI first. See
+[CHANGELOG.md](CHANGELOG.md) for the per-version history.

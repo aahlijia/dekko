@@ -1,6 +1,6 @@
 """A hand-rolled MCP server exposing the map over stdio.
 
-``lidar serve --mcp`` speaks the Model Context Protocol as
+``dekko serve --mcp`` speaks the Model Context Protocol as
 newline-delimited JSON-RPC 2.0 on stdin/stdout, with **no SDK
 dependency**. It exposes the read surface (query, context, status) plus
 an explicit refresh as MCP tools so an agent can ask "who calls X?"
@@ -24,8 +24,11 @@ from typing import Any
 from . import contextpack
 from . import mapfile
 from . import query
+from . import stats
+from . import trace
+from . import unused
 
-SERVER_NAME = "lidar"
+SERVER_NAME = "dekko"
 PROTOCOL_VERSION = "2025-06-18"
 
 PARSE_ERROR = -32700
@@ -136,6 +139,47 @@ def tool_get_context_pack(ctx: Context, args: dict) -> str:
     return out.strip()
 
 
+def tool_trace_path(ctx: Context, args: dict) -> str:
+    """Shortest call path(s) from one symbol to another."""
+    index = _index_for(ctx, args)
+    frm = _require(args, "from")
+    to = _require(args, "to")
+    max_paths = int(args.get("max_paths", 3))
+    code, out, err = _capture(
+        lambda: trace.run(index, frm, to, max_paths=max_paths, as_json=False)
+    )
+    if code == trace.EXIT_NO_PATH:
+        return out.strip() or err.strip() or f"no path from {frm} to {to}"
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return out.strip()
+
+
+def tool_find_unused(ctx: Context, args: dict) -> str:
+    """Symbols with no inbound calls (dead-code leads)."""
+    index = _index_for(ctx, args)
+    roots = args.get("roots") or []
+    if not isinstance(roots, list):
+        raise ToolError("'roots' must be a list of path globs")
+    limit = int(args.get("limit", 50))
+    code, out, err = _capture(
+        lambda: unused.run(index, tuple(roots), as_json=False, limit=limit)
+    )
+    if code not in (0, 1):
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return out.strip() or "(no unused symbols)"
+
+
+def tool_stats(ctx: Context, args: dict) -> str:
+    """Fan-in/out hotspots, largest files, language mix."""
+    index = _index_for(ctx, args)
+    top = int(args.get("top", 10))
+    code, out, err = _capture(lambda: stats.run(index, top, as_json=False))
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return out.strip()
+
+
 def tool_map_status(ctx: Context, args: dict) -> str:
     """Whether the map on disk is fresh, with what changed if stale."""
     root = _root_of(ctx, args)
@@ -237,6 +281,71 @@ TOOLS: list[dict[str, Any]] = [
         "handler": tool_get_context_pack,
     },
     {
+        "name": "trace_path",
+        "description": "Shortest call path(s) between two symbols "
+        "(how one reaches the other). Empty when there is no path.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from": {
+                    "type": "string",
+                    "description": "Source symbol (name, Class.method, "
+                    "file.py:name)",
+                },
+                "to": {
+                    "type": "string",
+                    "description": "Destination symbol (name, "
+                    "Class.method, file.py:name)",
+                },
+                "max_paths": {
+                    "type": "integer",
+                    "description": "Max distinct shortest paths (default 3)",
+                },
+                "root": _ROOT_PROP,
+            },
+            "required": ["from", "to"],
+        },
+        "handler": tool_trace_path,
+    },
+    {
+        "name": "find_unused",
+        "description": "Symbols with no inbound calls (dead-code leads, "
+        "not verdicts). Entry points and exported symbols are excluded.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "roots": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Extra path globs whose symbols are "
+                    "always treated as roots",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max result lines (default 50)",
+                },
+                "root": _ROOT_PROP,
+            },
+        },
+        "handler": tool_find_unused,
+    },
+    {
+        "name": "stats",
+        "description": "File/symbol/edge totals, language mix, top "
+        "fan-in/out, and largest files.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "top": {
+                    "type": "integer",
+                    "description": "Entries per ranked list (default 10)",
+                },
+                "root": _ROOT_PROP,
+            },
+        },
+        "handler": tool_stats,
+    },
+    {
         "name": "map_status",
         "description": "Report whether map.json is fresh or stale.",
         "inputSchema": {
@@ -254,7 +363,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "full": {
                     "type": "boolean",
-                    "description": "Ignore the .lidar cache (cold rebuild)",
+                    "description": "Ignore the .dekko cache (cold rebuild)",
                 },
                 "root": _ROOT_PROP,
             },
@@ -269,8 +378,8 @@ _HANDLERS: dict[str, Callable[[Context, dict], str]] = {
 
 
 def _prefixed(message: str) -> str:
-    """Ensure a tool error message carries a single ``lidar:`` prefix."""
-    return message if message.startswith("lidar:") else f"lidar: {message}"
+    """Ensure a tool error message carries a single ``dekko:`` prefix."""
+    return message if message.startswith("dekko:") else f"dekko: {message}"
 
 
 def _ok(req_id: Any, result: dict) -> dict:
@@ -298,7 +407,7 @@ def _handle_initialize(req_id: Any, params: dict) -> dict:
             "capabilities": {"tools": {}},
             "serverInfo": {
                 "name": SERVER_NAME,
-                "version": _pkg_version("lidar-map"),
+                "version": _pkg_version("dekko"),
             },
         },
     )
@@ -326,7 +435,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
     except ToolError as exc:
         text, is_error = _prefixed(str(exc)), True
     except Exception as exc:  # surface any tool crash as an error result
-        text, is_error = f"lidar: internal error: {exc}", True
+        text, is_error = f"dekko: internal error: {exc}", True
     return _ok(
         req_id,
         {"content": [{"type": "text", "text": text}], "isError": is_error},

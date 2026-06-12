@@ -27,7 +27,7 @@ def render_json(
     """
     when = datetime.now(timezone.utc).isoformat(timespec="seconds")
     doc = {
-        "generator": "lidar",
+        "generator": "dekko",
         "version": 2,
         "root": root_label,
         "generated_at": when,

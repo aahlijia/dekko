@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from lidar_map import cli, contextpack, mapfile
+from dekko import cli, contextpack, mapfile
 
 from conftest import RepoFactory
 
