@@ -7,10 +7,12 @@ writes a human-readable MAP.md plus a machine-readable map.json.
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 from importlib.metadata import version as _pkg_version
 from importlib.resources import files as _pkg_files
 from pathlib import Path
@@ -24,6 +26,7 @@ from . import mapfile
 from . import query
 from . import server
 from . import stats
+from . import trace
 from . import unused
 from . import walker
 from .extractor import extract_file
@@ -38,6 +41,7 @@ SUBCOMMANDS = (
     "map",
     "query",
     "context",
+    "trace",
     "diff",
     "status",
     "serve",
@@ -45,6 +49,10 @@ SUBCOMMANDS = (
     "stats",
     "export",
 )
+
+# Below this many cache-miss files, a process pool costs more in startup
+# and pickling than it saves, so extraction stays sequential.
+_PARALLEL_MIN = 50
 
 
 def build_legacy_parser() -> argparse.ArgumentParser:
@@ -184,6 +192,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="ignore the .lidar cache and re-parse every file",
     )
+    p_map.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="parallel extraction workers (1 = sequential, 0 = all cores)",
+    )
     _add_map_options(p_map)
     p_map.set_defaults(func=_cmd_map)
 
@@ -223,6 +238,28 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     _add_read_options(p_ctx)
     p_ctx.set_defaults(func=run_context)
+
+    p_trace = sub.add_parser(
+        "trace", help="shortest call path(s) between two symbols"
+    )
+    p_trace.add_argument(
+        "frm",
+        metavar="FROM",
+        help="source symbol (name, Class.method, file.py:func)",
+    )
+    p_trace.add_argument(
+        "to",
+        metavar="TO",
+        help="destination symbol (name, Class.method, file.py:func)",
+    )
+    p_trace.add_argument(
+        "--max-paths",
+        type=int,
+        default=3,
+        help="max distinct shortest paths to report (default: 3)",
+    )
+    _add_read_options(p_trace)
+    p_trace.set_defaults(func=run_trace)
 
     p_diff = sub.add_parser(
         "diff", help="changed symbols since a git rev, with callers"
@@ -378,14 +415,47 @@ def extract_one(root: Path, rel: str) -> FileMap | None:
     return None
 
 
+def _resolve_workers(jobs: int) -> int:
+    """Map a ``--jobs`` value to a concrete worker count (0 → all cores)."""
+    if jobs > 0:
+        return jobs
+    return os.cpu_count() or 1
+
+
+def _extract_misses(
+    root: Path, misses: list[str], workers: int
+) -> dict[str, FileMap | None]:
+    """Extract the cache-miss files, in parallel when it pays off.
+
+    Args:
+        root: Repository root.
+        misses: Repo-relative paths that were not served from cache.
+        workers: Resolved worker count (1 = sequential).
+
+    Returns:
+        ``rel -> FileMap`` (or ``None`` for unsupported files).
+    """
+    if workers <= 1 or len(misses) < _PARALLEL_MIN:
+        return {rel: extract_one(root, rel) for rel in misses}
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        results = pool.map(extract_one, [root] * len(misses), misses)
+        return dict(zip(misses, results))
+
+
 def map_repository(
     root: Path,
     subpath: str | None,
     excludes: tuple[str, ...],
     max_file_size: int,
     cache: cache_mod.IncrementalCache | None = None,
+    jobs: int = 1,
 ) -> tuple[list[FileMap], list[tuple[str, str]]]:
     """Discover and extract every mappable file under a root.
+
+    Cache hits are gathered in-process; the remaining files are extracted
+    sequentially or across a process pool (``jobs``), then results are
+    re-assembled in discovery order so output is independent of how many
+    workers ran.
 
     Args:
         root: Repository root.
@@ -394,6 +464,7 @@ def map_repository(
         max_file_size: Size cap in bytes.
         cache: Incremental cache to reuse unchanged files from and
             record fresh extractions into, or ``None`` for a cold run.
+        jobs: Worker count for extraction (1 = sequential, 0 = all cores).
 
     Returns:
         ``(file_maps, skipped)`` where ``skipped`` pairs paths with
@@ -405,16 +476,24 @@ def map_repository(
         excludes=excludes,
         max_file_size=max_file_size,
     )
-    file_maps: list[FileMap] = []
+    extracted: dict[str, FileMap] = {}
+    misses: list[str] = []
     for rel in paths:
         fm = cache.reuse(root, rel) if cache is not None else None
+        if fm is not None:
+            extracted[rel] = fm
+        else:
+            misses.append(rel)
+
+    fresh = _extract_misses(root, misses, _resolve_workers(jobs))
+    for rel, fm in fresh.items():
         if fm is None:
-            fm = extract_one(root, rel)
-            if fm is None:
-                continue
-            if cache is not None:
-                cache.store(root, rel, fm)
-        file_maps.append(fm)
+            continue
+        if cache is not None:
+            cache.store(root, rel, fm)
+        extracted[rel] = fm
+
+    file_maps = [extracted[rel] for rel in paths if rel in extracted]
     return file_maps, skipped
 
 
@@ -603,6 +682,7 @@ def run_map(args: argparse.Namespace) -> int:
         excludes=tuple(args.exclude),
         max_file_size=args.max_file_size,
         cache=cache,
+        jobs=getattr(args, "jobs", 1),
     )
     if not files:
         print(
@@ -732,6 +812,7 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
         quiet=quiet,
         if_stale=False,
         full=full,
+        jobs=1,
     )
     return run_map(regen_args)
 
@@ -768,6 +849,21 @@ def run_context(args: argparse.Namespace) -> int:
         args.target,
         hops=args.hops,
         budget=args.budget,
+        as_json=args.as_json,
+    )
+
+
+def run_trace(args: argparse.Namespace) -> int:
+    """Handle ``lidar trace <from> <to>``."""
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    return trace.run(
+        index,
+        args.frm,
+        args.to,
+        max_paths=args.max_paths,
         as_json=args.as_json,
     )
 
