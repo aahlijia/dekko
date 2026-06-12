@@ -117,15 +117,13 @@ def load(root: Path) -> dict[str, dict]:
 
 
 def save(root: Path, cache: IncrementalCache) -> None:
-    """Persist a cache and ensure ``.dekko/`` is git-ignored.
+    """Persist a cache, wiring gitignore only if ``.dekko/`` is new.
 
     Args:
         root: Repository root.
         cache: The cache whose ``entries`` should be written.
     """
-    cache_dir = root / CACHE_DIR
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_ignored(root, cache_dir)
+    cache_dir = _make_cache_dir(root)
     doc = {
         "version": CACHE_VERSION,
         "tool_version": _tool_version(),
@@ -135,9 +133,28 @@ def save(root: Path, cache: IncrementalCache) -> None:
 
 
 def ensure_dir(root: Path) -> Path:
-    """Create ``.dekko/`` and set up gitignore entries.
+    """Create ``.dekko/``, wiring gitignore only when it is new.
 
-    Idempotent — safe to call on every map run. Returns the cache dir.
+    Safe to call on every map run. The inner ``.gitignore`` and the
+    repo ``.gitignore`` entry are written only when this call actually
+    creates the directory; an existing ``.dekko/`` is left untouched.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Path to the ``.dekko/`` directory.
+    """
+    return _make_cache_dir(root)
+
+
+def _make_cache_dir(root: Path) -> Path:
+    """Return ``.dekko/``, creating it and wiring gitignore if absent.
+
+    Gitignore setup (an inner ``.gitignore`` of ``*`` plus a ``.dekko/``
+    entry in the repo ``.gitignore``) runs only when this call creates
+    the directory. An existing ``.dekko/`` is returned untouched, so a
+    user who removes either gitignore entry will not have it re-added.
 
     Args:
         root: Repository root.
@@ -146,6 +163,8 @@ def ensure_dir(root: Path) -> Path:
         Path to the ``.dekko/`` directory.
     """
     cache_dir = root / CACHE_DIR
+    if cache_dir.exists():
+        return cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
     _ensure_ignored(root, cache_dir)
     return cache_dir

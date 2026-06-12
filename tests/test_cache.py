@@ -116,9 +116,7 @@ def test_parallel_extraction_matches_sequential(
 def test_no_json_skips_cache(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text(SRC["a.py"])
     assert cli.main(["map", str(tmp_path), "--quiet", "--no-json"]) == 0
-    assert not (
-        tmp_path / cache_mod.CACHE_DIR / cache_mod.CACHE_FILE
-    ).exists()
+    assert not (tmp_path / cache_mod.CACHE_DIR / cache_mod.CACHE_FILE).exists()
 
 
 def test_gitignore_entry_not_duplicated(
@@ -128,6 +126,21 @@ def test_gitignore_entry_not_duplicated(
     cli.main(["map", str(root), "--quiet"])
     lines = (root / ".gitignore").read_text().splitlines()
     assert lines.count(".dekko/") == 1
+
+
+def test_existing_dekko_dir_leaves_gitignores_untouched(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    # Strip dekko's gitignore wiring but keep the .dekko/ directory.
+    (root / ".gitignore").write_text("node_modules/\n")
+    (root / cache_mod.CACHE_DIR / ".gitignore").unlink()
+
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+
+    # .dekko/ already existed, so neither gitignore is re-touched.
+    assert (root / ".gitignore").read_text() == "node_modules/\n"
+    assert not (root / cache_mod.CACHE_DIR / ".gitignore").exists()
 
 
 def test_reused_map_matches_cold_map(
