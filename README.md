@@ -52,6 +52,9 @@ lidar query file walker.py    # symbols defined in a file
 lidar context run_map --budget 1500 # minimal context pack for an edit
 lidar diff                    # symbols changed since the map's commit
 lidar diff main               # ...or since any git rev, with callers
+lidar unused                  # symbols nothing calls (dead-code leads)
+lidar stats                   # hotspots, largest files, language mix
+lidar export --format mermaid # render the call graph (mermaid|dot)
 lidar status                  # is map.json still fresh? (exit 0/1)
 lidar serve --mcp             # expose the map to agents over MCP (stdio)
 lidar --claude-install        # install the Claude Code plugin
@@ -65,6 +68,9 @@ lidar --version
 | `query ACTION TARGET` | `callers`, `callees`, `symbol`, or `file` lookups against map.json |
 | `context TARGET` | Signatures of a symbol's neighborhood (`--hops N`, `--budget TOKENS`) |
 | `diff [REV]` | Symbols added/removed/changed since a git rev (default: the map's commit), each with impacted callers (`--limit`, `--json`) |
+| `unused` | Symbols with no inbound calls, minus roots (`--roots GLOB`, `--limit`, `--json`); exit 1 when any are found |
+| `stats` | Fan-in/out hotspots, largest files, language mix (`--top`, `--json`) |
+| `export` | Call graph as `--format mermaid\|dot`, `--scope symbol\|file`, capped by `--max-nodes` |
 | `status` | Freshness report from the provenance stamp in map.json |
 | `serve --mcp` | Hand-rolled MCP server (stdio) exposing the read surface as agent tools (`--root`, `--no-regen`) |
 
@@ -81,8 +87,17 @@ keep working as aliases.
 contents changed; `--full` ignores it.
 
 Exit codes: `0` success/fresh/no-diff, `1` failure, stale (`status`),
-or differences found (`diff`); `2` usage error, `3` target not found,
-`4` ambiguous target, `5` stale map with `--no-regen`.
+differences found (`diff`), or unused symbols found (`unused`); `2`
+usage error, `3` target not found, `4` ambiguous target, `5` stale map
+with `--no-regen`.
+
+`unused` is call-graph based, so it lists *leads*, not verdicts: a
+symbol reached only via subclassing, type annotations, dynamic dispatch,
+or a callback registered by reference can still surface. It already
+treats `main`, test files, decorated/annotated symbols, the language's
+public surface (Rust `pub`, Go capitals, Java `public`, JS/TS `export`),
+Python dunders, and `__init__.py` re-exports as roots; add your own with
+`--roots`.
 
 ## Plugin usage
 
