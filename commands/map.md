@@ -8,7 +8,7 @@ allowed-tools: Bash(lidar:*)
 
 The mapping tool has already run; its summary is below.
 
-!`lidar --map . $ARGUMENTS`
+!`lidar map --if-stale . $ARGUMENTS`
 
 ## Your task
 
@@ -21,7 +21,8 @@ NOT parse any source files yourself.
    `uv tool install lidar-map`). Otherwise:
 2. Relay the summary to the user: how many files were mapped, in which
    languages, how many functions and call relationships were found, and
-   anything skipped.
+   anything skipped. If the summary says "map fresh", tell the user the
+   existing MAP.md is already up to date and nothing was regenerated.
 3. Tell the user the map was written to `MAP.md` (human-readable) and
    `map.json` (machine-readable) at the repo root.
 4. Do not read MAP.md back into context unless the user asks a question

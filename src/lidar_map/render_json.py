@@ -8,7 +8,10 @@ from .model import CallGraph, FileMap
 
 
 def render_json(
-    files: list[FileMap], graph: CallGraph, root_label: str
+    files: list[FileMap],
+    graph: CallGraph,
+    root_label: str,
+    provenance: dict | None = None,
 ) -> str:
     """Serialize the full graph (including external calls) to JSON.
 
@@ -16,6 +19,8 @@ def render_json(
         files: Per-file extraction results.
         graph: Resolved call graph.
         root_label: Display name of the mapped root.
+        provenance: Freshness stamp (tool version, git commit,
+            discovery options, per-file hashes), or ``None``.
 
     Returns:
         Pretty-printed JSON text.
@@ -23,9 +28,10 @@ def render_json(
     when = datetime.now(timezone.utc).isoformat(timespec="seconds")
     doc = {
         "generator": "lidar",
-        "version": 1,
+        "version": 2,
         "root": root_label,
         "generated_at": when,
+        "provenance": provenance,
         "files": [
             {
                 "path": fm.path,

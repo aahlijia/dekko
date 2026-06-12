@@ -6,6 +6,7 @@ writes a human-readable MAP.md plus a machine-readable map.json.
 """
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
@@ -14,7 +15,10 @@ from importlib.metadata import version as _pkg_version
 from importlib.resources import files as _pkg_files
 from pathlib import Path
 
+from . import contextpack
 from . import languages
+from . import mapfile
+from . import query
 from . import walker
 from .extractor import extract_file
 from .extractor_generic import extract_file_generic
@@ -24,8 +28,11 @@ from .render_md import render_markdown
 from .resolver import resolve
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    """Construct the CLI argument parser."""
+SUBCOMMANDS = ("map", "query", "context", "status")
+
+
+def build_legacy_parser() -> argparse.ArgumentParser:
+    """Construct the legacy flag-based parser (v0.2 aliases)."""
     parser = argparse.ArgumentParser(
         prog="lidar",
         description="Generate MAP.md and map.json for a repository.",
@@ -55,6 +62,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"lidar {_pkg_version('lidar-map')}",
     )
+    _add_map_options(parser)
+    return parser
+
+
+def _add_map_options(parser: argparse.ArgumentParser) -> None:
+    """Attach the mapping output/filter options shared by both parsers."""
     parser.add_argument(
         "--output",
         default=None,
@@ -89,6 +102,118 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--quiet", action="store_true", help="suppress the summary on stdout"
     )
+
+
+def _add_read_options(parser: argparse.ArgumentParser) -> None:
+    """Attach the options shared by map-reading subcommands."""
+    parser.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    parser.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    parser.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="fail (exit 5) instead of regenerating a stale map",
+    )
+
+
+def build_subcommand_parser() -> argparse.ArgumentParser:
+    """Construct the subcommand parser (map/query/context/status)."""
+    parser = argparse.ArgumentParser(
+        prog="lidar",
+        description=("Generate and query MAP.md/map.json for a repository."),
+        epilog=(
+            "legacy aliases: lidar --map [DIR] [SUBPATH], "
+            "lidar --claude-install, lidar --version"
+        ),
+    )
+    sub = parser.add_subparsers(
+        dest="command", required=True, metavar="COMMAND"
+    )
+
+    p_map = sub.add_parser("map", help="generate MAP.md and map.json")
+    p_map.add_argument(
+        "dir",
+        nargs="?",
+        default=".",
+        metavar="DIR",
+        help="directory to map (default: cwd)",
+    )
+    p_map.add_argument(
+        "subpath",
+        nargs="?",
+        default=None,
+        help="optional repo-relative subtree to map",
+    )
+    p_map.add_argument(
+        "--if-stale",
+        action="store_true",
+        help="skip regeneration when the existing map is fresh",
+    )
+    _add_map_options(p_map)
+    p_map.set_defaults(func=_cmd_map)
+
+    p_query = sub.add_parser("query", help="query the call graph")
+    p_query.add_argument("action", choices=query.ACTIONS)
+    p_query.add_argument(
+        "target",
+        help="symbol (name, Class.method, file.py:func) or file path",
+    )
+    p_query.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="max text result lines (default: 50)",
+    )
+    _add_read_options(p_query)
+    p_query.set_defaults(func=run_query)
+
+    p_ctx = sub.add_parser(
+        "context", help="emit a context pack for a symbol or file"
+    )
+    p_ctx.add_argument(
+        "target", help="symbol (name, file.py:func) or file path"
+    )
+    p_ctx.add_argument(
+        "--hops",
+        type=int,
+        default=1,
+        help="neighborhood radius (default: 1)",
+    )
+    p_ctx.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="approximate token budget for the pack",
+    )
+    _add_read_options(p_ctx)
+    p_ctx.set_defaults(func=run_context)
+
+    p_status = sub.add_parser(
+        "status", help="report whether map.json is fresh"
+    )
+    p_status.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_status.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_status.set_defaults(func=run_status)
     return parser
 
 
@@ -276,6 +401,9 @@ def run_map(args: argparse.Namespace) -> int:
         print(f"lidar: not a directory: {root}", file=sys.stderr)
         return 2
 
+    if getattr(args, "if_stale", False) and _map_is_fresh(root, args):
+        return 0
+
     files, skipped = map_repository(
         root,
         subpath=args.subpath,
@@ -299,8 +427,15 @@ def run_map(args: argparse.Namespace) -> int:
     md_path.write_text(render_markdown(files, graph, label))
     outputs.append(md_path)
     if not args.no_json:
+        provenance = mapfile.compute_provenance(
+            root,
+            [fm.path for fm in files],
+            subpath=args.subpath,
+            excludes=tuple(args.exclude),
+            max_file_size=args.max_file_size,
+        )
         json_path.parent.mkdir(parents=True, exist_ok=True)
-        json_path.write_text(render_json(files, graph, label))
+        json_path.write_text(render_json(files, graph, label, provenance))
         outputs.append(json_path)
 
     if not args.quiet:
@@ -317,6 +452,170 @@ def run_map(args: argparse.Namespace) -> int:
     return 0
 
 
+def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
+    """True when the existing map matches the request and is fresh.
+
+    Prints the one-line freshness summary (unless ``--quiet``) so
+    ``--if-stale`` callers still get a status line.
+    """
+    index = mapfile.load_map(root)
+    if index is None or not index.provenance:
+        return False
+    prov = index.provenance
+    options_match = (
+        prov.get("subpath") == args.subpath
+        and prov.get("excludes", []) == list(args.exclude)
+        and prov.get("max_file_size") == args.max_file_size
+    )
+    if not options_match:
+        return False
+    if not mapfile.check_freshness(root, index).fresh:
+        return False
+    if not args.quiet:
+        commit = (prov.get("git_commit") or "no git")[:12]
+        n = len(prov.get("files", {}))
+        print(f"lidar: map fresh ({n} files, commit {commit})")
+    return True
+
+
+def _load_or_regen(
+    root: Path, no_regen: bool
+) -> tuple[mapfile.MapIndex | None, int]:
+    """Load the map at root, regenerating when missing or stale.
+
+    Args:
+        root: Repo root containing map.json.
+        no_regen: Fail instead of regenerating.
+
+    Returns:
+        ``(index, exit_code)`` — index is ``None`` on failure.
+    """
+    index = mapfile.load_map(root)
+    if index is not None and mapfile.check_freshness(root, index).fresh:
+        return index, 0
+    if no_regen:
+        print(
+            f"lidar: map.json missing or stale under {root} "
+            "(run `lidar map`, or drop --no-regen)",
+            file=sys.stderr,
+        )
+        return None, 5
+
+    prov = (index.provenance if index else None) or {}
+    regen_args = argparse.Namespace(
+        map_dir=str(root),
+        subpath=prov.get("subpath"),
+        exclude=list(prov.get("excludes", [])),
+        max_file_size=prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE),
+        output=None,
+        json_output=None,
+        no_json=False,
+        quiet=True,
+        if_stale=False,
+    )
+    code = run_map(regen_args)
+    if code != 0:
+        return None, code
+    return mapfile.load_map(root), 0
+
+
+def _cmd_map(args: argparse.Namespace) -> int:
+    """Adapter: ``lidar map DIR`` → ``run_map`` namespace."""
+    args.map_dir = args.dir
+    return run_map(args)
+
+
+def run_query(args: argparse.Namespace) -> int:
+    """Handle ``lidar query``."""
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    return query.run(
+        index,
+        args.action,
+        args.target,
+        as_json=args.as_json,
+        limit=args.limit,
+    )
+
+
+def run_context(args: argparse.Namespace) -> int:
+    """Handle ``lidar context``."""
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    return contextpack.run(
+        index,
+        args.target,
+        hops=args.hops,
+        budget=args.budget,
+        as_json=args.as_json,
+    )
+
+
+def run_status(args: argparse.Namespace) -> int:
+    """Handle ``lidar status`` (never regenerates)."""
+    root = Path(args.root).resolve()
+    index = mapfile.load_map(root)
+    if index is None:
+        if args.as_json:
+            print(json.dumps({"status": "missing"}))
+        else:
+            print(
+                f"lidar: no map.json under {root} - run `lidar map`",
+                file=sys.stderr,
+            )
+        return 1
+
+    fresh = mapfile.check_freshness(root, index)
+    if args.as_json:
+        doc = {
+            "status": "fresh" if fresh.fresh else "stale",
+            "added": fresh.added,
+            "removed": fresh.removed,
+            "changed": fresh.changed,
+        }
+        print(json.dumps(doc, indent=2))
+        return 0 if fresh.fresh else 1
+
+    if fresh.fresh:
+        prov = index.provenance or {}
+        commit = (prov.get("git_commit") or "no git")[:12]
+        n = len(prov.get("files", {}))
+        print(f"lidar: map fresh ({n} files, commit {commit})")
+        return 0
+
+    print("lidar: map is stale")
+    for title, items in (
+        ("added", fresh.added),
+        ("changed", fresh.changed),
+        ("removed", fresh.removed),
+    ):
+        for path in items[:10]:
+            print(f"  {title}: {path}")
+        if len(items) > 10:
+            print(f"  ... and {len(items) - 10} more {title}")
+    return 1
+
+
+def _legacy_main(args_list: list[str]) -> int:
+    """Parse and dispatch the legacy flag-based invocation."""
+    parser = build_legacy_parser()
+    args = parser.parse_args(args_list)
+
+    if args.claude_install:
+        return claude_install()
+
+    if args.map_dir is None:
+        build_subcommand_parser().print_help()
+        return 0
+
+    args.if_stale = False
+    return run_map(args)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point.
 
@@ -326,17 +625,17 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Process exit code.
     """
-    parser = build_arg_parser()
-    args = parser.parse_args(argv)
+    args_list = list(sys.argv[1:] if argv is None else argv)
 
-    if args.claude_install:
-        return claude_install()
+    if args_list and args_list[0] in SUBCOMMANDS:
+        args = build_subcommand_parser().parse_args(args_list)
+        return args.func(args)
 
-    if args.map_dir is None:
-        parser.print_help()
+    if args_list and args_list[0] in ("-h", "--help"):
+        build_subcommand_parser().print_help()
         return 0
 
-    return run_map(args)
+    return _legacy_main(args_list)
 
 
 if __name__ == "__main__":
