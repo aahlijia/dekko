@@ -33,9 +33,9 @@ wheels = [
 ]
 
 [[package]]
-name = "lidar-tool"
-version = "0.1.1"
-source = { virtual = "." }
+name = "lidar-map"
+version = "0.2.0"
+source = { editable = "." }
 dependencies = [
     { name = "pathspec" },
     { name = "tree-sitter" },

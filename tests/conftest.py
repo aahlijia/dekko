@@ -1,6 +1,5 @@
-"""Make the tool's sibling-module layout importable from tests."""
+"""Shared pytest configuration.
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tool"))
+The project is installed into the test environment (``uv run pytest``
+syncs it), so tests import ``lidar_map`` directly — no path hacks.
+"""

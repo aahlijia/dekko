@@ -1,22 +1,24 @@
 ---
 description: Generate MAP.md — a relational map of every file, function, signature, and call in the repo
 argument-hint: "[subpath]"
-allowed-tools: Bash(uv run:*)
+allowed-tools: Bash(lidar:*)
 ---
 
 ## Code map results
 
 The mapping tool has already run; its summary is below.
 
-!`uv run --quiet "${CLAUDE_PLUGIN_ROOT}/tool/lidar.py" $ARGUMENTS`
+!`lidar --map . $ARGUMENTS`
 
 ## Your task
 
 The repository map was generated programmatically by the tool above — do
 NOT parse any source files yourself.
 
-1. If the summary above shows an error (e.g. `uv` missing or the tool
-   failed), explain the problem to the user and how to fix it. Otherwise:
+1. If the summary above shows an error, explain the problem to the user
+   and how to fix it. In particular, if the `lidar` command was not
+   found, tell them to install it with `pip install lidar-map` (or
+   `uv tool install lidar-map`). Otherwise:
 2. Relay the summary to the user: how many files were mapped, in which
    languages, how many functions and call relationships were found, and
    anything skipped.

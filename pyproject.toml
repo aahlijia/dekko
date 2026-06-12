@@ -1,13 +1,48 @@
 [project]
-name = "lidar-tool"
-version = "0.1.1"
-description = "Development environment for the lidar plugin tool"
+name = "lidar-map"
+version = "0.2.0"
+description = "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Austin Ahlijian", email = "aahlijia@gmail.com" }
+]
 requires-python = ">=3.10"
+keywords = ["code-map", "tree-sitter", "static-analysis", "claude-code"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
 dependencies = [
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.6",
     "pathspec>=0.12",
 ]
+
+[project.urls]
+Repository = "https://github.com/aahlijia/lidar"
+Issues = "https://github.com/aahlijia/lidar/issues"
+
+[project.scripts]
+lidar = "lidar_map.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lidar_map"]
+
+[tool.hatch.build.targets.wheel.force-include]
+".claude-plugin" = "lidar_map/_plugin/.claude-plugin"
+"commands" = "lidar_map/_plugin/commands"
 
 [dependency-groups]
 dev = [

@@ -10,8 +10,8 @@ import re
 from pathlib import Path
 from typing import Iterator
 
-from extractor import _callee_parts, _enclosing, _params_generic, _text
-from model import FileMap, RawCall, Symbol
+from .extractor import _callee_parts, _enclosing, _params_generic, _text
+from .model import FileMap, RawCall, Symbol
 from tree_sitter import Node, Parser
 from tree_sitter_language_pack import get_language
 

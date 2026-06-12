@@ -10,12 +10,10 @@ if ! command -v uv &>/dev/null; then
     exit 1
 fi
 
-printf 'Registering marketplace...\n'
-if ! claude plugin marketplace add "$DIR" 2>/dev/null; then
-    printf '(marketplace already registered, continuing)\n'
-fi
+printf 'Installing lidar-map (CLI command: lidar)...\n'
+uv tool install --force --from "$DIR" lidar-map
 
-printf 'Installing lidar plugin...\n'
-claude plugin install lidar@lidar
+printf 'Installing the lidar-map plugin into Claude Code...\n'
+lidar --claude-install
 
 printf '\n\033[32mDone.\033[0m Restart Claude Code to activate \033[1m/map\033[0m.\n'

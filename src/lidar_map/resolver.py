@@ -9,7 +9,7 @@ candidates are external.
 import re
 from pathlib import PurePosixPath
 
-from model import CallGraph, Edge, FileMap, Import, RawCall, Symbol
+from .model import CallGraph, Edge, FileMap, Import, RawCall, Symbol
 
 _SELF_RECEIVERS = {"self", "this", "Self", "cls"}
 _PATH_SPLIT = re.compile(r"::|\.|/")

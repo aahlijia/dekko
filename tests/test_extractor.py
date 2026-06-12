@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-import languages
-from extractor import _parse_rust_use, extract_file
-from model import Symbol
+from lidar_map import languages
+from lidar_map.extractor import _parse_rust_use, extract_file
+from lidar_map.model import Symbol
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
