@@ -76,11 +76,12 @@ lidar --version
 
 Symbol targets accept a bare `name`, `Class.method`, or the qualified
 `file.py:name` / `file.py:Class.method` forms; ambiguous names list
-their candidates instead of guessing. Read commands (`query`,
-`context`) regenerate a stale map automatically — pass `--no-regen` to
-fail instead, and `--json` anywhere for structured output. The legacy
-flags `--map [DIR] [SUBPATH]`, `--claude-install`, and `--version`
-keep working as aliases.
+their candidates instead of guessing. The read commands (`query`,
+`context`, `unused`, `stats`, `export`) regenerate a stale map
+automatically — pass `--no-regen` to fail instead, and `--json`
+anywhere for structured output. The legacy flags `--map [DIR]
+[SUBPATH]`, `--claude-install`, `--mcp-install`, and `--version` keep
+working as aliases.
 
 `map` keeps a per-file extraction cache under `.lidar/` (added to your
 `.gitignore` automatically), so re-mapping only re-parses files whose
@@ -163,4 +164,5 @@ uv build                         # sdist + wheel into dist/
 
 Releases: pushing a `v*` tag builds and publishes to PyPI via trusted
 publishing (`.github/workflows/release.yml`); configure the trusted
-publisher for `aahlijia/lidar` on PyPI first.
+publisher for `aahlijia/lidar` on PyPI first. See
+[CHANGELOG.md](CHANGELOG.md) for the per-version history.
