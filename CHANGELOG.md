@@ -9,6 +9,8 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-06-12
+
 ### Added
 - `dekko --claude-uninstall` — reverses `--claude-install`, removing the
   bundled plugin and its marketplace registration.
@@ -23,6 +25,11 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 - `MAP.md` and `map.json` are now written into the `.dekko/` directory by
   default (alongside the cache) instead of the repository root; `--output`
   still overrides the location.
+- The gitignore wiring (the inner `.dekko/.gitignore` and the `.dekko/`
+  entry in the repo `.gitignore`) is now written only when a run actually
+  creates the `.dekko/` directory. If `.dekko/` already exists, gitignores
+  are left untouched — removing either entry is no longer undone on the
+  next run.
 
 ### Fixed
 - `install.sh` invokes the freshly installed CLI by absolute path — a
@@ -190,7 +197,8 @@ Initial release: the **dekko** Claude Code plugin.
   imports → unique repo-wide match); ambiguous calls are marked, never
   guessed.
 
-[Unreleased]: https://github.com/aahlijia/dekko/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/aahlijia/dekko/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/aahlijia/dekko/releases/tag/v0.7.1
 [0.7.0]: https://github.com/aahlijia/dekko/releases/tag/v0.7.0
 [0.6.0]: https://github.com/aahlijia/dekko/releases/tag/v0.6.0
 [0.5.0]: https://github.com/aahlijia/dekko/releases/tag/v0.5.0

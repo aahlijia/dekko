@@ -2,17 +2,17 @@
   "generator": "dekko",
   "version": 2,
   "root": "code-map",
-  "generated_at": "2026-06-12T20:39:48+00:00",
+  "generated_at": "2026-06-12T21:02:58+00:00",
   "provenance": {
-    "tool_version": "0.7.0",
-    "git_commit": "96c09eb2aa7ade9429bc504bc9aa4b0d7a91c3c4",
+    "tool_version": "0.7.1",
+    "git_commit": "3c36742d5619e3559ba2827b9b4d1c1f8740cef7",
     "subpath": null,
     "excludes": [],
     "max_file_size": 1000000,
     "files": {
       "install.sh": "95d13654ef75cf11",
       "src/dekko/__init__.py": "cb857bf1f4daf292",
-      "src/dekko/cache.py": "ff2773591dca1f99",
+      "src/dekko/cache.py": "3371716700ef17d1",
       "src/dekko/cli.py": "9ebe89df3cee4dc8",
       "src/dekko/contextpack.py": "eb883f12359b201d",
       "src/dekko/diff.py": "6a23624a97189ca0",
@@ -45,7 +45,7 @@
       "tests/fixtures/rust/lib.rs": "5e378041ce959ea6",
       "tests/fixtures/rust/main.rs": "206685f483099a1a",
       "tests/fixtures/ts/svc.ts": "d7f73c2d24fa0523",
-      "tests/test_cache.py": "d64b2e8d4d113db5",
+      "tests/test_cache.py": "88dbbbfc79b8b557",
       "tests/test_cli.py": "b2a78ae48a4f24e6",
       "tests/test_contextpack.py": "16f9f71e35437ef2",
       "tests/test_diff.py": "6f5861c63f25ac87",
@@ -2074,7 +2074,7 @@
       ],
       "returns": "None",
       "start_line": 119,
-      "end_line": 134,
+      "end_line": 132,
       "decorated": false,
       "exported": false
     },
@@ -2092,8 +2092,27 @@
         }
       ],
       "returns": "Path",
-      "start_line": 137,
-      "end_line": 151,
+      "start_line": 135,
+      "end_line": 148,
+      "decorated": false,
+      "exported": false
+    },
+    {
+      "id": "src/dekko/cache.py::_make_cache_dir",
+      "name": "_make_cache_dir",
+      "qualname": "_make_cache_dir",
+      "kind": "function",
+      "path": "src/dekko/cache.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "root",
+          "type": "Path"
+        }
+      ],
+      "returns": "Path",
+      "start_line": 151,
+      "end_line": 170,
       "decorated": false,
       "exported": false
     },
@@ -2115,8 +2134,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 154,
-      "end_line": 167,
+      "start_line": 173,
+      "end_line": 186,
       "decorated": false,
       "exported": false
     },
@@ -8188,7 +8207,7 @@
       ],
       "returns": "None",
       "start_line": 116,
-      "end_line": 121,
+      "end_line": 119,
       "decorated": false,
       "exported": false
     },
@@ -8206,8 +8225,27 @@
         }
       ],
       "returns": "None",
-      "start_line": 124,
-      "end_line": 130,
+      "start_line": 122,
+      "end_line": 128,
+      "decorated": false,
+      "exported": false
+    },
+    {
+      "id": "tests/test_cache.py::test_existing_dekko_dir_leaves_gitignores_untouched",
+      "name": "test_existing_dekko_dir_leaves_gitignores_untouched",
+      "qualname": "test_existing_dekko_dir_leaves_gitignores_untouched",
+      "kind": "function",
+      "path": "tests/test_cache.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "make_mapped_repo",
+          "type": "RepoFactory"
+        }
+      ],
+      "returns": "None",
+      "start_line": 131,
+      "end_line": 143,
       "decorated": false,
       "exported": false
     },
@@ -8225,8 +8263,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 133,
-      "end_line": 148,
+      "start_line": 146,
+      "end_line": 161,
       "decorated": false,
       "exported": false
     },
@@ -8244,8 +8282,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 143,
-      "end_line": 146,
+      "start_line": 156,
+      "end_line": 159,
       "decorated": false,
       "exported": false
     },
@@ -10891,8 +10929,12 @@
       "callee": "src/dekko/model.py::RawCall"
     },
     {
-      "caller": "src/dekko/cache.py::ensure_dir",
+      "caller": "src/dekko/cache.py::_make_cache_dir",
       "callee": "src/dekko/cache.py::_ensure_ignored"
+    },
+    {
+      "caller": "src/dekko/cache.py::ensure_dir",
+      "callee": "src/dekko/cache.py::_make_cache_dir"
     },
     {
       "caller": "src/dekko/cache.py::load",
@@ -10900,7 +10942,7 @@
     },
     {
       "caller": "src/dekko/cache.py::save",
-      "callee": "src/dekko/cache.py::_ensure_ignored"
+      "callee": "src/dekko/cache.py::_make_cache_dir"
     },
     {
       "caller": "src/dekko/cache.py::save",
@@ -12508,6 +12550,14 @@
     },
     {
       "caller": "tests/test_cache.py::test_cache_created_and_ignored",
+      "callee": "tests/conftest.py::make_mapped_repo"
+    },
+    {
+      "caller": "tests/test_cache.py::test_existing_dekko_dir_leaves_gitignores_untouched",
+      "callee": "src/dekko/cli.py::main"
+    },
+    {
+      "caller": "tests/test_cache.py::test_existing_dekko_dir_leaves_gitignores_untouched",
       "callee": "tests/conftest.py::make_mapped_repo"
     },
     {
@@ -14165,12 +14215,16 @@
       "callee": "asdict"
     },
     {
-      "caller": "src/dekko/cache.py::_tool_version",
-      "callee": "_pkg_version"
+      "caller": "src/dekko/cache.py::_make_cache_dir",
+      "callee": "cache_dir.exists"
     },
     {
-      "caller": "src/dekko/cache.py::ensure_dir",
+      "caller": "src/dekko/cache.py::_make_cache_dir",
       "callee": "cache_dir.mkdir"
+    },
+    {
+      "caller": "src/dekko/cache.py::_tool_version",
+      "callee": "_pkg_version"
     },
     {
       "caller": "src/dekko/cache.py::load",
@@ -14187,10 +14241,6 @@
     {
       "caller": "src/dekko/cache.py::save",
       "callee": "(cache_dir / CACHE_FILE).write_text"
-    },
-    {
-      "caller": "src/dekko/cache.py::save",
-      "callee": "cache_dir.mkdir"
     },
     {
       "caller": "src/dekko/cache.py::save",
@@ -16413,6 +16463,26 @@
       "callee": "set"
     },
     {
+      "caller": "tests/test_cache.py::test_existing_dekko_dir_leaves_gitignores_untouched",
+      "callee": "(root / \".gitignore\").read_text"
+    },
+    {
+      "caller": "tests/test_cache.py::test_existing_dekko_dir_leaves_gitignores_untouched",
+      "callee": "(root / \".gitignore\").write_text"
+    },
+    {
+      "caller": "tests/test_cache.py::test_existing_dekko_dir_leaves_gitignores_untouched",
+      "callee": "(root / cache_mod.CACHE_DIR / \".gitignore\").exists"
+    },
+    {
+      "caller": "tests/test_cache.py::test_existing_dekko_dir_leaves_gitignores_untouched",
+      "callee": "(root / cache_mod.CACHE_DIR / \".gitignore\").unlink"
+    },
+    {
+      "caller": "tests/test_cache.py::test_existing_dekko_dir_leaves_gitignores_untouched",
+      "callee": "str"
+    },
+    {
       "caller": "tests/test_cache.py::test_full_forces_cold_rebuild",
       "callee": "sorted"
     },
@@ -16438,11 +16508,11 @@
     },
     {
       "caller": "tests/test_cache.py::test_no_json_skips_cache",
-      "callee": "( tmp_path / cache_mod.CACHE_DIR / cache_mod.CACHE_FILE ).exists"
+      "callee": "(tmp_path / \"a.py\").write_text"
     },
     {
       "caller": "tests/test_cache.py::test_no_json_skips_cache",
-      "callee": "(tmp_path / \"a.py\").write_text"
+      "callee": "(tmp_path / cache_mod.CACHE_DIR / cache_mod.CACHE_FILE).exists"
     },
     {
       "caller": "tests/test_cache.py::test_no_json_skips_cache",
