@@ -38,6 +38,8 @@ class Symbol:
     returns: str | None = None
     start_line: int = 0
     end_line: int = 0
+    exported: bool = False
+    decorated: bool = False
 
 
 @dataclass

@@ -188,6 +188,8 @@ def _make_symbol(
     if count:
         sym_id = f"{sym_id}#{count + 1}"
 
+    exported, decorated = _extract_facts(spec.name, rel, def_node, name)
+
     return Symbol(
         id=sym_id,
         name=name,
@@ -199,6 +201,8 @@ def _make_symbol(
         returns=returns,
         start_line=def_node.start_point[0] + 1,
         end_line=def_node.end_point[0] + 1,
+        exported=exported,
+        decorated=decorated,
     )
 
 
@@ -234,6 +238,40 @@ def _strip_generics(name: str) -> str:
     """Drop a trailing generic parameter list: ``Foo<T>`` → ``Foo``."""
     cut = name.find("<")
     return name[:cut].strip() if cut != -1 else name
+
+
+def _extract_facts(lang: str, rel: str, def_node: Node, name: str) -> tuple[bool, bool]:
+    """Determine (exported, decorated) facts for a definition."""
+    exported = False
+    decorated = False
+
+    if lang == "python":
+        decorated = def_node.parent is not None and def_node.parent.type == "decorated_definition"
+        exported = (name.startswith("__") and name.endswith("__")) or rel.endswith("__init__.py")
+    elif lang == "rust":
+        decorated = any(c.type == "attribute_item" for c in def_node.children)
+        exported = any(c.type == "visibility_modifier" for c in def_node.children)
+    elif lang == "go":
+        exported = bool(name and name[0].isupper())
+    elif lang == "java":
+        modifiers = def_node.child_by_field_name("modifiers")
+        if modifiers:
+            decorated = any(c.type in ("marker_annotation", "annotation") for c in modifiers.children)
+            exported = "public" in _text(modifiers).split()
+    elif lang in ("javascript", "typescript", "tsx"):
+        decorated = any(c.type == "decorator" for c in def_node.children)
+        parent = def_node.parent
+        if parent and parent.type == "export_statement":
+            exported = True
+        elif parent and parent.parent and parent.parent.type == "export_statement":
+            exported = True
+        else:
+            exported = False
+    else:
+        # C/C++ or unknown: default to exported, no decorators.
+        exported = True
+
+    return exported, decorated
 
 
 # ---------------------------------------------------------------------

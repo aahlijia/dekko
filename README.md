@@ -53,6 +53,9 @@ lidar context run_map --budget 1500 # minimal context pack for an edit
 lidar diff                    # symbols changed since the map's commit
 lidar diff main               # ...or since any git rev, with callers
 lidar status                  # is map.json still fresh? (exit 0/1)
+lidar unused                  # find zero-inbound-edge symbols (ignoring test/main/exported roots)
+lidar stats                   # repository call graph hotspots and language breakdown
+lidar export --format mermaid # dump the call graph (writes to .lidar/GRAPH-mermaid.md)
 lidar serve --mcp             # expose the map to agents over MCP (stdio)
 lidar --claude-install        # install the Claude Code plugin
 lidar --mcp-install           # register the MCP server (claude mcp add)
@@ -66,6 +69,9 @@ lidar --version
 | `context TARGET` | Signatures of a symbol's neighborhood (`--hops N`, `--budget TOKENS`) |
 | `diff [REV]` | Symbols added/removed/changed since a git rev (default: the map's commit), each with impacted callers (`--limit`, `--json`) |
 | `status` | Freshness report from the provenance stamp in map.json |
+| `unused` | Reports zero-inbound-edge symbols, systematically skipping known roots (tests, main, exported, decorated). Use `--roots GLOB` to ignore specific paths or symbols |
+| `stats` | Lists repository hotspots (fan-in/fan-out), largest files, and language breakdown |
+| `export` | Writes the call graph to `.lidar/GRAPH-{fmt}.md` (`--format mermaid|dot`, `--scope file|symbol`) |
 | `serve --mcp` | Hand-rolled MCP server (stdio) exposing the read surface as agent tools (`--root`, `--no-regen`) |
 
 Symbol targets accept a bare `name`, `Class.method`, or the qualified

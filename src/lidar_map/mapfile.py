@@ -16,7 +16,7 @@ from pathlib import Path
 from . import walker
 from .model import Import, Param, Symbol
 
-MAP_DOC_VERSION = 2
+MAP_DOC_VERSION = 3
 
 
 def compute_provenance(
@@ -131,6 +131,8 @@ def _symbol_from_dict(d: dict) -> Symbol:
         returns=d.get("returns"),
         start_line=d.get("start_line", 0),
         end_line=d.get("end_line", 0),
+        exported=d.get("exported", False),
+        decorated=d.get("decorated", False),
     )
 
 

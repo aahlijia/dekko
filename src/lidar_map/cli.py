@@ -22,7 +22,10 @@ from . import languages
 from . import mapfile
 from . import query
 from . import server
+from . import stats
+from . import unused
 from . import walker
+from . import export
 from .extractor import extract_file
 from .extractor_generic import extract_file_generic
 from .model import FileMap
@@ -31,7 +34,7 @@ from .render_md import render_markdown
 from .resolver import resolve
 
 
-SUBCOMMANDS = ("map", "query", "context", "diff", "status", "serve")
+SUBCOMMANDS = ("map", "query", "context", "diff", "status", "serve", "unused", "stats", "export")
 
 
 def build_legacy_parser() -> argparse.ArgumentParser:
@@ -276,6 +279,38 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="fail instead of regenerating a stale map on reads",
     )
     p_serve.set_defaults(func=run_serve)
+
+    p_unused = sub.add_parser("unused", help="find unused symbols in the codebase")
+    p_unused.add_argument(
+        "--roots",
+        nargs="+",
+        default=[],
+        metavar="GLOB",
+        help="glob patterns for files or symbols that act as roots (have no callers but are not unused)",
+    )
+    _add_read_options(p_unused)
+    p_unused.set_defaults(func=run_unused)
+
+    p_stats = sub.add_parser("stats", help="report call graph statistics and hotspots")
+    _add_read_options(p_stats)
+    p_stats.set_defaults(func=run_stats)
+
+    p_export = sub.add_parser("export", help="export the call graph to a graph format")
+    p_export.add_argument(
+        "--format",
+        choices=("mermaid", "dot"),
+        default="mermaid",
+        help="output format (default: mermaid)",
+    )
+    p_export.add_argument(
+        "--scope",
+        choices=("file", "symbol"),
+        default="symbol",
+        help="graph granularity (default: symbol)",
+    )
+    _add_read_options(p_export)
+    p_export.set_defaults(func=run_export)
+
     return parser
 
 
@@ -713,6 +748,33 @@ def run_serve(args: argparse.Namespace) -> int:
         )
         return 2
     return server.serve(Path(args.root), no_regen=args.no_regen)
+
+
+def run_unused(args: argparse.Namespace) -> int:
+    """Handle ``lidar unused``."""
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    return unused.run(index, args.roots, as_json=args.as_json)
+
+
+def run_stats(args: argparse.Namespace) -> int:
+    """Handle ``lidar stats``."""
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    return stats.run(index, as_json=args.as_json)
+
+
+def run_export(args: argparse.Namespace) -> int:
+    """Handle ``lidar export``."""
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    return export.run(root, index, args.format, args.scope, as_json=args.as_json)
 
 
 def run_status(args: argparse.Namespace) -> int:
