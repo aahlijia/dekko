@@ -43,6 +43,7 @@ packages = ["src/lidar_map"]
 [tool.hatch.build.targets.wheel.force-include]
 ".claude-plugin" = "lidar_map/_plugin/.claude-plugin"
 "commands" = "lidar_map/_plugin/commands"
+".mcp.json" = "lidar_map/_plugin/.mcp.json"
 
 [dependency-groups]
 dev = [

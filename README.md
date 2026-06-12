@@ -53,7 +53,9 @@ lidar context run_map --budget 1500 # minimal context pack for an edit
 lidar diff                    # symbols changed since the map's commit
 lidar diff main               # ...or since any git rev, with callers
 lidar status                  # is map.json still fresh? (exit 0/1)
+lidar serve --mcp             # expose the map to agents over MCP (stdio)
 lidar --claude-install        # install the Claude Code plugin
+lidar --mcp-install           # register the MCP server (claude mcp add)
 lidar --version
 ```
 
@@ -64,6 +66,7 @@ lidar --version
 | `context TARGET` | Signatures of a symbol's neighborhood (`--hops N`, `--budget TOKENS`) |
 | `diff [REV]` | Symbols added/removed/changed since a git rev (default: the map's commit), each with impacted callers (`--limit`, `--json`) |
 | `status` | Freshness report from the provenance stamp in map.json |
+| `serve --mcp` | Hand-rolled MCP server (stdio) exposing the read surface as agent tools (`--root`, `--no-regen`) |
 
 Symbol targets accept a bare `name`, `Class.method`, or the qualified
 `file.py:name` / `file.py:Class.method` forms; ambiguous names list
@@ -90,6 +93,30 @@ or differences found (`diff`); `2` usage error, `3` target not found,
 
 The plugin runs the installed `lidar` CLI, so install the package first
 (see above).
+
+## MCP server
+
+`lidar serve --mcp` speaks the Model Context Protocol over stdio as
+newline-delimited JSON-RPC 2.0 — **no SDK dependency**. It lets an agent
+answer "who calls X?" with a tool call instead of reading MAP.md. The
+read commands map to six tools:
+
+| Tool | Backs |
+| --- | --- |
+| `query_symbol` | `query symbol` |
+| `get_callers` / `get_callees` | `query callers` / `callees` |
+| `get_context_pack` | `context` (`hops`, `budget`) |
+| `map_status` | `status` |
+| `refresh_map` | `map` (`full` for a cold rebuild) |
+
+Reads auto-regenerate a stale map (pass `--no-regen` to disable), and
+each tool accepts an optional `root` (defaults to the server's working
+directory).
+
+The plugin ships an `.mcp.json` pointing at `lidar serve --mcp` with
+`cwd` set to `${CLAUDE_PROJECT_DIR}`, so `lidar --claude-install` wires
+the server automatically. For a non-plugin setup, `lidar --mcp-install`
+runs `claude mcp add lidar -- lidar serve --mcp`.
 
 ## Language support
 
