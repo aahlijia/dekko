@@ -1,7 +1,7 @@
 {
   "name": "lidar-map",
   "description": "Adds a /map command that programmatically scans the repository: every code file, function, parameter, type, return type, and the call relationships between functions. Writes MAP.md and map.json without spending model tokens on parsing.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "Austin Ahlijian"
   }

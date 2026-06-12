@@ -40,26 +40,38 @@ plugin in one step.
 ## CLI usage
 
 ```sh
-lidar --map                   # map the current directory
-lidar --map /path/to/repo     # map another directory
-lidar --map . src             # restrict the map to a subtree
-lidar --map . --output docs/  # write MAP.md + map.json into docs/
-lidar --map . --output codemap.md   # custom file (json: codemap.json)
+lidar map                     # map the current directory
+lidar map /path/to/repo       # map another directory
+lidar map . src               # restrict the map to a subtree
+lidar map --if-stale          # regenerate only when sources changed
+lidar query callers resolve   # who calls resolve?
+lidar query callees main      # what does main call?
+lidar query symbol cli.py:run_map   # signature card for one symbol
+lidar query file walker.py    # symbols defined in a file
+lidar context run_map --budget 1500 # minimal context pack for an edit
+lidar status                  # is map.json still fresh? (exit 0/1)
 lidar --claude-install        # install the Claude Code plugin
 lidar --version
 ```
 
-| Flag | Meaning |
+| Command | Meaning |
 | --- | --- |
-| `--map [DIR]` | Map `DIR` (defaults to the current directory) |
-| `--output PATH` | Markdown file, or a directory for both outputs |
-| `--json PATH` | Explicit map.json path |
-| `--no-json` | Skip map.json |
-| `--exclude GLOB` | Extra skip pattern (repeatable) |
-| `--max-file-size BYTES` | Skip files larger than this (default 1 MB) |
-| `--quiet` | Suppress the summary |
-| `--claude-install` | Register the bundled plugin with Claude Code |
-| `--version` | Print the version |
+| `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
+| `query ACTION TARGET` | `callers`, `callees`, `symbol`, or `file` lookups against map.json |
+| `context TARGET` | Signatures of a symbol's neighborhood (`--hops N`, `--budget TOKENS`) |
+| `status` | Freshness report from the provenance stamp in map.json |
+
+Symbol targets accept a bare `name`, `Class.method`, or the qualified
+`file.py:name` / `file.py:Class.method` forms; ambiguous names list
+their candidates instead of guessing. Read commands (`query`,
+`context`) regenerate a stale map automatically — pass `--no-regen` to
+fail instead, and `--json` anywhere for structured output. The legacy
+flags `--map [DIR] [SUBPATH]`, `--claude-install`, and `--version`
+keep working as aliases.
+
+Exit codes: `0` success/fresh, `1` failure or stale (`status`),
+`2` usage error, `3` target not found, `4` ambiguous target,
+`5` stale map with `--no-regen`.
 
 ## Plugin usage
 
