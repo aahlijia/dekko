@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from lidar_map.walker import discover
+from dekko.walker import discover
 
 
 def _touch(path: Path, content: str = "x = 1\n") -> None:

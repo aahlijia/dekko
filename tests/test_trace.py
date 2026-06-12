@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from lidar_map import cli
+from dekko import cli
 
 from conftest import RepoFactory
 

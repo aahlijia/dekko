@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from lidar_map import cli
-from lidar_map import server
+from dekko import cli
+from dekko import server
 
 from conftest import RepoFactory
 
@@ -43,7 +43,7 @@ def test_initialize_echoes_protocol_and_names() -> None:
     result = resp["result"]
     assert result["protocolVersion"] == "2025-03-26"
     assert result["capabilities"] == {"tools": {}}
-    assert result["serverInfo"]["name"] == "lidar"
+    assert result["serverInfo"]["name"] == "dekko"
 
 
 def test_initialized_notification_is_silent() -> None:
@@ -169,7 +169,7 @@ def test_not_found_is_tool_error_not_doubled(
     result = _call(ctx, "query_symbol", {"symbol": "ghost"})
     text = result["content"][0]["text"]
     assert result["isError"] is True
-    assert text.startswith("lidar: no symbol matches")  # single prefix
+    assert text.startswith("dekko: no symbol matches")  # single prefix
 
 
 def test_unknown_tool_is_error(make_mapped_repo: RepoFactory) -> None:

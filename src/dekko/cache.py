@@ -1,4 +1,4 @@
-"""Per-file extraction cache stored under ``.lidar/``.
+"""Per-file extraction cache stored under ``.dekko/``.
 
 Parsing every file with tree-sitter dominates a map run. The cache
 keys each file's extracted ``FileMap`` on the same content hash used
@@ -6,9 +6,9 @@ for provenance: on the next run, files whose hash is unchanged reuse
 their cached ``FileMap`` and skip re-parsing. Resolution still runs
 repo-wide (it is cheap relative to parsing).
 
-The cache lives in ``<root>/.lidar/cache.json``. On first creation the
-directory is made self-ignoring (``.lidar/.gitignore`` of ``*``) and
-``.lidar/`` is appended to the repository ``.gitignore``.
+The cache lives in ``<root>/.dekko/cache.json``. On first creation the
+directory is made self-ignoring (``.dekko/.gitignore`` of ``*``) and
+``.dekko/`` is appended to the repository ``.gitignore``.
 """
 
 import json
@@ -20,13 +20,13 @@ from .mapfile import _file_hash, _symbol_from_dict
 from .model import FileMap, Import, RawCall
 
 CACHE_VERSION = 1
-CACHE_DIR = ".lidar"
+CACHE_DIR = ".dekko"
 CACHE_FILE = "cache.json"
 
 
 def _tool_version() -> str:
-    """Current lidar-map version, used to invalidate stale extractions."""
-    return _pkg_version("lidar-map")
+    """Current dekko version, used to invalidate stale extractions."""
+    return _pkg_version("dekko")
 
 
 def _filemap_to_dict(fm: FileMap) -> dict:
@@ -95,7 +95,7 @@ def load(root: Path) -> dict[str, dict]:
     Args:
         root: Repository root.
 
-    A cache written by a different lidar-map version is discarded, so
+    A cache written by a different dekko version is discarded, so
     extractor changes always take effect on the next run without a
     manual ``--full``.
 
@@ -117,7 +117,7 @@ def load(root: Path) -> dict[str, dict]:
 
 
 def save(root: Path, cache: IncrementalCache) -> None:
-    """Persist a cache and ensure ``.lidar/`` is git-ignored.
+    """Persist a cache and ensure ``.dekko/`` is git-ignored.
 
     Args:
         root: Repository root.
@@ -134,8 +134,25 @@ def save(root: Path, cache: IncrementalCache) -> None:
     (cache_dir / CACHE_FILE).write_text(json.dumps(doc) + "\n")
 
 
+def ensure_dir(root: Path) -> Path:
+    """Create ``.dekko/`` and set up gitignore entries.
+
+    Idempotent — safe to call on every map run. Returns the cache dir.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Path to the ``.dekko/`` directory.
+    """
+    cache_dir = root / CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_ignored(root, cache_dir)
+    return cache_dir
+
+
 def _ensure_ignored(root: Path, cache_dir: Path) -> None:
-    """Make ``.lidar/`` self-ignoring and ignored by the repo."""
+    """Make ``.dekko/`` self-ignoring and ignored by the repo."""
     inner = cache_dir / ".gitignore"
     if not inner.exists():
         inner.write_text("*\n")

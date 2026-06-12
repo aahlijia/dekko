@@ -100,7 +100,7 @@ def run(index: MapIndex, top: int, as_json: bool) -> int:
         return 0
 
     print(
-        f"lidar: {len(index.languages_by_path)} files, "
+        f"dekko: {len(index.languages_by_path)} files, "
         f"{len(index.symbols_by_id)} symbols, {_edge_count(index)} edges"
     )
     mix = ", ".join(

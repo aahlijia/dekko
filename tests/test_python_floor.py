@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-TOOL_DIR = Path(__file__).resolve().parent.parent / "src" / "lidar_map"
+TOOL_DIR = Path(__file__).resolve().parent.parent / "src" / "dekko"
 FLOOR_VERSIONS = ("3.10", "3.11")
 
 

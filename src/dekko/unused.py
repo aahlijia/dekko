@@ -161,10 +161,10 @@ def run(
         return EXIT_FOUND if found else EXIT_NONE
 
     if not found:
-        print("lidar: no unused symbols")
+        print("dekko: no unused symbols")
         return EXIT_NONE
 
-    print(f"lidar: {len(found)} unused symbols")
+    print(f"dekko: {len(found)} unused symbols")
     for sym in found[:limit]:
         print(f"  {sym.path}:{sym.start_line}  {signature(sym)}  [{sym.kind}]")
     if len(found) > limit:

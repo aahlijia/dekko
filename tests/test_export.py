@@ -2,7 +2,7 @@
 
 import pytest
 
-from lidar_map import cli
+from dekko import cli
 
 from conftest import RepoFactory
 
@@ -41,7 +41,7 @@ def test_export_dot_file_scope(
     )
     out = capsys.readouterr().out
     assert code == 0
-    assert out.startswith("digraph lidar {")
+    assert out.startswith("digraph dekko {")
     assert 'label="b.py"' in out
     assert "->" in out and out.rstrip().endswith("}")
 

@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from lidar_map import mapfile
+from dekko import mapfile
 
 from conftest import RepoFactory
 
@@ -33,7 +33,7 @@ def test_load_round_trip(make_mapped_repo: RepoFactory) -> None:
 
 def test_provenance_written(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(CHAIN)
-    doc = json.loads((root / "map.json").read_text())
+    doc = json.loads((root / ".dekko" / "map.json").read_text())
     assert doc["version"] == 2
     prov = doc["provenance"]
     assert prov["tool_version"]
@@ -70,10 +70,10 @@ def test_v1_map_is_always_stale(
     make_mapped_repo: RepoFactory,
 ) -> None:
     root = make_mapped_repo(CHAIN)
-    doc = json.loads((root / "map.json").read_text())
+    doc = json.loads((root / ".dekko" / "map.json").read_text())
     doc["version"] = 1
     del doc["provenance"]
-    (root / "map.json").write_text(json.dumps(doc))
+    (root / ".dekko" / "map.json").write_text(json.dumps(doc))
 
     index = mapfile.load_map(root)
     assert index is not None

@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from lidar_map import cli
-from lidar_map import stats
+from dekko import cli
+from dekko import stats
 
 from conftest import RepoFactory
 
@@ -45,8 +45,8 @@ def test_stats_json_shape_and_hotspot(
 
 
 def test_largest_files_ranking() -> None:
-    from lidar_map.mapfile import MapIndex
-    from lidar_map.model import Symbol
+    from dekko.mapfile import MapIndex
+    from dekko.model import Symbol
 
     idx = MapIndex(root_label="t")
     for i in range(3):

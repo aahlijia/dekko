@@ -98,7 +98,7 @@ def render_mermaid(
 def render_dot(labels: dict[str, str], edges: list[tuple[str, str]]) -> str:
     """Render a digraph in Graphviz DOT syntax."""
     ids = _ids(labels)
-    lines = ["digraph lidar {", "  rankdir=LR;"]
+    lines = ["digraph dekko {", "  rankdir=LR;"]
     for node in sorted(labels):
         text = labels[node].replace("\\", "\\\\").replace('"', '\\"')
         lines.append(f'  {ids[node]} [label="{text}"];')
@@ -123,7 +123,7 @@ def run(index: MapIndex, fmt: str, scope: str, max_nodes: int) -> int:
     labels, edges = build_graph(index, scope)
     if len(labels) > max_nodes:
         print(
-            f"lidar: graph has {len(labels)} nodes (limit {max_nodes}); "
+            f"dekko: graph has {len(labels)} nodes (limit {max_nodes}); "
             "use --scope file, a subtree map, or raise --max-nodes",
             file=sys.stderr,
         )

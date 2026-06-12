@@ -1,6 +1,6 @@
 """Compare the working tree's symbols against an earlier git rev.
 
-``lidar diff [REV]`` maps the current working tree and the sources at a
+``dekko diff [REV]`` maps the current working tree and the sources at a
 git rev, then reports which symbols were added, removed, or changed
 (their source text differs) — each with the symbols that call them, so
 a reviewer sees the blast radius. The default rev is the commit the map
@@ -201,11 +201,11 @@ def render(result: DiffResult, as_json: bool, limit: int) -> None:
         return
 
     if result.empty():
-        print(f"lidar: no symbol changes vs {result.rev[:12]}")
+        print(f"dekko: no symbol changes vs {result.rev[:12]}")
         return
 
     print(
-        f"lidar: {len(result.changed)} changed, {len(result.added)} added, "
+        f"dekko: {len(result.changed)} changed, {len(result.added)} added, "
         f"{len(result.removed)} removed vs {result.rev[:12]}"
     )
     for marker, deltas in (
@@ -218,7 +218,7 @@ def render(result: DiffResult, as_json: bool, limit: int) -> None:
 
 
 def run(root: Path, rev: str | None, as_json: bool, limit: int) -> int:
-    """Execute ``lidar diff`` against a repository.
+    """Execute ``dekko diff`` against a repository.
 
     Args:
         root: Repository root (its working tree is the new side).
@@ -236,11 +236,11 @@ def run(root: Path, rev: str | None, as_json: bool, limit: int) -> int:
     max_file_size = prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE)
     target_rev = rev or prov.get("git_commit") or "HEAD"
 
-    with tempfile.TemporaryDirectory(prefix="lidar-diff-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="dekko-diff-") as tmp:
         old_root = Path(tmp)
         if not export_rev(root, target_rev, old_root):
             print(
-                f"lidar: cannot export git rev '{target_rev}' "
+                f"dekko: cannot export git rev '{target_rev}' "
                 f"(unknown rev or not a git repo)",
                 file=sys.stderr,
             )
