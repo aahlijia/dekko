@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from lidar_map import cli
+from dekko import cli
 
 from conftest import RepoFactory
 

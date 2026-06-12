@@ -1,6 +1,6 @@
 """Trace shortest call path(s) between two symbols.
 
-``lidar trace <from> <to>`` answers "how does X reach Y?" by walking the
+``dekko trace <from> <to>`` answers "how does X reach Y?" by walking the
 resolved call graph (``calls_out``) breadth-first from the source and
 reconstructing the shortest path(s) to the target. Endpoints use the same
 target syntax as ``query``/``context``; ambiguous or unknown endpoints are

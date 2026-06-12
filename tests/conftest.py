@@ -1,7 +1,7 @@
 """Shared pytest configuration.
 
 The project is installed into the test environment (``uv run pytest``
-syncs it), so tests import ``lidar_map`` directly — no path hacks.
+syncs it), so tests import ``dekko`` directly — no path hacks.
 """
 
 from collections.abc import Callable
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from lidar_map import cli
+from dekko import cli
 
 RepoFactory = Callable[[dict[str, str]], Path]
 

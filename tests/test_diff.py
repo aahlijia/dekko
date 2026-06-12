@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lidar_map import cli
+from dekko import cli
 
 BASE = {
     "a.py": "def f() -> int:\n    return 1\n",

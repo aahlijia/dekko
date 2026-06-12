@@ -1,4 +1,4 @@
-"""lidar: programmatically map a repository into MAP.md/map.json.
+"""dekko: programmatically map a repository into MAP.md/map.json.
 
 Walks the repo, parses every supported source file with tree-sitter,
 extracts functions/parameters/types, resolves call relationships, and
@@ -58,7 +58,7 @@ _PARALLEL_MIN = 50
 def build_legacy_parser() -> argparse.ArgumentParser:
     """Construct the legacy flag-based parser (v0.2 aliases)."""
     parser = argparse.ArgumentParser(
-        prog="lidar",
+        prog="dekko",
         description="Generate MAP.md and map.json for a repository.",
     )
     parser.add_argument(
@@ -79,7 +79,12 @@ def build_legacy_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--claude-install",
         action="store_true",
-        help="install the lidar-map plugin into Claude Code",
+        help="install the dekko plugin into Claude Code",
+    )
+    parser.add_argument(
+        "--claude-uninstall",
+        action="store_true",
+        help="remove the dekko plugin from Claude Code",
     )
     parser.add_argument(
         "--mcp-install",
@@ -87,9 +92,14 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         help="register the MCP server with Claude Code (claude mcp add)",
     )
     parser.add_argument(
+        "--mcp-uninstall",
+        action="store_true",
+        help="remove the MCP server from Claude Code (claude mcp remove)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
-        version=f"lidar {_pkg_version('lidar-map')}",
+        version=f"dekko {_pkg_version('dekko')}",
     )
     _add_map_options(parser)
     return parser
@@ -102,7 +112,8 @@ def _add_map_options(parser: argparse.ArgumentParser) -> None:
         default=None,
         metavar="PATH",
         help="markdown output file, or a directory to receive "
-        "MAP.md and map.json (default: the mapped directory)",
+        "MAP.md and map.json (default: a .dekko/ dir under the "
+        "mapped directory)",
     )
     parser.add_argument(
         "--json",
@@ -157,11 +168,11 @@ def _add_read_options(parser: argparse.ArgumentParser) -> None:
 def build_subcommand_parser() -> argparse.ArgumentParser:
     """Construct the subcommand parser (map/query/context/status)."""
     parser = argparse.ArgumentParser(
-        prog="lidar",
+        prog="dekko",
         description=("Generate and query MAP.md/map.json for a repository."),
         epilog=(
-            "legacy aliases: lidar --map [DIR] [SUBPATH], "
-            "lidar --claude-install, lidar --version"
+            "legacy aliases: dekko --map [DIR] [SUBPATH], "
+            "dekko --claude-install, dekko --version"
         ),
     )
     sub = parser.add_subparsers(
@@ -190,7 +201,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_map.add_argument(
         "--full",
         action="store_true",
-        help="ignore the .lidar cache and re-parse every file",
+        help="ignore the .dekko cache and re-parse every file",
     )
     p_map.add_argument(
         "--jobs",
@@ -512,7 +523,7 @@ def resolve_outputs(
         ``(markdown_path, json_path)``.
     """
     if output is None:
-        md_path = root / "MAP.md"
+        md_path = root / cache_mod.CACHE_DIR / "MAP.md"
     else:
         out = Path(output)
         if out.is_dir() or output.endswith("/"):
@@ -552,7 +563,7 @@ def _summary(
     classes = sum(1 for fm in files for s in fm.symbols if s.kind == "class")
     errors = sum(1 for fm in files if fm.error)
     lines = [
-        f"lidar: mapped {len(files)} files ({langs})",
+        f"dekko: mapped {len(files)} files ({langs})",
         f"  symbols: {funcs} functions/methods, {classes} classes",
         f"  call edges: {edges} resolved, {ambiguous} ambiguous, "
         f"{external} external",
@@ -582,24 +593,31 @@ def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+def _claude_cli_present() -> bool:
+    """Return True if the ``claude`` CLI is on PATH, else warn and False."""
+    if shutil.which("claude") is None:
+        print(
+            "dekko: 'claude' CLI not found on PATH. Install Claude Code "
+            "first: https://claude.com/claude-code",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def claude_install() -> int:
     """Register the bundled plugin with the Claude Code CLI.
 
     Returns:
         Process exit code.
     """
-    if shutil.which("claude") is None:
-        print(
-            "lidar: 'claude' CLI not found on PATH. Install Claude Code "
-            "first: https://claude.com/claude-code",
-            file=sys.stderr,
-        )
+    if not _claude_cli_present():
         return 1
 
-    plugin_dir = Path(str(_pkg_files("lidar_map"))) / "_plugin"
+    plugin_dir = Path(str(_pkg_files("dekko"))) / "_plugin"
     if not (plugin_dir / ".claude-plugin").is_dir():
         print(
-            f"lidar: bundled plugin not found at {plugin_dir}",
+            f"dekko: bundled plugin not found at {plugin_dir}",
             file=sys.stderr,
         )
         return 1
@@ -611,21 +629,49 @@ def claude_install() -> int:
         # Likely already registered (e.g. a previous install or a dev
         # checkout): refresh it instead.
         updated = _run_subprocess(
-            ["claude", "plugin", "marketplace", "update", "lidar-map"]
+            ["claude", "plugin", "marketplace", "update", "dekko"]
         )
         if updated.returncode != 0:
             print(added.stderr.strip(), file=sys.stderr)
             print(updated.stderr.strip(), file=sys.stderr)
             return 1
 
-    installed = _run_subprocess(
-        ["claude", "plugin", "install", "lidar-map@lidar-map"]
-    )
+    installed = _run_subprocess(["claude", "plugin", "install", "dekko@dekko"])
     if installed.returncode != 0:
         print(installed.stderr.strip(), file=sys.stderr)
         return 1
 
-    print("lidar: plugin installed. Restart Claude Code to activate /map.")
+    print("dekko: plugin installed. Restart Claude Code to activate /map.")
+    return 0
+
+
+def claude_uninstall() -> int:
+    """Remove the bundled plugin from the Claude Code CLI.
+
+    Reverses :func:`claude_install`: uninstalls the ``dekko`` plugin and
+    drops its marketplace registration. A step that reports the plugin or
+    marketplace is already absent is surfaced as a warning rather than a
+    failure, so the command is safe to run on a partial install.
+
+    Returns:
+        Process exit code (``1`` only when the ``claude`` CLI is missing).
+    """
+    if not _claude_cli_present():
+        return 1
+
+    for cmd in (
+        ["claude", "plugin", "uninstall", "dekko@dekko"],
+        ["claude", "plugin", "marketplace", "remove", "dekko"],
+    ):
+        result = _run_subprocess(cmd)
+        if result.returncode != 0:
+            print(
+                f"dekko: '{' '.join(cmd)}' failed (already removed?): "
+                f"{result.stderr.strip()}",
+                file=sys.stderr,
+            )
+
+    print("dekko: plugin removed. Restart Claude Code to drop /map.")
     return 0
 
 
@@ -635,22 +681,43 @@ def mcp_install() -> int:
     Returns:
         Process exit code.
     """
-    if shutil.which("claude") is None:
-        print(
-            "lidar: 'claude' CLI not found on PATH. Install Claude Code "
-            "first: https://claude.com/claude-code",
-            file=sys.stderr,
-        )
+    if not _claude_cli_present():
         return 1
 
     added = _run_subprocess(
-        ["claude", "mcp", "add", "lidar", "--", "lidar", "serve", "--mcp"]
+        ["claude", "mcp", "add", "dekko", "--", "dekko", "serve", "--mcp"]
     )
     if added.returncode != 0:
         print(added.stderr.strip(), file=sys.stderr)
         return 1
 
-    print("lidar: MCP server registered as 'lidar'. Restart Claude Code.")
+    print("dekko: MCP server registered as 'dekko'. Restart Claude Code.")
+    return 0
+
+
+def mcp_uninstall() -> int:
+    """Remove the standalone MCP server via ``claude mcp remove``.
+
+    Reverses :func:`mcp_install`. A "not found" report (the server was
+    never registered, or only via the plugin's bundled ``.mcp.json``) is
+    surfaced as a warning rather than a failure.
+
+    Returns:
+        Process exit code (``1`` only when the ``claude`` CLI is missing).
+    """
+    if not _claude_cli_present():
+        return 1
+
+    removed = _run_subprocess(["claude", "mcp", "remove", "dekko"])
+    if removed.returncode != 0:
+        print(
+            "dekko: 'claude mcp remove dekko' failed (already removed?): "
+            f"{removed.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return 0
+
+    print("dekko: MCP server 'dekko' removed. Restart Claude Code.")
     return 0
 
 
@@ -665,7 +732,7 @@ def run_map(args: argparse.Namespace) -> int:
     """
     root = Path(args.map_dir).resolve()
     if not root.is_dir():
-        print(f"lidar: not a directory: {root}", file=sys.stderr)
+        print(f"dekko: not a directory: {root}", file=sys.stderr)
         return 2
 
     if getattr(args, "if_stale", False) and _map_is_fresh(root, args):
@@ -686,7 +753,7 @@ def run_map(args: argparse.Namespace) -> int:
     )
     if not files:
         print(
-            f"lidar: no supported source files found under {root}",
+            f"dekko: no supported source files found under {root}",
             file=sys.stderr,
         )
         return 1
@@ -696,6 +763,7 @@ def run_map(args: argparse.Namespace) -> int:
 
     md_path, json_path = resolve_outputs(root, args.output, args.json_output)
 
+    cache_mod.ensure_dir(root)
     outputs: list[Path] = []
     md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(render_markdown(files, graph, label))
@@ -751,7 +819,7 @@ def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
     if not args.quiet:
         commit = (prov.get("git_commit") or "no git")[:12]
         n = len(prov.get("files", {}))
-        print(f"lidar: map fresh ({n} files, commit {commit})")
+        print(f"dekko: map fresh ({n} files, commit {commit})")
     return True
 
 
@@ -772,8 +840,8 @@ def _load_or_regen(
         return index, 0
     if no_regen:
         print(
-            f"lidar: map.json missing or stale under {root} "
-            "(run `lidar map`, or drop --no-regen)",
+            f"dekko: map.json missing or stale under {root} "
+            "(run `dekko map`, or drop --no-regen)",
             file=sys.stderr,
         )
         return None, 5
@@ -793,7 +861,7 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
 
     Args:
         root: Repository root to map.
-        full: Ignore the ``.lidar`` cache and re-parse every file.
+        full: Ignore the ``.dekko`` cache and re-parse every file.
         quiet: Suppress the one-line summary on stdout.
 
     Returns:
@@ -818,13 +886,13 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
 
 
 def _cmd_map(args: argparse.Namespace) -> int:
-    """Adapter: ``lidar map DIR`` → ``run_map`` namespace."""
+    """Adapter: ``dekko map DIR`` → ``run_map`` namespace."""
     args.map_dir = args.dir
     return run_map(args)
 
 
 def run_query(args: argparse.Namespace) -> int:
-    """Handle ``lidar query``."""
+    """Handle ``dekko query``."""
     root = Path(args.root).resolve()
     index, code = _load_or_regen(root, args.no_regen)
     if index is None:
@@ -839,7 +907,7 @@ def run_query(args: argparse.Namespace) -> int:
 
 
 def run_context(args: argparse.Namespace) -> int:
-    """Handle ``lidar context``."""
+    """Handle ``dekko context``."""
     root = Path(args.root).resolve()
     index, code = _load_or_regen(root, args.no_regen)
     if index is None:
@@ -854,7 +922,7 @@ def run_context(args: argparse.Namespace) -> int:
 
 
 def run_trace(args: argparse.Namespace) -> int:
-    """Handle ``lidar trace <from> <to>``."""
+    """Handle ``dekko trace <from> <to>``."""
     root = Path(args.root).resolve()
     index, code = _load_or_regen(root, args.no_regen)
     if index is None:
@@ -869,7 +937,7 @@ def run_trace(args: argparse.Namespace) -> int:
 
 
 def run_diff(args: argparse.Namespace) -> int:
-    """Handle ``lidar diff [REV]``."""
+    """Handle ``dekko diff [REV]``."""
     root = Path(args.root).resolve()
     return diff.run(
         root,
@@ -880,7 +948,7 @@ def run_diff(args: argparse.Namespace) -> int:
 
 
 def run_unused(args: argparse.Namespace) -> int:
-    """Handle ``lidar unused``."""
+    """Handle ``dekko unused``."""
     root = Path(args.root).resolve()
     index, code = _load_or_regen(root, args.no_regen)
     if index is None:
@@ -894,7 +962,7 @@ def run_unused(args: argparse.Namespace) -> int:
 
 
 def run_stats(args: argparse.Namespace) -> int:
-    """Handle ``lidar stats``."""
+    """Handle ``dekko stats``."""
     root = Path(args.root).resolve()
     index, code = _load_or_regen(root, args.no_regen)
     if index is None:
@@ -903,7 +971,7 @@ def run_stats(args: argparse.Namespace) -> int:
 
 
 def run_export(args: argparse.Namespace) -> int:
-    """Handle ``lidar export``."""
+    """Handle ``dekko export``."""
     root = Path(args.root).resolve()
     index, code = _load_or_regen(root, args.no_regen)
     if index is None:
@@ -912,10 +980,10 @@ def run_export(args: argparse.Namespace) -> int:
 
 
 def run_serve(args: argparse.Namespace) -> int:
-    """Handle ``lidar serve --mcp``."""
+    """Handle ``dekko serve --mcp``."""
     if not args.mcp:
         print(
-            "lidar: serve requires --mcp (the only transport)",
+            "dekko: serve requires --mcp (the only transport)",
             file=sys.stderr,
         )
         return 2
@@ -923,7 +991,7 @@ def run_serve(args: argparse.Namespace) -> int:
 
 
 def run_status(args: argparse.Namespace) -> int:
-    """Handle ``lidar status`` (never regenerates)."""
+    """Handle ``dekko status`` (never regenerates)."""
     root = Path(args.root).resolve()
     index = mapfile.load_map(root)
     if index is None:
@@ -931,7 +999,7 @@ def run_status(args: argparse.Namespace) -> int:
             print(json.dumps({"status": "missing"}))
         else:
             print(
-                f"lidar: no map.json under {root} - run `lidar map`",
+                f"dekko: no map.json under {root} - run `dekko map`",
                 file=sys.stderr,
             )
         return 1
@@ -951,10 +1019,10 @@ def run_status(args: argparse.Namespace) -> int:
         prov = index.provenance or {}
         commit = (prov.get("git_commit") or "no git")[:12]
         n = len(prov.get("files", {}))
-        print(f"lidar: map fresh ({n} files, commit {commit})")
+        print(f"dekko: map fresh ({n} files, commit {commit})")
         return 0
 
-    print("lidar: map is stale")
+    print("dekko: map is stale")
     for title, items in (
         ("added", fresh.added),
         ("changed", fresh.changed),
@@ -975,8 +1043,14 @@ def _legacy_main(args_list: list[str]) -> int:
     if args.claude_install:
         return claude_install()
 
+    if args.claude_uninstall:
+        return claude_uninstall()
+
     if args.mcp_install:
         return mcp_install()
+
+    if args.mcp_uninstall:
+        return mcp_uninstall()
 
     if args.map_dir is None:
         build_subcommand_parser().print_help()

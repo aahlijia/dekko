@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from lidar_map import languages
-from lidar_map.extractor import _parse_rust_use, extract_file
-from lidar_map.model import Symbol
+from dekko import languages
+from dekko.extractor import _parse_rust_use, extract_file
+from dekko.model import Symbol
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

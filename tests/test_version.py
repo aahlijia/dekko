@@ -30,10 +30,10 @@ def _json_version(rel: str, *keys: str) -> str:
 
 
 def _uvlock_version() -> str:
-    """The pinned lidar-map version recorded in uv.lock."""
+    """The pinned dekko version recorded in uv.lock."""
     text = (ROOT / "uv.lock").read_text()
-    match = re.search(r'name = "lidar-map"\s*\nversion = "([^"]+)"', text)
-    assert match is not None, "lidar-map not pinned in uv.lock"
+    match = re.search(r'name = "dekko"\s*\nversion = "([^"]+)"', text)
+    assert match is not None, "dekko not pinned in uv.lock"
     return match.group(1)
 
 

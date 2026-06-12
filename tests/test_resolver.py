@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from lidar_map.cli import map_repository
-from lidar_map.model import FileMap, RawCall, Symbol
-from lidar_map.resolver import resolve
+from dekko.cli import map_repository
+from dekko.model import FileMap, RawCall, Symbol
+from dekko.resolver import resolve
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

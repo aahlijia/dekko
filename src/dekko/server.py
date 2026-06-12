@@ -1,6 +1,6 @@
 """A hand-rolled MCP server exposing the map over stdio.
 
-``lidar serve --mcp`` speaks the Model Context Protocol as
+``dekko serve --mcp`` speaks the Model Context Protocol as
 newline-delimited JSON-RPC 2.0 on stdin/stdout, with **no SDK
 dependency**. It exposes the read surface (query, context, status) plus
 an explicit refresh as MCP tools so an agent can ask "who calls X?"
@@ -28,7 +28,7 @@ from . import stats
 from . import trace
 from . import unused
 
-SERVER_NAME = "lidar"
+SERVER_NAME = "dekko"
 PROTOCOL_VERSION = "2025-06-18"
 
 PARSE_ERROR = -32700
@@ -363,7 +363,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "full": {
                     "type": "boolean",
-                    "description": "Ignore the .lidar cache (cold rebuild)",
+                    "description": "Ignore the .dekko cache (cold rebuild)",
                 },
                 "root": _ROOT_PROP,
             },
@@ -378,8 +378,8 @@ _HANDLERS: dict[str, Callable[[Context, dict], str]] = {
 
 
 def _prefixed(message: str) -> str:
-    """Ensure a tool error message carries a single ``lidar:`` prefix."""
-    return message if message.startswith("lidar:") else f"lidar: {message}"
+    """Ensure a tool error message carries a single ``dekko:`` prefix."""
+    return message if message.startswith("dekko:") else f"dekko: {message}"
 
 
 def _ok(req_id: Any, result: dict) -> dict:
@@ -407,7 +407,7 @@ def _handle_initialize(req_id: Any, params: dict) -> dict:
             "capabilities": {"tools": {}},
             "serverInfo": {
                 "name": SERVER_NAME,
-                "version": _pkg_version("lidar-map"),
+                "version": _pkg_version("dekko"),
             },
         },
     )
@@ -435,7 +435,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
     except ToolError as exc:
         text, is_error = _prefixed(str(exc)), True
     except Exception as exc:  # surface any tool crash as an error result
-        text, is_error = f"lidar: internal error: {exc}", True
+        text, is_error = f"dekko: internal error: {exc}", True
     return _ok(
         req_id,
         {"content": [{"type": "text", "text": text}], "isError": is_error},

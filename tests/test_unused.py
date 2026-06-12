@@ -4,10 +4,10 @@ import json
 
 import pytest
 
-from lidar_map import cli
-from lidar_map import unused
-from lidar_map.mapfile import MapIndex
-from lidar_map.model import Import, Symbol
+from dekko import cli
+from dekko import unused
+from dekko.mapfile import MapIndex
+from dekko.model import Import, Symbol
 
 from conftest import RepoFactory
 
