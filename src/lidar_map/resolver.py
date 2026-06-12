@@ -28,6 +28,7 @@ def resolve(files: list[FileMap]) -> CallGraph:
         The resolved ``CallGraph`` with bidirectional adjacency.
     """
     index = _build_index(files)
+    by_name_path = _build_name_path_index(files)
     imports_by_file = _imports_by_file(files)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
 
@@ -41,6 +42,7 @@ def resolve(files: list[FileMap]) -> CallGraph:
             _resolve_call(
                 call,
                 index=index,
+                by_name_path=by_name_path,
                 file_imports=file_imports,
                 symbols_by_id=symbols_by_id,
                 edges=edges,
@@ -63,6 +65,7 @@ def resolve(files: list[FileMap]) -> CallGraph:
 def _resolve_call(
     call: RawCall,
     index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
     file_imports: dict[str, Import],
     symbols_by_id: dict[str, Symbol],
     edges: set[tuple[str, str]],
@@ -76,8 +79,13 @@ def _resolve_call(
         external.add((call.caller_id, call.text))
         return
 
+    same_file = by_name_path.get((call.name, call.path), [])
     target = _pick_candidate(
-        call, candidates, file_imports, symbols_by_id.get(call.caller_id or "")
+        call,
+        candidates,
+        same_file,
+        file_imports,
+        symbols_by_id.get(call.caller_id or ""),
     )
     if target is not None:
         if target.id != caller_id:
@@ -90,21 +98,23 @@ def _resolve_call(
 def _pick_candidate(
     call: RawCall,
     candidates: list[Symbol],
+    same_file: list[Symbol],
     file_imports: dict[str, Import],
     caller: Symbol | None,
 ) -> Symbol | None:
-    """Apply the resolution ladder; ``None`` means ambiguous."""
+    """Apply the resolution ladder; ``None`` means ambiguous.
+
+    ``same_file`` is the pre-bucketed list of like-named symbols in the
+    calling file, so the same-file and container steps avoid rescanning
+    every repo-wide candidate for a common name.
+    """
     container = _self_container(call, caller)
     if container is not None:
-        same = [
-            c
-            for c in candidates
-            if c.path == call.path and c.qualname == f"{container}.{call.name}"
-        ]
+        target_qual = f"{container}.{call.name}"
+        same = [c for c in same_file if c.qualname == target_qual]
         if len(same) == 1:
             return same[0]
 
-    same_file = [c for c in candidates if c.path == call.path]
     if len(same_file) == 1:
         return same_file[0]
 
@@ -178,6 +188,22 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     for fm in files:
         for sym in fm.symbols:
             index.setdefault(sym.name, []).append(sym)
+    return index
+
+
+def _build_name_path_index(
+    files: list[FileMap],
+) -> dict[tuple[str, str], list[Symbol]]:
+    """Map ``(bare name, file path)`` → the like-named symbols in that file.
+
+    Lets the resolver's same-file and self-container checks be O(1)
+    dict lookups instead of scanning every repo-wide candidate for a
+    very common name.
+    """
+    index: dict[tuple[str, str], list[Symbol]] = {}
+    for fm in files:
+        for sym in fm.symbols:
+            index.setdefault((sym.name, sym.path), []).append(sym)
     return index
 
 

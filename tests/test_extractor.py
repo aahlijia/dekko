@@ -52,6 +52,24 @@ def test_python_splat_params_and_imports() -> None:
     assert ("helper", "util.helper") in imports
 
 
+def test_python_relative_import_sources(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("rel.py")
+    assert spec is not None
+    (tmp_path / "rel.py").write_text(
+        "from . import sibling\n"
+        "from .. import parent\n"
+        "from .pkg import thing\n"
+        "from ..pkg import other\n"
+    )
+    fm = extract_file(tmp_path, "rel.py", spec)
+    imports = {(i.name, i.source) for i in fm.imports}
+    # Relative dots must not be doubled.
+    assert ("sibling", ".sibling") in imports
+    assert ("parent", "..parent") in imports
+    assert ("thing", ".pkg.thing") in imports
+    assert ("other", "..pkg.other") in imports
+
+
 def test_python_calls_attributed_to_enclosing_function() -> None:
     spec = languages.spec_for_path("main.py")
     assert spec is not None

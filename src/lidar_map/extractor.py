@@ -673,8 +673,11 @@ def _imports_python(
             base = _text(from_module)
             imported = _text(name)
             local = _text(alias) if alias else imported.split(".")[-1]
+            # Relative bases ("." / "..") already end in a dot; joining
+            # with another "." would double it (e.g. ``..contextpack``).
+            sep = "" if base.endswith(".") else "."
             out.append(
-                Import(path=rel, name=local, source=f"{base}.{imported}")
+                Import(path=rel, name=local, source=f"{base}{sep}{imported}")
             )
     return out
 

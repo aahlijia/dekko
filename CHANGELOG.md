@@ -7,6 +7,42 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 Dates are when the work landed on `develop`; releases are cut by pushing a
 `v*` tag.
 
+## [0.7.0] — 2026-06-12
+
+Close out the roadmap backlog: path tracing, a complete MCP surface, and
+extractor/resolver correctness and performance work.
+
+### Added
+- `lidar trace FROM TO` — shortest call path(s) between two symbols over
+  the resolved graph (`--max-paths K`, `--json`). "No path" is a clean
+  exit `1`, not an error; unknown/ambiguous endpoints exit `3`/`4` like
+  the other read commands. It auto-regenerates a stale map.
+- Three new MCP tools so the server now mirrors the whole read surface
+  (nine tools): `trace_path`, `find_unused`, and `stats`.
+- `lidar map --jobs N` — parallel extraction across a process pool
+  (`0` = all cores; sequential by default). Cache hits stay in-process and
+  results re-assemble in discovery order, so output is identical to a
+  single-worker run.
+
+### Changed
+- The `.lidar` extraction cache is now tagged with the `lidar-map`
+  version and discarded on a version change, so an upgrade re-parses once
+  and always reflects extractor changes (no manual `--full`).
+- Resolver same-file and self-container checks use a pre-built
+  `(name, path)` bucket instead of rescanning every repo-wide candidate,
+  cutting the worst case for very common names. Resolution results are
+  unchanged.
+
+### Fixed
+- Relative-import sources no longer double the leading dot
+  (`from . import x` rendered as `..x`); they now read `.x` / `..x` /
+  `.pkg.x` correctly in context packs.
+
+### Documented
+- A "Limitations" section in the README: calls inside Rust macro bodies
+  are invisible to tree-sitter token trees, and dynamic dispatch has no
+  static call site.
+
 ## [0.6.0] — 2026-06-12
 
 Graph analysis: turn the map into a source of code-health insight.
@@ -131,6 +167,7 @@ Initial release: the **lidar** Claude Code plugin.
   imports → unique repo-wide match); ambiguous calls are marked, never
   guessed.
 
+[0.7.0]: https://github.com/aahlijia/lidar/releases/tag/v0.7.0
 [0.6.0]: https://github.com/aahlijia/lidar/releases/tag/v0.6.0
 [0.5.0]: https://github.com/aahlijia/lidar/releases/tag/v0.5.0
 [0.4.0]: https://github.com/aahlijia/lidar/releases/tag/v0.4.0

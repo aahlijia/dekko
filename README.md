@@ -45,11 +45,13 @@ lidar map /path/to/repo       # map another directory
 lidar map . src               # restrict the map to a subtree
 lidar map --if-stale          # regenerate only when sources changed
 lidar map --full              # ignore the .lidar cache, re-parse everything
+lidar map --jobs 0            # parallel extraction (0 = all cores)
 lidar query callers resolve   # who calls resolve?
 lidar query callees main      # what does main call?
 lidar query symbol cli.py:run_map   # signature card for one symbol
 lidar query file walker.py    # symbols defined in a file
 lidar context run_map --budget 1500 # minimal context pack for an edit
+lidar trace main run_map      # shortest call path(s) between two symbols
 lidar diff                    # symbols changed since the map's commit
 lidar diff main               # ...or since any git rev, with callers
 lidar unused                  # symbols nothing calls (dead-code leads)
@@ -64,9 +66,10 @@ lidar --version
 
 | Command | Meaning |
 | --- | --- |
-| `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--full` forces a cold rebuild; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
+| `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--full` forces a cold rebuild; `--jobs N` parallelizes extraction, `0` = all cores; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
 | `query ACTION TARGET` | `callers`, `callees`, `symbol`, or `file` lookups against map.json |
 | `context TARGET` | Signatures of a symbol's neighborhood (`--hops N`, `--budget TOKENS`) |
+| `trace FROM TO` | Shortest call path(s) from one symbol to another (`--max-paths K`, `--json`); no path is a clean exit `1` |
 | `diff [REV]` | Symbols added/removed/changed since a git rev (default: the map's commit), each with impacted callers (`--limit`, `--json`) |
 | `unused` | Symbols with no inbound calls, minus roots (`--roots GLOB`, `--limit`, `--json`); exit 1 when any are found |
 | `stats` | Fan-in/out hotspots, largest files, language mix (`--top`, `--json`) |
@@ -77,7 +80,7 @@ lidar --version
 Symbol targets accept a bare `name`, `Class.method`, or the qualified
 `file.py:name` / `file.py:Class.method` forms; ambiguous names list
 their candidates instead of guessing. The read commands (`query`,
-`context`, `unused`, `stats`, `export`) regenerate a stale map
+`context`, `trace`, `unused`, `stats`, `export`) regenerate a stale map
 automatically — pass `--no-regen` to fail instead, and `--json`
 anywhere for structured output. The legacy flags `--map [DIR]
 [SUBPATH]`, `--claude-install`, `--mcp-install`, and `--version` keep
@@ -85,12 +88,14 @@ working as aliases.
 
 `map` keeps a per-file extraction cache under `.lidar/` (added to your
 `.gitignore` automatically), so re-mapping only re-parses files whose
-contents changed; `--full` ignores it.
+contents changed; `--full` ignores it. The cache is tagged with the
+`lidar-map` version, so upgrading re-parses everything once to pick up
+extractor changes.
 
 Exit codes: `0` success/fresh/no-diff, `1` failure, stale (`status`),
-differences found (`diff`), or unused symbols found (`unused`); `2`
-usage error, `3` target not found, `4` ambiguous target, `5` stale map
-with `--no-regen`.
+differences found (`diff`), unused symbols found (`unused`), or no call
+path (`trace`); `2` usage error, `3` target not found, `4` ambiguous
+target, `5` stale map with `--no-regen`.
 
 `unused` is call-graph based, so it lists *leads*, not verdicts: a
 symbol reached only via subclassing, type annotations, dynamic dispatch,
@@ -115,13 +120,16 @@ The plugin runs the installed `lidar` CLI, so install the package first
 `lidar serve --mcp` speaks the Model Context Protocol over stdio as
 newline-delimited JSON-RPC 2.0 — **no SDK dependency**. It lets an agent
 answer "who calls X?" with a tool call instead of reading MAP.md. The
-read commands map to six tools:
+read commands map to nine tools:
 
 | Tool | Backs |
 | --- | --- |
 | `query_symbol` | `query symbol` |
 | `get_callers` / `get_callees` | `query callers` / `callees` |
 | `get_context_pack` | `context` (`hops`, `budget`) |
+| `trace_path` | `trace` (`from`, `to`, `max_paths`) |
+| `find_unused` | `unused` (`roots`, `limit`) |
+| `stats` | `stats` (`top`) |
 | `map_status` | `status` |
 | `refresh_map` | `map` (`full` for a cold rebuild) |
 
@@ -152,6 +160,19 @@ Best-effort static resolution, in order: same class/container → same file
 → imported names → unique repo-wide name match. Calls that stay ambiguous
 are marked as such rather than guessed; calls to stdlib/third-party code
 are recorded in `map.json` only.
+
+## Limitations
+
+The call graph is static and best-effort, so a few edges are invisible by
+design:
+
+- **Rust macro bodies**: tree-sitter parses macro invocations
+  (`println!`, `vec!`, custom macros) as opaque token trees, so calls
+  written inside a macro body are not seen and those edges are missed.
+- **Dynamic dispatch**: calls made through reflection, callbacks passed by
+  reference, or runtime registries have no static call site. This is why
+  `lidar unused` treats decorated/exported symbols as roots and bills its
+  output as *leads, not verdicts*.
 
 ## Development
 

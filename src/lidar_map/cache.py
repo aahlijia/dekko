@@ -13,6 +13,7 @@ directory is made self-ignoring (``.lidar/.gitignore`` of ``*``) and
 
 import json
 from dataclasses import asdict
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from .mapfile import _file_hash, _symbol_from_dict
@@ -21,6 +22,11 @@ from .model import FileMap, Import, RawCall
 CACHE_VERSION = 1
 CACHE_DIR = ".lidar"
 CACHE_FILE = "cache.json"
+
+
+def _tool_version() -> str:
+    """Current lidar-map version, used to invalidate stale extractions."""
+    return _pkg_version("lidar-map")
 
 
 def _filemap_to_dict(fm: FileMap) -> dict:
@@ -89,6 +95,10 @@ def load(root: Path) -> dict[str, dict]:
     Args:
         root: Repository root.
 
+    A cache written by a different lidar-map version is discarded, so
+    extractor changes always take effect on the next run without a
+    manual ``--full``.
+
     Returns:
         ``path -> entry`` mapping, or an empty dict when no usable
         cache exists.
@@ -99,6 +109,8 @@ def load(root: Path) -> dict[str, dict]:
     except (OSError, json.JSONDecodeError):
         return {}
     if doc.get("version") != CACHE_VERSION:
+        return {}
+    if doc.get("tool_version") != _tool_version():
         return {}
     files = doc.get("files")
     return files if isinstance(files, dict) else {}
@@ -114,7 +126,11 @@ def save(root: Path, cache: IncrementalCache) -> None:
     cache_dir = root / CACHE_DIR
     cache_dir.mkdir(parents=True, exist_ok=True)
     _ensure_ignored(root, cache_dir)
-    doc = {"version": CACHE_VERSION, "files": cache.entries}
+    doc = {
+        "version": CACHE_VERSION,
+        "tool_version": _tool_version(),
+        "files": cache.entries,
+    }
     (cache_dir / CACHE_FILE).write_text(json.dumps(doc) + "\n")
 
 

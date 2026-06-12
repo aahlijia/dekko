@@ -70,6 +70,49 @@ def test_full_forces_cold_rebuild(
     assert sorted(parsed) == ["a.py", "b.py"]
 
 
+def test_version_change_invalidates_cache(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(SRC)
+    # Simulate upgrading lidar-map: the on-disk cache was written by an
+    # older version, so every file must re-parse (extractor logic may
+    # have changed).
+    monkeypatch.setattr(cache_mod, "_tool_version", lambda: "0.0.0-test")
+    assert cache_mod.load(root) == {}
+
+    parsed = _count_extractions(monkeypatch)
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    assert sorted(parsed) == ["a.py", "b.py"]
+
+
+def test_parallel_extraction_matches_sequential(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Force the process-pool path on a small repo, then confirm the
+    # output is byte-identical to a sequential cold rebuild.
+    root = make_mapped_repo(SRC)
+    monkeypatch.setattr(cli, "_PARALLEL_MIN", 1)
+
+    assert (
+        cli.main(["map", str(root), "--quiet", "--full", "--jobs", "2"]) == 0
+    )
+    parallel = (root / "map.json").read_text()
+    parallel_md = (root / "MAP.md").read_text()
+
+    assert (
+        cli.main(["map", str(root), "--quiet", "--full", "--jobs", "1"]) == 0
+    )
+    sequential = (root / "map.json").read_text()
+
+    def _strip(text: str) -> str:
+        return "\n".join(
+            ln for ln in text.splitlines() if "generated_at" not in ln
+        )
+
+    assert _strip(parallel) == _strip(sequential)
+    assert parallel_md == (root / "MAP.md").read_text()
+
+
 def test_no_json_skips_cache(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text(SRC["a.py"])
     assert cli.main(["map", str(tmp_path), "--quiet", "--no-json"]) == 0
