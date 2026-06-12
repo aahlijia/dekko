@@ -1,8 +1,8 @@
-# lidar
+# lidar-map
 
-A Claude Code plugin that adds a `/map` command. Like its namesake, it
-scans the terrain programmatically — no model tokens are spent parsing —
-sweeping the repository and writing:
+A code-map generator with a CLI and a Claude Code `/map` plugin —
+installed as `lidar-map`, run as `lidar`. Like its namesake, it scans the terrain programmatically — no model tokens
+are spent parsing — sweeping the repository and writing:
 
 - **`MAP.md`** — every code file, every function/method, parameters with
   types (when declared), return types, and relational call links: each
@@ -12,11 +12,16 @@ sweeping the repository and writing:
 
 ## Installation
 
-### Via Claude Code (recommended)
+Install the `lidar-map` package (the CLI command is `lidar`):
 
 ```sh
-claude plugin marketplace add github:aahlijia/lidar
-claude plugin install lidar@lidar
+uv tool install lidar-map     # or: pip install lidar-map / pipx install lidar-map
+```
+
+Then, to add the `/map` command to Claude Code:
+
+```sh
+lidar --claude-install
 ```
 
 Restart Claude Code after installing.
@@ -29,32 +34,42 @@ cd lidar
 ./install.sh
 ```
 
-`install.sh` checks for `uv`, registers the marketplace, and installs the
+`install.sh` installs the CLI with `uv tool install` and registers the
 plugin in one step.
 
-## Requirements
+## CLI usage
 
-- [`uv`](https://docs.astral.sh/uv/) on `PATH` — the tool declares its own
-  dependencies inline (PEP 723), so there is nothing else to install.
+```sh
+lidar --map                   # map the current directory
+lidar --map /path/to/repo     # map another directory
+lidar --map . src             # restrict the map to a subtree
+lidar --map . --output docs/  # write MAP.md + map.json into docs/
+lidar --map . --output codemap.md   # custom file (json: codemap.json)
+lidar --claude-install        # install the Claude Code plugin
+lidar --version
+```
 
-## Usage
+| Flag | Meaning |
+| --- | --- |
+| `--map [DIR]` | Map `DIR` (defaults to the current directory) |
+| `--output PATH` | Markdown file, or a directory for both outputs |
+| `--json PATH` | Explicit map.json path |
+| `--no-json` | Skip map.json |
+| `--exclude GLOB` | Extra skip pattern (repeatable) |
+| `--max-file-size BYTES` | Skip files larger than this (default 1 MB) |
+| `--quiet` | Suppress the summary |
+| `--claude-install` | Register the bundled plugin with Claude Code |
+| `--version` | Print the version |
+
+## Plugin usage
 
 ```
 /map           # map the whole repository
 /map src/      # map a subtree only
 ```
 
-Or run the tool directly, outside Claude Code:
-
-```sh
-uv run tool/lidar.py --root /path/to/repo
-```
-
-```
-usage: lidar [--root PATH] [SUBPATH] [--output MAP.md]
-             [--json map.json] [--no-json] [--exclude GLOB ...]
-             [--max-file-size BYTES] [--quiet]
-```
+The plugin runs the installed `lidar` CLI, so install the package first
+(see above).
 
 ## Language support
 
@@ -78,7 +93,12 @@ are recorded in `map.json` only.
 ## Development
 
 ```sh
-uv run pytest               # test suite
-uv run ruff check tool/ tests/   # lint
-uv run ruff format --check tool/ tests/
+uv run pytest                    # test suite
+uv run ruff check .              # lint
+uv run ruff format --check .
+uv build                         # sdist + wheel into dist/
 ```
+
+Releases: pushing a `v*` tag builds and publishes to PyPI via trusted
+publishing (`.github/workflows/release.yml`); configure the trusted
+publisher for `aahlijia/lidar` on PyPI first.

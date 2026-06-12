@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from model import CallGraph, FileMap
+from .model import CallGraph, FileMap
 
 
 def render_json(

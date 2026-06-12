@@ -4,8 +4,8 @@ import re
 from collections import Counter
 from datetime import datetime, timezone
 
-from model import CallGraph, FileMap, Symbol
-from resolver import MODULE_CALLER_SUFFIX
+from .model import CallGraph, FileMap, Symbol
+from .resolver import MODULE_CALLER_SUFFIX
 
 _SLUG = re.compile(r"[^a-z0-9]+")
 

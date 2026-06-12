@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pathspec
 
-import languages
+from . import languages
 
 DEFAULT_EXCLUDE_DIRS = {
     ".git",

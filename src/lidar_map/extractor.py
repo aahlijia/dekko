@@ -5,8 +5,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
-from languages import LanguageSpec
-from model import FileMap, Import, Param, RawCall, Symbol
+from .languages import LanguageSpec
+from .model import FileMap, Import, Param, RawCall, Symbol
 from tree_sitter import Node, Parser, Query, QueryCursor
 from tree_sitter_language_pack import get_language
 

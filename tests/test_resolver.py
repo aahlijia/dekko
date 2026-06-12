@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from lidar import map_repository
-from resolver import resolve
+from lidar_map.cli import map_repository
+from lidar_map.resolver import resolve
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

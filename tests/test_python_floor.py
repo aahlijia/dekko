@@ -1,8 +1,8 @@
-"""Guard the script's declared requires-python floor.
+"""Guard the package's declared requires-python floor.
 
 The dev venv runs a newer Python, so syntax that needs 3.12+ (e.g.
 PEP 701 multi-line f-strings) passes the rest of the suite even though
-it breaks on the 3.10 floor declared in lidar.py's PEP 723 header.
+it breaks on the 3.10 floor declared in pyproject.toml.
 ``ast.parse(feature_version=...)`` does not catch f-string grammar
 changes, so the sources must be compiled by a real interpreter at the
 floor; the test skips when none is installed.
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-TOOL_DIR = Path(__file__).resolve().parent.parent / "tool"
+TOOL_DIR = Path(__file__).resolve().parent.parent / "src" / "lidar_map"
 FLOOR_VERSIONS = ("3.10", "3.11")
 
 
