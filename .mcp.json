@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "lidar": {
+      "command": "lidar",
+      "args": ["serve", "--mcp"],
+      "cwd": "${CLAUDE_PROJECT_DIR}"
+    }
+  }
+}

@@ -21,6 +21,7 @@ from . import diff
 from . import languages
 from . import mapfile
 from . import query
+from . import server
 from . import walker
 from .extractor import extract_file
 from .extractor_generic import extract_file_generic
@@ -30,7 +31,7 @@ from .render_md import render_markdown
 from .resolver import resolve
 
 
-SUBCOMMANDS = ("map", "query", "context", "diff", "status")
+SUBCOMMANDS = ("map", "query", "context", "diff", "status", "serve")
 
 
 def build_legacy_parser() -> argparse.ArgumentParser:
@@ -58,6 +59,11 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         "--claude-install",
         action="store_true",
         help="install the lidar-map plugin into Claude Code",
+    )
+    parser.add_argument(
+        "--mcp-install",
+        action="store_true",
+        help="register the MCP server with Claude Code (claude mcp add)",
     )
     parser.add_argument(
         "--version",
@@ -251,6 +257,25 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="emit structured JSON",
     )
     p_status.set_defaults(func=run_status)
+
+    p_serve = sub.add_parser("serve", help="run the MCP server over stdio")
+    p_serve.add_argument(
+        "--mcp",
+        action="store_true",
+        help="speak the Model Context Protocol (the only transport)",
+    )
+    p_serve.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="default repo root for tool calls (default: cwd)",
+    )
+    p_serve.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="fail instead of regenerating a stale map on reads",
+    )
+    p_serve.set_defaults(func=run_serve)
     return parser
 
 
@@ -446,6 +471,31 @@ def claude_install() -> int:
     return 0
 
 
+def mcp_install() -> int:
+    """Register the MCP server with Claude Code via ``claude mcp add``.
+
+    Returns:
+        Process exit code.
+    """
+    if shutil.which("claude") is None:
+        print(
+            "lidar: 'claude' CLI not found on PATH. Install Claude Code "
+            "first: https://claude.com/claude-code",
+            file=sys.stderr,
+        )
+        return 1
+
+    added = _run_subprocess(
+        ["claude", "mcp", "add", "lidar", "--", "lidar", "serve", "--mcp"]
+    )
+    if added.returncode != 0:
+        print(added.stderr.strip(), file=sys.stderr)
+        return 1
+
+    print("lidar: MCP server registered as 'lidar'. Restart Claude Code.")
+    return 0
+
+
 def run_map(args: argparse.Namespace) -> int:
     """Execute the mapping action for parsed CLI arguments.
 
@@ -569,6 +619,28 @@ def _load_or_regen(
         )
         return None, 5
 
+    code = regen_map(root, quiet=True)
+    if code != 0:
+        return None, code
+    return mapfile.load_map(root), 0
+
+
+def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
+    """Re-generate the map at ``root`` with its recorded options.
+
+    Reuses the discovery options (subpath, excludes, size cap) recorded
+    in the existing map's provenance, defaulting to a whole-repo map
+    when none exists.
+
+    Args:
+        root: Repository root to map.
+        full: Ignore the ``.lidar`` cache and re-parse every file.
+        quiet: Suppress the one-line summary on stdout.
+
+    Returns:
+        Process exit code from ``run_map``.
+    """
+    index = mapfile.load_map(root)
     prov = (index.provenance if index else None) or {}
     regen_args = argparse.Namespace(
         map_dir=str(root),
@@ -578,13 +650,11 @@ def _load_or_regen(
         output=None,
         json_output=None,
         no_json=False,
-        quiet=True,
+        quiet=quiet,
         if_stale=False,
+        full=full,
     )
-    code = run_map(regen_args)
-    if code != 0:
-        return None, code
-    return mapfile.load_map(root), 0
+    return run_map(regen_args)
 
 
 def _cmd_map(args: argparse.Namespace) -> int:
@@ -632,6 +702,17 @@ def run_diff(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         limit=args.limit,
     )
+
+
+def run_serve(args: argparse.Namespace) -> int:
+    """Handle ``lidar serve --mcp``."""
+    if not args.mcp:
+        print(
+            "lidar: serve requires --mcp (the only transport)",
+            file=sys.stderr,
+        )
+        return 2
+    return server.serve(Path(args.root), no_regen=args.no_regen)
 
 
 def run_status(args: argparse.Namespace) -> int:
@@ -686,6 +767,9 @@ def _legacy_main(args_list: list[str]) -> int:
 
     if args.claude_install:
         return claude_install()
+
+    if args.mcp_install:
+        return mcp_install()
 
     if args.map_dir is None:
         build_subcommand_parser().print_help()
