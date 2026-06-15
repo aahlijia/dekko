@@ -1,6 +1,6 @@
 [project]
 name = "dekko"
-version = "0.7.1"
+version = "0.9.0"
 description = "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin"
 readme = "README.md"
 license = "MIT"
@@ -43,6 +43,7 @@ packages = ["src/dekko"]
 [tool.hatch.build.targets.wheel.force-include]
 ".claude-plugin" = "dekko/_plugin/.claude-plugin"
 "commands" = "dekko/_plugin/commands"
+"skills" = "dekko/_plugin/skills"
 ".mcp.json" = "dekko/_plugin/.mcp.json"
 
 [dependency-groups]

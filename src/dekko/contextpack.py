@@ -1,14 +1,17 @@
 """Context packs: the minimal neighborhood needed to work on a target.
 
-A pack contains the target's signature and location, its file's
-imports, and the signatures of callers/callees within N hops. An
-optional token budget trims the farthest, least-connected neighbors
-first; the target itself is never dropped.
+A pack contains the target's signature, location, and doc line, its
+file's imports, and the signatures of callers/callees within N hops.
+``with_source`` additionally inlines the target's body and hop-1
+call-site lines. An optional token budget trims the farthest,
+least-connected neighbors first, then the source from the bottom; the
+target's signature is never dropped.
 """
 
 import json
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .mapfile import MapIndex
 from .model import Import, Symbol
@@ -19,17 +22,27 @@ from .query import (
     report_unresolved,
     resolve_target,
 )
-from .render_md import signature
+from .textutil import signature
 from .resolver import MODULE_CALLER_SUFFIX
+from .textutil import estimate_tokens, token_footer
+
+# Call-site excerpts shown per hop-1 caller entry.
+_MAX_SITES_PER_ENTRY = 3
 
 
 @dataclass
 class PackEntry:
-    """One neighbor in a context pack."""
+    """One neighbor in a context pack.
+
+    Attributes:
+        sites: ``(line, source text)`` call-site excerpts; filled only
+            for hop-1 callers in ``with_source`` mode.
+    """
 
     sym: Symbol
     hop: int
     direction: str
+    sites: list[tuple[int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -45,6 +58,10 @@ class Pack:
         entries: Neighboring symbols with hop distance and direction.
         module_callers: Files whose top level calls into the pack.
         trimmed: Symbols dropped to satisfy the token budget.
+        source_lines: The target's body in ``with_source`` mode, else
+            ``None``.
+        source_truncated: Whether budget trimming dropped source lines.
+        notes: Note texts anchored to the target symbol.
     """
 
     label: str
@@ -55,6 +72,9 @@ class Pack:
     entries: list[PackEntry] = field(default_factory=list)
     module_callers: list[str] = field(default_factory=list)
     trimmed: int = 0
+    source_lines: list[str] | None = None
+    source_truncated: bool = False
+    notes: list[str] = field(default_factory=list)
 
 
 def _neighbors(index: MapIndex, sym_id: str) -> list[tuple[str, str]]:
@@ -80,6 +100,7 @@ def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
         target=target,
         file_path=target.path,
         imports=index.imports_by_path.get(target.path, []),
+        notes=list(index.notes.get(target.id, [])),
     )
     seen = {target.id}
     frontier = [target.id]
@@ -140,22 +161,90 @@ def build_file_pack(index: MapIndex, path: str) -> Pack:
     return pack
 
 
-def _entry_line(entry: PackEntry) -> str:
-    """Render one neighbor line."""
+def _file_lines(root: Path, rel: str) -> list[str]:
+    """Read a repo file's lines, or an empty list on failure."""
+    try:
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return text.splitlines()
+
+
+def attach_source(index: MapIndex, pack: Pack, root: Path) -> None:
+    """Attach the target's body and hop-1 caller call-site excerpts.
+
+    Best-effort: unreadable files simply leave the pack without
+    source. File-mode packs (no target symbol) are left untouched —
+    inlining a whole file would defeat the pack's purpose.
+
+    Args:
+        index: Loaded map index (for edge call-site lines).
+        pack: Pack to enrich in place.
+        root: Repository root the map was generated from.
+    """
+    if pack.target is None:
+        return
+    body = _file_lines(root, pack.target.path)[
+        pack.target.start_line - 1 : pack.target.end_line
+    ]
+    if body:
+        pack.source_lines = body
+    cache: dict[str, list[str]] = {}
+    for entry in pack.entries:
+        if entry.hop != 1 or entry.direction != "caller":
+            continue
+        lines = index.edge_lines.get((entry.sym.id, pack.target.id), [])
+        if not lines:
+            continue
+        if entry.sym.path not in cache:
+            cache[entry.sym.path] = _file_lines(root, entry.sym.path)
+        file_lines = cache[entry.sym.path]
+        for line_no in lines[:_MAX_SITES_PER_ENTRY]:
+            if 1 <= line_no <= len(file_lines):
+                entry.sites.append((line_no, file_lines[line_no - 1].strip()))
+
+
+def _entry_lines(entry: PackEntry) -> list[str]:
+    """Render one neighbor entry (with doc and call-site lines)."""
     sym = entry.sym
-    return f"  [{entry.hop}] {sym.path}:{sym.start_line}  {signature(sym)}"
+    rows = [f"  [{entry.hop}] {sym.path}:{sym.start_line}  {signature(sym)}"]
+    if sym.doc:
+        rows.append(f"      doc: {sym.doc}")
+    rows += [f"      > {line}: {text}" for line, text in entry.sites]
+    return rows
+
+
+def _target_lines(pack: Pack) -> list[str]:
+    """The target's signature/location/doc block, if any."""
+    if pack.target is None:
+        return []
+    t = pack.target
+    lines = [
+        signature(t),
+        f"  {t.kind} ({t.language}) at {t.path}:{t.start_line}-{t.end_line}",
+    ]
+    if t.doc:
+        lines.append(f"  doc: {t.doc}")
+    lines += [f"  note: {text}" for text in pack.notes]
+    return lines
+
+
+def _source_lines(pack: Pack) -> list[str]:
+    """The inlined source section, if any."""
+    if not pack.source_lines:
+        return []
+    lines = ["source:"]
+    lines += [f"  {src}" for src in pack.source_lines]
+    if pack.source_truncated:
+        lines.append("  … (source truncated)")
+    return lines
 
 
 def render_text(pack: Pack) -> str:
     """Render a pack as compact text."""
     lines = [f"context: {pack.label}"]
-    if pack.target is not None:
-        t = pack.target
-        lines.append(signature(t))
-        lines.append(
-            f"  {t.kind} ({t.language}) at "
-            f"{t.path}:{t.start_line}-{t.end_line}"
-        )
+    lines += _target_lines(pack)
+    lines += _source_lines(pack)
     if pack.imports:
         lines.append(f"imports ({pack.file_path}):")
         lines += [f"  {imp.name}  (from {imp.source})" for imp in pack.imports]
@@ -168,10 +257,8 @@ def render_text(pack: Pack) -> str:
         group = [e for e in pack.entries if e.direction == direction]
         if group:
             lines.append(title)
-            lines += [
-                _entry_line(e)
-                for e in sorted(group, key=lambda e: (e.hop, e.sym.path))
-            ]
+            for e in sorted(group, key=lambda e: (e.hop, e.sym.path)):
+                lines += _entry_lines(e)
     if pack.module_callers:
         joined = ", ".join(pack.module_callers)
         lines.append(f"module-level callers: {joined}")
@@ -182,15 +269,15 @@ def render_text(pack: Pack) -> str:
 
 def _estimate_tokens(pack: Pack) -> int:
     """Crude token estimate of the rendered pack."""
-    return len(render_text(pack)) // 4
+    return estimate_tokens(render_text(pack))
 
 
 def trim_to_budget(index: MapIndex, pack: Pack, budget: int | None) -> Pack:
-    """Drop neighbors until the pack fits the token budget.
+    """Drop pack content until it fits the token budget.
 
-    Farthest hops go first; within a hop, the least-connected symbols.
-    The target (and, in file mode, the file's own symbol list) is
-    trimmed last and only from the end.
+    Neighbors go first (farthest hops, then least-connected), then the
+    file-mode symbol list from the end, then inlined source from the
+    bottom. The target's signature and location are never dropped.
 
     Args:
         index: Loaded map index (for degree ranking).
@@ -211,6 +298,9 @@ def trim_to_budget(index: MapIndex, pack: Pack, budget: int | None) -> Pack:
     while len(pack.file_symbols) > 1 and _estimate_tokens(pack) > budget:
         pack.file_symbols.pop()
         pack.trimmed += 1
+    while pack.source_lines and _estimate_tokens(pack) > budget:
+        pack.source_lines.pop()
+        pack.source_truncated = True
     return pack
 
 
@@ -224,7 +314,16 @@ def _render_json(pack: Pack) -> str:
             "line": sym.start_line,
             "kind": sym.kind,
             "signature": signature(sym),
+            "doc": sym.doc,
         }
+
+    def neighbor_doc(e: PackEntry) -> dict:
+        entry = {"hop": e.hop, "direction": e.direction, **sym_doc(e.sym)}
+        if e.sites:
+            entry["sites"] = [
+                {"line": line, "text": text} for line, text in e.sites
+            ]
+        return entry
 
     doc = {
         "label": pack.label,
@@ -234,18 +333,27 @@ def _render_json(pack: Pack) -> str:
             {"name": i.name, "source": i.source} for i in pack.imports
         ],
         "file_symbols": [sym_doc(s) for s in pack.file_symbols],
-        "neighbors": [
-            {"hop": e.hop, "direction": e.direction, **sym_doc(e.sym)}
-            for e in pack.entries
-        ],
+        "neighbors": [neighbor_doc(e) for e in pack.entries],
         "module_callers": pack.module_callers,
         "trimmed": pack.trimmed,
     }
+    if pack.notes:
+        doc["notes"] = pack.notes
+    if pack.source_lines is not None:
+        doc["source"] = "\n".join(pack.source_lines)
+        doc["source_truncated"] = pack.source_truncated
     return json.dumps(doc, indent=2)
 
 
 def run(
-    index: MapIndex, target: str, hops: int, budget: int | None, as_json: bool
+    index: MapIndex,
+    target: str,
+    hops: int,
+    budget: int | None,
+    as_json: bool,
+    root: Path | None = None,
+    with_source: bool = False,
+    notes: bool = True,
 ) -> int:
     """Build, trim, and print a context pack for a target.
 
@@ -255,6 +363,10 @@ def run(
         hops: Neighborhood radius.
         budget: Approximate token budget, or ``None``.
         as_json: Emit structured JSON instead of text.
+        root: Repository root, required for ``with_source``.
+        with_source: Inline the target's body and hop-1 call-site
+            lines (strictly opt-in; counts against ``budget``).
+        notes: Include the target's notes (default on).
 
     Returns:
         Process exit code.
@@ -262,6 +374,8 @@ def run(
     sym, candidates = resolve_target(index, target)
     if sym is not None:
         pack = build_pack(index, sym, hops)
+        if not notes:
+            pack.notes = []
     elif not candidates and ":" not in target:
         paths = paths_matching(index, target)
         if len(paths) != 1:
@@ -278,6 +392,13 @@ def run(
     else:
         return report_unresolved(target, candidates)
 
+    if with_source and root is not None:
+        attach_source(index, pack, root)
     trim_to_budget(index, pack, budget)
-    print(_render_json(pack) if as_json else render_text(pack))
+    if as_json:
+        print(_render_json(pack))
+        return EXIT_OK
+    text = render_text(pack)
+    print(text)
+    print(token_footer(text))
     return EXIT_OK

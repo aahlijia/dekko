@@ -7,8 +7,11 @@ their cached ``FileMap`` and skip re-parsing. Resolution still runs
 repo-wide (it is cheap relative to parsing).
 
 The cache lives in ``<root>/.dekko/cache.json``. On first creation the
-directory is made self-ignoring (``.dekko/.gitignore`` of ``*``) and
-``.dekko/`` is appended to the repository ``.gitignore``.
+directory is made self-ignoring with an inner ``.dekko/.gitignore`` that
+ignores generated files (cache, maps) while keeping ``notes.json`` (and
+the ignore file itself) tracked, so symbol annotations can be committed.
+The repository ``.gitignore`` is left untouched — a blanket ``.dekko/``
+entry there would make ``notes.json`` impossible to track.
 """
 
 import json
@@ -22,6 +25,12 @@ from .model import FileMap, Import, RawCall
 CACHE_VERSION = 1
 CACHE_DIR = ".dekko"
 CACHE_FILE = "cache.json"
+
+# Inner ``.dekko/.gitignore``: ignore everything the tool generates, but
+# keep this file and committable symbol notes tracked.
+_INNER_GITIGNORE = "*\n!.gitignore\n!notes.json\n"
+# The pre-notes inner ignore; migrated in place when seen.
+_LEGACY_INNER_GITIGNORE = "*\n"
 
 
 def _tool_version() -> str:
@@ -43,6 +52,7 @@ def _filemap_from_dict(d: dict) -> FileMap:
         calls=[RawCall(**c) for c in d.get("calls", [])],
         imports=[Import(**i) for i in d.get("imports", [])],
         error=d.get("error"),
+        doc=d.get("doc"),
     )
 
 
@@ -52,6 +62,8 @@ class IncrementalCache:
     Attributes:
         entries: Cache entries to persist after the run — populated by
             both reused and freshly extracted files.
+        reused: Count of files served from the prior cache this run.
+        parsed: Count of files freshly extracted this run.
     """
 
     def __init__(self, old: dict[str, dict]) -> None:
@@ -63,6 +75,8 @@ class IncrementalCache:
         """
         self._old = old
         self.entries: dict[str, dict] = {}
+        self.reused = 0
+        self.parsed = 0
 
     def reuse(self, root: Path, rel: str) -> FileMap | None:
         """Return the cached ``FileMap`` for an unchanged file.
@@ -79,6 +93,7 @@ class IncrementalCache:
         if entry is None or entry.get("hash") != _file_hash(root / rel):
             return None
         self.entries[rel] = entry
+        self.reused += 1
         return _filemap_from_dict(entry["file"])
 
     def store(self, root: Path, rel: str, fm: FileMap) -> None:
@@ -87,6 +102,7 @@ class IncrementalCache:
             "hash": _file_hash(root / rel),
             "file": _filemap_to_dict(fm),
         }
+        self.parsed += 1
 
 
 def load(root: Path) -> dict[str, dict]:
@@ -148,13 +164,30 @@ def ensure_dir(root: Path) -> Path:
     return _make_cache_dir(root)
 
 
+def ensure_notes_tracked(root: Path) -> Path:
+    """Ensure ``.dekko/`` exists and its inner gitignore tracks notes.
+
+    Unlike the map-run path, this migrates a legacy inner ``.gitignore``
+    (the bare ``*``) to the notes-aware form even when ``.dekko/``
+    already exists, so adding a note makes ``notes.json`` committable.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Path to the ``.dekko/`` directory.
+    """
+    cache_dir = _make_cache_dir(root)
+    _write_inner_gitignore(cache_dir)
+    return cache_dir
+
+
 def _make_cache_dir(root: Path) -> Path:
     """Return ``.dekko/``, creating it and wiring gitignore if absent.
 
-    Gitignore setup (an inner ``.gitignore`` of ``*`` plus a ``.dekko/``
-    entry in the repo ``.gitignore``) runs only when this call creates
-    the directory. An existing ``.dekko/`` is returned untouched, so a
-    user who removes either gitignore entry will not have it re-added.
+    The inner ``.gitignore`` is written only when this call creates the
+    directory. An existing ``.dekko/`` is returned untouched, so a user
+    who edits the ignore file will not have it overwritten on a map run.
 
     Args:
         root: Repository root.
@@ -166,21 +199,16 @@ def _make_cache_dir(root: Path) -> Path:
     if cache_dir.exists():
         return cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_ignored(root, cache_dir)
+    _write_inner_gitignore(cache_dir)
     return cache_dir
 
 
-def _ensure_ignored(root: Path, cache_dir: Path) -> None:
-    """Make ``.dekko/`` self-ignoring and ignored by the repo."""
-    inner = cache_dir / ".gitignore"
-    if not inner.exists():
-        inner.write_text("*\n")
+def _write_inner_gitignore(cache_dir: Path) -> None:
+    """Write the notes-aware inner ``.gitignore`` if safe to do so.
 
-    gitignore = root / ".gitignore"
-    entry = f"{CACHE_DIR}/"
-    text = gitignore.read_text() if gitignore.exists() else ""
-    if entry in text.splitlines():
-        return
-    if text and not text.endswith("\n"):
-        text += "\n"
-    gitignore.write_text(text + entry + "\n")
+    Writes when the file is absent or still holds the legacy bare ``*``;
+    a user-customized ignore file is left untouched.
+    """
+    inner = cache_dir / ".gitignore"
+    if not inner.exists() or inner.read_text() == _LEGACY_INNER_GITIGNORE:
+        inner.write_text(_INNER_GITIGNORE)

@@ -17,8 +17,8 @@ from pathlib import Path
 
 from . import mapfile
 from . import walker
-from .model import Symbol
-from .render_md import signature
+from .model import Import, Symbol
+from .textutil import signature
 from .resolver import MODULE_CALLER_SUFFIX, resolve
 
 EXIT_SAME = 0
@@ -34,11 +34,14 @@ class Snapshot:
         symbols: Symbol id → symbol.
         callers: Symbol id → caller ids (resolved + module-level).
         body: Symbol id → short hash of the definition's source text.
+        imports: File path → imports declared in it (used by
+            ``affected`` for its import-edge fallback).
     """
 
     symbols: dict[str, Symbol] = field(default_factory=dict)
     callers: dict[str, list[str]] = field(default_factory=dict)
     body: dict[str, str] = field(default_factory=dict)
+    imports: dict[str, list[Import]] = field(default_factory=dict)
 
 
 @dataclass
@@ -89,6 +92,8 @@ def snapshot(
         for sym in fm.symbols:
             snap.symbols[sym.id] = sym
             snap.body[sym.id] = _body_hash(root, sym)
+        if fm.imports:
+            snap.imports[fm.path] = fm.imports
     snap.callers = graph.calls_in
     return snap
 

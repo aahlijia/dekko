@@ -28,7 +28,7 @@ def render_json(
     when = datetime.now(timezone.utc).isoformat(timespec="seconds")
     doc = {
         "generator": "dekko",
-        "version": 2,
+        "version": 3,
         "root": root_label,
         "generated_at": when,
         "provenance": provenance,
@@ -37,6 +37,7 @@ def render_json(
                 "path": fm.path,
                 "language": fm.language,
                 "error": fm.error,
+                "doc": fm.doc,
                 "imports": [asdict(i) for i in fm.imports],
             }
             for fm in files
@@ -47,9 +48,6 @@ def render_json(
             {"caller": caller, "name": name, "candidates": cands}
             for caller, name, cands in graph.ambiguous
         ],
-        "external": [
-            {"caller": caller, "callee": text}
-            for caller, text in graph.external
-        ],
+        "external": [asdict(ext) for ext in graph.external],
     }
     return json.dumps(doc, indent=2, sort_keys=False) + "\n"

@@ -10,7 +10,14 @@ import re
 from pathlib import Path
 from typing import Iterator
 
-from .extractor import _callee_parts, _enclosing, _params_generic, _text
+from .extractor import (
+    _callee_parts,
+    _doc_comment_above,
+    _enclosing,
+    _module_doc,
+    _params_generic,
+    _text,
+)
 from .model import FileMap, RawCall, Symbol
 from tree_sitter import Node, Parser
 from tree_sitter_language_pack import get_language
@@ -70,6 +77,7 @@ def extract_file_generic(root: Path, rel: str, grammar: str) -> FileMap:
         language=grammar,
         symbols=[sym for _, sym in defs],
         calls=calls,
+        doc=_module_doc(grammar, tree.root_node),
     )
 
 
@@ -160,6 +168,7 @@ def _make_symbol(
         returns=_text(ret) if ret is not None else None,
         start_line=node.start_point[0] + 1,
         end_line=node.end_point[0] + 1,
+        doc=_doc_comment_above(node),
     )
 
 

@@ -33,6 +33,10 @@ class Symbol:
             public surface (Rust ``pub``, Java ``public``, JS/TS
             ``export``); language-implicit visibility (Go capitals,
             Python dunders) is derived at analysis time, not here.
+        doc: First line of the symbol's docstring or doc comment, or
+            ``None`` when none was found (best-effort, per language).
+        test: Whether the defining file is classified as test code
+            (path-based; see ``classify.is_test_path``).
     """
 
     id: str
@@ -47,6 +51,8 @@ class Symbol:
     end_line: int = 0
     decorated: bool = False
     exported: bool = False
+    doc: str | None = None
+    test: bool = False
 
 
 @dataclass
@@ -89,7 +95,12 @@ class Import:
 
 @dataclass
 class FileMap:
-    """Everything extracted from a single source file."""
+    """Everything extracted from a single source file.
+
+    Attributes:
+        doc: First line of the file's module docstring or leading
+            comment, or ``None`` (best-effort, per language).
+    """
 
     path: str
     language: str
@@ -97,14 +108,37 @@ class FileMap:
     calls: list[RawCall] = field(default_factory=list)
     imports: list[Import] = field(default_factory=list)
     error: str | None = None
+    doc: str | None = None
 
 
 @dataclass
 class Edge:
-    """A resolved caller → callee relationship."""
+    """A resolved caller → callee relationship.
+
+    Attributes:
+        lines: Sorted, deduplicated 1-based call-site lines in the
+            caller's file (one edge may have many sites).
+    """
 
     caller: str
     callee: str
+    lines: list[int] = field(default_factory=list)
+
+
+@dataclass
+class ExternalCall:
+    """A call whose target is outside the repo.
+
+    Attributes:
+        caller: Symbol id of the calling definition; module-level
+            calls use the ``path::<module>`` convention.
+        callee: Callee text as written (``mod.func``, ``Path``).
+        lines: Sorted, deduplicated 1-based call-site lines.
+    """
+
+    caller: str
+    callee: str
+    lines: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -124,4 +158,4 @@ class CallGraph:
     calls_out: dict[str, list[str]] = field(default_factory=dict)
     calls_in: dict[str, list[str]] = field(default_factory=dict)
     ambiguous: list[tuple[str, str, list[str]]] = field(default_factory=list)
-    external: list[tuple[str | None, str]] = field(default_factory=list)
+    external: list[ExternalCall] = field(default_factory=list)
