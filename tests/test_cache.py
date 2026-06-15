@@ -32,8 +32,12 @@ def test_cache_created_and_ignored(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(SRC)
     cache_file = root / cache_mod.CACHE_DIR / cache_mod.CACHE_FILE
     assert cache_file.is_file()
-    assert (root / cache_mod.CACHE_DIR / ".gitignore").read_text() == "*\n"
-    assert ".dekko/" in (root / ".gitignore").read_text().splitlines()
+    inner = (root / cache_mod.CACHE_DIR / ".gitignore").read_text()
+    # Generated files ignored; the ignore file and notes are tracked.
+    assert inner.splitlines() == ["*", "!.gitignore", "!notes.json"]
+    # The repo .gitignore is intentionally not touched (a blanket
+    # .dekko/ there would make notes.json impossible to track).
+    assert not (root / ".gitignore").exists()
 
     entries = cache_mod.load(root)
     assert set(entries) == {"a.py", "b.py"}
@@ -110,7 +114,17 @@ def test_parallel_extraction_matches_sequential(
         )
 
     assert _strip(parallel) == _strip(sequential)
-    assert parallel_md == (root / ".dekko" / "MAP.md").read_text()
+
+    # The trust line carries wall-clock timing, which differs run to
+    # run; strip it before comparing the structural MAP.md output.
+    def _strip_md(text: str) -> str:
+        return "\n".join(
+            ln for ln in text.splitlines() if not ln.startswith("*Mapped ")
+        )
+
+    assert _strip_md(parallel_md) == _strip_md(
+        (root / ".dekko" / "MAP.md").read_text()
+    )
 
 
 def test_no_json_skips_cache(tmp_path: Path) -> None:
@@ -119,28 +133,55 @@ def test_no_json_skips_cache(tmp_path: Path) -> None:
     assert not (tmp_path / cache_mod.CACHE_DIR / cache_mod.CACHE_FILE).exists()
 
 
-def test_gitignore_entry_not_duplicated(
+def test_map_run_leaves_repo_gitignore_untouched(
     make_mapped_repo: RepoFactory,
 ) -> None:
     root = make_mapped_repo(SRC)
-    cli.main(["map", str(root), "--quiet"])
-    lines = (root / ".gitignore").read_text().splitlines()
-    assert lines.count(".dekko/") == 1
-
-
-def test_existing_dekko_dir_leaves_gitignores_untouched(
-    make_mapped_repo: RepoFactory,
-) -> None:
-    root = make_mapped_repo(SRC)
-    # Strip dekko's gitignore wiring but keep the .dekko/ directory.
     (root / ".gitignore").write_text("node_modules/\n")
+    cli.main(["map", str(root), "--quiet"])
+    # The repo .gitignore is never modified by a map run.
+    assert (root / ".gitignore").read_text() == "node_modules/\n"
+
+
+def test_existing_dekko_dir_leaves_inner_gitignore_untouched(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    # Remove the inner ignore but keep the .dekko/ directory.
     (root / cache_mod.CACHE_DIR / ".gitignore").unlink()
 
     assert cli.main(["map", str(root), "--quiet"]) == 0
 
-    # .dekko/ already existed, so neither gitignore is re-touched.
-    assert (root / ".gitignore").read_text() == "node_modules/\n"
+    # .dekko/ already existed, so a map run does not re-create it.
     assert not (root / cache_mod.CACHE_DIR / ".gitignore").exists()
+
+
+def test_ensure_notes_tracked_migrates_legacy_ignore(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    inner = root / cache_mod.CACHE_DIR / ".gitignore"
+    inner.write_text("*\n")  # legacy pre-notes form
+
+    cache_mod.ensure_notes_tracked(root)
+
+    assert inner.read_text().splitlines() == [
+        "*",
+        "!.gitignore",
+        "!notes.json",
+    ]
+
+
+def test_ensure_notes_tracked_keeps_custom_ignore(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    inner = root / cache_mod.CACHE_DIR / ".gitignore"
+    inner.write_text("*\n!custom\n")  # user-customized
+
+    cache_mod.ensure_notes_tracked(root)
+
+    assert inner.read_text() == "*\n!custom\n"
 
 
 def test_reused_map_matches_cold_map(

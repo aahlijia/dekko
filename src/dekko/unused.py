@@ -16,33 +16,13 @@ still surface — treat the output as a lead, not a verdict.
 import fnmatch
 import json
 
+from .classify import is_test_path
 from .mapfile import MapIndex
 from .model import Symbol
-from .render_md import signature
+from .textutil import signature
 
 EXIT_NONE = 0
 EXIT_FOUND = 1
-
-_TEST_NAME_GLOBS = (
-    "test_*",
-    "*_test.*",
-    "*.test.*",
-    "*.spec.*",
-    "*Test.*",
-    "*Tests.*",
-)
-_TEST_DIR_PARTS = frozenset(
-    {"test", "tests", "__tests__", "spec", "specs", "testing"}
-)
-
-
-def _is_test_path(path: str) -> bool:
-    """Whether a repo-relative path looks like test code."""
-    parts = path.split("/")
-    if _TEST_DIR_PARTS.intersection(parts):
-        return True
-    base = parts[-1]
-    return any(fnmatch.fnmatch(base, pat) for pat in _TEST_NAME_GLOBS)
 
 
 def _matches_globs(path: str, globs: tuple[str, ...]) -> bool:
@@ -77,7 +57,7 @@ def _is_root(
         return True
     if _matches_globs(sym.path, root_globs):
         return True
-    if _is_test_path(sym.path):
+    if is_test_path(sym.path):
         return True
     if sym.language == "go" and sym.name[:1].isupper():
         return True

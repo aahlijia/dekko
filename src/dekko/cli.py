@@ -11,21 +11,28 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from importlib.metadata import version as _pkg_version
 from importlib.resources import files as _pkg_files
 from pathlib import Path
 
+from . import affected
 from . import cache as cache_mod
+from . import classify
 from . import contextpack
 from . import diff
 from . import export
 from . import languages
 from . import mapfile
+from . import notes as notes_mod
 from . import query
+from . import render_html
+from . import render_md
 from . import server
 from . import stats
+from . import summary
 from . import trace
 from . import unused
 from . import walker
@@ -33,7 +40,6 @@ from .extractor import extract_file
 from .extractor_generic import extract_file_generic
 from .model import FileMap
 from .render_json import render_json
-from .render_md import render_markdown
 from .resolver import resolve
 
 
@@ -43,10 +49,13 @@ SUBCOMMANDS = (
     "context",
     "trace",
     "diff",
+    "affected",
     "status",
     "serve",
     "unused",
     "stats",
+    "summary",
+    "note",
     "export",
 )
 
@@ -113,7 +122,23 @@ def _add_map_options(parser: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="markdown output file, or a directory to receive "
         "MAP.md and map.json (default: a .dekko/ dir under the "
-        "mapped directory)",
+        "mapped directory). An explicit file path forces --shard "
+        "never; a directory shards into <dir>/map/ when sharding "
+        "applies",
+    )
+    parser.add_argument(
+        "--shard",
+        choices=render_md.SHARD_MODES,
+        default="auto",
+        help="split MAP.md into per-directory map/ pages: auto "
+        "(shard large maps; the default), always, or never",
+    )
+    parser.add_argument(
+        "--order",
+        choices=render_md.ORDER_MODES,
+        default="path",
+        help="order file sections by path (default), name, or fan-in "
+        "(most depended-on first; also orders symbols within a file)",
     )
     parser.add_argument(
         "--json",
@@ -162,6 +187,11 @@ def _add_read_options(parser: argparse.ArgumentParser) -> None:
         "--no-regen",
         action="store_true",
         help="fail (exit 5) instead of regenerating a stale map",
+    )
+    parser.add_argument(
+        "--no-tests",
+        action="store_true",
+        help="exclude test files' symbols and edges from results",
     )
 
 
@@ -217,13 +247,26 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_query.add_argument("action", choices=query.ACTIONS)
     p_query.add_argument(
         "target",
-        help="symbol (name, Class.method, file.py:func) or file path",
+        help="symbol (name, Class.method, file.py:func), file path, or "
+        "(for uses) an external base identifier",
     )
     p_query.add_argument(
         "--limit",
         type=int,
         default=50,
         help="max text result lines (default: 50)",
+    )
+    p_query.add_argument(
+        "--sites",
+        action="store_true",
+        help="for callers/callees: one row per call site (path:line of "
+        "each call expression) instead of one per definition",
+    )
+    p_query.add_argument(
+        "--notes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="show notes anchored to the symbol (default: on)",
     )
     _add_read_options(p_query)
     p_query.set_defaults(func=run_query)
@@ -246,6 +289,18 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="TOKENS",
         help="approximate token budget for the pack",
+    )
+    p_ctx.add_argument(
+        "--with-source",
+        action="store_true",
+        help="inline the target's source body and hop-1 call-site "
+        "lines (counts against --budget)",
+    )
+    p_ctx.add_argument(
+        "--notes",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="include notes anchored to the target (default: on)",
     )
     _add_read_options(p_ctx)
     p_ctx.set_defaults(func=run_context)
@@ -301,6 +356,36 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="max impacted callers shown per symbol (default: 8)",
     )
     p_diff.set_defaults(func=run_diff)
+
+    p_affected = sub.add_parser(
+        "affected", help="test files impacted by changes since a git rev"
+    )
+    p_affected.add_argument(
+        "rev",
+        nargs="?",
+        default=None,
+        help="git rev to compare against (default: the commit the map "
+        "was generated at, else HEAD)",
+    )
+    p_affected.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_affected.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_affected.add_argument(
+        "--limit",
+        type=int,
+        default=8,
+        help="max impacted symbols shown per test file (default: 8)",
+    )
+    p_affected.set_defaults(func=run_affected)
 
     p_status = sub.add_parser(
         "status", help="report whether map.json is fresh"
@@ -369,6 +454,68 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     _add_read_options(p_stats)
     p_stats.set_defaults(func=run_stats)
 
+    p_summary = sub.add_parser(
+        "summary", help="compact repo digest (dirs, hotspots, entrypoints)"
+    )
+    _add_read_options(p_summary)
+    p_summary.set_defaults(func=run_summary)
+
+    p_note = sub.add_parser(
+        "note", help="add, list, or remove symbol-anchored notes"
+    )
+    note_sub = p_note.add_subparsers(
+        dest="note_action", required=True, metavar="ACTION"
+    )
+    p_note_add = note_sub.add_parser("add", help="anchor a note to a symbol")
+    p_note_add.add_argument(
+        "target", help="symbol (name, Class.method, file.py:func)"
+    )
+    p_note_add.add_argument("text", help="the note text")
+    p_note_list = note_sub.add_parser(
+        "list", help="list notes (all, or for one symbol)"
+    )
+    p_note_list.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="symbol to list notes for (default: all)",
+    )
+    p_note_list.add_argument(
+        "--orphaned",
+        action="store_true",
+        help="only notes whose symbol is no longer in the map",
+    )
+    p_note_rm = note_sub.add_parser("rm", help="remove a note from a symbol")
+    p_note_rm.add_argument(
+        "target", help="symbol (name, Class.method, file.py:func)"
+    )
+    p_note_rm.add_argument(
+        "index",
+        nargs="?",
+        type=int,
+        default=None,
+        help="1-based note index to remove (default: all for the symbol)",
+    )
+    for sp in (p_note_add, p_note_list, p_note_rm):
+        sp.add_argument(
+            "--root",
+            default=".",
+            metavar="DIR",
+            help="repo root containing map.json (default: cwd)",
+        )
+        sp.add_argument(
+            "--json",
+            dest="as_json",
+            action="store_true",
+            help="emit structured JSON",
+        )
+    p_note_list.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="fail (exit 5) instead of regenerating a stale map",
+    )
+    p_note.set_defaults(func=run_note)
+
     p_export = sub.add_parser(
         "export", help="render the call graph as mermaid or dot"
     )
@@ -388,8 +535,16 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_export.add_argument(
         "--max-nodes",
         type=int,
-        default=300,
-        help="refuse to render more nodes than this (default: 300)",
+        default=export.DEFAULT_MAX_NODES,
+        help="refuse to render more nodes than this (default: 300); "
+        "ignored for html",
+    )
+    p_export.add_argument(
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="write to this file (default: stdout for mermaid/dot, "
+        ".dekko/map.html for html)",
     )
     p_export.add_argument(
         "--root",
@@ -505,6 +660,10 @@ def map_repository(
         extracted[rel] = fm
 
     file_maps = [extracted[rel] for rel in paths if rel in extracted]
+    for fm in file_maps:
+        if classify.is_test_path(fm.path):
+            for sym in fm.symbols:
+                sym.test = True
     return file_maps, skipped
 
 
@@ -539,6 +698,57 @@ def resolve_outputs(
         json_path = md_path.with_suffix(".json")
 
     return md_path, json_path
+
+
+def _resolve_shard(shard: str, output: str | None, md_path: Path) -> str:
+    """Apply the ``--output`` precedence rule to the shard mode.
+
+    An explicit ``--output FILE`` (a path that is not a directory and
+    does not resolve to ``MAP.md``) means the user asked for one file,
+    so sharding is forced off. ``--output DIR`` keeps the requested
+    mode and shards into ``DIR/map/``.
+
+    Args:
+        shard: Requested mode (``auto``/``always``/``never``).
+        output: Raw ``--output`` value, if any.
+        md_path: Resolved markdown output path.
+
+    Returns:
+        The effective shard mode.
+    """
+    if output is not None and md_path.name != "MAP.md":
+        return "never"
+    return shard
+
+
+def _write_pages(md_path: Path, pages: list[tuple[str, str]]) -> list[Path]:
+    """Write the index and any directory pages; wipe stale pages first.
+
+    The first pair is the index, written to ``md_path``. Remaining
+    pairs are ``map/<slug>.md`` pages written under ``md_path``'s
+    directory. Any ``map/*.md`` from a previous run is removed first so
+    renamed or deleted directories never leave orphan pages behind.
+
+    Args:
+        md_path: Path for the index page (e.g. ``.dekko/MAP.md``).
+        pages: ``(page_path, content)`` pairs from ``render_map``.
+
+    Returns:
+        Every path written, in write order.
+    """
+    map_dir = md_path.parent / "map"
+    if map_dir.is_dir():
+        for stale in map_dir.glob("*.md"):
+            stale.unlink()
+
+    written = [md_path]
+    md_path.write_text(pages[0][1])
+    for name, content in pages[1:]:
+        page_path = md_path.parent / name
+        page_path.parent.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(content)
+        written.append(page_path)
+    return written
 
 
 def _summary(
@@ -580,11 +790,16 @@ def _summary(
 
         lines.append(f"  skipped: {detail}")
 
-    sizes = ", ".join(
-        f"{p.name} ({p.stat().st_size / 1024:.1f} KB)" for p in outputs
-    )
+    pages = [
+        p for p in outputs if p.parent.name == "map" and p.suffix == ".md"
+    ]
+    singles = [p for p in outputs if p not in pages]
+    parts = [f"{p.name} ({p.stat().st_size / 1024:.1f} KB)" for p in singles]
+    if pages:
+        total = sum(p.stat().st_size for p in pages) / 1024
+        parts.append(f"{len(pages)} pages under map/ ({total:.1f} KB)")
 
-    lines.append(f"  wrote {sizes}")
+    lines.append(f"  wrote {', '.join(parts)}")
     return "\n".join(lines)
 
 
@@ -743,6 +958,7 @@ def run_map(args: argparse.Namespace) -> int:
         old = {} if getattr(args, "full", False) else cache_mod.load(root)
         cache = cache_mod.IncrementalCache(old)
 
+    start = time.perf_counter()
     files, skipped = map_repository(
         root,
         subpath=args.subpath,
@@ -751,6 +967,7 @@ def run_map(args: argparse.Namespace) -> int:
         cache=cache,
         jobs=getattr(args, "jobs", 1),
     )
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
     if not files:
         print(
             f"dekko: no supported source files found under {root}",
@@ -766,8 +983,26 @@ def run_map(args: argparse.Namespace) -> int:
     cache_mod.ensure_dir(root)
     outputs: list[Path] = []
     md_path.parent.mkdir(parents=True, exist_ok=True)
-    md_path.write_text(render_markdown(files, graph, label))
-    outputs.append(md_path)
+    shard = _resolve_shard(
+        getattr(args, "shard", "auto"), args.output, md_path
+    )
+    if cache is not None:
+        reused, parsed = cache.reused, cache.parsed
+    else:
+        reused, parsed = 0, len(files)
+    run_stats = render_md.RunStats(
+        elapsed_ms=elapsed_ms, reused=reused, parsed=parsed
+    )
+    pages = render_md.render_map(
+        files,
+        graph,
+        label,
+        shard,
+        run_stats=run_stats,
+        root=root,
+        order=getattr(args, "order", "path"),
+    )
+    outputs += _write_pages(md_path, pages)
     if not args.no_json:
         provenance = mapfile.compute_provenance(
             root,
@@ -891,10 +1126,30 @@ def _cmd_map(args: argparse.Namespace) -> int:
     return run_map(args)
 
 
-def run_query(args: argparse.Namespace) -> int:
-    """Handle ``dekko query``."""
+def _read_index(
+    args: argparse.Namespace,
+) -> tuple[mapfile.MapIndex | None, int]:
+    """Load (auto-regen) the index for a read command, applying filters.
+
+    Args:
+        args: Parsed namespace carrying ``root``, ``no_regen``, and
+            ``no_tests``.
+
+    Returns:
+        ``(index, exit_code)`` — index is ``None`` on failure.
+    """
     root = Path(args.root).resolve()
     index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return None, code
+    if getattr(args, "no_tests", False):
+        index = index.without_tests()
+    return index, 0
+
+
+def run_query(args: argparse.Namespace) -> int:
+    """Handle ``dekko query``."""
+    index, code = _read_index(args)
     if index is None:
         return code
     return query.run(
@@ -903,13 +1158,14 @@ def run_query(args: argparse.Namespace) -> int:
         args.target,
         as_json=args.as_json,
         limit=args.limit,
+        sites=args.sites,
+        notes=args.notes,
     )
 
 
 def run_context(args: argparse.Namespace) -> int:
     """Handle ``dekko context``."""
-    root = Path(args.root).resolve()
-    index, code = _load_or_regen(root, args.no_regen)
+    index, code = _read_index(args)
     if index is None:
         return code
     return contextpack.run(
@@ -918,13 +1174,15 @@ def run_context(args: argparse.Namespace) -> int:
         hops=args.hops,
         budget=args.budget,
         as_json=args.as_json,
+        root=Path(args.root).resolve(),
+        with_source=args.with_source,
+        notes=args.notes,
     )
 
 
 def run_trace(args: argparse.Namespace) -> int:
     """Handle ``dekko trace <from> <to>``."""
-    root = Path(args.root).resolve()
-    index, code = _load_or_regen(root, args.no_regen)
+    index, code = _read_index(args)
     if index is None:
         return code
     return trace.run(
@@ -947,10 +1205,20 @@ def run_diff(args: argparse.Namespace) -> int:
     )
 
 
+def run_affected(args: argparse.Namespace) -> int:
+    """Handle ``dekko affected [REV]``."""
+    root = Path(args.root).resolve()
+    return affected.run(
+        root,
+        args.rev,
+        as_json=args.as_json,
+        limit=args.limit,
+    )
+
+
 def run_unused(args: argparse.Namespace) -> int:
     """Handle ``dekko unused``."""
-    root = Path(args.root).resolve()
-    index, code = _load_or_regen(root, args.no_regen)
+    index, code = _read_index(args)
     if index is None:
         return code
     return unused.run(
@@ -963,11 +1231,95 @@ def run_unused(args: argparse.Namespace) -> int:
 
 def run_stats(args: argparse.Namespace) -> int:
     """Handle ``dekko stats``."""
-    root = Path(args.root).resolve()
-    index, code = _load_or_regen(root, args.no_regen)
+    index, code = _read_index(args)
     if index is None:
         return code
     return stats.run(index, args.top, as_json=args.as_json)
+
+
+def run_summary(args: argparse.Namespace) -> int:
+    """Handle ``dekko summary``."""
+    index, code = _read_index(args)
+    if index is None:
+        return code
+    return summary.run(index, as_json=args.as_json)
+
+
+def run_note(args: argparse.Namespace) -> int:
+    """Handle ``dekko note add|list|rm``."""
+    if args.note_action == "add":
+        return _note_add(args)
+    if args.note_action == "rm":
+        return _note_rm(args)
+    return _note_list(args)
+
+
+def _resolve_for_note(root: Path, target: str) -> tuple[str | None, int]:
+    """Resolve a note target to a symbol id (no map regeneration)."""
+    index = mapfile.load_map(root)
+    if index is None:
+        print(f"dekko: no map under {root} (run `dekko map`)", file=sys.stderr)
+        return None, 5
+    sym, candidates = query.resolve_target(index, target)
+    if sym is None:
+        return None, query.report_unresolved(target, candidates)
+    return sym.id, 0
+
+
+def _note_add(args: argparse.Namespace) -> int:
+    """Anchor a note to a resolved symbol."""
+    root = Path(args.root).resolve()
+    sym_id, code = _resolve_for_note(root, args.target)
+    if sym_id is None:
+        return code
+    notes_mod.add(root, sym_id, args.text)
+    if args.as_json:
+        print(json.dumps({"symbol": sym_id, "text": args.text}))
+    else:
+        print(f"dekko: noted {sym_id}")
+    return 0
+
+
+def _note_rm(args: argparse.Namespace) -> int:
+    """Remove one note (or all) from a resolved symbol."""
+    root = Path(args.root).resolve()
+    sym_id, code = _resolve_for_note(root, args.target)
+    if sym_id is None:
+        return code
+    removed = notes_mod.remove(root, sym_id, args.index)
+    if args.as_json:
+        print(json.dumps({"symbol": sym_id, "removed": removed}))
+    else:
+        print(f"dekko: removed {removed} note(s) from {sym_id}")
+    return 0
+
+
+def _note_list(args: argparse.Namespace) -> int:
+    """List notes: all, orphaned, or for a single symbol."""
+    root = Path(args.root).resolve()
+    if args.orphaned:
+        index, code = _load_or_regen(root, args.no_regen)
+        if index is None:
+            return code
+        data = notes_mod.orphaned(root, set(index.symbols_by_id))
+    elif args.target is not None:
+        sym_id, code = _resolve_for_note(root, args.target)
+        if sym_id is None:
+            return code
+        all_notes = notes_mod.load(root)
+        data = {sym_id: all_notes.get(sym_id, [])}
+    else:
+        data = notes_mod.load(root)
+    if args.as_json:
+        print(json.dumps(data, indent=2))
+        return 0
+    if not any(data.values()):
+        print("dekko: no notes")
+        return 0
+    for sym_id, records in sorted(data.items()):
+        for record in records:
+            print(f"{sym_id}: {record.get('text', '')}")
+    return 0
 
 
 def run_export(args: argparse.Namespace) -> int:
@@ -976,7 +1328,15 @@ def run_export(args: argparse.Namespace) -> int:
     index, code = _load_or_regen(root, args.no_regen)
     if index is None:
         return code
-    return export.run(index, args.fmt, args.scope, args.max_nodes)
+    if args.fmt == "html":
+        out = (
+            Path(args.output)
+            if args.output
+            else root / cache_mod.CACHE_DIR / "map.html"
+        )
+        return render_html.run(index, out)
+    out = Path(args.output) if args.output else None
+    return export.run(index, args.fmt, args.scope, args.max_nodes, out)
 
 
 def run_serve(args: argparse.Namespace) -> int:

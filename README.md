@@ -5,11 +5,19 @@ installed and run as `dekko`. It scans the repo programmatically — no model to
 are spent parsing — sweeping the repository and writing two files (by
 default into a `.dekko/` directory at the repo root):
 
-- **`MAP.md`** — every code file, every function/method, parameters with
+- **`MAP.md`** — a human-readable map: an `## Overview` (per-directory
+  rollup, an embedded `mermaid` architecture diagram, load-bearing and
+  orchestrator rankings, largest files, and churn × fan-in hotspots)
+  followed by every code file, every function/method, parameters with
   types (when declared), return types, and relational call links: each
-  function lists what it **calls** and what it is **called by**.
+  function lists what it **calls** and what it is **called by**. Large
+  repos shard into per-directory `map/` pages automatically.
 - **`map.json`** — the full symbol/call graph in machine-readable form,
   including external and ambiguous calls omitted from MAP.md.
+
+A standalone, dependency-free `dekko export --format html` renders the
+same map as an interactive single-file browser (tree, search, clickable
+callers/callees) for readers who never install dekko.
 
 ## Installation
 
@@ -69,17 +77,27 @@ dekko map . src               # restrict the map to a subtree
 dekko map --if-stale          # regenerate only when sources changed
 dekko map --full              # ignore the .dekko cache, re-parse everything
 dekko map --jobs 0            # parallel extraction (0 = all cores)
-dekko query callers resolve   # who calls resolve?
+dekko map --shard always      # force per-directory map/ pages (auto|always|never)
+dekko map --order fan-in      # order sections by fan-in (path|name|fan-in)
+dekko query callers resolve --sites # call sites that call resolve
 dekko query callees main      # what does main call?
-dekko query symbol cli.py:run_map   # signature card for one symbol
+dekko query symbol cli.py:run_map   # signature card (with doc + notes)
+dekko query uses Path         # who references the external name Path?
 dekko query file walker.py    # symbols defined in a file
+dekko query callers main --no-tests # drop test-file results
 dekko context run_map --budget 1500 # minimal context pack for an edit
+dekko context run_map --with-source # ...with the body + call sites inlined
 dekko trace main run_map      # shortest call path(s) between two symbols
+dekko summary                 # ~40-line repo digest (dirs, hotspots)
 dekko diff                    # symbols changed since the map's commit
-dekko diff main               # ...or since any git rev, with callers
+dekko affected                # test files impacted by your changes
+dekko affected main           # ...vs any git rev
 dekko unused                  # symbols nothing calls (dead-code leads)
 dekko stats                   # hotspots, largest files, language mix
+dekko note add cli.py:run_map "why" # anchor a durable note to a symbol
+dekko note list --orphaned    # notes whose symbol moved
 dekko export --format mermaid # render the call graph (mermaid|dot)
+dekko export --format html    # interactive single-file browser (.dekko/map.html)
 dekko status                  # is map.json still fresh? (exit 0/1)
 dekko serve --mcp             # expose the map to agents over MCP (stdio)
 dekko --claude-install        # install the Claude Code plugin
@@ -89,38 +107,51 @@ dekko --version
 
 | Command | Meaning |
 | --- | --- |
-| `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--full` forces a cold rebuild; `--jobs N` parallelizes extraction, `0` = all cores; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
-| `query ACTION TARGET` | `callers`, `callees`, `symbol`, or `file` lookups against map.json |
-| `context TARGET` | Signatures of a symbol's neighborhood (`--hops N`, `--budget TOKENS`) |
+| `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--full` forces a cold rebuild; `--jobs N` parallelizes extraction, `0` = all cores; `--shard auto\|always\|never` splits large maps into `map/` pages; `--order path\|name\|fan-in` orders sections; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
+| `query ACTION TARGET` | `callers`, `callees`, `symbol`, `file`, or `uses` lookups; `--sites` for per-call-site rows, `--no-tests` to drop test code, `--notes/--no-notes` |
+| `context TARGET` | A symbol's neighborhood with docs and notes (`--hops N`, `--budget TOKENS`); `--with-source` inlines the body and hop-1 call sites |
 | `trace FROM TO` | Shortest call path(s) from one symbol to another (`--max-paths K`, `--json`); no path is a clean exit `1` |
+| `summary` | ~40-line repo digest: counts, per-directory rollup with coupling and purpose, hotspots, entry points, parse errors (`--json`) |
 | `diff [REV]` | Symbols added/removed/changed since a git rev (default: the map's commit), each with impacted callers (`--limit`, `--json`) |
+| `affected [REV]` | Test files impacted by changes — reverse call-graph reachability plus an import-edge fallback; prints a `pytest …` line (`--limit`, `--json`) |
 | `unused` | Symbols with no inbound calls, minus roots (`--roots GLOB`, `--limit`, `--json`); exit 1 when any are found |
 | `stats` | Fan-in/out hotspots, largest files, language mix (`--top`, `--json`) |
-| `export` | Call graph as `--format mermaid\|dot`, `--scope symbol\|file`, capped by `--max-nodes` |
+| `note add\|list\|rm` | Durable symbol-anchored notes in `.dekko/notes.json` (`list --orphaned` finds notes whose symbol moved) |
+| `export` | Call graph as `--format mermaid\|dot` (`--scope symbol\|file`, capped by `--max-nodes`) or `--format html` (a self-contained interactive browser); `--output PATH` writes a file instead of stdout (html defaults to `.dekko/map.html`) |
 | `status` | Freshness report from the provenance stamp in map.json |
 | `serve --mcp` | Hand-rolled MCP server (stdio) exposing the read surface as agent tools (`--root`, `--no-regen`) |
 
 Symbol targets accept a bare `name`, `Class.method`, or the qualified
 `file.py:name` / `file.py:Class.method` forms; ambiguous names list
 their candidates instead of guessing. The read commands (`query`,
-`context`, `trace`, `unused`, `stats`, `export`) regenerate a stale map
-automatically — pass `--no-regen` to fail instead, and `--json`
-anywhere for structured output. The legacy flags `--map [DIR]
+`context`, `trace`, `summary`, `unused`, `stats`, `export`) regenerate a
+stale map automatically — pass `--no-regen` to fail instead, and
+`--json` anywhere for structured output. The legacy flags `--map [DIR]
 [SUBPATH]`, `--claude-install`, `--mcp-install`, and `--version` keep
 working as aliases.
 
 `map` writes `MAP.md` and `map.json` into a `.dekko/` directory at the
 repository root — override the location with `--output` — alongside a
-per-file extraction cache. `.dekko/` is added to your `.gitignore`
-automatically. The cache lets re-mapping re-parse only files whose
-contents changed (`--full` ignores it) and is tagged with the `dekko`
-version, so upgrading re-parses everything once to pick up extractor
-changes.
+per-file extraction cache. Large maps additionally shard into
+`.dekko/map/<dir>.md` pages, and `dekko export --format html` writes
+`.dekko/map.html`. An inner `.dekko/.gitignore` ignores all of this
+generated output (maps, pages, html, cache) while keeping `notes.json`
+(your committed symbol annotations) tracked; your repository
+`.gitignore` is left untouched. The cache lets re-mapping re-parse only
+files whose contents changed (`--full` ignores it) and is tagged with
+the `dekko` version, so upgrading re-parses everything once to pick up
+extractor changes.
 
-Exit codes: `0` success/fresh/no-diff, `1` failure, stale (`status`),
-differences found (`diff`), unused symbols found (`unused`), or no call
-path (`trace`); `2` usage error, `3` target not found, `4` ambiguous
-target, `5` stale map with `--no-regen`.
+To **commit a map** into your repo, opt in by whitelisting it in
+`.dekko/.gitignore` — e.g. add `!MAP.md` and `!map.json` (and `!map/`
+plus `!map/*.md` if you shard). Generated maps are ignored by default
+because they would otherwise churn on every regeneration.
+
+Exit codes: `0` success/fresh/no-diff/no-impact, `1` failure, stale
+(`status`), differences found (`diff`), impacted tests found
+(`affected`), unused symbols found (`unused`), or no call path
+(`trace`); `2` usage error or bad git rev, `3` target not found, `4`
+ambiguous target, `5` stale map with `--no-regen`.
 
 `unused` is call-graph based, so it lists *leads*, not verdicts: a
 symbol reached only via subclassing, type annotations, dynamic dispatch,
@@ -140,32 +171,90 @@ Python dunders, and `__init__.py` re-exports as roots; add your own with
 The plugin runs the installed `dekko` CLI, so install the package first
 (see above).
 
+### Keeping the map fresh automatically (optional)
+
+Read commands already regenerate a stale map on demand, and the
+freshness check is cheap — unchanged files are skipped by an
+`(mtime, size)` comparison, so only edited files are re-hashed. If you
+want the map refreshed the moment you edit a file, add a Claude Code
+`PostToolUse` hook in your `settings.json`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "dekko map --if-stale \"${CLAUDE_PROJECT_DIR}\"" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The incremental cache makes each refresh re-parse only the changed
+file. This is opt-in rather than bundled with the plugin so you control
+when dekko runs.
+
 ## MCP server
 
 `dekko serve --mcp` speaks the Model Context Protocol over stdio as
 newline-delimited JSON-RPC 2.0 — **no SDK dependency**. It lets an agent
 answer "who calls X?" with a tool call instead of reading MAP.md. The
-read commands map to nine tools:
+read surface maps to fourteen tools:
 
 | Tool | Backs |
 | --- | --- |
-| `query_symbol` | `query symbol` |
-| `get_callers` / `get_callees` | `query callers` / `callees` |
-| `get_context_pack` | `context` (`hops`, `budget`) |
+| `query_symbol` | `query symbol` (signature, doc, fan-in/out, notes) |
+| `get_callers` / `get_callees` | `query callers` / `callees` (`sites`) |
+| `find_usages` | `query uses` (references to an external name) |
+| `get_context_pack` | `context` (`hops`, `budget`, `with_source`) |
 | `trace_path` | `trace` (`from`, `to`, `max_paths`) |
+| `affected` → `impacted_tests` | `affected` (`rev`) |
+| `summary` | `summary` |
 | `find_unused` | `unused` (`roots`, `limit`) |
 | `stats` | `stats` (`top`) |
+| `add_note` / `list_notes` | `note add` / `note list` |
 | `map_status` | `status` |
 | `refresh_map` | `map` (`full` for a cold rebuild) |
 
-Reads auto-regenerate a stale map (pass `--no-regen` to disable), and
-each tool accepts an optional `root` (defaults to the server's working
-directory).
+It also serves one MCP **resource**, `dekko://summary`, for clients that
+attach resources as context. Reads auto-regenerate a stale map (pass
+`--no-regen` to disable), and each tool accepts an optional `root`
+(defaults to the server's working directory).
 
 The plugin ships an `.mcp.json` pointing at `dekko serve --mcp` with
 `cwd` set to `${CLAUDE_PROJECT_DIR}`, so `dekko --claude-install` wires
 the server automatically. For a non-plugin setup, `dekko --mcp-install`
 runs `claude mcp add dekko -- dekko serve --mcp`.
+
+## Notes
+
+`dekko note` anchors durable annotations to a symbol by id, stored in
+`.dekko/notes.json`. Notes are meant to be **committed** — the inner
+`.dekko/.gitignore` keeps that one file tracked while ignoring the
+generated map and cache — so rationale travels with the code and shows
+up inline in `dekko query symbol` and `dekko context`.
+
+```sh
+dekko note add resolver.py:resolve "ambiguous calls are marked, never guessed"
+dekko note list resolver.py:resolve
+dekko note list --orphaned   # notes whose symbol was renamed or moved
+dekko note rm resolver.py:resolve 1
+```
+
+Because a note's key is `path::Qualified.name`, renaming or moving a
+symbol orphans its notes; `note list --orphaned` finds them so you can
+re-anchor (`note add` the new target, `note rm` the old) or delete them.
+The plugin ships a `dekko-notes` skill that prompts Claude Code to do
+this upkeep as it edits.
+
+> If you used dekko before 0.8.0, your repository `.gitignore` may
+> contain a blanket `.dekko/` line from an older version. Remove it so
+> `notes.json` can be tracked — newer versions rely on the inner
+> `.dekko/.gitignore` instead and never touch your repo `.gitignore`.
 
 ## Language support
 

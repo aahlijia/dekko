@@ -128,5 +128,7 @@ def test_external_calls_recorded() -> None:
         max_file_size=1_000_000,
     )
     graph = resolve(files)
-    externals = {text for _, text in graph.external}
+    externals = {ext.callee for ext in graph.external}
     assert any("sqrt" in text for text in externals)
+    assert all(ext.caller for ext in graph.external)
+    assert all(line > 0 for ext in graph.external for line in ext.lines)

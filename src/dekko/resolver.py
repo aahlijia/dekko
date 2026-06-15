@@ -9,7 +9,16 @@ candidates are external.
 import re
 from pathlib import PurePosixPath
 
-from .model import CallGraph, Edge, FileMap, Import, RawCall, Symbol
+from .classify import is_test_path
+from .model import (
+    CallGraph,
+    Edge,
+    ExternalCall,
+    FileMap,
+    Import,
+    RawCall,
+    Symbol,
+)
 
 _SELF_RECEIVERS = {"self", "this", "Self", "cls"}
 _PATH_SPLIT = re.compile(r"::|\.|/")
@@ -32,9 +41,9 @@ def resolve(files: list[FileMap]) -> CallGraph:
     imports_by_file = _imports_by_file(files)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
 
-    edges: set[tuple[str, str]] = set()
+    edges: dict[tuple[str, str], set[int]] = {}
     ambiguous: dict[tuple[str, str], list[str]] = {}
-    external: set[tuple[str | None, str]] = set()
+    external: dict[tuple[str, str], set[int]] = {}
 
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
@@ -51,12 +60,18 @@ def resolve(files: list[FileMap]) -> CallGraph:
             )
 
     graph = CallGraph(
-        edges=[Edge(caller=c, callee=e) for c, e in sorted(edges)],
+        edges=[
+            Edge(caller=c, callee=e, lines=sorted(lines))
+            for (c, e), lines in sorted(edges.items())
+        ],
         ambiguous=[
             (caller, name, cands)
             for (caller, name), cands in sorted(ambiguous.items())
         ],
-        external=sorted(external, key=lambda t: (t[0] or "", t[1])),
+        external=[
+            ExternalCall(caller=c, callee=t, lines=sorted(lines))
+            for (c, t), lines in sorted(external.items())
+        ],
     )
     _build_adjacency(graph)
     return graph
@@ -68,15 +83,15 @@ def _resolve_call(
     by_name_path: dict[tuple[str, str], list[Symbol]],
     file_imports: dict[str, Import],
     symbols_by_id: dict[str, Symbol],
-    edges: set[tuple[str, str]],
+    edges: dict[tuple[str, str], set[int]],
     ambiguous: dict[tuple[str, str], list[str]],
-    external: set[tuple[str | None, str]],
+    external: dict[tuple[str, str], set[int]],
 ) -> None:
     """Resolve one call and record it in the right bucket."""
     caller_id = call.caller_id or f"{call.path}{MODULE_CALLER_SUFFIX}"
     candidates = index.get(call.name, [])
     if not candidates:
-        external.add((call.caller_id, call.text))
+        external.setdefault((caller_id, call.text), set()).add(call.line)
         return
 
     same_file = by_name_path.get((call.name, call.path), [])
@@ -89,10 +104,13 @@ def _resolve_call(
     )
     if target is not None:
         if target.id != caller_id:
-            edges.add((caller_id, target.id))
+            edges.setdefault((caller_id, target.id), set()).add(call.line)
         return
     key = (caller_id, call.name)
-    ambiguous.setdefault(key, sorted(c.id for c in candidates))
+    # Candidate lists are presentation data: production code first,
+    # test/fixture symbols last.
+    ranked = sorted(candidates, key=lambda c: (is_test_path(c.path), c.id))
+    ambiguous.setdefault(key, [c.id for c in ranked])
 
 
 def _pick_candidate(
