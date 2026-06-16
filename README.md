@@ -32,6 +32,18 @@ everything relevant to a change, and every list command takes a
 uv tool install dekko     # or: pip install dekko / pipx install dekko
 ```
 
+The default install bundles **nine Tier-1 languages** (Python, Rust, C,
+C++, JavaScript, TypeScript/TSX, Go, Java) as individual grammar
+packages, so dekko parses them **fully offline** — no grammar download
+at runtime. For the ~55 additional [Tier-2](#language-support)
+languages, add the extra:
+
+```sh
+pip install dekko[all]    # adds the tree-sitter grammar pack
+```
+
+Tested on macOS and Linux; Windows is best-effort (exercised in CI).
+
 Then, to add the `/map` command to Claude Code:
 
 ```sh
@@ -411,15 +423,18 @@ this upkeep as it edits.
 
 ## Language support
 
-Parsing is done with [tree-sitter](https://tree-sitter.github.io/) via
-`tree-sitter-language-pack`.
+Parsing is done with [tree-sitter](https://tree-sitter.github.io/).
 
 - **Tier 1 — full fidelity** (dedicated queries; typed params and return
   types where the language declares them): Python, Rust, C, C++,
-  JavaScript, TypeScript (+ TSX), Go, Java.
+  JavaScript, TypeScript (+ TSX), Go, Java. Shipped with every install
+  as individual grammar packages, so they parse **offline** — no network
+  and no grammar download.
 - **Tier 2 — generic fallback** (function names, parameter text, and call
-  links): every other grammar in the language pack — Ruby, PHP, C#,
-  Kotlin, Swift, Lua, and many more.
+  links): every other grammar in `tree-sitter-language-pack` — Ruby,
+  PHP, C#, Kotlin, Swift, Lua, and many more. Requires
+  `pip install dekko[all]`, which downloads grammars on demand; without
+  it, a Tier-2 file is skipped with a note rather than parsed.
 
 ## How call resolution works
 
@@ -444,11 +459,17 @@ design:
 ## Development
 
 ```sh
+uv sync --extra all              # include Tier-2 grammars + tokenizer
 uv run pytest                    # test suite
 uv run ruff check .              # lint
 uv run ruff format --check .
 uv build                         # sdist + wheel into dist/
 ```
+
+A plain `uv sync` installs only the Tier-1 grammars; the Tier-2 and
+tokenizer tests then skip (as they do on a default user install). CI
+runs the suite across `{ubuntu, macos, windows} × {3.10, 3.13}` —
+see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 Releases: pushing a `v*` tag builds and publishes to PyPI via trusted
 publishing (`.github/workflows/release.yml`); configure the trusted

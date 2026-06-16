@@ -9,6 +9,60 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-06-16
+
+### Added
+- **CI matrix** (`.github/workflows/ci.yml`): on every push/PR to
+  `develop`/`main`, the suite runs across
+  `{ubuntu, macos, windows} × {3.10, 3.13}` with `ruff check`,
+  `ruff format --check`, and `pytest`. Windows is `continue-on-error`
+  (best-effort for 1.0.0); Linux/macOS are blocking. This turns
+  cross-platform correctness from opinion into a checked fact.
+
+### Changed
+- **Tier-1 grammars now install offline; Tier-2 moves behind
+  `dekko[all]`.** A default `pip install dekko` ships the nine Tier-1
+  languages (C, C++, Go, Java, JavaScript, Python, Rust, TypeScript,
+  TSX) as individual, pinned grammar packages, so mapping them makes
+  **no network call** — no more runtime grammar download, offline
+  failure, or supply-chain surface from the catch-all pack. The ~55
+  generic Tier-2 languages now require `pip install dekko[all]`, which
+  pulls in `tree-sitter-language-pack`; without it, a Tier-2 file is
+  skipped with a "needs `dekko[all]`" note rather than parsed. Grammar
+  resolution moved behind a new `grammars.get_grammar` seam (cached, so
+  each grammar loads once). Map output for any installed grammar is
+  unchanged.
+- **Release workflow is hardened around the version tag.** `release.yml`
+  still fires only on a `v*` tag, but now rejects a tag whose version
+  does not match the built wheel (catches a forgotten version bump), and
+  the publish job carries an explicit `refs/tags/v*` guard so it can
+  never run off a non-release ref. The workflow header documents the
+  gating and the one-time PyPI trusted-publisher prerequisite.
+- **`dekko diff` no longer shells out to `tar`.** The earlier-rev export
+  now captures `git archive --format=tar` and extracts it with the
+  stdlib `tarfile` module instead of piping to an external `tar`
+  binary, removing an undocumented POSIX dependency (a step toward
+  Windows support). Extraction refuses path traversal (the `data`
+  filter on 3.12+, an explicit guard on 3.10/3.11). Map output is
+  unchanged.
+
+### Fixed
+- **Windows: the `claude` CLI is now invoked by its resolved full path**
+  rather than the bare name, so the plugin/MCP install and uninstall
+  commands launch a `claude.cmd` shim that `subprocess` would otherwise
+  fail to start. No change on macOS/Linux.
+- **Windows: the session ledger now finds its transcript.** The
+  `~/.claude/projects` directory key now encodes backslashes and the
+  drive colon (not just POSIX `/`), matching Claude Code's per-platform
+  naming. Still best-effort — a miss degrades to an empty ledger.
+
+### Documentation
+- **README install & platform pass**: the install section now states the
+  offline Tier-1 footprint, points to `pip install dekko[all]` for the
+  Tier-2 languages, and notes the tested-platforms line (macOS/Linux;
+  Windows best-effort via CI). The "Language support" and "Development"
+  sections match the new packaging.
+
 ## [0.11.0] — 2026-06-16
 
 ### Active Context Layer

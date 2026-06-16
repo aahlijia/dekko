@@ -172,9 +172,7 @@ def _rerank_touched(
     )
 
 
-def _rerank_files(
-    seed: Seed, index: MapIndex, task: TaskContext
-) -> list[str]:
+def _rerank_files(seed: Seed, index: MapIndex, task: TaskContext) -> list[str]:
     """Touched files, most task-relevant first (aggregate degree blended)."""
     by_file: dict[str, int] = {}
     for sym in seed.touched:

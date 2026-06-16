@@ -105,8 +105,14 @@ def test_claude_uninstall_removes_plugin_and_marketplace(
 
     monkeypatch.setattr(cli, "_run_subprocess", fake_run)
     assert cli.claude_uninstall() == 0
-    assert ["claude", "plugin", "uninstall", "dekko@dekko"] in calls
-    assert ["claude", "plugin", "marketplace", "remove", "dekko"] in calls
+    assert ["/usr/bin/claude", "plugin", "uninstall", "dekko@dekko"] in calls
+    assert [
+        "/usr/bin/claude",
+        "plugin",
+        "marketplace",
+        "remove",
+        "dekko",
+    ] in calls
 
 
 def test_claude_uninstall_tolerates_missing_plugin(
@@ -142,7 +148,7 @@ def test_mcp_uninstall_removes_server(
 
     monkeypatch.setattr(cli, "_run_subprocess", fake_run)
     assert cli.mcp_uninstall() == 0
-    assert ["claude", "mcp", "remove", "dekko"] in calls
+    assert ["/usr/bin/claude", "mcp", "remove", "dekko"] in calls
 
 
 def test_mcp_uninstall_tolerates_missing_server(
@@ -156,3 +162,20 @@ def test_mcp_uninstall_tolerates_missing_server(
     monkeypatch.setattr(cli, "_run_subprocess", fake_run)
     assert cli.mcp_uninstall() == 0
     assert "already removed?" in capsys.readouterr().err
+
+
+def test_claude_invoked_by_resolved_path_not_bare_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """argv[0] is the path shutil.which resolved (the Windows-shim fix)."""
+    resolved = "/opt/claude/bin/claude.cmd"
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: resolved)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str]) -> subprocess.CompletedProcess:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(cli, "_run_subprocess", fake_run)
+    assert cli.mcp_install() == 0
+    assert calls and all(cmd[0] == resolved for cmd in calls)

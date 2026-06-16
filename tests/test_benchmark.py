@@ -24,6 +24,7 @@ _FIXTURE = (
     Path(__file__).parent / "fixtures" / "transcripts" / "session_basic.jsonl"
 )
 
+
 # A file with a called symbol plus many unrelated bodies. The whole-file
 # baseline grows with every body; target's neighborhood pack does not, so
 # both outline (drops bodies) and context (neighbourhood vs whole file)
@@ -87,7 +88,7 @@ def test_lean_is_coverage_only(make_mapped_repo: RepoFactory) -> None:
     lean = next(
         r for r in measure.run_all(root, _TASKS) if r.task.kind == "lean"
     )
-    assert lean.baseline == 0          # no naive baseline
+    assert lean.baseline == 0  # no naive baseline
     assert lean.dekko > 0
     assert "symbols" in lean.covers
 

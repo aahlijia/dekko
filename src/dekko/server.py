@@ -333,7 +333,11 @@ def tool_lean(ctx: Context, args: dict) -> str:
     dense = bool(args.get("dense", False))
     code, out, err = _capture(
         lambda: render_lean.run(
-            index, root, budget=budget, as_json=False, task=task,
+            index,
+            root,
+            budget=budget,
+            as_json=False,
+            task=task,
             dense=dense,
         )
     )
@@ -383,7 +387,8 @@ def tool_ledger(ctx: Context, args: dict) -> str:
     root = _root_of(ctx, args)
     transcript = args.get("transcript")
     transcript = (
-        Path(transcript) if isinstance(transcript, str) and transcript
+        Path(transcript)
+        if isinstance(transcript, str) and transcript
         else None
     )
     session = args.get("session")

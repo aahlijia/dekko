@@ -575,8 +575,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         choices=list(hooks_mod.EVENTS),
         default=None,
         metavar="EVENT",
-        help="hook event(s) to enable; repeatable "
-        "(default: session-start)",
+        help="hook event(s) to enable; repeatable (default: session-start)",
     )
     p_hooks_install.add_argument(
         "--root",
@@ -1088,16 +1087,22 @@ def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def _claude_cli_present() -> bool:
-    """Return True if the ``claude`` CLI is on PATH, else warn and False."""
-    if shutil.which("claude") is None:
+def _claude_exe() -> str | None:
+    """Resolve the ``claude`` CLI to its full path, or warn and None.
+
+    Returns the absolute path so callers invoke the resolved executable
+    rather than the bare name. On Windows ``subprocess.run`` will not
+    launch a ``claude.cmd`` shim found only by name; the full path that
+    ``shutil.which`` returns does work.
+    """
+    exe = shutil.which("claude")
+    if exe is None:
         print(
             "dekko: 'claude' CLI not found on PATH. Install Claude Code "
             "first: https://claude.com/claude-code",
             file=sys.stderr,
         )
-        return False
-    return True
+    return exe
 
 
 def claude_install() -> int:
@@ -1106,7 +1111,8 @@ def claude_install() -> int:
     Returns:
         Process exit code.
     """
-    if not _claude_cli_present():
+    exe = _claude_exe()
+    if exe is None:
         return 1
 
     plugin_dir = Path(str(_pkg_files("dekko"))) / "_plugin"
@@ -1118,20 +1124,20 @@ def claude_install() -> int:
         return 1
 
     added = _run_subprocess(
-        ["claude", "plugin", "marketplace", "add", str(plugin_dir)]
+        [exe, "plugin", "marketplace", "add", str(plugin_dir)]
     )
     if added.returncode != 0:
         # Likely already registered (e.g. a previous install or a dev
         # checkout): refresh it instead.
         updated = _run_subprocess(
-            ["claude", "plugin", "marketplace", "update", "dekko"]
+            [exe, "plugin", "marketplace", "update", "dekko"]
         )
         if updated.returncode != 0:
             print(added.stderr.strip(), file=sys.stderr)
             print(updated.stderr.strip(), file=sys.stderr)
             return 1
 
-    installed = _run_subprocess(["claude", "plugin", "install", "dekko@dekko"])
+    installed = _run_subprocess([exe, "plugin", "install", "dekko@dekko"])
     if installed.returncode != 0:
         print(installed.stderr.strip(), file=sys.stderr)
         return 1
@@ -1151,12 +1157,13 @@ def claude_uninstall() -> int:
     Returns:
         Process exit code (``1`` only when the ``claude`` CLI is missing).
     """
-    if not _claude_cli_present():
+    exe = _claude_exe()
+    if exe is None:
         return 1
 
     for cmd in (
-        ["claude", "plugin", "uninstall", "dekko@dekko"],
-        ["claude", "plugin", "marketplace", "remove", "dekko"],
+        [exe, "plugin", "uninstall", "dekko@dekko"],
+        [exe, "plugin", "marketplace", "remove", "dekko"],
     ):
         result = _run_subprocess(cmd)
         if result.returncode != 0:
@@ -1176,11 +1183,12 @@ def mcp_install() -> int:
     Returns:
         Process exit code.
     """
-    if not _claude_cli_present():
+    exe = _claude_exe()
+    if exe is None:
         return 1
 
     added = _run_subprocess(
-        ["claude", "mcp", "add", "dekko", "--", "dekko", "serve", "--mcp"]
+        [exe, "mcp", "add", "dekko", "--", "dekko", "serve", "--mcp"]
     )
     if added.returncode != 0:
         print(added.stderr.strip(), file=sys.stderr)
@@ -1200,10 +1208,11 @@ def mcp_uninstall() -> int:
     Returns:
         Process exit code (``1`` only when the ``claude`` CLI is missing).
     """
-    if not _claude_cli_present():
+    exe = _claude_exe()
+    if exe is None:
         return 1
 
-    removed = _run_subprocess(["claude", "mcp", "remove", "dekko"])
+    removed = _run_subprocess([exe, "mcp", "remove", "dekko"])
     if removed.returncode != 0:
         print(
             "dekko: 'claude mcp remove dekko' failed (already removed?): "
@@ -1586,9 +1595,7 @@ def run_lean(args: argparse.Namespace) -> int:
 
 def run_ledger(args: argparse.Namespace) -> int:
     """Handle ``dekko ledger``."""
-    transcript = (
-        Path(args.transcript).resolve() if args.transcript else None
-    )
+    transcript = Path(args.transcript).resolve() if args.transcript else None
     return ledger_mod.run(
         Path(args.root).resolve(),
         transcript,

@@ -123,7 +123,7 @@ def compute_backbone(index: MapIndex) -> list[BackboneGroup]:
             BackboneGroup(
                 directory=directory,
                 rows=rows,
-                demotable=all(r.demotable for r in rows)
+                demotable=all(r.demotable for r in rows),
             )
         )
     return groups
@@ -132,7 +132,7 @@ def compute_backbone(index: MapIndex) -> list[BackboneGroup]:
 def render_backbone(
     groups: list[BackboneGroup],
     width: int = LEAN_PURPOSE_WIDTH,
-    collapse_demotable: bool = False
+    collapse_demotable: bool = False,
 ) -> list[str]:
     """Render backbone groups to dense lean lines.
 
@@ -256,10 +256,10 @@ def build_atoms(
                 centrality=_centrality(
                     len(index.calls_in.get(s.id, [])),
                     churn.get(path, 0),
-                    max_churn
+                    max_churn,
                 ),
                 path=path,
-                demotable=is_test_path(path)
+                demotable=is_test_path(path),
             )
             for s in ordered
         ]
@@ -501,7 +501,7 @@ def build_model(index: MapIndex, root: Path) -> LeanModel:
         groups=compute_backbone(index),
         atoms_by_path=build_atoms(index, summary.file_churn(root)),
         module_edges=module_edges(index),
-        mermaid=build_mermaid(index)
+        mermaid=build_mermaid(index),
     )
 
 
@@ -523,17 +523,13 @@ def effective_cap(model: LeanModel, config: CapConfig) -> int:
     if config.override is not None:
         target = config.override
     else:
-        target = min(
-            config.maximum, config.base + config.per_file * n_files
-        )
+        target = min(config.maximum, config.base + config.per_file * n_files)
     return max(target, _floor_cost(model))
 
 
 def _floor_cost(model: LeanModel) -> int:
     """Token cost of the path-only floor plus the header reserve."""
-    floor = render_backbone(
-        model.groups, width=0, collapse_demotable=True
-    )
+    floor = render_backbone(model.groups, width=0, collapse_demotable=True)
     return count_lines(floor) + _HEADER_RESERVE_TOK
 
 
@@ -574,16 +570,16 @@ def render(
         return count_lines(_render_document(model, state)) <= body_budget
 
     live = _live_atoms(model, scores)
-    if dense:                            # 0: pre-shed sigs off the long tail
+    if dense:  # 0: pre-shed sigs off the long tail
         _force_dense_sigs(state, live)
-    if not fits():                       # 1: mermaid
+    if not fits():  # 1: mermaid
         state.mermaid = False
-    if not fits():                       # 2: collapse demotable dirs
+    if not fits():  # 2: collapse demotable dirs
         state.collapse_demotable = True
-    _shed_symbols(state, live, fits)     # 3-4: signatures then names
-    if not fits():                       # 5: module edges
+    _shed_symbols(state, live, fits)  # 3-4: signatures then names
+    if not fits():  # 5: module edges
         state.module_edges = False
-    _shed_purpose(state, fits)           # 6: purpose 72→40→0 (7: floor)
+    _shed_purpose(state, fits)  # 6: purpose 72→40→0 (7: floor)
 
     body = _render_document(model, state)
     report = LeanReport(
@@ -656,9 +652,7 @@ def generate(
     )
 
 
-def _relevance_scores(
-    model: LeanModel, task: TaskContext
-) -> dict[str, float]:
+def _relevance_scores(model: LeanModel, task: TaskContext) -> dict[str, float]:
     """Blend task relevance with Q1 centrality over the live atoms.
 
     Scores only the atoms the ladder can shed (those in expanded,
@@ -796,9 +790,7 @@ def _group_block(
     return lines
 
 
-def _atom_lines(
-    model: LeanModel, path: str, state: _LeanState
-) -> list[str]:
+def _atom_lines(model: LeanModel, path: str, state: _LeanState) -> list[str]:
     """Symbol rows under a file, at their current shed form."""
     out: list[str] = []
     for atom in model.atoms_by_path.get(path, []):
@@ -812,7 +804,7 @@ def _atom_lines(
 
 def _atom_form(state: _LeanState, atom: SymbolAtom) -> str | None:
     """Rendering of an atom: ``sig``, ``name``, or dropped (``None``)."""
-    if atom.sym_id in state.seen:        # FR-D2: already in context
+    if atom.sym_id in state.seen:  # FR-D2: already in context
         return None
     if atom.sym_id in state.dropped_names:
         return None

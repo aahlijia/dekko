@@ -1,6 +1,6 @@
 [project]
 name = "dekko"
-version = "0.11.0"
+version = "0.12.0"
 description = "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin"
 readme = "README.md"
 license = "MIT"
@@ -22,7 +22,18 @@ classifiers = [
 ]
 dependencies = [
     "tree-sitter>=0.23",
-    "tree-sitter-language-pack>=0.6",
+    # Tier-1 grammars: the nine languages dekko parses with per-language
+    # queries, shipped as individual packages so a default install is
+    # fully offline (no runtime grammar download). tree-sitter-typescript
+    # provides both `typescript` and `tsx`.
+    "tree-sitter-c>=0.23",
+    "tree-sitter-cpp>=0.23",
+    "tree-sitter-go>=0.23",
+    "tree-sitter-java>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-python>=0.23",
+    "tree-sitter-rust>=0.23",
+    "tree-sitter-typescript>=0.23",
     "pathspec>=0.12",
 ]
 
@@ -30,6 +41,10 @@ dependencies = [
 # Accurate token counting for the --budget caps and the lean map.
 # Optional: without it, dekko falls back to a ~4-chars/token estimate.
 tokenizer = ["tiktoken>=0.7"]
+# Tier-2: the ~55 extra languages, parsed generically. Pulls in the
+# grammar pack, which downloads grammars on demand. `pip install
+# dekko[all]` to enable them.
+all = ["tree-sitter-language-pack>=0.6"]
 
 [project.urls]
 Repository = "https://github.com/aahlijia/dekko"
