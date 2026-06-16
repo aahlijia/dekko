@@ -2,10 +2,10 @@
   "generator": "dekko",
   "version": 3,
   "root": "code-map",
-  "generated_at": "2026-06-16T17:31:58+00:00",
+  "generated_at": "2026-06-16T17:50:07+00:00",
   "provenance": {
-    "tool_version": "0.10.0",
-    "git_commit": "d8b89897468cc74369516a2af80088ea6c2d8f13",
+    "tool_version": "0.11.0",
+    "git_commit": "0991ef63426d0894533034c974bfb50608695c06",
     "subpath": null,
     "excludes": [],
     "max_file_size": 1000000,
@@ -24,7 +24,7 @@
       "src/dekko/extractor_generic.py": "f7c3970ba6421bdf",
       "src/dekko/hooks.py": "a4bd1a6dbd7a3efd",
       "src/dekko/languages.py": "3c8ffb7fd6072ae7",
-      "src/dekko/ledger.py": "4b172547097e2012",
+      "src/dekko/ledger.py": "f15cb02e0db157de",
       "src/dekko/mapfile.py": "4dfa1baadf225e40",
       "src/dekko/model.py": "8aad18fd7ee72be2",
       "src/dekko/notes.py": "e2a86889f57f08df",
@@ -79,8 +79,8 @@
       "tests/test_hotspots.py": "0c2ca8bda3ac645e",
       "tests/test_html.py": "46e98960d015bbac",
       "tests/test_languages.py": "9dc1f7a2dd5b100c",
-      "tests/test_lean.py": "adbe594df5f88327",
-      "tests/test_ledger.py": "2730df8d21582bf1",
+      "tests/test_lean.py": "2556fed85540bdc3",
+      "tests/test_ledger.py": "4a26b5c830d0eadf",
       "tests/test_mapfile.py": "6b5c043774c2e1bd",
       "tests/test_noise.py": "26af2ed53ece47fd",
       "tests/test_notes.py": "49d98ebfd0f89279",
@@ -94,7 +94,7 @@
       "tests/test_render_md.py": "66037bb052c686c1",
       "tests/test_resolver.py": "6723ca028dc1b725",
       "tests/test_schema_v3.py": "4930b20e6d4bb15f",
-      "tests/test_server.py": "e55a97fc9bb98b19",
+      "tests/test_server.py": "3f759ae892feded6",
       "tests/test_shard.py": "efacc1d18eeac077",
       "tests/test_stats.py": "e888bbd2081ef64a",
       "tests/test_status.py": "21526724d2d363fc",
@@ -164,8 +164,8 @@
         13389
       ],
       "src/dekko/ledger.py": [
-        1781626787962932566,
-        14024
+        1781631500783628553,
+        14464
       ],
       "src/dekko/mapfile.py": [
         1781359072763653395,
@@ -384,12 +384,12 @@
         3858
       ],
       "tests/test_lean.py": [
-        1781630528317924299,
-        20858
+        1781631151736368243,
+        20887
       ],
       "tests/test_ledger.py": [
-        1781626791884626180,
-        4971
+        1781631520938350883,
+        6217
       ],
       "tests/test_mapfile.py": [
         1781313355868426799,
@@ -444,8 +444,8 @@
         3701
       ],
       "tests/test_server.py": [
-        1781605373696066518,
-        7493
+        1781631218304773366,
+        7511
       ],
       "tests/test_shard.py": [
         1781361117311541517,
@@ -3737,6 +3737,11 @@
           "path": "tests/test_ledger.py",
           "name": "json",
           "source": "json"
+        },
+        {
+          "path": "tests/test_ledger.py",
+          "name": "server",
+          "source": "dekko.server"
         }
       ]
     },
@@ -10400,7 +10405,7 @@
       ],
       "returns": "LedgerView",
       "start_line": 247,
-      "end_line": 290,
+      "end_line": 296,
       "decorated": false,
       "exported": false,
       "doc": "Project a session transcript into a :class:`LedgerView`.",
@@ -10420,8 +10425,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 293,
-      "end_line": 301,
+      "start_line": 299,
+      "end_line": 307,
       "decorated": false,
       "exported": false,
       "doc": "Rough token cost of a non-tool_use content block (fallback tally).",
@@ -10441,8 +10446,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 304,
-      "end_line": 306,
+      "start_line": 310,
+      "end_line": 312,
       "decorated": false,
       "exported": false,
       "doc": "Claude Code's project-dir encoding of a repo path (best-effort).",
@@ -10466,8 +10471,8 @@
         }
       ],
       "returns": "Path | None",
-      "start_line": 309,
-      "end_line": 335,
+      "start_line": 315,
+      "end_line": 341,
       "decorated": false,
       "exported": false,
       "doc": "Locate a session transcript for ``root`` under ``~/.claude``.",
@@ -10491,8 +10496,8 @@
         }
       ],
       "returns": "list[str]",
-      "start_line": 338,
-      "end_line": 367,
+      "start_line": 344,
+      "end_line": 373,
       "decorated": false,
       "exported": false,
       "doc": "Render the ledger view as dense human/agent-readable lines.",
@@ -10528,8 +10533,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 370,
-      "end_line": 406,
+      "start_line": 376,
+      "end_line": 412,
       "decorated": false,
       "exported": false,
       "doc": "Inspect what the session has put in context (FR-C4).",
@@ -24135,7 +24140,7 @@
       "params": [],
       "returns": "None",
       "start_line": 627,
-      "end_line": 632,
+      "end_line": 633,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24155,8 +24160,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 635,
-      "end_line": 646,
+      "start_line": 636,
+      "end_line": 647,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24226,9 +24231,9 @@
       "test": true
     },
     {
-      "id": "tests/test_ledger.py::test_real_usage_last_turn_wins",
-      "name": "test_real_usage_last_turn_wins",
-      "qualname": "test_real_usage_last_turn_wins",
+      "id": "tests/test_ledger.py::test_real_usage_uses_peak",
+      "name": "test_real_usage_uses_peak",
+      "qualname": "test_real_usage_uses_peak",
       "kind": "function",
       "path": "tests/test_ledger.py",
       "language": "python",
@@ -24240,7 +24245,7 @@
       ],
       "returns": "None",
       "start_line": 54,
-      "end_line": 56,
+      "end_line": 57,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24260,8 +24265,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 59,
-      "end_line": 66,
+      "start_line": 60,
+      "end_line": 67,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24281,8 +24286,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 69,
-      "end_line": 77,
+      "start_line": 70,
+      "end_line": 78,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24302,8 +24307,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 80,
-      "end_line": 85,
+      "start_line": 81,
+      "end_line": 86,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24323,8 +24328,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 88,
-      "end_line": 89,
+      "start_line": 89,
+      "end_line": 90,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24344,8 +24349,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 92,
-      "end_line": 97,
+      "start_line": 93,
+      "end_line": 98,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24365,8 +24370,29 @@
         }
       ],
       "returns": "None",
-      "start_line": 100,
-      "end_line": 103,
+      "start_line": 101,
+      "end_line": 104,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_ledger.py::test_peak_survives_trailing_zero_usage",
+      "name": "test_peak_survives_trailing_zero_usage",
+      "qualname": "test_peak_survives_trailing_zero_usage",
+      "kind": "function",
+      "path": "tests/test_ledger.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "tmp_path",
+          "type": "Path"
+        }
+      ],
+      "returns": "None",
+      "start_line": 110,
+      "end_line": 123,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24381,8 +24407,8 @@
       "language": "python",
       "params": [],
       "returns": "None",
-      "start_line": 109,
-      "end_line": 113,
+      "start_line": 126,
+      "end_line": 130,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24397,8 +24423,8 @@
       "language": "python",
       "params": [],
       "returns": "None",
-      "start_line": 116,
-      "end_line": 121,
+      "start_line": 133,
+      "end_line": 138,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24418,8 +24444,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 124,
-      "end_line": 129,
+      "start_line": 141,
+      "end_line": 146,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24443,8 +24469,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 135,
-      "end_line": 149,
+      "start_line": 152,
+      "end_line": 166,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -24464,8 +24490,29 @@
         }
       ],
       "returns": "None",
-      "start_line": 152,
-      "end_line": 157,
+      "start_line": 169,
+      "end_line": 174,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_ledger.py::test_mcp_ledger_tool",
+      "name": "test_mcp_ledger_tool",
+      "qualname": "test_mcp_ledger_tool",
+      "kind": "function",
+      "path": "tests/test_ledger.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "make_mapped_repo",
+          "type": "RepoFactory"
+        }
+      ],
+      "returns": "None",
+      "start_line": 177,
+      "end_line": 187,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -26988,7 +27035,7 @@
       "params": [],
       "returns": "None",
       "start_line": 65,
-      "end_line": 95,
+      "end_line": 96,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27008,8 +27055,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 98,
-      "end_line": 102,
+      "start_line": 99,
+      "end_line": 103,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27029,8 +27076,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 105,
-      "end_line": 109,
+      "start_line": 106,
+      "end_line": 110,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27050,8 +27097,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 112,
-      "end_line": 117,
+      "start_line": 113,
+      "end_line": 118,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27071,8 +27118,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 120,
-      "end_line": 125,
+      "start_line": 121,
+      "end_line": 126,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27092,8 +27139,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 128,
-      "end_line": 135,
+      "start_line": 129,
+      "end_line": 136,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27113,8 +27160,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 138,
-      "end_line": 144,
+      "start_line": 139,
+      "end_line": 145,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27134,8 +27181,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 147,
-      "end_line": 153,
+      "start_line": 148,
+      "end_line": 154,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27155,8 +27202,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 156,
-      "end_line": 161,
+      "start_line": 157,
+      "end_line": 162,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27176,8 +27223,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 164,
-      "end_line": 170,
+      "start_line": 165,
+      "end_line": 171,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27197,8 +27244,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 173,
-      "end_line": 180,
+      "start_line": 174,
+      "end_line": 181,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27218,8 +27265,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 183,
-      "end_line": 194,
+      "start_line": 184,
+      "end_line": 195,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27239,8 +27286,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 197,
-      "end_line": 209,
+      "start_line": 198,
+      "end_line": 210,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27264,8 +27311,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 212,
-      "end_line": 228,
+      "start_line": 213,
+      "end_line": 229,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -27285,8 +27332,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 231,
-      "end_line": 233,
+      "start_line": 232,
+      "end_line": 234,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -32375,8 +32422,8 @@
       "caller": "src/dekko/ledger.py::_block_estimate",
       "callee": "src/dekko/textutil.py::estimate_tokens",
       "lines": [
-        297,
-        300
+        303,
+        306
       ]
     },
     {
@@ -32390,21 +32437,21 @@
       "caller": "src/dekko/ledger.py::build_view",
       "callee": "src/dekko/ledger.py::_apply_tool_use",
       "lines": [
-        284
+        290
       ]
     },
     {
       "caller": "src/dekko/ledger.py::build_view",
       "callee": "src/dekko/ledger.py::_block_estimate",
       "lines": [
-        286
+        292
       ]
     },
     {
       "caller": "src/dekko/ledger.py::build_view",
       "callee": "src/dekko/ledger.py::_content_blocks",
       "lines": [
-        280
+        286
       ]
     },
     {
@@ -32425,56 +32472,56 @@
       "caller": "src/dekko/ledger.py::find_transcript",
       "callee": "src/dekko/ledger.py::_encode_project",
       "lines": [
-        324
+        330
       ]
     },
     {
       "caller": "src/dekko/ledger.py::render_text",
       "callee": "src/dekko/ledger.py::LedgerView.remaining",
       "lines": [
-        352
+        358
       ]
     },
     {
       "caller": "src/dekko/ledger.py::run",
       "callee": "src/dekko/ledger.py::LedgerView.as_dict",
       "lines": [
-        402
+        408
       ]
     },
     {
       "caller": "src/dekko/ledger.py::run",
       "callee": "src/dekko/ledger.py::build_view",
       "lines": [
-        400
+        406
       ]
     },
     {
       "caller": "src/dekko/ledger.py::run",
       "callee": "src/dekko/ledger.py::find_transcript",
       "lines": [
-        392
+        398
       ]
     },
     {
       "caller": "src/dekko/ledger.py::run",
       "callee": "src/dekko/ledger.py::render_text",
       "lines": [
-        404
+        410
       ]
     },
     {
       "caller": "src/dekko/ledger.py::run",
       "callee": "src/dekko/mapfile.py::MapIndex",
       "lines": [
-        399
+        405
       ]
     },
     {
       "caller": "src/dekko/ledger.py::run",
       "callee": "src/dekko/mapfile.py::load_map",
       "lines": [
-        399
+        405
       ]
     },
     {
@@ -39441,21 +39488,21 @@
       "caller": "tests/test_lean.py::test_mcp_lean_tool",
       "callee": "src/dekko/server.py::Context",
       "lines": [
-        637
+        638
       ]
     },
     {
       "caller": "tests/test_lean.py::test_mcp_lean_tool",
       "callee": "src/dekko/server.py::handle",
       "lines": [
-        644
+        645
       ]
     },
     {
       "caller": "tests/test_lean.py::test_mcp_lean_tool",
       "callee": "tests/conftest.py::make_mapped_repo",
       "lines": [
-        636
+        637
       ]
     },
     {
@@ -39689,107 +39736,142 @@
       "caller": "tests/test_ledger.py::test_aggregate_counts",
       "callee": "src/dekko/ledger.py::LedgerView.has_file",
       "lines": [
-        96,
-        97
+        97,
+        98
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_aggregate_counts",
       "callee": "tests/test_ledger.py::_view",
       "lines": [
-        93
+        94
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_cli_ledger_json",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        139
+        156
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_cli_ledger_json",
       "callee": "tests/conftest.py::make_mapped_repo",
       "lines": [
-        138
+        155
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_cli_ledger_no_transcript_exit_code",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        153
+        170
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_dekko_emission_attributed",
       "callee": "tests/test_ledger.py::_view",
       "lines": [
-        89
+        90
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_empty_index_still_tallies",
       "callee": "src/dekko/ledger.py::build_view",
       "lines": [
-        126
+        143
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_empty_index_still_tallies",
       "callee": "src/dekko/mapfile.py::MapIndex",
       "lines": [
-        126
+        143
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_iter_records_skips_junk",
       "callee": "src/dekko/ledger.py::iter_records",
       "lines": [
-        117
+        134
+      ]
+    },
+    {
+      "caller": "tests/test_ledger.py::test_mcp_ledger_tool",
+      "callee": "src/dekko/server.py::Context",
+      "lines": [
+        181
+      ]
+    },
+    {
+      "caller": "tests/test_ledger.py::test_mcp_ledger_tool",
+      "callee": "src/dekko/server.py::tool_ledger",
+      "lines": [
+        182
+      ]
+    },
+    {
+      "caller": "tests/test_ledger.py::test_mcp_ledger_tool",
+      "callee": "tests/conftest.py::make_mapped_repo",
+      "lines": [
+        180
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_missing_transcript_is_empty_not_error",
       "callee": "src/dekko/ledger.py::build_view",
       "lines": [
-        110
+        127
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_missing_transcript_is_empty_not_error",
       "callee": "src/dekko/mapfile.py::MapIndex",
       "lines": [
-        111
+        128
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_partial_read_captures_only_in_range",
       "callee": "tests/test_ledger.py::_view",
       "lines": [
-        72
+        73
       ]
     },
     {
-      "caller": "tests/test_ledger.py::test_real_usage_last_turn_wins",
+      "caller": "tests/test_ledger.py::test_peak_survives_trailing_zero_usage",
+      "callee": "src/dekko/ledger.py::build_view",
+      "lines": [
+        122
+      ]
+    },
+    {
+      "caller": "tests/test_ledger.py::test_peak_survives_trailing_zero_usage",
+      "callee": "src/dekko/mapfile.py::MapIndex",
+      "lines": [
+        122
+      ]
+    },
+    {
+      "caller": "tests/test_ledger.py::test_real_usage_uses_peak",
       "callee": "tests/test_ledger.py::_view",
       "lines": [
-        56
+        57
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_remaining_budget",
       "callee": "src/dekko/ledger.py::LedgerView.remaining",
       "lines": [
-        102,
-        103
+        103,
+        104
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_remaining_budget",
       "callee": "tests/test_ledger.py::_view",
       "lines": [
-        101
+        102
       ]
     },
     {
@@ -39803,14 +39885,14 @@
       "caller": "tests/test_ledger.py::test_subagent_and_out_of_root_reads_ignored",
       "callee": "tests/test_ledger.py::_view",
       "lines": [
-        83
+        84
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_whole_read_captures_all_symbols",
       "callee": "tests/test_ledger.py::_view",
       "lines": [
-        62
+        63
       ]
     },
     {
@@ -41650,63 +41732,63 @@
       "caller": "tests/test_server.py::test_find_unused_tool",
       "callee": "tests/conftest.py::make_mapped_repo",
       "lines": [
-        148
+        149
       ]
     },
     {
       "caller": "tests/test_server.py::test_find_unused_tool",
       "callee": "tests/test_server.py::_call",
       "lines": [
-        150
+        151
       ]
     },
     {
       "caller": "tests/test_server.py::test_find_unused_tool",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        148
+        149
       ]
     },
     {
       "caller": "tests/test_server.py::test_get_callers_tool",
       "callee": "tests/conftest.py::make_mapped_repo",
-      "lines": [
-        106
-      ]
-    },
-    {
-      "caller": "tests/test_server.py::test_get_callers_tool",
-      "callee": "tests/test_server.py::_call",
       "lines": [
         107
       ]
     },
     {
       "caller": "tests/test_server.py::test_get_callers_tool",
+      "callee": "tests/test_server.py::_call",
+      "lines": [
+        108
+      ]
+    },
+    {
+      "caller": "tests/test_server.py::test_get_callers_tool",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        106
+        107
       ]
     },
     {
       "caller": "tests/test_server.py::test_get_context_pack_tool",
       "callee": "tests/conftest.py::make_mapped_repo",
-      "lines": [
-        113
-      ]
-    },
-    {
-      "caller": "tests/test_server.py::test_get_context_pack_tool",
-      "callee": "tests/test_server.py::_call",
       "lines": [
         114
       ]
     },
     {
       "caller": "tests/test_server.py::test_get_context_pack_tool",
+      "callee": "tests/test_server.py::_call",
+      "lines": [
+        115
+      ]
+    },
+    {
+      "caller": "tests/test_server.py::test_get_context_pack_tool",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        113
+        114
       ]
     },
     {
@@ -41740,67 +41822,67 @@
     {
       "caller": "tests/test_server.py::test_map_status_and_refresh",
       "callee": "tests/conftest.py::make_mapped_repo",
-      "lines": [
-        198
-      ]
-    },
-    {
-      "caller": "tests/test_server.py::test_map_status_and_refresh",
-      "callee": "tests/test_server.py::_call",
-      "lines": [
-        200,
-        204,
-        206,
-        209
-      ]
-    },
-    {
-      "caller": "tests/test_server.py::test_map_status_and_refresh",
-      "callee": "tests/test_server.py::_ctx",
       "lines": [
         199
       ]
     },
     {
-      "caller": "tests/test_server.py::test_missing_argument_is_tool_error",
-      "callee": "tests/conftest.py::make_mapped_repo",
+      "caller": "tests/test_server.py::test_map_status_and_refresh",
+      "callee": "tests/test_server.py::_call",
       "lines": [
-        167
+        201,
+        205,
+        207,
+        210
+      ]
+    },
+    {
+      "caller": "tests/test_server.py::test_map_status_and_refresh",
+      "callee": "tests/test_server.py::_ctx",
+      "lines": [
+        200
       ]
     },
     {
       "caller": "tests/test_server.py::test_missing_argument_is_tool_error",
-      "callee": "tests/test_server.py::_call",
+      "callee": "tests/conftest.py::make_mapped_repo",
       "lines": [
         168
       ]
     },
     {
       "caller": "tests/test_server.py::test_missing_argument_is_tool_error",
+      "callee": "tests/test_server.py::_call",
+      "lines": [
+        169
+      ]
+    },
+    {
+      "caller": "tests/test_server.py::test_missing_argument_is_tool_error",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        167
+        168
       ]
     },
     {
       "caller": "tests/test_server.py::test_not_found_is_tool_error_not_doubled",
       "callee": "tests/conftest.py::make_mapped_repo",
       "lines": [
-        176
+        177
       ]
     },
     {
       "caller": "tests/test_server.py::test_not_found_is_tool_error_not_doubled",
       "callee": "tests/test_server.py::_call",
       "lines": [
-        177
+        178
       ]
     },
     {
       "caller": "tests/test_server.py::test_not_found_is_tool_error_not_doubled",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        176
+        177
       ]
     },
     {
@@ -41821,56 +41903,56 @@
       "caller": "tests/test_server.py::test_query_symbol_tool",
       "callee": "tests/conftest.py::make_mapped_repo",
       "lines": [
-        99
+        100
       ]
     },
     {
       "caller": "tests/test_server.py::test_query_symbol_tool",
       "callee": "tests/test_server.py::_call",
       "lines": [
-        100
+        101
       ]
     },
     {
       "caller": "tests/test_server.py::test_query_symbol_tool",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        99
+        100
       ]
     },
     {
       "caller": "tests/test_server.py::test_serve_loop_frames_messages",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        222
+        223
       ]
     },
     {
       "caller": "tests/test_server.py::test_serve_requires_mcp",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        232
+        233
       ]
     },
     {
       "caller": "tests/test_server.py::test_stats_tool",
       "callee": "tests/conftest.py::make_mapped_repo",
       "lines": [
-        157
+        158
       ]
     },
     {
       "caller": "tests/test_server.py::test_stats_tool",
       "callee": "tests/test_server.py::_call",
       "lines": [
-        158
+        159
       ]
     },
     {
       "caller": "tests/test_server.py::test_stats_tool",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        157
+        158
       ]
     },
     {
@@ -41891,63 +41973,63 @@
       "caller": "tests/test_server.py::test_trace_path_missing_argument_is_error",
       "callee": "tests/conftest.py::make_mapped_repo",
       "lines": [
-        141
-      ]
-    },
-    {
-      "caller": "tests/test_server.py::test_trace_path_missing_argument_is_error",
-      "callee": "tests/test_server.py::_call",
-      "lines": [
         142
       ]
     },
     {
       "caller": "tests/test_server.py::test_trace_path_missing_argument_is_error",
+      "callee": "tests/test_server.py::_call",
+      "lines": [
+        143
+      ]
+    },
+    {
+      "caller": "tests/test_server.py::test_trace_path_missing_argument_is_error",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        141
+        142
       ]
     },
     {
       "caller": "tests/test_server.py::test_trace_path_no_path_is_not_error",
       "callee": "tests/conftest.py::make_mapped_repo",
       "lines": [
-        131
+        132
       ]
     },
     {
       "caller": "tests/test_server.py::test_trace_path_no_path_is_not_error",
       "callee": "tests/test_server.py::_call",
       "lines": [
-        133
+        134
       ]
     },
     {
       "caller": "tests/test_server.py::test_trace_path_no_path_is_not_error",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        131
+        132
       ]
     },
     {
       "caller": "tests/test_server.py::test_trace_path_tool",
       "callee": "tests/conftest.py::make_mapped_repo",
-      "lines": [
-        121
-      ]
-    },
-    {
-      "caller": "tests/test_server.py::test_trace_path_tool",
-      "callee": "tests/test_server.py::_call",
       "lines": [
         122
       ]
     },
     {
       "caller": "tests/test_server.py::test_trace_path_tool",
+      "callee": "tests/test_server.py::_call",
+      "lines": [
+        123
+      ]
+    },
+    {
+      "caller": "tests/test_server.py::test_trace_path_tool",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        121
+        122
       ]
     },
     {
@@ -41968,21 +42050,21 @@
       "caller": "tests/test_server.py::test_unknown_tool_is_error",
       "callee": "src/dekko/server.py::handle",
       "lines": [
-        185
+        186
       ]
     },
     {
       "caller": "tests/test_server.py::test_unknown_tool_is_error",
       "callee": "tests/conftest.py::make_mapped_repo",
       "lines": [
-        184
+        185
       ]
     },
     {
       "caller": "tests/test_server.py::test_unknown_tool_is_error",
       "callee": "tests/test_server.py::_ctx",
       "lines": [
-        184
+        185
       ]
     },
     {
@@ -48817,8 +48899,8 @@
       "caller": "src/dekko/ledger.py::_block_estimate",
       "callee": "isinstance",
       "lines": [
-        296,
-        299
+        302,
+        305
       ]
     },
     {
@@ -48833,14 +48915,14 @@
       "caller": "src/dekko/ledger.py::_encode_project",
       "callee": "str",
       "lines": [
-        306
+        312
       ]
     },
     {
       "caller": "src/dekko/ledger.py::_encode_project",
       "callee": "str(root).replace",
       "lines": [
-        306
+        312
       ]
     },
     {
@@ -48930,49 +49012,56 @@
       "lines": [
         271,
         276,
-        281
+        287
+      ]
+    },
+    {
+      "caller": "src/dekko/ledger.py::build_view",
+      "callee": "max",
+      "lines": [
+        285
       ]
     },
     {
       "caller": "src/dekko/ledger.py::find_transcript",
       "callee": "Path.home",
       "lines": [
-        324
+        330
       ]
     },
     {
       "caller": "src/dekko/ledger.py::find_transcript",
       "callee": "candidate.is_file",
       "lines": [
-        329
+        335
       ]
     },
     {
       "caller": "src/dekko/ledger.py::find_transcript",
       "callee": "p.stat",
       "lines": [
-        332
+        338
       ]
     },
     {
       "caller": "src/dekko/ledger.py::find_transcript",
       "callee": "project.glob",
       "lines": [
-        331
+        337
       ]
     },
     {
       "caller": "src/dekko/ledger.py::find_transcript",
       "callee": "project.is_dir",
       "lines": [
-        325
+        331
       ]
     },
     {
       "caller": "src/dekko/ledger.py::find_transcript",
       "callee": "sorted",
       "lines": [
-        330
+        336
       ]
     },
     {
@@ -49014,78 +49103,78 @@
       "caller": "src/dekko/ledger.py::render_text",
       "callee": "\", \".join",
       "lines": [
-        363
+        369
       ]
     },
     {
       "caller": "src/dekko/ledger.py::render_text",
       "callee": "len",
       "lines": [
-        348,
-        349,
+        354,
         355,
-        365
+        361,
+        371
       ]
     },
     {
       "caller": "src/dekko/ledger.py::render_text",
       "callee": "lines.append",
       "lines": [
-        352,
-        364
+        358,
+        370
       ]
     },
     {
       "caller": "src/dekko/ledger.py::render_text",
       "callee": "sorted",
       "lines": [
-        353
+        359
       ]
     },
     {
       "caller": "src/dekko/ledger.py::render_text",
       "callee": "sum",
       "lines": [
-        345
+        351
       ]
     },
     {
       "caller": "src/dekko/ledger.py::render_text",
       "callee": "tags.append",
       "lines": [
-        360,
-        362
+        366,
+        368
       ]
     },
     {
       "caller": "src/dekko/ledger.py::render_text",
       "callee": "view.files.values",
       "lines": [
-        345,
-        354
+        351,
+        360
       ]
     },
     {
       "caller": "src/dekko/ledger.py::run",
       "callee": "json.dumps",
       "lines": [
-        402
+        408
       ]
     },
     {
       "caller": "src/dekko/ledger.py::run",
       "callee": "path.is_file",
       "lines": [
-        393
+        399
       ]
     },
     {
       "caller": "src/dekko/ledger.py::run",
       "callee": "print",
       "lines": [
-        394,
-        402,
-        405
+        400,
+        408,
+        411
       ]
     },
     {
@@ -55697,7 +55786,7 @@
       "caller": "tests/test_lean.py::test_lean_registered_and_tool_count",
       "callee": "len",
       "lines": [
-        632
+        633
       ]
     },
     {
@@ -55718,7 +55807,7 @@
       "caller": "tests/test_lean.py::test_mcp_lean_tool",
       "callee": "result[\"content\"][0][\"text\"].startswith",
       "lines": [
-        646
+        647
       ]
     },
     {
@@ -55846,100 +55935,114 @@
       "caller": "tests/test_ledger.py::test_aggregate_counts",
       "callee": "len",
       "lines": [
-        94,
-        95
+        95,
+        96
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_cli_ledger_json",
       "callee": "capsys.readouterr",
       "lines": [
-        146
+        163
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_cli_ledger_json",
       "callee": "json.loads",
       "lines": [
-        146
+        163
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_cli_ledger_json",
       "callee": "str",
       "lines": [
-        140
+        157
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_cli_ledger_no_transcript_exit_code",
       "callee": "str",
       "lines": [
-        154,
-        155
+        171,
+        172
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_empty_index_still_tallies",
       "callee": "set",
       "lines": [
-        129
+        146
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_iter_records_skips_junk",
       "callee": "all",
       "lines": [
-        121
+        138
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_iter_records_skips_junk",
       "callee": "isinstance",
       "lines": [
-        121
+        138
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_iter_records_skips_junk",
       "callee": "len",
       "lines": [
-        120
+        137
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_iter_records_skips_junk",
       "callee": "list",
       "lines": [
-        117
+        134
+      ]
+    },
+    {
+      "caller": "tests/test_ledger.py::test_mcp_ledger_tool",
+      "callee": "str",
+      "lines": [
+        183
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_missing_transcript_is_empty_not_error",
       "callee": "Path",
       "lines": [
-        111
+        128
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_partial_read_captures_only_in_range",
       "callee": "sid.rsplit",
       "lines": [
-        75
+        76
+      ]
+    },
+    {
+      "caller": "tests/test_ledger.py::test_peak_survives_trailing_zero_usage",
+      "callee": "transcript.write_text",
+      "lines": [
+        114
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_subagent_and_out_of_root_reads_ignored",
       "callee": "any",
       "lines": [
-        85
+        86
       ]
     },
     {
       "caller": "tests/test_ledger.py::test_whole_read_captures_all_symbols",
       "callee": "sid.rsplit",
       "lines": [
-        65
+        66
       ]
     },
     {
@@ -57039,14 +57142,14 @@
       "caller": "tests/test_server.py::test_map_status_and_refresh",
       "callee": "(root / \"a.py\").write_text",
       "lines": [
-        202
+        203
       ]
     },
     {
       "caller": "tests/test_server.py::test_not_found_is_tool_error_not_doubled",
       "callee": "text.startswith",
       "lines": [
-        180
+        181
       ]
     },
     {
@@ -57060,42 +57163,42 @@
       "caller": "tests/test_server.py::test_serve_loop_frames_messages",
       "callee": "capsys.readouterr",
       "lines": [
-        224
+        225
       ]
     },
     {
       "caller": "tests/test_server.py::test_serve_loop_frames_messages",
       "callee": "capsys.readouterr().out.splitlines",
       "lines": [
-        224
+        225
       ]
     },
     {
       "caller": "tests/test_server.py::test_serve_loop_frames_messages",
       "callee": "io.StringIO",
       "lines": [
-        221
+        222
       ]
     },
     {
       "caller": "tests/test_server.py::test_serve_loop_frames_messages",
       "callee": "json.loads",
       "lines": [
-        224
+        225
       ]
     },
     {
       "caller": "tests/test_server.py::test_serve_loop_frames_messages",
       "callee": "monkeypatch.setattr",
       "lines": [
-        221
+        222
       ]
     },
     {
       "caller": "tests/test_server.py::test_serve_requires_mcp",
       "callee": "capsys.readouterr",
       "lines": [
-        233
+        234
       ]
     },
     {
@@ -57109,28 +57212,28 @@
       "caller": "tests/test_server.py::test_tools_list_exposes_the_read_surface",
       "callee": "set",
       "lines": [
-        95
+        96
       ]
     },
     {
       "caller": "tests/test_server.py::test_trace_path_no_path_is_not_error",
       "callee": "result[\"content\"][0][\"text\"].lower",
       "lines": [
-        135
+        136
       ]
     },
     {
       "caller": "tests/test_server.py::test_trace_path_tool",
       "callee": "text.rstrip",
       "lines": [
-        125
+        126
       ]
     },
     {
       "caller": "tests/test_server.py::test_trace_path_tool",
       "callee": "text.rstrip().endswith",
       "lines": [
-        125
+        126
       ]
     },
     {

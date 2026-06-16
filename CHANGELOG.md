@@ -9,6 +9,8 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-06-16
+
 ### Active Context Layer
 
 dekko grows from a *pull* context server into a *session-aware push*
