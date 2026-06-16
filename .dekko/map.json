@@ -2,10 +2,10 @@
   "generator": "dekko",
   "version": 3,
   "root": "code-map",
-  "generated_at": "2026-06-16T10:23:56+00:00",
+  "generated_at": "2026-06-16T10:51:26+00:00",
   "provenance": {
-    "tool_version": "0.9.0",
-    "git_commit": "6ade925d54b16b51161f06f1ac290f31d529cc5c",
+    "tool_version": "0.10.0",
+    "git_commit": "7c7695b6f8ced22d75c1a58bf8803c3aeb381eba",
     "subpath": null,
     "excludes": [],
     "max_file_size": 1000000,
@@ -30,19 +30,19 @@
       "src/dekko/query.py": "3d90344a81d8a619",
       "src/dekko/render_html.py": "47f961ed7be62ae1",
       "src/dekko/render_json.py": "d86328d4c862d985",
-      "src/dekko/render_lean.py": "39781dd92e9b0a0a",
+      "src/dekko/render_lean.py": "67e94e59c91e6ba2",
       "src/dekko/render_md.py": "d7aec54689e2f755",
       "src/dekko/resolver.py": "053d60288cf49b9e",
       "src/dekko/server.py": "c189a7d4cade240b",
       "src/dekko/source.py": "36ebdf8f779a6dea",
       "src/dekko/stats.py": "60f413a88803872a",
       "src/dekko/summary.py": "026689c0dadf9628",
-      "src/dekko/textutil.py": "642be595ff42272d",
+      "src/dekko/textutil.py": "9d8762268ea6a13d",
       "src/dekko/trace.py": "55d7df788c825c82",
       "src/dekko/unused.py": "5a78a74868df9f44",
       "src/dekko/walker.py": "f4dfa46deffd1b97",
       "src/dekko/workset.py": "48ffcaef92b1264b",
-      "tests/conftest.py": "2d92e74aaa40619f",
+      "tests/conftest.py": "afb188d15eaf11b1",
       "tests/fixtures/c/main.c": "b25755770e1fdba7",
       "tests/fixtures/c/math.c": "72798269f871995d",
       "tests/fixtures/cpp/shapes.cpp": "faa784df5b3663d6",
@@ -90,6 +90,7 @@
       "tests/test_stats.py": "e888bbd2081ef64a",
       "tests/test_status.py": "21526724d2d363fc",
       "tests/test_summary.py": "597abc060205e558",
+      "tests/test_tokenizer.py": "2916d42e5eee5968",
       "tests/test_trace.py": "6a93cc2c1e6bd975",
       "tests/test_unused.py": "ad0941744d23b06b",
       "tests/test_version.py": "dc4f598c38a3105b",
@@ -178,8 +179,8 @@
         1630
       ],
       "src/dekko/render_lean.py": [
-        1781605273133926622,
-        24481
+        1781606287828797462,
+        24538
       ],
       "src/dekko/render_md.py": [
         1781471047590109103,
@@ -206,8 +207,8 @@
         14405
       ],
       "src/dekko/textutil.py": [
-        1781575726015942586,
-        5020
+        1781606254655398660,
+        7662
       ],
       "src/dekko/trace.py": [
         1781359085466767449,
@@ -226,8 +227,8 @@
         12114
       ],
       "tests/conftest.py": [
-        1781297498832779998,
-        780
+        1781606389863466478,
+        1099
       ],
       "tests/fixtures/c/main.c": [
         1781175103907320518,
@@ -416,6 +417,10 @@
       "tests/test_summary.py": [
         1781318664587538015,
         4605
+      ],
+      "tests/test_tokenizer.py": [
+        1781606394944123663,
+        3104
       ],
       "tests/test_trace.py": [
         1781297498836360968,
@@ -1686,13 +1691,13 @@
         },
         {
           "path": "src/dekko/render_lean.py",
-          "name": "dir_of",
-          "source": ".textutil.dir_of"
+          "name": "count_lines",
+          "source": ".textutil.count_lines"
         },
         {
           "path": "src/dekko/render_lean.py",
-          "name": "estimate_tokens",
-          "source": ".textutil.estimate_tokens"
+          "name": "dir_of",
+          "source": ".textutil.dir_of"
         },
         {
           "path": "src/dekko/render_lean.py",
@@ -2097,13 +2102,28 @@
       "imports": [
         {
           "path": "src/dekko/textutil.py",
+          "name": "os",
+          "source": "os"
+        },
+        {
+          "path": "src/dekko/textutil.py",
           "name": "dataclass",
           "source": "dataclasses.dataclass"
         },
         {
           "path": "src/dekko/textutil.py",
+          "name": "lru_cache",
+          "source": "functools.lru_cache"
+        },
+        {
+          "path": "src/dekko/textutil.py",
           "name": "Symbol",
           "source": ".model.Symbol"
+        },
+        {
+          "path": "src/dekko/textutil.py",
+          "name": "tiktoken",
+          "source": "tiktoken"
         }
       ]
     },
@@ -2345,6 +2365,11 @@
       "error": null,
       "doc": "Shared pytest configuration.",
       "imports": [
+        {
+          "path": "tests/conftest.py",
+          "name": "os",
+          "source": "os"
+        },
         {
           "path": "tests/conftest.py",
           "name": "Callable",
@@ -3824,6 +3849,29 @@
           "path": "tests/test_summary.py",
           "name": "RepoFactory",
           "source": "conftest.RepoFactory"
+        }
+      ]
+    },
+    {
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "error": null,
+      "doc": "Q2 token-counting seam: fallback, backend selection, determinism.",
+      "imports": [
+        {
+          "path": "tests/test_tokenizer.py",
+          "name": "os",
+          "source": "os"
+        },
+        {
+          "path": "tests/test_tokenizer.py",
+          "name": "pytest",
+          "source": "pytest"
+        },
+        {
+          "path": "tests/test_tokenizer.py",
+          "name": "textutil",
+          "source": "dekko.textutil"
         }
       ]
     },
@@ -10847,7 +10895,7 @@
       ],
       "returns": "tuple[list[str], LeanReport]",
       "start_line": 519,
-      "end_line": 563,
+      "end_line": 562,
       "decorated": false,
       "exported": false,
       "doc": "Render the lean map under ``cap`` via the NFR2 ladder (\u00a73).",
@@ -10863,7 +10911,7 @@
       "params": [],
       "returns": "bool",
       "start_line": 537,
-      "end_line": 539,
+      "end_line": 538,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10891,8 +10939,8 @@
         }
       ],
       "returns": "tuple[list[str], LeanReport]",
-      "start_line": 566,
-      "end_line": 572,
+      "start_line": 565,
+      "end_line": 571,
       "decorated": false,
       "exported": false,
       "doc": "One call: build the model, pick the cap, render the lean map.",
@@ -10928,8 +10976,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 575,
-      "end_line": 607,
+      "start_line": 574,
+      "end_line": 606,
       "decorated": false,
       "exported": false,
       "doc": "Render the lean map to stdout, JSON, or a file.",
@@ -10957,8 +11005,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 610,
-      "end_line": 621,
+      "start_line": 609,
+      "end_line": 620,
       "decorated": false,
       "exported": false,
       "doc": "Ladder rungs 3-4: drop signatures, then names, lowest first.",
@@ -10982,8 +11030,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 624,
-      "end_line": 629,
+      "start_line": 623,
+      "end_line": 628,
       "decorated": false,
       "exported": false,
       "doc": "Ladder rung 6: shrink purpose width toward the path-only floor.",
@@ -11003,8 +11051,8 @@
         }
       ],
       "returns": "list[SymbolAtom]",
-      "start_line": 632,
-      "end_line": 645,
+      "start_line": 631,
+      "end_line": 644,
       "decorated": false,
       "exported": false,
       "doc": "Atoms in expanded (non-demotable) groups, ascending centrality.",
@@ -11028,8 +11076,8 @@
         }
       ],
       "returns": "list[str]",
-      "start_line": 648,
-      "end_line": 656,
+      "start_line": 647,
+      "end_line": 655,
       "decorated": false,
       "exported": false,
       "doc": "Render the full lean body at the current shed state.",
@@ -11057,8 +11105,8 @@
         }
       ],
       "returns": "list[str]",
-      "start_line": 659,
-      "end_line": 669,
+      "start_line": 658,
+      "end_line": 668,
       "decorated": false,
       "exported": false,
       "doc": "One directory: collapsed line, or header + file/atom rows.",
@@ -11086,8 +11134,8 @@
         }
       ],
       "returns": "list[str]",
-      "start_line": 672,
-      "end_line": 683,
+      "start_line": 671,
+      "end_line": 682,
       "decorated": false,
       "exported": false,
       "doc": "Symbol rows under a file, at their current shed form.",
@@ -11111,8 +11159,8 @@
         }
       ],
       "returns": "str | None",
-      "start_line": 686,
-      "end_line": 692,
+      "start_line": 685,
+      "end_line": 691,
       "decorated": false,
       "exported": false,
       "doc": "Rendering of an atom: ``sig``, ``name``, or dropped (``None``).",
@@ -11136,8 +11184,8 @@
         }
       ],
       "returns": "list[str]",
-      "start_line": 695,
-      "end_line": 702,
+      "start_line": 694,
+      "end_line": 701,
       "decorated": false,
       "exported": false,
       "doc": "The FR3 module-edge section, or nothing when shed/empty.",
@@ -11161,8 +11209,8 @@
         }
       ],
       "returns": "tuple[list[str], LeanReport]",
-      "start_line": 705,
-      "end_line": 712,
+      "start_line": 704,
+      "end_line": 713,
       "decorated": false,
       "exported": false,
       "doc": "Prepend the NFR5 header, recording the final token count.",
@@ -11182,8 +11230,8 @@
         }
       ],
       "returns": "list[str]",
-      "start_line": 715,
-      "end_line": 724,
+      "start_line": 716,
+      "end_line": 725,
       "decorated": false,
       "exported": false,
       "doc": "The self-describing header (NFR5): budget, drops, recovery.",
@@ -13916,8 +13964,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 8,
-      "end_line": 16,
+      "start_line": 17,
+      "end_line": 25,
       "decorated": false,
       "exported": false,
       "doc": "Format a symbol as a one-line signature.",
@@ -13941,8 +13989,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 19,
-      "end_line": 37,
+      "start_line": 28,
+      "end_line": 46,
       "decorated": false,
       "exported": false,
       "doc": "Collapse text to its first non-empty line, truncated to ``limit``.",
@@ -13962,11 +14010,80 @@
         }
       ],
       "returns": "str",
-      "start_line": 40,
-      "end_line": 51,
+      "start_line": 49,
+      "end_line": 60,
       "decorated": false,
       "exported": false,
       "doc": "Directory portion of a repo-relative path (``.`` for the root).",
+      "test": false
+    },
+    {
+      "id": "src/dekko/textutil.py::_tokenizer_mode",
+      "name": "_tokenizer_mode",
+      "qualname": "_tokenizer_mode",
+      "kind": "function",
+      "path": "src/dekko/textutil.py",
+      "language": "python",
+      "params": [],
+      "returns": "str",
+      "start_line": 63,
+      "end_line": 66,
+      "decorated": false,
+      "exported": false,
+      "doc": "Resolve the backend mode from ``DEKKO_TOKENIZER`` (default auto).",
+      "test": false
+    },
+    {
+      "id": "src/dekko/textutil.py::_encoder",
+      "name": "_encoder",
+      "qualname": "_encoder",
+      "kind": "function",
+      "path": "src/dekko/textutil.py",
+      "language": "python",
+      "params": [],
+      "returns": "object | None",
+      "start_line": 70,
+      "end_line": 84,
+      "decorated": true,
+      "exported": false,
+      "doc": "Lazily build the tiktoken encoder, or ``None`` to use chars/4.",
+      "test": false
+    },
+    {
+      "id": "src/dekko/textutil.py::tokenizer_backend",
+      "name": "tokenizer_backend",
+      "qualname": "tokenizer_backend",
+      "kind": "function",
+      "path": "src/dekko/textutil.py",
+      "language": "python",
+      "params": [],
+      "returns": "str",
+      "start_line": 87,
+      "end_line": 89,
+      "decorated": false,
+      "exported": false,
+      "doc": "The active counting backend: ``\"tiktoken\"`` or ``\"chars4\"``.",
+      "test": false
+    },
+    {
+      "id": "src/dekko/textutil.py::_count_fragment",
+      "name": "_count_fragment",
+      "qualname": "_count_fragment",
+      "kind": "function",
+      "path": "src/dekko/textutil.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "text",
+          "type": "str"
+        }
+      ],
+      "returns": "int",
+      "start_line": 93,
+      "end_line": 105,
+      "decorated": true,
+      "exported": false,
+      "doc": "Token count of one text fragment: accurate, else chars/4.",
       "test": false
     },
     {
@@ -13983,11 +14100,32 @@
         }
       ],
       "returns": "int",
-      "start_line": 54,
-      "end_line": 56,
+      "start_line": 108,
+      "end_line": 116,
       "decorated": false,
       "exported": false,
-      "doc": "Crude token estimate (~4 characters per token).",
+      "doc": "Estimate the token cost of ``text``.",
+      "test": false
+    },
+    {
+      "id": "src/dekko/textutil.py::count_lines",
+      "name": "count_lines",
+      "qualname": "count_lines",
+      "kind": "function",
+      "path": "src/dekko/textutil.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "lines",
+          "type": "list[str]"
+        }
+      ],
+      "returns": "int",
+      "start_line": 119,
+      "end_line": 130,
+      "decorated": false,
+      "exported": false,
+      "doc": "Sum cached per-line token counts; for hot budget loops.",
       "test": false
     },
     {
@@ -14004,8 +14142,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 59,
-      "end_line": 61,
+      "start_line": 133,
+      "end_line": 135,
       "decorated": false,
       "exported": false,
       "doc": "Self-metering footer line for text-mode output.",
@@ -14020,8 +14158,8 @@
       "language": "python",
       "params": [],
       "returns": null,
-      "start_line": 65,
-      "end_line": 118,
+      "start_line": 139,
+      "end_line": 192,
       "decorated": true,
       "exported": false,
       "doc": "Cost/omission summary for a budget-capped tool response.",
@@ -14041,8 +14179,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 86,
-      "end_line": 88,
+      "start_line": 160,
+      "end_line": 162,
       "decorated": true,
       "exported": false,
       "doc": "Rows dropped to satisfy the caps.",
@@ -14062,8 +14200,8 @@
         }
       ],
       "returns": "str | None",
-      "start_line": 91,
-      "end_line": 97,
+      "start_line": 165,
+      "end_line": 171,
       "decorated": true,
       "exported": false,
       "doc": "Which cap bit: ``\"budget\"``, ``\"limit\"``, or ``None``.",
@@ -14083,8 +14221,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 99,
-      "end_line": 107,
+      "start_line": 173,
+      "end_line": 181,
       "decorated": false,
       "exported": false,
       "doc": "One-line text footer, stable enough to parse.",
@@ -14104,8 +14242,8 @@
         }
       ],
       "returns": "dict",
-      "start_line": 109,
-      "end_line": 118,
+      "start_line": 183,
+      "end_line": 192,
       "decorated": false,
       "exported": false,
       "doc": "Structured ``meta`` object for JSON output.",
@@ -14137,8 +14275,8 @@
         }
       ],
       "returns": "tuple[list[str], Meter]",
-      "start_line": 121,
-      "end_line": 159,
+      "start_line": 195,
+      "end_line": 233,
       "decorated": false,
       "exported": false,
       "doc": "Cap lines by count then token budget, returning kept + Meter.",
@@ -15307,8 +15445,8 @@
         }
       ],
       "returns": "RepoFactory",
-      "start_line": 18,
-      "end_line": 29,
+      "start_line": 26,
+      "end_line": 37,
       "decorated": true,
       "exported": false,
       "doc": "Factory: write source files into tmp_path and map them.",
@@ -15328,8 +15466,8 @@
         }
       ],
       "returns": "Path",
-      "start_line": 21,
-      "end_line": 27,
+      "start_line": 29,
+      "end_line": 35,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -23643,6 +23781,243 @@
       "test": true
     },
     {
+      "id": "tests/test_tokenizer.py::_reset_caches",
+      "name": "_reset_caches",
+      "qualname": "_reset_caches",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [],
+      "returns": "None",
+      "start_line": 15,
+      "end_line": 20,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::test_chars4_is_the_pinned_backend",
+      "name": "test_chars4_is_the_pinned_backend",
+      "qualname": "test_chars4_is_the_pinned_backend",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [],
+      "returns": "None",
+      "start_line": 23,
+      "end_line": 24,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::test_estimate_tokens_chars4_formula",
+      "name": "test_estimate_tokens_chars4_formula",
+      "qualname": "test_estimate_tokens_chars4_formula",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [],
+      "returns": "None",
+      "start_line": 27,
+      "end_line": 31,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::test_count_lines_sums_per_line",
+      "name": "test_count_lines_sums_per_line",
+      "qualname": "test_count_lines_sums_per_line",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [],
+      "returns": "None",
+      "start_line": 34,
+      "end_line": 38,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::test_count_lines_empty",
+      "name": "test_count_lines_empty",
+      "qualname": "test_count_lines_empty",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [],
+      "returns": "None",
+      "start_line": 41,
+      "end_line": 42,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::test_estimate_tokens_deterministic",
+      "name": "test_estimate_tokens_deterministic",
+      "qualname": "test_estimate_tokens_deterministic",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [],
+      "returns": "None",
+      "start_line": 45,
+      "end_line": 47,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::test_mode_resolution_rejects_garbage",
+      "name": "test_mode_resolution_rejects_garbage",
+      "qualname": "test_mode_resolution_rejects_garbage",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "monkeypatch",
+          "type": "pytest.MonkeyPatch"
+        }
+      ],
+      "returns": "None",
+      "start_line": 50,
+      "end_line": 56,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::test_encoder_failure_falls_back",
+      "name": "test_encoder_failure_falls_back",
+      "qualname": "test_encoder_failure_falls_back",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "monkeypatch",
+          "type": "pytest.MonkeyPatch"
+        }
+      ],
+      "returns": "None",
+      "start_line": 59,
+      "end_line": 68,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::_Boom",
+      "name": "_Boom",
+      "qualname": "_Boom",
+      "kind": "class",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [],
+      "returns": null,
+      "start_line": 61,
+      "end_line": 63,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::_Boom.encode",
+      "name": "encode",
+      "qualname": "_Boom.encode",
+      "kind": "method",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "self",
+          "type": null
+        },
+        {
+          "name": "text",
+          "type": "str"
+        }
+      ],
+      "returns": "list[int]",
+      "start_line": 62,
+      "end_line": 63,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::test_accurate_path_when_tiktoken_present",
+      "name": "test_accurate_path_when_tiktoken_present",
+      "qualname": "test_accurate_path_when_tiktoken_present",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "monkeypatch",
+          "type": "pytest.MonkeyPatch"
+        }
+      ],
+      "returns": "None",
+      "start_line": 71,
+      "end_line": 83,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::test_chars4_env_forces_fallback_even_if_tiktoken_present",
+      "name": "test_chars4_env_forces_fallback_even_if_tiktoken_present",
+      "qualname": "test_chars4_env_forces_fallback_even_if_tiktoken_present",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "monkeypatch",
+          "type": "pytest.MonkeyPatch"
+        }
+      ],
+      "returns": "None",
+      "start_line": 86,
+      "end_line": 95,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_tokenizer.py::test_suite_env_is_pinned",
+      "name": "test_suite_env_is_pinned",
+      "qualname": "test_suite_env_is_pinned",
+      "kind": "function",
+      "path": "tests/test_tokenizer.py",
+      "language": "python",
+      "params": [],
+      "returns": "None",
+      "start_line": 98,
+      "end_line": 99,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
       "id": "tests/test_trace.py::test_linear_path",
       "name": "test_linear_path",
       "qualname": "test_linear_path",
@@ -25995,6 +26370,13 @@
       ]
     },
     {
+      "caller": "src/dekko/diff.py::_body_hash",
+      "callee": "tests/test_tokenizer.py::_Boom.encode",
+      "lines": [
+        76
+      ]
+    },
+    {
       "caller": "src/dekko/diff.py::_callers_of",
       "callee": "src/dekko/diff.py::_render_caller",
       "lines": [
@@ -27969,6 +28351,13 @@
       ]
     },
     {
+      "caller": "src/dekko/render_html.py::run",
+      "callee": "tests/test_tokenizer.py::_Boom.encode",
+      "lines": [
+        167
+      ]
+    },
+    {
       "caller": "src/dekko/render_lean.py::LeanReport.footer",
       "callee": "src/dekko/render_lean.py::LeanReport._drops",
       "lines": [
@@ -27979,29 +28368,29 @@
       "caller": "src/dekko/render_lean.py::_assemble",
       "callee": "src/dekko/render_lean.py::_header_lines",
       "lines": [
-        710,
-        712
+        712,
+        713
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_assemble",
-      "callee": "src/dekko/textutil.py::estimate_tokens",
+      "callee": "src/dekko/textutil.py::count_lines",
       "lines": [
-        709
+        712
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_atom_lines",
       "callee": "src/dekko/render_lean.py::_atom_form",
       "lines": [
-        678
+        677
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_edge_block",
       "callee": "src/dekko/render_lean.py::render_module_edges",
       "lines": [
-        699
+        698
       ]
     },
     {
@@ -28013,7 +28402,7 @@
     },
     {
       "caller": "src/dekko/render_lean.py::_floor_cost",
-      "callee": "src/dekko/textutil.py::estimate_tokens",
+      "callee": "src/dekko/textutil.py::count_lines",
       "lines": [
         516
       ]
@@ -28022,42 +28411,42 @@
       "caller": "src/dekko/render_lean.py::_group_block",
       "callee": "src/dekko/render_lean.py::_atom_lines",
       "lines": [
-        668
+        667
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_group_block",
       "callee": "src/dekko/render_lean.py::_collapsed_line",
       "lines": [
-        664
+        663
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_group_block",
       "callee": "src/dekko/render_lean.py::_row_line",
       "lines": [
-        667
+        666
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_header_lines",
       "callee": "src/dekko/render_lean.py::LeanReport.footer",
       "lines": [
-        717
+        718
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_render_document",
       "callee": "src/dekko/render_lean.py::_edge_block",
       "lines": [
-        653
+        652
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_render_document",
       "callee": "src/dekko/render_lean.py::_group_block",
       "lines": [
-        652
+        651
       ]
     },
     {
@@ -28071,15 +28460,15 @@
       "caller": "src/dekko/render_lean.py::_shed_purpose",
       "callee": "src/dekko/render_lean.py::fits",
       "lines": [
-        627
+        626
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_shed_symbols",
       "callee": "src/dekko/render_lean.py::fits",
       "lines": [
-        615,
-        619
+        614,
+        618
       ]
     },
     {
@@ -28217,37 +28606,37 @@
     },
     {
       "caller": "src/dekko/render_lean.py::fits",
-      "callee": "src/dekko/textutil.py::estimate_tokens",
+      "callee": "src/dekko/textutil.py::count_lines",
       "lines": [
-        539
+        538
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::generate",
       "callee": "src/dekko/render_lean.py::CapConfig",
       "lines": [
-        570
+        569
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::generate",
       "callee": "src/dekko/render_lean.py::build_model",
       "lines": [
-        571
+        570
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::generate",
       "callee": "src/dekko/render_lean.py::effective_cap",
       "lines": [
-        572
+        571
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::generate",
       "callee": "src/dekko/render_lean.py::render",
       "lines": [
-        572
+        571
       ]
     },
     {
@@ -28261,7 +28650,7 @@
       "caller": "src/dekko/render_lean.py::render",
       "callee": "src/dekko/render_lean.py::LeanReport",
       "lines": [
-        552
+        551
       ]
     },
     {
@@ -28275,44 +28664,44 @@
       "caller": "src/dekko/render_lean.py::render",
       "callee": "src/dekko/render_lean.py::_assemble",
       "lines": [
-        563
+        562
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::render",
       "callee": "src/dekko/render_lean.py::_live_atoms",
       "lines": [
-        545
+        544
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::render",
       "callee": "src/dekko/render_lean.py::_render_document",
       "lines": [
-        551
+        550
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::render",
       "callee": "src/dekko/render_lean.py::_shed_purpose",
       "lines": [
-        549
+        548
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::render",
       "callee": "src/dekko/render_lean.py::_shed_symbols",
       "lines": [
-        546
+        545
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::render",
       "callee": "src/dekko/render_lean.py::fits",
       "lines": [
-        541,
-        543,
-        547
+        540,
+        542,
+        546
       ]
     },
     {
@@ -28333,21 +28722,21 @@
       "caller": "src/dekko/render_lean.py::run",
       "callee": "src/dekko/render_lean.py::CapConfig",
       "lines": [
-        596
+        595
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::run",
       "callee": "src/dekko/render_lean.py::LeanReport.as_dict",
       "lines": [
-        604
+        603
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::run",
       "callee": "src/dekko/render_lean.py::generate",
       "lines": [
-        596
+        595
       ]
     },
     {
@@ -28383,6 +28772,13 @@
       "callee": "src/dekko/render_md.py::_dir_of",
       "lines": [
         185
+      ]
+    },
+    {
+      "caller": "src/dekko/render_md.py::_exceeds_threshold",
+      "callee": "tests/test_tokenizer.py::_Boom.encode",
+      "lines": [
+        301
       ]
     },
     {
@@ -29900,25 +30296,67 @@
       ]
     },
     {
+      "caller": "src/dekko/textutil.py::_count_fragment",
+      "callee": "src/dekko/textutil.py::_encoder",
+      "lines": [
+        99
+      ]
+    },
+    {
+      "caller": "src/dekko/textutil.py::_count_fragment",
+      "callee": "tests/test_tokenizer.py::_Boom.encode",
+      "lines": [
+        102
+      ]
+    },
+    {
+      "caller": "src/dekko/textutil.py::_encoder",
+      "callee": "src/dekko/textutil.py::_tokenizer_mode",
+      "lines": [
+        77
+      ]
+    },
+    {
+      "caller": "src/dekko/textutil.py::count_lines",
+      "callee": "src/dekko/textutil.py::_count_fragment",
+      "lines": [
+        130
+      ]
+    },
+    {
+      "caller": "src/dekko/textutil.py::estimate_tokens",
+      "callee": "src/dekko/textutil.py::_count_fragment",
+      "lines": [
+        116
+      ]
+    },
+    {
       "caller": "src/dekko/textutil.py::fit_to_budget",
       "callee": "src/dekko/textutil.py::Meter",
       "lines": [
-        153
+        227
       ]
     },
     {
       "caller": "src/dekko/textutil.py::fit_to_budget",
       "callee": "src/dekko/textutil.py::estimate_tokens",
       "lines": [
-        149,
-        154
+        223,
+        228
       ]
     },
     {
       "caller": "src/dekko/textutil.py::token_footer",
       "callee": "src/dekko/textutil.py::estimate_tokens",
       "lines": [
-        61
+        135
+      ]
+    },
+    {
+      "caller": "src/dekko/textutil.py::tokenizer_backend",
+      "callee": "src/dekko/textutil.py::_encoder",
+      "lines": [
+        89
       ]
     },
     {
@@ -30430,7 +30868,7 @@
       "caller": "tests/conftest.py::_make",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        26
+        34
       ]
     },
     {
@@ -35684,6 +36122,117 @@
       ]
     },
     {
+      "caller": "tests/test_tokenizer.py::test_accurate_path_when_tiktoken_present",
+      "callee": "src/dekko/textutil.py::estimate_tokens",
+      "lines": [
+        81
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_accurate_path_when_tiktoken_present",
+      "callee": "src/dekko/textutil.py::tokenizer_backend",
+      "lines": [
+        78
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_accurate_path_when_tiktoken_present",
+      "callee": "tests/test_tokenizer.py::_reset_caches",
+      "lines": [
+        76,
+        83
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_chars4_env_forces_fallback_even_if_tiktoken_present",
+      "callee": "src/dekko/textutil.py::estimate_tokens",
+      "lines": [
+        93
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_chars4_env_forces_fallback_even_if_tiktoken_present",
+      "callee": "src/dekko/textutil.py::tokenizer_backend",
+      "lines": [
+        92
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_chars4_env_forces_fallback_even_if_tiktoken_present",
+      "callee": "tests/test_tokenizer.py::_reset_caches",
+      "lines": [
+        90,
+        95
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_chars4_is_the_pinned_backend",
+      "callee": "src/dekko/textutil.py::tokenizer_backend",
+      "lines": [
+        24
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_count_lines_empty",
+      "callee": "src/dekko/textutil.py::count_lines",
+      "lines": [
+        42
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_count_lines_sums_per_line",
+      "callee": "src/dekko/textutil.py::count_lines",
+      "lines": [
+        38
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_encoder_failure_falls_back",
+      "callee": "src/dekko/textutil.py::_count_fragment",
+      "lines": [
+        67
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_encoder_failure_falls_back",
+      "callee": "tests/test_tokenizer.py::_Boom",
+      "lines": [
+        66
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_encoder_failure_falls_back",
+      "callee": "tests/test_tokenizer.py::_reset_caches",
+      "lines": [
+        65,
+        68
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_estimate_tokens_chars4_formula",
+      "callee": "src/dekko/textutil.py::estimate_tokens",
+      "lines": [
+        29,
+        30,
+        31
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_estimate_tokens_deterministic",
+      "callee": "src/dekko/textutil.py::estimate_tokens",
+      "lines": [
+        47
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_mode_resolution_rejects_garbage",
+      "callee": "src/dekko/textutil.py::_tokenizer_mode",
+      "lines": [
+        54,
+        56
+      ]
+    },
+    {
       "caller": "tests/test_trace.py::test_endpoint_ambiguous",
       "callee": "src/dekko/cli.py::main",
       "lines": [
@@ -37202,6 +37751,14 @@
       ]
     },
     {
+      "caller": "src/dekko/textutil.py::_tokenizer_mode",
+      "name": "get",
+      "candidates": [
+        "src/dekko/render_md.py::_Anchors.get",
+        "tests/fixtures/ruby/store.rb::Store.get"
+      ]
+    },
+    {
       "caller": "src/dekko/trace.py::_reconstruct",
       "name": "get",
       "candidates": [
@@ -37463,6 +38020,14 @@
     },
     {
       "caller": "tests/test_shard.py::test_sharded_links_resolve_across_pages",
+      "name": "get",
+      "candidates": [
+        "src/dekko/render_md.py::_Anchors.get",
+        "tests/fixtures/ruby/store.rb::Store.get"
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_suite_env_is_pinned",
       "name": "get",
       "candidates": [
         "src/dekko/render_md.py::_Anchors.get",
@@ -39330,13 +39895,6 @@
       "callee": "(root / sym.path).read_text(errors=\"replace\").splitlines",
       "lines": [
         72
-      ]
-    },
-    {
-      "caller": "src/dekko/diff.py::_body_hash",
-      "callee": "body.encode",
-      "lines": [
-        76
       ]
     },
     {
@@ -41986,13 +42544,6 @@
     },
     {
       "caller": "src/dekko/render_html.py::run",
-      "callee": "_json_island(doc).encode",
-      "lines": [
-        167
-      ]
-    },
-    {
-      "caller": "src/dekko/render_html.py::run",
       "callee": "len",
       "lines": [
         167,
@@ -42097,18 +42648,11 @@
       ]
     },
     {
-      "caller": "src/dekko/render_lean.py::_assemble",
-      "callee": "\"\\n\".join",
-      "lines": [
-        710
-      ]
-    },
-    {
       "caller": "src/dekko/render_lean.py::_atom_lines",
       "callee": "out.append",
       "lines": [
-        680,
-        682
+        679,
+        681
       ]
     },
     {
@@ -42126,39 +42670,32 @@
       ]
     },
     {
-      "caller": "src/dekko/render_lean.py::_floor_cost",
-      "callee": "\"\\n\".join",
-      "lines": [
-        516
-      ]
-    },
-    {
       "caller": "src/dekko/render_lean.py::_group_block",
       "callee": "lines.append",
       "lines": [
-        667
+        666
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_header_lines",
       "callee": "lines.append",
       "lines": [
-        719,
-        723
+        720,
+        724
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_live_atoms",
       "callee": "live.extend",
       "lines": [
-        643
+        642
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::_live_atoms",
       "callee": "live.sort",
       "lines": [
-        644
+        643
       ]
     },
     {
@@ -42282,19 +42819,12 @@
       ]
     },
     {
-      "caller": "src/dekko/render_lean.py::fits",
-      "callee": "\"\\n\".join",
-      "lines": [
-        538
-      ]
-    },
-    {
       "caller": "src/dekko/render_lean.py::render",
       "callee": "len",
       "lines": [
+        556,
         557,
-        558,
-        561
+        560
       ]
     },
     {
@@ -42352,37 +42882,37 @@
       "caller": "src/dekko/render_lean.py::run",
       "callee": "\"\\n\".join",
       "lines": [
-        597
+        596
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::run",
       "callee": "json.dumps",
       "lines": [
-        604
+        603
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::run",
       "callee": "out_path.parent.mkdir",
       "lines": [
-        599
+        598
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::run",
       "callee": "out_path.write_text",
       "lines": [
-        600
+        599
       ]
     },
     {
       "caller": "src/dekko/render_lean.py::run",
       "callee": "print",
       "lines": [
-        601,
-        604,
-        606
+        600,
+        603,
+        605
       ]
     },
     {
@@ -42474,13 +43004,6 @@
       "callee": "text.count",
       "lines": [
         300
-      ]
-    },
-    {
-      "caller": "src/dekko/render_md.py::_exceeds_threshold",
-      "callee": "text.encode",
-      "lines": [
-        301
       ]
     },
     {
@@ -44032,81 +44555,118 @@
       ]
     },
     {
+      "caller": "src/dekko/textutil.py::<module>",
+      "callee": "lru_cache",
+      "lines": [
+        69,
+        92
+      ]
+    },
+    {
       "caller": "src/dekko/textutil.py::Meter.omitted",
       "callee": "max",
       "lines": [
-        88
+        162
+      ]
+    },
+    {
+      "caller": "src/dekko/textutil.py::_count_fragment",
+      "callee": "len",
+      "lines": [
+        102,
+        105
+      ]
+    },
+    {
+      "caller": "src/dekko/textutil.py::_encoder",
+      "callee": "tiktoken.get_encoding",
+      "lines": [
+        82
+      ]
+    },
+    {
+      "caller": "src/dekko/textutil.py::_tokenizer_mode",
+      "callee": "os.environ.get(\"DEKKO_TOKENIZER\", \"auto\").strip",
+      "lines": [
+        65
+      ]
+    },
+    {
+      "caller": "src/dekko/textutil.py::_tokenizer_mode",
+      "callee": "os.environ.get(\"DEKKO_TOKENIZER\", \"auto\").strip().lower",
+      "lines": [
+        65
+      ]
+    },
+    {
+      "caller": "src/dekko/textutil.py::count_lines",
+      "callee": "sum",
+      "lines": [
+        130
       ]
     },
     {
       "caller": "src/dekko/textutil.py::dir_of",
       "callee": "path.rpartition",
       "lines": [
-        50
-      ]
-    },
-    {
-      "caller": "src/dekko/textutil.py::estimate_tokens",
-      "callee": "len",
-      "lines": [
-        56
+        59
       ]
     },
     {
       "caller": "src/dekko/textutil.py::fit_to_budget",
       "callee": "kept.append",
       "lines": [
-        152
+        226
       ]
     },
     {
       "caller": "src/dekko/textutil.py::fit_to_budget",
       "callee": "len",
       "lines": [
-        143,
-        155
+        217,
+        229
       ]
     },
     {
       "caller": "src/dekko/textutil.py::oneline",
       "callee": "first[: limit - 1].rstrip",
       "lines": [
-        36
+        45
       ]
     },
     {
       "caller": "src/dekko/textutil.py::oneline",
       "callee": "len",
       "lines": [
-        35
+        44
       ]
     },
     {
       "caller": "src/dekko/textutil.py::oneline",
       "callee": "stripped.splitlines",
       "lines": [
-        34
+        43
       ]
     },
     {
       "caller": "src/dekko/textutil.py::oneline",
       "callee": "stripped.splitlines()[0].strip",
       "lines": [
-        34
+        43
       ]
     },
     {
       "caller": "src/dekko/textutil.py::oneline",
       "callee": "text.strip",
       "lines": [
-        31
+        40
       ]
     },
     {
       "caller": "src/dekko/textutil.py::signature",
       "callee": "', '.join",
       "lines": [
-        13
+        22
       ]
     },
     {
@@ -44762,28 +45322,28 @@
       "caller": "tests/conftest.py::_make",
       "callee": "files.items",
       "lines": [
-        22
+        30
       ]
     },
     {
       "caller": "tests/conftest.py::_make",
       "callee": "path.parent.mkdir",
       "lines": [
-        24
+        32
       ]
     },
     {
       "caller": "tests/conftest.py::_make",
       "callee": "path.write_text",
       "lines": [
-        25
+        33
       ]
     },
     {
       "caller": "tests/conftest.py::_make",
       "callee": "str",
       "lines": [
-        26
+        34
       ]
     },
     {
@@ -48474,6 +49034,70 @@
       "callee": "capsys.readouterr",
       "lines": [
         40
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::_Boom.encode",
+      "callee": "RuntimeError",
+      "lines": [
+        63
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::_reset_caches",
+      "callee": "clear",
+      "lines": [
+        20
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::_reset_caches",
+      "callee": "getattr",
+      "lines": [
+        18
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_accurate_path_when_tiktoken_present",
+      "callee": "len",
+      "lines": [
+        81
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_accurate_path_when_tiktoken_present",
+      "callee": "monkeypatch.setenv",
+      "lines": [
+        75
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_accurate_path_when_tiktoken_present",
+      "callee": "pytest.importorskip",
+      "lines": [
+        74
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_chars4_env_forces_fallback_even_if_tiktoken_present",
+      "callee": "monkeypatch.setenv",
+      "lines": [
+        89
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_encoder_failure_falls_back",
+      "callee": "monkeypatch.setattr",
+      "lines": [
+        66
+      ]
+    },
+    {
+      "caller": "tests/test_tokenizer.py::test_mode_resolution_rejects_garbage",
+      "callee": "monkeypatch.setenv",
+      "lines": [
+        53,
+        55
       ]
     },
     {

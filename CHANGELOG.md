@@ -7,7 +7,9 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 Dates are when the work landed on `develop`; releases are cut by pushing a
 `v*` tag.
 
-## [0.10.0]
+## [Unreleased]
+
+## [0.10.0] — 2026-06-16
 
 Context & token management for agents: every list-shaped command can now
 be held to a token budget, and new commands (`outline`, `lean`,
@@ -50,6 +52,13 @@ reading whole files.
   a file before reading it, but only when the file is large enough to be
   worth it, and never blocks. Ships with a `dekko-orient` skill and
   documented (opt-in) `SessionStart` / `PreToolUse` hook snippets.
+- Optional accurate token counting for every `--budget` cap and the lean
+  map: `pip install dekko[tokenizer]` adds `tiktoken` (o200k_base) and
+  dekko uses it automatically, replacing the default `~4 chars/token`
+  estimate (which systematically under-counts code). The default install
+  is unchanged — no dependency, byte-stable output. `DEKKO_TOKENIZER=
+  chars4` forces the estimate back on for reproducible output even when
+  the extra is installed.
 
 ### Changed
 - Internal: shared helpers were promoted for reuse by the lean map —
@@ -406,7 +415,8 @@ Initial release: the **dekko** Claude Code plugin.
   imports → unique repo-wide match); ambiguous calls are marked, never
   guessed.
 
-[Unreleased]: https://github.com/aahlijia/dekko/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/aahlijia/dekko/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/aahlijia/dekko/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/aahlijia/dekko/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/aahlijia/dekko/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/aahlijia/dekko/releases/tag/v0.7.1

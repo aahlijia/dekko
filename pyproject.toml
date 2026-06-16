@@ -1,6 +1,6 @@
 [project]
 name = "dekko"
-version = "0.9.0"
+version = "0.10.0"
 description = "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin"
 readme = "README.md"
 license = "MIT"
@@ -25,6 +25,11 @@ dependencies = [
     "tree-sitter-language-pack>=0.6",
     "pathspec>=0.12",
 ]
+
+[project.optional-dependencies]
+# Accurate token counting for the --budget caps and the lean map.
+# Optional: without it, dekko falls back to a ~4-chars/token estimate.
+tokenizer = ["tiktoken>=0.7"]
 
 [project.urls]
 Repository = "https://github.com/aahlijia/dekko"

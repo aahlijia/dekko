@@ -19,6 +19,13 @@ A standalone, dependency-free `dekko export --format html` renders the
 same map as an interactive single-file browser (tree, search, clickable
 callers/callees) for readers who never install dekko.
 
+For agents, dekko adds a token-aware read surface on top of the map:
+`dekko lean` emits a budget-capped navigation map of the whole repo (the
+middle ground between the ~400-token `summary` and a full MAP.md),
+`outline` shows a file's shape without its bodies, `workset` bundles
+everything relevant to a change, and every list command takes a
+`--budget`. The same surface is exposed over MCP via `dekko serve`.
+
 ## Installation
 
 ```sh
@@ -133,11 +140,29 @@ dekko --version
 Symbol targets accept a bare `name`, `Class.method`, or the qualified
 `file.py:name` / `file.py:Class.method` forms; ambiguous names list
 their candidates instead of guessing. The read commands (`query`,
-`context`, `trace`, `summary`, `unused`, `stats`, `export`) regenerate a
-stale map automatically — pass `--no-regen` to fail instead, and
-`--json` anywhere for structured output. The legacy flags `--map [DIR]
+`outline`, `context`, `trace`, `summary`, `lean`, `unused`, `stats`,
+`export`) regenerate a stale map automatically — pass `--no-regen` to
+fail instead, and `--json` anywhere for structured output. The legacy flags `--map [DIR]
 [SUBPATH]`, `--claude-install`, `--mcp-install`, and `--version` keep
 working as aliases.
+
+### Token budgets
+
+The `--budget` caps and the lean map's self-scaling cap count tokens
+with a `~4 chars/token` estimate by default — no dependency, and
+byte-identical output on every machine. For more accurate counts
+(chars/4 systematically under-counts code), install the optional
+tokenizer extra:
+
+```sh
+pip install dekko[tokenizer]      # adds tiktoken (o200k_base)
+```
+
+dekko then uses it automatically. Because real token counts depend on
+the installed tokenizer, output becomes environment-specific when the
+extra is present; set `DEKKO_TOKENIZER=chars4` to force the estimate
+back on (e.g. for a committed `.dekko/LEAN.md` that should diff cleanly
+across contributors).
 
 `map` writes `MAP.md` and `map.json` into a `.dekko/` directory at the
 repository root — override the location with `--output` — alongside a

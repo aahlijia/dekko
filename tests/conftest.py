@@ -2,12 +2,20 @@
 
 The project is installed into the test environment (``uv run pytest``
 syncs it), so tests import ``dekko`` directly — no path hacks.
+
+The token-counting backend is pinned to the chars/4 fallback for the
+whole suite (``DEKKO_TOKENIZER=chars4``) so budget assertions are
+byte-stable whether or not the developer has ``tiktoken`` installed.
+Tests that exercise the accurate path opt back in explicitly.
 """
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+
+os.environ["DEKKO_TOKENIZER"] = "chars4"
 
 from dekko import cli
 
