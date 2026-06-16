@@ -1,11 +1,23 @@
-"""Tier-2 generic fallback tests (Ruby fixture)."""
+"""Tier-2 generic fallback tests (Ruby fixture).
 
+Tier-2 grammars resolve through the optional ``dekko[all]`` pack, so
+these tests skip when it is not installed.
+"""
+
+import importlib.util
 from pathlib import Path
+
+import pytest
 
 from dekko.cli import map_repository
 from dekko.resolver import resolve
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("tree_sitter_language_pack") is None,
+    reason="Tier-2 grammar pack not installed (pip install dekko[all])",
+)
 
 
 def test_ruby_generic_extraction() -> None:

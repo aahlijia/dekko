@@ -29,6 +29,7 @@ guard).
 """
 
 import json
+import re
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -190,9 +191,7 @@ def _usage_total(message: dict) -> int | None:
     )
 
 
-def _read_symbols(
-    state: FileState, inp: dict, index: MapIndex
-) -> None:
+def _read_symbols(state: FileState, inp: dict, index: MapIndex) -> None:
     """Fold a ``Read``'s file/line-range into a file's seen symbols."""
     syms = index.symbols_by_path.get(state.path, [])
     offset = inp.get("offset")
@@ -308,8 +307,13 @@ def _block_estimate(block: dict) -> int:
 
 
 def _encode_project(root: Path) -> str:
-    """Claude Code's project-dir encoding of a repo path (best-effort)."""
-    return str(root).replace("/", "-")
+    """Claude Code's project-dir encoding of a repo path (best-effort).
+
+    Path separators (POSIX ``/`` and Windows ``\\``) and the Windows
+    drive colon become ``-``, mirroring how Claude Code names its
+    ``~/.claude/projects`` subdirectories on each platform.
+    """
+    return re.sub(r"[/\\:]", "-", str(root))
 
 
 def find_transcript(root: Path, session: str | None = None) -> Path | None:
@@ -367,9 +371,7 @@ def render_text(view: LedgerView, budget: int | None) -> list[str]:
         if state.dekko_emitted:
             tags.append("dekko")
         suffix = (" · " + ", ".join(tags)) if tags else ""
-        lines.append(
-            f"  {state.path}  {len(state.symbols_seen)} syms{suffix}"
-        )
+        lines.append(f"  {state.path}  {len(state.symbols_seen)} syms{suffix}")
     return lines
 
 

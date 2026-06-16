@@ -146,8 +146,12 @@ def _measure_outline(index: MapIndex, root: Path, task: Task) -> Result:
     baseline = _file_tokens(root, task.target)
     dekko = _capture_tokens(
         lambda: outline_mod.run(
-            index, task.target, root=root, budget=None,
-            limit=200, as_json=False,
+            index,
+            task.target,
+            root=root,
+            budget=None,
+            limit=200,
+            as_json=False,
         )
     )
     return Result(task, baseline, dekko)
@@ -166,8 +170,12 @@ def _measure_context(index: MapIndex, root: Path, task: Task) -> Result:
     baseline = sum(_file_tokens(root, p) for p in paths)
     dekko = _capture_tokens(
         lambda: contextpack.run(
-            index, task.target, hops=1, budget=None,
-            as_json=False, root=root,
+            index,
+            task.target,
+            hops=1,
+            budget=None,
+            as_json=False,
+            root=root,
         )
     )
     return Result(task, baseline, dekko, covers=f"{len(paths)} files")
@@ -187,9 +195,7 @@ def _measure_workset(index: MapIndex, root: Path, task: Task) -> Result:
     paths |= {imp.path for imp in seed.impacts}
     baseline = sum(_file_tokens(root, p) for p in paths)
     bundle = workset_mod.build(index, seed, workset_mod.DEFAULT_PACKS)
-    dekko = _capture_tokens(
-        lambda: workset_mod._render_text(bundle, None)
-    )
+    dekko = _capture_tokens(lambda: workset_mod._render_text(bundle, None))
     return Result(task, baseline, dekko, covers=f"{len(paths)} files")
 
 
@@ -201,7 +207,9 @@ def _measure_lean(index: MapIndex, root: Path, task: Task) -> Result:
     n_files = len(index.languages_by_path)
     n_syms = len(index.symbols_by_id)
     return Result(
-        task, 0, report.tokens,
+        task,
+        0,
+        report.tokens,
         covers=f"{n_files} files, {n_syms} symbols",
     )
 
@@ -219,9 +227,7 @@ def run_task(index: MapIndex, root: Path, task: Task) -> Result:
     return _MEASURERS[task.kind](index, root, task)
 
 
-def run_all(
-    root: Path, tasks: tuple[Task, ...] = TASKS
-) -> list[Result]:
+def run_all(root: Path, tasks: tuple[Task, ...] = TASKS) -> list[Result]:
     """Measure every task against the map at ``root``.
 
     Args:
@@ -289,7 +295,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", default=".", metavar="DIR")
     parser.add_argument("--json", dest="as_json", action="store_true")
     parser.add_argument(
-        "--session", default=None, metavar="PATH",
+        "--session",
+        default=None,
+        metavar="PATH",
         help="instead of tasks, report a session transcript's context cost",
     )
     args = parser.parse_args(argv)

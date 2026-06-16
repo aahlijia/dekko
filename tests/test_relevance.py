@@ -30,9 +30,9 @@ def test_normalize_splits_camel_and_snake() -> None:
 
 def test_normalize_drops_stopwords_and_short_tokens() -> None:
     terms = normalize_terms("fix the LoginForm bug a x")
-    assert "fix" not in terms          # stop word
-    assert "the" not in terms          # stop word
-    assert "x" not in terms            # too short
+    assert "fix" not in terms  # stop word
+    assert "the" not in terms  # stop word
+    assert "x" not in terms  # too short
     assert "login" in terms
     assert "form" in terms
     assert "bug" in terms
@@ -52,7 +52,7 @@ def test_exact_overlap_outranks_no_match() -> None:
         Candidate("miss", "database pool", "b.py"),
     ]
     scores = LexicalScorer().score(task, cands)
-    assert scores["hit"] == 1.0       # normalized top
+    assert scores["hit"] == 1.0  # normalized top
     assert scores["miss"] == 0.0
 
 
@@ -74,7 +74,8 @@ def test_partial_substring_match_scores_above_zero() -> None:
 
 def test_diff_path_boost_beats_recent_beats_none() -> None:
     task = TaskContext(
-        terms=(), diff_paths=frozenset({"a.py"}),
+        terms=(),
+        diff_paths=frozenset({"a.py"}),
         recent_paths=frozenset({"b.py"}),
     )
     cands = [
@@ -121,13 +122,9 @@ def test_task_context_is_empty() -> None:
 # --- integration fixtures --------------------------------------------
 
 _TWO_LEAVES = {
-    "src/auth.py": (
-        '"""Authentication."""\n'
-        "def login() -> None:\n    pass\n"
-    ),
+    "src/auth.py": ('"""Authentication."""\ndef login() -> None:\n    pass\n'),
     "src/db.py": (
-        '"""Database access."""\n'
-        "def connect() -> None:\n    pass\n"
+        '"""Database access."""\ndef connect() -> None:\n    pass\n'
     ),
 }
 
@@ -171,11 +168,7 @@ def test_lean_live_atoms_sort_lowest_survival_first(
 ) -> None:
     root, index = _index(make_mapped_repo, _TWO_LEAVES)
     model = render_lean.build_model(index, root)
-    ids = [
-        a.sym_id
-        for atoms in model.atoms_by_path.values()
-        for a in atoms
-    ]
+    ids = [a.sym_id for atoms in model.atoms_by_path.values() for a in atoms]
     scores = {sid: float(i) for i, sid in enumerate(sorted(ids))}
     ordered = render_lean._live_atoms(model, scores)
     got = [a.sym_id for a in ordered]
@@ -201,7 +194,10 @@ def test_workset_apply_task_reorders_touched_and_files(
     login = index.symbols_by_path["src/auth.py"][0]
     connect = index.symbols_by_path["src/db.py"][0]
     seed = workset.Seed(
-        mode="rev", label="t", rev=None, symbol=None,
+        mode="rev",
+        label="t",
+        rev=None,
+        symbol=None,
         touched=[connect, login],
         files=["src/db.py", "src/auth.py"],
         impacts=[],
@@ -236,9 +232,10 @@ def test_cli_task_flag_accepted(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(_TWO_LEAVES)
     r = str(root)
     assert cli.main(["lean", "--root", r, "--task", "login"]) == 0
-    assert cli.main(
-        ["context", "login", "--root", r, "--task", "auth"]
-    ) == 0
-    assert cli.main(
-        ["workset", "--symbol", "login", "--root", r, "--task", "auth"]
-    ) == 0
+    assert cli.main(["context", "login", "--root", r, "--task", "auth"]) == 0
+    assert (
+        cli.main(
+            ["workset", "--symbol", "login", "--root", r, "--task", "auth"]
+        )
+        == 0
+    )

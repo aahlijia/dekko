@@ -84,7 +84,7 @@ def test_dense_noop_below_threshold(make_mapped_repo: RepoFactory) -> None:
     assert index is not None
     _, normal = render_lean.generate(index, root)
     _, dense = render_lean.generate(index, root, dense=True)
-    assert dense.tokens == normal.tokens   # nothing to shed
+    assert dense.tokens == normal.tokens  # nothing to shed
 
 
 def test_cli_lean_dense_smoke(make_mapped_repo: RepoFactory) -> None:
@@ -104,7 +104,7 @@ def test_seen_omits_and_counts_symbols(
     lines, report = render_lean.generate(index, root, seen={target.id})
     body = "\n".join(lines)
     assert report.already_seen >= 1
-    assert "fn_0(" not in body                  # omitted from the map
+    assert "fn_0(" not in body  # omitted from the map
     assert "already in context" in report.footer()
 
 

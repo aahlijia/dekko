@@ -6,7 +6,7 @@ read, a dekko emission, real usage tokens, and deliberate junk lines.
 The fixture uses a fixed ``/repo`` root, decoupled from the tmp map.
 """
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from dekko import cli, ledger
 from dekko.mapfile import MapIndex, load_map
@@ -48,7 +48,7 @@ def _view(make_mapped_repo: RepoFactory) -> ledger.LedgerView:
 def test_session_id_and_turns(make_mapped_repo: RepoFactory) -> None:
     view = _view(make_mapped_repo)
     assert view.session_id == "sess-abc"
-    assert view.turns == 6          # six assistant records
+    assert view.turns == 6  # six assistant records
 
 
 def test_real_usage_uses_peak(make_mapped_repo: RepoFactory) -> None:
@@ -82,7 +82,7 @@ def test_subagent_and_out_of_root_reads_ignored(
     make_mapped_repo: RepoFactory,
 ) -> None:
     view = _view(make_mapped_repo)
-    assert "src/secret.py" not in view.files     # subagent caller
+    assert "src/secret.py" not in view.files  # subagent caller
     assert not any("hosts" in p for p in view.files)  # outside root
 
 
@@ -99,9 +99,9 @@ def test_aggregate_counts(make_mapped_repo: RepoFactory) -> None:
 
 
 def test_remaining_budget(make_mapped_repo: RepoFactory) -> None:
-    view = _view(make_mapped_repo)        # consumed 2500
+    view = _view(make_mapped_repo)  # consumed 2500
     assert view.remaining(4000) == 1500
-    assert view.remaining(1000) == 0      # floored, never negative
+    assert view.remaining(1000) == 0  # floored, never negative
 
 
 # --- robustness: the R1 guard ----------------------------------------
@@ -121,6 +121,15 @@ def test_peak_survives_trailing_zero_usage(tmp_path: Path) -> None:
     )
     view = ledger.build_view(transcript, MapIndex(root_label="x"), _ROOT)
     assert view.consumed_tokens == 2500
+
+
+def test_encode_project_handles_windows_paths() -> None:
+    """Backslashes and the drive colon encode to '-', like POSIX '/'."""
+    assert ledger._encode_project(Path("/Users/me/proj")) == "-Users-me-proj"
+    assert (
+        ledger._encode_project(PureWindowsPath(r"C:\Users\me\proj"))
+        == "C--Users-me-proj"
+    )
 
 
 def test_missing_transcript_is_empty_not_error() -> None:
@@ -154,8 +163,14 @@ def test_cli_ledger_json(
 ) -> None:
     root = make_mapped_repo(_FILES)
     code = cli.main(
-        ["ledger", "--transcript", str(_FIXTURE), "--root", str(root),
-         "--json"]
+        [
+            "ledger",
+            "--transcript",
+            str(_FIXTURE),
+            "--root",
+            str(root),
+            "--json",
+        ]
     )
     assert code == 0
     import json
@@ -168,8 +183,13 @@ def test_cli_ledger_json(
 
 def test_cli_ledger_no_transcript_exit_code(tmp_path: Path) -> None:
     code = cli.main(
-        ["ledger", "--transcript", str(tmp_path / "nope.jsonl"),
-         "--root", str(tmp_path)]
+        [
+            "ledger",
+            "--transcript",
+            str(tmp_path / "nope.jsonl"),
+            "--root",
+            str(tmp_path),
+        ]
     )
     assert code == ledger.EXIT_NO_TRANSCRIPT
 
@@ -183,5 +203,5 @@ def test_mcp_ledger_tool(make_mapped_repo: RepoFactory) -> None:
         ctx, {"transcript": str(_FIXTURE), "root": str(root)}
     )
     assert "ledger · session sess-abc" in out
-    assert "2 turns" not in out          # six assistant turns, not two
+    assert "2 turns" not in out  # six assistant turns, not two
     assert "6 turns" in out

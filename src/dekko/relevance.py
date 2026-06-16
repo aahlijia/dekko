@@ -50,9 +50,29 @@ _WORD_RE = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z0-9]+|[A-Z]+|[0-9]+")
 # stemmer, and small enough to stay obvious and deterministic.
 _STOPWORDS = frozenset(
     {
-        "the", "a", "an", "to", "of", "in", "on", "and", "or", "for",
-        "is", "it", "this", "that", "with", "as", "at", "by", "be",
-        "add", "use", "fix", "make",
+        "the",
+        "a",
+        "an",
+        "to",
+        "of",
+        "in",
+        "on",
+        "and",
+        "or",
+        "for",
+        "is",
+        "it",
+        "this",
+        "that",
+        "with",
+        "as",
+        "at",
+        "by",
+        "be",
+        "add",
+        "use",
+        "fix",
+        "make",
     }
 )
 

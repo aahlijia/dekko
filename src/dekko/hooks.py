@@ -128,7 +128,7 @@ def _file_candidates(
     for path in index.languages_by_path:
         state = view.files.get(path)
         if state is not None and state.fully_read:
-            continue                       # dedup (FR-C2)
+            continue  # dedup (FR-C2)
         doc = index.docs_by_path.get(path) or ""
         names = " ".join(
             s.name for s in index.symbols_by_path.get(path, [])[:_NAME_SAMPLE]
@@ -185,9 +185,7 @@ def prompt_submit(payload: dict) -> dict | None:
     return _additional_context("UserPromptSubmit", text)
 
 
-def _view(
-    payload: dict, index: MapIndex, root: Path
-) -> ledger.LedgerView:
+def _view(payload: dict, index: MapIndex, root: Path) -> ledger.LedgerView:
     """Build the session ledger from the payload's transcript, if any."""
     transcript = payload.get("transcript_path")
     if isinstance(transcript, str) and transcript:
@@ -331,8 +329,10 @@ def install(root: Path, events: list[str]) -> int:
     """
     unknown = [e for e in events if e not in EVENTS]
     if unknown:
-        print(f"dekko: unknown hook event(s): {', '.join(unknown)}",
-              file=sys.stderr)
+        print(
+            f"dekko: unknown hook event(s): {', '.join(unknown)}",
+            file=sys.stderr,
+        )
         return 2
     path = settings_path(root)
     settings = _load_settings(path)
@@ -381,7 +381,8 @@ def uninstall(root: Path) -> int:
     removed = 0
     for claude_event in list(hooks):
         kept = [
-            e for e in hooks[claude_event]
+            e
+            for e in hooks[claude_event]
             if not (isinstance(e, dict) and _is_dekko_entry(e))
         ]
         removed += len(hooks[claude_event]) - len(kept)
@@ -393,6 +394,8 @@ def uninstall(root: Path) -> int:
         settings.pop("hooks", None)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n")
-    print(f"dekko: removed {removed} dekko hook entr"
-          f"{'y' if removed == 1 else 'ies'} from {path}.")
+    print(
+        f"dekko: removed {removed} dekko hook entr"
+        f"{'y' if removed == 1 else 'ies'} from {path}."
+    )
     return 0

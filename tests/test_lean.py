@@ -44,9 +44,7 @@ def test_every_production_file_present_with_purpose(
     make_mapped_repo: RepoFactory,
 ) -> None:
     _, groups = _backbone(make_mapped_repo)
-    by_path = {
-        row.path: row for g in groups for row in g.rows
-    }
+    by_path = {row.path: row for g in groups for row in g.rows}
     assert "src/pkg/core.py" in by_path
     assert "src/pkg/util.py" in by_path
     assert by_path["src/pkg/core.py"].purpose.startswith("Core engine")
@@ -255,9 +253,7 @@ def test_centrality_key_deterministic_ties(
 
 
 def test_class_atom_signature(make_mapped_repo: RepoFactory) -> None:
-    root = make_mapped_repo(
-        {"src/c.py": '"""C."""\nclass Thing:\n    pass\n'}
-    )
+    root = make_mapped_repo({"src/c.py": '"""C."""\nclass Thing:\n    pass\n'})
     index = load_map(root)
     assert index is not None
     atoms = render_lean.build_atoms(index, Counter())
@@ -419,9 +415,7 @@ def test_cap_is_floor_aware_under_tiny_override(
     index = load_map(root)
     assert index is not None
     model = render_lean.build_model(index, root)
-    cap = render_lean.effective_cap(
-        model, render_lean.CapConfig(override=1)
-    )
+    cap = render_lean.effective_cap(model, render_lean.CapConfig(override=1))
     # The cap bends up to the path-only floor; never down to 1.
     assert cap > 1
     assert cap == render_lean._floor_cost(model)
@@ -592,9 +586,7 @@ def test_cli_lean_output_writes_file(
 ) -> None:
     root = make_mapped_repo(LADDER_FILES)
     dest = root / ".dekko" / "LEAN.md"
-    code = cli.main(
-        ["lean", "--root", str(root), "--output", str(dest)]
-    )
+    code = cli.main(["lean", "--root", str(root), "--output", str(dest)])
     assert code == 0
     assert dest.exists()
     assert dest.read_text().startswith("lean map · ~")
@@ -620,8 +612,8 @@ def test_cli_lean_budget_floors(
     code = cli.main(["lean", "--root", str(root), "--budget", "1"])
     assert code == 0
     out = capsys.readouterr().out
-    assert "core.py" in out                 # floor paths survive
-    assert "hub() -> int" not in out         # all depth shed
+    assert "core.py" in out  # floor paths survive
+    assert "hub() -> int" not in out  # all depth shed
 
 
 def test_lean_registered_and_tool_count() -> None:

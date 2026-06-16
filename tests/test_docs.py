@@ -1,11 +1,16 @@
 """Doc-line extraction: ``Symbol.doc`` and ``FileMap.doc``."""
 
+import importlib.util
 from pathlib import Path
+
+import pytest
 
 from dekko import languages
 from dekko.extractor import extract_file
 from dekko.extractor_generic import extract_file_generic
 from dekko.model import FileMap
+
+_HAS_PACK = importlib.util.find_spec("tree_sitter_language_pack") is not None
 
 
 def _extract(tmp_path: Path, name: str, source: str) -> FileMap:
@@ -197,6 +202,9 @@ def test_doc_line_truncated(tmp_path: Path) -> None:
     assert doc.endswith("…")
 
 
+@pytest.mark.skipif(
+    not _HAS_PACK, reason="Tier-2 grammar pack not installed (dekko[all])"
+)
 def test_generic_ruby_doc_comments(tmp_path: Path) -> None:
     (tmp_path / "store.rb").write_text(
         "# Store module.\n\n# Fetches a value.\ndef fetch(key)\nend\n"

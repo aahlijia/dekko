@@ -8,7 +8,7 @@ from typing import Callable
 from .languages import LanguageSpec
 from .model import FileMap, Import, Param, RawCall, Symbol
 from tree_sitter import Node, Parser, Query, QueryCursor
-from tree_sitter_language_pack import get_language
+from .grammars import get_grammar
 
 _WS = re.compile(r"\s+")
 
@@ -22,7 +22,7 @@ def _text(node: Node) -> str:
 @lru_cache(maxsize=None)
 def _compiled_query(grammar: str, query_str: str) -> Query:
     """Compile a query once per (grammar, query) pair."""
-    return Query(get_language(grammar), query_str)
+    return Query(get_grammar(grammar), query_str)
 
 
 def _run_query(
@@ -52,7 +52,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     """
     try:
         source = (root / rel).read_bytes()
-        parser = Parser(get_language(spec.grammar))
+        parser = Parser(get_grammar(spec.grammar))
         tree = parser.parse(source)
     except (OSError, ValueError) as exc:
         return FileMap(path=rel, language=spec.name, error=str(exc))

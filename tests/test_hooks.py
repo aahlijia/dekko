@@ -19,8 +19,7 @@ _FILES = {
         "def login() -> None:\n    pass\n"
     ),
     "src/db.py": (
-        '"""Database connection pool."""\n'
-        "def connect() -> None:\n    pass\n"
+        '"""Database connection pool."""\ndef connect() -> None:\n    pass\n'
     ),
 }
 
@@ -45,7 +44,7 @@ def test_session_start_injects_lean_map(
     assert hso["hookEventName"] == "SessionStart"
     ctx = hso["additionalContext"]
     assert "dekko orientation" in ctx
-    assert "src/" in ctx and "auth.py" in ctx    # the lean map body
+    assert "src/" in ctx and "auth.py" in ctx  # the lean map body
 
 
 def test_session_start_empty_repo_is_silent(tmp_path: Path) -> None:
@@ -64,8 +63,8 @@ def test_prompt_submit_points_at_relevant_files(
     )
     assert out is not None
     ctx = out["hookSpecificOutput"]["additionalContext"]
-    assert "src/auth.py" in ctx          # matched the task
-    assert "src/db.py" not in ctx        # unrelated, not listed
+    assert "src/auth.py" in ctx  # matched the task
+    assert "src/db.py" not in ctx  # unrelated, not listed
 
 
 def test_prompt_submit_unmatched_prompt_is_silent(
@@ -111,15 +110,17 @@ def test_adaptive_top_shrinks_as_budget_fills() -> None:
 def test_pre_read_advises_on_large_file(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    big = {"src/big.py": "x = 1\n" * 4000}      # well over the threshold
+    big = {"src/big.py": "x = 1\n" * 4000}  # well over the threshold
     root = make_mapped_repo(big)
     out = hooks.pre_read(
-        {"cwd": str(root),
-         "tool_input": {"file_path": str(root / "src/big.py")}}
+        {
+            "cwd": str(root),
+            "tool_input": {"file_path": str(root / "src/big.py")},
+        }
     )
     assert out is not None
     hso = out["hookSpecificOutput"]
-    assert hso["permissionDecision"] == "defer"   # never denies (Q5)
+    assert hso["permissionDecision"] == "defer"  # never denies (Q5)
     assert "outline" in hso["permissionDecisionReason"]
 
 
@@ -128,8 +129,10 @@ def test_pre_read_silent_on_small_file(
 ) -> None:
     root = make_mapped_repo(_FILES)
     out = hooks.pre_read(
-        {"cwd": str(root),
-         "tool_input": {"file_path": str(root / "src/auth.py")}}
+        {
+            "cwd": str(root),
+            "tool_input": {"file_path": str(root / "src/auth.py")},
+        }
     )
     assert out is None
 
@@ -190,9 +193,13 @@ def test_install_preserves_existing_hooks(tmp_path: Path) -> None:
     settings_file.parent.mkdir(parents=True)
     settings_file.write_text(
         json.dumps(
-            {"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "echo hi"}]}
-            ]}}
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "echo hi"}]}
+                    ]
+                }
+            }
         )
     )
     hooks.install(tmp_path, ["session-start"])
@@ -217,16 +224,20 @@ def test_uninstall_removes_only_dekko(tmp_path: Path) -> None:
     settings_file.parent.mkdir(parents=True)
     settings_file.write_text(
         json.dumps(
-            {"hooks": {"SessionStart": [
-                {"hooks": [{"type": "command", "command": "echo hi"}]}
-            ]}}
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "echo hi"}]}
+                    ]
+                }
+            }
         )
     )
     hooks.install(tmp_path, ["session-start"])
     hooks.uninstall(tmp_path)
     hooks_cfg = _settings(tmp_path)["hooks"]
     commands = [e["hooks"][0]["command"] for e in hooks_cfg["SessionStart"]]
-    assert commands == ["echo hi"]       # ours gone, theirs kept
+    assert commands == ["echo hi"]  # ours gone, theirs kept
 
 
 def test_cli_hooks_install_smoke(tmp_path: Path) -> None:

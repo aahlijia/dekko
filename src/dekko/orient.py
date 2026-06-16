@@ -101,7 +101,7 @@ def run(
     budget: int | None,
     threshold: int,
     as_json: bool,
-    no_regen: bool
+    no_regen: bool,
 ) -> int:
     """Orient an agent (session) or nudge before a large read (--read).
 
