@@ -148,6 +148,8 @@ class Meter:
         total: Rows before any cap.
         budget: Token budget in effect, or ``None``.
         limit: Count limit in effect, or ``None``.
+        signals: Distinct pieces of information covered (files + symbols),
+            for the FR-D3 density view; ``0`` disables the density line.
     """
 
     tokens: int
@@ -155,11 +157,19 @@ class Meter:
     total: int
     budget: int | None = None
     limit: int | None = None
+    signals: int = 0
 
     @property
     def omitted(self) -> int:
         """Rows dropped to satisfy the caps."""
         return max(0, self.total - self.returned)
+
+    @property
+    def per_signal(self) -> float | None:
+        """Tokens spent per signal covered (FR-D3), or ``None``."""
+        if self.signals <= 0:
+            return None
+        return round(self.tokens / self.signals, 1)
 
     @property
     def truncated_by(self) -> str | None:
@@ -170,13 +180,17 @@ class Meter:
             return "limit"
         return "budget"
 
+    def _density(self) -> str:
+        """The optional ``· N signals`` density suffix (FR-D3)."""
+        return f" · {self.signals} signals" if self.signals > 0 else ""
+
     def footer(self) -> str:
         """One-line text footer, stable enough to parse."""
         if self.omitted == 0:
-            return f"(~{self.tokens} tokens)"
+            return f"(~{self.tokens} tokens{self._density()})"
         raise_hint = f"raise --{self.truncated_by}"
         return (
-            f"(~{self.tokens} tokens · {self.omitted} of "
+            f"(~{self.tokens} tokens{self._density()} · {self.omitted} of "
             f"{self.total} omitted · {raise_hint})"
         )
 
@@ -189,6 +203,8 @@ class Meter:
             "budget": self.budget,
             "limit": self.limit,
             "truncated_by": self.truncated_by,
+            "signals": self.signals,
+            "tokens_per_signal": self.per_signal,
         }
 
 

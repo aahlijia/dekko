@@ -86,6 +86,7 @@ def test_tools_list_exposes_the_read_surface() -> None:
         "stats",
         "summary",
         "lean",
+        "ledger",
         "add_note",
         "list_notes",
         "map_status",

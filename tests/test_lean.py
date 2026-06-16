@@ -504,7 +504,10 @@ def test_report_as_dict_shape(make_mapped_repo: RepoFactory) -> None:
         "names_dropped",
         "module_edges_dropped",
         "purpose_width",
-        "floored"
+        "floored",
+        "signals",
+        "tokens_per_signal",
+        "already_seen",
     }
     assert d["floored"] is True
 
@@ -625,8 +628,9 @@ def test_lean_registered_and_tool_count() -> None:
     assert "lean" in cli.SUBCOMMANDS
     names = {t["name"] for t in server.TOOLS}
     assert "lean" in names
+    assert "ledger" in names
     # Canonical MCP tool-count assertion now lives here.
-    assert len(server.TOOLS) == 17
+    assert len(server.TOOLS) == 18
 
 
 def test_mcp_lean_tool(make_mapped_repo: RepoFactory) -> None:
