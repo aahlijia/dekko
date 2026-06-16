@@ -1,8 +1,17 @@
 """Small shared text helpers for the read-command renderers."""
 
+import os
 from dataclasses import dataclass
+from functools import lru_cache
 
 from .model import Symbol
+
+# Token-counting backend (Q2). The accurate path uses ``tiktoken`` when
+# it is installed (``pip install dekko[tokenizer]``); otherwise, and in
+# the default install, counting falls back to a ~4-chars/token estimate.
+# ``DEKKO_TOKENIZER=chars4`` forces the cheap path for reproducible,
+# byte-stable output even when tiktoken is present.
+_TIKTOKEN_ENCODING = "o200k_base"
 
 
 def signature(sym: Symbol) -> str:
@@ -51,9 +60,74 @@ def dir_of(path: str) -> str:
     return head or "."
 
 
-def estimate_tokens(text: str) -> int:
-    """Crude token estimate (~4 characters per token)."""
+def _tokenizer_mode() -> str:
+    """Resolve the backend mode from ``DEKKO_TOKENIZER`` (default auto)."""
+    mode = os.environ.get("DEKKO_TOKENIZER", "auto").strip().lower()
+    return mode if mode in ("auto", "chars4") else "auto"
+
+
+@lru_cache(maxsize=1)
+def _encoder() -> object | None:
+    """Lazily build the tiktoken encoder, or ``None`` to use chars/4.
+
+    Returns ``None`` when the mode is ``chars4``, tiktoken is not
+    installed, or the encoding cannot be constructed — so the counter
+    always has a working fallback and never raises.
+    """
+    if _tokenizer_mode() == "chars4":
+        return None
+    try:
+        import tiktoken
+
+        return tiktoken.get_encoding(_TIKTOKEN_ENCODING)
+    except Exception:
+        return None
+
+
+def tokenizer_backend() -> str:
+    """The active counting backend: ``"tiktoken"`` or ``"chars4"``."""
+    return "tiktoken" if _encoder() is not None else "chars4"
+
+
+@lru_cache(maxsize=16384)
+def _count_fragment(text: str) -> int:
+    """Token count of one text fragment: accurate, else chars/4.
+
+    Cached so the hot fit loops (which re-measure recurring lines) stay
+    cheap. Any encoder failure degrades to the chars/4 estimate.
+    """
+    enc = _encoder()
+    if enc is not None:
+        try:
+            return len(enc.encode(text))
+        except Exception:
+            pass
     return len(text) // 4
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate the token cost of ``text``.
+
+    Accurate when a tokenizer backend is active (``tiktoken`` via the
+    ``dekko[tokenizer]`` extra), and a ~4-chars/token estimate
+    otherwise. The canonical one-shot count used by footers and size
+    framing.
+    """
+    return _count_fragment(text)
+
+
+def count_lines(lines: list[str]) -> int:
+    """Sum cached per-line token counts; for hot budget loops.
+
+    A fast, stable proxy for ``estimate_tokens("\\n".join(lines))``:
+    each line is measured once (with its trailing newline) and cached,
+    so re-measuring a mostly-unchanged document — as the lean map's
+    degradation ladder does on every shed step — costs a sum of
+    memoized integers rather than re-encoding the whole text. May differ
+    slightly from the joined count at line boundaries; used for budget
+    decisions, not the final reported figure.
+    """
+    return sum(_count_fragment(line + "\n") for line in lines)
 
 
 def token_footer(text: str) -> str:

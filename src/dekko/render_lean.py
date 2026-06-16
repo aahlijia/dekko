@@ -26,7 +26,7 @@ from pathlib import Path
 from . import export, summary
 from .classify import is_test_path
 from .mapfile import MapIndex
-from .textutil import dir_of, estimate_tokens, oneline, signature
+from .textutil import count_lines, dir_of, oneline, signature
 
 # Default (and maximum) purpose width. The render layer may narrow this
 # toward 0 as the budget tightens (the FR1 floor sub-ladder); it never
@@ -513,7 +513,7 @@ def _floor_cost(model: LeanModel) -> int:
     floor = render_backbone(
         model.groups, width=0, collapse_demotable=True
     )
-    return estimate_tokens("\n".join(floor)) + _HEADER_RESERVE_TOK
+    return count_lines(floor) + _HEADER_RESERVE_TOK
 
 
 def render(model: LeanModel, cap: int) -> tuple[list[str], LeanReport]:
@@ -535,8 +535,7 @@ def render(model: LeanModel, cap: int) -> tuple[list[str], LeanReport]:
     body_budget = cap - _HEADER_RESERVE_TOK
 
     def fits() -> bool:
-        body = "\n".join(_render_document(model, state))
-        return estimate_tokens(body) <= body_budget
+        return count_lines(_render_document(model, state)) <= body_budget
 
     if not fits():                       # 1: mermaid
         state.mermaid = False
@@ -705,10 +704,12 @@ def _edge_block(model: LeanModel, state: _LeanState) -> list[str]:
 def _assemble(
     report: LeanReport, body: list[str]
 ) -> tuple[list[str], LeanReport]:
-    """Prepend the NFR5 header, recording the final token count."""
-    report.tokens = estimate_tokens(
-        "\n".join(_header_lines(report) + body)
-    )
+    """Prepend the NFR5 header, recording the final token count.
+
+    Uses the same ``count_lines`` measure as the fit decision so the
+    reported figure never contradicts the cap the ladder fit to.
+    """
+    report.tokens = count_lines(_header_lines(report) + body)
     return _header_lines(report) + body, report
 
 
