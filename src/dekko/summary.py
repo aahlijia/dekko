@@ -159,6 +159,26 @@ def _git_churn(root: Path, window_days: int) -> Counter[str]:
     )
 
 
+def file_churn(
+    root: Path, window_days: int = _CHURN_WINDOW_DAYS
+) -> Counter[str]:
+    """Per-file commit-touch counts over the recent window.
+
+    Public, best-effort wrapper over the git-churn reader so other
+    renderers (the lean map's symbol centrality) can reuse the same
+    signal. Returns an empty counter on any git failure, so callers
+    degrade cleanly to a churn-free ranking.
+
+    Args:
+        root: Repository root.
+        window_days: How many days back to count file changes.
+
+    Returns:
+        Repo-relative path → number of commits that touched it.
+    """
+    return _git_churn(root, window_days)
+
+
 def _file_fan_in(index: MapIndex, path: str) -> int:
     """Total incoming call edges to every symbol defined in a file."""
     return sum(

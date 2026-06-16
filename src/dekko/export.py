@@ -75,10 +75,15 @@ def _file_graph(
     return labels, sorted(edges)
 
 
-def _dir_graph(
+def dir_graph(
     index: MapIndex,
 ) -> tuple[dict[str, str], list[tuple[str, str]]]:
-    """Build ``(labels, edges)`` at directory scope (no self-loops)."""
+    """Build ``(labels, edges)`` at directory scope (no self-loops).
+
+    The coarse, directory-level dependency view shared by MAP.md's
+    mermaid diagram and the lean map's module-edge text (FR3): both are
+    skins of this one graph.
+    """
     edges: set[tuple[str, str]] = set()
     for caller, callees in index.calls_out.items():
         src = _path_of(index, caller)
@@ -129,7 +134,7 @@ def overview_graph(
         return {}, [], "empty"
     if len(labels) <= max_nodes:
         return labels, edges, "file"
-    labels, edges = _dir_graph(index)
+    labels, edges = dir_graph(index)
     if len(labels) <= max_nodes:
         return labels, edges, "dir"
     return labels, edges, "too_big"

@@ -31,6 +31,7 @@ from . import orient as orient_mod
 from . import outline as outline_mod
 from . import query
 from . import render_html
+from . import render_lean
 from . import render_md
 from . import server
 from . import stats
@@ -50,6 +51,7 @@ SUBCOMMANDS = (
     "map",
     "query",
     "outline",
+    "lean",
     "context",
     "trace",
     "diff",
@@ -561,6 +563,28 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
+
+    p_lean = sub.add_parser(
+        "lean",
+        help="budget-capped navigation map: files, symbols, module edges",
+    )
+    _add_read_options(p_lean)
+    p_lean.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="hard token cap (default: scales with repo size; never "
+        "below the file-backbone floor)",
+    )
+    p_lean.add_argument(
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="write the map to PATH (e.g. .dekko/LEAN.md) instead of "
+        "printing it",
+    )
+    p_lean.set_defaults(func=run_lean)
 
     p_orient = sub.add_parser(
         "orient",
@@ -1426,6 +1450,21 @@ def run_summary(args: argparse.Namespace) -> int:
     if index is None:
         return code
     return summary.run(index, as_json=args.as_json)
+
+
+def run_lean(args: argparse.Namespace) -> int:
+    """Handle ``dekko lean``."""
+    index, code = _read_index(args)
+    if index is None:
+        return code
+    out = Path(args.output).resolve() if args.output else None
+    return render_lean.run(
+        index,
+        Path(args.root).resolve(),
+        budget=args.budget,
+        as_json=args.as_json,
+        out_path=out
+    )
 
 
 def run_orient(args: argparse.Namespace) -> int:

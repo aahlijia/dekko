@@ -27,6 +27,7 @@ from . import mapfile
 from . import notes as notes_mod
 from . import outline as outline_mod
 from . import query
+from . import render_lean
 from . import stats
 from . import summary
 from . import trace
@@ -306,6 +307,20 @@ def _summary_text(ctx: Context, args: dict) -> str:
 def tool_summary(ctx: Context, args: dict) -> str:
     """Compact repo digest: directories, hotspots, entry points."""
     return _summary_text(ctx, args)
+
+
+def tool_lean(ctx: Context, args: dict) -> str:
+    """Budget-capped navigation map of the whole repo."""
+    index = _index_for(ctx, args)
+    root = _root_of(ctx, args)
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else None
+    code, out, err = _capture(
+        lambda: render_lean.run(index, root, budget=budget, as_json=False)
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return out.strip()
 
 
 def tool_add_note(ctx: Context, args: dict) -> str:
@@ -662,6 +677,28 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {"root": _ROOT_PROP},
         },
         "handler": tool_summary,
+    },
+    {
+        "name": "lean",
+        "description": "A budget-capped navigation map of the whole "
+        "repo: every file with its purpose, symbols (signatures on the "
+        "most central, names on the rest), and module dependency edges, "
+        "shed in priority order to fit a token cap. Denser than "
+        "`summary`, far cheaper than reading MAP.md — read it to orient "
+        "before exploring. The header reports what was elided and how to "
+        "recover it (`outline`, `context`, `query`).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget": {
+                    "type": "integer",
+                    "description": "Hard token cap (default scales with "
+                    "repo size)",
+                },
+                "root": _ROOT_PROP,
+            },
+        },
+        "handler": tool_lean,
     },
     {
         "name": "add_note",

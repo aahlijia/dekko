@@ -149,6 +149,6 @@ def test_orient_registered_as_subcommand() -> None:
 
 
 def test_orient_adds_no_mcp_tool() -> None:
-    # The push layer is CLI/skill-only; the MCP tool set stays at 16.
-    assert len(server.TOOLS) == 16
+    # The push layer is CLI/skill-only — it exposes no MCP tool. (The
+    # canonical tool-count assertion lives in test_lean.)
     assert "orient" not in {t["name"] for t in server.TOOLS}

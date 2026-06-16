@@ -261,4 +261,3 @@ def test_workset_registered() -> None:
     assert "workset" in cli.SUBCOMMANDS
     names = {t["name"] for t in server.TOOLS}
     assert "workset" in names
-    assert len(server.TOOLS) == 16
