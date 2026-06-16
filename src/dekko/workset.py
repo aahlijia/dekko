@@ -15,16 +15,18 @@ tight budget and detail is the first to go.
 """
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import affected
 from . import outline
+from . import relevance
 from .classify import relevance_key
 from .contextpack import Pack, build_pack
 from .mapfile import MapIndex
 from .model import Symbol
 from .query import report_unresolved, resolve_target
+from .relevance import TaskContext
 from .textutil import fit_to_budget, oneline, signature
 
 EXIT_OK = 0
@@ -135,6 +137,52 @@ def seed_from_symbol(
         "symbol", label, None, sym.qualname, [sym], impacts, index
     )
     return seed, candidates
+
+
+def _apply_task(seed: Seed, index: MapIndex, task: TaskContext) -> Seed:
+    """Re-rank a seed's touched symbols and files by blended relevance.
+
+    Composition (:func:`build`) draws packs from ``touched`` and outlines
+    from ``files`` in order and trims from the tail under budget, so
+    re-ordering both by task relevance is enough to make the whole bundle
+    task-aware without touching the renderers.
+    """
+    return replace(
+        seed,
+        touched=_rerank_touched(seed.touched, index, task),
+        files=_rerank_files(seed, index, task),
+    )
+
+
+def _rerank_touched(
+    touched: list[Symbol], index: MapIndex, task: TaskContext
+) -> list[Symbol]:
+    """Touched symbols, most task-relevant first (centrality blended in)."""
+    candidates = [
+        relevance.Candidate(
+            id=s.id, text=f"{s.qualname} {signature(s)}", path=s.path
+        )
+        for s in touched
+    ]
+    centrality = {s.id: float(index.degree(s.id)) for s in touched}
+    scores = relevance.blended_scores(task, candidates, centrality)
+    return sorted(
+        touched,
+        key=lambda s: (-scores.get(s.id, 0.0), *relevance_key(s, index)),
+    )
+
+
+def _rerank_files(seed: Seed, index: MapIndex, task: TaskContext) -> list[str]:
+    """Touched files, most task-relevant first (aggregate degree blended)."""
+    by_file: dict[str, int] = {}
+    for sym in seed.touched:
+        by_file[sym.path] = by_file.get(sym.path, 0) + index.degree(sym.id)
+    candidates = [
+        relevance.Candidate(id=p, text=p, path=p) for p in seed.files
+    ]
+    centrality = {p: float(by_file.get(p, 0)) for p in seed.files}
+    scores = relevance.blended_scores(task, candidates, centrality)
+    return sorted(seed.files, key=lambda p: (-scores.get(p, 0.0), p))
 
 
 def build(index: MapIndex, seed: Seed, packs: int) -> Workset:
@@ -338,6 +386,7 @@ def run(
     packs: int,
     as_json: bool,
     no_regen: bool,
+    task: TaskContext | None = None,
 ) -> int:
     """Build and render a work-set bundle for a change or a symbol.
 
@@ -349,6 +398,8 @@ def run(
         packs: Number of top-centrality symbols to deep-pack.
         as_json: Emit structured JSON instead of text.
         no_regen: Fail instead of regenerating a stale map.
+        task: Optional task context; when set, the bundle's packs and
+            outlines are ordered most task-relevant first.
 
     Returns:
         ``0`` ok, ``2`` bad rev, ``3`` symbol not found, ``4`` ambiguous,
@@ -367,6 +418,8 @@ def run(
         seed = seed_from_rev(index, root, rev)
         if seed is None:
             return EXIT_ERROR
+    if task is not None and not task.is_empty:
+        seed = _apply_task(seed, index, task)
     ws = build(index, seed, packs)
     if as_json:
         return _render_json(ws, budget)

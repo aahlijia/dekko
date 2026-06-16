@@ -32,7 +32,7 @@ SRC = {
     ),
 }
 
-_FOOTER = re.compile(r"\(~\d+ tokens\)")
+_FOOTER = re.compile(r"\(~\d+ tokens")
 
 
 def _query(root: Path, *argv: str) -> int:
