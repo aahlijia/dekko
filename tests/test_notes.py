@@ -131,4 +131,3 @@ def test_mcp_add_and_list_notes(make_mapped_repo: RepoFactory) -> None:
 def test_notes_tools_registered() -> None:
     names = {t["name"] for t in server.TOOLS}
     assert {"add_note", "list_notes"} <= names
-    assert len(server.TOOLS) == 14

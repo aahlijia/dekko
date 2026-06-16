@@ -25,11 +25,13 @@ from . import affected
 from . import contextpack
 from . import mapfile
 from . import notes as notes_mod
+from . import outline as outline_mod
 from . import query
 from . import stats
 from . import summary
 from . import trace
 from . import unused
+from . import workset as workset_mod
 
 SERVER_NAME = "dekko"
 PROTOCOL_VERSION = "2025-06-18"
@@ -103,6 +105,8 @@ def _relation_tool(ctx: Context, action: str, args: dict) -> str:
     target = _require(args, "symbol")
     limit = int(args.get("limit", 50))
     sites = bool(args.get("sites", False))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else None
     code, out, err = _capture(
         lambda: query.run(
             index,
@@ -111,6 +115,7 @@ def _relation_tool(ctx: Context, action: str, args: dict) -> str:
             as_json=False,
             limit=limit,
             sites=sites,
+            budget=budget,
         )
     )
     if code != 0:
@@ -138,8 +143,12 @@ def tool_find_usages(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     name = _require(args, "name")
     limit = int(args.get("limit", 50))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else None
     code, out, err = _capture(
-        lambda: query.run(index, "uses", name, as_json=False, limit=limit)
+        lambda: query.run(
+            index, "uses", name, as_json=False, limit=limit, budget=budget
+        )
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
@@ -171,6 +180,29 @@ def tool_get_context_pack(ctx: Context, args: dict) -> str:
     return out.strip()
 
 
+def tool_outline(ctx: Context, args: dict) -> str:
+    """Structural outline of a file or directory (signatures, no bodies)."""
+    index = _index_for(ctx, args)
+    target = _require(args, "target")
+    limit = int(args.get("limit", 200))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else None
+    root = _root_of(ctx, args)
+    code, out, err = _capture(
+        lambda: outline_mod.run(
+            index,
+            target,
+            root=root,
+            budget=budget,
+            limit=limit,
+            as_json=False,
+        )
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return out.strip()
+
+
 def tool_trace_path(ctx: Context, args: dict) -> str:
     """Shortest call path(s) from one symbol to another."""
     index = _index_for(ctx, args)
@@ -194,8 +226,12 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     if not isinstance(roots, list):
         raise ToolError("'roots' must be a list of path globs")
     limit = int(args.get("limit", 50))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else None
     code, out, err = _capture(
-        lambda: unused.run(index, tuple(roots), as_json=False, limit=limit)
+        lambda: unused.run(
+            index, tuple(roots), as_json=False, limit=limit, budget=budget
+        )
     )
     if code not in (0, 1):
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
@@ -208,12 +244,44 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     rev = args.get("rev")
     rev = rev if isinstance(rev, str) and rev else None
     limit = int(args.get("limit", 8))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else None
     code, out, err = _capture(
-        lambda: affected.run(root, rev, as_json=False, limit=limit)
+        lambda: affected.run(
+            root, rev, as_json=False, limit=limit, budget=budget
+        )
     )
     if code == affected.EXIT_ERROR:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
     return out.strip() or "(no impacted tests)"
+
+
+def tool_workset(ctx: Context, args: dict) -> str:
+    """One budgeted bundle for a change or symbol."""
+    root = _root_of(ctx, args)
+    rev = args.get("rev")
+    rev = rev if isinstance(rev, str) and rev else None
+    symbol = args.get("symbol")
+    symbol = symbol if isinstance(symbol, str) and symbol else None
+    if rev is not None and symbol is not None:
+        raise ToolError("give 'rev' or 'symbol', not both")
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else workset_mod.DEFAULT_BUDGET
+    packs = int(args.get("packs", workset_mod.DEFAULT_PACKS))
+    code, out, err = _capture(
+        lambda: workset_mod.run(
+            root,
+            rev,
+            symbol,
+            budget=budget,
+            packs=packs,
+            as_json=False,
+            no_regen=False,
+        )
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return out.strip()
 
 
 def tool_stats(ctx: Context, args: dict) -> str:
@@ -322,6 +390,11 @@ _SITES_PROP = {
     "description": "One row per call site (path:line of each call "
     "expression) instead of one per definition",
 }
+_BUDGET_PROP = {
+    "type": "integer",
+    "description": "Approximate token budget; lowest-relevance rows are "
+    "dropped to fit and a cost footer is appended",
+}
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -348,6 +421,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "symbol": _SYMBOL_PROP,
                 "sites": _SITES_PROP,
+                "budget": _BUDGET_PROP,
                 "root": _ROOT_PROP,
             },
             "required": ["symbol"],
@@ -364,6 +438,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "symbol": _SYMBOL_PROP,
                 "sites": _SITES_PROP,
+                "budget": _BUDGET_PROP,
                 "root": _ROOT_PROP,
             },
             "required": ["symbol"],
@@ -387,6 +462,7 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "Max result lines (default 50)",
                 },
+                "budget": _BUDGET_PROP,
                 "root": _ROOT_PROP,
             },
             "required": ["name"],
@@ -423,6 +499,31 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["target"],
         },
         "handler": tool_get_context_pack,
+    },
+    {
+        "name": "outline",
+        "description": "A file's (or directory's) structural outline — "
+        "signatures + doc lines, no bodies — at roughly a tenth the cost "
+        "of reading it. Prefer this before reading a file to learn what "
+        "it contains.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "Mapped file path or directory "
+                    "(suffix-matched); a directory rolls up its files",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max symbol rows (default 200)",
+                },
+                "budget": _BUDGET_PROP,
+                "root": _ROOT_PROP,
+            },
+            "required": ["target"],
+        },
+        "handler": tool_outline,
     },
     {
         "name": "trace_path",
@@ -468,6 +569,7 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "Max result lines (default 50)",
                 },
+                "budget": _BUDGET_PROP,
                 "root": _ROOT_PROP,
             },
         },
@@ -492,10 +594,46 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Max impacted symbols per test file "
                     "(default 8)",
                 },
+                "budget": _BUDGET_PROP,
                 "root": _ROOT_PROP,
             },
         },
         "handler": tool_impacted_tests,
+    },
+    {
+        "name": "workset",
+        "description": "Task work-set: for a change (git rev) or a "
+        "symbol, bundle the touched files' outlines plus call-graph "
+        "packs for the most central touched symbols under one token "
+        "budget. One call replaces affected + N outlines + N packs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "rev": {
+                    "type": "string",
+                    "description": "Git rev to bundle changes against "
+                    "(default: the commit the map was generated at, else "
+                    "HEAD); omit when using 'symbol'",
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Seed from a symbol instead of a diff "
+                    "(name, Class.method, file.py:name); not with 'rev'",
+                },
+                "budget": {
+                    "type": "integer",
+                    "description": "Shared token budget for the whole "
+                    "bundle (default 6000)",
+                },
+                "packs": {
+                    "type": "integer",
+                    "description": "Top-centrality touched symbols to "
+                    "deep-pack (default 5)",
+                },
+                "root": _ROOT_PROP,
+            },
+        },
+        "handler": tool_workset,
     },
     {
         "name": "stats",

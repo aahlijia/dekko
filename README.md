@@ -198,6 +198,58 @@ The incremental cache makes each refresh re-parse only the changed
 file. This is opt-in rather than bundled with the plugin so you control
 when dekko runs.
 
+### Proactive orientation (opt-in)
+
+By default dekko is a *pull* tool — it helps when the agent asks. The
+`dekko-orient` skill (bundled, no setup) steers an agent to orient with
+`dekko summary` and to prefer `outline` / `workset` / `query` over
+reading whole files. If you want that orientation to fire deterministically,
+add hooks to your `settings.json`.
+
+`dekko orient` prints a short steering preamble plus the `summary`
+digest — a ready-made `SessionStart` payload:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "dekko orient --root \"${CLAUDE_PROJECT_DIR}\"" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Add `--no-regen` to that command to skip refreshing a stale map at
+session start (faster, but the digest may be out of date).
+
+`dekko orient --read <file>` prints a one-line nudge to `outline` a file
+first **only when the file is large** (and nothing otherwise — it never
+blocks). Wiring it to `PreToolUse` on `Read` is **experimental**: the
+hook output-to-context behavior varies by harness and is not verified
+here. The harness-specific path extraction stays in the hook (via `jq`),
+not in dekko:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          { "type": "command", "command": "jq -r '.tool_input.file_path' | xargs -r dekko orient --root \"${CLAUDE_PROJECT_DIR}\" --read" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Both hooks are opt-in; core behavior is unchanged when neither is set.
+
 ## MCP server
 
 `dekko serve --mcp` speaks the Model Context Protocol over stdio as

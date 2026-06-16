@@ -7,6 +7,11 @@ deterministic, and language-independent.
 """
 
 import fnmatch
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .mapfile import MapIndex
+    from .model import Symbol
 
 TEST_NAME_GLOBS = (
     "test_*",
@@ -36,3 +41,27 @@ def is_test_path(path: str) -> bool:
         return True
     base = parts[-1]
     return any(fnmatch.fnmatch(base, pat) for pat in TEST_NAME_GLOBS)
+
+
+def relevance_key(
+    sym: "Symbol", index: "MapIndex"
+) -> tuple[bool, int, str, int]:
+    """Sort key for budget-drop ordering (lowest-ranked dropped first).
+
+    Ranks production code before tests, then more-connected symbols
+    before leaves, then by path and line for stable determinism.
+
+    Args:
+        sym: The symbol to rank.
+        index: Loaded map index, for degree (fan-in + fan-out).
+
+    Returns:
+        A tuple usable as a ``sorted`` key; ascending order puts the
+        most relevant rows first.
+    """
+    return (
+        is_test_path(sym.path),
+        -index.degree(sym.id),
+        sym.path,
+        sym.start_line,
+    )

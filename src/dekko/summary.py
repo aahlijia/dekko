@@ -16,7 +16,7 @@ from pathlib import Path
 from . import stats
 from .mapfile import MapIndex
 from .resolver import MODULE_CALLER_SUFFIX
-from .textutil import oneline, signature
+from .textutil import dir_of, oneline, signature
 
 # Index-file stems whose doc best describes their directory.
 _INDEX_STEMS = ("__init__", "mod", "lib", "index")
@@ -28,15 +28,9 @@ _MAX_HOTSPOTS = 10
 _CHURN_WINDOW_DAYS = 90
 
 
-def _dir_of(path: str) -> str:
-    """Directory portion of a repo-relative path (``.`` for the root)."""
-    head, _, _ = path.rpartition("/")
-    return head or "."
-
-
 def _id_dir(sym_id: str) -> str:
     """Directory of the file a symbol or module id belongs to."""
-    return _dir_of(sym_id.split("::", 1)[0])
+    return dir_of(sym_id.split("::", 1)[0])
 
 
 def _dir_purpose(index: MapIndex, directory: str, files: list[str]) -> str:
@@ -71,7 +65,7 @@ def _directories(index: MapIndex) -> list[dict]:
     """Per-directory rollup rows, most symbols first."""
     files_by_dir: dict[str, list[str]] = {}
     for path in index.languages_by_path:
-        files_by_dir.setdefault(_dir_of(path), []).append(path)
+        files_by_dir.setdefault(dir_of(path), []).append(path)
     coupling = _edge_coupling(index)
     rows = []
     for directory, files in files_by_dir.items():
