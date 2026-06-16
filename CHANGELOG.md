@@ -9,6 +9,43 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+Context & token management for agents: every list-shaped command can now
+be held to a token budget, and three new commands (`outline`, `workset`,
+`orient`) let an agent orient and scope a change without reading whole
+files.
+
+### Added
+- Universal token budgeting across `query`, `unused`, `affected`, and
+  `context`. Each command now ranks its rows by relevance (production
+  before tests, more-connected before leaves), keeps as many as fit, and
+  self-meters: text output carries a `(~N tokens · M of T omitted ·
+  raise --budget)` footer and JSON carries a matching `meta` object. A
+  `--budget` flag caps `query`/`unused`/`affected`; the relation MCP
+  tools gained an equivalent `budget` argument.
+- `dekko outline <path|dir>`: a file's (or directory's) structure —
+  module purpose, each symbol's signature, doc first line, and line
+  number, with no bodies — at roughly a tenth the cost of reading the
+  file, plus a `full ≈ X · outline ≈ Y (P%)` size frame. Exposed as an
+  MCP tool whose description steers agents to prefer it before reading a
+  file.
+- `dekko workset [REV] | --symbol NAME`: one budgeted bundle for a whole
+  change — the impacted test files (with a ready-to-paste `pytest` hint),
+  outlines of the touched files, and context packs for the most central
+  touched symbols. A single shared budget (default 6000) trims
+  detail-first so breadth survives a tight cap; `--packs` controls how
+  many symbols get a pack. Also available as an MCP tool.
+- `dekko orient`: an opt-in orientation layer. With no arguments it
+  prints a steering digest (a budgeted repo summary plus pointers to the
+  query surface); with `--read PATH` it emits a one-line nudge to outline
+  a file before reading it, but only when the file is large enough to be
+  worth it, and never blocks. Ships with a `dekko-orient` skill and
+  documented (opt-in) `SessionStart` / `PreToolUse` hook snippets.
+
+### Changed
+- Internal: the directory-of-a-path helper was promoted from `summary`
+  to a shared `textutil.dir_of`, in preparation for an upcoming lean
+  map renderer. No user-visible change.
+
 ## [0.9.0] — 2026-06-14
 
 Track B: the human-readable map. `MAP.md` is now a navigable document —

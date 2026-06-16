@@ -62,12 +62,8 @@ def _symbols(index: MapIndex) -> dict[str, dict]:
             "start": sym.start_line,
             "end": sym.end_line,
             "test": sym.test,
-            "callers": _rels(
-                index, index.calls_in.get(sid, []), True, sid
-            ),
-            "callees": _rels(
-                index, index.calls_out.get(sid, []), False, sid
-            ),
+            "callers": _rels(index, index.calls_in.get(sid, []), True, sid),
+            "callees": _rels(index, index.calls_out.get(sid, []), False, sid),
         }
     return out
 
@@ -83,9 +79,7 @@ def _files(index: MapIndex) -> list[dict]:
                 "doc": index.docs_by_path.get(path) or "",
                 "error": index.errors_by_path.get(path) or "",
                 "test": is_test_path(path),
-                "symbols": [
-                    s.id for s in index.symbols_by_path.get(path, [])
-                ],
+                "symbols": [s.id for s in index.symbols_by_path.get(path, [])],
             }
         )
     return out
@@ -135,8 +129,8 @@ def render(doc: dict) -> str:
     root = html.escape(doc["root"])
     s = doc["stats"]
     stats_line = (
-        f'{s["files"]} files · {s["functions"]} functions/methods · '
-        f'{s["classes"]} classes · {s["edges"]} edges'
+        f"{s['files']} files · {s['functions']} functions/methods · "
+        f"{s['classes']} classes · {s['edges']} edges"
     )
     return (
         "<!doctype html>\n"

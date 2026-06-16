@@ -22,9 +22,10 @@ from .query import (
     report_unresolved,
     resolve_target,
 )
+from .source import read_lines
 from .textutil import signature
 from .resolver import MODULE_CALLER_SUFFIX
-from .textutil import estimate_tokens, token_footer
+from .textutil import Meter, estimate_tokens
 
 # Call-site excerpts shown per hop-1 caller entry.
 _MAX_SITES_PER_ENTRY = 3
@@ -161,15 +162,6 @@ def build_file_pack(index: MapIndex, path: str) -> Pack:
     return pack
 
 
-def _file_lines(root: Path, rel: str) -> list[str]:
-    """Read a repo file's lines, or an empty list on failure."""
-    try:
-        text = (root / rel).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    return text.splitlines()
-
-
 def attach_source(index: MapIndex, pack: Pack, root: Path) -> None:
     """Attach the target's body and hop-1 caller call-site excerpts.
 
@@ -184,7 +176,7 @@ def attach_source(index: MapIndex, pack: Pack, root: Path) -> None:
     """
     if pack.target is None:
         return
-    body = _file_lines(root, pack.target.path)[
+    body = read_lines(root, pack.target.path)[
         pack.target.start_line - 1 : pack.target.end_line
     ]
     if body:
@@ -197,7 +189,7 @@ def attach_source(index: MapIndex, pack: Pack, root: Path) -> None:
         if not lines:
             continue
         if entry.sym.path not in cache:
-            cache[entry.sym.path] = _file_lines(root, entry.sym.path)
+            cache[entry.sym.path] = read_lines(root, entry.sym.path)
         file_lines = cache[entry.sym.path]
         for line_no in lines[:_MAX_SITES_PER_ENTRY]:
             if 1 <= line_no <= len(file_lines):
@@ -262,9 +254,24 @@ def render_text(pack: Pack) -> str:
     if pack.module_callers:
         joined = ", ".join(pack.module_callers)
         lines.append(f"module-level callers: {joined}")
-    if pack.trimmed:
-        lines.append(f"(trimmed {pack.trimmed} symbols to fit budget)")
     return "\n".join(lines)
+
+
+def _pack_meter(pack: Pack, text: str, budget: int | None) -> Meter:
+    """Cost meter for a pack, with trimmed neighbors as omissions.
+
+    Token cost is measured from the text rendering — the same basis
+    ``trim_to_budget`` uses — so the reported figure matches the budget
+    that was applied on either output surface.
+    """
+    kept = len(pack.entries) + len(pack.file_symbols)
+    return Meter(
+        tokens=estimate_tokens(text),
+        returned=kept,
+        total=kept + pack.trimmed,
+        budget=budget,
+        limit=None,
+    )
 
 
 def _estimate_tokens(pack: Pack) -> int:
@@ -304,7 +311,7 @@ def trim_to_budget(index: MapIndex, pack: Pack, budget: int | None) -> Pack:
     return pack
 
 
-def _render_json(pack: Pack) -> str:
+def _render_json(pack: Pack, meter: Meter) -> str:
     """Render a pack as structured JSON."""
 
     def sym_doc(sym: Symbol) -> dict:
@@ -336,6 +343,7 @@ def _render_json(pack: Pack) -> str:
         "neighbors": [neighbor_doc(e) for e in pack.entries],
         "module_callers": pack.module_callers,
         "trimmed": pack.trimmed,
+        "meta": meter.as_dict(),
     }
     if pack.notes:
         doc["notes"] = pack.notes
@@ -395,10 +403,11 @@ def run(
     if with_source and root is not None:
         attach_source(index, pack, root)
     trim_to_budget(index, pack, budget)
-    if as_json:
-        print(_render_json(pack))
-        return EXIT_OK
     text = render_text(pack)
+    meter = _pack_meter(pack, text, budget)
+    if as_json:
+        print(_render_json(pack, meter))
+        return EXIT_OK
     print(text)
-    print(token_footer(text))
+    print(meter.footer())
     return EXIT_OK

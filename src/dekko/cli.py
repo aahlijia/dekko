@@ -27,6 +27,8 @@ from . import export
 from . import languages
 from . import mapfile
 from . import notes as notes_mod
+from . import orient as orient_mod
+from . import outline as outline_mod
 from . import query
 from . import render_html
 from . import render_md
@@ -36,6 +38,7 @@ from . import summary
 from . import trace
 from . import unused
 from . import walker
+from . import workset as workset_mod
 from .extractor import extract_file
 from .extractor_generic import extract_file_generic
 from .model import FileMap
@@ -46,15 +49,18 @@ from .resolver import resolve
 SUBCOMMANDS = (
     "map",
     "query",
+    "outline",
     "context",
     "trace",
     "diff",
     "affected",
+    "workset",
     "status",
     "serve",
     "unused",
     "stats",
     "summary",
+    "orient",
     "note",
     "export",
 )
@@ -257,6 +263,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="max text result lines (default: 50)",
     )
     p_query.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="approximate token budget; drops lowest-relevance rows",
+    )
+    p_query.add_argument(
         "--sites",
         action="store_true",
         help="for callers/callees: one row per call site (path:line of "
@@ -270,6 +283,29 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     _add_read_options(p_query)
     p_query.set_defaults(func=run_query)
+
+    p_outline = sub.add_parser(
+        "outline",
+        help="a file's (or directory's) structure: signatures, no bodies",
+    )
+    p_outline.add_argument(
+        "target", help="mapped file path or directory (default: whole repo)"
+    )
+    p_outline.add_argument(
+        "--limit",
+        type=int,
+        default=200,
+        help="max symbol rows (default: 200)",
+    )
+    p_outline.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="approximate token budget for the outline",
+    )
+    _add_read_options(p_outline)
+    p_outline.set_defaults(func=run_outline)
 
     p_ctx = sub.add_parser(
         "context", help="emit a context pack for a symbol or file"
@@ -385,7 +421,66 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=8,
         help="max impacted symbols shown per test file (default: 8)",
     )
+    p_affected.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="approximate token budget; drops weakest-tier files first",
+    )
     p_affected.set_defaults(func=run_affected)
+
+    p_workset = sub.add_parser(
+        "workset",
+        help="one budgeted bundle for a change: impacts, outlines, packs",
+    )
+    p_workset.add_argument(
+        "rev",
+        nargs="?",
+        default=None,
+        help="git rev to compare against (default: the commit the map "
+        "was generated at, else HEAD); omit when using --symbol",
+    )
+    p_workset.add_argument(
+        "--symbol",
+        default=None,
+        metavar="NAME",
+        help="seed from a symbol instead of a diff (name, Class.method, "
+        "file.py:name); mutually exclusive with REV",
+    )
+    p_workset.add_argument(
+        "--budget",
+        type=int,
+        default=workset_mod.DEFAULT_BUDGET,
+        metavar="TOKENS",
+        help=f"shared token budget for the bundle "
+        f"(default: {workset_mod.DEFAULT_BUDGET})",
+    )
+    p_workset.add_argument(
+        "--packs",
+        type=int,
+        default=workset_mod.DEFAULT_PACKS,
+        help=f"top-centrality touched symbols to deep-pack "
+        f"(default: {workset_mod.DEFAULT_PACKS})",
+    )
+    p_workset.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_workset.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_workset.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="fail (exit 5) instead of regenerating a stale map",
+    )
+    p_workset.set_defaults(func=run_workset)
 
     p_status = sub.add_parser(
         "status", help="report whether map.json is fresh"
@@ -439,6 +534,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=50,
         help="max text result lines (default: 50)",
     )
+    p_unused.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="approximate token budget for the result rows",
+    )
     _add_read_options(p_unused)
     p_unused.set_defaults(func=run_unused)
 
@@ -459,6 +561,53 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
+
+    p_orient = sub.add_parser(
+        "orient",
+        help="opt-in orientation: a steering digest, or a pre-read nudge",
+    )
+    p_orient.add_argument(
+        "--read",
+        dest="read_path",
+        default=None,
+        metavar="PATH",
+        help="advisory mode: nudge to outline PATH first when it is "
+        "large (silent for small/unmapped files; never blocks)",
+    )
+    p_orient.add_argument(
+        "--budget",
+        type=int,
+        default=orient_mod.DEFAULT_BUDGET,
+        metavar="TOKENS",
+        help=f"session digest token budget "
+        f"(default: {orient_mod.DEFAULT_BUDGET})",
+    )
+    p_orient.add_argument(
+        "--threshold",
+        type=int,
+        default=orient_mod.DEFAULT_THRESHOLD,
+        metavar="TOKENS",
+        help=f"--read advises only when the file reaches this many "
+        f"tokens (default: {orient_mod.DEFAULT_THRESHOLD})",
+    )
+    p_orient.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_orient.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON (session mode)",
+    )
+    p_orient.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="fail (exit 5) instead of regenerating a stale map",
+    )
+    p_orient.set_defaults(func=run_orient)
 
     p_note = sub.add_parser(
         "note", help="add, list, or remove symbol-anchored notes"
@@ -1160,6 +1309,22 @@ def run_query(args: argparse.Namespace) -> int:
         limit=args.limit,
         sites=args.sites,
         notes=args.notes,
+        budget=args.budget,
+    )
+
+
+def run_outline(args: argparse.Namespace) -> int:
+    """Handle ``dekko outline <path>``."""
+    index, code = _read_index(args)
+    if index is None:
+        return code
+    return outline_mod.run(
+        index,
+        args.target,
+        root=Path(args.root).resolve(),
+        budget=args.budget,
+        limit=args.limit,
+        as_json=args.as_json,
     )
 
 
@@ -1213,6 +1378,23 @@ def run_affected(args: argparse.Namespace) -> int:
         args.rev,
         as_json=args.as_json,
         limit=args.limit,
+        budget=args.budget,
+    )
+
+
+def run_workset(args: argparse.Namespace) -> int:
+    """Handle ``dekko workset [REV] | --symbol NAME``."""
+    if args.symbol is not None and args.rev is not None:
+        print("dekko: give a REV or --symbol, not both", file=sys.stderr)
+        return workset_mod.EXIT_ERROR
+    return workset_mod.run(
+        Path(args.root).resolve(),
+        args.rev,
+        args.symbol,
+        budget=args.budget,
+        packs=args.packs,
+        as_json=args.as_json,
+        no_regen=args.no_regen,
     )
 
 
@@ -1226,6 +1408,7 @@ def run_unused(args: argparse.Namespace) -> int:
         tuple(args.roots),
         as_json=args.as_json,
         limit=args.limit,
+        budget=args.budget,
     )
 
 
@@ -1243,6 +1426,18 @@ def run_summary(args: argparse.Namespace) -> int:
     if index is None:
         return code
     return summary.run(index, as_json=args.as_json)
+
+
+def run_orient(args: argparse.Namespace) -> int:
+    """Handle ``dekko orient [--read PATH]``."""
+    return orient_mod.run(
+        Path(args.root).resolve(),
+        args.read_path,
+        budget=args.budget,
+        threshold=args.threshold,
+        as_json=args.as_json,
+        no_regen=args.no_regen,
+    )
 
 
 def run_note(args: argparse.Namespace) -> int:
