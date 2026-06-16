@@ -9,6 +9,38 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Active Context Layer
+
+dekko grows from a *pull* context server into a *session-aware push*
+layer: it ranks context by the live task, knows what the agent already
+holds, and can deliver orientation through opt-in Claude Code hooks.
+
+#### Added
+- **Task-aware ranking (`--task`)** on `lean`, `workset`, and `context`
+  (and the matching MCP tools): a free-text task description is blended
+  with structural centrality and the working diff so the most relevant
+  code survives a tight budget. Lexical and dependency-free; output is
+  byte-for-byte unchanged when no task is given. New `relevance` module
+  with a pluggable `Scorer` (lexical now, embeddings a future drop-in).
+- **`dekko lean --dense`** (and MCP `dense`): keeps full signatures only
+  on the most central symbols, names for the rest — the tersest
+  whole-repo map.
+- **`dekko ledger`** (and MCP `ledger`): projects the Claude Code session
+  transcript into "what is already in context" — files read, symbols
+  seen, and real tokens consumed (from the transcript's usage). dekko
+  persists no session state of its own, so it also sees direct reads.
+- **`dekko hooks install|uninstall|run`**: opt-in push hooks merged into
+  project `.claude/settings.json` — `session-start` (steering preamble +
+  budget-capped lean map), `prompt-submit` (relevance-ranked pointer to
+  files not yet in context), and `pre-read` (non-blocking advisory to
+  outline a large file first, `permissionDecision: "defer"`). Every hook
+  is fail-silent and individually toggleable; uninstall touches only
+  dekko's entries.
+- **Density metric (FR-D3)**: `Meter` and the lean report now expose
+  `signals` and tokens-per-signal, so output cost can be measured against
+  coverage. A `benchmarks/` harness records the baseline reduction (dekko
+  mapping its own source: ~92% fewer tokens than whole-file reads).
+
 ## [0.10.0] — 2026-06-16
 
 Context & token management for agents: every list-shaped command can now

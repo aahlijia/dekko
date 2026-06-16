@@ -13,8 +13,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import relevance
 from .mapfile import MapIndex
 from .model import Import, Symbol
+from .relevance import TaskContext
 from .query import (
     EXIT_AMBIGUOUS,
     EXIT_OK,
@@ -265,12 +267,16 @@ def _pack_meter(pack: Pack, text: str, budget: int | None) -> Meter:
     that was applied on either output surface.
     """
     kept = len(pack.entries) + len(pack.file_symbols)
+    # Signals: the symbols this pack puts in context — neighbors, file
+    # symbols, and the target itself (FR-D3 density).
+    signals = kept + (1 if pack.target is not None else 0)
     return Meter(
         tokens=estimate_tokens(text),
         returned=kept,
         total=kept + pack.trimmed,
         budget=budget,
         limit=None,
+        signals=signals,
     )
 
 
@@ -279,26 +285,63 @@ def _estimate_tokens(pack: Pack) -> int:
     return estimate_tokens(render_text(pack))
 
 
-def trim_to_budget(index: MapIndex, pack: Pack, budget: int | None) -> Pack:
+def _entry_scores(
+    index: MapIndex, pack: Pack, task: TaskContext
+) -> dict[str, float]:
+    """Blend task relevance with call degree over a pack's neighbors."""
+    candidates = [
+        relevance.Candidate(
+            id=e.sym.id,
+            text=f"{e.sym.qualname} {signature(e.sym)}",
+            path=e.sym.path,
+        )
+        for e in pack.entries
+    ]
+    centrality = {
+        e.sym.id: float(index.degree(e.sym.id)) for e in pack.entries
+    }
+    return relevance.blended_scores(task, candidates, centrality)
+
+
+def trim_to_budget(
+    index: MapIndex,
+    pack: Pack,
+    budget: int | None,
+    task: TaskContext | None = None,
+) -> Pack:
     """Drop pack content until it fits the token budget.
 
     Neighbors go first (farthest hops, then least-connected), then the
     file-mode symbol list from the end, then inlined source from the
-    bottom. The target's signature and location are never dropped.
+    bottom. The target's signature and location are never dropped. With a
+    ``task`` signal, neighbors are dropped least-relevant first so the
+    task-relevant callers/callees survive a tight budget.
 
     Args:
         index: Loaded map index (for degree ranking).
         pack: Pack to trim in place.
         budget: Approximate token budget, or ``None`` for no limit.
+        task: Optional task context for relevance-aware trimming.
 
     Returns:
         The same pack, trimmed.
     """
     if budget is None:
         return pack
-    droppable = sorted(
-        pack.entries, key=lambda e: (-e.hop, index.degree(e.sym.id))
-    )
+    if task is not None and not task.is_empty and pack.entries:
+        scores = _entry_scores(index, pack, task)
+        droppable = sorted(
+            pack.entries,
+            key=lambda e: (
+                scores.get(e.sym.id, 0.0),
+                -e.hop,
+                index.degree(e.sym.id),
+            ),
+        )
+    else:
+        droppable = sorted(
+            pack.entries, key=lambda e: (-e.hop, index.degree(e.sym.id))
+        )
     while droppable and _estimate_tokens(pack) > budget:
         pack.entries.remove(droppable.pop(0))
         pack.trimmed += 1
@@ -362,6 +405,7 @@ def run(
     root: Path | None = None,
     with_source: bool = False,
     notes: bool = True,
+    task: TaskContext | None = None,
 ) -> int:
     """Build, trim, and print a context pack for a target.
 
@@ -375,6 +419,8 @@ def run(
         with_source: Inline the target's body and hop-1 call-site
             lines (strictly opt-in; counts against ``budget``).
         notes: Include the target's notes (default on).
+        task: Optional task context; when set, neighbors are trimmed
+            least-relevant first under a tight budget.
 
     Returns:
         Process exit code.
@@ -402,7 +448,7 @@ def run(
 
     if with_source and root is not None:
         attach_source(index, pack, root)
-    trim_to_budget(index, pack, budget)
+    trim_to_budget(index, pack, budget, task)
     text = render_text(pack)
     meter = _pack_meter(pack, text, budget)
     if as_json:

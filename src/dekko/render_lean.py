@@ -23,9 +23,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import export, summary
+from . import export, relevance, summary
 from .classify import is_test_path
 from .mapfile import MapIndex
+from .relevance import TaskContext
 from .textutil import count_lines, dir_of, oneline, signature
 
 # Default (and maximum) purpose width. The render layer may narrow this
@@ -52,6 +53,9 @@ _HEADER_RESERVE_TOK = 64
 # the token budget — it stops an unreadable hairball even when the
 # budget would allow it. The block is the ladder's first drop regardless.
 LEAN_MERMAID_MAX_NODES = 40
+# FR-D1 dense mode: keep signatures only on this many most-central atoms
+# (names for the rest), regardless of budget headroom. The tersest skin.
+LEAN_DENSE_SIGNATURES = 30
 
 
 @dataclass(frozen=True)
@@ -366,6 +370,15 @@ class LeanReport:
     module_edges_dropped: bool
     purpose_width: int
     total_symbols: int
+    signals: int = 0
+    already_seen: int = 0
+
+    @property
+    def per_signal(self) -> float | None:
+        """Tokens spent per signal covered (FR-D3), or ``None``."""
+        if self.signals <= 0:
+            return None
+        return round(self.tokens / self.signals, 1)
 
     @property
     def floored(self) -> bool:
@@ -399,11 +412,15 @@ class LeanReport:
             parts.append("module edges")
         if self.purpose_width < LEAN_PURPOSE_WIDTH:
             parts.append(f"purpose→{self.purpose_width}")
+        if self.already_seen:
+            parts.append(f"{self.already_seen} already in context")
         return parts
 
     def footer(self) -> str:
-        """The header's first line: budget and what was elided."""
+        """The header's first line: budget, density, and what was elided."""
         head = f"lean map · ~{self.tokens}/{self.cap} tok"
+        if self.signals > 0:
+            head += f" · {self.signals} signals"
         drops = self._drops()
         if drops:
             head += " · dropped: " + ", ".join(drops)
@@ -420,7 +437,10 @@ class LeanReport:
             "names_dropped": self.names_dropped,
             "module_edges_dropped": self.module_edges_dropped,
             "purpose_width": self.purpose_width,
-            "floored": self.floored
+            "floored": self.floored,
+            "signals": self.signals,
+            "tokens_per_signal": self.per_signal,
+            "already_seen": self.already_seen,
         }
 
 
@@ -434,6 +454,7 @@ class _LeanState:
     purpose_width: int = LEAN_PURPOSE_WIDTH
     dropped_sigs: set[str] = field(default_factory=set)
     dropped_names: set[str] = field(default_factory=set)
+    seen: set[str] = field(default_factory=set)
 
 
 def build_mermaid(
@@ -516,7 +537,13 @@ def _floor_cost(model: LeanModel) -> int:
     return count_lines(floor) + _HEADER_RESERVE_TOK
 
 
-def render(model: LeanModel, cap: int) -> tuple[list[str], LeanReport]:
+def render(
+    model: LeanModel,
+    cap: int,
+    scores: dict[str, float] | None = None,
+    dense: bool = False,
+    seen: set[str] | None = None,
+) -> tuple[list[str], LeanReport]:
     """Render the lean map under ``cap`` via the NFR2 ladder (§3).
 
     Sheds depth in fixed preservation order, re-measuring after each
@@ -527,21 +554,32 @@ def render(model: LeanModel, cap: int) -> tuple[list[str], LeanReport]:
     Args:
         model: Full-fidelity lean model from :func:`build_model`.
         cap: Token budget from :func:`effective_cap`.
+        scores: Optional per-symbol survival scores (task-aware, higher
+            survives longer); ``None`` sheds by plain centrality.
+        dense: FR-D1 — keep signatures only on the most-central atoms
+            (names for the rest) regardless of budget headroom.
+        seen: FR-D2 — symbol ids already in the agent's context; these
+            atoms are omitted and counted, so a re-surfaced map carries
+            only what is new.
 
     Returns:
         ``(lines, report)`` — the rendered map and what was shed.
     """
     state = _LeanState()
+    if seen:
+        state.seen = set(seen)
     body_budget = cap - _HEADER_RESERVE_TOK
 
     def fits() -> bool:
         return count_lines(_render_document(model, state)) <= body_budget
 
+    live = _live_atoms(model, scores)
+    if dense:                            # 0: pre-shed sigs off the long tail
+        _force_dense_sigs(state, live)
     if not fits():                       # 1: mermaid
         state.mermaid = False
     if not fits():                       # 2: collapse demotable dirs
         state.collapse_demotable = True
-    live = _live_atoms(model)
     _shed_symbols(state, live, fits)     # 3-4: signatures then names
     if not fits():                       # 5: module edges
         state.module_edges = False
@@ -557,18 +595,92 @@ def render(model: LeanModel, cap: int) -> tuple[list[str], LeanReport]:
         names_dropped=len(state.dropped_names),
         module_edges_dropped=not state.module_edges,
         purpose_width=state.purpose_width,
-        total_symbols=len(live)
+        total_symbols=len(live),
+        signals=_count_signals(model, state, live),
+        already_seen=sum(1 for a in live if a.sym_id in state.seen),
     )
     return _assemble(report, body)
 
 
+def _force_dense_sigs(state: _LeanState, live: list[SymbolAtom]) -> None:
+    """FR-D1: drop signatures for all but the top-K central atoms.
+
+    ``live`` is ascending by survival score, so the most-central atoms
+    are its tail; everything before the last ``LEAN_DENSE_SIGNATURES``
+    loses its signature (keeps its name).
+    """
+    if len(live) > LEAN_DENSE_SIGNATURES:
+        for atom in live[:-LEAN_DENSE_SIGNATURES]:
+            state.dropped_sigs.add(atom.sym_id)
+
+
+def _count_signals(
+    model: LeanModel, state: _LeanState, live: list[SymbolAtom]
+) -> int:
+    """Files + symbols actually rendered (FR-D3 density numerator)."""
+    rendered_syms = sum(
+        1
+        for a in live
+        if a.sym_id not in state.dropped_names and a.sym_id not in state.seen
+    )
+    n_files = sum(
+        len(g.rows)
+        for g in model.groups
+        if not (state.collapse_demotable and g.demotable)
+    )
+    return n_files + rendered_syms
+
+
 def generate(
-    index: MapIndex, root: Path, config: CapConfig | None = None
+    index: MapIndex,
+    root: Path,
+    config: CapConfig | None = None,
+    task: TaskContext | None = None,
+    dense: bool = False,
+    seen: set[str] | None = None,
 ) -> tuple[list[str], LeanReport]:
-    """One call: build the model, pick the cap, render the lean map."""
+    """One call: build the model, pick the cap, render the lean map.
+
+    When ``task`` carries a signal, the symbol atoms are shed in a
+    task-aware order (relevant atoms survive the ladder longer); without
+    it the order is plain Q1 centrality and output is unchanged. ``dense``
+    (FR-D1) and ``seen`` (FR-D2) tune the density independently of budget.
+    """
     config = config or CapConfig()
     model = build_model(index, root)
-    return render(model, effective_cap(model, config))
+    scores = None
+    if task is not None and not task.is_empty:
+        scores = _relevance_scores(model, task)
+    return render(
+        model, effective_cap(model, config), scores, dense=dense, seen=seen
+    )
+
+
+def _relevance_scores(
+    model: LeanModel, task: TaskContext
+) -> dict[str, float]:
+    """Blend task relevance with Q1 centrality over the live atoms.
+
+    Scores only the atoms the ladder can shed (those in expanded,
+    non-demotable groups); demotable atoms are collapsed wholesale and
+    never ranked. Higher score = survives longer.
+    """
+    candidates: list[relevance.Candidate] = []
+    centrality: dict[str, float] = {}
+    for group in model.groups:
+        if group.demotable:
+            continue
+        for row in group.rows:
+            for atom in model.atoms_by_path.get(row.path, []):
+                candidates.append(
+                    relevance.Candidate(
+                        id=atom.sym_id,
+                        text=f"{atom.name} {atom.signature}",
+                        path=atom.path,
+                    )
+                )
+                centrality[atom.sym_id] = atom.centrality
+    return relevance.blended_scores(task, candidates, centrality)
 
 
 def run(
@@ -576,7 +688,9 @@ def run(
     root: Path,
     budget: int | None = None,
     as_json: bool = False,
-    out_path: Path | None = None
+    out_path: Path | None = None,
+    task: TaskContext | None = None,
+    dense: bool = False,
 ) -> int:
     """Render the lean map to stdout, JSON, or a file.
 
@@ -588,11 +702,16 @@ def run(
         out_path: When set, write the text map there (and print a
             confirmation) instead of printing the map itself; the cached,
             optionally-committed artifact (e.g. ``.dekko/LEAN.md``).
+        task: Optional task context; when set, the symbol atoms are shed
+            in a task-aware order so relevant code survives the ladder.
+        dense: Keep signatures only on the most-central atoms (FR-D1).
 
     Returns:
         Always ``0``.
     """
-    lines, report = generate(index, root, CapConfig(override=budget))
+    lines, report = generate(
+        index, root, CapConfig(override=budget), task, dense=dense
+    )
     text = "\n".join(lines)
     if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -628,11 +747,17 @@ def _shed_purpose(state: _LeanState, fits: Callable[[], bool]) -> None:
         state.purpose_width = width
 
 
-def _live_atoms(model: LeanModel) -> list[SymbolAtom]:
-    """Atoms in expanded (non-demotable) groups, ascending centrality.
+def _live_atoms(
+    model: LeanModel, scores: dict[str, float] | None = None
+) -> list[SymbolAtom]:
+    """Atoms in expanded (non-demotable) groups, lowest-survival first.
 
     These are the only atoms the ladder sheds: demotable groups are
-    collapsed wholesale at rung 2, so their atoms never render.
+    collapsed wholesale at rung 2, so their atoms never render. Without
+    ``scores`` the order is ascending Q1 centrality; with task-aware
+    ``scores`` it is ascending blended score, so relevant atoms sort to
+    the tail and are shed last. ``sym_id`` breaks ties for byte-stable
+    output (NFR3).
     """
     live: list[SymbolAtom] = []
     for group in model.groups:
@@ -640,7 +765,10 @@ def _live_atoms(model: LeanModel) -> list[SymbolAtom]:
             continue
         for row in group.rows:
             live.extend(model.atoms_by_path.get(row.path, []))
-    live.sort(key=centrality_key)
+    if scores is None:
+        live.sort(key=centrality_key)
+    else:
+        live.sort(key=lambda a: (scores.get(a.sym_id, 0.0), a.sym_id))
     return live
 
 
@@ -684,6 +812,8 @@ def _atom_lines(
 
 def _atom_form(state: _LeanState, atom: SymbolAtom) -> str | None:
     """Rendering of an atom: ``sig``, ``name``, or dropped (``None``)."""
+    if atom.sym_id in state.seen:        # FR-D2: already in context
+        return None
     if atom.sym_id in state.dropped_names:
         return None
     if atom.sym_id in state.dropped_sigs:

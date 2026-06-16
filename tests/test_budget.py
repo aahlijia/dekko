@@ -79,4 +79,6 @@ def test_as_dict_shape() -> None:
         "budget": 25,
         "limit": 4,
         "truncated_by": "budget",
+        "signals": 0,
+        "tokens_per_signal": None,
     }

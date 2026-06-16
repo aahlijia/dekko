@@ -98,6 +98,8 @@ dekko outline server.py       # a file's signatures + docs, no bodies
 dekko trace main run_map      # shortest call path(s) between two symbols
 dekko summary                 # ~40-line repo digest (dirs, hotspots)
 dekko lean                    # budget-capped whole-repo navigation map
+dekko lean --task "fix auth"  # rank the map by relevance to a task
+dekko lean --dense            # terser: signatures only on the most central
 dekko lean --output .dekko/LEAN.md  # write it (gitignored; commit via whitelist)
 dekko diff                    # symbols changed since the map's commit
 dekko affected                # test files impacted by your changes
@@ -106,6 +108,8 @@ dekko workset                 # one budgeted bundle for your current change
 dekko unused                  # symbols nothing calls (dead-code leads)
 dekko stats                   # hotspots, largest files, language mix
 dekko orient                  # opt-in session digest + steering preamble
+dekko ledger                  # what this session already has in context
+dekko hooks install           # enable the opt-in push hooks (settings.json)
 dekko note add cli.py:run_map "why" # anchor a durable note to a symbol
 dekko note list --orphaned    # notes whose symbol moved
 dekko export --format mermaid # render the call graph (mermaid|dot)
@@ -121,17 +125,19 @@ dekko --version
 | --- | --- |
 | `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--full` forces a cold rebuild; `--jobs N` parallelizes extraction, `0` = all cores; `--shard auto\|always\|never` splits large maps into `map/` pages; `--order path\|name\|fan-in` orders sections; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
 | `query ACTION TARGET` | `callers`, `callees`, `symbol`, `file`, or `uses` lookups; `--sites` for per-call-site rows, `--no-tests` to drop test code, `--notes/--no-notes` |
-| `context TARGET` | A symbol's neighborhood with docs and notes (`--hops N`, `--budget TOKENS`); `--with-source` inlines the body and hop-1 call sites |
+| `context TARGET` | A symbol's neighborhood with docs and notes (`--hops N`, `--budget TOKENS`); `--with-source` inlines the body and hop-1 call sites; `--task "…"` keeps the most task-relevant neighbors under a tight budget |
 | `outline PATH` | A file's (or directory's) structure — signatures, doc first lines, line numbers, no bodies — at ~1/10 the read cost (`--budget`, `--limit`, `--json`) |
 | `trace FROM TO` | Shortest call path(s) from one symbol to another (`--max-paths K`, `--json`); no path is a clean exit `1` |
 | `summary` | ~40-line repo digest: counts, per-directory rollup with coupling and purpose, hotspots, entry points, parse errors (`--json`) |
-| `lean` | A budget-capped whole-repo navigation map: every file + purpose, symbols (signatures on the most central, names on the rest), and module edges, shed to fit a token cap (`--budget`, `--output PATH`, `--json`). Denser than `summary`, far cheaper than MAP.md |
-| `workset [REV]` | One budgeted bundle for a change: impacted tests, touched-file outlines, and packs for the most central touched symbols (`--symbol NAME`, `--budget`, `--packs N`, `--json`) |
+| `lean` | A budget-capped whole-repo navigation map: every file + purpose, symbols (signatures on the most central, names on the rest), and module edges, shed to fit a token cap (`--budget`, `--output PATH`, `--json`). `--task "…"` ranks by relevance; `--dense` keeps signatures only on the most central. Denser than `summary`, far cheaper than MAP.md |
+| `workset [REV]` | One budgeted bundle for a change: impacted tests, touched-file outlines, and packs for the most central touched symbols (`--symbol NAME`, `--budget`, `--packs N`, `--task "…"`, `--json`) |
 | `diff [REV]` | Symbols added/removed/changed since a git rev (default: the map's commit), each with impacted callers (`--limit`, `--json`) |
 | `affected [REV]` | Test files impacted by changes — reverse call-graph reachability plus an import-edge fallback; prints a `pytest …` line (`--limit`, `--json`) |
 | `unused` | Symbols with no inbound calls, minus roots (`--roots GLOB`, `--limit`, `--json`); exit 1 when any are found |
 | `stats` | Fan-in/out hotspots, largest files, language mix (`--top`, `--json`) |
 | `orient [--read PATH]` | Opt-in orientation: a budgeted session digest with steering, or a pre-read nudge to outline a large file first (never blocks) |
+| `ledger` | What the current session already loaded into context (files read, symbols seen, tokens consumed), projected from the session transcript (`--transcript PATH`, `--session ID`, `--budget`, `--json`) |
+| `hooks install\|uninstall\|run` | Manage the opt-in push hooks in `.claude/settings.json` (`install --enable EVENT` for `session-start`, `prompt-submit`, `pre-read`) |
 | `note add\|list\|rm` | Durable symbol-anchored notes in `.dekko/notes.json` (`list --orphaned` finds notes whose symbol moved) |
 | `export` | Call graph as `--format mermaid\|dot` (`--scope symbol\|file`, capped by `--max-nodes`) or `--format html` (a self-contained interactive browser); `--output PATH` writes a file instead of stdout (html defaults to `.dekko/map.html`) |
 | `status` | Freshness report from the provenance stamp in map.json |
@@ -284,27 +290,85 @@ not in dekko:
 
 Both hooks are opt-in; core behavior is unchanged when neither is set.
 
+### Active Context Layer (opt-in)
+
+`dekko orient` above is the manual, one-shot push. The **Active Context
+Layer** is the fuller version: a set of opt-in Claude Code hooks that keep
+an agent oriented, point it at the code relevant to *this* task, and stop
+it re-spending tokens on context it already holds. It is built from three
+pieces that also work on their own.
+
+**Task-aware ranking (`--task`).** `lean`, `workset`, and `context` accept
+`--task "…"`; the description is blended with structural centrality (and
+your working diff) so the most relevant code survives a tight budget:
+
+```sh
+dekko lean --task "refactor the token budgeting"   # map ranked for the task
+dekko context fit_to_budget --task "add a floor" --budget 600
+```
+
+Ranking is lexical and dependency-free; with no `--task`, output is
+byte-for-byte unchanged. `dekko lean --dense` is an orthogonal lever — it
+keeps full signatures only on the most central symbols (names for the
+rest), for the tersest whole-repo map.
+
+**Session ledger (`dekko ledger`).** Projects the Claude Code session
+transcript into "what is already in context" — files read, symbols seen,
+and the real tokens consumed (read straight from the transcript's usage):
+
+```sh
+dekko ledger --budget 200000        # …and how much budget is left
+```
+
+dekko persists no session state of its own; the transcript is the source
+of truth, so the ledger also sees files the agent read *directly*.
+
+**Push hooks (`dekko hooks install`).** Wires the above into project
+`.claude/settings.json` — opt-in, per-project, nothing active until you
+run it:
+
+```sh
+dekko hooks install                                   # SessionStart only
+dekko hooks install --enable session-start --enable prompt-submit
+dekko hooks uninstall                                 # remove dekko's entries
+```
+
+- **`session-start`** injects a steering preamble + a budget-capped lean
+  map, so the first turn already holds a navigation map.
+- **`prompt-submit`** points at the files most relevant to the new prompt
+  that aren't already in context (relevance ⋈ ledger dedup), the list
+  tightening as the session's budget fills.
+- **`pre-read`** advises outlining a large file first — non-blocking
+  (`permissionDecision: "defer"`; it never denies a read).
+
+Every hook is fail-silent: a missing map, an empty signal, or any error
+yields no output and a clean exit, so a hook can never break or hijack a
+session. `dekko hooks install` writes direct `dekko hooks run <event>`
+commands (no shell substitution), and `uninstall` removes only dekko's
+entries, leaving your other hooks untouched.
+
 ## MCP server
 
 `dekko serve --mcp` speaks the Model Context Protocol over stdio as
 newline-delimited JSON-RPC 2.0 — **no SDK dependency**. It lets an agent
 answer "who calls X?" with a tool call instead of reading MAP.md. The
-read surface maps to fourteen tools:
+read surface maps to eighteen tools:
 
 | Tool | Backs |
 | --- | --- |
 | `query_symbol` | `query symbol` (signature, doc, fan-in/out, notes) |
 | `get_callers` / `get_callees` | `query callers` / `callees` (`sites`) |
 | `find_usages` | `query uses` (references to an external name) |
-| `get_context_pack` | `context` (`hops`, `budget`, `with_source`) |
+| `get_context_pack` | `context` (`hops`, `budget`, `with_source`, `task`) |
 | `outline` | `outline` (`target`, `budget`, `limit`) |
 | `trace_path` | `trace` (`from`, `to`, `max_paths`) |
 | `affected` → `impacted_tests` | `affected` (`rev`) |
-| `workset` | `workset` (`rev` or `symbol`, `budget`, `packs`) |
+| `workset` | `workset` (`rev` or `symbol`, `budget`, `packs`, `task`) |
 | `summary` | `summary` |
-| `lean` | `lean` (`budget`) — budget-capped whole-repo navigation map |
+| `lean` | `lean` (`budget`, `task`, `dense`) — budget-capped whole-repo navigation map |
 | `find_unused` | `unused` (`roots`, `limit`) |
 | `stats` | `stats` (`top`) |
+| `ledger` | `ledger` — what the session already holds in context |
 | `add_note` / `list_notes` | `note add` / `note list` |
 | `map_status` | `status` |
 | `refresh_map` | `map` (`full` for a cold rebuild) |
