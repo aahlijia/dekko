@@ -24,13 +24,17 @@ from . import classify
 from . import contextpack
 from . import diff
 from . import export
+from . import hooks as hooks_mod
 from . import languages
+from . import ledger as ledger_mod
 from . import mapfile
 from . import notes as notes_mod
 from . import orient as orient_mod
 from . import outline as outline_mod
 from . import query
+from . import relevance
 from . import render_html
+from . import render_lean
 from . import render_md
 from . import server
 from . import stats
@@ -50,12 +54,15 @@ SUBCOMMANDS = (
     "map",
     "query",
     "outline",
+    "lean",
     "context",
     "trace",
     "diff",
     "affected",
     "workset",
     "status",
+    "ledger",
+    "hooks",
     "serve",
     "unused",
     "stats",
@@ -201,6 +208,17 @@ def _add_read_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_task_option(parser: argparse.ArgumentParser) -> None:
+    """Attach the ``--task`` relevance flag (Pillar B)."""
+    parser.add_argument(
+        "--task",
+        default=None,
+        metavar="TEXT",
+        help="rank output by relevance to this task description, blended "
+        "with structural centrality and the working diff",
+    )
+
+
 def build_subcommand_parser() -> argparse.ArgumentParser:
     """Construct the subcommand parser (map/query/context/status)."""
     parser = argparse.ArgumentParser(
@@ -338,6 +356,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=True,
         help="include notes anchored to the target (default: on)",
     )
+    _add_task_option(p_ctx)
     _add_read_options(p_ctx)
     p_ctx.set_defaults(func=run_context)
 
@@ -480,6 +499,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail (exit 5) instead of regenerating a stale map",
     )
+    _add_task_option(p_workset)
     p_workset.set_defaults(func=run_workset)
 
     p_status = sub.add_parser(
@@ -498,6 +518,87 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="emit structured JSON",
     )
     p_status.set_defaults(func=run_status)
+
+    p_ledger = sub.add_parser(
+        "ledger",
+        help="what this session has put in context (from the transcript)",
+    )
+    p_ledger.add_argument(
+        "--transcript",
+        default=None,
+        metavar="PATH",
+        help="session JSONL to read (default: latest for this repo under "
+        "~/.claude)",
+    )
+    p_ledger.add_argument(
+        "--session",
+        default=None,
+        metavar="ID",
+        help="resolve a specific session id when discovering a transcript",
+    )
+    p_ledger.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="report remaining tokens against this session budget",
+    )
+    p_ledger.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_ledger.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_ledger.set_defaults(func=run_ledger)
+
+    p_hooks = sub.add_parser(
+        "hooks",
+        help="manage opt-in Claude Code push hooks (orientation, "
+        "task pointers, read advisories)",
+    )
+    hooks_sub = p_hooks.add_subparsers(
+        dest="hooks_action", required=True, metavar="ACTION"
+    )
+    p_hooks_install = hooks_sub.add_parser(
+        "install",
+        help="enable dekko hooks in .claude/settings.json (opt-in)",
+    )
+    p_hooks_install.add_argument(
+        "--enable",
+        action="append",
+        choices=list(hooks_mod.EVENTS),
+        default=None,
+        metavar="EVENT",
+        help="hook event(s) to enable; repeatable (default: session-start)",
+    )
+    p_hooks_install.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root whose .claude/settings.json to edit (default: cwd)",
+    )
+    p_hooks_install.set_defaults(func=run_hooks_install)
+    p_hooks_uninstall = hooks_sub.add_parser(
+        "uninstall", help="remove all dekko hooks from .claude/settings.json"
+    )
+    p_hooks_uninstall.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root whose .claude/settings.json to edit (default: cwd)",
+    )
+    p_hooks_uninstall.set_defaults(func=run_hooks_uninstall)
+    p_hooks_run = hooks_sub.add_parser(
+        "run", help="execute a hook handler (reads event JSON on stdin)"
+    )
+    p_hooks_run.add_argument("event", choices=list(hooks_mod.EVENTS))
+    p_hooks_run.set_defaults(func=run_hooks_run)
 
     p_serve = sub.add_parser("serve", help="run the MCP server over stdio")
     p_serve.add_argument(
@@ -561,6 +662,35 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
+
+    p_lean = sub.add_parser(
+        "lean",
+        help="budget-capped navigation map: files, symbols, module edges",
+    )
+    _add_read_options(p_lean)
+    p_lean.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="hard token cap (default: scales with repo size; never "
+        "below the file-backbone floor)",
+    )
+    p_lean.add_argument(
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="write the map to PATH (e.g. .dekko/LEAN.md) instead of "
+        "printing it",
+    )
+    p_lean.add_argument(
+        "--dense",
+        action="store_true",
+        help="terser skin: signatures only on the most-central symbols, "
+        "names for the rest (FR-D1)",
+    )
+    _add_task_option(p_lean)
+    p_lean.set_defaults(func=run_lean)
 
     p_orient = sub.add_parser(
         "orient",
@@ -957,16 +1087,22 @@ def _run_subprocess(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-def _claude_cli_present() -> bool:
-    """Return True if the ``claude`` CLI is on PATH, else warn and False."""
-    if shutil.which("claude") is None:
+def _claude_exe() -> str | None:
+    """Resolve the ``claude`` CLI to its full path, or warn and None.
+
+    Returns the absolute path so callers invoke the resolved executable
+    rather than the bare name. On Windows ``subprocess.run`` will not
+    launch a ``claude.cmd`` shim found only by name; the full path that
+    ``shutil.which`` returns does work.
+    """
+    exe = shutil.which("claude")
+    if exe is None:
         print(
             "dekko: 'claude' CLI not found on PATH. Install Claude Code "
             "first: https://claude.com/claude-code",
             file=sys.stderr,
         )
-        return False
-    return True
+    return exe
 
 
 def claude_install() -> int:
@@ -975,7 +1111,8 @@ def claude_install() -> int:
     Returns:
         Process exit code.
     """
-    if not _claude_cli_present():
+    exe = _claude_exe()
+    if exe is None:
         return 1
 
     plugin_dir = Path(str(_pkg_files("dekko"))) / "_plugin"
@@ -987,20 +1124,20 @@ def claude_install() -> int:
         return 1
 
     added = _run_subprocess(
-        ["claude", "plugin", "marketplace", "add", str(plugin_dir)]
+        [exe, "plugin", "marketplace", "add", str(plugin_dir)]
     )
     if added.returncode != 0:
         # Likely already registered (e.g. a previous install or a dev
         # checkout): refresh it instead.
         updated = _run_subprocess(
-            ["claude", "plugin", "marketplace", "update", "dekko"]
+            [exe, "plugin", "marketplace", "update", "dekko"]
         )
         if updated.returncode != 0:
             print(added.stderr.strip(), file=sys.stderr)
             print(updated.stderr.strip(), file=sys.stderr)
             return 1
 
-    installed = _run_subprocess(["claude", "plugin", "install", "dekko@dekko"])
+    installed = _run_subprocess([exe, "plugin", "install", "dekko@dekko"])
     if installed.returncode != 0:
         print(installed.stderr.strip(), file=sys.stderr)
         return 1
@@ -1020,12 +1157,13 @@ def claude_uninstall() -> int:
     Returns:
         Process exit code (``1`` only when the ``claude`` CLI is missing).
     """
-    if not _claude_cli_present():
+    exe = _claude_exe()
+    if exe is None:
         return 1
 
     for cmd in (
-        ["claude", "plugin", "uninstall", "dekko@dekko"],
-        ["claude", "plugin", "marketplace", "remove", "dekko"],
+        [exe, "plugin", "uninstall", "dekko@dekko"],
+        [exe, "plugin", "marketplace", "remove", "dekko"],
     ):
         result = _run_subprocess(cmd)
         if result.returncode != 0:
@@ -1045,11 +1183,12 @@ def mcp_install() -> int:
     Returns:
         Process exit code.
     """
-    if not _claude_cli_present():
+    exe = _claude_exe()
+    if exe is None:
         return 1
 
     added = _run_subprocess(
-        ["claude", "mcp", "add", "dekko", "--", "dekko", "serve", "--mcp"]
+        [exe, "mcp", "add", "dekko", "--", "dekko", "serve", "--mcp"]
     )
     if added.returncode != 0:
         print(added.stderr.strip(), file=sys.stderr)
@@ -1069,10 +1208,11 @@ def mcp_uninstall() -> int:
     Returns:
         Process exit code (``1`` only when the ``claude`` CLI is missing).
     """
-    if not _claude_cli_present():
+    exe = _claude_exe()
+    if exe is None:
         return 1
 
-    removed = _run_subprocess(["claude", "mcp", "remove", "dekko"])
+    removed = _run_subprocess([exe, "mcp", "remove", "dekko"])
     if removed.returncode != 0:
         print(
             "dekko: 'claude mcp remove dekko' failed (already removed?): "
@@ -1333,15 +1473,18 @@ def run_context(args: argparse.Namespace) -> int:
     index, code = _read_index(args)
     if index is None:
         return code
+    root = Path(args.root).resolve()
+    task = relevance.task_context(args.task, root) if args.task else None
     return contextpack.run(
         index,
         args.target,
         hops=args.hops,
         budget=args.budget,
         as_json=args.as_json,
-        root=Path(args.root).resolve(),
+        root=root,
         with_source=args.with_source,
         notes=args.notes,
+        task=task,
     )
 
 
@@ -1387,14 +1530,17 @@ def run_workset(args: argparse.Namespace) -> int:
     if args.symbol is not None and args.rev is not None:
         print("dekko: give a REV or --symbol, not both", file=sys.stderr)
         return workset_mod.EXIT_ERROR
+    root = Path(args.root).resolve()
+    task = relevance.task_context(args.task, root) if args.task else None
     return workset_mod.run(
-        Path(args.root).resolve(),
+        root,
         args.rev,
         args.symbol,
         budget=args.budget,
         packs=args.packs,
         as_json=args.as_json,
         no_regen=args.no_regen,
+        task=task,
     )
 
 
@@ -1426,6 +1572,53 @@ def run_summary(args: argparse.Namespace) -> int:
     if index is None:
         return code
     return summary.run(index, as_json=args.as_json)
+
+
+def run_lean(args: argparse.Namespace) -> int:
+    """Handle ``dekko lean``."""
+    index, code = _read_index(args)
+    if index is None:
+        return code
+    out = Path(args.output).resolve() if args.output else None
+    root = Path(args.root).resolve()
+    task = relevance.task_context(args.task, root) if args.task else None
+    return render_lean.run(
+        index,
+        root,
+        budget=args.budget,
+        as_json=args.as_json,
+        out_path=out,
+        task=task,
+        dense=args.dense,
+    )
+
+
+def run_ledger(args: argparse.Namespace) -> int:
+    """Handle ``dekko ledger``."""
+    transcript = Path(args.transcript).resolve() if args.transcript else None
+    return ledger_mod.run(
+        Path(args.root).resolve(),
+        transcript,
+        args.session,
+        args.budget,
+        as_json=args.as_json,
+    )
+
+
+def run_hooks_install(args: argparse.Namespace) -> int:
+    """Handle ``dekko hooks install``."""
+    events = args.enable or ["session-start"]
+    return hooks_mod.install(Path(args.root).resolve(), events)
+
+
+def run_hooks_uninstall(args: argparse.Namespace) -> int:
+    """Handle ``dekko hooks uninstall``."""
+    return hooks_mod.uninstall(Path(args.root).resolve())
+
+
+def run_hooks_run(args: argparse.Namespace) -> int:
+    """Handle ``dekko hooks run <event>`` (reads JSON on stdin)."""
+    return hooks_mod.dispatch(args.event, sys.stdin.read())
 
 
 def run_orient(args: argparse.Namespace) -> int:

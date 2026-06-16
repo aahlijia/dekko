@@ -20,7 +20,7 @@ from .extractor import (
 )
 from .model import FileMap, RawCall, Symbol
 from tree_sitter import Node, Parser
-from tree_sitter_language_pack import get_language
+from .grammars import get_grammar
 
 _DEF_RE = re.compile(r"function|method|func\b|procedure|subroutine")
 _CLASS_RE = re.compile(
@@ -50,7 +50,7 @@ def extract_file_generic(root: Path, rel: str, grammar: str) -> FileMap:
     """
     try:
         source = (root / rel).read_bytes()
-        parser = Parser(get_language(grammar))
+        parser = Parser(get_grammar(grammar))
         tree = parser.parse(source)
     except Exception as exc:  # grammar download/parse can fail
         return FileMap(path=rel, language=grammar, error=str(exc))

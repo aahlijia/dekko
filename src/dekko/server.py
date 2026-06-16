@@ -23,10 +23,13 @@ from typing import Any
 
 from . import affected
 from . import contextpack
+from . import ledger as ledger_mod
 from . import mapfile
 from . import notes as notes_mod
 from . import outline as outline_mod
 from . import query
+from . import relevance
+from . import render_lean
 from . import stats
 from . import summary
 from . import trace
@@ -86,6 +89,14 @@ def _root_of(ctx: Context, args: dict) -> Path:
     if isinstance(root, str) and root:
         return Path(root).resolve()
     return ctx.default_root
+
+
+def _task_of(ctx: Context, args: dict) -> relevance.TaskContext | None:
+    """Build a task context from a tool's ``task`` argument, or ``None``."""
+    text = args.get("task")
+    if not (isinstance(text, str) and text):
+        return None
+    return relevance.task_context(text, _root_of(ctx, args))
 
 
 def _index_for(ctx: Context, args: dict) -> mapfile.MapIndex:
@@ -164,6 +175,7 @@ def tool_get_context_pack(ctx: Context, args: dict) -> str:
     budget = int(budget) if budget is not None else None
     with_source = bool(args.get("with_source", False))
     root = _root_of(ctx, args)
+    task = _task_of(ctx, args)
     code, out, err = _capture(
         lambda: contextpack.run(
             index,
@@ -173,6 +185,7 @@ def tool_get_context_pack(ctx: Context, args: dict) -> str:
             as_json=False,
             root=root,
             with_source=with_source,
+            task=task,
         )
     )
     if code != 0:
@@ -268,6 +281,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
     budget = args.get("budget")
     budget = int(budget) if budget is not None else workset_mod.DEFAULT_BUDGET
     packs = int(args.get("packs", workset_mod.DEFAULT_PACKS))
+    task = _task_of(ctx, args)
     code, out, err = _capture(
         lambda: workset_mod.run(
             root,
@@ -277,6 +291,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
             packs=packs,
             as_json=False,
             no_regen=False,
+            task=task,
         )
     )
     if code != 0:
@@ -306,6 +321,29 @@ def _summary_text(ctx: Context, args: dict) -> str:
 def tool_summary(ctx: Context, args: dict) -> str:
     """Compact repo digest: directories, hotspots, entry points."""
     return _summary_text(ctx, args)
+
+
+def tool_lean(ctx: Context, args: dict) -> str:
+    """Budget-capped navigation map of the whole repo."""
+    index = _index_for(ctx, args)
+    root = _root_of(ctx, args)
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else None
+    task = _task_of(ctx, args)
+    dense = bool(args.get("dense", False))
+    code, out, err = _capture(
+        lambda: render_lean.run(
+            index,
+            root,
+            budget=budget,
+            as_json=False,
+            task=task,
+            dense=dense,
+        )
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return out.strip()
 
 
 def tool_add_note(ctx: Context, args: dict) -> str:
@@ -342,6 +380,29 @@ def tool_list_notes(ctx: Context, args: dict) -> str:
     for sym_id, records in sorted(all_notes.items()):
         lines += [f"{sym_id}: {r.get('text', '')}" for r in records]
     return "\n".join(lines)
+
+
+def tool_ledger(ctx: Context, args: dict) -> str:
+    """What this session has already put in context (from the transcript)."""
+    root = _root_of(ctx, args)
+    transcript = args.get("transcript")
+    transcript = (
+        Path(transcript)
+        if isinstance(transcript, str) and transcript
+        else None
+    )
+    session = args.get("session")
+    session = session if isinstance(session, str) and session else None
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else None
+    code, out, err = _capture(
+        lambda: ledger_mod.run(
+            root, transcript, session, budget, as_json=False
+        )
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return out.strip()
 
 
 def tool_map_status(ctx: Context, args: dict) -> str:
@@ -394,6 +455,11 @@ _BUDGET_PROP = {
     "type": "integer",
     "description": "Approximate token budget; lowest-relevance rows are "
     "dropped to fit and a cost footer is appended",
+}
+_TASK_PROP = {
+    "type": "string",
+    "description": "Rank output by relevance to this task description, "
+    "blended with structural centrality and the working diff",
 }
 
 TOOLS: list[dict[str, Any]] = [
@@ -494,6 +560,7 @@ TOOLS: list[dict[str, Any]] = [
                     "hop-1 call-site lines (default false; counts "
                     "against budget)",
                 },
+                "task": _TASK_PROP,
                 "root": _ROOT_PROP,
             },
             "required": ["target"],
@@ -630,6 +697,7 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Top-centrality touched symbols to "
                     "deep-pack (default 5)",
                 },
+                "task": _TASK_PROP,
                 "root": _ROOT_PROP,
             },
         },
@@ -662,6 +730,34 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {"root": _ROOT_PROP},
         },
         "handler": tool_summary,
+    },
+    {
+        "name": "lean",
+        "description": "A budget-capped navigation map of the whole "
+        "repo: every file with its purpose, symbols (signatures on the "
+        "most central, names on the rest), and module dependency edges, "
+        "shed in priority order to fit a token cap. Denser than "
+        "`summary`, far cheaper than reading MAP.md — read it to orient "
+        "before exploring. The header reports what was elided and how to "
+        "recover it (`outline`, `context`, `query`).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "budget": {
+                    "type": "integer",
+                    "description": "Hard token cap (default scales with "
+                    "repo size)",
+                },
+                "dense": {
+                    "type": "boolean",
+                    "description": "Terser skin: signatures only on the "
+                    "most-central symbols, names for the rest",
+                },
+                "task": _TASK_PROP,
+                "root": _ROOT_PROP,
+            },
+        },
+        "handler": tool_lean,
     },
     {
         "name": "add_note",
@@ -699,6 +795,33 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
         "handler": tool_list_notes,
+    },
+    {
+        "name": "ledger",
+        "description": "What this session has already loaded into context "
+        "(files read, symbols seen, tokens consumed), projected from the "
+        "session transcript. Use it to avoid re-fetching context the "
+        "agent already holds.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "transcript": {
+                    "type": "string",
+                    "description": "Session JSONL path (default: the "
+                    "latest transcript for this repo under ~/.claude)",
+                },
+                "session": {
+                    "type": "string",
+                    "description": "Session id to resolve when discovering",
+                },
+                "budget": {
+                    "type": "integer",
+                    "description": "Report remaining tokens vs this budget",
+                },
+                "root": _ROOT_PROP,
+            },
+        },
+        "handler": tool_ledger,
     },
     {
         "name": "map_status",

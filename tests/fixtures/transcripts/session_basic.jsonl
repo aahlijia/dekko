@@ -1,0 +1,13 @@
+{"type":"system","subtype":"init","sessionId":"sess-abc"}
+{"type":"user","sessionId":"sess-abc","message":{"role":"user","content":"please refactor auth"}}
+{"type":"assistant","sessionId":"sess-abc","message":{"role":"assistant","usage":{"input_tokens":1200,"cache_read_input_tokens":500,"cache_creation_input_tokens":300,"output_tokens":50},"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/repo/src/auth.py"},"caller":{"type":"direct"}}]}}
+{"type":"user","sessionId":"sess-abc","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file contents here","is_error":false}]}}
+{"type":"assistant","sessionId":"sess-abc","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/repo/src/db.py","offset":1,"limit":3},"caller":{"type":"direct"}}]}}
+{"type":"assistant","sessionId":"sess-abc","message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Read","input":{"file_path":"/repo/src/secret.py"},"caller":{"type":"agent"}}]}}
+{"type":"assistant","sessionId":"sess-abc","message":{"role":"assistant","content":[{"type":"tool_use","id":"t4","name":"Read","input":{"file_path":"/etc/hosts"},"caller":{"type":"direct"}}]}}
+{"type":"assistant","sessionId":"sess-abc","message":{"role":"assistant","content":[{"type":"tool_use","id":"t5","name":"mcp__plugin_dekko_dekko__get_context_pack","input":{"target":"/repo/src/auth.py"},"caller":{"type":"direct"}}]}}
+{"type":"assistant","sessionId":"sess-abc","message":{"role":"assistant","usage":{"input_tokens":1500,"cache_read_input_tokens":600,"cache_creation_input_tokens":400,"output_tokens":80},"content":[{"type":"text","text":"done"}]}}
+{malformed json line that must be skipped
+42
+{"type":"file-history-snapshot","snapshot":{}}
+{"type":"mode","mode":"default"}

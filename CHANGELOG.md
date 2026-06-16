@@ -9,12 +9,112 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
-Context & token management for agents: every list-shaped command can now
-be held to a token budget, and three new commands (`outline`, `workset`,
-`orient`) let an agent orient and scope a change without reading whole
-files.
+## [0.12.0] — 2026-06-16
 
 ### Added
+- **CI matrix** (`.github/workflows/ci.yml`): on every push/PR to
+  `develop`/`main`, the suite runs across
+  `{ubuntu, macos, windows} × {3.10, 3.13}` with `ruff check`,
+  `ruff format --check`, and `pytest`. Windows is `continue-on-error`
+  (best-effort for 1.0.0); Linux/macOS are blocking. This turns
+  cross-platform correctness from opinion into a checked fact.
+
+### Changed
+- **Tier-1 grammars now install offline; Tier-2 moves behind
+  `dekko[all]`.** A default `pip install dekko` ships the nine Tier-1
+  languages (C, C++, Go, Java, JavaScript, Python, Rust, TypeScript,
+  TSX) as individual, pinned grammar packages, so mapping them makes
+  **no network call** — no more runtime grammar download, offline
+  failure, or supply-chain surface from the catch-all pack. The ~55
+  generic Tier-2 languages now require `pip install dekko[all]`, which
+  pulls in `tree-sitter-language-pack`; without it, a Tier-2 file is
+  skipped with a "needs `dekko[all]`" note rather than parsed. Grammar
+  resolution moved behind a new `grammars.get_grammar` seam (cached, so
+  each grammar loads once). Map output for any installed grammar is
+  unchanged.
+- **Release workflow is hardened around the version tag.** `release.yml`
+  still fires only on a `v*` tag, but now rejects a tag whose version
+  does not match the built wheel (catches a forgotten version bump), and
+  the publish job carries an explicit `refs/tags/v*` guard so it can
+  never run off a non-release ref. The workflow header documents the
+  gating and the one-time PyPI trusted-publisher prerequisite.
+- **`dekko diff` no longer shells out to `tar`.** The earlier-rev export
+  now captures `git archive --format=tar` and extracts it with the
+  stdlib `tarfile` module instead of piping to an external `tar`
+  binary, removing an undocumented POSIX dependency (a step toward
+  Windows support). Extraction refuses path traversal (the `data`
+  filter on 3.12+, an explicit guard on 3.10/3.11). Map output is
+  unchanged.
+
+### Fixed
+- **Windows: the `claude` CLI is now invoked by its resolved full path**
+  rather than the bare name, so the plugin/MCP install and uninstall
+  commands launch a `claude.cmd` shim that `subprocess` would otherwise
+  fail to start. No change on macOS/Linux.
+- **Windows: the session ledger now finds its transcript.** The
+  `~/.claude/projects` directory key now encodes backslashes and the
+  drive colon (not just POSIX `/`), matching Claude Code's per-platform
+  naming. Still best-effort — a miss degrades to an empty ledger.
+
+### Documentation
+- **README install & platform pass**: the install section now states the
+  offline Tier-1 footprint, points to `pip install dekko[all]` for the
+  Tier-2 languages, and notes the tested-platforms line (macOS/Linux;
+  Windows best-effort via CI). The "Language support" and "Development"
+  sections match the new packaging.
+
+## [0.11.0] — 2026-06-16
+
+### Active Context Layer
+
+dekko grows from a *pull* context server into a *session-aware push*
+layer: it ranks context by the live task, knows what the agent already
+holds, and can deliver orientation through opt-in Claude Code hooks.
+
+#### Added
+- **Task-aware ranking (`--task`)** on `lean`, `workset`, and `context`
+  (and the matching MCP tools): a free-text task description is blended
+  with structural centrality and the working diff so the most relevant
+  code survives a tight budget. Lexical and dependency-free; output is
+  byte-for-byte unchanged when no task is given. New `relevance` module
+  with a pluggable `Scorer` (lexical now, embeddings a future drop-in).
+- **`dekko lean --dense`** (and MCP `dense`): keeps full signatures only
+  on the most central symbols, names for the rest — the tersest
+  whole-repo map.
+- **`dekko ledger`** (and MCP `ledger`): projects the Claude Code session
+  transcript into "what is already in context" — files read, symbols
+  seen, and real tokens consumed (from the transcript's usage). dekko
+  persists no session state of its own, so it also sees direct reads.
+- **`dekko hooks install|uninstall|run`**: opt-in push hooks merged into
+  project `.claude/settings.json` — `session-start` (steering preamble +
+  budget-capped lean map), `prompt-submit` (relevance-ranked pointer to
+  files not yet in context), and `pre-read` (non-blocking advisory to
+  outline a large file first, `permissionDecision: "defer"`). Every hook
+  is fail-silent and individually toggleable; uninstall touches only
+  dekko's entries.
+- **Density metric (FR-D3)**: `Meter` and the lean report now expose
+  `signals` and tokens-per-signal, so output cost can be measured against
+  coverage. A `benchmarks/` harness records the baseline reduction (dekko
+  mapping its own source: ~92% fewer tokens than whole-file reads).
+
+## [0.10.0] — 2026-06-16
+
+Context & token management for agents: every list-shaped command can now
+be held to a token budget, and new commands (`outline`, `lean`,
+`workset`, `orient`) let an agent orient and scope a change without
+reading whole files.
+
+### Added
+- `dekko lean`: a budget-capped, whole-repo navigation map for agents —
+  the middle ground between `dekko summary` (~400 tokens) and `MAP.md`
+  (tens of thousands). Every in-scope file with its purpose, each
+  symbol's name (signatures on the most central, by fan-in × churn),
+  the coarse module-dependency edges, and an optional architecture
+  diagram, all shed in a fixed priority order to fit a hard token cap
+  that scales with repo size. The header reports what was elided and the
+  command to recover it. Prints to stdout, writes a file with
+  `--output` (e.g. `.dekko/LEAN.md`, gitignored like other maps), or
+  emits `--json`; also an MCP `lean` tool.
 - Universal token budgeting across `query`, `unused`, `affected`, and
   `context`. Each command now ranks its rows by relevance (production
   before tests, more-connected before leaves), keeps as many as fit, and
@@ -40,11 +140,19 @@ files.
   a file before reading it, but only when the file is large enough to be
   worth it, and never blocks. Ships with a `dekko-orient` skill and
   documented (opt-in) `SessionStart` / `PreToolUse` hook snippets.
+- Optional accurate token counting for every `--budget` cap and the lean
+  map: `pip install dekko[tokenizer]` adds `tiktoken` (o200k_base) and
+  dekko uses it automatically, replacing the default `~4 chars/token`
+  estimate (which systematically under-counts code). The default install
+  is unchanged — no dependency, byte-stable output. `DEKKO_TOKENIZER=
+  chars4` forces the estimate back on for reproducible output even when
+  the extra is installed.
 
 ### Changed
-- Internal: the directory-of-a-path helper was promoted from `summary`
-  to a shared `textutil.dir_of`, in preparation for an upcoming lean
-  map renderer. No user-visible change.
+- Internal: shared helpers were promoted for reuse by the lean map —
+  `textutil.dir_of`, `summary.file_churn`, and `export.dir_graph` (the
+  directory-level graph behind both MAP.md's diagram and the lean map's
+  module edges). No user-visible change.
 
 ## [0.9.0] — 2026-06-14
 
@@ -395,7 +503,8 @@ Initial release: the **dekko** Claude Code plugin.
   imports → unique repo-wide match); ambiguous calls are marked, never
   guessed.
 
-[Unreleased]: https://github.com/aahlijia/dekko/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/aahlijia/dekko/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/aahlijia/dekko/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/aahlijia/dekko/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/aahlijia/dekko/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/aahlijia/dekko/releases/tag/v0.7.1
