@@ -7,14 +7,24 @@ and the project aims to follow [Semantic Versioning](https://semver.org/spec/v2.
 Dates are when the work landed on `develop`; releases are cut by pushing a
 `v*` tag.
 
-## [Unreleased]
+## [0.10.0]
 
 Context & token management for agents: every list-shaped command can now
-be held to a token budget, and three new commands (`outline`, `workset`,
-`orient`) let an agent orient and scope a change without reading whole
-files.
+be held to a token budget, and new commands (`outline`, `lean`,
+`workset`, `orient`) let an agent orient and scope a change without
+reading whole files.
 
 ### Added
+- `dekko lean`: a budget-capped, whole-repo navigation map for agents —
+  the middle ground between `dekko summary` (~400 tokens) and `MAP.md`
+  (tens of thousands). Every in-scope file with its purpose, each
+  symbol's name (signatures on the most central, by fan-in × churn),
+  the coarse module-dependency edges, and an optional architecture
+  diagram, all shed in a fixed priority order to fit a hard token cap
+  that scales with repo size. The header reports what was elided and the
+  command to recover it. Prints to stdout, writes a file with
+  `--output` (e.g. `.dekko/LEAN.md`, gitignored like other maps), or
+  emits `--json`; also an MCP `lean` tool.
 - Universal token budgeting across `query`, `unused`, `affected`, and
   `context`. Each command now ranks its rows by relevance (production
   before tests, more-connected before leaves), keeps as many as fit, and
@@ -42,9 +52,10 @@ files.
   documented (opt-in) `SessionStart` / `PreToolUse` hook snippets.
 
 ### Changed
-- Internal: the directory-of-a-path helper was promoted from `summary`
-  to a shared `textutil.dir_of`, in preparation for an upcoming lean
-  map renderer. No user-visible change.
+- Internal: shared helpers were promoted for reuse by the lean map —
+  `textutil.dir_of`, `summary.file_churn`, and `export.dir_graph` (the
+  directory-level graph behind both MAP.md's diagram and the lean map's
+  module edges). No user-visible change.
 
 ## [0.9.0] — 2026-06-14
 

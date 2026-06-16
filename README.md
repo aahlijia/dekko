@@ -87,13 +87,18 @@ dekko query file walker.py    # symbols defined in a file
 dekko query callers main --no-tests # drop test-file results
 dekko context run_map --budget 1500 # minimal context pack for an edit
 dekko context run_map --with-source # ...with the body + call sites inlined
+dekko outline server.py       # a file's signatures + docs, no bodies
 dekko trace main run_map      # shortest call path(s) between two symbols
 dekko summary                 # ~40-line repo digest (dirs, hotspots)
+dekko lean                    # budget-capped whole-repo navigation map
+dekko lean --output .dekko/LEAN.md  # write it (gitignored; commit via whitelist)
 dekko diff                    # symbols changed since the map's commit
 dekko affected                # test files impacted by your changes
 dekko affected main           # ...vs any git rev
+dekko workset                 # one budgeted bundle for your current change
 dekko unused                  # symbols nothing calls (dead-code leads)
 dekko stats                   # hotspots, largest files, language mix
+dekko orient                  # opt-in session digest + steering preamble
 dekko note add cli.py:run_map "why" # anchor a durable note to a symbol
 dekko note list --orphaned    # notes whose symbol moved
 dekko export --format mermaid # render the call graph (mermaid|dot)
@@ -110,12 +115,16 @@ dekko --version
 | `map [DIR] [SUBPATH]` | Generate MAP.md + map.json (`--if-stale` skips when fresh; `--full` forces a cold rebuild; `--jobs N` parallelizes extraction, `0` = all cores; `--shard auto\|always\|never` splits large maps into `map/` pages; `--order path\|name\|fan-in` orders sections; `--output`, `--json`, `--no-json`, `--exclude`, `--max-file-size`, `--quiet`) |
 | `query ACTION TARGET` | `callers`, `callees`, `symbol`, `file`, or `uses` lookups; `--sites` for per-call-site rows, `--no-tests` to drop test code, `--notes/--no-notes` |
 | `context TARGET` | A symbol's neighborhood with docs and notes (`--hops N`, `--budget TOKENS`); `--with-source` inlines the body and hop-1 call sites |
+| `outline PATH` | A file's (or directory's) structure — signatures, doc first lines, line numbers, no bodies — at ~1/10 the read cost (`--budget`, `--limit`, `--json`) |
 | `trace FROM TO` | Shortest call path(s) from one symbol to another (`--max-paths K`, `--json`); no path is a clean exit `1` |
 | `summary` | ~40-line repo digest: counts, per-directory rollup with coupling and purpose, hotspots, entry points, parse errors (`--json`) |
+| `lean` | A budget-capped whole-repo navigation map: every file + purpose, symbols (signatures on the most central, names on the rest), and module edges, shed to fit a token cap (`--budget`, `--output PATH`, `--json`). Denser than `summary`, far cheaper than MAP.md |
+| `workset [REV]` | One budgeted bundle for a change: impacted tests, touched-file outlines, and packs for the most central touched symbols (`--symbol NAME`, `--budget`, `--packs N`, `--json`) |
 | `diff [REV]` | Symbols added/removed/changed since a git rev (default: the map's commit), each with impacted callers (`--limit`, `--json`) |
 | `affected [REV]` | Test files impacted by changes — reverse call-graph reachability plus an import-edge fallback; prints a `pytest …` line (`--limit`, `--json`) |
 | `unused` | Symbols with no inbound calls, minus roots (`--roots GLOB`, `--limit`, `--json`); exit 1 when any are found |
 | `stats` | Fan-in/out hotspots, largest files, language mix (`--top`, `--json`) |
+| `orient [--read PATH]` | Opt-in orientation: a budgeted session digest with steering, or a pre-read nudge to outline a large file first (never blocks) |
 | `note add\|list\|rm` | Durable symbol-anchored notes in `.dekko/notes.json` (`list --orphaned` finds notes whose symbol moved) |
 | `export` | Call graph as `--format mermaid\|dot` (`--scope symbol\|file`, capped by `--max-nodes`) or `--format html` (a self-contained interactive browser); `--output PATH` writes a file instead of stdout (html defaults to `.dekko/map.html`) |
 | `status` | Freshness report from the provenance stamp in map.json |
@@ -263,9 +272,12 @@ read surface maps to fourteen tools:
 | `get_callers` / `get_callees` | `query callers` / `callees` (`sites`) |
 | `find_usages` | `query uses` (references to an external name) |
 | `get_context_pack` | `context` (`hops`, `budget`, `with_source`) |
+| `outline` | `outline` (`target`, `budget`, `limit`) |
 | `trace_path` | `trace` (`from`, `to`, `max_paths`) |
 | `affected` → `impacted_tests` | `affected` (`rev`) |
+| `workset` | `workset` (`rev` or `symbol`, `budget`, `packs`) |
 | `summary` | `summary` |
+| `lean` | `lean` (`budget`) — budget-capped whole-repo navigation map |
 | `find_unused` | `unused` (`roots`, `limit`) |
 | `stats` | `stats` (`top`) |
 | `add_note` / `list_notes` | `note add` / `note list` |
