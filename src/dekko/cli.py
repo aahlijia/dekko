@@ -1021,11 +1021,11 @@ def _write_pages(md_path: Path, pages: list[tuple[str, str]]) -> list[Path]:
             stale.unlink()
 
     written = [md_path]
-    md_path.write_text(pages[0][1])
+    md_path.write_text(pages[0][1], encoding="utf-8")
     for name, content in pages[1:]:
         page_path = md_path.parent / name
         page_path.parent.mkdir(parents=True, exist_ok=True)
-        page_path.write_text(content)
+        page_path.write_text(content, encoding="utf-8")
         written.append(page_path)
     return written
 
@@ -1301,7 +1301,10 @@ def run_map(args: argparse.Namespace) -> int:
             max_file_size=args.max_file_size,
         )
         json_path.parent.mkdir(parents=True, exist_ok=True)
-        json_path.write_text(render_json(files, graph, label, provenance))
+        json_path.write_text(
+            render_json(files, graph, label, provenance),
+            encoding="utf-8",
+        )
         outputs.append(json_path)
 
     if cache is not None:

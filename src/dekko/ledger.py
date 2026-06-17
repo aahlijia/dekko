@@ -33,7 +33,7 @@ import re
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 from .mapfile import MapIndex
 from .textutil import estimate_tokens
@@ -134,7 +134,7 @@ def iter_records(transcript_path: Path) -> Iterator[dict]:
         Each record that parses to a JSON object.
     """
     try:
-        text = transcript_path.read_text()
+        text = transcript_path.read_text(encoding="utf-8")
     except OSError:
         return
     for line in text.splitlines():
@@ -149,15 +149,36 @@ def iter_records(transcript_path: Path) -> Iterator[dict]:
             yield record
 
 
+_WIN_DRIVE = re.compile(r"^[A-Za-z]:")
+
+
+def _as_pure(raw: str) -> PurePath:
+    """Parse a path string in whichever flavor its shape implies.
+
+    Transcript paths must resolve independently of the host OS: a
+    backslash or a drive-letter prefix marks a Windows path, everything
+    else is treated as POSIX. This keeps relativization correct when a
+    transcript was recorded on a different platform than the one reading
+    it.
+    """
+    if "\\" in raw or _WIN_DRIVE.match(raw):
+        return PureWindowsPath(raw)
+    return PurePosixPath(raw)
+
+
 def _rel_path(file_path: str, root: Path) -> str | None:
     """Normalize a read target to a repo-relative POSIX path, or None."""
     if not isinstance(file_path, str) or not file_path:
         return None
-    p = Path(file_path)
+    p = _as_pure(file_path)
     if not p.is_absolute():
         return p.as_posix()
+    # Express root in the parsed path's flavor so the relativize is
+    # apples-to-apples regardless of the host OS (``as_posix`` strips any
+    # host-native backslashes from root first).
+    root_pure = type(p)(root.as_posix())
     try:
-        return p.relative_to(root).as_posix()
+        return p.relative_to(root_pure).as_posix()
     except ValueError:
         return None
 

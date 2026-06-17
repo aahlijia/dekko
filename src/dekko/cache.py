@@ -121,7 +121,7 @@ def load(root: Path) -> dict[str, dict]:
     """
     path = root / CACHE_DIR / CACHE_FILE
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     if doc.get("version") != CACHE_VERSION:
@@ -145,7 +145,9 @@ def save(root: Path, cache: IncrementalCache) -> None:
         "tool_version": _tool_version(),
         "files": cache.entries,
     }
-    (cache_dir / CACHE_FILE).write_text(json.dumps(doc) + "\n")
+    (cache_dir / CACHE_FILE).write_text(
+        json.dumps(doc) + "\n", encoding="utf-8"
+    )
 
 
 def ensure_dir(root: Path) -> Path:
@@ -210,5 +212,8 @@ def _write_inner_gitignore(cache_dir: Path) -> None:
     a user-customized ignore file is left untouched.
     """
     inner = cache_dir / ".gitignore"
-    if not inner.exists() or inner.read_text() == _LEGACY_INNER_GITIGNORE:
-        inner.write_text(_INNER_GITIGNORE)
+    if (
+        not inner.exists()
+        or inner.read_text(encoding="utf-8") == _LEGACY_INNER_GITIGNORE
+    ):
+        inner.write_text(_INNER_GITIGNORE, encoding="utf-8")
