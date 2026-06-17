@@ -81,7 +81,10 @@ def _walk_files(root: Path) -> list[str]:
     gitignore = root / ".gitignore"
     if gitignore.is_file():
         spec = pathspec.PathSpec.from_lines(
-            "gitwildmatch", gitignore.read_text(errors="replace").splitlines()
+            "gitwildmatch",
+            gitignore.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines(),
         )
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):

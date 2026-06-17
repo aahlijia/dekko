@@ -204,7 +204,7 @@ def run(
     output = text(labels, edges)
     if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(output + "\n")
+        out_path.write_text(output + "\n", encoding="utf-8")
         print(f"dekko: wrote {out_path}")
     else:
         print(output)

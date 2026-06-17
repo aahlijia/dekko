@@ -32,7 +32,7 @@ def _notes_path(root: Path) -> Path:
 def load(root: Path) -> dict[str, list[dict]]:
     """Load the symbol-id → note-records map (empty when absent)."""
     try:
-        doc = json.loads(_notes_path(root).read_text())
+        doc = json.loads(_notes_path(root).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     notes = doc.get("notes")
@@ -56,7 +56,9 @@ def save(root: Path, notes: dict[str, list[dict]]) -> None:
     cache_mod.ensure_notes_tracked(root)
     pruned = {sid: recs for sid, recs in notes.items() if recs}
     doc = {"version": NOTES_VERSION, "notes": pruned}
-    _notes_path(root).write_text(json.dumps(doc, indent=2) + "\n")
+    _notes_path(root).write_text(
+        json.dumps(doc, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def add(root: Path, sym_id: str, text: str) -> dict:

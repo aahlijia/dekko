@@ -176,7 +176,7 @@ def run(index: MapIndex, out_path: Path) -> int:
         return EXIT_TOO_BIG
     page = render(doc)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(page)
+    out_path.write_text(page, encoding="utf-8")
     print(f"dekko: wrote {out_path} ({len(page) / 1024:.1f} KB)")
     return EXIT_OK
 
