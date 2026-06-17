@@ -1,3 +1,15 @@
+# Release: build and publish to PyPI.
+#
+# Fires only on a version tag (`vMAJOR.MINOR.PATCH`, e.g. `v1.0.0`) — the
+# tag is the single source of truth for a release. Pushing any other ref
+# does nothing. The build job rejects a tag whose version does not match
+# the built wheel (a forgotten version bump), and the publish job is
+# additionally guarded so it can only run for a `refs/tags/v*` ref.
+#
+# Prerequisite (one-time, user-side): configure PyPI trusted publishing
+# (OIDC) for `aahlijia/dekko` and a `pypi` environment in repo settings.
+# No API token is stored; `id-token: write` below authorizes the upload.
+
 name: Release
 
 on:
@@ -13,6 +25,15 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Build sdist and wheel
         run: uv build
+      - name: Verify tag matches built version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ ! -f "dist/dekko-${version}-py3-none-any.whl" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match the built" \
+                 "wheel — bump the version (CHANGELOG/pyproject/plugin) first"
+            ls -1 dist/
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -21,6 +42,9 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    # Defense in depth: publish only ever runs for a version tag, even if
+    # the trigger above is later broadened.
+    if: startsWith(github.ref, 'refs/tags/v')
     environment: pypi
     permissions:
       id-token: write

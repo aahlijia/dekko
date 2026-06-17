@@ -18,7 +18,7 @@ from .query import (
     report_unresolved,
     resolve_target,
 )
-from .render_md import signature
+from .textutil import signature
 from .resolver import MODULE_CALLER_SUFFIX
 
 EXIT_NO_PATH = 1

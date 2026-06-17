@@ -67,7 +67,8 @@ def test_budget_trims_but_keeps_target(
     out = capsys.readouterr().out
     assert "context: chain.py:mid" in out
     assert "mid() -> int" in out
-    assert "trimmed" in out
+    assert "omitted" in out
+    assert "raise --budget" in out
 
 
 def test_file_mode_pack(

@@ -42,7 +42,7 @@ def test_initialize_echoes_protocol_and_names() -> None:
     resp = server.handle(_ctx(Path(".")), msg)
     result = resp["result"]
     assert result["protocolVersion"] == "2025-03-26"
-    assert result["capabilities"] == {"tools": {}}
+    assert result["capabilities"] == {"tools": {}, "resources": {}}
     assert result["serverInfo"]["name"] == "dekko"
 
 
@@ -76,10 +76,19 @@ def test_tools_list_exposes_the_read_surface() -> None:
         "query_symbol",
         "get_callers",
         "get_callees",
+        "find_usages",
         "get_context_pack",
+        "outline",
         "trace_path",
         "find_unused",
+        "impacted_tests",
+        "workset",
         "stats",
+        "summary",
+        "lean",
+        "ledger",
+        "add_note",
+        "list_notes",
         "map_status",
         "refresh_map",
     }

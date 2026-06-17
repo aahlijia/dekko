@@ -8,17 +8,19 @@ on disk was generated at; ``REV`` overrides it.
 """
 
 import hashlib
+import io
 import json
 import subprocess
 import sys
+import tarfile
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import mapfile
 from . import walker
-from .model import Symbol
-from .render_md import signature
+from .model import Import, Symbol
+from .textutil import signature
 from .resolver import MODULE_CALLER_SUFFIX, resolve
 
 EXIT_SAME = 0
@@ -34,11 +36,14 @@ class Snapshot:
         symbols: Symbol id → symbol.
         callers: Symbol id → caller ids (resolved + module-level).
         body: Symbol id → short hash of the definition's source text.
+        imports: File path → imports declared in it (used by
+            ``affected`` for its import-edge fallback).
     """
 
     symbols: dict[str, Symbol] = field(default_factory=dict)
     callers: dict[str, list[str]] = field(default_factory=dict)
     body: dict[str, str] = field(default_factory=dict)
+    imports: dict[str, list[Import]] = field(default_factory=dict)
 
 
 @dataclass
@@ -89,8 +94,30 @@ def snapshot(
         for sym in fm.symbols:
             snap.symbols[sym.id] = sym
             snap.body[sym.id] = _body_hash(root, sym)
+        if fm.imports:
+            snap.imports[fm.path] = fm.imports
     snap.callers = graph.calls_in
     return snap
+
+
+def _safe_extractall(tf: tarfile.TarFile, dest: Path) -> None:
+    """Extract every member into ``dest``, refusing path traversal.
+
+    On 3.12+ this delegates to the stdlib ``data`` filter. On the
+    3.10/3.11 floor (no ``filter`` argument) it drops any member whose
+    resolved path would escape ``dest``. ``git archive`` output is
+    trusted, but the guard is cheap and correct.
+    """
+    if sys.version_info >= (3, 12):
+        tf.extractall(dest, filter="data")
+        return
+    dest_resolved = dest.resolve()
+    safe = []
+    for member in tf.getmembers():
+        target = (dest / member.name).resolve()
+        if target == dest_resolved or dest_resolved in target.parents:
+            safe.append(member)
+    tf.extractall(dest, members=safe)
 
 
 def export_rev(root: Path, rev: str, dest: Path) -> bool:
@@ -106,7 +133,7 @@ def export_rev(root: Path, rev: str, dest: Path) -> bool:
     """
     try:
         archive = subprocess.run(
-            ["git", "-C", str(root), "archive", rev],
+            ["git", "-C", str(root), "archive", "--format=tar", rev],
             capture_output=True,
             timeout=120,
         )
@@ -115,15 +142,11 @@ def export_rev(root: Path, rev: str, dest: Path) -> bool:
     if archive.returncode != 0:
         return False
     try:
-        extracted = subprocess.run(
-            ["tar", "-x", "-C", str(dest)],
-            input=archive.stdout,
-            capture_output=True,
-            timeout=120,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tf:
+            _safe_extractall(tf, dest)
+    except (tarfile.TarError, OSError):
         return False
-    return extracted.returncode == 0
+    return True
 
 
 def _render_caller(caller_id: str, syms: dict[str, Symbol]) -> str:
