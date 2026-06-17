@@ -8,7 +8,7 @@ from typing import Callable
 from .languages import LanguageSpec
 from .model import FileMap, Import, Param, RawCall, Symbol
 from tree_sitter import Node, Parser, Query, QueryCursor
-from tree_sitter_language_pack import get_language
+from .grammars import get_grammar
 
 _WS = re.compile(r"\s+")
 
@@ -22,7 +22,7 @@ def _text(node: Node) -> str:
 @lru_cache(maxsize=None)
 def _compiled_query(grammar: str, query_str: str) -> Query:
     """Compile a query once per (grammar, query) pair."""
-    return Query(get_language(grammar), query_str)
+    return Query(get_grammar(grammar), query_str)
 
 
 def _run_query(
@@ -52,7 +52,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     """
     try:
         source = (root / rel).read_bytes()
-        parser = Parser(get_language(spec.grammar))
+        parser = Parser(get_grammar(spec.grammar))
         tree = parser.parse(source)
     except (OSError, ValueError) as exc:
         return FileMap(path=rel, language=spec.name, error=str(exc))
@@ -66,6 +66,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         symbols=[sym for _, sym in defs],
         calls=calls,
         imports=imports,
+        doc=_module_doc(spec.name, tree.root_node),
     )
 
 
@@ -202,6 +203,7 @@ def _make_symbol(
         end_line=def_node.end_point[0] + 1,
         decorated=decorated,
         exported=exported,
+        doc=_doc_for_symbol(spec.name, def_node),
     )
 
 
@@ -335,6 +337,174 @@ def _strip_generics(name: str) -> str:
     """Drop a trailing generic parameter list: ``Foo<T>`` → ``Foo``."""
     cut = name.find("<")
     return name[:cut].strip() if cut != -1 else name
+
+
+# ---------------------------------------------------------------------
+# Doc lines
+
+_DOC_MAX_LEN = 100
+_COMMENT_TYPES = frozenset(
+    {"comment", "line_comment", "block_comment", "doc_comment"}
+)
+# Nodes that may sit between a doc comment and the definition itself.
+_DOC_SKIP_TYPES = frozenset({"attribute_item", "decorator", "modifiers"})
+# Wrappers to climb before looking at preceding siblings: comments
+# precede the export/declaration statement, not the inner definition.
+_DOC_CLIMB_TYPES = frozenset(
+    {
+        "decorated_definition",
+        "export_statement",
+        "lexical_declaration",
+        "variable_declaration",
+    }
+)
+_STR_PREFIX = re.compile(r"^[rRbBuUfF]{0,3}")
+_COMMENT_MARKERS = ("/**", "/*!", "/*", "///", "//!", "//", "*/")
+
+
+def _raw(node: Node) -> str:
+    """Decode a node's source text, preserving newlines."""
+    return (node.text or b"").decode("utf-8", "replace")
+
+
+def _clean_doc(line: str) -> str | None:
+    """Collapse whitespace and truncate a doc line."""
+    line = _WS.sub(" ", line).strip()
+    if len(line) > _DOC_MAX_LEN:
+        line = line[: _DOC_MAX_LEN - 1].rstrip() + "…"
+    return line or None
+
+
+def _string_first_line(raw: str) -> str | None:
+    """First non-empty content line of a string literal."""
+    text = _STR_PREFIX.sub("", raw.strip(), count=1)
+    for quote in ('"""', "'''", '"', "'"):
+        if text.startswith(quote):
+            text = text[len(quote) :]
+            text = text.removesuffix(quote)
+            break
+    for line in text.splitlines():
+        if line.strip():
+            return _clean_doc(line)
+    return None
+
+
+def _strip_comment_markers(line: str) -> str:
+    """Drop leading/trailing comment syntax from one line."""
+    for marker in _COMMENT_MARKERS:
+        if line.startswith(marker):
+            line = line[len(marker) :]
+            break
+    else:
+        if line.startswith("*"):
+            line = line[1:]
+        elif line.startswith("#"):
+            line = line.lstrip("#")
+    return line.removesuffix("*/").strip()
+
+
+def _comment_first_line(raw: str) -> str | None:
+    """First non-empty content line of a comment block."""
+    for line in raw.splitlines():
+        content = _strip_comment_markers(line.strip())
+        if content:
+            return _clean_doc(content)
+    return None
+
+
+def _leading_string(children: list[Node]) -> Node | None:
+    """The docstring node opening a block, if any.
+
+    Depending on grammar version a docstring appears either as a bare
+    ``string`` or wrapped in an ``expression_statement``.
+    """
+    if not children:
+        return None
+    first = children[0]
+    if first.type == "expression_statement" and first.named_children:
+        first = first.named_children[0]
+    return first if first.type == "string" else None
+
+
+def _python_docstring(def_node: Node) -> str | None:
+    """First docstring line of a Python function/class body."""
+    body = def_node.child_by_field_name("body")
+    if body is None:
+        return None
+    string = _leading_string(list(body.named_children))
+    if string is None:
+        return None
+    return _string_first_line(_raw(string))
+
+
+def _end_row(node: Node) -> int:
+    """Last row a node occupies, excluding a trailing newline.
+
+    Comment nodes that swallow their newline end at column 0 of the
+    next row; for gap detection that next row does not count.
+    """
+    row, col = node.end_point
+    if col == 0 and row > node.start_point[0]:
+        return row - 1
+    return row
+
+
+def _doc_comment_above(def_node: Node) -> str | None:
+    """First line of the contiguous comment block above a definition.
+
+    Climbs wrapper nodes (export statements, declarations) first, then
+    walks preceding siblings: decorators/attributes are skipped, a
+    blank-line gap or an inner doc comment (``//!``, module-level)
+    ends the block. The block's topmost comment supplies the line —
+    for ``///`` runs that is the summary line.
+    """
+    node = def_node
+    while node.parent is not None and node.parent.type in _DOC_CLIMB_TYPES:
+        node = node.parent
+    expected = node.start_point[0]
+    comments: list[Node] = []
+    prev = node.prev_sibling
+    while prev is not None:
+        if prev.type in _DOC_SKIP_TYPES:
+            expected = prev.start_point[0]
+            prev = prev.prev_sibling
+            continue
+        if prev.type not in _COMMENT_TYPES:
+            break
+        if _end_row(prev) < expected - 1:
+            break
+        if _raw(prev).lstrip().startswith(("//!", "/*!")):
+            break
+        comments.append(prev)
+        expected = prev.start_point[0]
+        prev = prev.prev_sibling
+    if not comments:
+        return None
+    return _comment_first_line(_raw(comments[-1]))
+
+
+def _doc_for_symbol(language: str, def_node: Node) -> str | None:
+    """Best-effort first doc line for a definition, or ``None``."""
+    if language == "python":
+        return _python_docstring(def_node)
+    return _doc_comment_above(def_node)
+
+
+def _module_doc(language: str, root: Node) -> str | None:
+    """Best-effort first doc line for a whole file, or ``None``."""
+    if language == "python":
+        string = _leading_string(list(root.named_children))
+        if string is None:
+            return None
+        return _string_first_line(_raw(string))
+    for child in root.named_children:
+        if child.type not in _COMMENT_TYPES:
+            return None
+        raw = _raw(child)
+        if raw.startswith("#!"):
+            continue
+        return _comment_first_line(raw)
+    return None
 
 
 # ---------------------------------------------------------------------

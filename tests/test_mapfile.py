@@ -34,7 +34,7 @@ def test_load_round_trip(make_mapped_repo: RepoFactory) -> None:
 def test_provenance_written(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(CHAIN)
     doc = json.loads((root / ".dekko" / "map.json").read_text())
-    assert doc["version"] == 2
+    assert doc["version"] == 3
     prov = doc["provenance"]
     assert prov["tool_version"]
     assert set(prov["files"]) == {"a.py"}

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko import cli
+from dekko import cli, diff
 
 BASE = {
     "a.py": "def f() -> int:\n    return 1\n",
@@ -116,3 +116,24 @@ def test_diff_bad_rev(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     root = _repo(tmp_path, BASE)
     assert cli.main(["diff", "nope-not-a-rev", "--root", str(root)]) == 2
     assert "cannot export git rev" in capsys.readouterr().err
+
+
+def test_diff_uses_no_tar_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """export_rev extracts via stdlib tarfile, never the tar binary."""
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+
+    real_run = subprocess.run
+    calls: list[list[str]] = []
+
+    def spy(cmd: list[str], *args: object, **kwargs: object):  # noqa: ANN202
+        calls.append(list(cmd))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(diff.subprocess, "run", spy)
+    assert cli.main(["diff", "--root", str(root)]) == 1
+    # No `tar` subprocess; the snapshot still comes from `git archive`.
+    assert not any(c and c[0] == "tar" for c in calls)
+    assert any(c[:2] == ["git", "-C"] and "archive" in c for c in calls)

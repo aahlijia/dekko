@@ -39,6 +39,29 @@ def test_callees(
     assert "helper(x: int) -> int" in capsys.readouterr().out
 
 
+def test_file_json_carries_meta(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(["query", "file", "a.py", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["meta"]["total"] == len(doc["symbols"])
+    assert doc["meta"]["truncated_by"] is None
+
+
+def test_callees_budget_caps_and_footers(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(
+        ["query", "callees", "entry", "--root", str(root), "--budget", "1"]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "tokens" in out.splitlines()[-1]
+
+
 def test_ambiguous_bare_name(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
@@ -83,7 +106,8 @@ def test_file_action_and_limit(
     assert code == 0
     out = capsys.readouterr().out
     assert "helper" in out
-    assert "and 1 more" in out
+    assert "1 of 2 omitted" in out
+    assert "raise --limit" in out
 
 
 def test_file_not_found(

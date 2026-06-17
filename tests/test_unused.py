@@ -140,4 +140,5 @@ def test_unused_json(
     root = make_mapped_repo(PY)
     assert cli.main(["unused", "--root", str(root), "--json"]) == 1
     doc = json.loads(capsys.readouterr().out)
-    assert [d["id"] for d in doc] == ["a.py::dead"]
+    assert [d["id"] for d in doc["results"]] == ["a.py::dead"]
+    assert doc["meta"]["total"] == 1

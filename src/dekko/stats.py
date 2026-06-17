@@ -5,7 +5,7 @@ from collections import Counter
 
 from .mapfile import MapIndex
 from .model import Symbol
-from .render_md import signature
+from .textutil import signature
 
 
 def _edge_count(index: MapIndex) -> int:
