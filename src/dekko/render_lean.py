@@ -709,7 +709,7 @@ def run(
     text = "\n".join(lines)
     if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(text + "\n")
+        out_path.write_text(text + "\n", encoding="utf-8")
         print(f"dekko: wrote {out_path} (~{report.tokens} tokens)")
         return 0
     if as_json:
