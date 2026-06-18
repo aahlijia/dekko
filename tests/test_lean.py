@@ -589,7 +589,7 @@ def test_cli_lean_output_writes_file(
     code = cli.main(["lean", "--root", str(root), "--output", str(dest)])
     assert code == 0
     assert dest.exists()
-    assert dest.read_text().startswith("lean map · ~")
+    assert dest.read_text(encoding="utf-8").startswith("lean map · ~")
     # Stdout carries a confirmation, not the map itself.
     assert "wrote" in capsys.readouterr().out
 
