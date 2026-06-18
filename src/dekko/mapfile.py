@@ -243,7 +243,9 @@ def _load_notes(root: Path) -> dict[str, list[str]]:
     low-level loader free of higher-level imports.
     """
     try:
-        doc = json.loads((root / _MAP_DIR / "notes.json").read_text())
+        doc = json.loads(
+            (root / _MAP_DIR / "notes.json").read_text(encoding="utf-8")
+        )
     except (OSError, json.JSONDecodeError):
         return {}
     raw = doc.get("notes")
@@ -275,7 +277,7 @@ def load_map(root: Path) -> MapIndex | None:
     """
     path = root / _MAP_DIR / "map.json"
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 

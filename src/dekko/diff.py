@@ -71,7 +71,11 @@ class DiffResult:
 def _body_hash(root: Path, sym: Symbol) -> str:
     """Short hash of a symbol's defining source lines."""
     try:
-        lines = (root / sym.path).read_text(errors="replace").splitlines()
+        lines = (
+            (root / sym.path)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+        )
     except OSError:
         return ""
     body = "\n".join(lines[sym.start_line - 1 : sym.end_line])

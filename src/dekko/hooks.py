@@ -290,7 +290,7 @@ def settings_path(root: Path) -> Path:
 def _load_settings(path: Path) -> dict:
     """Read existing settings, or an empty object (best-effort)."""
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -343,7 +343,7 @@ def install(root: Path, events: list[str]) -> int:
         if not _already_installed(bucket, event):
             bucket.append(_entry(event, matcher))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n")
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     print(
         f"dekko: enabled hooks [{', '.join(events)}] in {path}. "
         "Restart Claude Code."
@@ -393,7 +393,7 @@ def uninstall(root: Path) -> int:
     if not hooks:
         settings.pop("hooks", None)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n")
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     print(
         f"dekko: removed {removed} dekko hook entr"
         f"{'y' if removed == 1 else 'ies'} from {path}."
