@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import classify, export, mapfile, summary
-from .model import CallGraph, FileMap, Symbol
+from .model import TYPE_KINDS, CallGraph, FileMap, Symbol
 from .resolver import MODULE_CALLER_SUFFIX
 from .textutil import oneline, signature
 
@@ -395,7 +395,12 @@ def _header(
         for s in fm.symbols
         if s.kind in ("function", "method")
     )
-    classes = sum(1 for fm in files for s in fm.symbols if s.kind == "class")
+    classes = sum(
+        1 for fm in files for s in fm.symbols if s.kind in TYPE_KINDS
+    )
+    variables = sum(
+        1 for fm in files for s in fm.symbols if s.kind == "variable"
+    )
     when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     langs = ", ".join(f"{lang} {n}" for lang, n in by_lang.most_common())
     lines = [
@@ -409,7 +414,8 @@ def _header(
         "be large.",
         "",
         f"**{len(files)}** files ({langs}) · "
-        f"**{funcs}** functions/methods · **{classes}** classes · "
+        f"**{funcs}** functions/methods · **{classes}** types · "
+        f"**{variables}** variables · "
         f"**{len(graph.edges)}** call edges "
         f"({len(graph.ambiguous)} ambiguous, "
         f"{len(graph.external)} external — see map.json)",

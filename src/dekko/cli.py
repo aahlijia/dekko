@@ -21,6 +21,7 @@ from pathlib import Path
 from . import affected
 from . import cache as cache_mod
 from . import classify
+from . import cline as cline_mod
 from . import contextpack
 from . import diff
 from . import export
@@ -45,7 +46,7 @@ from . import walker
 from . import workset as workset_mod
 from .extractor import extract_file
 from .extractor_generic import extract_file_generic
-from .model import FileMap
+from .model import TYPE_KINDS, FileMap
 from .render_json import render_json
 from .resolver import resolve
 
@@ -117,6 +118,36 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         "--mcp-uninstall",
         action="store_true",
         help="remove the MCP server from Claude Code (claude mcp remove)",
+    )
+    parser.add_argument(
+        "--cline-install",
+        action="store_true",
+        help="register the MCP server in Cline's cline_mcp_settings.json",
+    )
+    parser.add_argument(
+        "--cline-uninstall",
+        action="store_true",
+        help="remove the MCP server from Cline's cline_mcp_settings.json",
+    )
+    parser.add_argument(
+        "--cline-scope",
+        choices=cline_mod.SCOPES,
+        default="vscode",
+        help="Cline install to target: the VS Code extension "
+        "(default) or a standalone cline CLI's global config",
+    )
+    parser.add_argument(
+        "--cline-config",
+        default=None,
+        metavar="PATH",
+        help="explicit cline_mcp_settings.json path, overriding "
+        "--cline-scope auto-detection",
+    )
+    parser.add_argument(
+        "--cline-force",
+        action="store_true",
+        help="reset a malformed cline_mcp_settings.json instead of "
+        "aborting (--cline-install/--cline-uninstall)",
     )
     parser.add_argument(
         "--version",
@@ -225,6 +256,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         prog="dekko",
         description=("Generate and query MAP.md/map.json for a repository."),
         epilog=(
+            "note: 'map' takes DIR positionally; every other command "
+            "uses --root DIR\n"
             "legacy aliases: dekko --map [DIR] [SUBPATH], "
             "dekko --claude-install, dekko --version"
         ),
@@ -660,6 +693,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_summary = sub.add_parser(
         "summary", help="compact repo digest (dirs, hotspots, entrypoints)"
     )
+    p_summary.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="approximate token cap; trailing sections are shed to fit",
+    )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
 
@@ -1049,11 +1089,17 @@ def _summary(
         if s.kind in ("function", "method")
     )
 
-    classes = sum(1 for fm in files for s in fm.symbols if s.kind == "class")
+    classes = sum(
+        1 for fm in files for s in fm.symbols if s.kind in TYPE_KINDS
+    )
+    variables = sum(
+        1 for fm in files for s in fm.symbols if s.kind == "variable"
+    )
     errors = sum(1 for fm in files if fm.error)
     lines = [
         f"dekko: mapped {len(files)} files ({langs})",
-        f"  symbols: {funcs} functions/methods, {classes} classes",
+        f"  symbols: {funcs} functions/methods, {classes} types, "
+        f"{variables} variables",
         f"  call edges: {edges} resolved, {ambiguous} ambiguous, "
         f"{external} external",
     ]
@@ -1225,6 +1271,71 @@ def mcp_uninstall() -> int:
     return 0
 
 
+def _map_run_is_noop(
+    root: Path,
+    args: argparse.Namespace,
+    cache: cache_mod.IncrementalCache | None,
+    files: list[FileMap],
+) -> bool:
+    """True when this run would re-write byte-identical output.
+
+    Guards a true no-op fast path for the default (non ``--full``)
+    ``dekko map`` path: when nothing needed re-parsing, no file was
+    added or removed since the cache was written, this run's discovery
+    options match the on-disk map's provenance, and that map was built
+    by the exact running dekko, re-serializing MAP.md/map.json/shards
+    would produce the same bytes already on disk — skip resolve() and
+    every render/write step entirely (prints a short summary unless
+    ``--quiet``) rather than paying that cost on every invocation.
+
+    The ``tool_version``/``spec_hash`` check exists because ``cache.
+    parsed == 0`` alone is not quite sufficient: it is trustworthy for
+    *the cache itself* (a cache from a different dekko build never
+    survives to be reused — see bug #1's fix in ``cache.py``), but
+    ``.dekko/cache.json`` and ``.dekko/map.json`` are two independent
+    files, and a hand-edited or otherwise desynced map.json could
+    still be stale even when the cache looks fully warm.
+
+    Args:
+        root: Repository root.
+        args: Parsed CLI arguments for this run.
+        cache: The incremental cache used for this run, or ``None``
+            (``--no-json`` runs never take the fast path — there is no
+            map.json to compare against).
+        files: This run's extraction results.
+
+    Returns:
+        True when the run's summary was printed and nothing else
+        needs to happen.
+    """
+    if getattr(args, "full", False) or cache is None:
+        return False
+    if cache.parsed != 0 or not cache.unchanged([fm.path for fm in files]):
+        return False
+    index = mapfile.load_map(root)
+    if index is None or not index.provenance:
+        return False
+    prov = index.provenance
+    options_match = (
+        prov.get("subpath") == args.subpath
+        and prov.get("excludes", []) == list(args.exclude)
+        and prov.get("max_file_size") == args.max_file_size
+    )
+    version_match = (
+        prov.get("tool_version") == _pkg_version("dekko")
+        and prov.get("spec_hash") == languages.spec_fingerprint()
+    )
+    if not (options_match and version_match):
+        return False
+    if not args.quiet:
+        commit = (prov.get("git_commit") or "no git")[:12]
+        print(
+            f"dekko: unchanged ({len(files)} files, commit {commit}) "
+            "— nothing written"
+        )
+    return True
+
+
 def run_map(args: argparse.Namespace) -> int:
     """Execute the mapping action for parsed CLI arguments.
 
@@ -1264,6 +1375,9 @@ def run_map(args: argparse.Namespace) -> int:
         )
         return 1
 
+    if _map_run_is_noop(root, args, cache, files):
+        return 0
+
     graph = resolve(files)
     label = root.name + (f"/{args.subpath}" if args.subpath else "")
 
@@ -1299,6 +1413,7 @@ def run_map(args: argparse.Namespace) -> int:
             subpath=args.subpath,
             excludes=tuple(args.exclude),
             max_file_size=args.max_file_size,
+            skipped=skipped,
         )
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(
@@ -1347,6 +1462,9 @@ def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
         commit = (prov.get("git_commit") or "no git")[:12]
         n = len(prov.get("files", {}))
         print(f"dekko: map fresh ({n} files, commit {commit})")
+        note = mapfile.format_unsupported(prov)
+        if note:
+            print(f"  {note}")
     return True
 
 
@@ -1574,7 +1692,7 @@ def run_summary(args: argparse.Namespace) -> int:
     index, code = _read_index(args)
     if index is None:
         return code
-    return summary.run(index, as_json=args.as_json)
+    return summary.run(index, as_json=args.as_json, budget=args.budget)
 
 
 def run_lean(args: argparse.Namespace) -> int:
@@ -1653,7 +1771,7 @@ def _resolve_for_note(root: Path, target: str) -> tuple[str | None, int]:
         return None, 5
     sym, candidates = query.resolve_target(index, target)
     if sym is None:
-        return None, query.report_unresolved(target, candidates)
+        return None, query.report_unresolved(target, candidates, index)
     return sym.id, 0
 
 
@@ -1756,24 +1874,55 @@ def run_status(args: argparse.Namespace) -> int:
         return 1
 
     fresh = mapfile.check_freshness(root, index)
+    unsupported = (index.provenance or {}).get("unsupported")
     if args.as_json:
         doc = {
             "status": "fresh" if fresh.fresh else "stale",
+            "reason": fresh.reason,
             "added": fresh.added,
             "removed": fresh.removed,
             "changed": fresh.changed,
+            "unsupported": unsupported,
         }
         print(json.dumps(doc, indent=2))
         return 0 if fresh.fresh else 1
 
     if fresh.fresh:
-        prov = index.provenance or {}
-        commit = (prov.get("git_commit") or "no git")[:12]
-        n = len(prov.get("files", {}))
-        print(f"dekko: map fresh ({n} files, commit {commit})")
+        _print_fresh_status(index.provenance)
         return 0
 
+    _print_stale_status(fresh, index.provenance)
+    return 1
+
+
+def _print_fresh_status(provenance: dict | None) -> None:
+    """Print the one-line ``dekko status`` message for a fresh map."""
+    prov = provenance or {}
+    commit = (prov.get("git_commit") or "no git")[:12]
+    n = len(prov.get("files", {}))
+    print(f"dekko: map fresh ({n} files, commit {commit})")
+    note = mapfile.format_unsupported(prov)
+    if note:
+        print(f"  {note}")
+
+
+def _print_stale_status(
+    fresh: mapfile.Freshness, provenance: dict | None
+) -> None:
+    """Print the ``dekko status`` message for a stale map.
+
+    A ``reason="version"`` verdict has no added/removed/changed lists
+    to show (``check_freshness`` returns immediately on a version
+    mismatch, before diffing file content) — print the actionable
+    built-vs-running note instead.
+    """
     print("dekko: map is stale")
+    if fresh.reason == "version":
+        print(f"  {_version_stale_note(provenance)}")
+        return
+    note = mapfile.format_unsupported(provenance)
+    if note:
+        print(f"  {note}")
     for title, items in (
         ("added", fresh.added),
         ("changed", fresh.changed),
@@ -1783,7 +1932,13 @@ def run_status(args: argparse.Namespace) -> int:
             print(f"  {title}: {path}")
         if len(items) > 10:
             print(f"  ... and {len(items) - 10} more {title}")
-    return 1
+
+
+def _version_stale_note(provenance: dict | None) -> str:
+    """One-line explanation for a ``reason="version"`` freshness verdict."""
+    built = (provenance or {}).get("tool_version", "unknown")
+    running = _pkg_version("dekko")
+    return f"built by dekko {built}, running {running} — run `dekko map`"
 
 
 def _legacy_main(args_list: list[str]) -> int:
@@ -1802,6 +1957,18 @@ def _legacy_main(args_list: list[str]) -> int:
 
     if args.mcp_uninstall:
         return mcp_uninstall()
+
+    if args.cline_install:
+        config = Path(args.cline_config) if args.cline_config else None
+        return cline_mod.install(
+            config, args.cline_scope, force=args.cline_force
+        )
+
+    if args.cline_uninstall:
+        config = Path(args.cline_config) if args.cline_config else None
+        return cline_mod.uninstall(
+            config, args.cline_scope, force=args.cline_force
+        )
 
     if args.map_dir is None:
         build_subcommand_parser().print_help()

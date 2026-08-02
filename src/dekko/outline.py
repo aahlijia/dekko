@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .classify import is_test_path
 from .mapfile import MapIndex
-from .model import Symbol
+from .model import TYPE_KINDS, Symbol
 from .query import paths_matching
 from .source import read_lines
 from .textutil import estimate_tokens, fit_to_budget, oneline
@@ -76,8 +76,10 @@ def collect_dir(index: MapIndex, prefix: str) -> list[FileOutline]:
 
 def _outline_sig(sym: Symbol) -> str:
     """Signature using the bare name; nesting is shown by indentation."""
-    if sym.kind == "class":
-        return f"class {sym.name}"
+    if sym.kind in TYPE_KINDS:
+        return f"{sym.kind} {sym.name}"
+    if sym.kind == "variable":
+        return sym.name
     parts = [f"{p.name}: {p.type}" if p.type else p.name for p in sym.params]
     sig = f"{sym.name}({', '.join(parts)})"
     if sym.returns:
@@ -129,6 +131,66 @@ def _size_line(full: int, outline_tokens: int) -> str | None:
     return f"full ≈ {full} tok · outline ≈ {outline_tokens} tok ({pct}%)"
 
 
+# Thresholds for ``_sparse_note``: a file has to be substantial
+# (``_SPARSE_MIN_FULL_TOKENS``) with very few named symbols
+# (``_SPARSE_MAX_SYMBOLS``) *and* an outline that covers only a
+# sliver of it (``_SPARSE_MAX_RATIO``) before the caveat fires — a
+# genuinely small/simple file (little content either way) must not
+# trip this.
+_SPARSE_MIN_FULL_TOKENS = 500
+_SPARSE_MAX_SYMBOLS = 8
+_SPARSE_MAX_RATIO = 0.15
+
+
+def _file_outline_tokens(fo: FileOutline) -> int:
+    """Token estimate of one file's full (untrimmed) outline rows."""
+    rows = _file_header(fo) + [_symbol_row(s) for s in fo.symbols]
+    return estimate_tokens("\n".join(rows))
+
+
+def _sparse_note(
+    full: int, outline_tokens: int, symbol_count: int
+) -> str | None:
+    """Caveat when a file's outline looks suspiciously thin for its size.
+
+    A callback-heavy file — handlers registered via anonymous
+    function expressions passed to a handful of top-level calls (an
+    MCP server's ``server.tool("x", async () => {...})``, an Express
+    app's ``router.get(...)``) — has almost no *named* symbols for
+    the extractor to find, so its outline can look like an extreme
+    (and perfectly legitimate-looking) token-savings ratio while
+    actually hiding nearly the entire file's real content (bug #9/B9
+    — claude-buddy's 1,344-line MCP server entrypoint outlined to 5
+    rows/43 tokens, ~0.2% of the full file). This doesn't detect the
+    callback pattern itself (that needs new extraction work) — it
+    flags the precondition (large file, almost no named symbols, and
+    an outline covering only a sliver of it) so a caller knows to
+    cross-check with a targeted grep before trusting a near-empty
+    outline as complete.
+
+    Args:
+        full: Estimated tokens of the whole file (0 if unknown).
+        outline_tokens: Estimated tokens of the file's full,
+            untrimmed outline (see ``_file_outline_tokens``).
+        symbol_count: Number of symbols the outline lists.
+
+    Returns:
+        A one-line caveat, or ``None`` when the file doesn't look
+        anomalously sparse.
+    """
+    if full < _SPARSE_MIN_FULL_TOKENS or symbol_count > _SPARSE_MAX_SYMBOLS:
+        return None
+    if full <= 0 or outline_tokens / full > _SPARSE_MAX_RATIO:
+        return None
+    return (
+        "this file has very few named symbols for its size — if it "
+        "registers behavior via anonymous callbacks (route handlers, "
+        "event listeners, tool/command registration, ...), this "
+        "outline may be missing most of its real content; consider "
+        "`grep` for the registration pattern"
+    )
+
+
 def size_estimate(
     index: MapIndex, root: Path, path: str
 ) -> tuple[int, int] | None:
@@ -167,9 +229,13 @@ def _render_text_file(
     print(prefix)
     for row in kept:
         print(row)
-    size = _size_line(_full_tokens(root, fo.path), meter.tokens)
+    full = _full_tokens(root, fo.path)
+    size = _size_line(full, meter.tokens)
     if size:
         print(size)
+    note = _sparse_note(full, _file_outline_tokens(fo), len(fo.symbols))
+    if note:
+        print(f"  note: {note}", file=sys.stderr)
     print(meter.footer())
     return EXIT_OK
 
@@ -195,6 +261,14 @@ def _render_text_dir(
     size = _size_line(full, meter.tokens)
     if size:
         print(size)
+    for fo in outlines:
+        note = _sparse_note(
+            _full_tokens(root, fo.path),
+            _file_outline_tokens(fo),
+            len(fo.symbols),
+        )
+        if note:
+            print(f"  note: {fo.path} — {note}", file=sys.stderr)
     print(meter.footer())
     return EXIT_OK
 
@@ -216,16 +290,19 @@ def _render_json(
     files = []
     for fi, fo in enumerate(outlines):
         kept_syms = keep_by_file.get(fi, [])
-        files.append(
-            {
-                "path": fo.path,
-                "language": fo.language,
-                "doc": fo.doc,
-                "error": fo.error,
-                "symbols": [_sym_json(s) for s in kept_syms],
-                "full_tokens": _full_tokens(root, fo.path),
-            }
-        )
+        full = _full_tokens(root, fo.path)
+        entry = {
+            "path": fo.path,
+            "language": fo.language,
+            "doc": fo.doc,
+            "error": fo.error,
+            "symbols": [_sym_json(s) for s in kept_syms],
+            "full_tokens": full,
+        }
+        note = _sparse_note(full, _file_outline_tokens(fo), len(fo.symbols))
+        if note:
+            entry["sparse_note"] = note
+        files.append(entry)
     doc = {"target": target, "files": files, "meta": meter.as_dict()}
     print(json.dumps(doc, indent=2))
     return EXIT_OK

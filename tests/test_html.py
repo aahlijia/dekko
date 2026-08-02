@@ -60,6 +60,33 @@ def test_document_matches_index() -> None:
     assert caller == {"id": "b.py::g", "lines": [2]}
 
 
+def test_stats_key_stable_label_says_types() -> None:
+    # The TYPE_KINDS rollup keeps its JSON key "classes" for schema
+    # stability, but the rendered page label reads "types" — an
+    # all-interface repo should not surface a "classes" count in the
+    # human-readable stats line.
+    sym = Symbol(
+        id="item.ts::Item",
+        name="Item",
+        qualname="Item",
+        kind="interface",
+        path="item.ts",
+        language="typescript",
+        start_line=1,
+        end_line=1,
+    )
+    fm = FileMap("item.ts", "typescript", symbols=[sym])
+    index = mapfile.index_from_maps([fm], CallGraph(), "demo")
+    doc = render_html.build_document(index)
+    assert doc["stats"]["classes"] == 1
+    page = render_html.render(doc)
+    assert "1 types" in page
+    # The JSON island still keys the count as "classes" (schema
+    # stability); the visible page outside that island must not.
+    visible = _ISLAND.sub("", page)
+    assert "classes" not in visible
+
+
 def test_island_parses_and_is_valid_json() -> None:
     page = render_html.render(render_html.build_document(_index()))
     parsed = _parse_island(page)

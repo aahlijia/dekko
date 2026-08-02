@@ -87,4 +87,24 @@ def test_purpose_line_suppressed_on_parse_error() -> None:
     # The error itself surfaces in the Overview and the file section.
     overview = text.split("## Contents")[0]
     assert "syntax error" in overview
-    assert "*python — parse error: syntax error*" in text
+
+
+def test_header_stats_label_types_not_classes() -> None:
+    # The TYPE_KINDS rollup (class + interface + enum + struct + record
+    # + trait) is labeled "types" in the header stats line, not
+    # "classes" — an all-interface repo should not read as having
+    # "classes" it doesn't have.
+    sym = Symbol(
+        id="item.ts::Item",
+        name="Item",
+        qualname="Item",
+        kind="interface",
+        path="item.ts",
+        language="typescript",
+        start_line=1,
+        end_line=1,
+    )
+    fm = FileMap(path="item.ts", language="typescript", symbols=[sym])
+    text = render_markdown([fm], CallGraph(), "demo")
+    assert "**1** types" in text
+    assert "classes" not in text

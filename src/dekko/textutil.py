@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 
-from .model import Symbol
+from .model import TYPE_KINDS, Symbol
 
 # Token-counting backend (Q2). The accurate path uses ``tiktoken`` when
 # it is installed (``pip install dekko[tokenizer]``); otherwise, and in
@@ -16,8 +16,15 @@ _TIKTOKEN_ENCODING = "o200k_base"
 
 def signature(sym: Symbol) -> str:
     """Format a symbol as a one-line signature."""
-    if sym.kind == "class":
-        return f"class {sym.qualname}"
+    if sym.kind in TYPE_KINDS:
+        return f"{sym.kind} {sym.qualname}"
+    if sym.kind == "variable":
+        return sym.qualname
+    if sym.kind == "module":
+        # Synthetic placeholder for an anonymous-callback call site
+        # promoted out of contextpack's module-caller bucket (bug #4)
+        # — it has no real params/returns to render.
+        return f"<anonymous> ({sym.path})"
     parts = [f"{p.name}: {p.type}" if p.type else p.name for p in sym.params]
     sig = f"{sym.qualname}({', '.join(parts)})"
     if sym.returns:

@@ -39,7 +39,32 @@ def test_status_json(
     assert cli.main(["status", "--root", str(root), "--json"]) == 1
     doc = json.loads(capsys.readouterr().out)
     assert doc["status"] == "stale"
+    assert doc["reason"] == "content"
     assert doc["added"] == ["b.py"]
+
+
+def test_status_stale_on_version_bump(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Bug #1: an unchanged source tree must still read as stale once
+    # the map's recorded tool_version no longer matches the running
+    # build — "dekko status" is the primary surface for this.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["tool_version"] = "0.0.0-stale"
+    map_path.write_text(json.dumps(doc))
+
+    assert cli.main(["status", "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "stale" in out
+    assert "built by dekko 0.0.0-stale, running" in out
+    assert "run `dekko map`" in out
+
+    assert cli.main(["status", "--root", str(root), "--json"]) == 1
+    json_doc = json.loads(capsys.readouterr().out)
+    assert json_doc["status"] == "stale"
+    assert json_doc["reason"] == "version"
 
 
 def test_read_command_auto_regenerates(
@@ -65,6 +90,22 @@ def test_no_regen_fails_on_stale(
     )
     assert code == 5
     assert "missing or stale" in capsys.readouterr().err
+
+
+def test_status_reports_unsupported_coverage(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        dict(SRC, **{"Card.astro": "---\nconst x = 1;\n---\n"})
+    )
+    assert cli.main(["status", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "map fresh" in out
+    assert "no parser for: astro" in out
+
+    assert cli.main(["status", "--root", str(root), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["unsupported"] == {"count": 1, "languages": {"astro": 1}}
 
 
 def test_map_if_stale_short_circuits(

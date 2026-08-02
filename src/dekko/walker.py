@@ -139,8 +139,11 @@ def discover(
 
     Returns:
         A pair ``(files, skipped)``: sorted repo-relative paths to
-        map, and ``(path, reason)`` pairs for supported files that
-        were skipped.
+        map, and ``(path, reason)`` pairs for files that were skipped
+        — including files in a confirmed-unsupported language (reason
+        ``"no parser (<language>)"``, see ``languages.KNOWN_UNSUPPORTED``).
+        Extensions dekko simply doesn't recognize at all (non-code
+        files) are still omitted with no entry here.
     """
     candidates = _git_files(root)
     if candidates is None:
@@ -176,8 +179,6 @@ def _classify(
         ``"ok"`` to map the file, ``None`` to ignore it silently, or
         a skip reason to report.
     """
-    if not languages.is_supported(rel):
-        return None
     if prefix and not (rel == prefix or rel.startswith(prefix + "/")):
         return None
     if _in_excluded_dir(rel):
@@ -188,6 +189,9 @@ def _classify(
         fnmatch.fnmatch(rel, pat) for pat in excludes
     ):
         return "excluded"
+    if not languages.is_supported(rel):
+        unsupported = languages.known_unsupported_language(rel)
+        return f"no parser ({unsupported})" if unsupported else None
     try:
         size = (root / rel).stat().st_size
     except OSError:

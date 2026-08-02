@@ -18,3 +18,10 @@ class Helper {
         return x + x;
     }
 }
+
+enum Status {
+    OK,
+    FAIL,
+}
+
+record Point(int x, int y) {}

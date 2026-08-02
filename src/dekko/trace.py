@@ -122,7 +122,7 @@ def _resolve_endpoint(
     """Resolve one endpoint, printing and coding any failure."""
     sym, candidates = resolve_target(index, target)
     if sym is None:
-        return None, report_unresolved(target, candidates)
+        return None, report_unresolved(target, candidates, index)
     return sym, EXIT_OK
 
 

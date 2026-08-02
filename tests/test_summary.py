@@ -59,6 +59,31 @@ def test_json_shape(
     assert "parse_errors" in doc
 
 
+def test_digest_reports_unsupported_coverage(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        dict(SRC, **{"src/Card.astro": "---\nconst x = 1;\n---\n"})
+    )
+    assert _summary(root) == 0
+    out = capsys.readouterr().out
+    assert "coverage:" in out
+    assert "no parser for: astro (1)" in out
+    assert "may be incomplete" in out
+
+    assert _summary(root, "--json") == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["unsupported"] == {"count": 1, "languages": {"astro": 1}}
+
+
+def test_digest_omits_coverage_when_fully_covered(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SRC)
+    assert _summary(root) == 0
+    assert "coverage:" not in capsys.readouterr().out
+
+
 def test_directory_purpose_prefers_index_file(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
@@ -144,3 +169,49 @@ def test_initialize_advertises_resources() -> None:
 
 def test_summary_tool_registered() -> None:
     assert "summary" in {t["name"] for t in server.TOOLS}
+
+
+def test_cli_budget_caps_text_and_footers(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SRC)
+    assert _summary(root, "--budget", "30") == 0
+    out = capsys.readouterr().out
+    assert "omitted" in out.splitlines()[-1]
+    assert "entrypoints:" not in out  # trailing sections shed first
+
+
+def test_mcp_summary_tool_applies_default_budget(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # The tool defaults its budget (the digest scales with repo size and
+    # is re-read as cache every turn); the footer proves a cap was live.
+    root = make_mapped_repo(SRC)
+    resp = _request(root, "tools/call", {"name": "summary", "arguments": {}})
+    text = resp["result"]["content"][0]["text"]
+    assert not resp["result"]["isError"]
+    assert "tokens" in text.splitlines()[-1]
+
+
+def test_mcp_summary_tool_honors_explicit_budget(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    resp = _request(
+        root, "tools/call", {"name": "summary", "arguments": {"budget": 30}}
+    )
+    text = resp["result"]["content"][0]["text"]
+    assert not resp["result"]["isError"]
+    assert "omitted" in text.splitlines()[-1]
+
+
+def test_mcp_summary_resource_stays_unbudgeted(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    read = _request(root, "resources/read", {"uri": "dekko://summary"})[
+        "result"
+    ]
+    text = read["contents"][0]["text"]
+    assert "entrypoints:" in text
+    assert "omitted" not in text.splitlines()[-1]

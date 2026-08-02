@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 
+from .mapfile import MAP_DOC_VERSION
 from .model import CallGraph, FileMap
 
 
@@ -28,7 +29,7 @@ def render_json(
     when = datetime.now(timezone.utc).isoformat(timespec="seconds")
     doc = {
         "generator": "dekko",
-        "version": 3,
+        "version": MAP_DOC_VERSION,
         "root": root_label,
         "generated_at": when,
         "provenance": provenance,
@@ -49,5 +50,6 @@ def render_json(
             for caller, name, cands in graph.ambiguous
         ],
         "external": [asdict(ext) for ext in graph.external],
+        "referenced": [asdict(edge) for edge in graph.referenced],
     }
     return json.dumps(doc, indent=2, sort_keys=False) + "\n"

@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .classify import is_test_path
 from .mapfile import MapIndex
+from .model import TYPE_KINDS
 from .textutil import signature
 
 EXIT_OK = 0
@@ -92,7 +93,8 @@ def _stats(index: MapIndex) -> dict:
         "files": len(index.languages_by_path),
         "symbols": len(index.symbols_by_id),
         "functions": sum(1 for k in kinds if k in ("function", "method")),
-        "classes": sum(1 for k in kinds if k == "class"),
+        "classes": sum(1 for k in kinds if k in TYPE_KINDS),
+        "variables": sum(1 for k in kinds if k == "variable"),
         "edges": sum(len(v) for v in index.calls_out.values()),
     }
 
@@ -130,7 +132,8 @@ def render(doc: dict) -> str:
     s = doc["stats"]
     stats_line = (
         f"{s['files']} files · {s['functions']} functions/methods · "
-        f"{s['classes']} classes · {s['edges']} edges"
+        f"{s['classes']} types · {s['variables']} variables · "
+        f"{s['edges']} edges"
     )
     return (
         "<!doctype html>\n"

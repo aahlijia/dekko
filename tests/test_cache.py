@@ -89,6 +89,22 @@ def test_version_change_invalidates_cache(
     assert sorted(parsed) == ["a.py", "b.py"]
 
 
+def test_spec_change_invalidates_cache(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A dev iteration or hotfix can change what the extractor pulls
+    # out of a file without bumping the released version string — the
+    # cache must still invalidate on that, not just on a real version
+    # bump (bug #1: the tool-version check alone is too coarse).
+    root = make_mapped_repo(SRC)
+    monkeypatch.setattr(cache_mod, "spec_fingerprint", lambda: "deadbeef")
+    assert cache_mod.load(root) == {}
+
+    parsed = _count_extractions(monkeypatch)
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    assert sorted(parsed) == ["a.py", "b.py"]
+
+
 def test_parallel_extraction_matches_sequential(
     make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
