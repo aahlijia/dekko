@@ -34,9 +34,10 @@ def _map_doc(root: Path) -> dict:
     return json.loads((root / ".dekko" / "map.json").read_text())
 
 
-def test_doc_version_is_3(make_mapped_repo: RepoFactory) -> None:
+def test_doc_version_is_4(make_mapped_repo: RepoFactory) -> None:
+    # Bumped 3 -> 4 for the "referenced" edge table (bug #2b).
     doc = _map_doc(make_mapped_repo(SRC))
-    assert doc["version"] == 3
+    assert doc["version"] == 4
 
 
 def test_edges_carry_call_site_lines(make_mapped_repo: RepoFactory) -> None:

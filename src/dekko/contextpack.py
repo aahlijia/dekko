@@ -9,6 +9,7 @@ target's signature is never dropped.
 """
 
 import json
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,13 @@ from .textutil import Meter, estimate_tokens
 
 # Call-site excerpts shown per hop-1 caller entry.
 _MAX_SITES_PER_ENTRY = 3
+
+# Default token cap for a context pack when the caller passes no
+# budget. Without this, a symbol-mode pack's import list (before
+# relevance filtering) or a wide neighbor set can dump far more than
+# an edit task needs — the caller can always pass a larger budget
+# explicitly.
+DEFAULT_PACK_BUDGET = 800
 
 
 @dataclass
@@ -57,10 +65,15 @@ class Pack:
         target: Target symbol, or ``None`` in file mode.
         file_path: File the target (or pack) belongs to.
         file_symbols: All symbols of the file (file mode only).
-        imports: Imports declared in ``file_path``.
+        imports: Imports declared in ``file_path``. In symbol mode
+            this is filtered to imports referenced by the target or
+            its neighbors — see ``_relevant_imports``.
         entries: Neighboring symbols with hop distance and direction.
         module_callers: Files whose top level calls into the pack.
-        trimmed: Symbols dropped to satisfy the token budget.
+        trimmed: Content items (neighbors, imports, file symbols)
+            dropped to satisfy the token budget.
+        imports_dropped: Imports discarded by relevance filtering
+            (distinct from ``trimmed``, which counts budget cuts).
         source_lines: The target's body in ``with_source`` mode, else
             ``None``.
         source_truncated: Whether budget trimming dropped source lines.
@@ -75,6 +88,7 @@ class Pack:
     entries: list[PackEntry] = field(default_factory=list)
     module_callers: list[str] = field(default_factory=list)
     trimmed: int = 0
+    imports_dropped: int = 0
     source_lines: list[str] | None = None
     source_truncated: bool = False
     notes: list[str] = field(default_factory=list)
@@ -85,6 +99,76 @@ def _neighbors(index: MapIndex, sym_id: str) -> list[tuple[str, str]]:
     pairs = [(sid, "caller") for sid in index.calls_in.get(sym_id, [])]
     pairs += [(sid, "callee") for sid in index.calls_out.get(sym_id, [])]
     return pairs
+
+
+def _anonymous_entries(
+    index: MapIndex, module_id: str, callee_id: str, hop: int
+) -> list[PackEntry]:
+    """Promote a module-level pseudo-caller's call sites to real entries.
+
+    ``module_id`` (``path::<module>``) is always the caller side of an
+    edge — a module is never a resolvable callee — so each recorded
+    call-site line becomes its own synthetic ``kind="module"`` symbol
+    with a real line number, landing in the ``callers:`` list next to
+    named-function callers instead of a separate, line-number-less
+    ``module-level callers:`` summary that is easy to miss (bug #4).
+
+    Maps written before doc version 3 have no ``edge_lines``; when the
+    lookup is empty, the caller falls back to the bare
+    ``pack.module_callers`` entry it already appended (no synthetic
+    entries added here — same graceful-degradation pattern
+    ``query.py``'s ``_site_rows`` uses).
+
+    Args:
+        index: Loaded map index (for ``edge_lines``/``languages_by_path``).
+        module_id: The ``path::<module>`` pseudo-symbol id.
+        callee_id: The real symbol id the module calls into.
+        hop: BFS hop distance to record on each entry.
+
+    Returns:
+        One ``PackEntry`` per call site, or an empty list.
+    """
+    path = module_id[: -len(MODULE_CALLER_SUFFIX)]
+    lines = index.edge_lines.get((module_id, callee_id), [])
+    return [
+        PackEntry(
+            sym=Symbol(
+                id=module_id,
+                name="<anonymous>",
+                qualname="<anonymous>",
+                kind="module",
+                path=path,
+                language=index.languages_by_path.get(path, ""),
+                start_line=line,
+                end_line=line,
+            ),
+            hop=hop,
+            direction="caller",
+        )
+        for line in lines
+    ]
+
+
+def _relevant_imports(pack: Pack) -> list[Import]:
+    """Filter ``pack.imports`` to names referenced by the pack itself.
+
+    Cheap heuristic, no source re-scan: an import survives if its
+    local binding name appears as a whole word in the target's own
+    signature/doc, or in any collected neighbor's signature/doc — the
+    same text ``render_text`` already assembles via ``_target_lines``/
+    ``_entry_lines``. Call after ``pack.entries`` is populated.
+
+    Args:
+        pack: Pack whose imports to filter.
+
+    Returns:
+        The subset of ``pack.imports`` judged relevant.
+    """
+    haystack_lines = _target_lines(pack)
+    for entry in pack.entries:
+        haystack_lines += _entry_lines(entry)
+    tokens = set(re.findall(r"\w+", " ".join(haystack_lines)))
+    return [imp for imp in pack.imports if imp.name in tokens]
 
 
 def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
@@ -118,6 +202,9 @@ def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
                     pack.module_callers.append(
                         nid[: -len(MODULE_CALLER_SUFFIX)]
                     )
+                    pack.entries.extend(
+                        _anonymous_entries(index, nid, sym_id, hop)
+                    )
                     continue
                 sym = index.symbols_by_id.get(nid)
                 if sym is None:
@@ -126,6 +213,9 @@ def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
                 next_frontier.append(nid)
         frontier = next_frontier
     pack.module_callers = sorted(set(pack.module_callers))
+    all_imports = pack.imports
+    pack.imports = _relevant_imports(pack)
+    pack.imports_dropped = len(all_imports) - len(pack.imports)
     return pack
 
 
@@ -153,7 +243,15 @@ def build_file_pack(index: MapIndex, path: str) -> Pack:
                 continue
             seen.add(nid)
             if nid.endswith(MODULE_CALLER_SUFFIX):
-                pack.module_callers.append(nid[: -len(MODULE_CALLER_SUFFIX)])
+                caller_path = nid[: -len(MODULE_CALLER_SUFFIX)]
+                pack.module_callers.append(caller_path)
+                # Mirrors the "outside callers" framing this function
+                # promises: a file's own top-level code calling its
+                # own function isn't a caller worth surfacing here.
+                if caller_path != path:
+                    pack.entries.extend(
+                        _anonymous_entries(index, nid, sym.id, 1)
+                    )
                 continue
             other = index.symbols_by_id.get(nid)
             if other is not None and other.path != path:
@@ -234,14 +332,40 @@ def _source_lines(pack: Pack) -> list[str]:
     return lines
 
 
+def _residual_module_callers(pack: Pack) -> list[str]:
+    """module_callers paths with no corresponding promoted entry.
+
+    A path fully covered by a promoted anonymous PackEntry (see
+    ``_anonymous_entries``) has nothing left to say in the terser
+    trailing line — printing it there too just duplicates what
+    ``callers:`` already shows with a real line number. A path is
+    still printed here when promotion produced nothing for it (pre-v3
+    maps with no ``edge_lines``, or a file-mode pack's own
+    self-caller, which ``build_file_pack`` deliberately never
+    promotes) — that's the only place the information still lives.
+
+    Args:
+        pack: Pack whose ``module_callers`` to filter.
+
+    Returns:
+        The subset of ``pack.module_callers`` not already represented
+        by a promoted ``kind="module"`` entry.
+    """
+    covered = {e.sym.path for e in pack.entries if e.sym.kind == "module"}
+    return [p for p in pack.module_callers if p not in covered]
+
+
 def render_text(pack: Pack) -> str:
     """Render a pack as compact text."""
     lines = [f"context: {pack.label}"]
     lines += _target_lines(pack)
     lines += _source_lines(pack)
-    if pack.imports:
+    if pack.imports or pack.imports_dropped:
         lines.append(f"imports ({pack.file_path}):")
         lines += [f"  {imp.name}  (from {imp.source})" for imp in pack.imports]
+        if pack.imports_dropped:
+            n = pack.imports_dropped
+            lines.append(f"  +{n} more imports (irrelevant to this pack)")
     if pack.file_symbols:
         lines.append("symbols:")
         lines += [
@@ -253,9 +377,9 @@ def render_text(pack: Pack) -> str:
             lines.append(title)
             for e in sorted(group, key=lambda e: (e.hop, e.sym.path)):
                 lines += _entry_lines(e)
-    if pack.module_callers:
-        joined = ", ".join(pack.module_callers)
-        lines.append(f"module-level callers: {joined}")
+    residual = _residual_module_callers(pack)
+    if residual:
+        lines.append(f"module-level callers: {', '.join(residual)}")
     return "\n".join(lines)
 
 
@@ -311,11 +435,24 @@ def trim_to_budget(
 ) -> Pack:
     """Drop pack content until it fits the token budget.
 
-    Neighbors go first (farthest hops, then least-connected), then the
-    file-mode symbol list from the end, then inlined source from the
-    bottom. The target's signature and location are never dropped. With a
-    ``task`` signal, neighbors are dropped least-relevant first so the
-    task-relevant callers/callees survive a tight budget.
+    Imports go first (least load-bearing for an edit task —
+    ``outline`` or reading the file already answers "what's imported
+    here"), then neighbors (farthest hops, then least-connected), then
+    the file-mode symbol list from the end, then inlined source from
+    the bottom. The target's signature and location are never
+    dropped. With a ``task`` signal, neighbors are dropped
+    least-relevant first so the task-relevant callers/callees survive
+    a tight budget.
+
+    Imports are trimmed *before* neighbors specifically so a high-
+    fan-out symbol's import list can never fully starve the callers/
+    callees a caller actually asked about (bug #5/B5 — four
+    evaluators hit a context pack that spent its entire default
+    budget on imports and returned 0% of the requested callers/
+    callees; ``_relevant_imports`` already shrinks the import list to
+    what the pack references, but a tight budget could previously
+    still empty ``pack.entries`` to zero before touching a single
+    import).
 
     Args:
         index: Loaded map index (for degree ranking).
@@ -328,6 +465,9 @@ def trim_to_budget(
     """
     if budget is None:
         return pack
+    while pack.imports and _estimate_tokens(pack) > budget:
+        pack.imports.pop()
+        pack.trimmed += 1
     if task is not None and not task.is_empty and pack.entries:
         scores = _entry_scores(index, pack, task)
         droppable = sorted(
@@ -382,6 +522,7 @@ def _render_json(pack: Pack, meter: Meter) -> str:
         "imports": [
             {"name": i.name, "source": i.source} for i in pack.imports
         ],
+        "imports_dropped": pack.imports_dropped,
         "file_symbols": [sym_doc(s) for s in pack.file_symbols],
         "neighbors": [neighbor_doc(e) for e in pack.entries],
         "module_callers": pack.module_callers,
@@ -413,7 +554,9 @@ def run(
         index: Loaded map index.
         target: Symbol target, or a file path in file mode.
         hops: Neighborhood radius.
-        budget: Approximate token budget, or ``None``.
+        budget: Approximate token budget. ``None`` falls back to
+            ``DEFAULT_PACK_BUDGET`` rather than going unbounded, so an
+            unscoped call can't return an unfiltered dump.
         as_json: Emit structured JSON instead of text.
         root: Repository root, required for ``with_source``.
         with_source: Inline the target's body and hop-1 call-site
@@ -441,16 +584,17 @@ def run(
                 for p in paths:
                     print(f"  {p}", file=sys.stderr)
                 return EXIT_AMBIGUOUS
-            return report_unresolved(target, candidates)
+            return report_unresolved(target, candidates, index)
         pack = build_file_pack(index, paths[0])
     else:
-        return report_unresolved(target, candidates)
+        return report_unresolved(target, candidates, index)
 
     if with_source and root is not None:
         attach_source(index, pack, root)
-    trim_to_budget(index, pack, budget, task)
+    effective_budget = DEFAULT_PACK_BUDGET if budget is None else budget
+    trim_to_budget(index, pack, effective_budget, task)
     text = render_text(pack)
-    meter = _pack_meter(pack, text, budget)
+    meter = _pack_meter(pack, text, effective_budget)
     if as_json:
         print(_render_json(pack, meter))
         return EXIT_OK

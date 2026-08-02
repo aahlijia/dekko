@@ -32,6 +32,20 @@ SRC = {
     ),
 }
 
+COLLISION_SRC = {
+    # ``run`` defined in two in-repo files (same-name collision) plus a
+    # receiver-qualified external call (``subprocess.run``) in a third.
+    # Regression fixture for the resolver retest (design doc item #5 /
+    # analysis doc Failure 1, P0): the collision must never push the
+    # external call into the ambiguous bucket or hide it from
+    # ``query uses``/``find_usages``.
+    "src/a.py": "def run():\n    return 1\n",
+    "src/b.py": "def run():\n    return 2\n",
+    "src/main.py": (
+        "import subprocess\n\n\ndef entry():\n    subprocess.run(['ls'])\n"
+    ),
+}
+
 _FOOTER = re.compile(r"\(~\d+ tokens")
 
 
@@ -173,3 +187,39 @@ def test_mcp_find_usages(make_mapped_repo: RepoFactory) -> None:
 def test_find_usages_listed_in_tools() -> None:
     names = {t["name"] for t in server.TOOLS}
     assert "find_usages" in names
+
+
+def test_uses_resolves_bare_name_despite_repo_wide_collision(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(COLLISION_SRC)
+    doc = json.loads((root / ".dekko" / "map.json").read_text())
+    # The collision must not create an ambiguous edge or an in-repo
+    # edge — the receiver ("subprocess") is a non-repo import, so the
+    # bare-name lookup must never run at all.
+    assert doc["ambiguous"] == []
+    assert any(ext["callee"] == "subprocess.run" for ext in doc["external"])
+
+    assert _query(root, "uses", "run") == 0
+    out = capsys.readouterr().out
+    assert "src/main.py:5" in out
+    assert "[subprocess.run]" in out
+
+
+def test_mcp_find_usages_resolves_bare_name_despite_collision(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(COLLISION_SRC)
+    result = _call_tool(root, "find_usages", {"name": "run"})
+    assert not result["isError"]
+    assert "src/main.py:5" in result["content"][0]["text"]
+
+
+def test_uses_unknown_name_suggests_close_externals(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SRC)
+    assert _query(root, "uses", "externl_thing") == 3
+    err = capsys.readouterr().err
+    assert "no external reference" in err
+    assert "closest external names: external_thing" in err

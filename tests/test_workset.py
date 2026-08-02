@@ -225,6 +225,57 @@ def test_json_shape(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     assert {"tokens", "returned", "total"} <= doc["meta"].keys()
 
 
+def test_impacted_tests_tier_shown_in_text(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    code = cli.main(["workset", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "impacted tests:" in out
+    assert "tests/test_direct.py  [direct]" in out
+
+
+def test_json_impacted_tests_total_matches_seed(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    code = cli.main(["workset", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["impacted_tests_total"] == 2
+    assert len(doc["impacted_tests"]) == 2
+
+
+def test_impacted_tests_respect_budget_when_numerous(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # tensorflow's bug (B6): impacted_tests used to bypass token-
+    # budget accounting entirely — a real ~1,500-impact repo dumped
+    # every path verbatim, 3.6x over the stated budget. Many impacted
+    # tests under a modest budget must now truncate like every other
+    # section, with the meter reflecting the omission.
+    files = dict(BASE)
+    for i in range(60):
+        files[f"tests/test_extra_{i}.py"] = (
+            "from src.app import core\n\n\n"
+            f"def test_extra_{i}():\n"
+            "    assert core() == 2\n"
+        )
+    root = _repo(tmp_path, files)
+    _change_core(root)
+    code = cli.main(
+        ["workset", "--root", str(root), "--budget", "150", "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["impacted_tests_total"] == 62
+    assert len(doc["impacted_tests"]) < doc["impacted_tests_total"]
+    assert doc["meta"]["truncated_by"] is not None
+
+
 def test_mcp_workset_tool(tmp_path: Path) -> None:
     root = _repo(tmp_path, BASE)
     _change_core(root)
@@ -237,7 +288,9 @@ def test_mcp_workset_tool(tmp_path: Path) -> None:
     }
     result = server.handle(ctx, msg)["result"]
     assert not result["isError"]
-    assert result["content"][0]["text"].startswith("workset:")
+    # No explicit `root` argument: the reply is prefixed with the
+    # resolved default root (bug #1/B1) ahead of the usual manifest.
+    assert "workset:" in result["content"][0]["text"]
 
 
 def test_mcp_workset_rejects_both_seeds(tmp_path: Path) -> None:

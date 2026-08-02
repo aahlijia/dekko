@@ -28,6 +28,29 @@ _CLASS_RE = re.compile(
 )
 _NOT_DEF_RE = re.compile(r"call|type|pattern|expression|signature")
 _NOT_CLASS_RE = re.compile(r"call|pattern|expression|access")
+
+# Best-effort ``kind`` for a Tier-2 (generic) class-like node, based on
+# which word in ``_CLASS_RE`` matched its tree-sitter node type. Order
+# matters: checked most-specific-first so e.g. "interface" wins over a
+# node type that also happens to contain "class". Anything that only
+# matches "class"/"module"/"impl"/"namespace"/"object" keeps the
+# default ``"class"`` kind — coarse, but consistent with Tier-1's
+# fallback for the same shapes.
+_GENERIC_KIND_RE: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"interface"), "interface"),
+    (re.compile(r"struct"), "struct"),
+    (re.compile(r"trait"), "trait"),
+)
+
+
+def _generic_class_kind(node_type: str) -> str:
+    """Best-effort ``Symbol.kind`` for a Tier-2 class-like node type."""
+    for pattern, kind in _GENERIC_KIND_RE:
+        if pattern.search(node_type):
+            return kind
+    return "class"
+
+
 _CALL_RE = re.compile(r"call$|call_expression|invocation")
 _NAME_SPLIT = re.compile(r"[.:]+")
 
@@ -64,7 +87,9 @@ def extract_file_generic(root: Path, rel: str, grammar: str) -> FileMap:
             if sym is not None:
                 defs.append((node, sym))
         elif _is_class(node):
-            sym = _make_symbol(node, rel, grammar, "class", seen)
+            sym = _make_symbol(
+                node, rel, grammar, _generic_class_kind(node.type), seen
+            )
             if sym is not None:
                 defs.append((node, sym))
         elif _CALL_RE.search(node.type):

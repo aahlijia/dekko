@@ -9,6 +9,167 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-08-02
+
+### Changed
+- **MCP agent surface trimmed 18 → 13 tools.** `trace_path`,
+  `find_unused`, `stats`, `lean`, and `ledger` are CLI-only now: every
+  MCP schema is paid in context tokens each session (~2.8k → ~2.1k),
+  and live agent transcripts (2026-07-10 A/B eval) never reached for
+  them. The CLI commands are unchanged.
+- **`summary` and `outline` MCP tools default to a ~2000-token budget**
+  (override with `budget`). An un-capped `summary` on a large monorepo
+  rendered ~30k chars as the session's first call and was re-read as
+  cache every turn. `dekko summary` gained a matching `--budget` flag;
+  the `dekko://summary` resource stays uncapped.
+- **Symbol targets accept `::`** (`file.py::name`, `Class::method`) —
+  the Rust/C++ habit agents fall into — retried as both grammar
+  readings instead of dead-ending.
+- **`dekko map` takes a true no-op fast path.** When the incremental
+  cache determines nothing needs re-parsing, no file was added or
+  removed, and the on-disk map already matches this dekko build,
+  `map` now skips `resolve()`/render/write entirely and prints
+  `dekko: unchanged (N files, commit X) — nothing written` instead of
+  unconditionally re-serializing MAP.md/map.json/shards on every
+  invocation. `--full` always bypasses this path.
+- **`get_context_pack`'s tool description** now shows a worked
+  `target`/`task` example (`target="awardXp", task="who calls
+  this"`), the one parameter agents most often guessed wrong on.
+- **CLI help documents the `--root` split**: `dekko map [DIR]` takes
+  its root positionally; every other subcommand uses `--root DIR`.
+
+### Added
+- **`--cline-install`/`--cline-uninstall`** register/remove the MCP
+  server in Cline's `cline_mcp_settings.json` (`--cline-scope
+  vscode|global`, `--cline-config PATH` to override auto-detection,
+  `--cline-force` to reset a malformed existing file instead of
+  aborting). `dekko serve --mcp` needed no changes — it's a
+  client-agnostic stdio JSON-RPC server; only Claude Code's install
+  path (`.mcp.json`, `claude mcp add`) was ever Claude-specific. Cline
+  has no plugin system, so there is no `/map`-equivalent for it — only
+  the MCP tools are installed.
+- **Near-miss suggestions on failed lookups.** `query symbol` (and the
+  MCP relation tools) list the closest symbols when a target resolves
+  to nothing; `query uses` suggests close external names. Keeps agents
+  inside the map instead of ejecting them to grep/full reads.
+- **Top-level `const`/`let` exports indexed as symbols** (new
+  `kind="variable"`) in JS/TS/TSX. `export const jobs = [...]` was
+  previously invisible to the symbol table — only arrow-function/
+  function-expression values were captured — so `query symbol
+  jobs`/`get_callers` returned "no symbol matches" even for exported
+  data. `dekko summary`/`MAP.md`/the HTML map now report a `variables`
+  count alongside functions/methods and classes.
+- **`interface`/`enum`/`struct`/`record`/`trait` kinds.** TS
+  interfaces/enums, Go structs/interfaces, Java interfaces/enums/
+  records, and Rust structs/enums/traits used to all come back as
+  `kind: class` from `query_symbol`/`outline`. Every renderer that
+  counted `kind == "class"` (`dekko summary`, `MAP.md`, the HTML map)
+  now counts the full set so the "classes" total doesn't undercount.
+- **`ambiguous_in` counts on `query symbol`/`get_callers`.** A call
+  whose name matches more than one repo-wide candidate was already
+  recorded in map.json but never loaded back for reading — a low
+  fan-in can now be qualified as "+N ambiguous call sites not counted"
+  instead of read as exhaustive.
+- **Unparsed-language coverage note on "not found" replies.**
+  `query_symbol`/`outline`/`get_context_pack`/`get_callers`/
+  `get_callees` now attach the same "N files unparsed" note
+  `summary`/`status` already show when a target resolves to nothing,
+  so a symbol that only exists in an unsupported file (e.g. `.astro`)
+  doesn't read as a confident "doesn't exist."
+- **Anonymous-callback callers in `get_context_pack`.** A call site
+  with no named enclosing function used to be demoted to a terser,
+  line-number-less `module_callers` summary line; it now also appears
+  in the main `callers:` list with a real line number
+  (`module_callers` is kept for backward compatibility).
+- **`referenced` edges (map.json schema v3 → v4).** A function passed
+  *by reference* (an object-literal property value, array element,
+  bare call argument, or assignment/declarator right-hand side in
+  JS/TS/TSX) is now tracked separately from calls via a new
+  `RawRef`/`referenced`/`referenced_in`/`referenced_out` table —
+  deliberately never merged with `edges`/`calls_in`/`calls_out`, so
+  "wired up as a callback" stays distinguishable from "invoked here."
+  `query symbol` reports a `referenced-by: N (not called)` line next
+  to fan-in/fan-out; `get_callers` on a reference-only symbol prints a
+  `referenced (not called):` section instead of the bare `(no callers
+  of X)` line. Old (pre-v4) maps simply have empty referenced tables.
+
+### Fixed
+- **Stale map/cache could silently serve outdated extraction results
+  forever.** `.dekko/cache.json` and `.dekko/map.json` now carry a
+  `spec_hash` fingerprint of the extraction queries, invalidating a
+  cached extraction (or flagging a map as stale) on *any* extractor
+  change — not just a released version bump. `dekko status`/
+  `map_status` report why a map is stale (`reason: "version"` vs.
+  `"content"` vs. `"missing"`) with an actionable "built by dekko X,
+  running Y" message for a version mismatch, instead of a silent
+  false "fresh."
+- **Nested closures no longer inherit the enclosing class's
+  qualname/kind.** A `const helper = () => {}` (or Rust nested `fn`)
+  declared inside a method body was reported as `Class.helper`, kind
+  `method` — a closure-local helper mislabeled as a class member. The
+  container-qualification climb now stops dead at the first enclosing
+  function/method/closure in JS/TS/TSX and Rust.
+- **`dekko unused` no longer flags pass-by-reference callbacks as dead
+  code.** A callback wired up by name (JS/TS/TSX) and never itself
+  called was invisible to `get_callers`/fan-in/`unused` entirely — the
+  new `referenced_in` table (see Added) now counts it as used.
+- **Every MCP reply built from a default (unspecified) `root` now
+  echoes the resolved path.** Omitting `root` silently answered
+  against the server's cwd — often the wrong repo in a multi-project
+  session — with no visible sign anything was off. A reply built this
+  way now opens with `(root: /resolved/path — no 'root' argument was
+  given; pass one to target a different repo)`, so a wrong-repo answer
+  is visually distinct from a correct one instead of looking identical.
+- **`get_callers`/fan-in undercounted calls made through a typed
+  variable, a function's own typed parameter, or `new X()`
+  construction.** The resolver's ladder now also matches a call
+  through one of the calling function's declared-typed parameters, and
+  credits a class's own constructor (JS/TS `constructor`, Python
+  `__init__`, Java's same-named constructor declaration) when a call
+  resolves to that class — `new Controller(...)` no longer leaves
+  `Controller.constructor`'s fan-in at 0. Scope note: this covers
+  declared parameter types only; local-variable type inference outside
+  a parameter list still isn't tracked.
+- **`find_usages` gives no caveat when a shadowing in-repo symbol
+  returns a wrong or incomplete external-reference result.** It
+  already refused cleanly when a query matched *only* an in-repo
+  symbol; now any query whose name collides with an in-repo symbol —
+  even one that still returns some external hits — carries a "this
+  result may be incomplete" caveat, in both text and JSON
+  (`shadow_warning`) output.
+- **`get_context_pack`'s budget trimming could zero out the very
+  callers/callees a task asked about while its import list survived
+  untouched.** Imports are now trimmed to empty first; callers/callees
+  are never the first thing cut under a tight budget.
+- **`workset`'s impacted-tests listing ignored `--budget` entirely.**
+  The pytest-command hint now caps at 20 paths (`+N more impacted test
+  files not shown`), and the JSON output reports a budget-fitted
+  `impacted_tests` list alongside a separate `impacted_tests_total` so
+  the two are never conflated.
+- **`outline` gives no signal when a file's shape looks anomalously
+  thin for its size** (e.g. a file built mostly from anonymous-
+  callback registration, which has few named symbols to hang an
+  outline row on). A file at least ~500 tokens with ≤8 named symbols
+  covering ≤15% of its full length now carries a caveat that the
+  outline may be missing most of the file's real content.
+- **Ambiguous-symbol lookups dumped every candidate unconditionally**
+  (a bare `main` in a Rust workspace with ~90 binaries listed all of
+  them). The candidate list is now capped at 20 with a "+N more
+  (qualify with `file.py:name` to narrow)" note.
+- **Type symbols (class/struct/interface/enum/record/trait) with zero
+  call/reference edges read as "unused" even when heavily referenced
+  as a parameter, field, or return type.** `query symbol` now attaches
+  a caveat to a zero-fan type symbol explaining that call/reference
+  edges only track invocations, not type usage.
+
+### Documentation
+- **Documented the MCP server staleness gotcha.** A running `dekko
+  serve --mcp` process holds its Python modules in memory for its
+  whole lifetime — restarting it is required to pick up any dekko code
+  change, and `uv tool install --reinstall` alone does not affect an
+  already-running server process. See README's "MCP server" and
+  "Development" sections for the full restart-required workflow.
+
 ## [0.12.0] — 2026-06-16
 
 ### Added

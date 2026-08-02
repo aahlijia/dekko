@@ -10,17 +10,80 @@ import hashlib
 import json
 import re
 import subprocess
+from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from . import walker
 from .classify import is_test_path
+from .languages import spec_fingerprint
 from .model import CallGraph, ExternalCall, FileMap, Import, Param, Symbol
 
-MAP_DOC_VERSION = 3
+MAP_DOC_VERSION = 4
 _MAP_DIR = ".dekko"
 _BASE_SPLIT = re.compile(r"::|\.|->|/")
+_UNSUPPORTED_PREFIX = "no parser ("
+
+
+def _unsupported_summary(
+    skipped: list[tuple[str, str]] | None,
+) -> dict | None:
+    """Aggregate ``walker.discover``'s skip reasons into a coverage note.
+
+    Only ``"no parser (<language>)"`` reasons are counted here — the
+    confirmed language-support gaps recorded in
+    ``languages.KNOWN_UNSUPPORTED`` — not the ordinary
+    ``"excluded"``/``"generated"``/``"too large"`` skips a repo owner
+    asked for or expects. This is what lets a "no callers found"
+    answer be qualified as "no callers among parsed files" instead of
+    presented as unconditional truth (see ``query`` module).
+
+    Args:
+        skipped: ``(path, reason)`` pairs from ``walker.discover``.
+
+    Returns:
+        ``{"count": N, "languages": {lang: N, ...}}``, or ``None``
+        when there is nothing to report.
+    """
+    if not skipped:
+        return None
+    by_lang: Counter[str] = Counter()
+    for _, reason in skipped:
+        if reason.startswith(_UNSUPPORTED_PREFIX) and reason.endswith(")"):
+            by_lang[reason[len(_UNSUPPORTED_PREFIX) : -1]] += 1
+    if not by_lang:
+        return None
+    return {
+        "count": sum(by_lang.values()),
+        "languages": dict(sorted(by_lang.items())),
+    }
+
+
+def format_unsupported(provenance: dict | None) -> str | None:
+    """One-line coverage note from a provenance dict's ``unsupported``.
+
+    Shared by ``dekko status``, ``map_status``, and the CLI build
+    summary so the wording is identical everywhere a caller might see
+    it.
+
+    Args:
+        provenance: A map's provenance dict, or ``None``.
+
+    Returns:
+        E.g. ``"12 files unparsed — no parser for: astro (12)"``, or
+        ``None`` when there is nothing to report.
+    """
+    if not provenance:
+        return None
+    unsupported = provenance.get("unsupported")
+    if not unsupported:
+        return None
+    by_lang = unsupported.get("languages", {})
+    detail = ", ".join(f"{lang} ({n})" for lang, n in by_lang.items())
+    count = unsupported.get("count", 0)
+    return f"{count} files unparsed — no parser for: {detail}"
 
 
 def compute_provenance(
@@ -29,6 +92,7 @@ def compute_provenance(
     subpath: str | None,
     excludes: tuple[str, ...],
     max_file_size: int,
+    skipped: list[tuple[str, str]] | None = None,
 ) -> dict:
     """Build the provenance stamp for a freshly generated map.
 
@@ -38,18 +102,23 @@ def compute_provenance(
         subpath: Subtree restriction used for discovery, if any.
         excludes: Extra exclude globs used for discovery.
         max_file_size: Size cap used for discovery.
+        skipped: ``(path, reason)`` pairs from the same ``walker.
+            discover`` call that produced ``paths``, used to record a
+            coverage note for confirmed-unsupported languages.
 
     Returns:
         JSON-serializable provenance dict.
     """
     return {
         "tool_version": _pkg_version("dekko"),
+        "spec_hash": spec_fingerprint(),
         "git_commit": _git_commit(root),
         "subpath": subpath,
         "excludes": list(excludes),
         "max_file_size": max_file_size,
         "files": {rel: _file_hash(root / rel) for rel in paths},
         "stat": {rel: _stat_sig(root / rel) for rel in paths},
+        "unsupported": _unsupported_summary(skipped),
     }
 
 
@@ -111,6 +180,26 @@ class MapIndex:
             that failed to parse appear).
         externals_by_name: Base callee identifier → external calls
             referencing it (e.g. ``run`` for ``subprocess.run``).
+        ambiguous_in: Candidate symbol id → ``(caller_id, name)`` pairs
+            that could have resolved to it but didn't, because the
+            name matched more than one repo-wide candidate. These
+            never contribute to ``calls_in``/fan-in (see ``resolver``'s
+            module docstring) — this is how a caller can tell "N more
+            call sites exist but weren't resolvable to this symbol
+            specifically" instead of reading a low fan-in as complete.
+        referenced_in: Symbol id → ids that reference it as a value
+            (object-literal property, array element, call argument,
+            assignment RHS) without calling it — e.g. a callback wired
+            up by name (empty for maps written before doc version 4).
+        referenced_out: Symbol id → ids it references as a value
+            without calling them.
+        ref_lines: ``(caller id, callee id)`` → reference-site lines
+            for the ``referenced`` edge table (empty for maps written
+            before doc version 4). Kept separate from ``edge_lines``
+            rather than merged into it, since a caller can in
+            principle both call and reference the same callee and a
+            single dict keyed only on ``(caller, callee)`` would let
+            one overwrite the other.
         notes: Symbol id → note texts loaded from ``.dekko/notes.json``.
         provenance: Provenance stamp, or ``None`` for v1 documents.
     """
@@ -130,6 +219,12 @@ class MapIndex:
     externals_by_name: dict[str, list[ExternalCall]] = field(
         default_factory=dict
     )
+    ambiguous_in: dict[str, list[tuple[str, str]]] = field(
+        default_factory=dict
+    )
+    referenced_in: dict[str, list[str]] = field(default_factory=dict)
+    referenced_out: dict[str, list[str]] = field(default_factory=dict)
+    ref_lines: dict[tuple[str, str], list[int]] = field(default_factory=dict)
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
 
@@ -176,6 +271,21 @@ class MapIndex:
             kept = [e for e in exts if _prod_id(e.caller)]
             if kept:
                 out.externals_by_name[name] = kept
+        for cand, pairs in self.ambiguous_in.items():
+            if not _prod_id(cand):
+                continue
+            kept_pairs = [
+                (caller, name) for caller, name in pairs if _prod_id(caller)
+            ]
+            if kept_pairs:
+                out.ambiguous_in[cand] = kept_pairs
+        out.referenced_in = _filter_adjacency(self.referenced_in)
+        out.referenced_out = _filter_adjacency(self.referenced_out)
+        out.ref_lines = {
+            key: lines
+            for key, lines in self.ref_lines.items()
+            if _prod_id(key[0]) and _prod_id(key[1])
+        }
         return out
 
 
@@ -207,12 +317,22 @@ def _filter_paths(mapping: dict) -> dict:
 
 @dataclass
 class Freshness:
-    """Result of comparing a map's provenance to the working tree."""
+    """Result of comparing a map's provenance to the working tree.
+
+    Attributes:
+        reason: ``None`` when fresh; otherwise ``"missing"`` (no
+            provenance at all — a pre-v2 map), ``"version"`` (the map
+            predates the running dekko build — its ``tool_version``
+            or ``spec_hash`` no longer matches, so ``added``/
+            ``removed``/``changed`` are not computed), or ``"content"``
+            (source files were added, changed, or removed).
+    """
 
     fresh: bool
     added: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
     changed: list[str] = field(default_factory=list)
+    reason: str | None = None
 
 
 def _symbol_from_dict(d: dict) -> Symbol:
@@ -315,7 +435,41 @@ def load_map(root: Path) -> MapIndex | None:
         base = _callee_base(ext.callee)
         if base:
             index.externals_by_name.setdefault(base, []).append(ext)
+    index.ambiguous_in = _invert_ambiguous(
+        (d.get("caller", ""), d.get("name", ""), d.get("candidates", []))
+        for d in doc.get("ambiguous", [])
+    )
+    for edge in doc.get("referenced", []):
+        caller, callee = edge["caller"], edge["callee"]
+        index.referenced_out.setdefault(caller, []).append(callee)
+        index.referenced_in.setdefault(callee, []).append(caller)
+        index.ref_lines[(caller, callee)] = edge.get("lines", [])
     return index
+
+
+def _invert_ambiguous(
+    entries: Iterator[tuple[str, str, list[str]]],
+) -> dict[str, list[tuple[str, str]]]:
+    """Invert ambiguous-call records into candidate id → callers.
+
+    An ambiguous call never becomes a resolved edge (see ``resolver``'s
+    module docstring), so it never shows up in any candidate's
+    ``calls_in``. This is the read side of that gap: for each
+    candidate a name collision could have pointed at, record who tried
+    and under what name, so a low fan-in can be qualified as "+N
+    ambiguous call sites not counted" instead of read as exhaustive.
+
+    Args:
+        entries: ``(caller_id, name, candidate_ids)`` triples.
+
+    Returns:
+        Candidate symbol id → list of ``(caller_id, name)`` pairs.
+    """
+    out: dict[str, list[tuple[str, str]]] = {}
+    for caller, name, candidates in entries:
+        for cand in candidates:
+            out.setdefault(cand, []).append((caller, name))
+    return out
 
 
 def index_from_maps(
@@ -357,6 +511,11 @@ def index_from_maps(
         base = _callee_base(ext.callee)
         if base:
             index.externals_by_name.setdefault(base, []).append(ext)
+    index.ambiguous_in = _invert_ambiguous(iter(graph.ambiguous))
+    for edge in graph.referenced:
+        index.referenced_out.setdefault(edge.caller, []).append(edge.callee)
+        index.referenced_in.setdefault(edge.callee, []).append(edge.caller)
+        index.ref_lines[(edge.caller, edge.callee)] = edge.lines
     return index
 
 
@@ -375,9 +534,24 @@ def check_freshness(root: Path, index: MapIndex) -> Freshness:
         Freshness verdict with per-file difference lists.
     """
     if not index.provenance:
-        return Freshness(fresh=False, changed=sorted(index.symbols_by_path))
+        return Freshness(
+            fresh=False,
+            changed=sorted(index.symbols_by_path),
+            reason="missing",
+        )
 
     prov = index.provenance
+    version_stale = prov.get("tool_version") != _pkg_version("dekko")
+    spec_stale = prov.get("spec_hash") != spec_fingerprint()
+    if version_stale or spec_stale:
+        # The map was built by a different dekko (or an unreleased
+        # extractor change under the same version string). Source
+        # content may be byte-identical, but what dekko would extract
+        # from it has changed, so no amount of file-hash diffing can
+        # answer "is this map still correct" — treat it as stale
+        # outright, once, until the next `dekko map` re-stamps it.
+        return Freshness(fresh=False, reason="version")
+
     recorded: dict[str, str] = prov.get("files", {})
     recorded_stat: dict[str, list[int]] = prov.get("stat", {})
     current_paths, _ = walker.discover(
@@ -405,9 +579,11 @@ def check_freshness(root: Path, index: MapIndex) -> Freshness:
         for rel in set(recorded) & set(current)
         if recorded[rel] != current[rel]
     )
+    is_stale = bool(added or removed or changed)
     return Freshness(
-        fresh=not (added or removed or changed),
+        fresh=not is_stale,
         added=added,
         removed=removed,
         changed=changed,
+        reason="content" if is_stale else None,
     )

@@ -619,13 +619,16 @@ def test_cli_lean_budget_floors(
 def test_lean_registered_and_tool_count() -> None:
     assert "lean" in cli.SUBCOMMANDS
     names = {t["name"] for t in server.TOOLS}
-    assert "lean" in names
-    assert "ledger" in names
+    # lean/ledger (with trace_path/find_unused/stats) are CLI-only:
+    # dropped from the agent-facing MCP surface, whose schemas are paid
+    # in context tokens every session (E5 trim, 2026-07-10).
+    assert "lean" not in names
+    assert "ledger" not in names
     # Canonical MCP tool-count assertion now lives here.
-    assert len(server.TOOLS) == 18
+    assert len(server.TOOLS) == 13
 
 
-def test_mcp_lean_tool(make_mapped_repo: RepoFactory) -> None:
+def test_mcp_lean_tool_is_cli_only(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(LADDER_FILES)
     ctx = server.Context(default_root=root, no_regen=False)
     msg = {
@@ -634,6 +637,6 @@ def test_mcp_lean_tool(make_mapped_repo: RepoFactory) -> None:
         "method": "tools/call",
         "params": {"name": "lean", "arguments": {}},
     }
-    result = server.handle(ctx, msg)["result"]
-    assert not result["isError"]
-    assert result["content"][0]["text"].startswith("lean map · ~")
+    assert "error" in server.handle(ctx, msg)
+    # The handler itself still works for direct callers off the surface.
+    assert server.tool_lean(ctx, {}).startswith("lean map · ~")

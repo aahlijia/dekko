@@ -14,9 +14,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import stats
-from .mapfile import MapIndex
+from .mapfile import MapIndex, format_unsupported
 from .resolver import MODULE_CALLER_SUFFIX
-from .textutil import dir_of, oneline, signature
+from .textutil import dir_of, fit_to_budget, oneline, signature
 
 # Index-file stems whose doc best describes their directory.
 _INDEX_STEMS = ("__init__", "mod", "lib", "index")
@@ -119,6 +119,7 @@ def compute(index: MapIndex) -> dict:
             {"path": p, "error": e}
             for p, e in sorted(index.errors_by_path.items())
         ],
+        "unsupported": (index.provenance or {}).get("unsupported"),
     }
 
 
@@ -257,6 +258,9 @@ def render_text(index: MapIndex) -> str:
         for lng in doc["languages"]
     )
     lines.append(f"languages: {mix}")
+    note = format_unsupported(index.provenance)
+    if note:
+        lines.append(f"coverage: {note} — results below may be incomplete")
     lines.append("directories (files/symbols, int+cross edges):")
     for d in doc["directories"]:
         suffix = f"  — {d['purpose']}" if d["purpose"] else ""
@@ -317,6 +321,7 @@ def render_overview(
         Markdown lines for the overview section.
     """
     lines = ["## Overview", ""]
+    lines += _overview_unsupported(doc.get("unsupported"))
     lines += _overview_dirs(doc["directories"])
     if diagram:
         lines += diagram
@@ -331,6 +336,21 @@ def render_overview(
     lines += _overview_entrypoints(doc["entrypoints"], href)
     lines += _overview_errors(doc["parse_errors"], href)
     return lines
+
+
+def _overview_unsupported(unsupported: dict | None) -> list[str]:
+    """A coverage warning when confirmed-unsupported files were skipped."""
+    if not unsupported:
+        return []
+    by_lang = unsupported.get("languages", {})
+    detail = ", ".join(f"{lang} ({n})" for lang, n in by_lang.items())
+    count = unsupported.get("count", 0)
+    return [
+        f"> **Coverage:** {count} file(s) skipped — no parser for: "
+        f"{detail}. Results throughout this map may be incomplete "
+        "for symbols only used in these files.",
+        "",
+    ]
 
 
 def _overview_largest(
@@ -429,18 +449,34 @@ def _overview_errors(
     return lines
 
 
-def run(index: MapIndex, as_json: bool) -> int:
+def run(
+    index: MapIndex,
+    as_json: bool,
+    budget: int | None = None,
+) -> int:
     """Print the summary as text or JSON.
 
     Args:
         index: Loaded map index.
-        as_json: Emit structured JSON instead of text.
+        as_json: Emit structured JSON instead of text (never budgeted).
+        budget: Approximate token cap for the text rendering; trailing
+            sections (entry points, parse errors) are shed first and a
+            cost footer reports the omission. ``None`` disables the cap.
+            The digest scales with repo size (a large monorepo renders
+            ~30k chars), so budget-less output can dominate an agent's
+            context.
 
     Returns:
         Always ``0``.
     """
     if as_json:
         print(json.dumps(compute(index), indent=2))
-    else:
-        print(render_text(index))
+        return 0
+    text = render_text(index)
+    if budget is None:
+        print(text)
+        return 0
+    kept, meter = fit_to_budget(text.splitlines(), budget, None)
+    print("\n".join(kept))
+    print(meter.footer())
     return 0

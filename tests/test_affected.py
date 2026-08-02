@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko import cli
+from dekko import affected, cli
 from dekko import server
 
 # core() is called directly by one test, transitively (via wrapper) by
@@ -131,6 +131,21 @@ def test_pytest_hint_lists_impacted_files(
     assert "tests/test_direct.py" in hint
     assert "tests/test_import_only.py" in hint
     assert "tests/test_unrelated.py" not in hint
+
+
+def test_pytest_hint_caps_a_large_impact_set() -> None:
+    # tensorflow's bug (B6): a real ~1,500-impact repo embedded every
+    # path in this one line, blowing a workset budget 3.6x over its
+    # stated cap. The hint must truncate like every other list in the
+    # tool instead of enumerating every path unconditionally.
+    impacts = [
+        affected.TestImpact(path=f"tests/test_{i}.py", tier="direct")
+        for i in range(50)
+    ]
+    hint = affected._pytest_hint(impacts)
+    shown = hint.split("#")[0].split()
+    assert len(shown) == 1 + affected._MAX_HINT_PATHS  # "pytest" + paths
+    assert "+30 more impacted test files not shown" in hint
 
 
 def test_json_shape(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:

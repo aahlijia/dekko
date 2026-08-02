@@ -5,14 +5,15 @@ Targets use the agreed syntax: bare ``name``, ``Class.method``,
 on the full repo-relative path or any trailing path suffix.
 """
 
+import difflib
 import io
 import json
 import sys
 from contextlib import redirect_stdout
 
 from .classify import is_test_path, relevance_key
-from .mapfile import MapIndex
-from .model import Symbol
+from .mapfile import MapIndex, format_unsupported
+from .model import TYPE_KINDS, ExternalCall, Symbol
 from .textutil import Meter, fit_to_budget, signature, token_footer
 from .resolver import MODULE_CALLER_SUFFIX
 
@@ -21,6 +22,17 @@ EXIT_NOT_FOUND = 3
 EXIT_AMBIGUOUS = 4
 
 ACTIONS = ("callers", "callees", "symbol", "file", "uses")
+
+# Default token cap for relation-shaped actions (callers/callees/uses)
+# when the caller passes no budget. Without this, a high-fan-in
+# symbol's full caller/callee list (or an external name's every
+# reference) renders unbounded text capped only by --limit's row
+# count — the 2026-07-31 eval measured ~3,524 tokens on a 469-caller
+# symbol with no budget passed, over 4x the advertised default.
+# Callers can always pass a larger budget explicitly.
+DEFAULT_RELATION_BUDGET = 800
+
+_BUDGETED_ACTIONS = ("callers", "callees", "uses")
 
 
 def paths_matching(index: MapIndex, path: str) -> list[str]:
@@ -36,6 +48,12 @@ def resolve_target(
 ) -> tuple[Symbol | None, list[Symbol]]:
     """Resolve a target string to a symbol.
 
+    A ``::`` separator (the Rust/C++ habit agents fall into, e.g.
+    ``file.py::name`` or ``Class::method``) is not part of the target
+    grammar but is retried as both the ``path:qualname`` and the
+    ``Class.method`` reading before giving up — a dead-end here ejects
+    an agent into grep/Read, the exact cost the map exists to avoid.
+
     Args:
         index: Loaded map index.
         target: Bare name, qualname, or ``path:qualname`` form.
@@ -45,6 +63,22 @@ def resolve_target(
         candidates considered. No candidates means not found; several
         with no match means ambiguous.
     """
+    match, candidates = _resolve_exact(index, target)
+    if not candidates and "::" in target:
+        for variant in (
+            target.replace("::", ":"),
+            target.replace("::", "."),
+        ):
+            match, candidates = _resolve_exact(index, variant)
+            if candidates:
+                break
+    return match, candidates
+
+
+def _resolve_exact(
+    index: MapIndex, target: str
+) -> tuple[Symbol | None, list[Symbol]]:
+    """Resolve one target reading against the documented grammar."""
     if ":" in target:
         path_part, _, qual = target.rpartition(":")
         candidates = [
@@ -122,21 +156,107 @@ def _fit_entries(
     return entries[: len(kept)], meter
 
 
-def report_unresolved(target: str, candidates: list[Symbol]) -> int:
+_MAX_SUGGESTIONS = 5
+# Cap on how many ambiguous candidates ``report_unresolved`` prints
+# unconditionally. Without this, a very-high-cardinality bare-name
+# collision (zed's 99 same-named ``fn main`` candidates across a Rust
+# workspace — bug #10/B10) dumps every candidate path unconditionally,
+# ~1,110 tokens for a list an agent almost never reads past the first
+# handful of before narrowing the target with a ``path:`` qualifier.
+_MAX_AMBIGUOUS_CANDIDATES = 20
+
+
+def _close_names(needle: str, names: list[str]) -> list[str]:
+    """Names close to ``needle``: exact (case-insensitive) first, then
+    prefix, then substring either way, then edit-distance for typos.
+    Deterministic, capped."""
+    low = needle.lower()
+    if not low:
+        return []
+    scored: list[tuple[int, str]] = []
+    rest: list[str] = []
+    for name in names:
+        cand = name.lower()
+        if cand == low:
+            scored.append((0, name))
+        elif cand.startswith(low) or low.startswith(cand):
+            scored.append((1, name))
+        elif low in cand or cand in low:
+            scored.append((2, name))
+        else:
+            rest.append(name)
+    scored.sort()
+    out = [name for _, name in scored[:_MAX_SUGGESTIONS]]
+    if len(out) < _MAX_SUGGESTIONS and rest:
+        by_low = {}
+        for name in sorted(rest):
+            by_low.setdefault(name.lower(), name)
+        out += [
+            by_low[m]
+            for m in difflib.get_close_matches(
+                low, list(by_low), _MAX_SUGGESTIONS - len(out), 0.6
+            )
+        ]
+    return out
+
+
+def _suggest_symbols(index: MapIndex, target: str) -> list[Symbol]:
+    """Symbols worth offering for a target that resolved to nothing.
+
+    Matches the qualname part of the target (and its last segment)
+    against the name index, so a wrong or stale path qualifier still
+    finds the right symbol. Production code ranks before test code.
+    """
+    qual = target.rpartition(":")[2]
+    seen: dict[str, Symbol] = {}
+    for needle in dict.fromkeys((qual, qual.rpartition(".")[2])):
+        for name in _close_names(needle, list(index.symbols_by_name)):
+            for sym in index.symbols_by_name[name]:
+                seen.setdefault(sym.id, sym)
+    ranked = sorted(
+        seen.values(),
+        key=lambda s: (is_test_path(s.path), s.path, s.qualname),
+    )
+    return ranked[:_MAX_SUGGESTIONS]
+
+
+def report_unresolved(
+    target: str,
+    candidates: list[Symbol],
+    index: MapIndex | None = None,
+) -> int:
     """Explain a failed resolution and return the exit code.
 
     Ambiguous candidates are listed production code first, test code
-    last (presentation only — resolution itself is unchanged).
+    last (presentation only — resolution itself is unchanged). When an
+    ``index`` is given, a not-found reply names the closest symbols so
+    the caller can retry inside the map instead of falling back to
+    grep (the 2026-07-10 eval transcripts show a bare not-found ejects
+    agents into reading whole files).
     """
     if not candidates:
         print(f"dekko: no symbol matches '{target}'", file=sys.stderr)
+        suggestions = _suggest_symbols(index, target) if index else []
+        if suggestions:
+            print("closest matches:", file=sys.stderr)
+            for sym in suggestions:
+                print(f"  {sym.path}:{sym.qualname}", file=sys.stderr)
+        coverage = _coverage_note(index) if index else None
+        if coverage:
+            print(f"  note: {coverage}", file=sys.stderr)
         return EXIT_NOT_FOUND
     print(f"dekko: '{target}' is ambiguous; candidates:", file=sys.stderr)
     ranked = sorted(
         candidates, key=lambda s: (is_test_path(s.path), s.path, s.qualname)
     )
-    for sym in ranked:
+    for sym in ranked[:_MAX_AMBIGUOUS_CANDIDATES]:
         print(f"  {sym.path}:{sym.qualname}", file=sys.stderr)
+    if len(ranked) > _MAX_AMBIGUOUS_CANDIDATES:
+        more = len(ranked) - _MAX_AMBIGUOUS_CANDIDATES
+        print(
+            f"  … +{more} more (qualify with `file.py:{target}` to narrow)",
+            file=sys.stderr,
+        )
     return EXIT_AMBIGUOUS
 
 
@@ -175,6 +295,132 @@ def _module_rows(
     return [f"{path}  (module level)"]
 
 
+def _coverage_note(index: MapIndex) -> str | None:
+    """Caveat text when the map skipped confirmed-unsupported files.
+
+    Qualifies a "no results" answer as "no results among parsed
+    files" rather than unconditional truth — a symbol only used in a
+    file dekko can't parse (e.g. ``.astro``) would otherwise read as a
+    confident false negative (2026-07-31 eval, gitaustin/Astro repo).
+
+    Args:
+        index: Loaded map index.
+
+    Returns:
+        A one-line caveat, or ``None`` when nothing was skipped.
+    """
+    note = format_unsupported(index.provenance)
+    return f"{note} — this answer may be incomplete" if note else None
+
+
+def _referenced_entries(
+    index: MapIndex, sym: Symbol, sites: bool = False
+) -> list[dict]:
+    """JSON-shaped rows for symbols that reference (not call) ``sym``.
+
+    A callback wired up by reference and never itself called (bug
+    #2b — see ``model.RawRef``) is invisible to ``calls_in``; this is
+    the ``get_callers`` surface for it, so "referenced_in nonzero, no
+    called-in" doesn't read as "nothing uses this."
+
+    When ``sites`` is true, each entry's ``"sites"`` key carries the
+    actual reference-site lines (from ``index.ref_lines``) instead of
+    only the referencer's own definition line — mirroring
+    ``_print_relation_json``'s call-edge ``"sites"`` handling.
+    """
+    entries: list[dict] = []
+    for rid in index.referenced_in.get(sym.id, []):
+        if rid.endswith(MODULE_CALLER_SUFFIX):
+            entries.append(
+                {
+                    "id": rid,
+                    "path": rid[: -len(MODULE_CALLER_SUFFIX)],
+                    "module_level": True,
+                }
+            )
+            continue
+        other = index.symbols_by_id.get(rid)
+        if other is not None:
+            entry = _sym_json(index, other)
+            if sites:
+                entry["sites"] = index.ref_lines.get((rid, sym.id), [])
+            entries.append(entry)
+    return entries
+
+
+def _referenced_rows(
+    index: MapIndex, sym: Symbol, sites: bool = False
+) -> list[str]:
+    """Text rows for symbols that reference (not call) ``sym``.
+
+    When ``sites`` is true and a reference-site line is recorded (doc
+    version 4+ maps), one row per actual reference line is emitted
+    instead of the referencer's own definition line — the read-side
+    fix for showing e.g. ``file.ts:680`` (the reference) rather than
+    ``file.ts:209`` (the enclosing function's definition line). Falls
+    back to the definition-line row when no site line is recorded
+    (pre-v4 maps, or ``sites=False``), same graceful-degradation
+    contract ``_site_rows`` already uses for call edges.
+    """
+    rows: list[str] = []
+    for rid in index.referenced_in.get(sym.id, []):
+        if rid.endswith(MODULE_CALLER_SUFFIX):
+            path = rid[: -len(MODULE_CALLER_SUFFIX)]
+            rows.append(f"{path}  (module level)")
+            continue
+        other = index.symbols_by_id.get(rid)
+        if other is None:
+            continue
+        lines = index.ref_lines.get((rid, sym.id), []) if sites else []
+        if lines:
+            rows += [
+                f"{other.path}:{line}  {signature(other)}" for line in lines
+            ]
+        else:
+            rows.append(_sym_line(other))
+    return rows
+
+
+def _print_relation_json(
+    index: MapIndex,
+    action: str,
+    sym: Symbol,
+    symbols: list[Symbol],
+    modules: list[str],
+    sites: bool,
+    budget: int | None,
+    limit: int,
+    coverage: str | None,
+    ambig_in: int,
+) -> None:
+    """JSON rendering for ``_run_relation`` (callers/callees)."""
+    entries = []
+    for s in symbols:
+        entry = _sym_json(index, s)
+        if sites:
+            entry["sites"] = index.edge_lines.get(
+                _edge_key(action, sym, s.id), []
+            )
+        entries.append(entry)
+    kept, meter = _fit_entries(entries, budget, limit)
+    doc = {
+        "action": action,
+        "target": sym.id,
+        "results": kept,
+        "module_level": modules,
+        "meta": meter.as_dict(),
+    }
+    if coverage:
+        doc["coverage_warning"] = coverage
+    if ambig_in:
+        doc["ambiguous_in"] = ambig_in
+    if action == "callers" and not entries and not modules:
+        referenced = _referenced_entries(index, sym, sites)
+        if referenced:
+            doc["referenced_not_called"] = referenced
+    print(json.dumps(doc, indent=2))
+
+
 def _run_relation(
     index: MapIndex,
     action: str,
@@ -187,34 +433,161 @@ def _run_relation(
     """Execute callers/callees for a resolved symbol."""
     symbols, modules = _related(index, sym, action)
     symbols.sort(key=lambda s: relevance_key(s, index))
+    coverage = _coverage_note(index)
+    # Ambiguous calls never become a resolved edge (see resolver.py's
+    # module docstring), so a symbol's calls_in can look exhaustive
+    # when name-collision candidates were actually dropped. Only
+    # meaningful for the "who calls this" direction.
+    ambig_in = (
+        len(index.ambiguous_in.get(sym.id, [])) if action == "callers" else 0
+    )
     if as_json:
-        entries = []
-        for s in symbols:
-            entry = _sym_json(index, s)
-            if sites:
-                entry["sites"] = index.edge_lines.get(
-                    _edge_key(action, sym, s.id), []
-                )
-            entries.append(entry)
-        kept, meter = _fit_entries(entries, budget, limit)
-        doc = {
-            "action": action,
-            "target": sym.id,
-            "results": kept,
-            "module_level": modules,
-            "meta": meter.as_dict(),
-        }
-        print(json.dumps(doc, indent=2))
+        _print_relation_json(
+            index,
+            action,
+            sym,
+            symbols,
+            modules,
+            sites,
+            budget,
+            limit,
+            coverage,
+            ambig_in,
+        )
         return EXIT_OK, None
     lines: list[str] = []
     for s in symbols:
         lines += _site_rows(index, action, sym, s) if sites else [_sym_line(s)]
     for path in modules:
         lines += _module_rows(index, action, sym, path, sites)
+    if ambig_in:
+        print(
+            f"  note: {ambig_in} additional call site(s) named "
+            f"'{sym.name}' resolved ambiguously — not counted here",
+            file=sys.stderr,
+        )
     if not lines:
+        referenced = (
+            _referenced_rows(index, sym, sites) if action == "callers" else []
+        )
+        if referenced:
+            # A callback wired up by reference but never called (bug
+            # #2b) must not read as "nothing uses this" just because
+            # calls_in is empty.
+            print("referenced (not called):")
+            for row in referenced:
+                print(f"  {row}")
+            return EXIT_OK, None
         print(f"(no {action} of {sym.id})")
+        if coverage:
+            print(f"  note: {coverage}", file=sys.stderr)
         return EXIT_OK, None
     return EXIT_OK, _emit_lines(lines, budget, limit)
+
+
+def _shadow_note(index: MapIndex, target: str) -> str | None:
+    """Caveat when an in-repo symbol shares the queried external name.
+
+    An in-repo declaration sharing the target's bare name can suppress
+    or corrupt receiver-qualified external-call resolution for that
+    name repo-wide (bug #4/B4 — tensorflow's own ``np_array_ops.py::
+    array`` shadowed ``np.array(...)``: ``find_usages("array")``
+    returned one near-miss hit instead of the ~5,967 real ones, with
+    no signal anything was off). This doesn't attempt to detect
+    *whether* a given result was actually corrupted — that would need
+    re-deriving each call site's receiver binding — it flags the
+    precondition (a same-name in-repo symbol exists) unconditionally,
+    the same way ``query_symbol`` already discloses "+N ambiguous call
+    sites not counted" rather than staying silent about a resolver
+    blind spot.
+
+    Args:
+        index: Loaded map index.
+        target: The external-reference base name queried.
+
+    Returns:
+        A one-line caveat, or ``None`` when no in-repo symbol shares
+        the name.
+    """
+    if not (
+        index.symbols_by_name.get(target)
+        or index.symbols_by_qualname.get(target)
+    ):
+        return None
+    return (
+        f"'{target}' is also an in-repo symbol name — this result may "
+        "be incomplete if a same-named in-repo definition shadowed "
+        f"some external call sites; cross-check with `query callers "
+        f"{target}` (or `get_callers`)"
+    )
+
+
+def _run_uses_not_found(index: MapIndex, target: str) -> int:
+    """Report a ``uses`` target with zero external matches."""
+    internal = index.symbols_by_name.get(
+        target
+    ) or index.symbols_by_qualname.get(target)
+    if internal:
+        print(
+            f"dekko: '{target}' is an internal symbol, not an "
+            "external reference — 'uses'/'find_usages' only "
+            "covers out-of-repo names; try `query callers "
+            f"{target}` (or the `get_callers` tool) instead",
+            file=sys.stderr,
+        )
+        return EXIT_NOT_FOUND
+    print(f"dekko: no external reference matches '{target}'", file=sys.stderr)
+    close = _close_names(target, list(index.externals_by_name))
+    if close:
+        print("closest external names: " + ", ".join(close), file=sys.stderr)
+    coverage = _coverage_note(index)
+    if coverage:
+        print(f"  note: {coverage}", file=sys.stderr)
+    return EXIT_NOT_FOUND
+
+
+def _print_uses_json(
+    index: MapIndex,
+    target: str,
+    exts: list[ExternalCall],
+    shadow: str | None,
+    budget: int | None,
+    limit: int,
+) -> None:
+    """JSON rendering for a non-empty ``uses`` result."""
+    entries = [
+        {"caller": e.caller, "callee": e.callee, "lines": e.lines}
+        for e in exts
+    ]
+    kept, meter = _fit_entries(entries, budget, limit)
+    doc = {
+        "action": "uses",
+        "name": target,
+        "results": kept,
+        "meta": meter.as_dict(),
+    }
+    coverage = _coverage_note(index)
+    if coverage:
+        doc["coverage_warning"] = coverage
+    if shadow:
+        doc["shadow_warning"] = shadow
+    print(json.dumps(doc, indent=2))
+
+
+def _uses_rows(index: MapIndex, exts: list[ExternalCall]) -> list[str]:
+    """Text rows for a non-empty ``uses`` result, one per call site."""
+    rows: list[str] = []
+    for ext in exts:
+        path = ext.caller.split("::", 1)[0]
+        if ext.caller.endswith(MODULE_CALLER_SUFFIX):
+            label = "(module level)"
+        else:
+            s = index.symbols_by_id.get(ext.caller)
+            label = signature(s) if s else ext.caller
+        for line in ext.lines or [0]:
+            loc = f"{path}:{line}" if line else path
+            rows.append(f"{loc}  {label}  [{ext.callee}]")
+    return rows
 
 
 def _run_uses(
@@ -227,40 +600,24 @@ def _run_uses(
     """Execute the uses action: who references an external name."""
     exts = index.externals_by_name.get(target, [])
     if not exts:
-        print(
-            f"dekko: no external reference matches '{target}'",
-            file=sys.stderr,
-        )
-        return EXIT_NOT_FOUND, None
+        return _run_uses_not_found(index, target), None
     exts = sorted(
         exts, key=lambda e: (is_test_path(e.caller), e.caller, e.callee)
     )
+    shadow = _shadow_note(index, target)
     if as_json:
-        entries = [
-            {"caller": e.caller, "callee": e.callee, "lines": e.lines}
-            for e in exts
-        ]
-        kept, meter = _fit_entries(entries, budget, limit)
-        doc = {
-            "action": "uses",
-            "name": target,
-            "results": kept,
-            "meta": meter.as_dict(),
-        }
-        print(json.dumps(doc, indent=2))
+        _print_uses_json(index, target, exts, shadow, budget, limit)
         return EXIT_OK, None
-    rows: list[str] = []
-    for ext in exts:
-        path = ext.caller.split("::", 1)[0]
-        if ext.caller.endswith(MODULE_CALLER_SUFFIX):
-            label = "(module level)"
-        else:
-            s = index.symbols_by_id.get(ext.caller)
-            label = signature(s) if s else ext.caller
-        for line in ext.lines or [0]:
-            loc = f"{path}:{line}" if line else path
-            rows.append(f"{loc}  {label}  [{ext.callee}]")
-    return EXIT_OK, _emit_lines(rows, budget, limit)
+    if shadow:
+        print(f"  note: {shadow}", file=sys.stderr)
+    return EXIT_OK, _emit_lines(_uses_rows(index, exts), budget, limit)
+
+
+_TYPE_ZERO_FAN_NOTE = (
+    "call/reference edges only — a type used solely as a parameter, "
+    "field, or return-type annotation reports 0/0 here even when it's "
+    "heavily used; this is not evidence the type is unused"
+)
 
 
 def _run_symbol(
@@ -269,7 +626,19 @@ def _run_symbol(
     """Execute the symbol card action."""
     fan_in = len(index.calls_in.get(sym.id, []))
     fan_out = len(index.calls_out.get(sym.id, []))
+    ambig_in = len(index.ambiguous_in.get(sym.id, []))
+    referenced_by = len(index.referenced_in.get(sym.id, []))
     sym_notes = index.notes.get(sym.id, []) if notes else []
+    # A struct/class/interface/... only ever gets call/reference edges
+    # from being constructed or passed by value — used purely as a
+    # parameter/field/return-type annotation, it always reads 0/0,
+    # which is easy to misread as "unused" (bug #11/B11).
+    type_zero_fan = (
+        sym.kind in TYPE_KINDS
+        and fan_in == 0
+        and fan_out == 0
+        and not referenced_by
+    )
     if as_json:
         doc = _sym_json(index, sym)
         doc.update(
@@ -280,6 +649,12 @@ def _run_symbol(
                 "fan_out": fan_out,
             }
         )
+        if ambig_in:
+            doc["ambiguous_in"] = ambig_in
+        if referenced_by:
+            doc["referenced_by"] = referenced_by
+        if type_zero_fan:
+            doc["fan_note"] = _TYPE_ZERO_FAN_NOTE
         if notes:
             doc["notes"] = index.notes.get(sym.id, [])
         print(json.dumps(doc, indent=2))
@@ -287,7 +662,17 @@ def _run_symbol(
     print(signature(sym))
     print(f"  kind: {sym.kind} ({sym.language})")
     print(f"  at: {sym.path}:{sym.start_line}-{sym.end_line}")
-    print(f"  fan-in: {fan_in}, fan-out: {fan_out}")
+    fan_line = f"  fan-in: {fan_in}, fan-out: {fan_out}"
+    if ambig_in:
+        fan_line += f" (+{ambig_in} ambiguous call sites not counted)"
+    print(fan_line)
+    if referenced_by:
+        # fan-in alone can read as "definitely unused" for a callback
+        # wired up by reference and never itself called (bug #2b) —
+        # this line is what stops that misread.
+        print(f"  referenced-by: {referenced_by} (not called)")
+    if type_zero_fan:
+        print(f"  note: {_TYPE_ZERO_FAN_NOTE}")
     for text in sym_notes:
         print(f"  note: {text}")
     return EXIT_OK, None
@@ -304,6 +689,9 @@ def _run_file(
     matches = paths_matching(index, target)
     if not matches:
         print(f"dekko: no mapped file matches '{target}'", file=sys.stderr)
+        coverage = _coverage_note(index)
+        if coverage:
+            print(f"  note: {coverage}", file=sys.stderr)
         return EXIT_NOT_FOUND, None
     if len(matches) > 1:
         print(
@@ -348,7 +736,7 @@ def _dispatch(
 
     sym, candidates = resolve_target(index, target)
     if sym is None:
-        return report_unresolved(target, candidates), None
+        return report_unresolved(target, candidates, index), None
     if action == "symbol":
         return _run_symbol(index, sym, as_json, notes)
     return _run_relation(index, action, sym, as_json, limit, budget, sites)
@@ -378,15 +766,31 @@ def run(
             related definition.
         notes: Show a symbol's notes on its card (``symbol`` action).
         budget: Approximate token budget for the result rows, or
-            ``None``. Lowest-relevance rows are dropped first.
+            ``None``. Lowest-relevance rows are dropped first. For
+            ``callers``/``callees``/``uses``, ``None`` falls back to
+            ``DEFAULT_RELATION_BUDGET`` rather than going unbounded —
+            a high-fan-in symbol's full row list is otherwise capped
+            only by ``limit``'s row count, which can still render
+            thousands of tokens (the CLI and MCP paths previously
+            diverged here; both now share this one fallback).
 
     Returns:
         Process exit code.
     """
+    effective_budget = budget
+    if budget is None and action in _BUDGETED_ACTIONS:
+        effective_budget = DEFAULT_RELATION_BUDGET
     buf = io.StringIO()
     with redirect_stdout(buf):
         code, meter = _dispatch(
-            index, action, target, as_json, limit, budget, sites, notes
+            index,
+            action,
+            target,
+            as_json,
+            limit,
+            effective_budget,
+            sites,
+            notes,
         )
     text = buf.getvalue()
     sys.stdout.write(text)

@@ -70,18 +70,23 @@ def _used_keys(index: MapIndex) -> set[tuple[str, str]]:
     """``(path, qualname)`` keys that any inbound edge keeps alive.
 
     A called symbol marks itself *and* every enclosing container (so a
-    class counts as used when one of its methods is called).
+    class counts as used when one of its methods is called). A
+    symbol referenced as a value — a callback wired up by name and
+    never itself called (see ``model.RawRef``) — counts as used the
+    same way: it is not dead code just because nothing *calls* it
+    directly (bug #2b / Performance #3's false positives).
     """
     used: set[tuple[str, str]] = set()
-    for sym_id, callers in index.calls_in.items():
-        if not callers:
-            continue
-        sym = index.symbols_by_id.get(sym_id)
-        if sym is None:
-            continue
-        parts = sym.qualname.split(".")
-        for end in range(1, len(parts) + 1):
-            used.add((sym.path, ".".join(parts[:end])))
+    for table in (index.calls_in, index.referenced_in):
+        for sym_id, callers in table.items():
+            if not callers:
+                continue
+            sym = index.symbols_by_id.get(sym_id)
+            if sym is None:
+                continue
+            parts = sym.qualname.split(".")
+            for end in range(1, len(parts) + 1):
+                used.add((sym.path, ".".join(parts[:end])))
     return used
 
 

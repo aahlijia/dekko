@@ -1,9 +1,41 @@
 """Best-effort static call resolution: raw calls → graph edges.
 
-Resolution order for each call: same class/container → same file →
-imported names → unique repo-wide name match. Anything still unclear
-is reported as ambiguous rather than guessed; names with no in-repo
-candidates are external.
+Resolution order for each call: same class/container → typed
+parameter → same file → imported names → unique repo-wide name match
+→ class/own-constructor pair collapse. Anything still unclear is
+reported as ambiguous rather than guessed; names with no in-repo
+candidates are external. Ambiguous calls contribute to no candidate's
+``calls_in``/fan-in — they are never guessed into an edge — so a
+symbol's fan-in can undercount actual usage when its name collides
+with another definition; see ``mapfile.MapIndex.ambiguous_in`` for how
+many call sites were dropped for a given candidate.
+
+A call through one of the *calling function's own declared
+parameters* (``controller.initTask(...)`` where the caller declares
+``controller: Controller``) is resolved against that parameter's
+declared type before falling back to the (purely coincidental)
+same-file step — see ``_typed_param_match``. A call/construction that
+resolves to a class-shaped symbol also credits that class's own
+explicit constructor method (JS/TS ``constructor``, Python
+``__init__``, Java's same-named ``constructor_declaration``) when one
+was extracted, via ``_constructor_of`` — without this, ``new
+ClassName(...)`` construction was invisible to the constructor
+method's fan-in even though it resolved fine to the class itself (or,
+for Java specifically, fell into ``ambiguous`` entirely, since a Java
+constructor's own bare name is the class name — see
+``_construction_pick``). These three gaps were bug #2's undercounted-
+caller family (cline's ``get_callers("Controller.initTask")`` finding
+2 of 9 real callers; cline/spring-boot's ``Controller.constructor``/
+``AutoConfigurations.of`` reading fan-in 0 despite real call sites).
+
+Bare-identifier *references* (a callback passed by value rather than
+invoked — see ``model.RawRef``) go through the same candidate ladder
+via ``resolve_refs()``, but land in a wholly separate ``referenced``/
+``referenced_in``/``referenced_out`` table, never merged with
+``edges``/``calls_in``/``calls_out``. Unlike calls, an unresolved
+reference is simply dropped rather than recorded as ambiguous — there
+is no "ambiguous references" concept, mirroring how an unresolved call
+already falls through to ``external`` with nothing further tracked.
 """
 
 import re
@@ -11,18 +43,25 @@ from pathlib import PurePosixPath
 
 from .classify import is_test_path
 from .model import (
+    TYPE_KINDS,
     CallGraph,
     Edge,
     ExternalCall,
     FileMap,
     Import,
     RawCall,
+    RawRef,
     Symbol,
 )
 
 _SELF_RECEIVERS = {"self", "this", "Self", "cls"}
 _PATH_SPLIT = re.compile(r"::|\.|/")
 _INDEX_STEMS = {"__init__", "mod", "lib", "index"}
+# Either raw-usage shape the shared candidate ladder resolves — a
+# call and a bare-value reference expose the same fields
+# (name/receiver/caller_id/path) and only differ in what table the
+# result lands in.
+_Referable = RawCall | RawRef
 
 MODULE_CALLER_SUFFIX = "::<module>"
 
@@ -40,6 +79,7 @@ def resolve(files: list[FileMap]) -> CallGraph:
     by_name_path = _build_name_path_index(files)
     imports_by_file = _imports_by_file(files)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
+    repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
 
     edges: dict[tuple[str, str], set[int]] = {}
     ambiguous: dict[tuple[str, str], list[str]] = {}
@@ -53,6 +93,7 @@ def resolve(files: list[FileMap]) -> CallGraph:
                 index=index,
                 by_name_path=by_name_path,
                 file_imports=file_imports,
+                repo_stems=repo_stems,
                 symbols_by_id=symbols_by_id,
                 edges=edges,
                 ambiguous=ambiguous,
@@ -74,7 +115,97 @@ def resolve(files: list[FileMap]) -> CallGraph:
         ],
     )
     _build_adjacency(graph)
+    graph.referenced, graph.referenced_in, graph.referenced_out = resolve_refs(
+        files
+    )
     return graph
+
+
+def resolve_refs(
+    files: list[FileMap],
+) -> tuple[list[Edge], dict[str, list[str]], dict[str, list[str]]]:
+    """Resolve every raw value reference across the repo.
+
+    Mirrors ``resolve()``'s resolution ladder, but for ``RawRef``s
+    (bare identifiers used as values — see ``model.RawRef``) instead
+    of ``RawCall``s. Kept as a distinct pass with its own return
+    shape/tables rather than folding into ``edges``/``calls_in``/
+    ``calls_out`` — see the module docstring for why.
+
+    Args:
+        files: Per-file extraction results.
+
+    Returns:
+        ``(edges, referenced_in, referenced_out)``, the same shape
+        ``resolve()`` builds for calls, but for references.
+    """
+    index = _build_index(files)
+    by_name_path = _build_name_path_index(files)
+    imports_by_file = _imports_by_file(files)
+    symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
+
+    edges: dict[tuple[str, str], set[int]] = {}
+    for fm in files:
+        file_imports = imports_by_file.get(fm.path, {})
+        for ref in fm.refs:
+            _resolve_ref(
+                ref,
+                index=index,
+                by_name_path=by_name_path,
+                file_imports=file_imports,
+                symbols_by_id=symbols_by_id,
+                edges=edges,
+            )
+
+    edge_list = [
+        Edge(caller=c, callee=e, lines=sorted(lines))
+        for (c, e), lines in sorted(edges.items())
+    ]
+    referenced_in: dict[str, list[str]] = {}
+    referenced_out: dict[str, list[str]] = {}
+    for edge in edge_list:
+        referenced_out.setdefault(edge.caller, []).append(edge.callee)
+        referenced_in.setdefault(edge.callee, []).append(edge.caller)
+    for table in (referenced_in, referenced_out):
+        for key in table:
+            table[key] = sorted(set(table[key]))
+    return edge_list, referenced_in, referenced_out
+
+
+def _resolve_ref(
+    ref: RawRef,
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    file_imports: dict[str, Import],
+    symbols_by_id: dict[str, Symbol],
+    edges: dict[tuple[str, str], set[int]],
+) -> None:
+    """Resolve one reference; ambiguous/unmatched refs are dropped.
+
+    Unlike ``_resolve_call``, there is no ``ambiguous``/``external``
+    bucket for references — an unresolved reference (no candidates,
+    or more than one with no disambiguating signal) simply contributes
+    no edge, mirroring how a call with no in-repo candidates already
+    falls through to ``external`` with nothing further tracked.
+    """
+    caller_id = ref.caller_id or f"{ref.path}{MODULE_CALLER_SUFFIX}"
+    candidates = index.get(ref.name, [])
+    if not candidates:
+        alias = _alias_candidates(ref, file_imports, index)
+        if len(alias) == 1 and alias[0].id != caller_id:
+            edges.setdefault((caller_id, alias[0].id), set()).add(ref.line)
+        return
+    same_file = by_name_path.get((ref.name, ref.path), [])
+    target = _pick_candidate(
+        ref,
+        candidates,
+        same_file,
+        file_imports,
+        symbols_by_id.get(ref.caller_id or ""),
+        by_name_path,
+    )
+    if target is not None and target.id != caller_id:
+        edges.setdefault((caller_id, target.id), set()).add(ref.line)
 
 
 def _resolve_call(
@@ -82,6 +213,7 @@ def _resolve_call(
     index: dict[str, list[Symbol]],
     by_name_path: dict[tuple[str, str], list[Symbol]],
     file_imports: dict[str, Import],
+    repo_stems: set[str],
     symbols_by_id: dict[str, Symbol],
     edges: dict[tuple[str, str], set[int]],
     ambiguous: dict[tuple[str, str], list[str]],
@@ -89,8 +221,21 @@ def _resolve_call(
 ) -> None:
     """Resolve one call and record it in the right bucket."""
     caller_id = call.caller_id or f"{call.path}{MODULE_CALLER_SUFFIX}"
+    if _receiver_is_external(call, file_imports, repo_stems):
+        external.setdefault((caller_id, call.text), set()).add(call.line)
+        return
+
     candidates = index.get(call.name, [])
     if not candidates:
+        alias = _alias_candidates(call, file_imports, index)
+        if len(alias) == 1:
+            _add_call_and_constructor(
+                caller_id, alias[0], call.line, by_name_path, edges
+            )
+            return
+        if len(alias) > 1:
+            _record_ambiguous(caller_id, call.name, alias, ambiguous)
+            return
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
 
@@ -101,26 +246,82 @@ def _resolve_call(
         same_file,
         file_imports,
         symbols_by_id.get(call.caller_id or ""),
+        by_name_path,
     )
     if target is not None:
-        if target.id != caller_id:
-            edges.setdefault((caller_id, target.id), set()).add(call.line)
+        _add_call_and_constructor(
+            caller_id, target, call.line, by_name_path, edges
+        )
         return
-    key = (caller_id, call.name)
+    _record_ambiguous(caller_id, call.name, candidates, ambiguous)
+
+
+def _add_edge(
+    caller_id: str,
+    target_id: str,
+    line: int,
+    edges: dict[tuple[str, str], set[int]],
+) -> None:
+    """Record one resolved call-site line, skipping self-recursion noise."""
+    if target_id != caller_id:
+        edges.setdefault((caller_id, target_id), set()).add(line)
+
+
+def _add_call_and_constructor(
+    caller_id: str,
+    target: Symbol,
+    line: int,
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    edges: dict[tuple[str, str], set[int]],
+) -> None:
+    """Record the resolved call edge, plus a constructor edge if any.
+
+    See ``_constructor_of`` (module docstring, bug #2): a call or
+    construction that resolves to a class-shaped symbol also counts
+    toward that class's own explicit constructor method's fan-in, when
+    the language extracted one as its own symbol.
+    """
+    _add_edge(caller_id, target.id, line, edges)
+    ctor = _constructor_of(target, by_name_path)
+    if ctor is not None:
+        _add_edge(caller_id, ctor.id, line, edges)
+
+
+def _record_ambiguous(
+    caller_id: str,
+    name: str,
+    candidates: list[Symbol],
+    ambiguous: dict[tuple[str, str], list[str]],
+) -> None:
+    """Record a call/alias name with 2+ same-name candidates.
+
+    Args:
+        caller_id: Id of the calling symbol (or a module pseudo-id).
+        name: The bare callee name (as written at the call site).
+        candidates: The 2+ same-name symbols that could not be
+            disambiguated.
+        ambiguous: The graph's ambiguous-call accumulator, keyed on
+            ``(caller_id, name)``, mutated in place.
+    """
     # Candidate lists are presentation data: production code first,
     # test/fixture symbols last.
     ranked = sorted(candidates, key=lambda c: (is_test_path(c.path), c.id))
-    ambiguous.setdefault(key, [c.id for c in ranked])
+    ambiguous.setdefault((caller_id, name), [c.id for c in ranked])
 
 
 def _pick_candidate(
-    call: RawCall,
+    call: _Referable,
     candidates: list[Symbol],
     same_file: list[Symbol],
     file_imports: dict[str, Import],
     caller: Symbol | None,
+    by_name_path: dict[tuple[str, str], list[Symbol]],
 ) -> Symbol | None:
     """Apply the resolution ladder; ``None`` means ambiguous.
+
+    Shared by ``_resolve_call`` and ``_resolve_ref`` — ``call`` is
+    either a ``RawCall`` or a ``RawRef``; both expose the same
+    ``name``/``receiver`` fields this ladder reads.
 
     ``same_file`` is the pre-bucketed list of like-named symbols in the
     calling file, so the same-file and container steps avoid rescanning
@@ -133,6 +334,10 @@ def _pick_candidate(
         if len(same) == 1:
             return same[0]
 
+    typed = _typed_param_match(call, candidates, caller)
+    if typed is not None:
+        return typed
+
     if len(same_file) == 1:
         return same_file[0]
 
@@ -142,10 +347,155 @@ def _pick_candidate(
 
     if len(candidates) == 1:
         return candidates[0]
+
+    if len(candidates) == 2:
+        pair = _construction_pick(candidates, by_name_path)
+        if pair is not None:
+            return pair
+
     return None
 
 
-def _self_container(call: RawCall, caller: Symbol | None) -> str | None:
+# Type-annotation tokens that never name the receiver's own class —
+# generic/optional/collection wrappers and null-like literals a
+# declared type can be dressed in (``Optional[Controller]``,
+# ``Controller | undefined``, ``List<Controller>``, ``Box<Controller>``).
+# Filtered out before trying each remaining identifier token as a
+# candidate bare class name, rather than parsing the type expression
+# properly (best-effort, not a type-language parser).
+_TYPE_NOISE_WORDS = frozenset(
+    {
+        "Optional", "Promise", "List", "Array", "Vec", "Box", "Rc",
+        "Arc", "Option", "Result", "Ok", "Err", "None", "null",
+        "undefined", "readonly", "const", "mut", "ref",
+    }
+)  # fmt: skip
+_TYPE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _typed_param_match(
+    call: _Referable, candidates: list[Symbol], caller: Symbol | None
+) -> Symbol | None:
+    """Resolve a call through one of the caller's own typed parameters.
+
+    ``controller.initTask(...)``, where the calling function declares
+    a parameter ``controller: Controller`` — cline's headline finding
+    for bug #2: the container (``self``/``this``) and same-file steps
+    never look at a receiver that is neither, so a call through an
+    explicitly-typed parameter of a *different* name than its class
+    either fell through to a coincidental same-file match or, when no
+    same-file candidate existed, straight to ``ambiguous`` whenever
+    another same-named method existed anywhere else in the repo.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidates: Every same-named symbol repo-wide (already looked
+            up by the caller).
+        caller: The enclosing symbol, or ``None`` for module-level
+            calls — which have no declared parameters to check.
+
+    Returns:
+        The uniquely-matching method, or ``None`` when the receiver
+        isn't one of ``caller``'s declared, typed parameters, or the
+        type doesn't narrow ``candidates`` to exactly one.
+    """
+    if caller is None or not call.receiver:
+        return None
+    first = _PATH_SPLIT.split(call.receiver)[0]
+    param_type = next(
+        (p.type for p in caller.params if p.name == first and p.type),
+        None,
+    )
+    if not param_type:
+        return None
+    for token in _TYPE_TOKEN_RE.findall(param_type):
+        if token in _TYPE_NOISE_WORDS:
+            continue
+        target_qual = f"{token}.{call.name}"
+        matched = [c for c in candidates if c.qualname == target_qual]
+        if len(matched) == 1:
+            return matched[0]
+    return None
+
+
+# Constructor method names this resolver recognizes for a class-shaped
+# symbol, checked in order against ``(name, cls.path)`` — JS/TS/TSX's
+# fixed ``constructor``, Python's fixed ``__init__``, and last, the
+# class's own bare name (Java's ``constructor_declaration`` has no
+# distinct keyword: its extracted ``name`` field is the class name).
+_CONSTRUCTOR_NAMES = ("constructor", "__init__")
+
+
+def _constructor_of(
+    cls: Symbol, by_name_path: dict[tuple[str, str], list[Symbol]]
+) -> Symbol | None:
+    """The class's own explicit constructor method, if extracted.
+
+    ``new ClassName(...)``/bare ``ClassName(...)`` construction always
+    resolves to the class symbol itself, which under-counts a class's
+    real "how is this constructed" fan-in whenever the language also
+    extracts an explicit constructor as its own method symbol —
+    cline's ``Controller.constructor`` read fan-in 0 despite a real
+    ``new Controller(...)`` call site (bug #2). When one exists,
+    ``_add_call_and_constructor`` adds a second edge to it alongside
+    the class-level edge, so both "who constructs this class" and
+    "who calls the constructor body" are counted.
+
+    Args:
+        cls: A resolved symbol, checked only when it is class-shaped
+            (``model.TYPE_KINDS``) — a plain function/method target
+            returns ``None`` immediately.
+        by_name_path: ``(bare name, file path)`` → same-file symbols.
+
+    Returns:
+        The constructor method symbol, or ``None`` when ``cls`` isn't
+        a type-kind symbol or has no matching constructor definition.
+    """
+    if cls.kind not in TYPE_KINDS:
+        return None
+    for name in (*_CONSTRUCTOR_NAMES, cls.name):
+        for sym in by_name_path.get((name, cls.path), []):
+            qual = f"{cls.qualname}.{name}"
+            if sym.kind == "method" and sym.qualname == qual:
+                return sym
+    return None
+
+
+def _construction_pick(
+    candidates: list[Symbol],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+) -> Symbol | None:
+    """Collapse a same-name {class, own-constructor} pair to the class.
+
+    Java's ``constructor_declaration`` shares its bare name with its
+    own class (no distinct keyword the way JS/TS's ``constructor`` or
+    Python's ``__init__`` is), so ``new Foo(...)`` finds two same-
+    named candidates — the class ``Foo`` and its constructor method
+    ``Foo.Foo`` — and used to be recorded as unresolvably ambiguous,
+    undercounting fan-in for *both* (bug #2). This isn't a real
+    ambiguity: the two symbols are one class and its own constructor,
+    so the class wins as the primary target (matching JS/TS/Python's
+    convention elsewhere in this ladder) — ``_add_call_and_constructor``
+    then finds and adds the constructor edge alongside it automatically.
+
+    Args:
+        candidates: Exactly two same-named symbols (the caller only
+            invokes this when ``len(candidates) == 2``).
+        by_name_path: ``(bare name, file path)`` → same-file symbols.
+
+    Returns:
+        The class symbol when ``candidates`` is one class and its own
+        constructor method, else ``None`` (a real ambiguity).
+    """
+    a, b = candidates
+    for cls, ctor in ((a, b), (b, a)):
+        found = _constructor_of(cls, by_name_path)
+        if found is not None and found.id == ctor.id:
+            return cls
+    return None
+
+
+def _self_container(call: _Referable, caller: Symbol | None) -> str | None:
     """Container qualname when the call goes through self/this."""
     if caller is None or call.receiver is None:
         return None
@@ -158,7 +508,7 @@ def _self_container(call: RawCall, caller: Symbol | None) -> str | None:
 
 
 def _import_match(
-    call: RawCall, candidates: list[Symbol], file_imports: dict[str, Import]
+    call: _Referable, candidates: list[Symbol], file_imports: dict[str, Import]
 ) -> Symbol | None:
     """Match candidates against import hints for this file."""
     hints: list[str] = []
@@ -177,6 +527,115 @@ def _import_match(
     return None
 
 
+def _alias_candidates(
+    call: _Referable,
+    file_imports: dict[str, Import],
+    index: dict[str, list[Symbol]],
+) -> list[Symbol]:
+    """Recover candidates when a call/ref uses a local import alias.
+
+    ``import { real as alias } from "..."`` binds a local name to a
+    definition the index knows only by its *declared* name, so a
+    direct ``index.get(call.name, [])`` lookup on the alias always
+    misses. This recovers the pre-alias name from the import's
+    ``source`` — its last path-like segment, matching how
+    ``_imports_js``/``_imports_python``/``_rust_use_leaf`` all build
+    that string — and retries the lookup under that name, filtered to
+    symbols whose file plausibly matches the import.
+
+    Args:
+        call: The raw call or reference whose bare name missed the
+            direct index lookup.
+        file_imports: Local name to import record for the calling
+            file.
+        index: Bare symbol name to every symbol with that name.
+
+    Returns:
+        Repo-wide candidates for the recovered original name whose
+        file matches the import's source. Empty when ``call.name``
+        isn't a known local import, or no original-name candidate's
+        file matches — e.g. an alias for a genuinely external
+        package, which must keep resolving to ``external``.
+    """
+    imp = file_imports.get(call.name)
+    if imp is None:
+        return []
+    original = _PATH_SPLIT.split(imp.source)[-1]
+    return [
+        c
+        for c in index.get(original, [])
+        if _module_matches(imp.source, c.path)
+    ]
+
+
+def _receiver_is_external(
+    call: RawCall,
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+) -> bool:
+    """Check whether a call's receiver is bound to a non-repo import.
+
+    Runs before the bare-name index lookup so a call like
+    ``subprocess.run(...)`` is recorded as external even when the
+    repo happens to define its own ``run`` symbols elsewhere — the
+    bare-name ladder never gets a chance to misresolve or strand the
+    call in the ``ambiguous`` bucket.
+
+    Args:
+        call: The raw call being resolved.
+        file_imports: Local name to import record for the calling
+            file.
+        repo_stems: Every repo file's matching stem (see
+            ``_repo_stem``), used to test whether an import's source
+            plausibly names a module in this repo.
+
+    Returns:
+        True when the receiver resolves to an import whose source
+        matches no file in the repo. False when there is no receiver,
+        the receiver isn't an import (local variable, ``self``, ...),
+        or the import does plausibly point into the repo.
+    """
+    if not call.receiver:
+        return False
+    first = _PATH_SPLIT.split(call.receiver)[0]
+    imp = file_imports.get(first)
+    if imp is None:
+        return False
+    return not (_import_segments(imp.source) & repo_stems)
+
+
+def _import_segments(source: str) -> set[str]:
+    """Split an import source string into path-like segments.
+
+    Args:
+        source: Import source string (``pkg.mod.name``, ``a::b::c``).
+
+    Returns:
+        The non-empty segments, excluding relative-import markers.
+    """
+    return {
+        s
+        for s in _PATH_SPLIT.split(source)
+        if s and s not in ("crate", "super", "self")
+    }
+
+
+def _repo_stem(path: PurePosixPath) -> str:
+    """Compute the stem used to match a file against import sources.
+
+    Args:
+        path: Repo-relative path of a file.
+
+    Returns:
+        The file's stem, or its parent directory's name for index
+        files (``__init__.py``, ``mod.rs``, ...).
+    """
+    stem = path.stem
+    if stem in _INDEX_STEMS and path.parent.name:
+        return path.parent.name
+    return stem
+
+
 def _module_matches(source: str, candidate_path: str) -> bool:
     """Check whether an import source plausibly names a file.
 
@@ -188,16 +647,8 @@ def _module_matches(source: str, candidate_path: str) -> bool:
         True when the file's stem (or its directory, for index files
         like ``__init__.py`` / ``mod.rs``) appears in the source.
     """
-    segments = {
-        s
-        for s in _PATH_SPLIT.split(source)
-        if s and s not in ("crate", "super", "self")
-    }
-    path = PurePosixPath(candidate_path)
-    stem = path.stem
-    if stem in _INDEX_STEMS and path.parent.name:
-        stem = path.parent.name
-    return stem in segments
+    stem = _repo_stem(PurePosixPath(candidate_path))
+    return stem in _import_segments(source)
 
 
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:

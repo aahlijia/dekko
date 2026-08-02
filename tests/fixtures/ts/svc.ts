@@ -19,3 +19,12 @@ export class Service {
     return item;
   }
 }
+
+export class QueryEngine {
+  wrap(): void {
+    const wrappedHelper = (): void => {
+      fetchItem(1);
+    };
+    wrappedHelper();
+  }
+}

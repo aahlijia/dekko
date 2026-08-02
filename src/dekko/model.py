@@ -2,6 +2,17 @@
 
 from dataclasses import dataclass, field
 
+# Type-container ``Symbol.kind`` values — every non-callable, non-
+# variable definition a language can produce (classes plus the
+# interface/enum/struct/record/trait shapes other languages use for
+# the same "named type" concept). Shared by every renderer/summary
+# that used to check ``kind == "class"`` alone and would otherwise
+# silently undercount once ``extractor.py`` stopped lumping all of
+# these into ``"class"`` (see ``extractor._CLASSDEF_KIND``).
+TYPE_KINDS = frozenset(
+    {"class", "interface", "enum", "struct", "record", "trait"}
+)
+
 
 @dataclass
 class Param:
@@ -19,7 +30,11 @@ class Symbol:
         id: Stable identifier, ``relpath::Qualified.name``.
         name: Bare name of the symbol.
         qualname: Name qualified by its container, e.g. ``Config.load``.
-        kind: One of ``function``, ``method``, ``class``.
+        kind: One of ``function``, ``method``, ``variable`` (module-
+            scope ``const``/``let`` exports in JS/TS; a plain data
+            binding, not a callable), or one of ``TYPE_KINDS``
+            (``class``, ``interface``, ``enum``, ``struct``,
+            ``record``, ``trait``) for named-type definitions.
         path: Repo-relative POSIX path of the defining file.
         language: Language name from the registry.
         params: Ordered parameters with types when declared.
@@ -79,6 +94,40 @@ class RawCall:
 
 
 @dataclass
+class RawRef:
+    """A bare identifier used as a value (not invoked), before resolution.
+
+    Structurally mirrors ``RawCall`` so ``resolver.py``'s resolution
+    ladder can be reused unmodified, but represents a different kind
+    of usage entirely: an object-literal property value, array
+    element, call argument, or assignment/declarator right-hand side
+    — a function passed *by reference* rather than called. Kept as
+    its own type, resolved into its own ``referenced``/
+    ``referenced_in``/``referenced_out`` tables (never merged with
+    ``calls_in``/``calls_out``), so a caller can always tell "this was
+    wired up as a callback" apart from "this was invoked here" (bug
+    #2b — a bare-reference callback used to be invisible to
+    ``get_callers``/``unused``/fan-in entirely).
+
+    Attributes:
+        caller_id: Symbol id of the enclosing definition, or ``None``
+            for module/top-level references.
+        path: File the reference appears in.
+        name: The referenced identifier.
+        receiver: Always ``None`` — a raw reference is always a bare
+            identifier, never a ``.`` accessor. Present only so the
+            call-resolution ladder's shared helpers work unmodified.
+        line: 1-based line of the reference.
+    """
+
+    caller_id: str | None
+    path: str
+    name: str
+    receiver: str | None = None
+    line: int = 0
+
+
+@dataclass
 class Import:
     """A name imported into a file.
 
@@ -98,6 +147,9 @@ class FileMap:
     """Everything extracted from a single source file.
 
     Attributes:
+        refs: Bare-identifier value references (JS/TS/TSX only as of
+            this writing — see ``languages.LanguageSpec.
+            reference_query``).
         doc: First line of the file's module docstring or leading
             comment, or ``None`` (best-effort, per language).
     """
@@ -106,6 +158,7 @@ class FileMap:
     language: str
     symbols: list[Symbol] = field(default_factory=list)
     calls: list[RawCall] = field(default_factory=list)
+    refs: list[RawRef] = field(default_factory=list)
     imports: list[Import] = field(default_factory=list)
     error: str | None = None
     doc: str | None = None
@@ -152,6 +205,14 @@ class CallGraph:
         ambiguous: Per caller, the unresolved name and its candidate
             symbol ids.
         external: Calls whose target is outside the repo.
+        referenced: Deduplicated resolved bare-reference edges — kept
+            structurally separate from ``edges`` (see ``RawRef``); a
+            reference is a "wired up as a value" fact, never a "this
+            call site invoked it" fact.
+        referenced_out: Symbol id → sorted ids it references (but
+            does not call) as values.
+        referenced_in: Symbol id → sorted ids that reference it (but
+            do not call it) as a value.
     """
 
     edges: list[Edge] = field(default_factory=list)
@@ -159,3 +220,6 @@ class CallGraph:
     calls_in: dict[str, list[str]] = field(default_factory=dict)
     ambiguous: list[tuple[str, str, list[str]]] = field(default_factory=list)
     external: list[ExternalCall] = field(default_factory=list)
+    referenced: list[Edge] = field(default_factory=list)
+    referenced_out: dict[str, list[str]] = field(default_factory=dict)
+    referenced_in: dict[str, list[str]] = field(default_factory=dict)
