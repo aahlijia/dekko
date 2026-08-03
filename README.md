@@ -2,12 +2,15 @@
 
 [![CI](https://github.com/aahlijia/dekko/actions/workflows/ci.yml/badge.svg)](https://github.com/aahlijia/dekko/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/dekko)](https://pypi.org/project/dekko/)
+[![Downloads](https://static.pepy.tech/badge/dekko)](https://pepy.tech/project/dekko)
 [![Python](https://img.shields.io/pypi/pyversions/dekko)](https://pypi.org/project/dekko/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-**dekko** is a fast, offline, dependency-free static code-map generator.
-It scans a repository with [tree-sitter](https://tree-sitter.github.io/)
-(no model tokens spent parsing) and writes:
+**dekko** is a fast, offline, dependency-free **static code map
+generator** and **codebase indexer for LLM coding agents**. It scans a
+repository with [tree-sitter](https://tree-sitter.github.io/) (no model
+tokens spent parsing) and writes:
 
 - **`MAP.md`** — a human-readable map: a per-directory overview, an
   embedded architecture diagram, load-bearing/orchestrator rankings,
@@ -18,8 +21,28 @@ It scans a repository with [tree-sitter](https://tree-sitter.github.io/)
 On top of the map, dekko gives an agent a token-cheap way to answer
 questions like "what does this file contain," "who calls this function,"
 and "what do I need to safely change this" — without reading whole files.
-It ships as a **CLI**, a **Claude Code `/map` plugin + MCP server**, and
+It ships as a **CLI**, a **Claude Code `/map` plugin + MCP server**
+([Model Context Protocol](https://modelcontextprotocol.io/)), and
 works with **Cline** too.
+
+## Why dekko?
+
+Most agent workflows gather context by reading whole files or grepping
+across a repo — expensive, and it throws away structure (who calls
+what, what a function's fan-in/fan-out looks like). dekko instead
+parses the repo once into a call graph and answers targeted questions
+against it. Measured across 7 real, unmodified open-source repos
+(Go, TypeScript, Java, Rust, Python/C++ — up to 14k files), dekko's
+structured queries used **3x–200x fewer tokens** than the equivalent
+`Read`/`Grep` workflow for the same task (repo orientation, outlining a
+large file, tracing a symbol's callers/callees). See
+[`benchmarks/real-world-repos/`](benchmarks/real-world-repos/README.md)
+for the full per-task breakdown and methodology.
+
+Compared to tag-index tools like `ctags`/`gtags`, dekko resolves actual
+call edges (not just definitions), ranks files by load-bearing-ness,
+and speaks directly to agents over MCP or the CLI — no editor plugin
+required.
 
 ## Installation
 

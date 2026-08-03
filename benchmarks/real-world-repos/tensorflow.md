@@ -1,7 +1,5 @@
 # tensorflow
 
-Source: `test-repos/reports/fable-tokentest-tensorflow.md`
-
 Huge real polyglot repo (Python/C++/…): **14,285 mapped files, 157,845
 symbols** — the largest repo in this test batch.
 

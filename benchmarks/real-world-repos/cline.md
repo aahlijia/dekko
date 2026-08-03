@@ -1,6 +1,5 @@
 # cline
 
-Source: `test-repos/reports/fable-tokentest-cline.md`
 
 Large real TypeScript monorepo (VS Code extension + CLI + SDK):
 **2,730 mapped files, 19,542 symbols**, effectively ~4 sub-projects

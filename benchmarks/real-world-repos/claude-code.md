@@ -1,6 +1,5 @@
 # claude-code
 
-Source: `test-repos/reports/fable-tokentest-claude-code.md`
 
 Large real TypeScript/TSX repo: **1,902 mapped files, 15,360 symbols**.
 

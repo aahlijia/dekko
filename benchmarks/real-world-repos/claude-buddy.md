@@ -1,6 +1,5 @@
 # claude-buddy
 
-Source: `test-repos/reports/fable-tokentest-claude-buddy.md`
 
 Mid-sized real TypeScript repo (a Claude Code companion/MCP server):
 **57 mapped files, 662 symbols**.

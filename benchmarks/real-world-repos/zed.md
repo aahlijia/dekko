@@ -1,6 +1,5 @@
 # zed
 
-Source: `test-repos/reports/fable-tokentest-zed.md`
 
 Huge real Rust workspace: **2,178 mapped files, ~60,000 symbols**.
 

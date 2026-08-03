@@ -1,7 +1,5 @@
 # spring-boot
 
-Source: `test-repos/reports/fable-tokentest-spring-boot.md`
-
 Large real Java monorepo: **9,647 mapped files, 66,458 symbols**.
 
 ## Results
