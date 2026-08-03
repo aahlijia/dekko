@@ -1,11 +1,21 @@
-# dekko
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.svg">
+    <img src="assets/logo-light.svg" alt="dekko" width="88">
+  </picture>
+</p>
 
-[![CI](https://github.com/aahlijia/dekko/actions/workflows/ci.yml/badge.svg)](https://github.com/aahlijia/dekko/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/dekko)](https://pypi.org/project/dekko/)
-[![Downloads](https://static.pepy.tech/badge/dekko)](https://pepy.tech/project/dekko)
-[![Python](https://img.shields.io/pypi/pyversions/dekko)](https://pypi.org/project/dekko/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+<h1 align="center">dekko</h1>
+
+<p align="center">
+  <a href="https://github.com/aahlijia/dekko/actions/workflows/ci.yml"><img src="https://github.com/aahlijia/dekko/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/dekko/"><img src="https://img.shields.io/pypi/v/dekko" alt="PyPI"></a>
+  <a href="https://pepy.tech/project/dekko"><img src="https://static.pepy.tech/badge/dekko" alt="Downloads"></a>
+  <a href="https://pypi.org/project/dekko/"><img src="https://img.shields.io/pypi/pyversions/dekko" alt="Python"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
+</p>
 
 **dekko** is a fast, offline, dependency-free **static code map
 generator** and **codebase indexer for LLM coding agents**. It scans a
