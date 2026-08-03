@@ -9,6 +9,12 @@
 # Prerequisite (one-time, user-side): configure PyPI trusted publishing
 # (OIDC) for `aahlijia/dekko` and a `pypi` environment in repo settings.
 # No API token is stored; `id-token: write` below authorizes the upload.
+#
+# The final job then registers the same release with the official MCP
+# Registry (registry.modelcontextprotocol.io) via `mcp-publisher`,
+# authenticating with GitHub OIDC — no stored secret needed there either.
+# It runs after the PyPI publish so the `mcp-name` marker the registry
+# checks for is already live on PyPI's rendered project description.
 
 name: Release
 
@@ -55,3 +61,27 @@ jobs:
           path: dist/
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-mcp-registry:
+    needs: publish
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sync server.json version to tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          jq --arg v "$version" \
+            '.version = $v | .packages[0].version = $v' \
+            server.json > server.tmp
+          mv server.tmp server.json
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+      - name: Publish server to MCP Registry
+        run: ./mcp-publisher publish
