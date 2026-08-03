@@ -199,7 +199,10 @@ def _add_map_options(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         metavar="GLOB",
-        help="extra glob pattern to skip (repeatable)",
+        help="extra glob pattern to skip (repeatable); also persisted to "
+        ".dekko/.dekkoignore for future bare runs — note that patterns "
+        "there are matched with gitignore (not fnmatch) semantics, so "
+        "e.g. 'dir/*.py' stops matching nested files once persisted",
     )
     parser.add_argument(
         "--max-file-size",
@@ -1336,11 +1339,33 @@ def _map_run_is_noop(
     return True
 
 
-def run_map(args: argparse.Namespace) -> int:
+def _maybe_persist_excludes(
+    root: Path, args: argparse.Namespace, persist_excludes: bool
+) -> None:
+    """Append ``args.exclude`` to ``.dekko/.dekkoignore`` if requested.
+
+    Args:
+        root: Repository root.
+        args: Parsed arguments for this run.
+        persist_excludes: Whether this call site is allowed to persist
+            (``False`` for ``regen_map``'s replayed provenance).
+    """
+    if persist_excludes and args.exclude:
+        cache_mod.persist_dekkoignore(root, args.exclude)
+
+
+def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
     """Execute the mapping action for parsed CLI arguments.
 
     Args:
         args: Parsed arguments with ``map_dir`` set.
+        persist_excludes: Append ``args.exclude`` to
+            ``.dekko/.dekkoignore`` on a successful run. Set to
+            ``False`` by ``regen_map`` — its ``exclude`` values are
+            already-persisted provenance replayed for a re-render, not
+            a fresh user-supplied ``--exclude``, so re-persisting them
+            on every ``--if-stale``/auto-regen cycle would be a no-op
+            at best and a surprise write at worst.
 
     Returns:
         Process exit code.
@@ -1374,6 +1399,8 @@ def run_map(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+
+    _maybe_persist_excludes(root, args, persist_excludes)
 
     if _map_run_is_noop(root, args, cache, files):
         return 0
@@ -1527,7 +1554,7 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
         full=full,
         jobs=1,
     )
-    return run_map(regen_args)
+    return run_map(regen_args, persist_excludes=False)
 
 
 def _cmd_map(args: argparse.Namespace) -> int:

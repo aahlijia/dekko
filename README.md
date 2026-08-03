@@ -120,6 +120,42 @@ Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
 `ledger`, `hooks`, `orient` cover more specialized workflows).
 
+### Excluding files
+
+`--exclude GLOB` (repeatable) skips extra files for one `dekko map`
+invocation, matched with plain shell globbing (`fnmatch`) against both
+the basename and the full relative path:
+
+```sh
+dekko map --exclude 'fixtures/*' --exclude '*.generated.py'
+```
+
+Every `--exclude` pattern is also appended to `.dekko/.dekkoignore` —
+created alongside `notes.json`, and tracked (not git-ignored) so the
+exclusion is shared with anyone who clones the repo. Once a pattern is
+persisted, a plain `dekko map` with no flags at all still honors it, so
+you don't need to retype `--exclude` on every invocation, in every
+wrapper script, or for every MCP client. `.dekko/.dekkoignore` is also
+fully hand-editable — open it like a `.gitignore` and add or remove
+lines directly, with comments, negation (`!pattern`), and `**`
+supported.
+
+**`--exclude` and `.dekkoignore` are additive, never overriding**: a
+file is skipped if it matches *either* one. They do use different
+matching engines, though — `--exclude` stays plain `fnmatch` (unchanged
+behavior for existing scripts/CI), while `.dekko/.dekkoignore` is
+parsed as gitignore syntax (`gitwildmatch`), since that's what a
+hand-edited, comment-and-negation-bearing file should behave like. This
+means a persisted pattern can occasionally change meaning: `--exclude
+'dir/*.py'` reaches into `dir/sub/nested.py` today (`fnmatch`'s `*`
+isn't slash-aware), but the identical string in `.dekko/.dekkoignore`
+only matches the direct child, `dir/nested.py` — the wildcard doesn't
+also match (and thus prune) the intermediate subdirectory the way it
+does under `fnmatch`. Whole-subtree patterns (`dir/*` or `dir/`) behave
+the same under both. The run summary distinguishes the two sources:
+files skipped by `--exclude` are reported as `excluded`, files skipped
+by `.dekko/.dekkoignore` as `ignored`.
+
 ### Notes
 
 Anchor a durable, committed note to a symbol — it shows up in
