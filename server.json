@@ -13,7 +13,18 @@
       "identifier": "dekko",
       "version": "0.21.3",
       "runtimeHint": "uvx",
-      "packageArguments": ["serve", "--mcp"],
+      "packageArguments": [
+        {
+          "type": "positional",
+          "valueHint": "subcommand",
+          "value": "serve"
+        },
+        {
+          "type": "positional",
+          "valueHint": "flag",
+          "value": "--mcp"
+        }
+      ],
       "transport": {
         "type": "stdio"
       }
