@@ -19,8 +19,9 @@ from dataclasses import asdict
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
+from .languages import spec_fingerprint
 from .mapfile import _file_hash, _symbol_from_dict
-from .model import FileMap, Import, RawCall
+from .model import FileMap, Import, RawCall, RawRef
 
 CACHE_VERSION = 1
 CACHE_DIR = ".dekko"
@@ -50,6 +51,7 @@ def _filemap_from_dict(d: dict) -> FileMap:
         language=d["language"],
         symbols=[_symbol_from_dict(s) for s in d.get("symbols", [])],
         calls=[RawCall(**c) for c in d.get("calls", [])],
+        refs=[RawRef(**r) for r in d.get("refs", [])],
         imports=[Import(**i) for i in d.get("imports", [])],
         error=d.get("error"),
         doc=d.get("doc"),
@@ -104,6 +106,26 @@ class IncrementalCache:
         }
         self.parsed += 1
 
+    def unchanged(self, paths: list[str]) -> bool:
+        """True when every currently discovered path was already cached.
+
+        Guards ``dekko map``'s no-op fast path: ``self.parsed == 0``
+        alone doesn't catch a file removed from the repo since the
+        cache was written (discovery simply stops seeing it, so no
+        extraction is attempted either way) — this additionally
+        requires the current and previous path sets to match exactly,
+        so an add/remove with an otherwise all-cache-hit run still
+        falls through to a real re-render.
+
+        Args:
+            paths: Currently discovered repo-relative paths.
+
+        Returns:
+            True when ``paths`` and the prior cache's entries are the
+            same set.
+        """
+        return set(paths) == set(self._old)
+
 
 def load(root: Path) -> dict[str, dict]:
     """Load the prior cache entries for a repository.
@@ -111,9 +133,11 @@ def load(root: Path) -> dict[str, dict]:
     Args:
         root: Repository root.
 
-    A cache written by a different dekko version is discarded, so
-    extractor changes always take effect on the next run without a
-    manual ``--full``.
+    A cache written by a different dekko version, or whose extraction
+    spec fingerprint no longer matches (an unreleased extractor change
+    that didn't bump the version string), is discarded, so extractor
+    changes always take effect on the next run without a manual
+    ``--full``.
 
     Returns:
         ``path -> entry`` mapping, or an empty dict when no usable
@@ -127,6 +151,8 @@ def load(root: Path) -> dict[str, dict]:
     if doc.get("version") != CACHE_VERSION:
         return {}
     if doc.get("tool_version") != _tool_version():
+        return {}
+    if doc.get("spec_hash") != spec_fingerprint():
         return {}
     files = doc.get("files")
     return files if isinstance(files, dict) else {}
@@ -143,6 +169,7 @@ def save(root: Path, cache: IncrementalCache) -> None:
     doc = {
         "version": CACHE_VERSION,
         "tool_version": _tool_version(),
+        "spec_hash": spec_fingerprint(),
         "files": cache.entries,
     }
     (cache_dir / CACHE_FILE).write_text(

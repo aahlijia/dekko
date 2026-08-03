@@ -112,6 +112,111 @@ def test_rust_calls_and_receivers() -> None:
     assert any(name == "dist" for name, _ in calls)
 
 
+def test_rust_nested_fn_not_a_method(tmp_path: Path) -> None:
+    # Bug #2(a): a fn nested inside another fn's body is a closure-
+    # local helper, not a member of whatever impl block contains the
+    # outer fn — it must not climb past the outer fn to inherit
+    # Point's qualname/kind.
+    spec = languages.spec_for_path("point.rs")
+    assert spec is not None
+    (tmp_path / "point.rs").write_text(
+        "struct Point { x: f64, y: f64 }\n"
+        "\n"
+        "impl Point {\n"
+        "    fn dist(&self) -> f64 {\n"
+        "        fn helper(v: f64) -> f64 {\n"
+        "            v.abs()\n"
+        "        }\n"
+        "        helper(self.x)\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "point.rs", spec)
+    assert fm.error is None
+    syms = _by_qualname(fm.symbols)
+    assert "Point.helper" not in syms
+    assert syms["helper"].kind == "function"
+    assert syms["Point.dist"].kind == "method"
+
+
+def test_typescript_variable_export_indexed_as_symbol(
+    tmp_path: Path,
+) -> None:
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "export const jobs = [1, 2, 3];\n"
+        'const CONFIG = { host: "local" };\n'
+        "export const build = () => jobs.length;\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    syms = _by_qualname(fm.symbols)
+    assert syms["jobs"].kind == "variable"
+    assert syms["jobs"].exported is True
+    assert syms["CONFIG"].kind == "variable"
+    assert syms["CONFIG"].exported is False
+    # Arrow-function values are already covered by the dedicated
+    # function-definition pattern; the broad variable-export pattern
+    # must not add a duplicate "variable" symbol for the same node.
+    assert syms["build"].kind == "function"
+    assert sum(1 for s in fm.symbols if s.name == "build") == 1
+
+
+def test_javascript_variable_export_indexed_as_symbol(
+    tmp_path: Path,
+) -> None:
+    spec = languages.spec_for_path("data.js")
+    assert spec is not None
+    (tmp_path / "data.js").write_text(
+        "export const jobs = [1, 2, 3];\n"
+        "export const run = () => jobs.length;\n"
+    )
+    fm = extract_file(tmp_path, "data.js", spec)
+    syms = _by_qualname(fm.symbols)
+    assert syms["jobs"].kind == "variable"
+    assert syms["run"].kind == "function"
+    assert sum(1 for s in fm.symbols if s.name == "run") == 1
+
+
+def test_typescript_template_substitution_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """A ``${...}`` template-literal identifier is a bare reference.
+
+    Regression test for the false-positive-unused gap where a
+    module-level ``const`` used only inside a template-literal
+    substitution (e.g. ANSI color constants like
+    ``` `${RED}x${NC}` ```) was invisible to ``dekko unused`` because
+    ``_JS_REFERENCE_BASE`` had no pattern for
+    ``template_substitution`` nodes.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        'const RED = "\\x1b[31m";\n'
+        'const NC = "\\x1b[0m";\n'
+        "export const shout = () => `${RED}x${NC}`;\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "RED" in ref_names
+    assert "NC" in ref_names
+
+
+def test_javascript_template_substitution_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """Same template-literal capture, JS grammar (JSX-inclusive query)."""
+    spec = languages.spec_for_path("data.js")
+    assert spec is not None
+    (tmp_path / "data.js").write_text(
+        'const RED = "\\x1b[31m";\nexport const shout = () => `${RED}x`;\n'
+    )
+    fm = extract_file(tmp_path, "data.js", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "RED" in ref_names
+
+
 def test_parse_rust_use() -> None:
     assert _parse_rust_use("a::b::c") == [("c", "a::b::c")]
     assert _parse_rust_use("a::b as d") == [("d", "a::b")]

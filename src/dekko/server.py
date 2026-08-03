@@ -39,6 +39,28 @@ from . import workset as workset_mod
 SERVER_NAME = "dekko"
 PROTOCOL_VERSION = "2025-06-18"
 
+# Default token cap for the orientation tools (summary/outline) when the
+# caller passes no budget. Their output scales with repo size — a large
+# monorepo's un-capped summary renders ~30k chars, and because agents
+# call these tools FIRST, that cost is re-read as cache on every later
+# turn (2026-07-10 eval: the zed net-negative was mostly this). Callers
+# can always pass a larger budget explicitly.
+DEFAULT_ORIENT_BUDGET = 2000
+
+# Default token cap for the relation/usage/pack tools (get_callers,
+# get_callees, query_symbol, find_usages, get_context_pack) when the
+# caller passes no budget. These return a flatter, more repetitive row
+# shape than an outline, so half of DEFAULT_ORIENT_BUDGET is a
+# reasonable starting cap — a symbol with dozens of call sites (or
+# test-file callers included) otherwise renders unbounded output that
+# can exceed a naive grep for the same question (2026-07-31 eval:
+# get_callers/find_usages both lost to grep on uncapped output).
+# Callers can always pass a larger budget explicitly. Sourced from
+# ``query.DEFAULT_RELATION_BUDGET`` (which the CLI's ``dekko query``
+# now also falls back to) so the two surfaces can't drift apart again
+# the way they did when only the MCP path enforced this default.
+DEFAULT_RELATION_BUDGET = query.DEFAULT_RELATION_BUDGET
+
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
@@ -99,25 +121,61 @@ def _task_of(ctx: Context, args: dict) -> relevance.TaskContext | None:
     return relevance.task_context(text, _root_of(ctx, args))
 
 
-def _index_for(ctx: Context, args: dict) -> mapfile.MapIndex:
-    """Load (auto-regenerating) the map for a tool call."""
+def _index_for(
+    ctx: Context, args: dict, include_tests: bool = True
+) -> mapfile.MapIndex:
+    """Load (auto-regenerating) the map for a tool call.
+
+    Args:
+        ctx: Server-wide settings.
+        args: The tool call's raw arguments (for ``root``).
+        include_tests: When false, apply ``MapIndex.without_tests()``
+            (mirrors the CLI's ``--no-tests`` flag) so test-path
+            symbols, edges, and external calls are dropped before the
+            tool sees the index.
+
+    Returns:
+        The loaded (optionally filtered) map index.
+    """
     from . import cli
 
     root = _root_of(ctx, args)
     index, code = cli._load_or_regen(root, ctx.no_regen)
     if index is None:
         raise ToolError(f"no usable map under {root} (exit {code})")
+    if not include_tests:
+        index = index.without_tests()
     return index
 
 
-def _relation_tool(ctx: Context, action: str, args: dict) -> str:
-    """Run a query action (symbol/callers/callees) and return text."""
-    index = _index_for(ctx, args)
+def _relation_tool(
+    ctx: Context,
+    action: str,
+    args: dict,
+    default_include_tests: bool = True,
+) -> str:
+    """Run a query action (symbol/callers/callees) and return text.
+
+    Args:
+        ctx: Server-wide settings.
+        action: One of ``query.ACTIONS`` (``symbol``/``callers``/
+            ``callees``).
+        args: The tool call's raw arguments.
+        default_include_tests: Value to use for ``include_tests`` when
+            the caller omits it — tools whose own descriptions pitch
+            them as impact-analysis (e.g. ``get_callers``) pass
+            ``False`` here since test callers are usually noise.
+
+    Returns:
+        Rendered text result, or a placeholder when there are none.
+    """
+    include_tests = bool(args.get("include_tests", default_include_tests))
+    index = _index_for(ctx, args, include_tests=include_tests)
     target = _require(args, "symbol")
     limit = int(args.get("limit", 50))
     sites = bool(args.get("sites", False))
     budget = args.get("budget")
-    budget = int(budget) if budget is not None else None
+    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
     code, out, err = _capture(
         lambda: query.run(
             index,
@@ -141,7 +199,7 @@ def tool_query_symbol(ctx: Context, args: dict) -> str:
 
 def tool_get_callers(ctx: Context, args: dict) -> str:
     """Symbols (and module-level sites) that call the target."""
-    return _relation_tool(ctx, "callers", args)
+    return _relation_tool(ctx, "callers", args, default_include_tests=False)
 
 
 def tool_get_callees(ctx: Context, args: dict) -> str:
@@ -155,7 +213,7 @@ def tool_find_usages(ctx: Context, args: dict) -> str:
     name = _require(args, "name")
     limit = int(args.get("limit", 50))
     budget = args.get("budget")
-    budget = int(budget) if budget is not None else None
+    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
     code, out, err = _capture(
         lambda: query.run(
             index, "uses", name, as_json=False, limit=limit, budget=budget
@@ -172,7 +230,7 @@ def tool_get_context_pack(ctx: Context, args: dict) -> str:
     target = _require(args, "target")
     hops = int(args.get("hops", 1))
     budget = args.get("budget")
-    budget = int(budget) if budget is not None else None
+    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
     with_source = bool(args.get("with_source", False))
     root = _root_of(ctx, args)
     task = _task_of(ctx, args)
@@ -198,8 +256,7 @@ def tool_outline(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     target = _require(args, "target")
     limit = int(args.get("limit", 200))
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else None
+    budget = int(args.get("budget", DEFAULT_ORIENT_BUDGET))
     root = _root_of(ctx, args)
     code, out, err = _capture(
         lambda: outline_mod.run(
@@ -309,10 +366,12 @@ def tool_stats(ctx: Context, args: dict) -> str:
     return out.strip()
 
 
-def _summary_text(ctx: Context, args: dict) -> str:
+def _summary_text(ctx: Context, args: dict, budget: int | None = None) -> str:
     """Render the repo digest, reused by the tool and the resource."""
     index = _index_for(ctx, args)
-    code, out, err = _capture(lambda: summary.run(index, as_json=False))
+    code, out, err = _capture(
+        lambda: summary.run(index, as_json=False, budget=budget)
+    )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
     return out.strip()
@@ -320,7 +379,8 @@ def _summary_text(ctx: Context, args: dict) -> str:
 
 def tool_summary(ctx: Context, args: dict) -> str:
     """Compact repo digest: directories, hotspots, entry points."""
-    return _summary_text(ctx, args)
+    budget = int(args.get("budget", DEFAULT_ORIENT_BUDGET))
+    return _summary_text(ctx, args, budget=budget)
 
 
 def tool_lean(ctx: Context, args: dict) -> str:
@@ -412,14 +472,27 @@ def tool_map_status(ctx: Context, args: dict) -> str:
     if index is None:
         return f"no map.json under {root} (call refresh_map)"
     fresh = mapfile.check_freshness(root, index)
+    note = mapfile.format_unsupported(index.provenance)
     if fresh.fresh:
         prov = index.provenance or {}
         commit = (prov.get("git_commit") or "no git")[:12]
-        return f"fresh ({len(prov.get('files', {}))} files, commit {commit})"
+        n = len(prov.get("files", {}))
+        status = f"fresh ({n} files, commit {commit})"
+        return f"{status}\n{note}" if note else status
+    if fresh.reason == "version":
+        prov = index.provenance or {}
+        built = prov.get("tool_version", "unknown")
+        running = _pkg_version("dekko")
+        return (
+            f"stale (version): built by dekko {built}, running "
+            f"{running} — call refresh_map"
+        )
     parts = [f"stale: {len(fresh.changed)} changed"]
     parts.append(f"{len(fresh.added)} added")
     parts.append(f"{len(fresh.removed)} removed")
     detail = ", ".join(parts)
+    if note:
+        detail = f"{detail}\n{note}"
     changed = ", ".join((fresh.changed + fresh.added + fresh.removed)[:10])
     return f"{detail}\n{changed}" if changed else detail
 
@@ -453,8 +526,15 @@ _SITES_PROP = {
 }
 _BUDGET_PROP = {
     "type": "integer",
-    "description": "Approximate token budget; lowest-relevance rows are "
-    "dropped to fit and a cost footer is appended",
+    "description": "Approximate token budget (default 800); "
+    "lowest-relevance rows are dropped to fit and a cost footer is "
+    "appended",
+}
+_INCLUDE_TESTS_PROP = {
+    "type": "boolean",
+    "description": "Include results from test files (default: false — "
+    "test-file callers are usually noise for impact analysis; set "
+    "true to include them)",
 }
 _TASK_PROP = {
     "type": "string",
@@ -462,6 +542,12 @@ _TASK_PROP = {
     "blended with structural centrality and the working diff",
 }
 
+# The agent-facing tool surface. Deliberately smaller than the CLI:
+# every schema below is sent to the model on each session, so each entry
+# pays rent in context tokens. trace_path / find_unused / stats / lean /
+# ledger are CLI-only — diagnostic/operator surface with no observed
+# agent usage (2026-07-10 eval transcripts) — their handlers remain
+# callable and `dekko <cmd>` unaffected.
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "query_symbol",
@@ -481,13 +567,15 @@ TOOLS: list[dict[str, Any]] = [
         "a symbol — exact call edges, unlike grep, which can't tell a "
         "call from a same-named string. Set sites=true for the precise "
         "path:line of each call. Use for impact analysis before a "
-        "change.",
+        "change. Test-file callers are excluded by default — set "
+        "include_tests=true to see them.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "symbol": _SYMBOL_PROP,
                 "sites": _SITES_PROP,
                 "budget": _BUDGET_PROP,
+                "include_tests": _INCLUDE_TESTS_PROP,
                 "root": _ROOT_PROP,
             },
             "required": ["symbol"],
@@ -538,7 +626,8 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_context_pack",
         "description": "Compact signature neighborhood (callers/callees "
-        "within N hops) for editing a symbol or file. Token-budgetable.",
+        "within N hops) for editing a symbol or file. Token-budgetable. "
+        'Example: target="awardXp", task="who calls this".',
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -552,7 +641,8 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "budget": {
                     "type": "integer",
-                    "description": "Approx token budget for the pack",
+                    "description": "Approx token budget for the pack "
+                    "(default 800)",
                 },
                 "with_source": {
                     "type": "boolean",
@@ -585,62 +675,17 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "Max symbol rows (default 200)",
                 },
-                "budget": _BUDGET_PROP,
+                "budget": {
+                    "type": "integer",
+                    "description": "Approximate token budget (default "
+                    "2000); lowest-relevance rows are dropped to fit "
+                    "and a cost footer is appended",
+                },
                 "root": _ROOT_PROP,
             },
             "required": ["target"],
         },
         "handler": tool_outline,
-    },
-    {
-        "name": "trace_path",
-        "description": "Shortest call path(s) between two symbols "
-        "(how one reaches the other). Empty when there is no path.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "from": {
-                    "type": "string",
-                    "description": "Source symbol (name, Class.method, "
-                    "file.py:name)",
-                },
-                "to": {
-                    "type": "string",
-                    "description": "Destination symbol (name, "
-                    "Class.method, file.py:name)",
-                },
-                "max_paths": {
-                    "type": "integer",
-                    "description": "Max distinct shortest paths (default 3)",
-                },
-                "root": _ROOT_PROP,
-            },
-            "required": ["from", "to"],
-        },
-        "handler": tool_trace_path,
-    },
-    {
-        "name": "find_unused",
-        "description": "Symbols with no inbound calls (dead-code leads, "
-        "not verdicts). Entry points and exported symbols are excluded.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "roots": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Extra path globs whose symbols are "
-                    "always treated as roots",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Max result lines (default 50)",
-                },
-                "budget": _BUDGET_PROP,
-                "root": _ROOT_PROP,
-            },
-        },
-        "handler": tool_find_unused,
     },
     {
         "name": "impacted_tests",
@@ -704,22 +749,6 @@ TOOLS: list[dict[str, Any]] = [
         "handler": tool_workset,
     },
     {
-        "name": "stats",
-        "description": "File/symbol/edge totals, language mix, top "
-        "fan-in/out, and largest files.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "top": {
-                    "type": "integer",
-                    "description": "Entries per ranked list (default 10)",
-                },
-                "root": _ROOT_PROP,
-            },
-        },
-        "handler": tool_stats,
-    },
-    {
         "name": "summary",
         "description": "Compact repo digest (~40 lines): counts, "
         "language mix, per-directory rollup with coupling and purpose, "
@@ -727,37 +756,17 @@ TOOLS: list[dict[str, Any]] = [
         "errors. Read this before exploring an unfamiliar repo.",
         "inputSchema": {
             "type": "object",
-            "properties": {"root": _ROOT_PROP},
-        },
-        "handler": tool_summary,
-    },
-    {
-        "name": "lean",
-        "description": "A budget-capped navigation map of the whole "
-        "repo: every file with its purpose, symbols (signatures on the "
-        "most central, names on the rest), and module dependency edges, "
-        "shed in priority order to fit a token cap. Denser than "
-        "`summary`, far cheaper than reading MAP.md — read it to orient "
-        "before exploring. The header reports what was elided and how to "
-        "recover it (`outline`, `context`, `query`).",
-        "inputSchema": {
-            "type": "object",
             "properties": {
                 "budget": {
                     "type": "integer",
-                    "description": "Hard token cap (default scales with "
-                    "repo size)",
+                    "description": "Approximate token cap (default "
+                    "2000); trailing sections are shed to fit and a "
+                    "footer reports the omission",
                 },
-                "dense": {
-                    "type": "boolean",
-                    "description": "Terser skin: signatures only on the "
-                    "most-central symbols, names for the rest",
-                },
-                "task": _TASK_PROP,
                 "root": _ROOT_PROP,
             },
         },
-        "handler": tool_lean,
+        "handler": tool_summary,
     },
     {
         "name": "add_note",
@@ -795,33 +804,6 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
         "handler": tool_list_notes,
-    },
-    {
-        "name": "ledger",
-        "description": "What this session has already loaded into context "
-        "(files read, symbols seen, tokens consumed), projected from the "
-        "session transcript. Use it to avoid re-fetching context the "
-        "agent already holds.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "transcript": {
-                    "type": "string",
-                    "description": "Session JSONL path (default: the "
-                    "latest transcript for this repo under ~/.claude)",
-                },
-                "session": {
-                    "type": "string",
-                    "description": "Session id to resolve when discovering",
-                },
-                "budget": {
-                    "type": "integer",
-                    "description": "Report remaining tokens vs this budget",
-                },
-                "root": _ROOT_PROP,
-            },
-        },
-        "handler": tool_ledger,
     },
     {
         "name": "map_status",
@@ -911,6 +893,39 @@ def _handle_tools_list(req_id: Any) -> dict:
     return _ok(req_id, {"tools": listed})
 
 
+def _with_default_root_note(ctx: Context, args: dict, text: str) -> str:
+    """Prefix a successful reply with the root it actually resolved to.
+
+    Four independent evaluators (2026 fable token-usage tests, bug
+    #1/B1) hit the same failure on four different repos/languages:
+    omitting ``root`` silently resolves against the server's cwd —
+    often dekko's own project, not the repo an agent meant to query —
+    and a wrong-repo answer otherwise looks identical in shape to a
+    correct one. Requiring ``root`` on every call would be a bigger
+    ergonomics regression, and guessing "does this answer plausibly
+    belong to the target repo" has its own false-negative risk, so
+    this takes the report's own minimum-viable fix: echo the resolved
+    root on every reply that used the default, so a wrong-repo answer
+    is visually obvious immediately instead of only discovered later.
+
+    Args:
+        ctx: Server-wide settings (for the actual default root).
+        args: The tool call's raw arguments.
+        text: The handler's already-rendered reply text.
+
+    Returns:
+        ``text`` prefixed with a one-line root note when ``root`` was
+        omitted; unchanged when the caller passed one explicitly.
+    """
+    root = args.get("root")
+    if isinstance(root, str) and root:
+        return text
+    return (
+        f"(root: {ctx.default_root} — no 'root' argument was given; "
+        "pass one to target a different repo)\n"
+    ) + text
+
+
 def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
     """Dispatch a ``tools/call`` to a registered handler."""
     name = params.get("name")
@@ -919,7 +934,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         return _err(req_id, INVALID_PARAMS, f"unknown tool '{name}'")
     args = params.get("arguments") or {}
     try:
-        text = handler(ctx, args)
+        text = _with_default_root_note(ctx, args, handler(ctx, args))
         is_error = False
     except ToolError as exc:
         text, is_error = _prefixed(str(exc)), True

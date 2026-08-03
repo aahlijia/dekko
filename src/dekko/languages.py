@@ -5,7 +5,8 @@ fidelity. Tier-2 languages (everything else in the language pack) are
 handled by the generic fallback extractor and only need a grammar name.
 """
 
-from dataclasses import dataclass, field
+import hashlib
+from dataclasses import dataclass, field, fields
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,27 @@ class LanguageSpec:
         method_containers: Subset of ``container_types`` that make a
             contained function a method (classes/impls, not modules).
         param_style: Dispatch key for parameter-list parsing.
+        function_boundary_types: Function/method/closure node types
+            that stop the container-qualification climb in
+            ``extractor._qualify``. A definition nested inside another
+            function/method/closure is a closure-local helper, never a
+            member of whatever contains that outer function — without
+            this, a local helper defined inside a method climbs past
+            it to the enclosing class and is mislabeled as one of that
+            class's members. Empty for languages whose ``container_
+            types`` never register a function-like node type, so
+            there is nothing to accidentally climb through (Python,
+            C, C++, Go, Java as of this writing).
+        reference_query: Query capturing bare identifiers used as
+            *values* rather than invoked — object-literal property
+            values, array elements, call arguments, and assignment/
+            declarator right-hand sides — via a single ``@ref``
+            capture. A plain call-expression query structurally
+            cannot see this (a callback passed by reference is never
+            a call site), which used to make it invisible to
+            ``get_callers``/``unused``/fan-in entirely (bug #2b).
+            ``None`` for languages without one yet (JS/TS/TSX only as
+            of this writing).
     """
 
     name: str
@@ -37,6 +59,8 @@ class LanguageSpec:
     container_types: dict[str, str] = field(default_factory=dict)
     method_containers: tuple[str, ...] = ()
     param_style: str = "generic"
+    function_boundary_types: tuple[str, ...] = ()
+    reference_query: str | None = None
 
 
 PYTHON = LanguageSpec(
@@ -111,6 +135,7 @@ RUST = LanguageSpec(
     },
     method_containers=("impl_item", "trait_item"),
     param_style="rust",
+    function_boundary_types=("function_item", "closure_expression"),
 )
 
 _C_DEFINITIONS = """
@@ -207,6 +232,48 @@ CPP = LanguageSpec(
     param_style="c",
 )
 
+# Function/method/closure node types shared by JS/TS/TSX's
+# ``function_boundary_types`` — a definition nested inside any of
+# these is a closure-local helper, never a member of whatever
+# contains the outer function (see ``LanguageSpec.
+# function_boundary_types``).
+_JS_FUNCTION_BOUNDARIES = (
+    "function_declaration",
+    "generator_function_declaration",
+    "function_expression",
+    "arrow_function",
+    "method_definition",
+)
+
+# Bare-identifier value references shared by JS/TS/TSX (bug #2b): a
+# callback wired up by name rather than invoked at that site — an
+# object-literal property value, a shorthand property, an array
+# element, a bare call argument, an assignment/declarator
+# right-hand side, or a ``${...}`` template-literal substitution.
+# Only ``identifier`` nodes are captured, so a string/number literal
+# can never be mistaken for one; a same-named local variable
+# shadowing a repo-wide function is a real ambiguity, resolved by
+# reusing ``resolver.py``'s existing candidate ladder.
+_JS_REFERENCE_BASE = """
+(pair value: (identifier) @ref)
+(shorthand_property_identifier) @ref
+(array (identifier) @ref)
+(arguments (identifier) @ref)
+(variable_declarator value: (identifier) @ref)
+(assignment_expression right: (identifier) @ref)
+(template_substitution (identifier) @ref)
+"""
+
+# JSX attribute/expression values (``<Button onClick={handleClick}
+# />``) — a separate fragment because plain ``.ts`` (non-JSX
+# TypeScript) has no ``jsx_expression`` node type and would fail to
+# compile with it included.
+_JSX_REFERENCE_EXTRA = """
+(jsx_expression (identifier) @ref)
+"""
+
+_JS_REFERENCE_QUERY = _JS_REFERENCE_BASE + _JSX_REFERENCE_EXTRA
+
 JAVASCRIPT = LanguageSpec(
     name="javascript",
     grammar="javascript",
@@ -235,6 +302,19 @@ JAVASCRIPT = LanguageSpec(
     parameters: (formal_parameters) @params)) @def
 
 (class_declaration name: (identifier) @classname) @classdef
+
+(program
+  (export_statement
+    declaration: (lexical_declaration
+      (variable_declarator
+        name: (identifier) @name
+        value: (_) @value) @vardef)))
+
+(program
+  (lexical_declaration
+    (variable_declarator
+      name: (identifier) @name
+      value: (_) @value) @vardef))
 """,
     call_query="""
 (call_expression function: (_) @callee) @call
@@ -256,6 +336,8 @@ JAVASCRIPT = LanguageSpec(
     container_types={"class_declaration": "name"},
     method_containers=("class_declaration",),
     param_style="js",
+    function_boundary_types=_JS_FUNCTION_BOUNDARIES,
+    reference_query=_JS_REFERENCE_QUERY,
 )
 
 _TS_DEFINITIONS = """
@@ -295,6 +377,19 @@ _TS_DEFINITIONS = """
   name: (type_identifier) @classname) @classdef
 
 (enum_declaration name: (identifier) @classname) @classdef
+
+(program
+  (export_statement
+    declaration: (lexical_declaration
+      (variable_declarator
+        name: (identifier) @name
+        value: (_) @value) @vardef)))
+
+(program
+  (lexical_declaration
+    (variable_declarator
+      name: (identifier) @name
+      value: (_) @value) @vardef))
 """
 
 _TS_CALLS = """
@@ -318,6 +413,9 @@ TYPESCRIPT = LanguageSpec(
     container_types=_TS_CONTAINERS,
     method_containers=tuple(_TS_CONTAINERS),
     param_style="ts",
+    function_boundary_types=_JS_FUNCTION_BOUNDARIES,
+    # Plain (non-JSX) TypeScript has no jsx_expression node type.
+    reference_query=_JS_REFERENCE_BASE,
 )
 
 TSX = LanguageSpec(
@@ -330,6 +428,8 @@ TSX = LanguageSpec(
     container_types=_TS_CONTAINERS,
     method_containers=tuple(_TS_CONTAINERS),
     param_style="ts",
+    function_boundary_types=_JS_FUNCTION_BOUNDARIES,
+    reference_query=_JS_REFERENCE_QUERY,
 )
 
 GO = LanguageSpec(
@@ -351,12 +451,12 @@ GO = LanguageSpec(
 (type_declaration
   (type_spec
     name: (type_identifier) @classname
-    type: (struct_type))) @classdef
+    type: (struct_type) @classkind)) @classdef
 
 (type_declaration
   (type_spec
     name: (type_identifier) @classname
-    type: (interface_type))) @classdef
+    type: (interface_type) @classkind)) @classdef
 """,
     call_query="""
 (call_expression function: (_) @callee) @call
@@ -426,6 +526,34 @@ EXTENSION_MAP: dict[str, LanguageSpec] = {
     ext: spec for spec in TIER1_SPECS for ext in spec.extensions
 }
 
+
+def spec_fingerprint() -> str:
+    """Hash every Tier-1 extraction spec into one invalidation key.
+
+    Captures everything that changes what ``extractor.py`` pulls out
+    of a file — queries, container/method-container types, parameter
+    style, and any field added to ``LanguageSpec`` later (the loop is
+    driven by ``dataclasses.fields``, not a hand-kept list, so a new
+    field is covered automatically). Used to invalidate a stale
+    ``.dekko`` cache entry or flag a stale ``map.json`` even when the
+    released package version string hasn't changed — a dev iteration
+    or hotfix that reuses the same version, or an unreleased checkout.
+
+    Returns:
+        A stable hex digest, unchanged as long as extraction behavior
+        is unchanged.
+    """
+    parts: list[str] = []
+    for spec in TIER1_SPECS:
+        for f in fields(spec):
+            value = getattr(spec, f.name)
+            if isinstance(value, dict):
+                value = tuple(sorted(value.items()))
+            parts.append(f"{f.name}={value!r}")
+    canonical = "\x1f".join(parts)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 # Tier-2: extension → tree-sitter-language-pack grammar name. These are
 # handled by the generic extractor (names + calls, raw parameter text).
 # Grammars are downloaded on demand by the language pack on first use.
@@ -491,6 +619,23 @@ TIER2_GRAMMARS: dict[str, str] = {
     ".svelte": "svelte",
 }
 
+# Extensions dekko recognizes as source code but has no grammar for at
+# all (not even a Tier-2 attempt) — confirmed gaps rather than a
+# blanket guess about every unfamiliar extension. Unlike Tier-2 files,
+# these never reach the extractor, so without this registry they were
+# silently dropped by ``walker.discover`` with no warning anywhere:
+# ``dekko map``'s own output, ``map.json``, and every read command
+# (``query callers``, ``find_usages``, ``summary``) treated a partially
+# mapped repo as complete, producing confident "no callers found"
+# answers for symbols only used in these files (2026-07-31 eval,
+# gitaustin/Astro repo). Extend this list as new gaps are confirmed;
+# it intentionally does not attempt to enumerate every non-code
+# extension (``.md``, ``.json``, images, ...), which stay silently
+# ignored as before.
+KNOWN_UNSUPPORTED: dict[str, str] = {
+    ".astro": "astro",
+}
+
 
 def spec_for_path(filename: str) -> LanguageSpec | None:
     """Return the Tier-1 spec for a filename, or ``None``.
@@ -524,3 +669,27 @@ def is_supported(filename: str) -> bool:
         spec_for_path(filename) is not None
         or tier2_grammar_for_path(filename) is not None
     )
+
+
+def known_unsupported_language(filename: str) -> str | None:
+    """Return the display name of a confirmed-unsupported language.
+
+    Distinct from every extension dekko simply doesn't recognize
+    (``.md``, ``.json``, images, ...), which are non-code and stay
+    silently ignored. This only covers extensions in
+    ``KNOWN_UNSUPPORTED`` — languages dekko has confirmed look like
+    source code but has no grammar for — so a caller can surface a
+    targeted "no parser for X" warning instead of treating the gap as
+    ordinary non-code noise.
+
+    Args:
+        filename: Any path or basename; only the extension is used.
+
+    Returns:
+        The language's display name, or ``None``.
+    """
+    dot = filename.rfind(".")
+    if dot == -1:
+        return None
+
+    return KNOWN_UNSUPPORTED.get(filename[dot:].lower())

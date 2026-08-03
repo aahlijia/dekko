@@ -64,3 +64,15 @@ reports. G★ holds only if **on < off**.
 a synthetic repo and asserts the core invariant (dekko `outline`/`context`
 cost strictly less than the whole-file baseline), so the value proposition
 stays falsifiable and is checked on every test run.
+
+## Real-world repos
+
+The harness above runs on a small synthetic repo, by design (fast,
+deterministic, checked on every test run). For a one-time look at how
+the same value proposition holds up on large, real, unmodified
+open-source codebases, see
+[`real-world-repos/`](real-world-repos/README.md) — a 7-repo
+token-cost comparison (dekko vs. Read/Grep) across awesome-go,
+claude-buddy, claude-code, cline, spring-boot, tensorflow, and zed,
+including where the win is biggest, where it's smallest, and a few
+correctness caveats worth reading before trusting a ratio.

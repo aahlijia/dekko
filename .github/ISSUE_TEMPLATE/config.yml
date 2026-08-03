@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question / discuss an idea
+    url: https://github.com/aahlijia/dekko/discussions
+    about: For open-ended questions or design discussions before filing an issue.

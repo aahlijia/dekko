@@ -36,7 +36,12 @@ DEFAULT_BUDGET = 6000
 DEFAULT_PACKS = 5
 
 _DOC_LIMIT = 80
-_TIER_TITLES = {"files": "files:", "packs": "packs:", "detail": "detail:"}
+_TIER_TITLES = {
+    "tests": "impacted tests:",
+    "files": "files:",
+    "packs": "packs:",
+    "detail": "detail:",
+}
 
 
 @dataclass
@@ -81,6 +86,7 @@ class _Row:
     file: str | None = None
     sym: Symbol | None = None
     pack: int | None = None
+    test: affected.TestImpact | None = None
 
 
 def _rank_files(touched: list[Symbol], index: MapIndex) -> list[str]:
@@ -211,6 +217,11 @@ def _manifest(ws: Workset) -> list[str]:
     return lines
 
 
+def _test_row(impact: affected.TestImpact) -> str:
+    """One condensed impacted-test row: path and evidence tier."""
+    return f"  {impact.path}  [{impact.tier}]"
+
+
 def _roster_row(fo: outline.FileOutline) -> str:
     """One condensed breadth row: path, language, doc, symbol count."""
     row = f"  {fo.path}  [{fo.language}]"
@@ -249,7 +260,19 @@ def _pack_block(pack: Pack) -> list[str]:
 
 
 def _rows(ws: Workset) -> list[_Row]:
-    """Flatten the three value tiers into one ordered droppable list."""
+    """Flatten the four value tiers into one ordered droppable list.
+
+    Impacted tests are their own tier, added *last* — after breadth
+    (files), depth (packs), and full outline detail — so they
+    participate in the same budget-fitting pass as every other
+    section without displacing the existing "breadth survives a
+    tight budget" guarantee those three tiers already give. They used
+    to bypass budget-fitting entirely: a real ~1,500-impact repo
+    dumped every path verbatim via the (unbudgeted) pytest hint,
+    blowing 3.6x past the stated budget (bug #6/B6). The manifest's
+    impacted-test count and the (separately capped) pytest hint are
+    unaffected by this tier's own trimming.
+    """
     rows: list[_Row] = [
         _Row("files", _roster_row(fo), file=fo.path) for fo in ws.outlines
     ]
@@ -268,6 +291,9 @@ def _rows(ws: Workset) -> list[_Row]:
             _Row("detail", outline._symbol_row(s), file=fo.path, sym=s)
             for s in fo.symbols
         )
+    rows += [
+        _Row("tests", _test_row(imp), test=imp) for imp in ws.seed.impacts
+    ]
     return rows
 
 
@@ -294,10 +320,13 @@ def _render_text(ws: Workset, budget: int | None) -> int:
     return EXIT_OK
 
 
-def _kept_view(kept: list[_Row]) -> tuple[dict[str, list[Symbol]], set[int]]:
-    """Reduce kept rows to surviving files (with symbols) and packs."""
+def _kept_view(
+    kept: list[_Row],
+) -> tuple[dict[str, list[Symbol]], set[int], list[affected.TestImpact]]:
+    """Reduce kept rows to surviving files (with symbols), packs, tests."""
     files: dict[str, list[Symbol]] = {}
     packs: set[int] = set()
+    tests: list[affected.TestImpact] = []
     for row in kept:
         if row.file is not None:
             files.setdefault(row.file, [])
@@ -305,7 +334,9 @@ def _kept_view(kept: list[_Row]) -> tuple[dict[str, list[Symbol]], set[int]]:
                 files[row.file].append(row.sym)
         if row.pack is not None:
             packs.add(row.pack)
-    return files, packs
+        if row.test is not None:
+            tests.append(row.test)
+    return files, packs, tests
 
 
 def _entry_json(entry: object) -> dict:
@@ -354,7 +385,7 @@ def _outline_json(fo: outline.FileOutline, syms: list[Symbol]) -> dict:
 def _render_json(ws: Workset, budget: int | None) -> int:
     """Render the bundle as JSON, reflecting exactly what the budget kept."""
     kept, meter = _fit(ws, budget)
-    files, packs = _kept_view(kept)
+    files, packs, tests = _kept_view(kept)
     seed = ws.seed
     doc = {
         "seed": {
@@ -364,7 +395,12 @@ def _render_json(ws: Workset, budget: int | None) -> int:
             "touched_files": list(seed.files),
             "touched_symbols": len(seed.touched),
         },
-        "impacted_tests": [affected._impact_json(i) for i in seed.impacts],
+        # `tests` is the budget-fitted subset (bug #6/B6 — this used
+        # to be every impacted path unconditionally, regardless of
+        # budget); `impacted_tests_total` is the true count so a
+        # caller can tell the two apart.
+        "impacted_tests": [affected._impact_json(i) for i in tests],
+        "impacted_tests_total": len(seed.impacts),
         "pytest": affected._pytest_hint(seed.impacts),
         "outlines": [
             _outline_json(fo, files[fo.path])
@@ -413,7 +449,7 @@ def run(
     if symbol is not None:
         seed, candidates = seed_from_symbol(index, symbol)
         if seed is None:
-            return report_unresolved(symbol, candidates)
+            return report_unresolved(symbol, candidates, index)
     else:
         seed = seed_from_rev(index, root, rev)
         if seed is None:

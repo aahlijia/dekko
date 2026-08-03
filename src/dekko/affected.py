@@ -250,11 +250,34 @@ def render(
     print(meter.footer())
 
 
+# Cap on how many paths a "ready to paste" pytest invocation embeds.
+# Without this, ``_pytest_hint`` is unbounded regardless of budget —
+# a real ~1,500-impact repo embedded every path in this one line,
+# blowing a workset budget 3.6x over its stated cap (bug #6/B6). A
+# command holding hundreds/thousands of paths also stops being
+# "ready to paste" long before it stops being technically valid.
+_MAX_HINT_PATHS = 20
+
+
 def _pytest_hint(impacts: list[TestImpact]) -> str:
-    """A ready-to-paste pytest invocation, or empty when none apply."""
+    """A ready-to-paste pytest invocation, or empty when none apply.
+
+    Capped at ``_MAX_HINT_PATHS`` paths; beyond the cap, the
+    remaining count is noted instead of enumerated (see module
+    docstring at ``_MAX_HINT_PATHS``).
+    """
     if not impacts:
         return ""
-    return "pytest " + " ".join(i.path for i in impacts)
+    paths = [i.path for i in impacts]
+    if len(paths) <= _MAX_HINT_PATHS:
+        return "pytest " + " ".join(paths)
+    shown = paths[:_MAX_HINT_PATHS]
+    more = len(paths) - _MAX_HINT_PATHS
+    return (
+        "pytest "
+        + " ".join(shown)
+        + f"  # +{more} more impacted test files not shown"
+    )
 
 
 def changes(

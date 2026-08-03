@@ -6,11 +6,30 @@ from pathlib import Path
 from typing import Callable
 
 from .languages import LanguageSpec
-from .model import FileMap, Import, Param, RawCall, Symbol
+from .model import FileMap, Import, Param, RawCall, RawRef, Symbol
 from tree_sitter import Node, Parser, Query, QueryCursor
 from .grammars import get_grammar
 
 _WS = re.compile(r"\s+")
+
+# Tree-sitter node type -> ``Symbol.kind`` for ``@classdef`` matches
+# (looked up against ``@classkind`` when present, else the ``@classdef``
+# node itself — Go's struct/interface both surface as the same
+# ``type_declaration`` wrapper, so those two definitions capture an
+# inner ``@classkind`` node to disambiguate). Anything not listed here
+# keeps the default ``"class"`` (plain classes across every language
+# need no entry).
+_CLASSDEF_KIND: dict[str, str] = {
+    "interface_declaration": "interface",
+    "interface_type": "interface",
+    "enum_declaration": "enum",
+    "enum_item": "enum",
+    "record_declaration": "record",
+    "struct_specifier": "struct",
+    "struct_item": "struct",
+    "struct_type": "struct",
+    "trait_item": "trait",
+}
 
 
 def _text(node: Node) -> str:
@@ -59,12 +78,14 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
 
     defs = _collect_definitions(spec, tree.root_node, rel)
     calls = _collect_calls(spec, tree.root_node, rel, defs)
+    refs = _collect_refs(spec, tree.root_node, rel, defs)
     imports = _collect_imports(spec, tree.root_node, rel)
     return FileMap(
         path=rel,
         language=spec.name,
         symbols=[sym for _, sym in defs],
         calls=calls,
+        refs=refs,
         imports=imports,
         doc=_module_doc(spec.name, tree.root_node),
     )
@@ -90,17 +111,50 @@ def _collect_definitions(
             if def_node is None:
                 continue
 
+            kind_node = _one(caps, "classkind")
+            kind_type = (
+                kind_node.type if kind_node is not None else def_node.type
+            )
             sym = _make_symbol(
                 spec,
                 rel,
                 def_node,
                 _text(class_name),
-                "class",
+                _CLASSDEF_KIND.get(kind_type, "class"),
                 params=[],
                 returns=None,
                 seen=seen,
             )
             defs.append((def_node, sym))
+            continue
+
+        var_def = _one(caps, "vardef")
+
+        if var_def is not None:
+            value_node = _one(caps, "value")
+            name_node = _one(caps, "name")
+
+            # Arrow/function-expression values are already captured by
+            # the dedicated function-definition patterns above; skip
+            # them here to avoid a duplicate symbol for the same node.
+            if (
+                name_node is None
+                or value_node is None
+                or value_node.type in ("arrow_function", "function_expression")
+            ):
+                continue
+
+            sym = _make_symbol(
+                spec,
+                rel,
+                var_def,
+                _text(name_node),
+                "variable",
+                params=[],
+                returns=None,
+                seen=seen,
+            )
+            defs.append((var_def, sym))
             continue
 
         name_node = _one(caps, "name")
@@ -308,6 +362,13 @@ def _modifiers_keyword(def_node: Node, keyword: str) -> bool:
 def _qualify(spec: LanguageSpec, def_node: Node) -> tuple[list[str], bool]:
     """Collect container names above a definition, outermost first.
 
+    The climb stops dead at the first enclosing function/method/
+    closure (``spec.function_boundary_types``): a definition nested
+    inside another function body is a closure-local helper, never a
+    member of whatever contains that outer function, so anything
+    collected before reaching a boundary is discarded rather than
+    attributed to a class several levels further up.
+
     Returns:
         ``(container_names, is_method)`` where ``is_method`` is true
         when the immediate class-like container makes this a method.
@@ -316,6 +377,9 @@ def _qualify(spec: LanguageSpec, def_node: Node) -> tuple[list[str], bool]:
     is_method = False
     node = def_node.parent
     while node is not None:
+        if node.type in spec.function_boundary_types:
+            return [], False
+
         name_field = spec.container_types.get(node.type)
 
         if name_field is not None:
@@ -725,6 +789,42 @@ def _collect_calls(
             )
         )
     return calls
+
+
+def _collect_refs(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawRef]:
+    """Find bare-identifier value references, attributed to enclosing defs.
+
+    Captures identifiers used as *values* rather than invoked —
+    object-literal property values, array elements, call arguments,
+    and assignment/declarator right-hand sides (see ``languages.py``'s
+    per-language ``reference_query``) — the pass-by-reference usage a
+    plain call-expression query structurally cannot see (bug #2b).
+    Returns an empty list for languages with no ``reference_query``
+    yet.
+    """
+    if spec.reference_query is None:
+        return []
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    refs: list[RawRef] = []
+    for _, caps in _run_query(spec.grammar, spec.reference_query, root):
+        ref_node = _one(caps, "ref")
+        if ref_node is None:
+            continue
+        name = _text(ref_node)
+        if not name:
+            continue
+        caller = _enclosing(spans, ref_node.start_byte)
+        refs.append(
+            RawRef(
+                caller_id=caller.id if caller else None,
+                path=rel,
+                name=name,
+                line=ref_node.start_point[0] + 1,
+            )
+        )
+    return refs
 
 
 _NAME_FIELDS = ("attribute", "property", "field")

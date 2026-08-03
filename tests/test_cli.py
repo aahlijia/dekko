@@ -35,6 +35,112 @@ def test_map_rejects_missing_dir(tmp_path: Path) -> None:
     assert cli.main(["--map", str(tmp_path / "nope")]) == 2
 
 
+def test_map_second_run_is_noop_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # Performance #1: once the incremental cache determines nothing
+    # needs re-parsing, an unchanged repo should not re-serialize and
+    # rewrite MAP.md/map.json on every invocation — verified here by
+    # asserting the files' mtimes are untouched by the second run.
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    assert cli.main(["map", str(tmp_path)]) == 0
+    capsys.readouterr()
+
+    md_path = tmp_path / ".dekko" / "MAP.md"
+    json_path = tmp_path / ".dekko" / "map.json"
+    md_before = md_path.stat().st_mtime_ns
+    json_before = json_path.stat().st_mtime_ns
+
+    assert cli.main(["map", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "unchanged" in out
+    assert "nothing written" in out
+    assert md_path.stat().st_mtime_ns == md_before
+    assert json_path.stat().st_mtime_ns == json_before
+
+
+def test_map_noop_summary_suppressed_by_quiet(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+    capsys.readouterr()
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_map_full_bypasses_noop_fast_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    assert cli.main(["map", str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert cli.main(["map", str(tmp_path), "--full"]) == 0
+    out = capsys.readouterr().out
+    assert "unchanged" not in out
+    assert "mapped 1 files" in out
+
+
+def test_map_added_file_forces_a_real_rewrite(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # cache.parsed == 0 alone would be true here too (the new file
+    # still needs first-time extraction, so this isn't the sharpest
+    # case, but a *removed* file is the sharp one: discovery simply
+    # stops seeing it, so cache.parsed stays 0 even though the map
+    # must shrink). Exercise the add case for the common path and the
+    # remove case below for the one cache.parsed can't catch alone.
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    assert cli.main(["map", str(tmp_path)]) == 0
+    capsys.readouterr()
+    (tmp_path / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "unchanged" not in out
+    assert "mapped 2 files" in out
+
+
+def test_map_removed_file_forces_a_real_rewrite(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path)]) == 0
+    capsys.readouterr()
+    (tmp_path / "b.py").unlink()
+    assert cli.main(["map", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "unchanged" not in out
+    assert "mapped 1 files" in out
+
+
+def test_map_summary_reports_unsupported_language(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # A confirmed-unsupported extension (.astro) must show up in the
+    # build summary instead of being silently dropped — the primary
+    # visibility fix for the 2026-07-31 eval's most severe finding
+    # (a partially mapped repo with no warning anywhere).
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "Card.astro").write_text("---\nconst x = 1;\n---\n")
+    assert cli.main(["--map", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "mapped 1 files" in out
+    assert "skipped: no parser (astro) 1" in out
+
+
+def test_map_summary_counts_variable_symbols(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # Top-level "export const" data bindings are indexed as
+    # kind="variable" symbols and must be counted in the run summary,
+    # not silently dropped from the printed totals.
+    (tmp_path / "data.ts").write_text("export const jobs = [1, 2, 3];\n")
+    assert cli.main(["--map", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "0 functions/methods, 0 types, 1 variables" in out
+
+
 def test_output_as_directory(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("def f():\n    return 1\n")
     out_dir = tmp_path / "out"
@@ -162,6 +268,61 @@ def test_mcp_uninstall_tolerates_missing_server(
     monkeypatch.setattr(cli, "_run_subprocess", fake_run)
     assert cli.mcp_uninstall() == 0
     assert "already removed?" in capsys.readouterr().err
+
+
+def test_cline_install_flag_dispatches_with_defaults(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple] = []
+
+    def fake_install(config: Path | None, scope: str, *, force: bool) -> int:
+        calls.append((config, scope, force))
+        return 0
+
+    monkeypatch.setattr(cli.cline_mod, "install", fake_install)
+    assert cli.main(["--cline-install"]) == 0
+    assert calls == [(None, "vscode", False)]
+
+
+def test_cline_install_flag_passes_scope_config_force(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple] = []
+
+    def fake_install(config: Path | None, scope: str, *, force: bool) -> int:
+        calls.append((config, scope, force))
+        return 0
+
+    monkeypatch.setattr(cli.cline_mod, "install", fake_install)
+    cfg = tmp_path / "settings.json"
+    assert (
+        cli.main(
+            [
+                "--cline-install",
+                "--cline-scope",
+                "global",
+                "--cline-config",
+                str(cfg),
+                "--cline-force",
+            ]
+        )
+        == 0
+    )
+    assert calls == [(cfg, "global", True)]
+
+
+def test_cline_uninstall_flag_dispatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple] = []
+
+    def fake_uninstall(config: Path | None, scope: str, *, force: bool) -> int:
+        calls.append((config, scope, force))
+        return 0
+
+    monkeypatch.setattr(cli.cline_mod, "uninstall", fake_uninstall)
+    assert cli.main(["--cline-uninstall"]) == 0
+    assert calls == [(None, "vscode", False)]
 
 
 def test_claude_invoked_by_resolved_path_not_bare_name(

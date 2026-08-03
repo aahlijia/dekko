@@ -76,12 +76,21 @@ def test_trust_line_cold_then_warm(tmp_path: Path) -> None:
     assert "(cache: 0 reused / 2 parsed)" in line
     assert re.search(r"Mapped 2 files in \d+ ms", line)
 
+    # An unchanged repo now takes the no-op fast path (Performance
+    # #1) — nothing is re-parsed *or* re-written, so MAP.md still
+    # shows the cold-run stats byte-for-byte.
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+    assert (tmp_path / ".dekko" / "MAP.md").read_text() == cold
+
+    # Change one file so this run isn't a full no-op, to verify cache
+    # reuse still correctly counts the untouched file as reused.
+    (tmp_path / "b.py").write_text("def g() -> int:\n    return 3\n")
     assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
     warm = (tmp_path / ".dekko" / "MAP.md").read_text()
     warm_line = next(
         ln for ln in warm.splitlines() if ln.startswith("*Mapped ")
     )
-    assert "(cache: 2 reused / 0 parsed)" in warm_line
+    assert "(cache: 1 reused / 1 parsed)" in warm_line
 
 
 # --- churn x fan-in hotspots ----------------------------------------------

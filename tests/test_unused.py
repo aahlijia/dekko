@@ -32,6 +32,9 @@ def _index(symbols: list[Symbol], **kw: object) -> MapIndex:
         idx.symbols_by_path.setdefault(sym.path, []).append(sym)
         idx.languages_by_path[sym.path] = sym.language
     idx.calls_in = dict(kw.get("calls_in", {}))  # type: ignore[arg-type]
+    idx.referenced_in = dict(  # type: ignore[arg-type]
+        kw.get("referenced_in", {})
+    )
     idx.imports_by_path = dict(kw.get("imports", {}))  # type: ignore
     return idx
 
@@ -89,6 +92,16 @@ def test_init_reexport_is_a_root() -> None:
     assert [s.name for s in unused.find_unused(idx, ())] == ["hidden"]
 
 
+def test_referenced_but_never_called_is_kept() -> None:
+    # Bug #2(b)/Performance #3: a callback wired up by reference
+    # (object-literal value, array element, bare call argument, ...)
+    # and never itself called must not read as dead code just because
+    # calls_in is empty.
+    handler = _sym("handleClick", "a.ts", language="typescript")
+    idx = _index([handler], referenced_in={handler.id: ["b.ts::wireUp"]})
+    assert unused.find_unused(idx, ()) == []
+
+
 def test_roots_glob() -> None:
     idx = _index([_sym("keep", "gen/x.py"), _sym("drop", "src/y.py")])
     names = {s.name for s in unused.find_unused(idx, ("gen/*",))}
@@ -131,6 +144,32 @@ def test_unused_decorated_is_root(
     }
     root = make_mapped_repo(src)
     cli.main(["unused", "--root", str(root)])
+    assert "no unused symbols" in capsys.readouterr().out
+
+
+TS_CALLBACK = {
+    "handlers.ts": (
+        "export function handleClick(): void {\n  console.log('clicked');\n}\n"
+    ),
+    "wire.ts": (
+        "import { handleClick } from './handlers';\n"
+        "\n"
+        "export const config = {\n"
+        "  onClick: handleClick,\n"
+        "};\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_pass_by_reference_callback(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # End-to-end repro of bug #2(b): handleClick is never *called*
+    # anywhere, only wired up as an object-literal property value in
+    # wire.ts — before the referenced_in plumbing, this was
+    # indistinguishable from genuinely dead code.
+    root = make_mapped_repo(TS_CALLBACK)
+    assert cli.main(["unused", "--root", str(root)]) == 0
     assert "no unused symbols" in capsys.readouterr().out
 
 
