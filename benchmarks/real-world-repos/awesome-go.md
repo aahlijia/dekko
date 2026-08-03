@@ -1,7 +1,5 @@
 # awesome-go
 
-Source: `test-repos/reports/fable-tokentest-awesome-go.md`
-
 Small, real Go repository (a list-site generator): **10 mapped files,
 89 symbols, 73 call edges** — a root `main.go` (static-site builder +
 GitHub/GitLab metadata fetcher), two CI helper scripts, and two small

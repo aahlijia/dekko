@@ -9,6 +9,17 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Added
+- **Community health files**: `CODE_OF_CONDUCT.md`, `SECURITY.md`,
+  `.github/ISSUE_TEMPLATE/` (bug report, feature request), and
+  `.github/PULL_REQUEST_TEMPLATE.md`.
+- **README**: a "Why dekko?" section with the headline benchmark
+  numbers and a comparison to `ctags`/`gtags`-style navigation, plus
+  downloads/ruff badges.
+- `pyproject.toml` keywords extended with `llm-agents`,
+  `codebase-indexing`, `model-context-protocol` to match the GitHub
+  topics used for discovery.
+
 ## [0.20.0] — 2026-08-02
 
 ### Changed

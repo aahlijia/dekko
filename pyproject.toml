@@ -12,7 +12,8 @@ keywords = [
     "code-map", "tree-sitter", "static-analysis", "claude-code",
     "code-analysis", "call-graph", "mcp-server", "ai-coding",
     "dead-code-detection", "code-navigation", "repository-map",
-    "claude-code-plugin", "developer-tools",
+    "claude-code-plugin", "developer-tools", "llm-agents",
+    "codebase-indexing", "model-context-protocol",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

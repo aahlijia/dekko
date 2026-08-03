@@ -18,9 +18,6 @@ repo; **this** directory is the one-off study on real, large,
 messy codebases, several orders of magnitude bigger than anything the
 regression suite touches.
 
-Source data (read-only inputs to this write-up, not modified):
-`test-repos/reports/fable-tokentest-*.md` (one per repo) and the
-cross-repo synthesis, `test-repos/reports/fable-synthesis-analysis.md`.
 
 ## Repos tested
 
@@ -171,7 +168,7 @@ consequential were:
 Both failure modes shared the same signature: no error, no truncation
 footer, no low-confidence flag — indistinguishable in shape from a
 correct, complete answer. As of the fix-status pass on 2026-08-02
-(recorded in `test-repos/reports/fable-synthesis-analysis.md` §1.4),
+(recorded in `test-repos/reports/05-tokentest-7repo-retest/fable-synthesis-analysis.md` §1.4),
 9 of the 13 issues are fixed and 2 are partially fixed, including both
 of the above — but any number in this write-up that traces back to one
 of these tasks predates those fixes and should be read as a
