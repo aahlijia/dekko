@@ -20,6 +20,7 @@ dist/
 .eval/
 .features/
 test-repos/
+.marketplaces/
 
 # OS
 .DS_Store
