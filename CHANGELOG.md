@@ -9,6 +9,20 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.21.2] — 2026-08-03
+
+### Changed
+- **Claude plugin files moved into `integrations/claude/`.**
+  `.claude-plugin/`, `commands/`, `skills/`, and `.mcp.json` were
+  cluttering the repo root; they're now grouped under
+  `integrations/claude/` (`integrations/claude/.claude-plugin/`,
+  `integrations/claude/commands/`, `integrations/claude/skills/`,
+  `integrations/claude/.mcp.json`), leaving room for other editor
+  integrations alongside it under `integrations/`. Pure source-tree
+  reorg — the wheel's `dekko/_plugin/` layout (what
+  `dekko --claude-install` actually uses) is unchanged, so installed
+  users see no difference.
+
 ## [0.21.1] — 2026-08-03
 
 ### Fixed

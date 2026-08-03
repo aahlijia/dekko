@@ -136,43 +136,29 @@ regenerates a stale map automatically (`--no-regen` to fail instead).
 
 Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
-`ledger`, `hooks`, `orient` cover more specialized workflows).
+`ledger`, `orient` cover more specialized workflows; `hooks` is
+documented below).
 
 ### Excluding files
 
-`--exclude GLOB` (repeatable) skips extra files for one `dekko map`
-invocation, matched with plain shell globbing (`fnmatch`) against both
-the basename and the full relative path:
+`--exclude GLOB` (repeatable) skips extra files for `dekko map`,
+matched against both the basename and the full relative path:
 
 ```sh
 dekko map --exclude 'fixtures/*' --exclude '*.generated.py'
 ```
 
-Every `--exclude` pattern is also appended to `.dekko/.dekkoignore` —
-created alongside `notes.json`, and tracked (not git-ignored) so the
-exclusion is shared with anyone who clones the repo. Once a pattern is
-persisted, a plain `dekko map` with no flags at all still honors it, so
-you don't need to retype `--exclude` on every invocation, in every
-wrapper script, or for every MCP client. `.dekko/.dekkoignore` is also
-fully hand-editable — open it like a `.gitignore` and add or remove
-lines directly, with comments, negation (`!pattern`), and `**`
-supported.
-
-**`--exclude` and `.dekkoignore` are additive, never overriding**: a
-file is skipped if it matches *either* one. They do use different
-matching engines, though — `--exclude` stays plain `fnmatch` (unchanged
-behavior for existing scripts/CI), while `.dekko/.dekkoignore` is
-parsed as gitignore syntax (`gitwildmatch`), since that's what a
-hand-edited, comment-and-negation-bearing file should behave like. This
-means a persisted pattern can occasionally change meaning: `--exclude
-'dir/*.py'` reaches into `dir/sub/nested.py` today (`fnmatch`'s `*`
-isn't slash-aware), but the identical string in `.dekko/.dekkoignore`
-only matches the direct child, `dir/nested.py` — the wildcard doesn't
-also match (and thus prune) the intermediate subdirectory the way it
-does under `fnmatch`. Whole-subtree patterns (`dir/*` or `dir/`) behave
-the same under both. The run summary distinguishes the two sources:
-files skipped by `--exclude` are reported as `excluded`, files skipped
-by `.dekko/.dekkoignore` as `ignored`.
+Every pattern is also persisted to `.dekko/.dekkoignore` (tracked, not
+git-ignored), so a bare `dekko map` afterward keeps honoring it without
+retyping `--exclude`. That file is directly hand-editable too,
+gitignore-style (comments, negation, `**`). The two sources are
+additive — a file is skipped if either matches — but use different
+matching engines (`--exclude` is plain `fnmatch`; `.dekkoignore` is
+gitignore syntax), so an identical pattern can occasionally match a
+slightly different set of nested paths depending on which file it's
+in; run `dekko map --help` for the details. Skips are reported
+separately in the run summary: `excluded` for `--exclude`, `ignored`
+for `.dekkoignore`.
 
 ### Notes
 
@@ -194,6 +180,29 @@ dekko note list resolver.py:resolve
 `dekko --claude-install` wires up both the `/map` command and the MCP
 server (see below); the plugin just runs the installed `dekko` CLI, so
 install the package first.
+
+### Push hooks (opt-in)
+
+Everything above is *pull* — it only helps once the agent knows to
+ask. `dekko hooks` adds an opt-in *push* layer: three Claude Code hook
+events, enabled individually, that inject context automatically:
+
+```sh
+dekko hooks install                        # session-start only (the default)
+dekko hooks install --enable session-start --enable prompt-submit --enable pre-read
+dekko hooks uninstall                      # remove all dekko hooks
+```
+
+- **`session-start`** — a steering preamble plus a budget-capped `lean`
+  map, so the first turn already has a navigation map.
+- **`prompt-submit`** — for the new prompt, a short pointer to the most
+  task-relevant files not already read, so the agent doesn't `grep` blind.
+- **`pre-read`** — a non-blocking advisory to `outline` a large file
+  first, before a whole-file `Read`.
+
+Installing writes to `.claude/settings.json` (restart Claude Code to
+activate). Every handler is fail-silent — a stale map or hook error
+never blocks a session or a tool call, it just produces no output.
 
 ## Using the MCP server
 
