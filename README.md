@@ -17,6 +17,8 @@
   <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff"></a>
 </p>
 
+<!-- mcp-name: io.github.aahlijia/dekko -->
+
 **dekko** is a fast, offline, dependency-free **static code map
 generator** and **codebase indexer for LLM coding agents**. It scans a
 repository with [tree-sitter](https://tree-sitter.github.io/) (no model

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.aahlijia/dekko",
+  "description": "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin",
+  "repository": {
+    "url": "https://github.com/aahlijia/dekko",
+    "source": "github"
+  },
+  "version": "0.21.3",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "dekko",
+      "version": "0.21.3",
+      "runtimeHint": "uvx",
+      "packageArguments": ["serve", "--mcp"],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
