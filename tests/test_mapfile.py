@@ -57,6 +57,24 @@ def test_freshness_transitions(make_mapped_repo: RepoFactory) -> None:
     assert fresh.added == ["b.py"]
 
 
+def test_dekkoignore_hand_edit_marks_map_stale(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Proves the "falls out for free" staleness claim: hand-editing
+    # .dekko/.dekkoignore with no CLI flags involved is enough to make
+    # check_freshness() see the newly-ignored file as removed, because
+    # discover() reads the ignore file live on every call.
+    root = make_mapped_repo(dict(CHAIN, **{"b.py": "X = 1\n"}))
+    index = mapfile.load_map(root)
+    assert mapfile.check_freshness(root, index).fresh
+
+    (root / ".dekko" / ".dekkoignore").write_text("b.py\n")
+
+    fresh = mapfile.check_freshness(root, index)
+    assert not fresh.fresh
+    assert fresh.removed == ["b.py"]
+
+
 def test_removed_file_detected(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(
         dict(CHAIN, **{"b.py": "def extra() -> None:\n    pass\n"})

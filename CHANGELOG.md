@@ -9,7 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-08-03
+
 ### Added
+- **Persistent `.dekko/.dekkoignore`.** `dekko map --exclude GLOB`
+  now also appends each new pattern to `.dekko/.dekkoignore` (created
+  and tracked alongside `notes.json`), so exclusions survive as
+  project state instead of shell history — a bare `dekko map` with no
+  flags honors patterns persisted by an earlier `--exclude` run.
+  `.dekkoignore` is hand-editable gitignore syntax (comments,
+  negation, `**`, trailing-slash dir patterns), parsed with
+  `pathspec`/`gitwildmatch` — a different matching engine than
+  `--exclude`'s plain `fnmatch`, so files it skips are reported under
+  a distinct `"ignored"` skip reason (`--exclude` keeps `"excluded"`).
+  Note the resulting matching-semantics divergence for
+  extension-filtered directory patterns: `--exclude 'dir/*.py'`
+  reaches into `dir/sub/nested.py` today (fnmatch isn't slash-aware),
+  but the identical string persisted to `.dekkoignore` only matches
+  the direct child once re-parsed as gitwildmatch. `regen_map`/
+  `--if-stale` auto-regen never re-persist; staleness from a hand-edit
+  falls out of the existing freshness check with no new provenance
+  field.
 - **Community health files**: `CODE_OF_CONDUCT.md`, `SECURITY.md`,
   `.github/ISSUE_TEMPLATE/` (bug report, feature request), and
   `.github/PULL_REQUEST_TEMPLATE.md`.

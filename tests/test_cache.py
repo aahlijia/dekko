@@ -33,8 +33,14 @@ def test_cache_created_and_ignored(make_mapped_repo: RepoFactory) -> None:
     cache_file = root / cache_mod.CACHE_DIR / cache_mod.CACHE_FILE
     assert cache_file.is_file()
     inner = (root / cache_mod.CACHE_DIR / ".gitignore").read_text()
-    # Generated files ignored; the ignore file and notes are tracked.
-    assert inner.splitlines() == ["*", "!.gitignore", "!notes.json"]
+    # Generated files ignored; the ignore file, notes, and the
+    # persistent .dekkoignore are tracked.
+    assert inner.splitlines() == [
+        "*",
+        "!.gitignore",
+        "!notes.json",
+        "!.dekkoignore",
+    ]
     # The repo .gitignore is intentionally not touched (a blanket
     # .dekko/ there would make notes.json impossible to track).
     assert not (root / ".gitignore").exists()
@@ -185,6 +191,24 @@ def test_ensure_notes_tracked_migrates_legacy_ignore(
         "*",
         "!.gitignore",
         "!notes.json",
+        "!.dekkoignore",
+    ]
+
+
+def test_ensure_notes_tracked_migrates_pre_dekkoignore_ignore(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    inner = root / cache_mod.CACHE_DIR / ".gitignore"
+    inner.write_text("*\n!.gitignore\n!notes.json\n")  # pre-feature form
+
+    cache_mod.ensure_notes_tracked(root)
+
+    assert inner.read_text().splitlines() == [
+        "*",
+        "!.gitignore",
+        "!notes.json",
+        "!.dekkoignore",
     ]
 
 
@@ -216,3 +240,48 @@ def test_reused_map_matches_cold_map(
         )
 
     assert _strip(incremental) == _strip(cold)
+
+
+def test_persist_dekkoignore_creates_and_dedupes(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    ignore_path = root / cache_mod.CACHE_DIR / cache_mod.DEKKOIGNORE_FILE
+    assert not ignore_path.exists()
+
+    cache_mod.persist_dekkoignore(root, ["*.astro", "fixtures/*"])
+    assert ignore_path.read_text().splitlines() == [
+        "*.astro",
+        "fixtures/*",
+    ]
+
+    # Overlapping list: only the new pattern is appended.
+    cache_mod.persist_dekkoignore(root, ["*.astro", "generated/*"])
+    assert ignore_path.read_text().splitlines() == [
+        "*.astro",
+        "fixtures/*",
+        "generated/*",
+    ]
+
+    # Identical list: no-op, file content unchanged.
+    before = ignore_path.read_text()
+    cache_mod.persist_dekkoignore(root, ["*.astro", "generated/*"])
+    assert ignore_path.read_text() == before
+
+
+def test_persist_dekkoignore_preserves_comments_and_order(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    ignore_dir = root / cache_mod.CACHE_DIR
+    ignore_dir.mkdir(parents=True, exist_ok=True)
+    ignore_path = ignore_dir / cache_mod.DEKKOIGNORE_FILE
+    ignore_path.write_text("# hand-authored\n*.log\n")
+
+    cache_mod.persist_dekkoignore(root, ["*.astro"])
+
+    assert ignore_path.read_text().splitlines() == [
+        "# hand-authored",
+        "*.log",
+        "*.astro",
+    ]

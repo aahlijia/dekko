@@ -1,5 +1,6 @@
 """CLI surface tests: flags, output resolution, plugin install."""
 
+import json
 import subprocess
 from importlib.metadata import version
 from pathlib import Path
@@ -112,6 +113,56 @@ def test_map_removed_file_forces_a_real_rewrite(
     out = capsys.readouterr().out
     assert "unchanged" not in out
     assert "mapped 1 files" in out
+
+
+def test_map_exclude_persists_to_dekkoignore(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "widget.astro").write_text("---\n---\n")
+    ignore_path = tmp_path / ".dekko" / ".dekkoignore"
+
+    assert cli.main(["map", str(tmp_path), "--exclude", "*.astro"]) == 0
+    assert ignore_path.read_text().splitlines() == ["*.astro"]
+
+    assert cli.main(["map", str(tmp_path), "--exclude", "*.astro"]) == 0
+    assert ignore_path.read_text().splitlines() == ["*.astro"]
+
+
+def test_bare_map_after_exclude_run_honors_persisted_pattern(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "widget.astro").write_text("---\n---\n")
+
+    assert cli.main(["map", str(tmp_path), "--exclude", "*.astro"]) == 0
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert "widget.astro" not in doc["provenance"]["files"]
+
+    (tmp_path / "b.py").write_text("def g():\n    return 2\n")
+    assert cli.main(["map", str(tmp_path)]) == 0
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert "widget.astro" not in doc["provenance"]["files"]
+    assert "b.py" in doc["provenance"]["files"]
+
+
+def test_regen_map_does_not_re_persist_dekkoignore(
+    tmp_path: Path,
+) -> None:
+    # regen_map() reconstructs a synthetic namespace with `exclude` set
+    # from provenance (non-empty here) and re-runs run_map — it must
+    # not re-trigger persistence on every auto-regen/--if-stale cycle.
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "widget.astro").write_text("---\n---\n")
+    assert cli.main(["map", str(tmp_path), "--exclude", "*.astro"]) == 0
+
+    ignore_path = tmp_path / ".dekko" / ".dekkoignore"
+    before = ignore_path.read_text()
+    before_mtime = ignore_path.stat().st_mtime_ns
+
+    (tmp_path / "a.py").write_text("def f():\n    return 2\n")
+    assert cli.regen_map(tmp_path, quiet=True) == 0
+
+    assert ignore_path.read_text() == before
+    assert ignore_path.stat().st_mtime_ns == before_mtime
 
 
 def test_map_summary_reports_unsupported_language(
