@@ -40,9 +40,13 @@ def _uvlock_version() -> str:
 def test_declared_versions_agree() -> None:
     versions = {
         "pyproject.toml": _pyproject_version(),
-        "plugin.json": _json_version(".claude-plugin/plugin.json", "version"),
+        "plugin.json": _json_version(
+            "integrations/claude/.claude-plugin/plugin.json", "version"
+        ),
         "marketplace.json": _json_version(
-            ".claude-plugin/marketplace.json", "metadata", "version"
+            "integrations/claude/.claude-plugin/marketplace.json",
+            "metadata",
+            "version",
         ),
         "uv.lock": _uvlock_version(),
     }
