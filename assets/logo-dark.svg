@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="dekko logo">
+  <path d="M6,32 C16,14 48,14 58,32 C48,50 16,50 6,32 Z"
+        fill="none" stroke="#E7E7EE" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="32" cy="32" r="6" fill="#8F82FF"/>
+</svg>

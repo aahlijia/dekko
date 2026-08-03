@@ -9,6 +9,12 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Added
+- **README logo.** A small eye mark (light/dark SVG variants under
+  `assets/`, swapped via `prefers-color-scheme`) now heads the
+  README — a nod to the name itself ("dekko" is British slang for a
+  look or glance).
+
 ## [0.21.2] — 2026-08-03
 
 ### Changed
