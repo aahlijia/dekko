@@ -2,19 +2,13 @@
   "generator": "dekko",
   "version": 4,
   "root": "dekko",
-  "generated_at": "2026-08-03T13:50:48+00:00",
+  "generated_at": "2026-08-03T19:07:44+00:00",
   "provenance": {
-    "tool_version": "0.21.0",
+    "tool_version": "0.21.2",
     "spec_hash": "8427a52d5da7901a52b62b1b5f73dd75ead96e7ba670917f2e2326a353d5c13a",
-    "git_commit": "aa6aa049d3e2257e5fc2549cf03465b5cebc58ac",
+    "git_commit": "31d3f55f7719b29cfe0b55b243065f7d5979a801",
     "subpath": null,
-    "excludes": [
-      ".dev/*",
-      ".claude/*",
-      ".eval/*",
-      ".docs/*",
-      ".features/*"
-    ],
+    "excludes": [],
     "max_file_size": 1000000,
     "files": {
       "benchmarks/measure.py": "bc3abf60b2c436dc",
@@ -46,7 +40,7 @@
       "src/dekko/render_lean.py": "559e509b7e2ed8d4",
       "src/dekko/render_md.py": "858fbd89c9fb59be",
       "src/dekko/resolver.py": "6c8a5fd7eae37855",
-      "src/dekko/server.py": "fa5ba7bba12c0b37",
+      "src/dekko/server.py": "03571ef0242f13b1",
       "src/dekko/source.py": "36ebdf8f779a6dea",
       "src/dekko/stats.py": "60f413a88803872a",
       "src/dekko/summary.py": "97d8d6d6391d8deb",
@@ -116,7 +110,7 @@
       "tests/test_tokenizer.py": "2916d42e5eee5968",
       "tests/test_trace.py": "6a93cc2c1e6bd975",
       "tests/test_unused.py": "a003ebe3bd875c95",
-      "tests/test_version.py": "dc4f598c38a3105b",
+      "tests/test_version.py": "47a2db1de6bf8fb6",
       "tests/test_walker.py": "7e25f782674c682e",
       "tests/test_workset.py": "a8aecd6a1c2aa8f8"
     },
@@ -238,8 +232,8 @@
         25759
       ],
       "src/dekko/server.py": [
-        1785693662340140315,
-        36037
+        1785765941445026627,
+        36364
       ],
       "src/dekko/source.py": [
         1781521355839504294,
@@ -518,8 +512,8 @@
         6026
       ],
       "tests/test_version.py": [
-        1781297498836940428,
-        1647
+        1785767179508492348,
+        1734
       ],
       "tests/test_walker.py": [
         1785763982601427548,
@@ -17825,7 +17819,7 @@
       ],
       "returns": "dict",
       "start_line": 954,
-      "end_line": 966,
+      "end_line": 973,
       "decorated": false,
       "exported": false,
       "doc": "Answer ``resources/read`` for a known resource URI.",
@@ -17849,8 +17843,8 @@
         }
       ],
       "returns": "dict | None",
-      "start_line": 969,
-      "end_line": 992,
+      "start_line": 976,
+      "end_line": 999,
       "decorated": false,
       "exported": false,
       "doc": "Route one JSON-RPC message, returning a response or ``None``.",
@@ -17870,8 +17864,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 995,
-      "end_line": 998,
+      "start_line": 1002,
+      "end_line": 1005,
       "decorated": false,
       "exported": false,
       "doc": "Write one newline-delimited JSON-RPC message to stdout.",
@@ -17895,8 +17889,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1001,
-      "end_line": 1024,
+      "start_line": 1008,
+      "end_line": 1031,
       "decorated": false,
       "exported": false,
       "doc": "Run the stdio MCP loop until stdin closes.",
@@ -34774,7 +34768,7 @@
       "params": [],
       "returns": "None",
       "start_line": 40,
-      "end_line": 51,
+      "end_line": 55,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -42365,36 +42359,36 @@
       "caller": "src/dekko/server.py::_handle_resources_read",
       "callee": "src/dekko/render_md.py::_Anchors.get",
       "lines": [
-        956
+        963
       ]
     },
     {
       "caller": "src/dekko/server.py::_handle_resources_read",
       "callee": "src/dekko/server.py::_err",
       "lines": [
-        958,
-        962
+        965,
+        969
       ]
     },
     {
       "caller": "src/dekko/server.py::_handle_resources_read",
       "callee": "src/dekko/server.py::_ok",
       "lines": [
-        963
+        970
       ]
     },
     {
       "caller": "src/dekko/server.py::_handle_resources_read",
       "callee": "src/dekko/server.py::_prefixed",
       "lines": [
-        962
+        969
       ]
     },
     {
       "caller": "src/dekko/server.py::_handle_resources_read",
       "callee": "src/dekko/server.py::_summary_text",
       "lines": [
-        960
+        967
       ]
     },
     {
@@ -42602,94 +42596,94 @@
       "caller": "src/dekko/server.py::handle",
       "callee": "src/dekko/render_md.py::_Anchors.get",
       "lines": [
-        975,
-        976,
-        977
+        982,
+        983,
+        984
       ]
     },
     {
       "caller": "src/dekko/server.py::handle",
       "callee": "src/dekko/server.py::_err",
       "lines": [
-        992
+        999
       ]
     },
     {
       "caller": "src/dekko/server.py::handle",
       "callee": "src/dekko/server.py::_handle_initialize",
       "lines": [
-        981
+        988
       ]
     },
     {
       "caller": "src/dekko/server.py::handle",
       "callee": "src/dekko/server.py::_handle_resources_list",
       "lines": [
-        987
+        994
       ]
     },
     {
       "caller": "src/dekko/server.py::handle",
       "callee": "src/dekko/server.py::_handle_resources_read",
       "lines": [
-        989
+        996
       ]
     },
     {
       "caller": "src/dekko/server.py::handle",
       "callee": "src/dekko/server.py::_handle_tools_call",
       "lines": [
-        985
+        992
       ]
     },
     {
       "caller": "src/dekko/server.py::handle",
       "callee": "src/dekko/server.py::_handle_tools_list",
       "lines": [
-        983
+        990
       ]
     },
     {
       "caller": "src/dekko/server.py::handle",
       "callee": "src/dekko/server.py::_ok",
       "lines": [
-        991
+        998
       ]
     },
     {
       "caller": "src/dekko/server.py::serve",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        1011
+        1018
       ]
     },
     {
       "caller": "src/dekko/server.py::serve",
       "callee": "src/dekko/server.py::Context",
       "lines": [
-        1011
+        1018
       ]
     },
     {
       "caller": "src/dekko/server.py::serve",
       "callee": "src/dekko/server.py::_err",
       "lines": [
-        1019
+        1026
       ]
     },
     {
       "caller": "src/dekko/server.py::serve",
       "callee": "src/dekko/server.py::_send",
       "lines": [
-        1019,
-        1023
+        1026,
+        1030
       ]
     },
     {
       "caller": "src/dekko/server.py::serve",
       "callee": "src/dekko/server.py::handle",
       "lines": [
-        1021
+        1028
       ]
     },
     {
@@ -53997,7 +53991,7 @@
       "callee": "tests/test_version.py::_json_version",
       "lines": [
         43,
-        44
+        46
       ]
     },
     {
@@ -54011,7 +54005,7 @@
       "caller": "tests/test_version.py::test_declared_versions_agree",
       "callee": "tests/test_version.py::_uvlock_version",
       "lines": [
-        47
+        51
       ]
     },
     {
@@ -63051,7 +63045,7 @@
       "caller": "src/dekko/server.py::_handle_resources_read",
       "callee": "str",
       "lines": [
-        962
+        969
       ]
     },
     {
@@ -63131,21 +63125,21 @@
       "caller": "src/dekko/server.py::_send",
       "callee": "json.dumps",
       "lines": [
-        997
+        1004
       ]
     },
     {
       "caller": "src/dekko/server.py::_send",
       "callee": "sys.stdout.flush",
       "lines": [
-        998
+        1005
       ]
     },
     {
       "caller": "src/dekko/server.py::_send",
       "callee": "sys.stdout.write",
       "lines": [
-        997
+        1004
       ]
     },
     {
@@ -63181,14 +63175,14 @@
       "caller": "src/dekko/server.py::serve",
       "callee": "json.loads",
       "lines": [
-        1017
+        1024
       ]
     },
     {
       "caller": "src/dekko/server.py::serve",
       "callee": "raw.strip",
       "lines": [
-        1013
+        1020
       ]
     },
     {
@@ -71824,21 +71818,21 @@
       "caller": "tests/test_version.py::test_declared_versions_agree",
       "callee": "len",
       "lines": [
-        49
+        53
       ]
     },
     {
       "caller": "tests/test_version.py::test_declared_versions_agree",
       "callee": "set",
       "lines": [
-        49
+        53
       ]
     },
     {
       "caller": "tests/test_version.py::test_declared_versions_agree",
       "callee": "versions.values",
       "lines": [
-        49
+        53
       ]
     },
     {
