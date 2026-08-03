@@ -10,7 +10,7 @@ The map has been (re)generated and a compact digest printed below.
 
 !`dekko map --if-stale . $ARGUMENTS`
 
-!`dekko summary`
+!`dekko summary --budget 2000`
 
 ## Your task
 
@@ -27,6 +27,10 @@ NOT parse any source files yourself.
 3. Tell the user the full map is at `.dekko/MAP.md` (human-readable)
    and `.dekko/map.json` (machine-readable), and that they can query it
    without re-reading source via `dekko query|context|affected` or the
-   dekko MCP tools.
+   dekko MCP tools (`query_symbol`, `get_context_pack`, `outline`,
+   `workset`, `impacted_tests`, ...) — see the `dekko-orient` skill.
 4. Do not read `.dekko/MAP.md` back into context (it can be large) —
    prefer the query commands for follow-up questions.
+5. If `$ARGUMENTS` included `--exclude GLOB`, mention that the
+   pattern(s) were also persisted to `.dekko/.dekkoignore` (gitignore
+   syntax) so future bare `dekko map` runs keep honoring them.

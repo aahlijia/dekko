@@ -952,7 +952,14 @@ def _handle_resources_list(req_id: Any) -> dict:
 
 
 def _handle_resources_read(ctx: Context, req_id: Any, params: dict) -> dict:
-    """Answer ``resources/read`` for a known resource URI."""
+    """Answer ``resources/read`` for a known resource URI.
+
+    Deliberately unbudgeted, unlike ``tool_summary``: a resource is
+    fetched by reference on demand, not re-sent as cache on every
+    conversation turn the way a tool result is, so the token-bloat
+    concern that justified capping the tool doesn't apply here. See
+    ``test_mcp_summary_resource_stays_unbudgeted``.
+    """
     uri = params.get("uri")
     if uri != _SUMMARY_URI:
         return _err(req_id, INVALID_PARAMS, f"unknown resource '{uri}'")

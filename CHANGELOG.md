@@ -9,6 +9,19 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.21.1] — 2026-08-03
+
+### Fixed
+- **Documented why `dekko://summary` stays unbounded.** An audit of
+  `skills/`/`commands/` flagged the MCP resource's uncapped output as
+  an apparent inconsistency with the `summary` tool's ~2000-token
+  default. It's intentional, not a bug: a resource is fetched by
+  reference on demand rather than re-sent as cache on every
+  conversation turn like a tool result, so the token-bloat concern
+  that justified capping the tool doesn't apply. Added a comment on
+  `_handle_resources_read` explaining the asymmetry; no behavior
+  change (see `test_mcp_summary_resource_stays_unbudgeted`).
+
 ## [0.21.0] — 2026-08-03
 
 ### Added

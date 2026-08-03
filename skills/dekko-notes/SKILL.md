@@ -1,34 +1,36 @@
 ---
 name: dekko-notes
-description: Keep dekko's symbol-anchored notes current. Use whenever you read a symbol's context, rename or move a symbol, or make a non-obvious behavioral change in a repo that has a .dekko/ map. Notes are durable, committed code annotations keyed by symbol id.
+description: Read and write dekko's symbol-anchored notes in any repo with a .dekko/ directory. Trigger every time you pull a symbol's context (query_symbol, get_context_pack, dekko query/context), right after a non-obvious change, and right after any rename/move/signature edit (to sweep orphaned notes). Notes are durable, committed annotations keyed by symbol id — they carry rationale grep/Read cannot show.
 ---
 
 # Keeping dekko notes current
 
 dekko stores **symbol-anchored notes** in `.dekko/notes.json`, keyed by
 symbol id (`path::Qualified.name`). They are committed to git and shown
-inline by `dekko query symbol` and `dekko context`, so they are durable
-memory that travels with the code. This skill is about keeping them
-accurate as you work.
+inline by `query_symbol` / `get_context_pack` (CLI: `dekko query
+symbol` / `dekko context`). See the `dekko-orient` skill for target
+syntax (bare name, `Class.method`, `file.py:name`, or the tolerated
+`::` form) and for when to reach for dekko over grep/Read generally.
 
 ## Consult notes before editing
 
-When you pull a symbol's context (`dekko query symbol <sym>`,
-`dekko context <sym>`, or the `query_symbol` / `get_context_pack` MCP
-tools), read any `note:` lines first — they record rationale, gotchas,
-and constraints that the code alone does not show.
+Whenever you pull a symbol's context, read any `note:` lines first —
+they record rationale, gotchas, and constraints the code alone does
+not show. Call the `list_notes` MCP tool (or `dekko note list <sym>`)
+directly if you need to see a symbol's notes outside a context pack.
 
 ## Write a note after a non-obvious change
 
-After you make a change whose reasoning is not evident from the diff —
-a workaround, an invariant that must hold, a deliberate trade-off — add
-a note so the next reader (human or agent) sees it:
+After a change whose reasoning is not evident from the diff — a
+workaround, an invariant that must hold, a deliberate trade-off — add
+a note so the next reader (human or agent) sees it. Call the
+`add_note` MCP tool directly, or:
 
 ```
 dekko note add path/to/file.py:func "why this is the way it is"
 ```
 
-or the `add_note` MCP tool. Keep notes short and about *why*, not what.
+Keep notes short and about *why*, not what.
 
 ## Re-anchor notes when a symbol moves
 
@@ -41,11 +43,11 @@ a symbol **orphans** its notes. After such a change:
    dekko note add <new-target> "<the note text>"
    dekko note rm  <old-target>
    ```
-   (The old id is shown in the orphaned listing.)
+   (the old id is shown in the orphaned listing).
 3. Remove notes that no longer apply: `dekko note rm <old-target>`.
 
-Run the orphan sweep after any rename, file move, or signature change
-that alters a symbol's qualified name.
+Run this sweep after any rename, file move, or signature change that
+alters a symbol's qualified name.
 
 ## Boundaries
 
