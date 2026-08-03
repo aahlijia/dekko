@@ -9,11 +9,17 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.21.3] — 2026-08-03
+
 ### Added
 - **README logo.** A small eye mark (light/dark SVG variants under
   `assets/`, swapped via `prefers-color-scheme`) now heads the
   README — a nod to the name itself ("dekko" is British slang for a
   look or glance).
+- **MCP Registry metadata.** Added `server.json` and an `mcp-name:
+  io.github.aahlijia/dekko` marker in the README so dekko can be
+  published to the official [MCP
+  Registry](https://registry.modelcontextprotocol.io).
 
 ## [0.21.2] — 2026-08-03
 
