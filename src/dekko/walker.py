@@ -75,17 +75,49 @@ def _git_files(root: Path) -> list[str] | None:
     return [p for p in proc.stdout.split("\0") if p]
 
 
+def _load_pathspec(path: Path) -> pathspec.PathSpec | None:
+    """Build a ``gitwildmatch`` ``PathSpec`` from a file, or ``None``.
+
+    Args:
+        path: Path to a gitignore-syntax file.
+
+    Returns:
+        The compiled spec, or ``None`` when ``path`` doesn't exist.
+    """
+    if not path.is_file():
+        return None
+    return pathspec.PathSpec.from_lines(
+        "gitwildmatch",
+        path.read_text(encoding="utf-8", errors="replace").splitlines(),
+    )
+
+
+def _load_dekkoignore(root: Path) -> pathspec.PathSpec | None:
+    """Load the persistent ``.dekko/.dekkoignore``, if present.
+
+    Read live from disk on every call — not cached, not stamped into
+    provenance — so a hand-edit takes effect on the very next
+    ``discover()`` call and staleness falls out of the existing
+    freshness check's file-set diff.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        The compiled spec, or ``None`` when no ``.dekkoignore`` exists.
+    """
+    # Deferred import: `cache` depends on `mapfile`, which imports this
+    # module at load time, so a top-level `from .cache import ...` here
+    # would be a circular import. By call time, both modules are fully
+    # initialized.
+    from .cache import CACHE_DIR, DEKKOIGNORE_FILE
+
+    return _load_pathspec(root / CACHE_DIR / DEKKOIGNORE_FILE)
+
+
 def _walk_files(root: Path) -> list[str]:
     """Walk the tree manually, honoring a root ``.gitignore``."""
-    spec = None
-    gitignore = root / ".gitignore"
-    if gitignore.is_file():
-        spec = pathspec.PathSpec.from_lines(
-            "gitwildmatch",
-            gitignore.read_text(
-                encoding="utf-8", errors="replace"
-            ).splitlines(),
-        )
+    spec = _load_pathspec(root / ".gitignore")
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
@@ -141,9 +173,11 @@ def discover(
         A pair ``(files, skipped)``: sorted repo-relative paths to
         map, and ``(path, reason)`` pairs for files that were skipped
         — including files in a confirmed-unsupported language (reason
-        ``"no parser (<language>)"``, see ``languages.KNOWN_UNSUPPORTED``).
-        Extensions dekko simply doesn't recognize at all (non-code
-        files) are still omitted with no entry here.
+        ``"no parser (<language>)"``, see ``languages.KNOWN_UNSUPPORTED``)
+        and files matched by the persistent ``.dekko/.dekkoignore``
+        (reason ``"ignored"``, distinct from ``"excluded"`` — see
+        ``_classify``). Extensions dekko simply doesn't recognize at
+        all (non-code files) are still omitted with no entry here.
     """
     candidates = _git_files(root)
     if candidates is None:
@@ -153,10 +187,14 @@ def discover(
     if subpath:
         prefix = Path(subpath).as_posix().strip("/")
 
+    ignore_spec = _load_dekkoignore(root)
+
     files: list[str] = []
     skipped: list[tuple[str, str]] = []
     for rel in sorted(set(candidates)):
-        verdict = _classify(root, rel, prefix, excludes, max_file_size)
+        verdict = _classify(
+            root, rel, prefix, excludes, ignore_spec, max_file_size
+        )
         if verdict is None:
             continue
         if verdict == "ok":
@@ -171,6 +209,7 @@ def _classify(
     rel: str,
     prefix: str | None,
     excludes: tuple[str, ...],
+    ignore_spec: pathspec.PathSpec | None,
     max_file_size: int,
 ) -> str | None:
     """Categorize one candidate path.
@@ -189,6 +228,12 @@ def _classify(
         fnmatch.fnmatch(rel, pat) for pat in excludes
     ):
         return "excluded"
+    if ignore_spec is not None and ignore_spec.match_file(rel):
+        # Distinct from "excluded": a different matching engine
+        # (gitwildmatch vs. fnmatch) and a different source (the
+        # committed .dekko/.dekkoignore vs. this run's CLI flags), so
+        # a user debugging a vanished file knows where to look.
+        return "ignored"
     if not languages.is_supported(rel):
         unsupported = languages.known_unsupported_language(rel)
         return f"no parser ({unsupported})" if unsupported else None

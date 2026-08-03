@@ -8,10 +8,12 @@ repo-wide (it is cheap relative to parsing).
 
 The cache lives in ``<root>/.dekko/cache.json``. On first creation the
 directory is made self-ignoring with an inner ``.dekko/.gitignore`` that
-ignores generated files (cache, maps) while keeping ``notes.json`` (and
-the ignore file itself) tracked, so symbol annotations can be committed.
-The repository ``.gitignore`` is left untouched — a blanket ``.dekko/``
-entry there would make ``notes.json`` impossible to track.
+ignores generated files (cache, maps) while keeping ``notes.json`` and
+``.dekkoignore`` (and the ignore file itself) tracked, so symbol
+annotations and persisted exclude patterns can both be committed. The
+repository ``.gitignore`` is left untouched — a blanket ``.dekko/``
+entry there would make ``notes.json``/``.dekkoignore`` impossible to
+track.
 """
 
 import json
@@ -26,10 +28,15 @@ from .model import FileMap, Import, RawCall, RawRef
 CACHE_VERSION = 1
 CACHE_DIR = ".dekko"
 CACHE_FILE = "cache.json"
+DEKKOIGNORE_FILE = ".dekkoignore"
 
 # Inner ``.dekko/.gitignore``: ignore everything the tool generates, but
-# keep this file and committable symbol notes tracked.
-_INNER_GITIGNORE = "*\n!.gitignore\n!notes.json\n"
+# keep this file, committable symbol notes, and the persistent ignore
+# file itself tracked.
+_INNER_GITIGNORE = "*\n!.gitignore\n!notes.json\n!.dekkoignore\n"
+# The pre-dekkoignore inner ignore (notes tracked, ignore file not yet
+# introduced); migrated in place when seen.
+_PRE_DEKKOIGNORE_INNER_GITIGNORE = "*\n!.gitignore\n!notes.json\n"
 # The pre-notes inner ignore; migrated in place when seen.
 _LEGACY_INNER_GITIGNORE = "*\n"
 
@@ -233,14 +240,43 @@ def _make_cache_dir(root: Path) -> Path:
 
 
 def _write_inner_gitignore(cache_dir: Path) -> None:
-    """Write the notes-aware inner ``.gitignore`` if safe to do so.
+    """Write the current inner ``.gitignore`` if safe to do so.
 
-    Writes when the file is absent or still holds the legacy bare ``*``;
+    Writes when the file is absent or still holds one of the known
+    older forms (bare ``*``, or notes-aware but pre-``.dekkoignore``);
     a user-customized ignore file is left untouched.
     """
     inner = cache_dir / ".gitignore"
-    if (
-        not inner.exists()
-        or inner.read_text(encoding="utf-8") == _LEGACY_INNER_GITIGNORE
+    current = inner.read_text(encoding="utf-8") if inner.exists() else None
+    if current in (
+        None,
+        _LEGACY_INNER_GITIGNORE,
+        _PRE_DEKKOIGNORE_INNER_GITIGNORE,
     ):
         inner.write_text(_INNER_GITIGNORE, encoding="utf-8")
+
+
+def persist_dekkoignore(root: Path, patterns: list[str]) -> None:
+    """Append new ``--exclude`` globs to ``.dekko/.dekkoignore``, deduped.
+
+    Creates ``.dekko/`` (and wires its inner ``.gitignore``) if this is
+    the first write. Existing lines are preserved verbatim, including
+    user comments and ordering; only patterns not already present (as
+    exact line matches) are appended.
+
+    Args:
+        root: Repository root.
+        patterns: Glob patterns to persist (typically ``args.exclude``
+            from a ``dekko map`` invocation).
+    """
+    cache_dir = _make_cache_dir(root)
+    path = cache_dir / DEKKOIGNORE_FILE
+    existing = (
+        path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    )
+    existing_set = set(existing)
+    new = [p for p in patterns if p not in existing_set]
+    if not new:
+        return
+    lines = existing + new
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")

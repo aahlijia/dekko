@@ -9,7 +9,54 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.21.2] — 2026-08-03
+
+### Changed
+- **Claude plugin files moved into `integrations/claude/`.**
+  `.claude-plugin/`, `commands/`, `skills/`, and `.mcp.json` were
+  cluttering the repo root; they're now grouped under
+  `integrations/claude/` (`integrations/claude/.claude-plugin/`,
+  `integrations/claude/commands/`, `integrations/claude/skills/`,
+  `integrations/claude/.mcp.json`), leaving room for other editor
+  integrations alongside it under `integrations/`. Pure source-tree
+  reorg — the wheel's `dekko/_plugin/` layout (what
+  `dekko --claude-install` actually uses) is unchanged, so installed
+  users see no difference.
+
+## [0.21.1] — 2026-08-03
+
+### Fixed
+- **Documented why `dekko://summary` stays unbounded.** An audit of
+  `skills/`/`commands/` flagged the MCP resource's uncapped output as
+  an apparent inconsistency with the `summary` tool's ~2000-token
+  default. It's intentional, not a bug: a resource is fetched by
+  reference on demand rather than re-sent as cache on every
+  conversation turn like a tool result, so the token-bloat concern
+  that justified capping the tool doesn't apply. Added a comment on
+  `_handle_resources_read` explaining the asymmetry; no behavior
+  change (see `test_mcp_summary_resource_stays_unbudgeted`).
+
+## [0.21.0] — 2026-08-03
+
 ### Added
+- **Persistent `.dekko/.dekkoignore`.** `dekko map --exclude GLOB`
+  now also appends each new pattern to `.dekko/.dekkoignore` (created
+  and tracked alongside `notes.json`), so exclusions survive as
+  project state instead of shell history — a bare `dekko map` with no
+  flags honors patterns persisted by an earlier `--exclude` run.
+  `.dekkoignore` is hand-editable gitignore syntax (comments,
+  negation, `**`, trailing-slash dir patterns), parsed with
+  `pathspec`/`gitwildmatch` — a different matching engine than
+  `--exclude`'s plain `fnmatch`, so files it skips are reported under
+  a distinct `"ignored"` skip reason (`--exclude` keeps `"excluded"`).
+  Note the resulting matching-semantics divergence for
+  extension-filtered directory patterns: `--exclude 'dir/*.py'`
+  reaches into `dir/sub/nested.py` today (fnmatch isn't slash-aware),
+  but the identical string persisted to `.dekkoignore` only matches
+  the direct child once re-parsed as gitwildmatch. `regen_map`/
+  `--if-stale` auto-regen never re-persist; staleness from a hand-edit
+  falls out of the existing freshness check with no new provenance
+  field.
 - **Community health files**: `CODE_OF_CONDUCT.md`, `SECURITY.md`,
   `.github/ISSUE_TEMPLATE/` (bug report, feature request), and
   `.github/PULL_REQUEST_TEMPLATE.md`.

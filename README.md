@@ -35,9 +35,27 @@ against it. Measured across 7 real, unmodified open-source repos
 (Go, TypeScript, Java, Rust, Python/C++ — up to 14k files), dekko's
 structured queries used **3x–200x fewer tokens** than the equivalent
 `Read`/`Grep` workflow for the same task (repo orientation, outlining a
-large file, tracing a symbol's callers/callees). See
+large file, tracing a symbol's callers/callees).
+
+| Task | Example repo (scale) | dekko | Read/Grep | Savings |
+|---|---|---:|---:|---:|
+| Repo orientation (`summary`) | awesome-go (10 files) | 308 tok | ~15,271 tok | ~50x |
+| Repo orientation (`summary`) | cline (2,730 files) | 1,202 tok | ~4,020 tok | ~3.3x |
+| Outline a large file | claude-code `main.tsx` (4,683 lines) | 1,017 tok | 200,981 tok | ~197x |
+| Outline a large file | zed `editor.rs` (12,554 lines) | 1,996 tok | 115,109 tok | ~58x |
+| Symbol lookup (`query_symbol` + callers/callees) | tensorflow `Graph` class | ~811 tok | 61,656 tok | ~76x |
+| Symbol lookup (`query_symbol` + callers/callees) | spring-boot `prepareContext` | 759 tok | ~18,460 tok | ~24x |
+| Bundled context (`workset`) | zed | 2,984 tok | ~5,903+ tok (targeted) / ~164,571 tok (whole file) | ~2x / ~55x |
+| Bundled context (`workset`) | awesome-go | 617 tok | ~6,136 tok | ~10x |
+
+dekko's cost stays roughly flat per query while `Read`/`Grep` scales
+with file/repo size, so the ratio grows with scale. The win isn't
+universal — small,
+self-contained files and already-grep-friendly local symbols see
+little to no benefit, and a few cases in the raw data are void because
+the cheap answer was also an incomplete one. See
 [`benchmarks/real-world-repos/`](benchmarks/real-world-repos/README.md)
-for the full per-task breakdown and methodology.
+for the full per-task breakdown, methodology, and correctness caveats.
 
 Compared to tag-index tools like `ctags`/`gtags`, dekko resolves actual
 call edges (not just definitions), ranks files by load-bearing-ness,
@@ -118,7 +136,29 @@ regenerates a stale map automatically (`--no-regen` to fail instead).
 
 Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
-`ledger`, `hooks`, `orient` cover more specialized workflows).
+`ledger`, `orient` cover more specialized workflows; `hooks` is
+documented below).
+
+### Excluding files
+
+`--exclude GLOB` (repeatable) skips extra files for `dekko map`,
+matched against both the basename and the full relative path:
+
+```sh
+dekko map --exclude 'fixtures/*' --exclude '*.generated.py'
+```
+
+Every pattern is also persisted to `.dekko/.dekkoignore` (tracked, not
+git-ignored), so a bare `dekko map` afterward keeps honoring it without
+retyping `--exclude`. That file is directly hand-editable too,
+gitignore-style (comments, negation, `**`). The two sources are
+additive — a file is skipped if either matches — but use different
+matching engines (`--exclude` is plain `fnmatch`; `.dekkoignore` is
+gitignore syntax), so an identical pattern can occasionally match a
+slightly different set of nested paths depending on which file it's
+in; run `dekko map --help` for the details. Skips are reported
+separately in the run summary: `excluded` for `--exclude`, `ignored`
+for `.dekkoignore`.
 
 ### Notes
 
@@ -140,6 +180,29 @@ dekko note list resolver.py:resolve
 `dekko --claude-install` wires up both the `/map` command and the MCP
 server (see below); the plugin just runs the installed `dekko` CLI, so
 install the package first.
+
+### Push hooks (opt-in)
+
+Everything above is *pull* — it only helps once the agent knows to
+ask. `dekko hooks` adds an opt-in *push* layer: three Claude Code hook
+events, enabled individually, that inject context automatically:
+
+```sh
+dekko hooks install                        # session-start only (the default)
+dekko hooks install --enable session-start --enable prompt-submit --enable pre-read
+dekko hooks uninstall                      # remove all dekko hooks
+```
+
+- **`session-start`** — a steering preamble plus a budget-capped `lean`
+  map, so the first turn already has a navigation map.
+- **`prompt-submit`** — for the new prompt, a short pointer to the most
+  task-relevant files not already read, so the agent doesn't `grep` blind.
+- **`pre-read`** — a non-blocking advisory to `outline` a large file
+  first, before a whole-file `Read`.
+
+Installing writes to `.claude/settings.json` (restart Claude Code to
+activate). Every handler is fail-silent — a stale map or hook error
+never blocks a session or a tool call, it just produces no output.
 
 ## Using the MCP server
 
