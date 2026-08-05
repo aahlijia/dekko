@@ -30,6 +30,7 @@ from . import outline as outline_mod
 from . import query
 from . import relevance
 from . import render_lean
+from . import search
 from . import stats
 from . import summary
 from . import trace
@@ -326,6 +327,33 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     return out.strip() or "(no impacted tests)"
 
 
+def tool_search_code(ctx: Context, args: dict) -> str:
+    """Free-text relevance search over symbol names, docs, signatures."""
+    query_text = _require(args, "query")
+    include_tests = bool(args.get("include_tests", False))
+    index = _index_for(ctx, args, include_tests=include_tests)
+    limit = int(args.get("limit", search.DEFAULT_LIMIT))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else search.DEFAULT_BUDGET
+    kinds = search.parse_kinds(args.get("kind"))
+    scorer_name = args.get("scorer") or search.DEFAULT_SCORER
+    code, out, err = _capture(
+        lambda: search.run(
+            index,
+            query_text,
+            kinds=kinds,
+            limit=limit,
+            budget=budget,
+            as_json=False,
+            root=_root_of(ctx, args),
+            scorer_name=scorer_name,
+        )
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return out.strip() or "(no matches)"
+
+
 def tool_workset(ctx: Context, args: dict) -> str:
     """One budgeted bundle for a change or symbol."""
     root = _root_of(ctx, args)
@@ -549,6 +577,56 @@ _TASK_PROP = {
 # agent usage (2026-07-10 eval transcripts) — their handlers remain
 # callable and `dekko <cmd>` unaffected.
 TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "search_code",
+        "description": "Rank symbols by free-text relevance to a "
+        "natural-language description — for when you know what the code "
+        "should do but not its name. Matches against names, signatures, "
+        "and doc lines with BM25-style scoring, not substring matching. "
+        "Falls back to zero hits (not an error) when nothing matches; try "
+        "broader or different terms. Use query_symbol/get_callers instead "
+        "once you have an exact name.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Free-text description of the code "
+                    "you're looking for",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max hits (default 15)",
+                },
+                "budget": {
+                    "type": "integer",
+                    "description": "Token budget for the output (default 800)",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Comma-separated symbol kinds to "
+                    "restrict to (function, method, class, ...)",
+                },
+                "include_tests": {
+                    "type": "boolean",
+                    "description": "Include test-path symbols "
+                    "(default: false)",
+                },
+                "scorer": {
+                    "type": "string",
+                    "enum": ["lexical", "embedding"],
+                    "description": "Relevance scorer: 'lexical' "
+                    "(default, BM25, always available) or 'embedding' "
+                    "(hashing-trick embedding; only works if the "
+                    "server was installed with the dekko[search] "
+                    "extra)",
+                },
+                "root": _ROOT_PROP,
+            },
+            "required": ["query"],
+        },
+        "handler": tool_search_code,
+    },
     {
         "name": "query_symbol",
         "description": "Signature, kind, location, doc, fan-in/out, and "

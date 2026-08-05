@@ -89,6 +89,16 @@ generically), add the extra:
 pip install dekko[all]
 ```
 
+`dekko search` works out of the box (BM25 lexical scoring, no
+dependencies). For its optional embedding-based scorer
+(`--scorer embedding` / `search_code`'s `scorer: "embedding"`) — a
+deterministic, fully-offline hashing-trick embedding, not a
+downloaded model — add:
+
+```sh
+pip install dekko[search]
+```
+
 Then add the `/map` command + MCP server to Claude Code:
 
 ```sh
@@ -133,6 +143,8 @@ dekko query callers resolve --sites  # who calls resolve, with call sites
 dekko query callees main             # what does main call?
 dekko query uses Path                # who references the external name Path?
 dekko context run_map --budget 1500  # minimal context pack for an edit
+dekko search "retries failed http requests"  # free-text relevance search
+dekko search "..." --scorer embedding        # optional; needs dekko[search]
 dekko workset                        # one bundle for your current change
 dekko affected                       # test files impacted by your changes
 dekko diff                           # symbols changed since the map's commit
@@ -221,10 +233,11 @@ never blocks a session or a tool call, it just produces no output.
 `dekko serve --mcp` speaks the Model Context Protocol over stdio
 (newline-delimited JSON-RPC, no SDK dependency), so an agent can ask
 "who calls X?" with a tool call instead of reading `MAP.md`. It exposes
-13 tools:
+14 tools:
 
 | Tool | Backs |
 | --- | --- |
+| `search_code` | free-text relevance search over every symbol (BM25 by default; `scorer: "embedding"` opt-in with `dekko[search]`) |
 | `query_symbol` | signature, doc, fan-in/out, notes |
 | `get_callers` / `get_callees` | callers/callees, with call sites |
 | `find_usages` | references to an external name |

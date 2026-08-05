@@ -47,6 +47,11 @@ dependencies = [
 # Accurate token counting for the --budget caps and the lean map.
 # Optional: without it, dekko falls back to a ~4-chars/token estimate.
 tokenizer = ["tiktoken>=0.7"]
+# `dekko search --scorer embedding`: a deterministic hashing-trick
+# embedding scorer (numpy only -- no pretrained model, no download,
+# stays offline). Optional: without it, `dekko search` still works
+# via its always-on BM25 lexical scorer (the unflagged default).
+search = ["numpy>=1.24"]
 # Tier-2: the ~55 extra languages, parsed generically. Pulls in the
 # grammar pack, which downloads grammars on demand. `pip install
 # dekko[all]` to enable them.

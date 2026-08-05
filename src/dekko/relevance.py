@@ -18,15 +18,23 @@ The scorer is deliberately split into a **pure core** and a thin
   it gathers the diff and recent-file signals and degrades to a
   prompt-only context when there is no repo.
 
-:class:`Scorer` is a ``Protocol`` so a future embedding-based scorer can
-replace :class:`LexicalScorer` without touching any call site (noted
-enhancement; not built). When no task is supplied the call sites simply
-skip this module, so structural ranking is the zero-task special case and
-existing output is byte-for-byte unchanged.
+:class:`Scorer` is a ``Protocol`` so a scorer can be swapped without
+touching any call site. :class:`BM25Scorer` (used by ``search.py``'s
+``dekko search``) is the first concrete alternative to
+:class:`LexicalScorer` — it stays a separate class rather than an
+in-place upgrade so ``workset``/``context``/``lean``'s existing
+``--task`` blend (and their pinned ranking tests) are untouched; see
+``.features/plans/SEMANTIC-SEARCH-PLAN.md`` §3.2 for the tradeoff. A
+future embedding-based scorer (Phase 2, optional ``dekko[search]``
+extra) can follow the same seam. When no task is supplied the call
+sites simply skip this module, so structural ranking is the zero-task
+special case and existing output is byte-for-byte unchanged.
 """
 
+import math
 import re
 import subprocess
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -80,6 +88,27 @@ _MIN_TERM_LEN = 2
 _MIN_PARTIAL_LEN = 3
 
 
+def _raw_terms(text: str) -> list[str]:
+    """Identifier-aware terms, in order, without deduplication.
+
+    The shared tokenization core behind :func:`normalize_terms` (which
+    dedupes, for the set-based ``LexicalScorer``/query-term use case)
+    and :class:`BM25Scorer`'s document-side term-frequency counting,
+    where genuine repetition must actually inflate the count rather
+    than collapse to bare presence/absence — otherwise BM25's ``f(t,
+    d)`` term is always 0 or 1 and ``search.py``'s field-weighting-by-
+    repetition trick (repeating a symbol's name in its candidate text
+    to approximate a name-field boost) would silently do nothing.
+    """
+    terms = []
+    for piece in _WORD_RE.findall(text):
+        term = piece.lower()
+        if len(term) < _MIN_TERM_LEN or term in _STOPWORDS:
+            continue
+        terms.append(term)
+    return terms
+
+
 def normalize_terms(text: str) -> list[str]:
     """Split text into lowercase, identifier-aware search terms.
 
@@ -95,10 +124,7 @@ def normalize_terms(text: str) -> list[str]:
         Distinct search terms, in first-seen order.
     """
     seen: dict[str, None] = {}
-    for piece in _WORD_RE.findall(text):
-        term = piece.lower()
-        if len(term) < _MIN_TERM_LEN or term in _STOPWORDS:
-            continue
+    for term in _raw_terms(text):
         seen.setdefault(term, None)
     return list(seen)
 
@@ -204,6 +230,146 @@ class LexicalScorer:
             + self.PARTIAL_WEIGHT * partial
             + self._path_boost(task, candidate.path)
         )
+
+    def _path_boost(self, task: TaskContext, path: str) -> float:
+        """Boost for a candidate whose file is in the diff or recent set."""
+        if path in task.diff_paths:
+            return self.DIFF_BOOST
+        if path in task.recent_paths:
+            return self.RECENT_BOOST
+        return 0.0
+
+
+# BM25 defaults (Robertson/Sparck-Jones); standard values, not exposed
+# as user-facing flags — same treatment as LexicalScorer.DIFF_BOOST.
+_BM25_K1 = 1.5
+_BM25_B = 0.75
+
+# Suffixes that typically mark an ``-es`` plural/verb form worth
+# collapsing (``boxes`` -> ``box``, ``matches`` -> ``match``) as
+# opposed to a bare trailing ``s`` (``names`` -> ``name``, handled by
+# the plain ``s``-strip rule instead).
+_ES_TRIGGERS = ("s", "x", "z", "ch", "sh")
+
+
+def _stem(term: str) -> str:
+    """Tiny, deterministic suffix stripper for inflection tolerance.
+
+    Not a real stemmer — five rule-based cases so ``retry``/
+    ``retries``/``retrying``/``retried`` all collapse to the same
+    matching key, per the search feature plan's "obvious and
+    deterministic over linguistically complete" philosophy (matches
+    :data:`_STOPWORDS`'s own stated bar). Used only internally by
+    :class:`BM25Scorer` for term/document-frequency grouping; never
+    changes what :func:`normalize_terms` returns publicly.
+
+    Args:
+        term: An already-normalized (lowercase) search term.
+
+    Returns:
+        The stemmed key, or ``term`` unchanged when no rule applies.
+    """
+    if len(term) <= 4:
+        return term
+    if term.endswith("ies"):
+        return term[:-3] + "y"
+    if term.endswith("ied"):
+        return term[:-3] + "y"
+    if term.endswith("ing") and len(term) > 6:
+        return term[:-3]
+    if term.endswith("es") and term[:-2].endswith(_ES_TRIGGERS):
+        return term[:-2]
+    if term.endswith("ed"):
+        return term[:-2]
+    if term.endswith("s") and not term.endswith("ss"):
+        return term[:-1]
+    return term
+
+
+class BM25Scorer:
+    """BM25 lexical relevance, recomputed fresh over each candidate batch.
+
+    Unlike :class:`LexicalScorer`'s exact-overlap count, a query term's
+    contribution is weighted by how rare it is across the *batch*
+    (inverse document frequency) and normalized for candidate length,
+    so a rare, distinguishing term outweighs a common one and a short,
+    precisely-matching candidate isn't buried by a long one that
+    contains the term only incidentally. Term matching additionally
+    folds simple inflections together via :func:`_stem` (``retry`` /
+    ``retries`` / ``retrying``), on both the query and candidate side.
+    Path boost (diff/recent) is layered on after BM25 normalization,
+    same as :class:`LexicalScorer`. Deterministic; no I/O.
+    """
+
+    K1 = _BM25_K1
+    B = _BM25_B
+    DIFF_BOOST = LexicalScorer.DIFF_BOOST
+    RECENT_BOOST = LexicalScorer.RECENT_BOOST
+
+    def score(
+        self, task: TaskContext, candidates: list[Candidate]
+    ) -> dict[str, float]:
+        """Score candidates by BM25 relevance to the task's terms.
+
+        Args:
+            task: The task to rank against.
+            candidates: Items to score (also the corpus for IDF/avgdl).
+
+        Returns:
+            ``candidate.id -> score`` in ``[0, 1]``; all-zero when no
+            candidate matches any query term at all.
+        """
+        if not candidates:
+            return {}
+        if not task.terms:
+            return {c.id: 0.0 for c in candidates}
+        query_terms = [_stem(t) for t in task.terms]
+        doc_terms = {
+            c.id: [_stem(t) for t in _raw_terms(c.text)] for c in candidates
+        }
+        lengths = {cid: len(terms) for cid, terms in doc_terms.items()}
+        n = len(candidates)
+        avgdl = sum(lengths.values()) / n if n else 0.0
+        doc_freq = {
+            qt: sum(1 for terms in doc_terms.values() if qt in terms)
+            for qt in set(query_terms)
+        }
+        raw = {
+            c.id: self._bm25(
+                c, task, query_terms, doc_terms, doc_freq, lengths, n, avgdl
+            )
+            for c in candidates
+        }
+        top = max(raw.values(), default=0.0)
+        if top <= 0:
+            return {c.id: 0.0 for c in candidates}
+        return {cid: value / top for cid, value in raw.items()}
+
+    def _bm25(
+        self,
+        candidate: Candidate,
+        task: TaskContext,
+        query_terms: list[str],
+        doc_terms: dict[str, list[str]],
+        doc_freq: dict[str, int],
+        lengths: dict[str, int],
+        n: int,
+        avgdl: float,
+    ) -> float:
+        """Unnormalized BM25 score of one candidate against the query."""
+        freq = Counter(doc_terms[candidate.id])
+        dl = lengths[candidate.id]
+        norm_len = (dl / avgdl) if avgdl else 0.0
+        total = 0.0
+        for qt in query_terms:
+            f = freq.get(qt, 0)
+            if f == 0:
+                continue
+            n_t = doc_freq[qt]
+            idf = math.log((n - n_t + 0.5) / (n_t + 0.5) + 1)
+            denom = f + self.K1 * (1 - self.B + self.B * norm_len)
+            total += idf * (f * (self.K1 + 1)) / denom
+        return total + self._path_boost(task, candidate.path)
 
     def _path_boost(self, task: TaskContext, path: str) -> float:
         """Boost for a candidate whose file is in the diff or recent set."""

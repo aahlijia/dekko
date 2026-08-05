@@ -624,8 +624,10 @@ def test_lean_registered_and_tool_count() -> None:
     # in context tokens every session (E5 trim, 2026-07-10).
     assert "lean" not in names
     assert "ledger" not in names
-    # Canonical MCP tool-count assertion now lives here.
-    assert len(server.TOOLS) == 13
+    # Canonical MCP tool-count assertion now lives here. 14, not 13:
+    # search_code (BM25 free-text search, Phase 1 of the semantic
+    # search plan) joined the read surface after the E5 trim.
+    assert len(server.TOOLS) == 14
 
 
 def test_mcp_lean_tool_is_cli_only(make_mapped_repo: RepoFactory) -> None:

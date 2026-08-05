@@ -76,6 +76,7 @@ def test_tools_list_exposes_the_read_surface() -> None:
     # 2026-07-10): the MCP surface pays schema rent in context tokens
     # on every session, and agents never reached for them live.
     assert names == {
+        "search_code",
         "query_symbol",
         "get_callers",
         "get_callees",
@@ -144,6 +145,117 @@ def test_get_context_pack_tool(make_mapped_repo: RepoFactory) -> None:
     text = result["content"][0]["text"]
     assert result["isError"] is False
     assert "context: b.py:g" in text
+
+
+_SEARCH_SRC = {
+    "src/auth.py": ('"""Authentication."""\ndef login() -> None:\n    pass\n'),
+    "src/db.py": '"""Database access."""\ndef connect() -> None:\n    pass\n',
+}
+
+
+def test_search_code_tool(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(_SEARCH_SRC))
+    result = _call(ctx, "search_code", {"query": "login flow"})
+    assert result["isError"] is False
+    assert "login" in result["content"][0]["text"]
+
+
+def test_search_code_tool_missing_query_is_tool_error(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(make_mapped_repo(_SEARCH_SRC))
+    result = _call(ctx, "search_code", {})
+    assert result["isError"] is True
+    assert "missing required argument 'query'" in result["content"][0]["text"]
+
+
+def test_search_code_tool_zero_hits_is_not_error(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(make_mapped_repo(_SEARCH_SRC))
+    result = _call(ctx, "search_code", {"query": "xyzxyzxyz"})
+    assert result["isError"] is False
+    assert "(no matches)" in result["content"][0]["text"]
+
+
+def test_search_code_tool_defaults_budget(
+    monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
+) -> None:
+    ctx = _ctx(make_mapped_repo(_SEARCH_SRC))
+    seen: dict = {}
+
+    def fake_run(
+        index,  # noqa: ANN001
+        query_text,  # noqa: ANN001
+        kinds=None,  # noqa: ANN001
+        limit=15,  # noqa: ANN001
+        budget=None,  # noqa: ANN001
+        as_json=False,  # noqa: ANN001
+        root=None,  # noqa: ANN001
+        scorer_name="lexical",  # noqa: ANN001
+    ) -> int:
+        seen["budget"] = budget
+        print("search")
+        return 0
+
+    monkeypatch.setattr(server.search, "run", fake_run)
+    assert _call(ctx, "search_code", {"query": "login"})["isError"] is False
+    assert seen["budget"] == server.search.DEFAULT_BUDGET
+
+    assert (
+        _call(ctx, "search_code", {"query": "login", "budget": 9000})[
+            "isError"
+        ]
+        is False
+    )
+    assert seen["budget"] == 9000
+
+
+def test_search_code_tool_forwards_scorer_arg(
+    monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
+) -> None:
+    ctx = _ctx(make_mapped_repo(_SEARCH_SRC))
+    seen: dict = {}
+
+    def fake_run(
+        index,  # noqa: ANN001
+        query_text,  # noqa: ANN001
+        kinds=None,  # noqa: ANN001
+        limit=15,  # noqa: ANN001
+        budget=None,  # noqa: ANN001
+        as_json=False,  # noqa: ANN001
+        root=None,  # noqa: ANN001
+        scorer_name="lexical",  # noqa: ANN001
+    ) -> int:
+        seen["scorer_name"] = scorer_name
+        seen["root"] = root
+        print("search")
+        return 0
+
+    monkeypatch.setattr(server.search, "run", fake_run)
+    assert _call(ctx, "search_code", {"query": "login"})["isError"] is False
+    assert seen["scorer_name"] == "lexical"
+    assert seen["root"] is not None
+
+    assert (
+        _call(ctx, "search_code", {"query": "login", "scorer": "embedding"})[
+            "isError"
+        ]
+        is False
+    )
+    assert seen["scorer_name"] == "embedding"
+
+
+def test_search_code_tool_embedding_scorer_unavailable_is_tool_error(
+    monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
+) -> None:
+    ctx = _ctx(make_mapped_repo(_SEARCH_SRC))
+    monkeypatch.setattr(server.search.embedding, "available", lambda: False)
+    result = _call(
+        ctx, "search_code", {"query": "login", "scorer": "embedding"}
+    )
+    assert result["isError"] is True
+    assert "dekko[search]" in result["content"][0]["text"]
 
 
 # trace_path/find_unused/stats left the MCP surface (E5 trim) but their

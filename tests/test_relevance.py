@@ -11,6 +11,7 @@ from pathlib import Path
 from dekko import cli, contextpack, query, relevance, render_lean, workset
 from dekko.mapfile import MapIndex, load_map
 from dekko.relevance import (
+    BM25Scorer,
     Candidate,
     LexicalScorer,
     TaskContext,
@@ -85,6 +86,68 @@ def test_diff_path_boost_beats_recent_beats_none() -> None:
     ]
     scores = LexicalScorer().score(task, cands)
     assert scores["diff"] > scores["recent"] > scores["cold"] == 0.0
+
+
+# --- pure core: BM25Scorer --------------------------------------------
+
+
+def test_bm25_exact_match_outranks_no_overlap() -> None:
+    task = TaskContext(terms=("login", "form"))
+    cands = [
+        Candidate("hit", "login form handler", "a.py"),
+        Candidate("miss", "database pool", "b.py"),
+    ]
+    scores = BM25Scorer().score(task, cands)
+    assert scores["hit"] > 0.0
+    assert scores["miss"] == 0.0
+
+
+def test_bm25_no_candidate_matches_is_all_zero() -> None:
+    task = TaskContext(terms=("nonexistent",))
+    cands = [Candidate("a", "alpha", "a.py"), Candidate("b", "beta", "b.py")]
+    assert BM25Scorer().score(task, cands) == {"a": 0.0, "b": 0.0}
+
+
+def test_bm25_rare_term_outweighs_common_term() -> None:
+    # "retry" appears in every candidate (common -> low IDF); "auth"
+    # appears in exactly one (rare -> high IDF). The concrete, testable
+    # difference BM25 adds over LexicalScorer's plain overlap count —
+    # see the plan's §3.2/§7 rationale for picking BM25 over a naive
+    # count.
+    task = TaskContext(terms=("retry", "auth"))
+    cands = [
+        Candidate("common_only", "retry retry retry", "a.py"),
+        Candidate("rare_hit", "retry auth", "b.py"),
+        Candidate("also_common", "retry logic here", "c.py"),
+    ]
+    scores = BM25Scorer().score(task, cands)
+    assert scores["rare_hit"] > scores["common_only"]
+    assert scores["rare_hit"] > scores["also_common"]
+
+
+def test_bm25_short_precise_match_not_buried_by_long_candidate() -> None:
+    task = TaskContext(terms=("retry",))
+    cands = [
+        Candidate("short_precise", "retry", "a.py"),
+        Candidate(
+            "long_incidental",
+            "retry " + " ".join(f"word{i}" for i in range(40)),
+            "b.py",
+        ),
+    ]
+    scores = BM25Scorer().score(task, cands)
+    assert scores["short_precise"] > scores["long_incidental"]
+
+
+def test_bm25_suffix_broadening_matches_inflections() -> None:
+    task = TaskContext(terms=("retrying",))
+    cands = [
+        Candidate("hit", "retry_request retries the call", "a.py"),
+        Candidate("miss", "unrelated database pool", "b.py"),
+    ]
+    scores = BM25Scorer().score(task, cands)
+    assert scores["hit"] > 0.0
+    assert scores["miss"] == 0.0
 
 
 # --- pure core: blended_scores ---------------------------------------

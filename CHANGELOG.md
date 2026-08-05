@@ -9,6 +9,34 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Added
+- **`dekko search "<query>"` / `search_code` MCP tool (semantic
+  search, Phase 1).** Free-text relevance search that ranks every
+  symbol in the map by BM25-style lexical scoring (name/qualname/
+  signature/doc), for when you know what code should do but not its
+  name — no new dependencies. New `relevance.BM25Scorer` (alongside
+  the existing `LexicalScorer`, which is unchanged) and new
+  `search.py` module. Options: `--limit`, `--budget`, `--kind`,
+  `--include-tests`, `--json`, `--no-regen`. See
+  `.features/plans/SEMANTIC-SEARCH-PLAN.md` for the design and
+  implementation notes.
+- **`--scorer embedding` for `dekko search` / `search_code` (semantic
+  search, Phase 2), opt-in via `pip install dekko[search]`.** A
+  deterministic hashing-trick embedding scorer (character n-gram
+  feature hashing + signed random projection, `numpy`-only — no
+  pretrained model, no download, fully offline), with a new
+  `embedding.py` module: `EmbeddingScorer` (implements the same
+  `relevance.Scorer` protocol as `BM25Scorer`) and `EmbeddingCache`
+  (mirrors `cache.IncrementalCache`'s reuse/invalidate pattern),
+  persisted to `.dekko/embeddings.json`. The default scorer stays
+  `lexical` (BM25, unflagged, always available) — a base install and
+  every existing `dekko search`/`search_code` call are unaffected.
+  Requesting `--scorer embedding` / `scorer: "embedding"` without the
+  extra installed fails with a clear error rather than silently
+  falling back. Deviates from the plan's original `sentence-
+  transformers` sketch — see `.features/plans/SEMANTIC-SEARCH-PLAN.md`
+  §8 and "Implementation status" for why.
+
 ## [0.21.3] — 2026-08-03
 
 ### Added

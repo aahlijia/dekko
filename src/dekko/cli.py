@@ -37,6 +37,7 @@ from . import relevance
 from . import render_html
 from . import render_lean
 from . import render_md
+from . import search
 from . import server
 from . import stats
 from . import summary
@@ -61,6 +62,7 @@ SUBCOMMANDS = (
     "diff",
     "affected",
     "workset",
+    "search",
     "status",
     "ledger",
     "hooks",
@@ -537,6 +539,69 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     _add_task_option(p_workset)
     p_workset.set_defaults(func=run_workset)
+
+    p_search = sub.add_parser(
+        "search",
+        help="free-text relevance search over every symbol in the map",
+    )
+    p_search.add_argument(
+        "query",
+        nargs="+",
+        help="free-text description of the code you're looking for "
+        "(quoting is optional; unquoted words are joined with spaces)",
+    )
+    p_search.add_argument(
+        "--limit",
+        type=int,
+        default=search.DEFAULT_LIMIT,
+        help=f"max hits to return (default: {search.DEFAULT_LIMIT})",
+    )
+    p_search.add_argument(
+        "--budget",
+        type=int,
+        default=search.DEFAULT_BUDGET,
+        metavar="TOKENS",
+        help="approximate token budget for the rendered output "
+        f"(default: {search.DEFAULT_BUDGET})",
+    )
+    p_search.add_argument(
+        "--kind",
+        default=None,
+        metavar="KIND[,KIND...]",
+        help="restrict to these comma-separated symbol kinds "
+        "(function, method, class, ...; default: all kinds)",
+    )
+    p_search.add_argument(
+        "--include-tests",
+        action="store_true",
+        help="include test-path symbols (default: excluded)",
+    )
+    p_search.add_argument(
+        "--scorer",
+        choices=list(search.SCORER_CHOICES),
+        default=search.DEFAULT_SCORER,
+        help="relevance scorer: 'lexical' (default, BM25, always "
+        "available) or 'embedding' (Phase 2, hashing-trick "
+        "embedding, requires `pip install dekko[search]`)",
+    )
+    p_search.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_search.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_search.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="fail (exit 5) instead of regenerating a stale map",
+    )
+    p_search.set_defaults(func=run_search)
 
     p_status = sub.add_parser(
         "status", help="report whether map.json is fresh"
@@ -1689,6 +1754,37 @@ def run_workset(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         no_regen=args.no_regen,
         task=task,
+    )
+
+
+def run_search(args: argparse.Namespace) -> int:
+    """Handle ``dekko search "<query>"``.
+
+    Unlike the other read commands, ``search`` defaults to *excluding*
+    test-path symbols (opt in with ``--include-tests``) rather than
+    the ``--no-tests`` opt-out convention every other read command
+    uses — a relevance-ranked result competing for a rank slot
+    shouldn't default to including test noise the way an exhaustive
+    caller list should default to completeness (deliberate deviation,
+    see the search feature plan §9.6).
+    """
+    query_text = " ".join(args.query)
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    if not args.include_tests:
+        index = index.without_tests()
+    kinds = search.parse_kinds(args.kind)
+    return search.run(
+        index,
+        query_text,
+        kinds=kinds,
+        limit=args.limit,
+        budget=args.budget,
+        as_json=args.as_json,
+        root=root,
+        scorer_name=args.scorer,
     )
 
 
