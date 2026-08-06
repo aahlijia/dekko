@@ -33,7 +33,9 @@ DEFAULT_THRESHOLD = 1000
 
 _PREAMBLE = (
     "dekko orientation — this repo has a .dekko/ map. Prefer dekko's\n"
-    "structural tools over reading whole files:\n"
+    "structural tools over grep/reading whole files:\n"
+    "  • search <text>    — find a symbol by what it does, not its "
+    "name (use before grepping blind)\n"
     "  • outline <file>  — a file's shape (signatures, no bodies), "
     "~1/10 cost\n"
     "  • workset [REV]    — all you need to work a change, one budget\n"
