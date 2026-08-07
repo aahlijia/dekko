@@ -193,6 +193,7 @@ def test_search_code_tool_defaults_budget(
         as_json=False,  # noqa: ANN001
         root=None,  # noqa: ANN001
         scorer_name="lexical",  # noqa: ANN001
+        excluded_test_count=0,  # noqa: ANN001
     ) -> int:
         seen["budget"] = budget
         print("search")
@@ -226,6 +227,7 @@ def test_search_code_tool_forwards_scorer_arg(
         as_json=False,  # noqa: ANN001
         root=None,  # noqa: ANN001
         scorer_name="lexical",  # noqa: ANN001
+        excluded_test_count=0,  # noqa: ANN001
     ) -> int:
         seen["scorer_name"] = scorer_name
         seen["root"] = root

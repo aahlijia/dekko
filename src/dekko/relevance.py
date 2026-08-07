@@ -29,6 +29,20 @@ future embedding-based scorer (Phase 2, optional ``dekko[search]``
 extra) can follow the same seam. When no task is supplied the call
 sites simply skip this module, so structural ranking is the zero-task
 special case and existing output is byte-for-byte unchanged.
+
+Both scorers' ``value / top`` min-max normalization is *relative to
+the current batch* — whatever candidate happens to score highest gets
+rescaled to exactly ``1.00``, even when that top score reflects a weak
+field (e.g. a filtered-out candidate pool) rather than a genuinely
+strong match. For a 2+-term task, both scorers additionally discount
+their top-of-batch score by :func:`coverage_factor` on
+:func:`term_coverage` — the fraction of query terms the candidate's
+text actually contains — so a `1.00` requires covering the query, not
+just outscoring a weak field (round-08 §2.2). ``search.rank`` layers a
+second, scorer-agnostic use of the same coverage curve on top of
+*any* scorer's output, correcting a different failure mode: one
+lexically-dominant common query term crowding out a candidate that
+covers every distinctive term more lightly (round-08 §2.3).
 """
 
 import math
@@ -223,13 +237,25 @@ class LexicalScorer:
 
         Returns:
             ``candidate.id -> score`` in ``[0, 1]``; all-zero when no
-            candidate matches the task at all.
+            candidate matches the task at all. For a 2+-term task, the
+            top-of-batch score is additionally discounted by
+            :func:`coverage_factor` so "best of a weak field" can't
+            renormalize to a misleading ``1.00`` the way plain
+            ``value / top`` min-max normalization would on its own —
+            see round-08 §2.2.
         """
         raw = {c.id: self._raw(task, c) for c in candidates}
         top = max(raw.values(), default=0.0)
         if top <= 0:
             return {c.id: 0.0 for c in candidates}
-        return {cid: value / top for cid, value in raw.items()}
+        normalized = {cid: value / top for cid, value in raw.items()}
+        if len(task.terms) < 2:
+            return normalized
+        return {
+            c.id: normalized[c.id]
+            * coverage_factor(term_coverage(task.terms, c.text))
+            for c in candidates
+        }
 
     def _raw(self, task: TaskContext, candidate: Candidate) -> float:
         """Unnormalized relevance of one candidate."""
@@ -303,6 +329,65 @@ def _stem(term: str) -> str:
     return term
 
 
+# Coverage-factor curve: ``floor + scale * coverage``. Full coverage
+# (every query term present) leaves the score unchanged (``1.0``);
+# zero coverage discounts to the floor rather than zeroing outright —
+# a zero-coverage candidate was already dropped wherever that matters
+# (e.g. ``search.rank``'s zero-raw-relevance filter), so this only
+# needs to discount a weak match, not eliminate it. Shared, tunable
+# constants rather than inlined literals so both call sites below (and
+# ``search.py``'s separate, scorer-agnostic use of the same curve —
+# round-08 §2.3) stay in lockstep if the curve is ever retuned.
+_COVERAGE_FLOOR = 0.4
+_COVERAGE_SCALE = 0.6
+
+
+def term_coverage(terms: tuple[str, ...], text: str) -> float:
+    """Fraction of ``terms`` present in ``text``, exact or stemmed.
+
+    Symmetric inflection tolerance: a query term matches a candidate
+    token when either side's stem equals the other's raw or stemmed
+    form (``retries`` in the query matches a candidate token
+    ``retry``, and vice versa), so coverage isn't sensitive to which
+    side happens to carry the inflected spelling.
+
+    Shared by :class:`BM25Scorer`/:class:`LexicalScorer` (discounting
+    a false ``1.00`` on a weak field, round-08 §2.2) and
+    ``search.rank`` (discounting a lexically-dominant common term that
+    crowds out a candidate covering every distinctive query term,
+    round-08 §2.3) — one shared notion of "how much of the query does
+    this text actually cover" so both fixes agree on what coverage
+    means.
+
+    Args:
+        terms: Normalized query terms (already stopword-filtered).
+        text: Candidate text to check coverage against.
+
+    Returns:
+        ``hits / len(terms)`` in ``[0, 1]``; ``1.0`` when ``terms`` is
+        empty (nothing to fail to cover).
+    """
+    if not terms:
+        return 1.0
+    present = set(normalize_terms(text))
+    stemmed_present = {_stem(t) for t in present}
+    hits = sum(1 for t in terms if t in present or _stem(t) in stemmed_present)
+    return hits / len(terms)
+
+
+def coverage_factor(coverage: float) -> float:
+    """Map a term-coverage fraction to a bounded ``[floor, 1.0]`` scale.
+
+    Args:
+        coverage: A term-coverage fraction in ``[0, 1]``, typically
+            from :func:`term_coverage`.
+
+    Returns:
+        ``_COVERAGE_FLOOR + _COVERAGE_SCALE * coverage``.
+    """
+    return _COVERAGE_FLOOR + _COVERAGE_SCALE * coverage
+
+
 @lru_cache(maxsize=_TERM_CACHE_SIZE)
 def _stemmed_terms(text: str) -> tuple[str, ...]:
     """Tokenized and stemmed terms for one candidate's text, cached.
@@ -348,7 +433,10 @@ class BM25Scorer:
 
         Returns:
             ``candidate.id -> score`` in ``[0, 1]``; all-zero when no
-            candidate matches any query term at all.
+            candidate matches any query term at all. For a 2+-term
+            task, the top-of-batch score is additionally discounted
+            by :func:`coverage_factor` so "best of a weak field" can't
+            renormalize to a misleading ``1.00`` — see round-08 §2.2.
         """
         if not candidates:
             return {}
@@ -372,7 +460,14 @@ class BM25Scorer:
         top = max(raw.values(), default=0.0)
         if top <= 0:
             return {c.id: 0.0 for c in candidates}
-        return {cid: value / top for cid, value in raw.items()}
+        normalized = {cid: value / top for cid, value in raw.items()}
+        if len(task.terms) < 2:
+            return normalized
+        return {
+            c.id: normalized[c.id]
+            * coverage_factor(term_coverage(task.terms, c.text))
+            for c in candidates
+        }
 
     def _bm25(
         self,

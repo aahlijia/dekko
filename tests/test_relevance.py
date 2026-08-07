@@ -150,6 +150,106 @@ def test_bm25_suffix_broadening_matches_inflections() -> None:
     assert scores["miss"] == 0.0
 
 
+# --- round-08 §2.2: coverage-factor discount on top-of-batch --------
+#
+# Both scorers' ``value / top`` min-max normalization rescales
+# whatever survives filtering to exactly 1.00, regardless of how weak
+# its actual match is. Reproduces the awesome-go shape: a query
+# ("getAllFlaggedRepositories" -> get/all/flagged/repositories) whose
+# only genuinely relevant symbol was filtered out upstream (e.g. by
+# ``--include-tests`` defaulting to off), leaving an unrelated symbol
+# that only shares one incidental term ("all") as the new best-in-
+# batch. That symbol should no longer renormalize to a confident 1.00.
+
+
+def test_term_coverage_is_fraction_of_terms_present() -> None:
+    assert relevance.term_coverage(("get", "all"), "mkdir all things") == 0.5
+    assert (
+        relevance.term_coverage(
+            ("get", "all", "flagged", "repositories"), "mkdir all things"
+        )
+        == 0.25
+    )
+
+
+def test_term_coverage_matches_stemmed_inflections_either_direction() -> None:
+    # Query term inflected, candidate token bare.
+    assert relevance.term_coverage(("retries",), "retry handler") == 1.0
+    # Candidate token inflected, query term bare.
+    assert relevance.term_coverage(("retry",), "retries handler") == 1.0
+
+
+def test_term_coverage_empty_terms_is_full_coverage() -> None:
+    assert relevance.term_coverage((), "anything") == 1.0
+
+
+def test_coverage_factor_is_bounded_floor_to_one() -> None:
+    assert relevance.coverage_factor(1.0) == 1.0
+    assert relevance.coverage_factor(0.0) == relevance._COVERAGE_FLOOR
+    assert relevance._COVERAGE_FLOOR < relevance.coverage_factor(0.5) < 1.0
+
+
+def test_lexical_weak_field_top_hit_no_longer_reads_as_confident() -> None:
+    # 4-term query; only "mkdir_all" shares one incidental term ("all")
+    # with it — the real match isn't in this batch at all (as if it
+    # had been filtered out upstream), so the best-in-batch score
+    # should read as weak, not a confident 1.00.
+    task = TaskContext(terms=("get", "all", "flagged", "repositories"))
+    cands = [Candidate("mkdir_all", "mkdir_all creates directories", "a.py")]
+    scores = LexicalScorer().score(task, cands)
+    assert 0.0 < scores["mkdir_all"] < 1.0
+
+
+def test_lexical_full_coverage_top_hit_still_reads_as_confident() -> None:
+    # Same query, but now the genuinely relevant symbol is present and
+    # covers every term — no regression for a real, complete match.
+    task = TaskContext(terms=("get", "all", "flagged", "repositories"))
+    cands = [
+        Candidate(
+            "get_all_flagged_repositories",
+            "getAllFlaggedRepositories get all flagged repositories",
+            "a.py",
+        ),
+        Candidate("mkdir_all", "mkdir_all creates directories", "b.py"),
+    ]
+    scores = LexicalScorer().score(task, cands)
+    assert scores["get_all_flagged_repositories"] == 1.0
+    assert scores["mkdir_all"] < scores["get_all_flagged_repositories"]
+
+
+def test_lexical_single_term_query_is_unaffected_by_coverage_discount() -> (
+    None
+):
+    # Single-term queries have no "crowded field" failure mode — a
+    # top-of-batch match with 1/1 coverage stays at a full 1.00.
+    task = TaskContext(terms=("retry",))
+    cands = [Candidate("hit", "retry handler", "a.py")]
+    scores = LexicalScorer().score(task, cands)
+    assert scores["hit"] == 1.0
+
+
+def test_bm25_weak_field_top_hit_no_longer_reads_as_confident() -> None:
+    task = TaskContext(terms=("get", "all", "flagged", "repositories"))
+    cands = [Candidate("mkdir_all", "mkdir_all creates directories", "a.py")]
+    scores = BM25Scorer().score(task, cands)
+    assert 0.0 < scores["mkdir_all"] < 1.0
+
+
+def test_bm25_full_coverage_top_hit_still_reads_as_confident() -> None:
+    task = TaskContext(terms=("get", "all", "flagged", "repositories"))
+    cands = [
+        Candidate(
+            "get_all_flagged_repositories",
+            "getAllFlaggedRepositories get all flagged repositories",
+            "a.py",
+        ),
+        Candidate("mkdir_all", "mkdir_all creates directories", "b.py"),
+    ]
+    scores = BM25Scorer().score(task, cands)
+    assert scores["get_all_flagged_repositories"] == 1.0
+    assert scores["mkdir_all"] < scores["get_all_flagged_repositories"]
+
+
 # --- 2.5: tokenization memoization (search/BM25 performance) ---------
 #
 # Track F (test-repos/reports/IMPLEMENTATION-PLAN.md #2.5): BM25Scorer

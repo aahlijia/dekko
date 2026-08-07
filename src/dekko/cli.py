@@ -1853,8 +1853,13 @@ def run_search(args: argparse.Namespace) -> int:
     index, code = _load_or_regen(root, args.no_regen)
     if index is None:
         return code
+    excluded_test_count = 0
     if not args.include_tests:
-        index = index.without_tests()
+        filtered = index.without_tests()
+        excluded_test_count = len(index.symbols_by_id) - len(
+            filtered.symbols_by_id
+        )
+        index = filtered
     kinds = search.parse_kinds(args.kind)
     return search.run(
         index,
@@ -1865,6 +1870,7 @@ def run_search(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         root=root,
         scorer_name=args.scorer,
+        excluded_test_count=excluded_test_count,
     )
 
 

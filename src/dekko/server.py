@@ -331,7 +331,18 @@ def tool_search_code(ctx: Context, args: dict) -> str:
     """Free-text relevance search over symbol names, docs, signatures."""
     query_text = _require(args, "query")
     include_tests = bool(args.get("include_tests", False))
-    index = _index_for(ctx, args, include_tests=include_tests)
+    # Load unfiltered first so a not-``include_tests`` call can report
+    # how many test-path symbols ``.without_tests()`` dropped before
+    # ranking ever saw them (round-08 §2.2's exclusion hint) — mirrors
+    # ``cli.run_search``'s own before/after count.
+    index = _index_for(ctx, args, include_tests=True)
+    excluded_test_count = 0
+    if not include_tests:
+        filtered = index.without_tests()
+        excluded_test_count = len(index.symbols_by_id) - len(
+            filtered.symbols_by_id
+        )
+        index = filtered
     limit = int(args.get("limit", search.DEFAULT_LIMIT))
     budget = args.get("budget")
     budget = int(budget) if budget is not None else search.DEFAULT_BUDGET
@@ -347,6 +358,7 @@ def tool_search_code(ctx: Context, args: dict) -> str:
             as_json=False,
             root=_root_of(ctx, args),
             scorer_name=scorer_name,
+            excluded_test_count=excluded_test_count,
         )
     )
     if code != 0:

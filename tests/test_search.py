@@ -5,6 +5,7 @@ import json
 import pytest
 
 from dekko import cli, search
+from dekko.relevance import Candidate, TaskContext
 from dekko.textutil import Meter
 
 from conftest import RepoFactory
@@ -146,6 +147,77 @@ def test_search_excludes_tests_by_default(
     doc2 = _json_out(capsys)
     quals2 = {h["qualname"] for h in doc2["hits"]}
     assert "test_retries_on_500" in quals2
+
+
+# --- round-08 §2.2: exclusion hint when test filtering may have hidden
+# the real match --------------------------------------------------------
+
+
+def test_search_exclusion_note_fires_on_weak_top_hit(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SRC)
+    assert (
+        cli.main(
+            [
+                "search",
+                "500 status code retry",
+                "--root",
+                str(root),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    doc = _json_out(capsys)
+    assert doc["hits"][0]["score"] < search.LOW_CONFIDENCE_THRESHOLD
+    assert "note" in doc
+    assert "1 test-file symbol excluded" in doc["note"]
+    assert "--include-tests" in doc["note"]
+
+
+def test_search_exclusion_note_text_rendering(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SRC)
+    assert (
+        cli.main(["search", "500 status code retry", "--root", str(root)]) == 0
+    )
+    out = capsys.readouterr().out
+    assert "note: 1 test-file symbol excluded" in out
+
+
+def test_search_exclusion_note_absent_on_confident_top_hit(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SRC)
+    assert (
+        cli.main(["search", "http retry", "--root", str(root), "--json"]) == 0
+    )
+    doc = _json_out(capsys)
+    assert doc["hits"][0]["score"] >= search.LOW_CONFIDENCE_THRESHOLD
+    assert "note" not in doc
+
+
+def test_search_exclusion_note_absent_with_include_tests(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SRC)
+    assert (
+        cli.main(
+            [
+                "search",
+                "500 status code retry",
+                "--root",
+                str(root),
+                "--json",
+                "--include-tests",
+            ]
+        )
+        == 0
+    )
+    doc = _json_out(capsys)
+    assert "note" not in doc
 
 
 def test_search_kind_filter(
@@ -549,4 +621,130 @@ def test_search_rank_still_deterministic_across_repeated_calls(
     first = search.rank(index, "retries failed http request")
     second = search.rank(index, "retries failed http request")
     assert [h.symbol.id for h in first] == [h.symbol.id for h in second]
-    assert [h.score for h in first] == [h.score for h in second]
+
+
+# --- round-08 §2.3: a common term shouldn't crowd out a distinctive
+# one ------------------------------------------------------------------
+
+
+def test_coverage_adjusted_scorer_flips_common_term_domination() -> None:
+    """Unit-level check on the exact mechanism ``rank()`` wraps in.
+
+    A candidate that only covers the common query term ("integration")
+    scores higher than a candidate covering both distinctive terms
+    under the raw (unadjusted) scorer -- the shape reported for
+    claude-code's "sandbox escape" and cline's "slack integration"
+    (round-08 §2.3). Wrapping the scorer in
+    :class:`search._CoverageAdjustedScorer` should flip the order.
+    """
+    task = TaskContext(terms=("slack", "integration"))
+    cands = [
+        Candidate(
+            "shell_integration",
+            "shell_integration shell integration helper",
+            "src/shell.py",
+        ),
+        Candidate(
+            "slack_connector",
+            "slack_connector post a message via a slack integration webhook",
+            "src/slack.py",
+        ),
+    ]
+
+    class _FakeScorer:
+        """Returns fixed scores, standing in for a real scorer's raw
+        output (BM25 or embedding) so the wrapper is tested in
+        isolation from either scorer's own internals."""
+
+        def score(
+            self, task: TaskContext, candidates: list[Candidate]
+        ) -> dict[str, float]:
+            return {"shell_integration": 0.7, "slack_connector": 0.6}
+
+    # Pre-adjustment: the common-term-only candidate already outranks
+    # the full-coverage one -- the bug being fixed.
+    raw = _FakeScorer().score(task, cands)
+    assert raw["shell_integration"] > raw["slack_connector"]
+
+    adjusted = search._CoverageAdjustedScorer(_FakeScorer()).score(task, cands)
+    assert adjusted["slack_connector"] > adjusted["shell_integration"]
+
+
+def test_coverage_adjusted_scorer_is_noop_for_single_term_query() -> None:
+    """No "crowded out by a different term" failure mode for one term."""
+    task = TaskContext(terms=("integration",))
+    cands = [Candidate("a", "integration integration", "a.py")]
+
+    class _FakeScorer:
+        def score(
+            self, task: TaskContext, candidates: list[Candidate]
+        ) -> dict[str, float]:
+            return {"a": 0.42}
+
+    inner = _FakeScorer()
+    assert search._CoverageAdjustedScorer(inner).score(
+        task, cands
+    ) == inner.score(task, cands)
+
+
+def test_search_coverage_multiplier_discounts_common_term_only_matches(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """End-to-end: single-term-only matches score lower with the fix.
+
+    Six symbols repeat "escape" heavily but never mention "sandbox";
+    one symbol covers both distinctive query terms. Comparing against
+    the same ranking with the coverage multiplier neutralized proves
+    the mechanism actually engages (not just that the target already
+    wins on IDF alone) -- the common-term-only ceiling drops once the
+    multiplier is active.
+    """
+    from dekko import relevance as relevance_mod
+    from dekko.mapfile import load_map
+
+    files = {}
+    for i in range(6):
+        files[f"src/escape_{i}.py"] = (
+            f'"""Escaping helper {i}."""\n\n\n'
+            f"def escape_thing_{i}(s):\n"
+            f'    """Escape escape escape a string, escape it well, '
+            f'escape."""\n'
+            f"    pass\n"
+        )
+    for i in range(4):
+        files[f"src/sandbox_{i}.py"] = (
+            f'"""Sandbox config {i}."""\n\n\n'
+            f"def sandbox_setting_{i}(x):\n"
+            f'    """Configure sandbox option {i}."""\n'
+            f"    pass\n"
+        )
+    files["src/sandbox_escape.py"] = (
+        '"""Sandbox boundary enforcement."""\n\n\n'
+        "def check(proc):\n"
+        '    """Detect a sandbox escape attempt."""\n'
+        "    pass\n"
+    )
+    root = make_mapped_repo(files)
+    index = load_map(root)
+    assert index is not None
+
+    def _target_and_ceiling(
+        hits: list[search.SearchHit],
+    ) -> tuple[float, float]:
+        target = next(h for h in hits if h.symbol.qualname == "check")
+        ceiling = max(h.score for h in hits if h.symbol.qualname != "check")
+        return target.score, ceiling
+
+    hits = search.rank(index, "sandbox escape")
+    target_score, ceiling_with_fix = _target_and_ceiling(hits)
+    assert target_score > ceiling_with_fix
+
+    original = relevance_mod.coverage_factor
+    relevance_mod.coverage_factor = lambda coverage: 1.0
+    try:
+        hits_unadjusted = search.rank(index, "sandbox escape")
+    finally:
+        relevance_mod.coverage_factor = original
+    _, ceiling_without_fix = _target_and_ceiling(hits_unadjusted)
+
+    assert ceiling_with_fix < ceiling_without_fix

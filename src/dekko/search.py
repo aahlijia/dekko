@@ -23,6 +23,17 @@ default: a base install and every existing ``dekko search`` call are
 completely unaffected by Phase 2's addition. See ``embedding.py``'s
 module docstring for the scorer itself and the plan's §8 for why this
 diverges from the plan's original ``sentence-transformers`` sketch.
+
+Two round-08 corrections layer on top of whichever scorer runs:
+:class:`_CoverageAdjustedScorer` (wrapped around ``scorer`` in
+:func:`rank`) discounts a candidate that only covers some of a 2+-term
+query's distinct terms, so one lexically-dominant common term can't
+crowd out a candidate matching every distinctive term more lightly
+(§2.3); and ``--include-tests`` defaulting to off means a genuinely
+relevant test-path symbol can be silently excluded before ranking ever
+sees it — :func:`run` prints a ``note:`` hint (a JSON ``"note"`` key)
+when the surviving top hit is weak and symbols were in fact excluded,
+so a low-confidence result doesn't read as a confident one (§2.2).
 """
 
 import json
@@ -44,6 +55,12 @@ EXIT_ERROR = 2
 
 DEFAULT_LIMIT = 15
 DEFAULT_BUDGET = 800
+
+# Below this blended score, the top hit is "weak" — worth telling the
+# caller that test-path symbols were excluded, in case the real match
+# lives in one. Reuses relevance.py's own coverage-factor floor (0.4)
+# so there's one threshold in the codebase to reason about, not two.
+LOW_CONFIDENCE_THRESHOLD = 0.4
 
 # Phase 1 (BM25, always available) vs. Phase 2 (hashing-trick
 # embedding, requires `pip install dekko[search]`). See embedding.py's
@@ -185,6 +202,49 @@ def _build_candidates(
     return candidates
 
 
+class _CoverageAdjustedScorer:
+    """Wraps a scorer, discounting candidates with low query-term coverage.
+
+    A scorer-agnostic post-processing layer (round-08 §2.3): a
+    candidate that matches one query term very strongly (e.g. a short
+    symbol whose name/doc repeats a common word) can otherwise outrank
+    a candidate that covers every distinctive query term more
+    lightly, under both BM25 and the hashing-trick embedding scorer
+    alike — the raw relevance number alone can't tell the difference,
+    so the correction is layered on top of whichever scorer produced
+    it rather than duplicated inside each one (any future scorer
+    inherits the fix automatically, instead of needing to remember to
+    implement it itself). Deliberately separate from
+    ``relevance.py``'s own per-scorer coverage discount (round-08
+    §2.2, which fixes a different failure mode — a false ``1.00`` on a
+    weak candidate field): this wraps *whatever* score a scorer
+    already returned, compounding with any discount the scorer already
+    applied internally.
+    """
+
+    def __init__(self, inner: relevance.Scorer) -> None:
+        self._inner = inner
+
+    def score(
+        self, task: TaskContext, candidates: list[Candidate]
+    ) -> dict[str, float]:
+        """Score via the wrapped scorer, then discount by term coverage.
+
+        Only engages for 2+-term queries — a one-term query has no
+        "crowded out by a different term" failure mode to correct.
+        """
+        scores = self._inner.score(task, candidates)
+        if len(task.terms) < 2:
+            return scores
+        return {
+            c.id: scores.get(c.id, 0.0)
+            * relevance.coverage_factor(
+                relevance.term_coverage(task.terms, c.text)
+            )
+            for c in candidates
+        }
+
+
 def rank(
     index: MapIndex,
     query_text: str,
@@ -199,6 +259,12 @@ def rank(
     centrality component alone), and surfacing that as a "search
     result" would be actively misleading for a tool whose whole job is
     text relevance.
+
+    ``scorer`` is wrapped in :class:`_CoverageAdjustedScorer` for a
+    2+-term query, discounting any candidate that only covers some of
+    the query's distinct terms — otherwise a candidate matching one
+    common term very strongly can outrank one that covers every term
+    lightly, under any scorer (round-08 §2.3).
 
     Args:
         index: Loaded map index. Callers wanting to exclude test-path
@@ -219,7 +285,7 @@ def rank(
     task = TaskContext(terms=_query_terms(query_text))
     if not candidates or not task.terms:
         return []
-    scorer = scorer or BM25Scorer()
+    scorer = _CoverageAdjustedScorer(scorer or BM25Scorer())
     raw_relevance = scorer.score(task, candidates)
     survivors = [c for c in candidates if raw_relevance.get(c.id, 0.0) > 0.0]
     if not survivors:
@@ -282,10 +348,46 @@ def _fit(
     return hits[: len(kept_rows)], meter
 
 
+def _exclusion_note(
+    hits: list[SearchHit], excluded_test_count: int
+) -> str | None:
+    """A hint when test-path exclusion may have hidden the real match.
+
+    Fires only when there *were* excluded test-path symbols (the
+    caller passes ``0`` when ``--include-tests`` was already given, so
+    this never fires redundantly) and the surviving top hit is weak —
+    below :data:`LOW_CONFIDENCE_THRESHOLD`, or there are no hits at
+    all. A strong, confident top hit means exclusion almost certainly
+    didn't matter, so staying silent there keeps the common case
+    quiet (round-08 §2.2).
+
+    Args:
+        hits: The ranked hits, already scored (pre-budget-fit).
+        excluded_test_count: Symbols dropped by ``.without_tests()``
+            before ranking, or ``0`` if nothing was excluded.
+
+    Returns:
+        A one-line hint, or ``None`` when nothing is worth flagging.
+    """
+    if excluded_test_count <= 0:
+        return None
+    if hits and hits[0].score >= LOW_CONFIDENCE_THRESHOLD:
+        return None
+    noun = "symbol" if excluded_test_count == 1 else "symbols"
+    return (
+        f"{excluded_test_count} test-file {noun} excluded — "
+        "low-confidence result, re-run with --include-tests"
+    )
+
+
 def _render_text(
-    query_text: str, hits: list[SearchHit], budget: int | None, limit: int
+    query_text: str,
+    hits: list[SearchHit],
+    budget: int | None,
+    limit: int,
+    note: str | None,
 ) -> int:
-    """Render hits as text: manifest, ranked rows, cost footer."""
+    """Render hits as text: manifest, ranked rows, cost footer, hint."""
     kept, meter = _fit(query_text, hits, budget, limit)
     print(_manifest(query_text, len(hits)))
     print()
@@ -295,11 +397,17 @@ def _render_text(
         for hit in kept:
             print(_hit_row(hit))
     print(meter.footer())
+    if note:
+        print(f"note: {note}")
     return EXIT_OK
 
 
 def _render_json(
-    query_text: str, hits: list[SearchHit], budget: int | None, limit: int
+    query_text: str,
+    hits: list[SearchHit],
+    budget: int | None,
+    limit: int,
+    note: str | None,
 ) -> int:
     """Render hits as JSON, reflecting exactly what the budget kept."""
     kept, meter = _fit(query_text, hits, budget, limit)
@@ -308,6 +416,8 @@ def _render_json(
         "hits": [_hit_json(h) for h in kept],
         "meta": meter.as_dict(),
     }
+    if note:
+        doc["note"] = note
     print(json.dumps(doc, indent=2))
     return EXIT_OK
 
@@ -357,6 +467,7 @@ def run(
     as_json: bool = False,
     root: Path | None = None,
     scorer_name: str = DEFAULT_SCORER,
+    excluded_test_count: int = 0,
 ) -> int:
     """Rank symbols by free-text relevance and render the result.
 
@@ -374,6 +485,12 @@ def run(
             ``"embedding"`` — ignored for the default lexical scorer.
         scorer_name: One of :data:`SCORER_CHOICES`; defaults to
             :data:`DEFAULT_SCORER` (Phase 1's BM25 lexical scorer).
+        excluded_test_count: Symbols the caller already dropped via
+            ``.without_tests()`` before ``index`` was passed in, or
+            ``0`` when nothing was excluded (including whenever
+            ``--include-tests`` was given). Used only to decide
+            whether to print the exclusion hint (round-08 §2.2); it
+            plays no part in ranking.
 
     Returns:
         ``0`` on a completed search (a search matching nothing is a
@@ -390,6 +507,7 @@ def run(
     hits = rank(index, query_text, kinds, scorer=scorer)
     if cache is not None and root is not None:
         embedding.save(root, cache)
+    note = _exclusion_note(hits, excluded_test_count)
     if as_json:
-        return _render_json(query_text, hits, budget, limit)
-    return _render_text(query_text, hits, budget, limit)
+        return _render_json(query_text, hits, budget, limit, note)
+    return _render_text(query_text, hits, budget, limit, note)
