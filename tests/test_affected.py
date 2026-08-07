@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko import affected, cli, mapfile
+from dekko import affected, cli, diff, mapfile
 from dekko import server
 from dekko.model import Import, Symbol
 
@@ -118,6 +118,57 @@ def test_tiers_direct_transitive_import(
     assert "[transitive] tests/test_transitive.py" in out
     assert "[import] tests/test_import_only.py" in out
     assert "test_unrelated.py" not in out
+
+
+def test_affected_rev_cache_hit_skips_reexport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-08 §2.6: a second ``affected`` call against the same rev
+    must reuse the cached old-side snapshot (``diff.old_snapshot``)
+    instead of re-exporting and re-parsing the rev from scratch."""
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+
+    calls: list[str] = []
+    real_export_rev = diff.export_rev
+
+    def spy(root_arg: Path, rev: str, dest: Path) -> bool:
+        calls.append(rev)
+        return real_export_rev(root_arg, rev, dest)
+
+    monkeypatch.setattr(diff, "export_rev", spy)
+
+    assert cli.main(["affected", "--root", str(root)]) == 1
+    assert len(calls) == 1  # cache miss: real export
+
+    assert cli.main(["affected", "--root", str(root)]) == 1
+    assert len(calls) == 1  # cache hit: no second export
+
+
+def test_affected_shares_rev_cache_with_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``diff`` and ``affected`` hit the same disk-backed rev-cache
+    (both call ``diff.old_snapshot``) — a ``diff`` call against a rev
+    should warm the cache for a later ``affected`` call against the
+    identical rev, and vice versa."""
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+
+    calls: list[str] = []
+    real_export_rev = diff.export_rev
+
+    def spy(root_arg: Path, rev: str, dest: Path) -> bool:
+        calls.append(rev)
+        return real_export_rev(root_arg, rev, dest)
+
+    monkeypatch.setattr(diff, "export_rev", spy)
+
+    assert cli.main(["diff", "--root", str(root)]) == 1
+    assert len(calls) == 1
+
+    assert cli.main(["affected", "--root", str(root)]) == 1
+    assert len(calls) == 1  # affected reused diff's cached snapshot
 
 
 def test_pytest_hint_lists_impacted_files(

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from dekko import cli, query
+from dekko import cli, mapfile, query
 
 from conftest import RepoFactory
 
@@ -740,3 +740,108 @@ def test_query_callers_reports_unsupported_coverage_gap(
     err = capsys.readouterr().err
     assert "no parser for: astro" in err
     assert "may be incomplete" in err
+
+
+# Round-08 §2.5: Java-style overloads sharing one qualname in one file
+# — `path:qualname` alone can never tell them apart, since that's
+# exactly the key they collide on. `_make_symbol` (extractor.py)
+# disambiguates the *id* with a `#N` suffix, but `qualname`/`path`
+# stay identical across every overload, which is the real repro shape.
+OVERLOADED_METHODS = {
+    "Foo.java": (
+        "class Foo {\n"
+        "    void run(int x) {\n"
+        "    }\n"
+        "\n"
+        "    void run(String x) {\n"
+        "    }\n"
+        "\n"
+        "    void run(int x, int y) {\n"
+        "    }\n"
+        "}\n"
+    ),
+}
+
+
+def test_overload_disambiguation_via_line_qualifier(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """3.2: `path:qualname:line` picks the exact overload out of a set
+    that shares (path, qualname) — the escape hatch `path:qualname`
+    alone can't provide."""
+    root = make_mapped_repo(OVERLOADED_METHODS)
+    index = mapfile.load_map(root)
+    assert index is not None
+
+    match, candidates = query.resolve_target(index, "Foo.java:Foo.run")
+    assert match is None
+    assert len(candidates) == 3
+
+    for sym in candidates:
+        target = f"Foo.java:Foo.run:{sym.start_line}"
+        resolved, _ = query.resolve_target(index, target)
+        assert resolved is not None
+        assert resolved.id == sym.id
+        assert resolved.start_line == sym.start_line
+
+
+def test_overload_line_qualifier_cli_end_to_end(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(OVERLOADED_METHODS)
+    code = cli.main(
+        ["query", "symbol", "Foo.java:Foo.run:5", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Foo.run(x: String) -> void" in out
+    assert "Foo.run(x: int) -> void" not in out
+
+
+def test_overload_stale_line_falls_back_to_ambiguous_report(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """A hand-typed/stale line number that matches zero or more than
+    one candidate must not crash or silently pick the wrong one — it
+    falls back to the ordinary ambiguous-candidates report."""
+    root = make_mapped_repo(OVERLOADED_METHODS)
+    code = cli.main(
+        ["query", "symbol", "Foo.java:Foo.run:9999", "--root", str(root)]
+    )
+    assert code == 4
+    err = capsys.readouterr().err
+    assert "is ambiguous" in err
+    assert "Foo.java:2" in err
+    assert "Foo.java:5" in err
+    assert "Foo.java:8" in err
+
+
+def test_overload_ambiguous_report_hints_line_qualifier(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """report_unresolved's hint must point at the `:LINE` form
+    specifically when every candidate shares (path, qualname) — a
+    plain `file.py:{target}` qualifier (the pre-existing truncation
+    hint) can't narrow an overload set at all."""
+    root = make_mapped_repo(OVERLOADED_METHODS)
+    code = cli.main(
+        ["query", "symbol", "Foo.java:Foo.run", "--root", str(root)]
+    )
+    assert code == 4
+    err = capsys.readouterr().err
+    assert "can't disambiguate" in err
+    assert "Foo.java:Foo.run:2" in err
+
+
+def test_ambiguous_bare_name_no_overload_hint_for_distinct_paths(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """The overload-specific hint must not fire for the ordinary
+    same-name-different-file ambiguity (TWO_FILES) — those candidates
+    don't share (path, qualname), so `file.py:target` already narrows
+    them and the line-qualifier hint would be noise."""
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(["query", "symbol", "helper", "--root", str(root)])
+    assert code == 4
+    err = capsys.readouterr().err
+    assert "can't disambiguate" not in err

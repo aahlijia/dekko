@@ -2,7 +2,12 @@
 
 Targets use the agreed syntax: bare ``name``, ``Class.method``,
 ``file.py:name``, or ``file.py:Class.method``. File qualifiers match
-on the full repo-relative path or any trailing path suffix.
+on the full repo-relative path or any trailing path suffix. When two
+or more candidates share the same ``(path, qualname)`` — Java/C++-style
+overloads — append the candidate's own ``start_line`` as a third,
+colon-separated segment (``file.py:Class.method:LINE``) to pick one;
+``report_unresolved`` prints this form in its ambiguity hint whenever
+plain ``path:qualname`` can't narrow the set.
 """
 
 import difflib
@@ -56,7 +61,10 @@ def resolve_target(
 
     Args:
         index: Loaded map index.
-        target: Bare name, qualname, or ``path:qualname`` form.
+        target: Bare name, qualname, ``path:qualname``, or
+            ``path:qualname:line`` form — the trailing ``:line`` picks
+            one candidate out of an overload set that shares the same
+            ``(path, qualname)`` (see ``_resolve_exact``).
 
     Returns:
         ``(match, candidates)``: a unique match (or ``None``) plus all
@@ -78,15 +86,41 @@ def resolve_target(
 def _resolve_exact(
     index: MapIndex, target: str
 ) -> tuple[Symbol | None, list[Symbol]]:
-    """Resolve one target reading against the documented grammar."""
-    if ":" in target:
-        path_part, _, qual = target.rpartition(":")
-        candidates = [
+    """Resolve one target reading against the documented grammar.
+
+    A target with 2+ ``:`` separators whose final segment is all
+    digits is read as ``path:qualname:line`` — the line qualifier an
+    agent copies verbatim from a candidate row printed by
+    ``report_unresolved`` to disambiguate same-file, same-qualname
+    overloads (Java/C++ overload sets, round-08 §2.5) that plain
+    ``path:qualname`` can never tell apart, since the resolution key
+    is identical across every overload. Matched by exact
+    ``start_line`` only — no fuzzy "nearest line". A stale or
+    hand-typed line number that matches zero or more than one
+    candidate is silently ignored (falls back to the unfiltered
+    ``path:qualname`` candidate pool) rather than raising a distinct
+    error, so ``report_unresolved`` handles it the same way it always
+    has.
+    """
+    line = None
+    body = target
+    if target.count(":") >= 2:
+        head, _, tail = target.rpartition(":")
+        if tail.isdigit():
+            body, line = head, int(tail)
+    if ":" in body:
+        path_part, _, qual = body.rpartition(":")
+        pool = [
             s
             for p in paths_matching(index, path_part)
             for s in index.symbols_by_path[p]
             if s.qualname == qual or s.name == qual
         ]
+        candidates = pool
+        if line is not None:
+            narrowed = [s for s in pool if s.start_line == line]
+            if len(narrowed) == 1:
+                candidates = narrowed
     else:
         # Merge both pools (deduped by id) instead of short-circuiting
         # on whichever is non-empty first: a bare name can be both a
@@ -284,6 +318,19 @@ def report_unresolved(
         more = len(ranked) - _MAX_AMBIGUOUS_CANDIDATES
         print(
             f"  … +{more} more (qualify with `file.py:{target}` to narrow)",
+            file=sys.stderr,
+        )
+    if len({(s.path, s.qualname) for s in candidates}) == 1:
+        # Every candidate shares (path, qualname) — an overload set a
+        # plain `file.py:qualname` qualifier can never narrow, since
+        # that's exactly the key they collide on. The line-number
+        # qualifier (round-08 §2.5) is the only escape hatch; point at
+        # it directly with a real candidate's own line as an example.
+        sample = ranked[0]
+        print(
+            "  … path+qualname alone can't disambiguate these (same "
+            "file, same name) — append `:LINE` from a row above, e.g. "
+            f"`{sample.path}:{sample.qualname}:{sample.start_line}`",
             file=sys.stderr,
         )
     return EXIT_AMBIGUOUS

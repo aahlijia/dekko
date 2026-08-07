@@ -19,7 +19,6 @@ don't treat the absence of a test as proof it is unaffected.
 
 import json
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -457,23 +456,16 @@ def changes(
     target_rev = rev or prov.get("git_commit") or "HEAD"
 
     old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
-    with tempfile.TemporaryDirectory(prefix="dekko-affected-") as tmp:
-        old_root = Path(tmp)
-        if not diff.export_rev(root, target_rev, old_root):
-            print(
-                f"dekko: cannot export git rev '{target_rev}' "
-                f"(unknown rev or not a git repo)",
-                file=sys.stderr,
-            )
-            return None
-        old = diff.snapshot(
-            old_root,
-            subpath,
-            excludes,
-            max_file_size,
-            cache=old_cache,
-            candidates=diff.tracked_at_rev(root, target_rev),
+    old = diff.old_snapshot(
+        root, target_rev, subpath, excludes, max_file_size, old_cache
+    )
+    if old is None:
+        print(
+            f"dekko: cannot export git rev '{target_rev}' "
+            f"(unknown rev or not a git repo)",
+            file=sys.stderr,
         )
+        return None
 
     new = diff.snapshot_new_side(root, subpath, excludes, max_file_size, index)
     result = diff.compare(target_rev, old, new)

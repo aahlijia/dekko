@@ -225,3 +225,54 @@ def test_diff_run_reuses_index_for_new_side_when_fresh(
     assert cli.main(["diff", "--root", str(root)]) == 0
     assert len(calls) == 1
     assert calls[0] != root
+
+
+def test_diff_rev_cache_hit_skips_reexport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-08 §2.6: a second ``diff`` call against the same rev must
+    reuse the cached old-side snapshot instead of paying the
+    export/tarfile-extract/re-parse cost again."""
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+    _commit_all(root, "change f")
+
+    calls: list[str] = []
+    real_export_rev = diff.export_rev
+
+    def spy(root_arg: Path, rev: str, dest: Path) -> bool:
+        calls.append(rev)
+        return real_export_rev(root_arg, rev, dest)
+
+    monkeypatch.setattr(diff, "export_rev", spy)
+
+    assert cli.main(["diff", "HEAD~1", "--root", str(root)]) == 1
+    assert len(calls) == 1  # cache miss: real export
+
+    assert cli.main(["diff", "HEAD~1", "--root", str(root)]) == 1
+    assert len(calls) == 1  # cache hit: no second export
+
+    cache_dir = root / ".dekko" / "rev-cache"
+    assert list(cache_dir.glob("*.json"))
+
+
+def test_diff_rev_cache_is_correct_not_just_fast(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The cached (second-call) snapshot must reproduce the same diff
+    result as the uncached first call — a fast-but-wrong cache would
+    be worse than none."""
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+    (root / "c.py").write_text("def h() -> int:\n    return 3\n")
+    _commit_all(root, "change f, add h")
+
+    assert cli.main(["diff", "HEAD~1", "--root", str(root), "--json"]) == 1
+    first = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["diff", "HEAD~1", "--root", str(root), "--json"]) == 1
+    second = json.loads(capsys.readouterr().out)
+
+    assert first == second
+    assert [d["id"] for d in first["changed"]] == ["a.py::f"]
+    assert [d["id"] for d in first["added"]] == ["c.py::h"]

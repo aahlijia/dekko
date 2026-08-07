@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from dekko import cli
+from dekko import mapfile
 from dekko import server
 
 from conftest import RepoFactory
@@ -130,6 +131,103 @@ def test_explicit_root_suppresses_the_default_note(
     assert result["isError"] is False
     assert "no 'root' argument was given" not in text
     assert text.startswith("f() -> int")
+
+
+def test_index_for_caches_across_calls_when_unchanged(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-08 §2.6: a warm session must not re-parse map.json on every
+    tool call — repeated calls against an unchanged map should hit the
+    in-process cache and skip ``mapfile.load_map`` entirely."""
+    root = make_mapped_repo(SRC)
+    ctx = _ctx(root)
+
+    calls = []
+    real_load_map = mapfile.load_map
+
+    def spy(root_arg: Path) -> mapfile.MapIndex | None:
+        calls.append(root_arg)
+        return real_load_map(root_arg)
+
+    monkeypatch.setattr(mapfile, "load_map", spy)
+
+    result1 = _call(ctx, "query_symbol", {"symbol": "f"})
+    assert result1["isError"] is False
+    assert len(calls) == 1  # cache miss: first call loads the map
+
+    result2 = _call(ctx, "get_callers", {"symbol": "f"})
+    assert result2["isError"] is False
+    assert len(calls) == 1  # cache hit: no second load_map call
+
+    result3 = _call(ctx, "query_symbol", {"symbol": "g"})
+    assert result3["isError"] is False
+    assert len(calls) == 1  # still cached
+
+
+def test_index_for_busts_cache_when_map_goes_stale(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cached index must never be served once the working tree has
+    actually moved on — correctness depends on ``check_freshness``
+    catching this every call, not on observing the change event. A new
+    symbol added after the first (caching) call must be invisible
+    until the cache is actually refreshed, then visible right after —
+    a weaker check (unchanged text) would pass even if invalidation
+    were silently broken."""
+    root = make_mapped_repo(SRC)
+    ctx = _ctx(root)
+
+    calls = []
+    real_load_map = mapfile.load_map
+
+    def spy(root_arg: Path) -> mapfile.MapIndex | None:
+        calls.append(root_arg)
+        return real_load_map(root_arg)
+
+    monkeypatch.setattr(mapfile, "load_map", spy)
+
+    result1 = _call(ctx, "query_symbol", {"symbol": "f"})
+    assert result1["isError"] is False
+    assert len(calls) == 1  # cache miss: populates the cache
+
+    not_yet = _call(ctx, "query_symbol", {"symbol": "brand_new"})
+    assert not_yet["isError"] is True  # cache still serving the old index
+    assert len(calls) == 1  # served from cache, no reload triggered
+
+    (root / "a.py").write_text(
+        "def f() -> int:\n    return 1\n\n\ndef brand_new() -> int:\n"
+        "    return 2\n"
+    )
+    before_refresh = len(calls)
+    result2 = _call(ctx, "query_symbol", {"symbol": "brand_new"})
+    assert result2["isError"] is False  # staleness detected, cache refreshed
+    assert len(calls) > before_refresh  # a reload actually happened
+    assert "brand_new() -> int" in result2["content"][0]["text"]
+
+    after_refresh = len(calls)
+    result3 = _call(ctx, "query_symbol", {"symbol": "brand_new"})
+    assert result3["isError"] is False
+    assert len(calls) == after_refresh  # re-cached after the refresh
+
+
+def test_index_for_caches_per_root(
+    make_mapped_repo: RepoFactory, tmp_path: Path
+) -> None:
+    """Two distinct roots must not share (or clobber) one cache entry."""
+    root_a = make_mapped_repo(SRC)
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    (other_dir / "z.py").write_text("def only_here() -> int:\n    return 1\n")
+    assert cli.main(["map", str(other_dir), "--quiet"]) == 0
+
+    ctx = server.Context(default_root=root_a, no_regen=False)
+    result_a = _call(ctx, "query_symbol", {"symbol": "f", "root": str(root_a)})
+    assert result_a["isError"] is False
+    result_b = _call(
+        ctx, "query_symbol", {"symbol": "only_here", "root": str(other_dir)}
+    )
+    assert result_b["isError"] is False
+    assert len(ctx.index_cache) == 2
 
 
 def test_get_callers_tool(make_mapped_repo: RepoFactory) -> None:

@@ -5,6 +5,12 @@ git rev, then reports which symbols were added, removed, or changed
 (their source text differs) — each with the symbols that call them, so
 a reviewer sees the blast radius. The default rev is the commit the map
 on disk was generated at; ``REV`` overrides it.
+
+The old-side snapshot (a full export + tree-sitter re-parse of ``REV``)
+is cached under ``.dekko/rev-cache/<sha>.json`` (see ``revcache.py``),
+keyed on the rev's resolved commit SHA — repeated ``diff``/``affected``
+calls against the same rev after the first reuse the cached snapshot
+instead of paying the export/re-parse cost again.
 """
 
 import hashlib
@@ -19,6 +25,7 @@ from pathlib import Path
 
 from . import cache as cache_mod
 from . import mapfile
+from . import revcache
 from . import walker
 from .model import Import, Symbol
 from .textutil import signature
@@ -191,6 +198,63 @@ def snapshot_new_side(
     if index is not None and mapfile.check_freshness(root, index).fresh:
         return snapshot_from_index(index, root)
     return snapshot(root, subpath, excludes, max_file_size)
+
+
+def old_snapshot(
+    root: Path,
+    target_rev: str,
+    subpath: str | None,
+    excludes: tuple[str, ...],
+    max_file_size: int,
+    old_cache: cache_mod.IncrementalCache,
+) -> Snapshot | None:
+    """Old-side snapshot for ``target_rev``, from the rev-cache when possible.
+
+    Shared by ``diff.run`` and ``affected.changes`` — both need the
+    identical old-side snapshot (export + re-map of a historical git
+    rev), the dominant cost of either command on a large repo (round-08
+    §2.6). ``target_rev`` is resolved to its full commit SHA first; a
+    commit's tree is immutable once it exists, so a cache hit here is
+    unconditionally safe to reuse without any freshness check (unlike
+    the working tree's own map). Falls back to the always-correct
+    export/extract/parse path — which also populates the cache for
+    next time — on a cache miss, an unresolvable SHA, or a corrupt
+    cache entry.
+
+    Args:
+        root: Repository root (the real repo, with ``.git/``).
+        target_rev: Git rev for the old side (already defaulted by the
+            caller — see ``run``/``affected.changes``).
+        subpath: Optional repo-relative subtree restriction.
+        excludes: Extra glob patterns to skip.
+        max_file_size: Size cap in bytes.
+        old_cache: Incremental extraction cache to pass through to
+            ``snapshot()`` on a rev-cache miss.
+
+    Returns:
+        The old-side ``Snapshot``, or ``None`` if ``target_rev`` cannot
+        be exported (unknown rev, not a git repo).
+    """
+    sha = revcache.resolve_sha(root, target_rev)
+    if sha is not None:
+        cached = revcache.load(root, sha)
+        if cached is not None:
+            return cached
+    with tempfile.TemporaryDirectory(prefix="dekko-diff-") as tmp:
+        old_root = Path(tmp)
+        if not export_rev(root, target_rev, old_root):
+            return None
+        old = snapshot(
+            old_root,
+            subpath,
+            excludes,
+            max_file_size,
+            cache=old_cache,
+            candidates=tracked_at_rev(root, target_rev),
+        )
+    if sha is not None:
+        revcache.save(root, sha, old)
+    return old
 
 
 def tracked_at_rev(root: Path, rev: str) -> list[str] | None:
@@ -384,23 +448,16 @@ def run(root: Path, rev: str | None, as_json: bool, limit: int) -> int:
     target_rev = rev or prov.get("git_commit") or "HEAD"
 
     old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
-    with tempfile.TemporaryDirectory(prefix="dekko-diff-") as tmp:
-        old_root = Path(tmp)
-        if not export_rev(root, target_rev, old_root):
-            print(
-                f"dekko: cannot export git rev '{target_rev}' "
-                f"(unknown rev or not a git repo)",
-                file=sys.stderr,
-            )
-            return EXIT_ERROR
-        old = snapshot(
-            old_root,
-            subpath,
-            excludes,
-            max_file_size,
-            cache=old_cache,
-            candidates=tracked_at_rev(root, target_rev),
+    old = old_snapshot(
+        root, target_rev, subpath, excludes, max_file_size, old_cache
+    )
+    if old is None:
+        print(
+            f"dekko: cannot export git rev '{target_rev}' "
+            f"(unknown rev or not a git repo)",
+            file=sys.stderr,
         )
+        return EXIT_ERROR
 
     new = snapshot_new_side(root, subpath, excludes, max_file_size, index)
     result = compare(target_rev, old, new)

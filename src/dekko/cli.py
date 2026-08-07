@@ -316,7 +316,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_query.add_argument(
         "target",
         help="symbol (name, Class.method, file.py:func), file path, or "
-        "(for uses) an external base identifier",
+        "(for uses) an external base identifier; append "
+        "':LINE' (file.py:Class.method:LINE) to pick one candidate out "
+        "of an overload set the ambiguous-candidate error reports",
     )
     p_query.add_argument(
         "--limit",

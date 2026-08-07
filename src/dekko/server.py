@@ -16,7 +16,7 @@ import json
 import sys
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any
@@ -80,10 +80,20 @@ class Context:
     Attributes:
         default_root: Root used when a tool omits ``root``.
         no_regen: Fail instead of regenerating a stale map on reads.
+        index_cache: In-process cache of the last loaded (unfiltered)
+            index per resolved root, reused across tool calls in this
+            server session. A long-lived MCP session used to pay the
+            full ``map.json`` parse + index-rebuild cost
+            (``mapfile.load_map``) on *every single* tool call, even
+            back-to-back calls against an unchanged map (round-08
+            §2.6) — this cache is checked, and only refreshed on a
+            ``mapfile.check_freshness`` miss, so a warm session skips
+            straight to the cheap freshness check instead.
     """
 
     default_root: Path
     no_regen: bool
+    index_cache: dict[Path, mapfile.MapIndex] = field(default_factory=dict)
 
 
 def _capture(fn: Callable[[], int]) -> tuple[int, str, str]:
@@ -127,23 +137,40 @@ def _index_for(
 ) -> mapfile.MapIndex:
     """Load (auto-regenerating) the map for a tool call.
 
+    Checks ``ctx.index_cache`` first: a cached index for this root that
+    ``mapfile.check_freshness`` still reports fresh is reused outright,
+    skipping ``map.json``'s JSON parse and the full symbol/call-graph
+    index rebuild — the dominant cost of a reload, per round-08 §2.6.
+    ``check_freshness`` itself still runs on every call (a cheap
+    provenance/mtime comparison, not a reload), so a map regenerated
+    out-of-band (another process, or this session's own
+    ``refresh_map``) is never served stale: correctness comes from
+    re-checking on every access, not from catching invalidation events.
+
     Args:
         ctx: Server-wide settings.
         args: The tool call's raw arguments (for ``root``).
         include_tests: When false, apply ``MapIndex.without_tests()``
             (mirrors the CLI's ``--no-tests`` flag) so test-path
             symbols, edges, and external calls are dropped before the
-            tool sees the index.
+            tool sees the index. Applied fresh on every call — the
+            cache holds only the unfiltered index, since filtering is
+            already a cheap view rebuild, not a reload.
 
     Returns:
         The loaded (optionally filtered) map index.
     """
-    from . import cli
-
     root = _root_of(ctx, args)
-    index, code = cli._load_or_regen(root, ctx.no_regen)
-    if index is None:
-        raise ToolError(f"no usable map under {root} (exit {code})")
+    cached = ctx.index_cache.get(root)
+    if cached is not None and mapfile.check_freshness(root, cached).fresh:
+        index = cached
+    else:
+        from . import cli
+
+        index, code = cli._load_or_regen(root, ctx.no_regen)
+        if index is None:
+            raise ToolError(f"no usable map under {root} (exit {code})")
+        ctx.index_cache[root] = index
     if not include_tests:
         index = index.without_tests()
     return index
@@ -557,7 +584,10 @@ _ROOT_PROP = {
 }
 _SYMBOL_PROP = {
     "type": "string",
-    "description": "Symbol: name, Class.method, or file.py:name",
+    "description": "Symbol: name, Class.method, or file.py:name. If the "
+    "reply says the target is ambiguous (an overload set sharing the "
+    "same file+name), append ':LINE' from one of the printed candidate "
+    "rows, e.g. file.py:Class.method:42, to pick that one",
 }
 _SITES_PROP = {
     "type": "boolean",
