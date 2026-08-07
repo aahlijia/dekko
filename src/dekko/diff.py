@@ -17,6 +17,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import cache as cache_mod
 from . import mapfile
 from . import walker
 from .model import Import, Symbol
@@ -87,11 +88,42 @@ def snapshot(
     subpath: str | None,
     excludes: tuple[str, ...],
     max_file_size: int,
+    cache: cache_mod.IncrementalCache | None = None,
+    candidates: list[str] | None = None,
 ) -> Snapshot:
-    """Map a tree and capture its symbols, callers, and body hashes."""
+    """Map a tree and capture its symbols, callers, and body hashes.
+
+    Args:
+        root: Directory to map.
+        subpath: Optional repo-relative subtree restriction.
+        excludes: Extra glob patterns to skip.
+        max_file_size: Size cap in bytes.
+        cache: Optional incremental extraction cache. Entries are keyed
+            on file content hash, not path, so passing the *current*
+            tree's cache in for an old-rev extraction still pays off:
+            any file whose content at the old rev is byte-identical to
+            the current tree's cached entry skips its tree-sitter parse.
+        candidates: Explicit repo-relative paths to map, bypassing
+            ``walker.discover``'s own tracked-file discovery. ``root``
+            for the old side of a diff is a plain ``git archive``
+            extraction with no ``.git/`` of its own, so discovery there
+            falls back to a bare filesystem walk that reapplies
+            ``.gitignore`` with no tracked/untracked distinction — wrong
+            for any ignore pattern that happens to match an
+            already-tracked path. Callers building the old side should
+            pass ``tracked_at_rev(root, rev)`` (queried against the
+            *real* repo, which does have ``.git/``) here instead.
+    """
     from . import cli
 
-    files, _ = cli.map_repository(root, subpath, excludes, max_file_size)
+    files, _ = cli.map_repository(
+        root,
+        subpath,
+        excludes,
+        max_file_size,
+        cache=cache,
+        candidates=candidates,
+    )
     graph = resolve(files)
     snap = Snapshot()
     for fm in files:
@@ -102,6 +134,94 @@ def snapshot(
             snap.imports[fm.path] = fm.imports
     snap.callers = graph.calls_in
     return snap
+
+
+def snapshot_from_index(index: mapfile.MapIndex, root: Path) -> Snapshot:
+    """Build a ``Snapshot`` directly from an already-loaded ``MapIndex``.
+
+    Reuses the index's symbol/caller/import tables outright instead of
+    a full tree-sitter re-parse plus ``resolve()`` pass — only each
+    symbol's body hash needs fresh work (one file read + hash, via
+    ``_body_hash``). This is the fix for the redundant-reparse
+    performance defect: ``affected.changes()``/``diff.run()`` already
+    load a fully-populated ``MapIndex`` for the current working tree
+    before ever touching ``snapshot()``; using it here instead of
+    re-parsing every file from scratch is the dominant cost saving on a
+    large repo.
+
+    Callers must confirm ``index`` is fresh against the working tree
+    first (see ``snapshot_new_side``) — a stale index's symbol table no
+    longer reflects what's on disk, and using it here would silently
+    reintroduce drift between what ``diff``/``affected`` report and
+    what actually changed.
+    """
+    snap = Snapshot()
+    snap.symbols = dict(index.symbols_by_id)
+    snap.callers = index.calls_in
+    # Match snapshot()'s own construction exactly: only files with at
+    # least one import get an entry. index.imports_by_path (loaded from
+    # map.json) has a key for every mapped file, even ones with an
+    # empty import list, so this isn't a no-op — leaving it as a plain
+    # reassignment would diverge from the "real" extraction path.
+    snap.imports = {
+        path: imports
+        for path, imports in index.imports_by_path.items()
+        if imports
+    }
+    for sym_id, sym in snap.symbols.items():
+        snap.body[sym_id] = _body_hash(root, sym)
+    return snap
+
+
+def snapshot_new_side(
+    root: Path,
+    subpath: str | None,
+    excludes: tuple[str, ...],
+    max_file_size: int,
+    index: mapfile.MapIndex | None,
+) -> Snapshot:
+    """New-side (working tree) snapshot, reusing a fresh index when possible.
+
+    Falls back to a full re-parse (``snapshot``) whenever ``index`` is
+    missing or stale against the current working tree, so the
+    performance win never comes at the cost of correctness — a caller
+    that forgot to regenerate the map first still gets an accurate
+    diff, just without the speedup.
+    """
+    if index is not None and mapfile.check_freshness(root, index).fresh:
+        return snapshot_from_index(index, root)
+    return snapshot(root, subpath, excludes, max_file_size)
+
+
+def tracked_at_rev(root: Path, rev: str) -> list[str] | None:
+    """Repo-relative paths tracked at ``rev``, or ``None`` on failure.
+
+    Queried against ``root`` (the real repository, which has ``.git/``)
+    rather than a ``git archive`` extraction of that rev — see
+    ``snapshot``'s ``candidates`` parameter for why the extraction
+    directory can't answer this question on its own.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "-z",
+                rev,
+            ],
+            capture_output=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    text = proc.stdout.decode("utf-8", errors="replace")
+    return [p for p in text.split("\0") if p]
 
 
 def _safe_extractall(tf: tarfile.TarFile, dest: Path) -> None:
@@ -263,6 +383,7 @@ def run(root: Path, rev: str | None, as_json: bool, limit: int) -> int:
     max_file_size = prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE)
     target_rev = rev or prov.get("git_commit") or "HEAD"
 
+    old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
     with tempfile.TemporaryDirectory(prefix="dekko-diff-") as tmp:
         old_root = Path(tmp)
         if not export_rev(root, target_rev, old_root):
@@ -272,9 +393,16 @@ def run(root: Path, rev: str | None, as_json: bool, limit: int) -> int:
                 file=sys.stderr,
             )
             return EXIT_ERROR
-        old = snapshot(old_root, subpath, excludes, max_file_size)
+        old = snapshot(
+            old_root,
+            subpath,
+            excludes,
+            max_file_size,
+            cache=old_cache,
+            candidates=tracked_at_rev(root, target_rev),
+        )
 
-    new = snapshot(root, subpath, excludes, max_file_size)
+    new = snapshot_new_side(root, subpath, excludes, max_file_size, index)
     result = compare(target_rev, old, new)
     render(result, as_json, limit)
     return EXIT_SAME if result.empty() else EXIT_DIFFERENT

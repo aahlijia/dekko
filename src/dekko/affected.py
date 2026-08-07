@@ -23,11 +23,12 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import cache as cache_mod
 from . import diff
 from . import mapfile
 from . import walker
 from .classify import is_test_path
-from .model import Symbol
+from .model import Import, Symbol
 from .textutil import fit_to_budget, signature
 from .resolver import _module_matches
 
@@ -138,10 +139,12 @@ def _finalize(impacts: dict[str, TestImpact]) -> list[TestImpact]:
     )
 
 
-def _import_hits(new: diff.Snapshot, changed_files: set[str]) -> set[str]:
+def _import_hits(
+    imports_by_path: dict[str, list[Import]], changed_files: set[str]
+) -> set[str]:
     """Test files whose imports resolve to any changed file."""
     hits: set[str] = set()
-    for path, imports in new.imports.items():
+    for path, imports in imports_by_path.items():
         if not is_test_path(path):
             continue
         for imp in imports:
@@ -164,7 +167,7 @@ def analyze(result: diff.DiffResult, new: diff.Snapshot) -> list[TestImpact]:
     impacts = _call_impacts(
         _changed_for_calls(result), new.callers, new.symbols
     )
-    for path in _import_hits(new, _changed_files(result)):
+    for path in _import_hits(new.imports, _changed_files(result)):
         if path not in impacts:
             impacts[path] = TestImpact(path=path, tier="import")
     return _finalize(impacts)
@@ -173,15 +176,32 @@ def analyze(result: diff.DiffResult, new: diff.Snapshot) -> list[TestImpact]:
 def impacts_from_symbol(
     index: mapfile.MapIndex, seed_ids: set[str]
 ) -> list[TestImpact]:
-    """Call-edge impacts for a static seed (no diff, no import tier).
+    """Call-edge and same-file-import impacts for a static symbol seed.
 
     Used by ``workset``'s symbol seed: walks the index's call graph back
-    from ``seed_ids`` and reports the test files reached. There is no
-    import-tier fallback (that needs a diff's changed-file set).
+    from ``seed_ids`` and reports the test files reached, same as
+    ``analyze()``'s call-edge tier. Also includes an import-tier
+    fallback for test files that import/``#include`` a seed symbol's own
+    file — the same evidence ``analyze()``'s ``_import_hits`` uses for a
+    diff's changed-file set, narrowed here to the seed symbols' files.
+    This closes a real false-negative for languages (C++ in particular)
+    whose whole-file-include model leaves same-named cross-file calls
+    unresolved as ``ambiguous`` in the resolver, never reaching
+    ``calls_in`` at all — see investigation-1.5-cpp-gtest-affected.md.
+    It is narrower than ``analyze()``'s tier (a whole diff's changed
+    files vs. one seed's own file), since a bare symbol seed has no
+    diff to draw a broader changed-file set from.
     """
-    return _finalize(
-        _call_impacts(seed_ids, index.calls_in, index.symbols_by_id)
-    )
+    impacts = _call_impacts(seed_ids, index.calls_in, index.symbols_by_id)
+    seed_files = {
+        sym.path
+        for sid in seed_ids
+        if (sym := index.symbols_by_id.get(sid)) is not None
+    }
+    for path in _import_hits(index.imports_by_path, seed_files):
+        if path not in impacts:
+            impacts[path] = TestImpact(path=path, tier="import")
+    return _finalize(impacts)
 
 
 def _impact_json(impact: TestImpact) -> dict:
@@ -220,6 +240,7 @@ def render(
     rev: str,
     as_json: bool,
     limit: int,
+    root: Path,
     budget: int | None = None,
 ) -> None:
     """Emit the impacted-test report as text or JSON."""
@@ -230,7 +251,7 @@ def render(
         doc = {
             "rev": rev,
             "impacted": entries[: len(kept_ser)],
-            "command": _pytest_hint(impacts),
+            "command": _test_hint(impacts, root),
             "meta": meter.as_dict(),
         }
         print(json.dumps(doc, indent=2))
@@ -244,40 +265,140 @@ def render(
     print(header)
     for row in kept:
         print(row)
-    hint = _pytest_hint(impacts)
+    hint = _test_hint(impacts, root)
     if hint:
         print(f"\n{hint}")
     print(meter.footer())
 
 
-# Cap on how many paths a "ready to paste" pytest invocation embeds.
-# Without this, ``_pytest_hint`` is unbounded regardless of budget —
-# a real ~1,500-impact repo embedded every path in this one line,
-# blowing a workset budget 3.6x over its stated cap (bug #6/B6). A
-# command holding hundreds/thousands of paths also stops being
-# "ready to paste" long before it stops being technically valid.
+# Cap on how many paths a "ready to paste" test-runner invocation
+# embeds per language group. Without this, the hint is unbounded
+# regardless of budget — a real ~1,500-impact repo embedded every path
+# in this one line, blowing a workset budget 3.6x over its stated cap
+# (bug #6/B6). A command holding hundreds/thousands of paths also
+# stops being "ready to paste" long before it stops being technically
+# valid.
 _MAX_HINT_PATHS = 20
 
+# Extensions grouped by their (confidently known, static) test runner.
+# Extensions not covered here get no hint line at all — silence beats
+# a wrong guess, matching the existing "no impacts -> empty string"
+# contract.
+_PY_EXTS = frozenset({".py"})
+_RUST_EXTS = frozenset({".rs"})
+_GO_EXTS = frozenset({".go"})
+_JS_EXTS = frozenset({".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"})
+_JVM_EXTS = frozenset({".java", ".kt", ".kts", ".groovy"})
 
-def _pytest_hint(impacts: list[TestImpact]) -> str:
-    """A ready-to-paste pytest invocation, or empty when none apply.
+# Lockfile -> package-manager test invocation, strongest signal first.
+_JS_LOCKFILE_RUNNERS = (
+    ("bun.lock", "bun run test"),
+    ("bun.lockb", "bun run test"),
+    ("pnpm-lock.yaml", "pnpm test"),
+    ("yarn.lock", "yarn test"),
+)
 
-    Capped at ``_MAX_HINT_PATHS`` paths; beyond the cap, the
-    remaining count is noted instead of enumerated (see module
-    docstring at ``_MAX_HINT_PATHS``).
+
+def _cap_paths(paths: list[str]) -> tuple[list[str], int]:
+    """Cap a path list at ``_MAX_HINT_PATHS``; return (shown, extra)."""
+    if len(paths) <= _MAX_HINT_PATHS:
+        return paths, 0
+    return paths[:_MAX_HINT_PATHS], len(paths) - _MAX_HINT_PATHS
+
+
+def _py_hint(paths: list[str]) -> str:
+    """A ready-to-paste ``pytest`` invocation for impacted ``.py`` files."""
+    shown, extra = _cap_paths(paths)
+    hint = "pytest " + " ".join(shown)
+    if extra:
+        hint += f"  # +{extra} more impacted test files not shown"
+    return hint
+
+
+def _named_hint(command: str, paths: list[str]) -> str:
+    """A whole-suite runner invocation, with impacted paths as a comment.
+
+    Used for runners (``cargo test``, ``go test ./...``) that don't
+    accept arbitrary source paths the way ``pytest`` does.
+    """
+    shown, extra = _cap_paths(paths)
+    names = ", ".join(shown)
+    if extra:
+        names += f", +{extra} more"
+    return f"{command}  # impacted: {names}"
+
+
+def _js_hint(root: Path) -> str:
+    """The repo's own declared JS/TS test command, or empty if unknown.
+
+    Reads ``package.json``'s ``scripts.test`` as a presence check (a
+    declared test script at all) rather than embedding its text, then
+    picks the matching package-manager invocation from the strongest
+    lockfile signal at ``root`` — this is what actually runs whatever
+    ``scripts.test`` says, correctly, for the package manager the repo
+    uses (``bun test``, `vitest`, etc. are invoked *through* it).
+    """
+    try:
+        pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+    if not isinstance(pkg, dict) or not pkg.get("scripts", {}).get("test"):
+        return ""
+    for lockfile, command in _JS_LOCKFILE_RUNNERS:
+        if (root / lockfile).is_file():
+            return command
+    return "npm test"
+
+
+def _jvm_hint(root: Path) -> str:
+    """A Gradle/Maven test invocation, or empty when neither is present."""
+    if (root / "gradlew").is_file():
+        return "./gradlew test"
+    if (root / "pom.xml").is_file():
+        return "mvn test"
+    return ""
+
+
+def _group_hint(ext: str, paths: list[str], root: Path) -> str:
+    """One language group's runner hint, or empty when none applies."""
+    if ext in _PY_EXTS:
+        return _py_hint(paths)
+    if ext in _RUST_EXTS:
+        return _named_hint("cargo test", paths)
+    if ext in _GO_EXTS:
+        return _named_hint("go test ./...", paths)
+    if ext in _JS_EXTS:
+        return _js_hint(root)
+    if ext in _JVM_EXTS:
+        return _jvm_hint(root)
+    return ""
+
+
+def _test_hint(impacts: list[TestImpact], root: Path) -> str:
+    """Ready-to-paste test-runner invocation(s), one per language group.
+
+    Impacted files are grouped by extension; each group with a
+    confidently known, static runner gets its own hint line — ``pytest``
+    for Python (byte-identical to the historical Python-only behavior),
+    ``cargo test``/``go test ./...`` for Rust/Go, the repo's own
+    declared ``package.json`` test script (run through the strongest
+    lockfile-inferred package manager) for JS/TS, and a Gradle/Maven
+    invocation for JVM languages. A group with no confident mapping is
+    silently omitted, same as today's "no impacts -> empty string"
+    contract. Each group is capped at ``_MAX_HINT_PATHS`` paths
+    independently.
     """
     if not impacts:
         return ""
-    paths = [i.path for i in impacts]
-    if len(paths) <= _MAX_HINT_PATHS:
-        return "pytest " + " ".join(paths)
-    shown = paths[:_MAX_HINT_PATHS]
-    more = len(paths) - _MAX_HINT_PATHS
-    return (
-        "pytest "
-        + " ".join(shown)
-        + f"  # +{more} more impacted test files not shown"
-    )
+    groups: dict[str, list[str]] = {}
+    for impact in impacts:
+        groups.setdefault(Path(impact.path).suffix, []).append(impact.path)
+    hints = [
+        hint
+        for ext, paths in groups.items()
+        if (hint := _group_hint(ext, paths, root))
+    ]
+    return "\n".join(hints)
 
 
 def changes(
@@ -306,6 +427,7 @@ def changes(
     max_file_size = prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE)
     target_rev = rev or prov.get("git_commit") or "HEAD"
 
+    old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
     with tempfile.TemporaryDirectory(prefix="dekko-affected-") as tmp:
         old_root = Path(tmp)
         if not diff.export_rev(root, target_rev, old_root):
@@ -315,9 +437,16 @@ def changes(
                 file=sys.stderr,
             )
             return None
-        old = diff.snapshot(old_root, subpath, excludes, max_file_size)
+        old = diff.snapshot(
+            old_root,
+            subpath,
+            excludes,
+            max_file_size,
+            cache=old_cache,
+            candidates=diff.tracked_at_rev(root, target_rev),
+        )
 
-    new = diff.snapshot(root, subpath, excludes, max_file_size)
+    new = diff.snapshot_new_side(root, subpath, excludes, max_file_size, index)
     result = diff.compare(target_rev, old, new)
     impacts = analyze(result, new)
     return impacts, result, new, target_rev
@@ -346,5 +475,5 @@ def run(
     if outcome is None:
         return EXIT_ERROR
     impacts, _result, _new, target_rev = outcome
-    render(impacts, target_rev, as_json, limit, budget)
+    render(impacts, target_rev, as_json, limit, root, budget)
     return EXIT_IMPACTED if impacts else EXIT_NONE

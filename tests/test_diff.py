@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko import cli, diff
+from dekko import cli, diff, mapfile
 
 BASE = {
     "a.py": "def f() -> int:\n    return 1\n",
@@ -137,3 +137,91 @@ def test_diff_uses_no_tar_binary(
     # No `tar` subprocess; the snapshot still comes from `git archive`.
     assert not any(c and c[0] == "tar" for c in calls)
     assert any(c[:2] == ["git", "-C"] and "archive" in c for c in calls)
+
+
+def test_diff_unaffected_by_gitignore_pattern_matching_tracked_dir(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """Investigation-1.6: an unanchored ``.gitignore`` pattern that
+    happens to match an already-tracked path must not make the
+    old-side snapshot silently drop it. ``git`` never retroactively
+    untracks a path a later ignore rule happens to match, but the
+    old-side fallback (a bare filesystem walk of the ``git archive``
+    extraction, which has no ``.git/`` to ask) can't tell tracked from
+    untracked and used to prune it anyway, surfacing as phantom
+    "added" symbols on a genuinely clean tree (awesome-go's
+    ``.github/scripts/check-*`` vs. a root ``check-*`` ignore pattern).
+    """
+    root = tmp_path
+    _git(root, "init", "-q")
+    (root / "foo-bar").mkdir()
+    (root / "foo-bar" / "main.py").write_text(
+        "def helper() -> int:\n    return 1\n"
+    )
+    _commit_all(root, "add foo-bar (tracked before any ignore rule)")
+    (root / ".gitignore").write_text("foo-*\n")
+    _commit_all(root, "add colliding ignore pattern")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+
+    assert cli.main(["diff", "--root", str(root)]) == 0
+    assert "no symbol changes" in capsys.readouterr().out
+
+
+def test_snapshot_from_index_matches_full_snapshot(tmp_path: Path) -> None:
+    """2.2: ``snapshot_from_index`` must match a full tree-sitter
+    re-parse's symbol/caller/import tables for an unchanged tree — the
+    regression guard against subtly diverging from the "real"
+    extraction path while eliminating its redundant cost."""
+    root = _repo(tmp_path, BASE)
+    index = mapfile.load_map(root)
+    assert index is not None
+
+    full = diff.snapshot(root, None, (), 1_000_000)
+    from_index = diff.snapshot_from_index(index, root)
+
+    assert set(from_index.symbols) == set(full.symbols)
+    for sym_id, sym in full.symbols.items():
+        assert from_index.symbols[sym_id].qualname == sym.qualname
+        assert from_index.symbols[sym_id].start_line == sym.start_line
+    assert from_index.callers == full.callers
+    assert from_index.body == full.body
+    assert set(from_index.imports) == set(full.imports)
+
+
+def test_snapshot_new_side_falls_back_when_index_is_stale(
+    tmp_path: Path,
+) -> None:
+    """A loaded index that predates a working-tree change must not be
+    trusted outright — ``snapshot_new_side`` should fall back to a real
+    re-parse rather than silently reporting stale symbols."""
+    root = _repo(tmp_path, BASE)
+    index = mapfile.load_map(root)
+    assert index is not None
+    (root / "c.py").write_text("def h() -> int:\n    return 3\n")
+
+    stale = diff.snapshot_from_index(index, root)
+    assert "c.py::h" not in stale.symbols  # index predates the new file
+
+    fresh = diff.snapshot_new_side(root, None, (), 1_000_000, index)
+    assert "c.py::h" in fresh.symbols  # fell back to a real re-parse
+
+
+def test_diff_run_reuses_index_for_new_side_when_fresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2.2 primary fix: with a fresh loaded index, the new (working-
+    tree) side must not pay for a second full tree-sitter re-parse —
+    only the old (git-archive) side calls the full ``snapshot()``
+    path."""
+    root = _repo(tmp_path, BASE)
+    calls: list[Path] = []
+    real_snapshot = diff.snapshot
+
+    def spy(root_arg: Path, *args: object, **kwargs: object) -> diff.Snapshot:
+        calls.append(Path(root_arg))
+        return real_snapshot(root_arg, *args, **kwargs)
+
+    monkeypatch.setattr(diff, "snapshot", spy)
+    assert cli.main(["diff", "--root", str(root)]) == 0
+    assert len(calls) == 1
+    assert calls[0] != root

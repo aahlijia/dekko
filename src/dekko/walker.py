@@ -159,6 +159,7 @@ def discover(
     subpath: str | None = None,
     excludes: tuple[str, ...] = (),
     max_file_size: int = DEFAULT_MAX_FILE_SIZE,
+    candidates: list[str] | None = None,
 ) -> tuple[list[str], list[tuple[str, str]]]:
     """Find all mappable source files under a root directory.
 
@@ -168,6 +169,15 @@ def discover(
         excludes: Extra glob patterns (matched against basenames and
             full relative paths) to skip.
         max_file_size: Files larger than this many bytes are skipped.
+        candidates: Explicit repo-relative paths to classify, bypassing
+            this function's own tracked-file discovery (``git
+            ls-files``, falling back to a bare filesystem walk). Used
+            when the caller already knows the exact file set — e.g. a
+            ``git archive`` extraction of a historical rev, where
+            ``root`` has no ``.git/`` of its own and the fallback walk
+            can't distinguish tracked from untracked paths against a
+            ``.gitignore`` pattern (see ``diff.snapshot``'s
+            ``candidates`` parameter).
 
     Returns:
         A pair ``(files, skipped)``: sorted repo-relative paths to
@@ -179,9 +189,10 @@ def discover(
         ``_classify``). Extensions dekko simply doesn't recognize at
         all (non-code files) are still omitted with no entry here.
     """
-    candidates = _git_files(root)
     if candidates is None:
-        candidates = _walk_files(root)
+        candidates = _git_files(root)
+        if candidates is None:
+            candidates = _walk_files(root)
 
     prefix = None
     if subpath:

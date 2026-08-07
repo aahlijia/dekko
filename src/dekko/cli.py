@@ -1002,6 +1002,7 @@ def map_repository(
     max_file_size: int,
     cache: cache_mod.IncrementalCache | None = None,
     jobs: int = 1,
+    candidates: list[str] | None = None,
 ) -> tuple[list[FileMap], list[tuple[str, str]]]:
     """Discover and extract every mappable file under a root.
 
@@ -1018,6 +1019,9 @@ def map_repository(
         cache: Incremental cache to reuse unchanged files from and
             record fresh extractions into, or ``None`` for a cold run.
         jobs: Worker count for extraction (1 = sequential, 0 = all cores).
+        candidates: Explicit repo-relative paths to consider, bypassing
+            ``walker.discover``'s own tracked-file discovery — see that
+            function's ``candidates`` parameter.
 
     Returns:
         ``(file_maps, skipped)`` where ``skipped`` pairs paths with
@@ -1028,6 +1032,7 @@ def map_repository(
         subpath=subpath,
         excludes=excludes,
         max_file_size=max_file_size,
+        candidates=candidates,
     )
     extracted: dict[str, FileMap] = {}
     misses: list[str] = []
