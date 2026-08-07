@@ -817,3 +817,274 @@ def test_real_ambiguity_between_two_unrelated_classes_still_ambiguous() -> (
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert edges == set()
     assert len(graph.ambiguous) == 1
+
+
+# --- Resolver fan-in noise (investigation-1.2-resolver-fanin.md) ---
+#
+# cline's ``trim``/``expect``/``describe``/``interface String`` hotspots
+# (reported fan-in 1,404/603/676/548) turned out not to be a merge bug —
+# ``_pick_candidate`` never guesses among 2+ genuinely ambiguous
+# candidates — but a false-positive *single*-candidate resolution: a
+# repo defining exactly one symbol sharing a name with a language
+# built-in/ambient global had every unrelated built-in/global call site
+# silently credited to it. These tests cover the three shapes the
+# investigation confirmed live against cline, plus regression guards
+# that legitimate same-shape resolutions are unaffected.
+
+
+def test_receiver_qualified_builtin_method_name_not_guessed() -> None:
+    # cline's headline case: exactly one repo-wide ``trim`` symbol; an
+    # unrelated call through an untyped local variable
+    # (``opts.config.trim()``) is really JS's built-in
+    # ``String.prototype.trim()``. Must not be guessed into the repo
+    # symbol's fan-in.
+    trim_fn = _fn("util.ts", "trim")
+    caller = _fn("caller.ts", "run")
+    files = [
+        FileMap("util.ts", "typescript", symbols=[trim_fn]),
+        FileMap(
+            "caller.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="opts.config.trim",
+                    name="trim",
+                    receiver="opts.config",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, trim_fn.id) not in edges
+    assert graph.calls_in.get(trim_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+
+
+def test_bare_call_to_same_file_builtin_named_function_still_resolves() -> (
+    None
+):
+    # Regression guard: the noise guard only applies to
+    # receiver-qualified calls and known ambient-global bare names — a
+    # genuinely local bare call to a same-file function sharing a
+    # built-in method name (dekko's real cline callers: bare
+    # ``trim(value)``, no receiver) must still resolve normally.
+    trim_fn = _fn("util.ts", "trim")
+    caller = _fn("util.ts", "run", line=5)
+    files = [
+        FileMap(
+            "util.ts",
+            "typescript",
+            symbols=[trim_fn, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="util.ts",
+                    text="trim",
+                    name="trim",
+                    line=6,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, trim_fn.id) in edges
+    assert graph.ambiguous == []
+
+
+def test_exact_self_receiver_builtin_named_method_still_resolves() -> None:
+    # ``this.trim()`` (bare self/this receiver, no further chain) on a
+    # class that defines its own ``trim`` method must still resolve via
+    # ``_self_container`` — the noise guard only rejects a
+    # *multi-segment* chain rooted at self/this, not a direct
+    # sibling-method call.
+    cls = FileMap(
+        path="c.ts",
+        language="typescript",
+        symbols=[
+            _fn("c.ts", "C", "C"),
+            _fn("c.ts", "trim", "C.trim", line=2),
+            _fn("c.ts", "m", "C.m", line=4),
+        ],
+        calls=[
+            RawCall(
+                caller_id="c.ts::C.m",
+                path="c.ts",
+                text="this.trim",
+                name="trim",
+                receiver="this",
+                line=5,
+            )
+        ],
+    )
+    graph = resolve([cls])
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert ("c.ts::C.m", "c.ts::C.trim") in edges
+
+
+def test_multi_segment_self_chain_builtin_call_not_guessed() -> None:
+    # A property chain merely rooted at ``this``
+    # (``this.options.value.trim()``) is a value access, not a
+    # sibling-method call — must not be exempted from the noise guard
+    # just because the chain's first token is ``this``. Confirmed live
+    # against cline's ``this.options.authToken?.trim()``.
+    trim_fn = _fn("util.ts", "trim")
+    cls = _fn("c.ts", "C", "C")
+    caller = Symbol(
+        id="c.ts::C.m",
+        name="m",
+        qualname="C.m",
+        kind="method",
+        path="c.ts",
+        language="typescript",
+    )
+    files = [
+        FileMap("util.ts", "typescript", symbols=[trim_fn]),
+        FileMap(
+            "c.ts",
+            "typescript",
+            symbols=[cls, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="c.ts",
+                    text="this.options.value.trim",
+                    name="trim",
+                    receiver="this.options.value",
+                    line=6,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, trim_fn.id) not in edges
+
+
+def test_bare_call_shadowed_by_external_import_not_guessed() -> None:
+    # A file explicitly imports ``expect`` from an external package
+    # (e.g. vitest); a bare ``expect(...)`` call there always means the
+    # import, never an unrelated same-named repo shim the bare-name
+    # index happens to find.
+    shim = _fn("test-setup.js", "expect")
+    caller = _fn("spec.js", "run")
+    files = [
+        FileMap("test-setup.js", "javascript", symbols=[shim]),
+        FileMap(
+            "spec.js",
+            "javascript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="spec.js",
+                    text="expect",
+                    name="expect",
+                    line=3,
+                )
+            ],
+            imports=[
+                Import(path="spec.js", name="expect", source="vitest"),
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, shim.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_bare_call_to_ambient_global_name_not_guessed_without_import() -> None:
+    # Vitest/jest-style ``globals: true`` injects ``describe``/
+    # ``expect``/etc. with no explicit import at all — the noise guard
+    # must still reject the single-candidate guess from the name alone.
+    local = _fn("helpers.ts", "describe")
+    caller = _fn("spec.ts", "run")
+    files = [
+        FileMap("helpers.ts", "typescript", symbols=[local]),
+        FileMap(
+            "spec.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="spec.ts",
+                    text="describe",
+                    name="describe",
+                    line=3,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, local.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_bare_call_to_global_type_name_not_guessed() -> None:
+    # A TS ``declare global { interface String { ... } }`` augmentation
+    # is not a real callable definition; a bare ``String(x)`` call
+    # elsewhere means the JS global cast/constructor, never that
+    # augmentation symbol. Confirmed live against cline: ``interface
+    # String`` was credited with 548 calls that were actually
+    # ``String(...)`` casts.
+    aug = _fn("path.ts", "String", "String")
+    caller = _fn("caller.ts", "run")
+    files = [
+        FileMap("path.ts", "typescript", symbols=[aug]),
+        FileMap(
+            "caller.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="String",
+                    name="String",
+                    line=3,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, aug.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_reference_resolution_unaffected_by_noise_guard() -> None:
+    # ``_pick_candidate``'s ``repo_stems`` gate is only threaded from
+    # ``_resolve_call`` — ``resolve_refs()``/``_resolve_ref`` never
+    # passes it, so a bare-value *reference* (not a call) to a
+    # noise-listed name resolves exactly as it did before this fix; the
+    # fan-in bug this pass targets never affected the separate
+    # ``referenced``/``referenced_in`` tables.
+    local = _fn("helpers.ts", "describe")
+    caller = _fn("spec.ts", "run")
+    files = [
+        FileMap("helpers.ts", "typescript", symbols=[local]),
+        FileMap(
+            "spec.ts",
+            "typescript",
+            symbols=[caller],
+            refs=[
+                RawRef(
+                    caller_id=caller.id,
+                    path="spec.ts",
+                    name="describe",
+                    line=3,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    ref_edges = {(e.caller, e.callee) for e in graph.referenced}
+    assert (caller.id, local.id) in ref_edges

@@ -36,6 +36,21 @@ via ``resolve_refs()``, but land in a wholly separate ``referenced``/
 reference is simply dropped rather than recorded as ambiguous — there
 is no "ambiguous references" concept, mirroring how an unresolved call
 already falls through to ``external`` with nothing further tracked.
+
+The "unique repo-wide name match" step (``_pick_candidate``'s
+``len(candidates) == 1`` fast path) is skipped in favor of ambiguous
+when the call looks like a built-in/global rather than a genuine
+repo-symbol reference — see ``_is_noise_call``. Without this guard, a
+repo that happens to define exactly one symbol sharing a name with a
+language built-in or ambient global (``trim``, ``expect``,
+``describe``, a TS ``declare global`` augmentation of ``String``, ...)
+had every unrelated built-in/global call site silently credited to
+that one symbol's fan-in, since nothing else in the ladder ever
+disambiguates a bare-name call with no receiver or an untyped
+receiver. Confirmed live against cline: a same-file-only helper
+literally named ``trim`` (true fan-in 8) was reported at fan-in 1,404,
+almost entirely misattributed ``String.prototype.trim()`` calls — see
+``test-repos/reports/investigation-1.2-resolver-fanin.md``.
 """
 
 import re
@@ -247,6 +262,7 @@ def _resolve_call(
         file_imports,
         symbols_by_id.get(call.caller_id or ""),
         by_name_path,
+        repo_stems,
     )
     if target is not None:
         _add_call_and_constructor(
@@ -316,6 +332,7 @@ def _pick_candidate(
     file_imports: dict[str, Import],
     caller: Symbol | None,
     by_name_path: dict[tuple[str, str], list[Symbol]],
+    repo_stems: set[str] | None = None,
 ) -> Symbol | None:
     """Apply the resolution ladder; ``None`` means ambiguous.
 
@@ -326,6 +343,12 @@ def _pick_candidate(
     ``same_file`` is the pre-bucketed list of like-named symbols in the
     calling file, so the same-file and container steps avoid rescanning
     every repo-wide candidate for a common name.
+
+    ``repo_stems`` gates the built-in/global-name noise check (see
+    ``_is_noise_call``) — only ``_resolve_call`` passes it, so
+    ``_resolve_ref``'s reference resolution (a separate table from
+    ``calls_in``/fan-in, not affected by the bug this check targets)
+    is left byte-for-byte unchanged.
     """
     container = _self_container(call, caller)
     if container is not None:
@@ -345,6 +368,11 @@ def _pick_candidate(
     if hinted is not None:
         return hinted
 
+    if repo_stems is not None and _is_noise_call(
+        call, file_imports, repo_stems
+    ):
+        return None
+
     if len(candidates) == 1:
         return candidates[0]
 
@@ -354,6 +382,129 @@ def _pick_candidate(
             return pair
 
     return None
+
+
+# Well-known JS/TS global constructor/type/cast names (``String(x)``,
+# ``Array.isArray``-shaped bare calls) and ambient test-framework
+# globals (vitest/jest/mocha, commonly injected without an explicit
+# import via ``globals: true``) — a same-named free function/shim a
+# repo happens to define is essentially never what a *bare* call to
+# one of these names means. See
+# ``test-repos/reports/investigation-1.2-resolver-fanin.md``: cline's
+# ``interface String`` (a TS ``declare global`` augmentation, not a
+# real definition) was credited with 548 calls that were actually
+# ``String(...)`` casts; its ``expect``/``describe`` hotspots were an
+# unrelated local shim/helper credited with calls actually aimed at
+# vitest's globals.
+_AMBIENT_GLOBAL_NAMES = frozenset(
+    {
+        "String", "Number", "Boolean", "Array", "Object", "Symbol",
+        "Promise", "Map", "Set", "Date", "RegExp", "Error", "JSON",
+        "Math",
+        "expect", "describe", "it", "test", "beforeEach", "afterEach",
+        "beforeAll", "afterAll",
+    }
+)  # fmt: skip
+
+# Well-known String/Array/Object prototype method names. When a
+# *receiver-qualified* call reaches this point in the ladder, every
+# receiver-aware disambiguation step (self/this, typed parameter,
+# same-file, import hint) has already had its shot and failed — the
+# only remaining "evidence" for the single-candidate fast path is
+# "this name happens to be otherwise unique in the repo," which is
+# false for these names precisely because they are called constantly
+# on ordinary local variables (``opts.config.trim()``) that are never
+# provably typed as the repo's own like-named class. See the same
+# investigation report: cline's ``trim`` (fan-in 1,404, true fan-in 8)
+# was almost entirely misattributed ``String.prototype.trim()`` calls.
+_BUILTIN_METHOD_NAMES = frozenset(
+    {
+        "trim", "trimStart", "trimEnd", "toString", "valueOf",
+        "toLowerCase", "toUpperCase", "includes", "indexOf", "slice",
+        "splice", "concat", "join", "push", "pop", "shift", "unshift",
+        "forEach", "map", "filter", "reduce", "startsWith", "endsWith",
+        "padStart", "padEnd", "repeat", "charAt", "substring",
+        "replace", "replaceAll", "split", "flat", "hasOwnProperty",
+    }
+)  # fmt: skip
+
+
+def _is_noise_call(
+    call: _Referable,
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+) -> bool:
+    """Whether this call is likely a built-in/global, not a repo symbol.
+
+    Checked right before the single-/pair-candidate fast paths in
+    ``_pick_candidate`` — after every receiver-aware disambiguation
+    step has already failed to find real evidence, this rejects the
+    "it happens to be the only same-named repo symbol" guess for
+    names strongly associated with language built-ins or ambient
+    globals, in favor of leaving the call ambiguous/unresolved rather
+    than silently inflating an unrelated symbol's fan-in.
+
+    Args:
+        call: The raw call or reference being resolved.
+        file_imports: Local name to import record for the calling
+            file.
+        repo_stems: Every repo file's matching stem (see
+            ``_repo_stem``), used to tell an external import from a
+            same-repo one.
+
+    Returns:
+        True when the call should be treated as noise rather than
+        resolved via the single-candidate fast path.
+    """
+    if _shadowed_by_external_import(call, file_imports, repo_stems):
+        return True
+    if not call.receiver:
+        return call.name in _AMBIENT_GLOBAL_NAMES
+    # An *exact* self/this receiver (no further chain) is the shape
+    # ``_self_container`` already resolves when the class defines a
+    # like-named method; a multi-segment chain rooted at self/this
+    # (``this.options.authToken.trim()``) is a property/value access,
+    # not a sibling-method call, and must not be exempted here — the
+    # `receiver` text is the raw expression before the final call, so
+    # only an exact match is the single-token shape `_self_container`
+    # itself checks.
+    if call.receiver in _SELF_RECEIVERS:
+        return False
+    return call.name in _BUILTIN_METHOD_NAMES
+
+
+def _shadowed_by_external_import(
+    call: _Referable,
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+) -> bool:
+    """Whether a bare (no-receiver) call's own name is a local import.
+
+    ``expect(...)`` in a file that does ``import { expect } from
+    "vitest"`` always means the imported ``expect`` — JS/TS lexical
+    scoping means an import binding shadows every other same-named
+    thing in that file, including an unrelated repo symbol the
+    bare-name index happens to find. Restricted to receiver-less calls
+    since an import only binds the identifier itself, not an arbitrary
+    method name reached through some other receiver.
+
+    Args:
+        call: The raw call or reference being resolved.
+        file_imports: Local name to import record for the calling
+            file.
+        repo_stems: Every repo file's matching stem, used to tell an
+            external import from a same-repo one.
+
+    Returns:
+        True when ``call.name`` is imported in this file from a
+        source matching no file in the repo.
+    """
+    if call.receiver:
+        return False
+    imp = file_imports.get(call.name)
+    if imp is None:
+        return False
+    return not (_import_segments(imp.source) & repo_stems)
 
 
 # Type-annotation tokens that never name the receiver's own class —

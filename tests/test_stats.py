@@ -44,6 +44,41 @@ def test_stats_json_shape_and_hotspot(
     assert langs["python"]["files"] == 2
 
 
+def test_hotspots_exclude_noise_names() -> None:
+    # A symbol named ``String``/``expect``/etc. must never surface in
+    # a fan-in/fan-out ranking, even with a very high adjacency count
+    # — see investigation-1.2-resolver-fanin.md: these names collide
+    # with JS/TS built-ins/globals often enough that even after the
+    # resolver-level fix, a residual high count here is still a red
+    # flag, not a real hotspot worth surfacing.
+    from dekko.mapfile import MapIndex
+    from dekko.model import Symbol
+
+    idx = MapIndex(root_label="t")
+
+    def _add(sym_id: str, name: str) -> Symbol:
+        sym = Symbol(
+            id=sym_id,
+            name=name,
+            qualname=name,
+            kind="function",
+            path="a.ts",
+            language="typescript",
+        )
+        idx.symbols_by_id[sym.id] = sym
+        return sym
+
+    noisy = _add("a.ts::String", "String")
+    real = _add("a.ts::realHelper", "realHelper")
+    idx.calls_in[noisy.id] = [f"caller{i}" for i in range(500)]
+    idx.calls_in[real.id] = ["caller0", "caller1"]
+
+    doc = stats.compute(idx, top=10)
+    ids = [row["id"] for row in doc["top_fan_in"]]
+    assert noisy.id not in ids
+    assert real.id in ids
+
+
 def test_largest_files_ranking() -> None:
     from dekko.mapfile import MapIndex
     from dekko.model import Symbol
