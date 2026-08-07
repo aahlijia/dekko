@@ -47,7 +47,7 @@ from . import walker
 from . import workset as workset_mod
 from .extractor import extract_file
 from .extractor_generic import extract_file_generic
-from .model import TYPE_KINDS, FileMap
+from .model import TYPE_KINDS, CallGraph, FileMap
 from .render_json import render_json
 from .resolver import resolve
 
@@ -110,6 +110,12 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         "--claude-uninstall",
         action="store_true",
         help="remove the dekko plugin from Claude Code",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --claude-install/--claude-uninstall, print the "
+        "command(s) that would run instead of running them",
     )
     parser.add_argument(
         "--mcp-install",
@@ -764,9 +770,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_summary.add_argument(
         "--budget",
         type=int,
-        default=None,
+        default=summary.DEFAULT_BUDGET,
         metavar="TOKENS",
-        help="approximate token cap; trailing sections are shed to fit",
+        help="approximate token cap; trailing sections are shed to fit "
+        f"(default: {summary.DEFAULT_BUDGET})",
     )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
@@ -872,7 +879,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="only notes whose symbol is no longer in the map",
     )
-    p_note_rm = note_sub.add_parser("rm", help="remove a note from a symbol")
+    p_note_rm = note_sub.add_parser(
+        "rm", aliases=["remove"], help="remove a note from a symbol"
+    )
     p_note_rm.add_argument(
         "target", help="symbol (name, Class.method, file.py:func)"
     )
@@ -1224,8 +1233,12 @@ def _claude_exe() -> str | None:
     return exe
 
 
-def claude_install() -> int:
+def claude_install(dry_run: bool = False) -> int:
     """Register the bundled plugin with the Claude Code CLI.
+
+    Args:
+        dry_run: Print the command(s) that would run instead of running
+            them; leaves Claude Code's config untouched.
 
     Returns:
         Process exit code.
@@ -1241,6 +1254,12 @@ def claude_install() -> int:
             file=sys.stderr,
         )
         return 1
+
+    if dry_run:
+        print("dekko: --dry-run, would run:")
+        print(f"  {exe} plugin marketplace add {plugin_dir}")
+        print(f"  {exe} plugin install dekko@dekko")
+        return 0
 
     added = _run_subprocess(
         [exe, "plugin", "marketplace", "add", str(plugin_dir)]
@@ -1265,7 +1284,7 @@ def claude_install() -> int:
     return 0
 
 
-def claude_uninstall() -> int:
+def claude_uninstall(dry_run: bool = False) -> int:
     """Remove the bundled plugin from the Claude Code CLI.
 
     Reverses :func:`claude_install`: uninstalls the ``dekko`` plugin and
@@ -1273,12 +1292,25 @@ def claude_uninstall() -> int:
     marketplace is already absent is surfaced as a warning rather than a
     failure, so the command is safe to run on a partial install.
 
+    Args:
+        dry_run: Print the command(s) that would run instead of running
+            them; leaves Claude Code's config untouched.
+
     Returns:
         Process exit code (``1`` only when the ``claude`` CLI is missing).
     """
     exe = _claude_exe()
     if exe is None:
         return 1
+
+    if dry_run:
+        print("dekko: --dry-run, would run:")
+        for cmd in (
+            [exe, "plugin", "uninstall", "dekko@dekko"],
+            [exe, "plugin", "marketplace", "remove", "dekko"],
+        ):
+            print(f"  {' '.join(cmd)}")
+        return 0
 
     for cmd in (
         [exe, "plugin", "uninstall", "dekko@dekko"],
@@ -1504,20 +1536,11 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
     )
     outputs += _write_pages(md_path, pages)
     if not args.no_json:
-        provenance = mapfile.compute_provenance(
-            root,
-            [fm.path for fm in files],
-            subpath=args.subpath,
-            excludes=tuple(args.exclude),
-            max_file_size=args.max_file_size,
-            skipped=skipped,
+        outputs.append(
+            _write_json_output(
+                root, args, files, graph, label, json_path, skipped
+            )
         )
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        json_path.write_text(
-            render_json(files, graph, label, provenance),
-            encoding="utf-8",
-        )
-        outputs.append(json_path)
 
     if cache is not None:
         cache_mod.save(root, cache)
@@ -1534,6 +1557,57 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
             )
         )
     return 0
+
+
+def _write_json_output(
+    root: Path,
+    args: argparse.Namespace,
+    files: list[FileMap],
+    graph: CallGraph,
+    label: str,
+    json_path: Path,
+    skipped: list[tuple[str, str]],
+) -> Path:
+    """Write ``map.json`` (and its provenance sidecar) for a map run.
+
+    Split out of ``run_map`` to keep it under the complexity budget.
+
+    The sidecar is written only when this run's ``json_path`` is the
+    canonical ``.dekko/map.json`` location — the fixed path
+    ``load_map``/``check_freshness``/``load_provenance`` always read,
+    regardless of ``--output``. A custom ``--output``/``--json-output``
+    run doesn't touch that canonical file, so writing the sidecar then
+    would desync it from whatever map.json (if any) is still sitting
+    at the canonical path.
+
+    Args:
+        root: Repository root.
+        args: Parsed ``dekko map`` arguments.
+        files: This run's extraction results.
+        graph: Resolved call graph.
+        label: Display label of the mapped root.
+        json_path: Resolved output path for ``map.json``.
+        skipped: ``(path, reason)`` pairs from discovery.
+
+    Returns:
+        ``json_path``, for the caller's ``outputs`` list.
+    """
+    provenance = mapfile.compute_provenance(
+        root,
+        [fm.path for fm in files],
+        subpath=args.subpath,
+        excludes=tuple(args.exclude),
+        max_file_size=args.max_file_size,
+        skipped=skipped,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        render_json(files, graph, label, provenance),
+        encoding="utf-8",
+    )
+    if json_path == root / cache_mod.CACHE_DIR / "map.json":
+        mapfile.write_provenance_sidecar(root, provenance)
+    return json_path
 
 
 def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
@@ -1886,7 +1960,7 @@ def run_note(args: argparse.Namespace) -> int:
     """Handle ``dekko note add|list|rm``."""
     if args.note_action == "add":
         return _note_add(args)
-    if args.note_action == "rm":
+    if args.note_action in ("rm", "remove"):
         return _note_rm(args)
     return _note_list(args)
 
@@ -1988,21 +2062,35 @@ def run_serve(args: argparse.Namespace) -> int:
 
 
 def run_status(args: argparse.Namespace) -> int:
-    """Handle ``dekko status`` (never regenerates)."""
-    root = Path(args.root).resolve()
-    index = mapfile.load_map(root)
-    if index is None:
-        if args.as_json:
-            print(json.dumps({"status": "missing"}))
-        else:
-            print(
-                f"dekko: no map.json under {root} - run `dekko map`",
-                file=sys.stderr,
-            )
-        return 1
+    """Handle ``dekko status`` (never regenerates).
 
-    fresh = mapfile.check_freshness(root, index)
-    unsupported = (index.provenance or {}).get("unsupported")
+    Reads only the small provenance sidecar (``mapfile.
+    load_provenance``) rather than the full ``map.json`` — this
+    command only ever needs the freshness stamp, not the parsed
+    symbol/call graph other read commands pay to build. Falls back to
+    a full ``mapfile.load_map`` for maps written before the sidecar
+    existed (or with a missing/corrupt one), matching its prior
+    behavior exactly.
+    """
+    root = Path(args.root).resolve()
+    prov = mapfile.load_provenance(root)
+    if prov is not None:
+        fresh = mapfile.check_freshness_provenance(root, prov)
+    else:
+        index = mapfile.load_map(root)
+        if index is None:
+            if args.as_json:
+                print(json.dumps({"status": "missing"}))
+            else:
+                print(
+                    f"dekko: no map.json under {root} - run `dekko map`",
+                    file=sys.stderr,
+                )
+            return 1
+        fresh = mapfile.check_freshness(root, index)
+        prov = index.provenance
+
+    unsupported = (prov or {}).get("unsupported")
     if args.as_json:
         doc = {
             "status": "fresh" if fresh.fresh else "stale",
@@ -2016,10 +2104,10 @@ def run_status(args: argparse.Namespace) -> int:
         return 0 if fresh.fresh else 1
 
     if fresh.fresh:
-        _print_fresh_status(index.provenance)
+        _print_fresh_status(prov)
         return 0
 
-    _print_stale_status(fresh, index.provenance)
+    _print_stale_status(fresh, prov)
     return 1
 
 
@@ -2075,10 +2163,10 @@ def _legacy_main(args_list: list[str]) -> int:
     args = parser.parse_args(args_list)
 
     if args.claude_install:
-        return claude_install()
+        return claude_install(dry_run=args.dry_run)
 
     if args.claude_uninstall:
-        return claude_uninstall()
+        return claude_uninstall(dry_run=args.dry_run)
 
     if args.mcp_install:
         return mcp_install()

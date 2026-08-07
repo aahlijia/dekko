@@ -56,6 +56,10 @@ search = ["numpy>=1.24"]
 # grammar pack, which downloads grammars on demand. `pip install
 # dekko[all]` to enable them.
 all = ["tree-sitter-language-pack>=0.6"]
+# Faster JSON parse/serialize for map.json (up to hundreds of MB on
+# large repos) and the per-file extraction cache. Optional: without
+# it, dekko falls back to the stdlib json module.
+fastjson = ["orjson>=3.9"]
 
 [project.urls]
 Homepage = "https://github.com/aahlijia/dekko"

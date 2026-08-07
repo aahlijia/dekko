@@ -236,6 +236,21 @@ def test_cli_budget_caps_text_and_footers(
     assert "entrypoints:" not in out  # trailing sections shed first
 
 
+def test_cli_summary_applies_default_budget_without_flag(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # 2.3 item 2: the bare CLI used to default `--budget` to `None`
+    # (unbounded), the one surface `orient`'s own default cap didn't
+    # reach. A live budget (even one generous enough not to truncate
+    # this small fixture) always prints a token-count footer line, so
+    # its presence proves a cap is now applied by default.
+    root = make_mapped_repo(SRC)
+    assert _summary(root) == 0
+    out = capsys.readouterr().out
+    assert "tokens" in out.splitlines()[-1]
+    assert "entrypoints:" in out  # small fixture: nothing actually shed
+
+
 def test_mcp_summary_tool_applies_default_budget(
     make_mapped_repo: RepoFactory,
 ) -> None:

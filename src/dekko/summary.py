@@ -34,6 +34,15 @@ _MAX_PARSE_ERRORS = 15
 _NON_ENTRYPOINT_KINDS = TYPE_KINDS | {"variable"}
 # How far back churn is measured for the risk view.
 _CHURN_WINDOW_DAYS = 90
+# 2.3 item 2: bare-CLI default token cap. `summary` is meant to be a
+# fuller digest than `orient`'s 1500-token preamble+digest, so this is
+# deliberately larger — big enough to hold every section on a typical
+# repo, small enough that an uncapped-by-accident future addition can't
+# silently blow up an agent's context the way the pre-fix parse-errors
+# list did (see `_MAX_PARSE_ERRORS` above). An explicit `--budget N`
+# (any size) always overrides this default, same escape hatch `orient`
+# already offers for its own default.
+DEFAULT_BUDGET = 5000
 
 
 def _id_dir(sym_id: str) -> str:

@@ -222,6 +222,37 @@ def test_output_as_file_renames_json_sibling(tmp_path: Path) -> None:
     assert (tmp_path / "docs" / "codemap.json").is_file()
 
 
+def test_map_writes_provenance_sidecar_at_canonical_path(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n")
+    assert cli.main(["--map", str(tmp_path), "--quiet"]) == 0
+    sidecar = tmp_path / ".dekko" / "provenance.json"
+    assert sidecar.is_file()
+    doc = json.loads(sidecar.read_text())
+    map_doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert doc["provenance"] == map_doc["provenance"]
+    assert doc["map_stat"]
+
+
+def test_custom_output_does_not_write_canonical_sidecar(
+    tmp_path: Path,
+) -> None:
+    # A --output run doesn't touch the canonical .dekko/map.json, so
+    # writing .dekko/provenance.json alongside a map written somewhere
+    # else would desync it from whatever (if anything) actually lives
+    # at the canonical path status/query/etc. always read from.
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    assert (
+        cli.main(["--map", str(tmp_path), "--output", str(out_dir), "--quiet"])
+        == 0
+    )
+    assert (out_dir / "map.json").is_file()
+    assert not (tmp_path / ".dekko" / "provenance.json").exists()
+
+
 def test_resolve_outputs_defaults(tmp_path: Path) -> None:
     md, js = cli.resolve_outputs(tmp_path, None, None)
     assert md == tmp_path / ".dekko" / "MAP.md"
@@ -291,6 +322,96 @@ def test_mcp_uninstall_requires_claude_cli(
     monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
     assert cli.mcp_uninstall() == 1
     assert "claude" in capsys.readouterr().err
+
+
+def test_claude_install_dry_run_prints_commands_without_running(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/bin/claude")
+    plugin_dir = tmp_path / "_plugin"
+    (plugin_dir / ".claude-plugin").mkdir(parents=True)
+    monkeypatch.setattr(cli, "_pkg_files", lambda _pkg: tmp_path)
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "_run_subprocess", lambda cmd: calls.append(cmd))
+
+    assert cli.claude_install(dry_run=True) == 0
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "would run" in out
+    assert "plugin marketplace add" in out
+    assert "plugin install dekko@dekko" in out
+
+
+def test_claude_uninstall_dry_run_prints_commands_without_running(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/bin/claude")
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "_run_subprocess", lambda cmd: calls.append(cmd))
+
+    assert cli.claude_uninstall(dry_run=True) == 0
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "would run" in out
+    assert "plugin uninstall dekko@dekko" in out
+    assert "plugin marketplace remove dekko" in out
+
+
+def test_claude_install_no_dry_run_runs_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/bin/claude")
+    plugin_dir = tmp_path / "_plugin"
+    (plugin_dir / ".claude-plugin").mkdir(parents=True)
+    monkeypatch.setattr(cli, "_pkg_files", lambda _pkg: tmp_path)
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str]) -> subprocess.CompletedProcess:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(cli, "_run_subprocess", fake_run)
+
+    assert cli.claude_install() == 0
+    assert [
+        "/usr/bin/claude",
+        "plugin",
+        "marketplace",
+        "add",
+        str(plugin_dir),
+    ] in calls
+    assert [
+        "/usr/bin/claude",
+        "plugin",
+        "install",
+        "dekko@dekko",
+    ] in calls
+    assert "installed" in capsys.readouterr().out
+
+
+def test_legacy_parser_dry_run_wired_to_claude_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/bin/claude")
+    plugin_dir = tmp_path / "_plugin"
+    (plugin_dir / ".claude-plugin").mkdir(parents=True)
+    monkeypatch.setattr(cli, "_pkg_files", lambda _pkg: tmp_path)
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "_run_subprocess", lambda cmd: calls.append(cmd))
+
+    assert cli.main(["--claude-install", "--dry-run"]) == 0
+    assert calls == []
+    assert "would run" in capsys.readouterr().out
 
 
 def test_mcp_uninstall_removes_server(

@@ -21,10 +21,40 @@ from .classify import is_test_path
 from .languages import spec_fingerprint
 from .model import CallGraph, ExternalCall, FileMap, Import, Param, Symbol
 
+try:
+    import orjson
+except ImportError:  # pragma: no cover - exercised in stdlib-only envs
+    orjson = None  # type: ignore[assignment]
+
 MAP_DOC_VERSION = 4
 _MAP_DIR = ".dekko"
 _BASE_SPLIT = re.compile(r"::|\.|->|/")
 _UNSUPPORTED_PREFIX = "no parser ("
+_VENDORED_PREFIX = "vendored ("
+_PROVENANCE_FILE = "provenance.json"
+
+
+def _json_loads(data: bytes) -> object:
+    """Parse JSON bytes, preferring ``orjson`` (2-10x faster) when
+    installed (the ``dekko[fastjson]`` extra); falls back to stdlib
+    ``json`` otherwise. Both raise a ``ValueError`` subclass on bad
+    input, so callers can catch ``ValueError`` uniformly regardless of
+    which backend is active.
+    """
+    if orjson is not None:
+        return orjson.loads(data)
+    return json.loads(data)
+
+
+def _json_dumps(obj: object) -> bytes:
+    """Serialize to compact JSON bytes, preferring ``orjson`` when
+    installed; falls back to stdlib ``json``. Used for machine-only
+    files (the provenance sidecar) where human-readable indentation
+    doesn't matter.
+    """
+    if orjson is not None:
+        return orjson.dumps(obj)
+    return json.dumps(obj).encode("utf-8")
 
 
 def _unsupported_summary(
@@ -61,29 +91,84 @@ def _unsupported_summary(
     }
 
 
-def format_unsupported(provenance: dict | None) -> str | None:
-    """One-line coverage note from a provenance dict's ``unsupported``.
+def _vendored_summary(
+    skipped: list[tuple[str, str]] | None,
+) -> dict | None:
+    """Aggregate ``walker.discover``'s ``"vendored (<dir>)"`` reasons.
 
-    Shared by ``dekko status``, ``map_status``, and the CLI build
-    summary so the wording is identical everywhere a caller might see
-    it.
+    Mirrors ``_unsupported_summary`` but for files skipped solely
+    because they live under a default-excluded directory that
+    occasionally holds first-party code (``node_modules``, ``vendor``,
+    ``third_party``, ``target``, ``dist``, ``build`` — see
+    ``walker._VENDORED_DIRS``), as opposed to VCS metadata/tool caches
+    (``walker._NOISE_DIRS``) where silence is correct and
+    ``walker.discover`` never even records a skip entry.
+
+    Args:
+        skipped: ``(path, reason)`` pairs from ``walker.discover``.
+
+    Returns:
+        ``{"count": N, "dirs": {name: N, ...}}``, or ``None`` when
+        there is nothing to report.
+    """
+    if not skipped:
+        return None
+    by_dir: Counter[str] = Counter()
+    for _, reason in skipped:
+        if reason.startswith(_VENDORED_PREFIX) and reason.endswith(")"):
+            by_dir[reason[len(_VENDORED_PREFIX) : -1]] += 1
+    if not by_dir:
+        return None
+    return {
+        "count": sum(by_dir.values()),
+        "dirs": dict(sorted(by_dir.items())),
+    }
+
+
+def format_unsupported(provenance: dict | None) -> str | None:
+    """Coverage note(s) from a provenance dict's skip aggregates.
+
+    Combines two independent coverage gaps into one caller-facing
+    note, each included only when present: confirmed-unsupported
+    languages (``provenance["unsupported"]``) and files skipped only
+    because they live under a default-excluded directory that
+    sometimes holds first-party code
+    (``provenance["vendored_excluded"]`` — e.g. tensorflow's
+    ``third_party/xla``). Shared by ``dekko status``, ``map_status``,
+    ``dekko summary``, and ``query``'s not-found/ambiguous replies so
+    the wording is identical everywhere a caller might see it.
 
     Args:
         provenance: A map's provenance dict, or ``None``.
 
     Returns:
-        E.g. ``"12 files unparsed — no parser for: astro (12)"``, or
-        ``None`` when there is nothing to report.
+        E.g. ``"12 files unparsed — no parser for: astro (12)"``,
+        both notes joined by a newline when both apply, or ``None``
+        when there is nothing to report.
     """
     if not provenance:
         return None
+    parts: list[str] = []
     unsupported = provenance.get("unsupported")
-    if not unsupported:
+    if unsupported:
+        by_lang = unsupported.get("languages", {})
+        detail = ", ".join(f"{lang} ({n})" for lang, n in by_lang.items())
+        count = unsupported.get("count", 0)
+        parts.append(f"{count} files unparsed — no parser for: {detail}")
+    vendored = provenance.get("vendored_excluded")
+    if vendored:
+        by_dir = vendored.get("dirs", {})
+        detail = ", ".join(f"{name} ({n})" for name, n in by_dir.items())
+        count = vendored.get("count", 0)
+        parts.append(
+            f"{count} files under default-excluded directories "
+            f"({detail}) were not mapped — pass --exclude '' or a "
+            "narrower default-dir allowlist to include them if they "
+            "hold first-party code"
+        )
+    if not parts:
         return None
-    by_lang = unsupported.get("languages", {})
-    detail = ", ".join(f"{lang} ({n})" for lang, n in by_lang.items())
-    count = unsupported.get("count", 0)
-    return f"{count} files unparsed — no parser for: {detail}"
+    return "\n  ".join(parts)
 
 
 def compute_provenance(
@@ -103,8 +188,10 @@ def compute_provenance(
         excludes: Extra exclude globs used for discovery.
         max_file_size: Size cap used for discovery.
         skipped: ``(path, reason)`` pairs from the same ``walker.
-            discover`` call that produced ``paths``, used to record a
-            coverage note for confirmed-unsupported languages.
+            discover`` call that produced ``paths``, used to record
+            coverage notes for confirmed-unsupported languages and
+            for files skipped only because they live under a
+            default-excluded (vendored/build-output) directory.
 
     Returns:
         JSON-serializable provenance dict.
@@ -119,6 +206,7 @@ def compute_provenance(
         "files": {rel: _file_hash(root / rel) for rel in paths},
         "stat": {rel: _stat_sig(root / rel) for rel in paths},
         "unsupported": _unsupported_summary(skipped),
+        "vendored_excluded": _vendored_summary(skipped),
     }
 
 
@@ -397,8 +485,8 @@ def load_map(root: Path) -> MapIndex | None:
     """
     path = root / _MAP_DIR / "map.json"
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        doc = _json_loads(path.read_bytes())
+    except (OSError, ValueError):
         return None
 
     index = MapIndex(
@@ -539,8 +627,40 @@ def check_freshness(root: Path, index: MapIndex) -> Freshness:
             changed=sorted(index.symbols_by_path),
             reason="missing",
         )
+    return _freshness_from_provenance(root, index.provenance)
 
-    prov = index.provenance
+
+def check_freshness_provenance(
+    root: Path, provenance: dict | None
+) -> Freshness:
+    """Cheap freshness check driven by a provenance dict alone.
+
+    Same comparison as ``check_freshness``, for callers that only have
+    the provenance sidecar (``load_provenance``) rather than a full
+    ``MapIndex`` — e.g. ``dekko status``, which has no other use for
+    the parsed symbol/call graph. The one behavioral difference: a
+    missing-provenance verdict here can't list every symbol as
+    ``changed`` the way ``check_freshness(root, index)`` can, since
+    that needs the full symbol table this path never builds. A caller
+    that needs that detail on a ``provenance is None`` result should
+    fall back to ``check_freshness(root, load_map(root))``.
+
+    Args:
+        root: Repository root.
+        provenance: Provenance dict from ``load_provenance``, or
+            ``None``.
+
+    Returns:
+        Freshness verdict; ``changed`` is empty (not exhaustive) when
+        ``provenance`` is ``None``.
+    """
+    if not provenance:
+        return Freshness(fresh=False, reason="missing")
+    return _freshness_from_provenance(root, provenance)
+
+
+def _freshness_from_provenance(root: Path, prov: dict) -> Freshness:
+    """Shared comparison body for both freshness-check entry points."""
     version_stale = prov.get("tool_version") != _pkg_version("dekko")
     spec_stale = prov.get("spec_hash") != spec_fingerprint()
     if version_stale or spec_stale:
@@ -587,3 +707,80 @@ def check_freshness(root: Path, index: MapIndex) -> Freshness:
         changed=changed,
         reason="content" if is_stale else None,
     )
+
+
+def load_provenance(root: Path) -> dict | None:
+    """Freshness-only load: read the provenance sidecar, not the map.
+
+    ``dekko status`` (and any other caller that only needs to answer
+    "is this map still fresh") does not need the parsed symbol/call
+    graph ``load_map`` builds — only ``doc["provenance"]``. Reading
+    the small ``.dekko/provenance.json`` sidecar (written alongside
+    ``map.json`` by ``write_provenance_sidecar``) instead of the full
+    map document is the win: ``map.json`` can run into the hundreds of
+    MB on a large repo, while the sidecar is a few KB.
+
+    The sidecar records the ``(mtime, size)`` signature of the
+    ``map.json`` it was written next to (the same fast-path signature
+    ``_freshness_from_provenance`` uses for individual source files).
+    It is trusted only when that signature still matches — a
+    hand-edited, externally regenerated, or otherwise desynced
+    ``map.json`` (two independent files, same risk already called out
+    for ``cache.json`` in ``cli._map_run_is_noop``'s docstring) falls
+    back to a real parse rather than silently trusting stale data.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        The provenance dict, or ``None`` when ``map.json`` itself is
+        missing (mirrors ``load_map``'s ``None`` in that case, so
+        callers can tell "no map at all" from "map exists but has no
+        provenance"). Falls back to parsing ``map.json`` directly —
+        still cheaper than ``load_map``, since it skips building the
+        symbol/call tables — when the sidecar is missing, stale, or
+        unreadable.
+    """
+    map_path = root / _MAP_DIR / "map.json"
+    current_sig = _stat_sig(map_path)
+    if not current_sig:
+        return None
+    sidecar = root / _MAP_DIR / _PROVENANCE_FILE
+    try:
+        doc = _json_loads(sidecar.read_bytes())
+    except (OSError, ValueError):
+        doc = None
+    if isinstance(doc, dict) and doc.get("map_stat") == current_sig:
+        prov = doc.get("provenance")
+        if isinstance(prov, dict):
+            return prov
+    try:
+        full_doc = _json_loads(map_path.read_bytes())
+    except (OSError, ValueError):
+        return None
+    prov = full_doc.get("provenance") if isinstance(full_doc, dict) else None
+    return prov if isinstance(prov, dict) else None
+
+
+def write_provenance_sidecar(root: Path, provenance: dict) -> None:
+    """Write the small provenance-only sidecar next to ``map.json``.
+
+    Lets ``load_provenance`` skip parsing the full ``map.json``
+    document. ``map.json`` keeps its own embedded ``"provenance"`` key
+    too — for backward compatibility with anything reading it
+    directly, and as ``load_provenance``'s fallback when this sidecar
+    is missing or stale. Must be called immediately after ``map.json``
+    itself is written, so the recorded ``map_stat`` signature actually
+    matches the file on disk.
+
+    Args:
+        root: Repository root; the sidecar is written under its
+            ``.dekko/`` directory, which the caller is expected to
+            have already created (e.g. via ``cache.ensure_dir``).
+        provenance: The same provenance dict just embedded in
+            ``map.json``.
+    """
+    map_path = root / _MAP_DIR / "map.json"
+    path = root / _MAP_DIR / _PROVENANCE_FILE
+    doc = {"provenance": provenance, "map_stat": _stat_sig(map_path)}
+    path.write_bytes(_json_dumps(doc))

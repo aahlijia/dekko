@@ -204,3 +204,102 @@ def test_discover_dekkoignore_parity_git_and_walk(tmp_path: Path) -> None:
     assert files_no_git == files_git == ["src/app.py"]
     assert dict(skipped_no_git)["src/widget.astro"] == "ignored"
     assert dict(skipped_git)["src/widget.astro"] == "ignored"
+
+
+def test_discover_vendored_dir_reason_parity_git_and_walk(
+    tmp_path: Path,
+) -> None:
+    # Regression guard: the manual os.walk fallback (used when there's
+    # no .git/) must not prune vendored dirs out of the walk before
+    # _classify ever sees them — that would silently reintroduce the
+    # "no signal at all" gap for any non-git checkout, defeating the
+    # whole point of the vendored-dir coverage note.
+    _touch(tmp_path / "src" / "app.py")
+    _touch(tmp_path / "third_party" / "xla" / "lib.py")
+
+    files_no_git, skipped_no_git = discover(tmp_path)
+    assert files_no_git == ["src/app.py"]
+    assert (
+        dict(skipped_no_git)["third_party/xla/lib.py"]
+        == "vendored (third_party)"
+    )
+
+    _init_git_repo(tmp_path)
+    files_git, skipped_git = discover(tmp_path)
+    assert files_git == ["src/app.py"]
+    assert (
+        dict(skipped_git)["third_party/xla/lib.py"] == "vendored (third_party)"
+    )
+
+
+def test_discover_reports_vendored_directory_with_reason(
+    tmp_path: Path,
+) -> None:
+    # Track E / 1.5: a default-excluded dir that occasionally holds
+    # first-party code (tensorflow's third_party/xla is the motivating
+    # case) must be recorded with a distinguishable reason, not
+    # silently dropped like a VCS/cache dir.
+    _touch(tmp_path / "src" / "app.py")
+    _touch(tmp_path / "third_party" / "xla" / "lib.py")
+    _touch(tmp_path / "vendor" / "pkg" / "mod.go", "package pkg\n")
+
+    files, skipped = discover(tmp_path)
+    assert files == ["src/app.py"]
+    reasons = dict(skipped)
+    assert reasons["third_party/xla/lib.py"] == "vendored (third_party)"
+    assert reasons["vendor/pkg/mod.go"] == "vendored (vendor)"
+
+
+def test_discover_noise_dirs_stay_silent_not_vendored(
+    tmp_path: Path,
+) -> None:
+    # VCS metadata / tool caches are genuinely never worth a coverage
+    # note (a warning about .git/ would be pure noise) — distinct from
+    # the vendored-dir case above, which does get recorded.
+    _touch(tmp_path / "src" / "app.py")
+    _touch(tmp_path / ".git" / "objects" / "pack.py")
+    _touch(tmp_path / "__pycache__" / "app.cpython-311.pyc.py")
+
+    files, skipped = discover(tmp_path)
+    assert files == ["src/app.py"]
+    reasons = dict(skipped)
+    assert ".git/objects/pack.py" not in reasons
+    assert "__pycache__/app.cpython-311.pyc.py" not in reasons
+
+
+def test_discover_flags_minified_content_without_min_filename(
+    tmp_path: Path,
+) -> None:
+    # Track E / 3.4a: zed's junk suggestions came from a vendored
+    # book.js/highlight.js bundle with no ".min." filename convention
+    # — filename-pattern matching alone misses it, so a content-based
+    # average-line-length heuristic must catch it.
+    _touch(tmp_path / "src" / "app.py")
+    minified = "x" * 5000 + "\n"
+    _touch(tmp_path / "docs" / "theme" / "book.js", minified * 5)
+    normal_long_lines = "\n".join(f"const line_{i} = {i};" for i in range(60))
+    _touch(tmp_path / "src" / "generated_but_normal.js", normal_long_lines)
+
+    files, skipped = discover(tmp_path)
+    assert "src/app.py" in files
+    assert "src/generated_but_normal.js" in files
+    reasons = dict(skipped)
+    assert reasons["docs/theme/book.js"] == "generated"
+
+
+def test_discover_minified_check_ignores_unreadable_file(
+    tmp_path: Path,
+) -> None:
+    # A file that can't be read for the heuristic (e.g. removed
+    # between stat and read, or binary content that still passes
+    # every other gate) must fail safe: never override another gate's
+    # verdict by raising, only ever add a skip when the check succeeds.
+    path = tmp_path / "weird.py"
+    path.write_bytes(b"\xff\xfe" * 10)
+
+    files, _skipped = discover(tmp_path)
+    # Short garbled content decodes fine under errors="replace" and
+    # falls well under the average-line-length threshold, so the file
+    # still maps — the point of this test is that discover() never
+    # raises on it.
+    assert files == ["weird.py"]
