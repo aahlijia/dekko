@@ -487,9 +487,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_affected.add_argument(
         "--budget",
         type=int,
-        default=None,
+        default=affected.DEFAULT_BUDGET,
         metavar="TOKENS",
-        help="approximate token budget; drops weakest-tier files first",
+        help="approximate token budget; drops weakest-tier files first "
+        f"(default: {affected.DEFAULT_BUDGET})",
     )
     p_affected.set_defaults(func=run_affected)
 

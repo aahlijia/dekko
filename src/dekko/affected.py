@@ -39,6 +39,13 @@ EXIT_ERROR = 2
 # Evidence tiers, strongest first.
 _TIERS = ("direct", "transitive", "import")
 
+# Mirrors workset.DEFAULT_BUDGET: without a cap, a single large-repo
+# commit can render an unbounded report (round-08 eval: ~124K tokens
+# for one tensorflow commit) — a sane default keeps `affected` cheap
+# by default like every other read command, while `--budget 0`/a large
+# explicit value still opts back out.
+DEFAULT_BUDGET = 6000
+
 
 @dataclass
 class TestImpact:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko import cli
+from dekko import affected, cli
 
 
 def test_version_flag(capsys: pytest.CaptureFixture) -> None:
@@ -23,6 +23,16 @@ def test_bare_invocation_prints_help(capsys: pytest.CaptureFixture) -> None:
     out = capsys.readouterr().out
     assert "--map" in out
     assert "--claude-install" in out
+
+
+def test_affected_budget_defaults_to_affected_default_budget() -> None:
+    # Round-08 eval: `dekko affected` had no default --budget at all
+    # (confirmed via --help) and returned ~124K uncapped tokens for one
+    # commit on a large repo. It should be budgeted by default like
+    # every other whole-graph read command (search/summary/workset).
+    parser = cli.build_subcommand_parser()
+    args = parser.parse_args(["affected"])
+    assert args.budget == affected.DEFAULT_BUDGET
 
 
 def test_map_writes_outputs_to_target_dir(tmp_path: Path) -> None:

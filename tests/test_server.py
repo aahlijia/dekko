@@ -512,6 +512,34 @@ def test_get_callers_tool_defaults_budget(
     assert seen["budget"] == 9000
 
 
+def test_impacted_tests_tool_defaults_budget(
+    monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
+) -> None:
+    # No caller budget -> affected.DEFAULT_BUDGET, not unbounded (round-08
+    # eval: a single tensorflow commit rendered ~124K uncapped tokens
+    # with no --budget default at all on either the CLI or this tool).
+    ctx = _ctx(make_mapped_repo(SRC))
+    seen: dict = {}
+
+    def fake_run(
+        root,  # noqa: ANN001
+        rev,  # noqa: ANN001
+        as_json,  # noqa: ANN001
+        limit,  # noqa: ANN001
+        budget=None,  # noqa: ANN001
+    ) -> int:
+        seen["budget"] = budget
+        print("impacted")
+        return 0
+
+    monkeypatch.setattr(server.affected, "run", fake_run)
+    assert _call(ctx, "impacted_tests", {})["isError"] is False
+    assert seen["budget"] == server.affected.DEFAULT_BUDGET
+
+    assert _call(ctx, "impacted_tests", {"budget": 9000})["isError"] is False
+    assert seen["budget"] == 9000
+
+
 def test_find_usages_tool_defaults_budget(
     monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
 ) -> None:

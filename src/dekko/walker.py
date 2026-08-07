@@ -39,6 +39,16 @@ _VENDORED_DIRS = {
     "third_party",
 }
 
+# JVM package-naming conventions can put an ordinary directory named
+# after a ``_VENDORED_DIRS`` entry (most commonly ``build``, per Spring
+# Boot's own ``org.springframework.boot.build`` package) directly
+# beneath a language source root — nothing to do with build output.
+# Once a ``src/main/<lang>`` or ``src/test/<lang>`` prefix is seen,
+# everything beneath it is package path, not a vendored/build-output
+# directory, and is exempted from ``_VENDORED_DIRS`` matching. See
+# ``_source_root_end``.
+_SOURCE_ROOT_LANGS = {"java", "kotlin", "groovy", "scala"}
+
 DEFAULT_EXCLUDE_DIRS = _NOISE_DIRS | _VENDORED_DIRS
 
 GENERATED_PATTERNS = (
@@ -182,9 +192,42 @@ def _in_noise_dir(rel: str) -> bool:
     return any(part in _NOISE_DIRS for part in rel.split("/"))
 
 
+def _source_root_end(parts: list[str]) -> int | None:
+    """Index right past a ``src/main|test/<lang>`` prefix, if any.
+
+    Args:
+        parts: ``rel.split("/")`` path components (directories and,
+            last, the filename).
+
+    Returns:
+        The index of the first component *beneath* a recognized JVM
+        source root (e.g. ``3`` for ``src/main/java/...``), or
+        ``None`` if no such prefix is present anywhere in ``parts``.
+    """
+    for i in range(len(parts) - 2):
+        if (
+            parts[i] == "src"
+            and parts[i + 1] in ("main", "test")
+            and parts[i + 2] in _SOURCE_ROOT_LANGS
+        ):
+            return i + 3
+    return None
+
+
 def _vendored_dir_hit(rel: str) -> str | None:
-    """The first vendored-dir path component in ``rel``, if any."""
-    for part in rel.split("/"):
+    """The first vendored-dir path component in ``rel``, if any.
+
+    Components at or beyond a ``src/main/<lang>``/``src/test/<lang>``
+    prefix (see ``_source_root_end``) are exempt — a directory literally
+    named ``build`` there is a Java/Kotlin/Groovy/Scala package
+    segment (e.g. ``org.springframework.boot.build``), not vendored
+    build output.
+    """
+    parts = rel.split("/")
+    root_end = _source_root_end(parts)
+    for i, part in enumerate(parts[:-1]):  # last part is the filename
+        if root_end is not None and i >= root_end:
+            continue
         if part in _VENDORED_DIRS:
             return part
     return None

@@ -316,7 +316,7 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     rev = rev if isinstance(rev, str) and rev else None
     limit = int(args.get("limit", 8))
     budget = args.get("budget")
-    budget = int(budget) if budget is not None else None
+    budget = int(budget) if budget is not None else affected.DEFAULT_BUDGET
     code, out, err = _capture(
         lambda: affected.run(
             root, rev, as_json=False, limit=limit, budget=budget

@@ -250,6 +250,48 @@ def test_discover_reports_vendored_directory_with_reason(
     assert reasons["vendor/pkg/mod.go"] == "vendored (vendor)"
 
 
+def test_discover_java_package_named_build_is_not_vendored(
+    tmp_path: Path,
+) -> None:
+    # Regression guard for the round-08 spring-boot finding: JVM
+    # package-naming conventions can legitimately produce a directory
+    # literally named "build" beneath a src/main/java source root
+    # (Spring Boot's own org.springframework.boot.build package lives
+    # at buildSrc/src/main/java/.../build/...). That must be mapped as
+    # ordinary first-party source, not silently dropped as vendored
+    # build output.
+    java_src = (
+        "package org.springframework.boot.build;\n\n"
+        "public class BuildProperties {\n"
+        "    public void run() {}\n"
+        "}\n"
+    )
+    _touch(
+        tmp_path
+        / "buildSrc"
+        / "src"
+        / "main"
+        / "java"
+        / "org"
+        / "springframework"
+        / "boot"
+        / "build"
+        / "BuildProperties.java",
+        java_src,
+    )
+    # A genuine Gradle build-output dir must still be excluded, even in
+    # the same repo — only the src/main|test/<lang> subtree is exempt.
+    _touch(tmp_path / "buildSrc" / "build" / "classes" / "Foo.class")
+
+    files, skipped = discover(tmp_path)
+    assert files == [
+        "buildSrc/src/main/java/org/springframework/boot/build/"
+        "BuildProperties.java"
+    ]
+    reasons = dict(skipped)
+    assert reasons["buildSrc/build/classes/Foo.class"] == "vendored (build)"
+
+
 def test_discover_noise_dirs_stay_silent_not_vendored(
     tmp_path: Path,
 ) -> None:
