@@ -88,11 +88,16 @@ def _resolve_exact(
             if s.qualname == qual or s.name == qual
         ]
     else:
-        candidates = list(
-            index.symbols_by_qualname.get(target)
-            or index.symbols_by_name.get(target)
-            or []
-        )
+        # Merge both pools (deduped by id) instead of short-circuiting
+        # on whichever is non-empty first: a bare name can be both a
+        # unique top-level symbol's full qualname (no "." in it) *and*
+        # the shared bare name of several unrelated nested methods
+        # (whose qualnames are `Foo.name`/`Bar.name`, never bare
+        # `name`) — picking only the qualname hit silently ignores the
+        # real collision (bug #1.4).
+        qual = index.symbols_by_qualname.get(target) or []
+        name = index.symbols_by_name.get(target) or []
+        candidates = list({s.id: s for s in (*qual, *name)}.values())
     if len(candidates) == 1:
         return candidates[0], candidates
     return None, candidates
@@ -157,6 +162,14 @@ def _fit_entries(
 
 
 _MAX_SUGGESTIONS = 5
+# Edit-distance fuzzy-suggestion tuning (bug #3.4b): a name shorter
+# than this floor is only ever eligible via the exact/prefix/substring
+# tiers, never the fuzzy edit-distance tier, and the cutoff itself is
+# raised from difflib's permissive 0.6 default to trim genuinely
+# unrelated matches while still surfacing real near-typos (tuned
+# against claude-buddy's `buddyStateDr` case).
+_MIN_FUZZY_NAME_LEN = 3
+_FUZZY_CUTOFF = 0.72
 # Cap on how many ambiguous candidates ``report_unresolved`` prints
 # unconditionally. Without this, a very-high-cardinality bare-name
 # collision (zed's 99 same-named ``fn main`` candidates across a Rust
@@ -188,13 +201,24 @@ def _close_names(needle: str, names: list[str]) -> list[str]:
     scored.sort()
     out = [name for _, name in scored[:_MAX_SUGGESTIONS]]
     if len(out) < _MAX_SUGGESTIONS and rest:
+        # Edit-distance matching is inherently biased toward short
+        # strings, so a single-letter symbol (`B`, `t`, `A`, `D`) wins
+        # this tier disproportionately even when it isn't a real
+        # match. A length floor keeps such names eligible only via the
+        # stricter exact/prefix/substring tiers above, and a higher
+        # cutoff (0.72 vs difflib's default-ish 0.6) trims genuinely
+        # unrelated names that a permissive cutoff still let through.
         by_low = {}
         for name in sorted(rest):
-            by_low.setdefault(name.lower(), name)
+            if len(name) >= _MIN_FUZZY_NAME_LEN:
+                by_low.setdefault(name.lower(), name)
         out += [
             by_low[m]
             for m in difflib.get_close_matches(
-                low, list(by_low), _MAX_SUGGESTIONS - len(out), 0.6
+                low,
+                list(by_low),
+                _MAX_SUGGESTIONS - len(out),
+                _FUZZY_CUTOFF,
             )
         ]
     return out
@@ -240,7 +264,10 @@ def report_unresolved(
         if suggestions:
             print("closest matches:", file=sys.stderr)
             for sym in suggestions:
-                print(f"  {sym.path}:{sym.qualname}", file=sys.stderr)
+                print(
+                    f"  {sym.path}:{sym.start_line}  {signature(sym)}",
+                    file=sys.stderr,
+                )
         coverage = _coverage_note(index) if index else None
         if coverage:
             print(f"  note: {coverage}", file=sys.stderr)
@@ -250,7 +277,9 @@ def report_unresolved(
         candidates, key=lambda s: (is_test_path(s.path), s.path, s.qualname)
     )
     for sym in ranked[:_MAX_AMBIGUOUS_CANDIDATES]:
-        print(f"  {sym.path}:{sym.qualname}", file=sys.stderr)
+        print(
+            f"  {sym.path}:{sym.start_line}  {signature(sym)}", file=sys.stderr
+        )
     if len(ranked) > _MAX_AMBIGUOUS_CANDIDATES:
         more = len(ranked) - _MAX_AMBIGUOUS_CANDIDATES
         print(

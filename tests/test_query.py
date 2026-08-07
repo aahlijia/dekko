@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from dekko import cli
+from dekko import cli, query
 
 from conftest import RepoFactory
 
@@ -69,8 +69,11 @@ def test_ambiguous_bare_name(
     code = cli.main(["query", "symbol", "helper", "--root", str(root)])
     assert code == 4
     err = capsys.readouterr().err
-    assert "a.py:helper" in err
-    assert "b.py:helper" in err
+    # 3.3: candidate rows now carry a line number and signature, not
+    # just path:qualname, so same-file/same-name overloads render as
+    # visually distinct rows.
+    assert "a.py:1  helper(x: int) -> int" in err
+    assert "b.py:1  helper(x: int) -> int" in err
 
 
 def test_ambiguous_candidates_truncated_past_cap(
@@ -91,6 +94,72 @@ def test_ambiguous_candidates_truncated_past_cap(
     candidate_rows = [ln for ln in err.splitlines() if ln.startswith("  mod_")]
     assert len(candidate_rows) == 20
     assert "+5 more (qualify with" in err
+
+
+CONTROLLER_COLLISION = {
+    # A top-level function whose bare name has no "." in its qualname
+    # (qualname == name == "controller") coexists with several
+    # unrelated nested methods that happen to share the same bare
+    # name but never the same qualname (`Foo.controller`,
+    # `Bar.controller`). Bug #1.4: the old ``or``-short-circuiting
+    # lookup in ``_resolve_exact`` found the single qualname hit and
+    # returned it immediately, never even consulting
+    # ``symbols_by_name`` — silently picking the top-level function
+    # while ignoring two real, same-named collisions.
+    "top.py": "def controller() -> None:\n    pass\n",
+    "foo.py": (
+        "class Foo:\n    def controller(self) -> None:\n        pass\n"
+    ),
+    "bar.py": (
+        "class Bar:\n    def controller(self) -> None:\n        pass\n"
+    ),
+}
+
+
+def test_bare_name_ambiguity_not_masked_by_qualname_shortcut(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CONTROLLER_COLLISION)
+    code = cli.main(["query", "symbol", "controller", "--root", str(root)])
+    assert code == 4
+    err = capsys.readouterr().err
+    assert "top.py:1  controller() -> None" in err
+    assert "foo.py:2  Foo.controller(self) -> None" in err
+    assert "bar.py:2  Bar.controller(self) -> None" in err
+
+
+def test_close_names_suppresses_short_fuzzy_junk(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # 3.4b, mode (b): single-letter symbol names (zed's `B`/`t`/`A`/
+    # `D`) must never win the fuzzy edit-distance tier just because
+    # edit distance is biased toward short strings, even when nothing
+    # else is close.
+    assert query._close_names("zzznonsense", ["B", "t", "A", "D"]) == []
+
+
+def test_close_names_still_surfaces_real_near_typo(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # 3.4b, mode (a): a genuine near-typo of a real (non-trivially-
+    # short) symbol name must still be suggested — the tightened
+    # cutoff/floor must not blind the suggester to real answers
+    # (claude-buddy's `buddyStateDr` case).
+    assert query._close_names(
+        "buddyStateDrx", ["buddyStateDr", "Q", "Z", "W"]
+    ) == ["buddyStateDr"]
+
+
+def test_close_names_raised_cutoff_excludes_marginal_fuzzy_match(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # The edit-distance cutoff was raised from difflib's permissive
+    # 0.6 to 0.72 specifically to trim marginal, not-actually-close
+    # matches — this candidate scores 0.667 (passed under the old
+    # cutoff, fails under the new one) and is long enough that the
+    # separate length floor isn't what's excluding it.
+    assert query._close_names("trix", ["tribe"]) == []
+    assert query._close_names("trix", ["trib"]) == ["trib"]
 
 
 AMBIGUOUS_CALL = {
@@ -442,8 +511,8 @@ def test_not_found_lists_closest_matches(
     err = capsys.readouterr().err
     assert "no symbol matches" in err
     assert "closest matches:" in err
-    assert "a.py:helper" in err
-    assert "b.py:helper" in err
+    assert "a.py:1  helper(x: int) -> int" in err
+    assert "b.py:1  helper(x: int) -> int" in err
 
 
 def test_not_found_with_no_close_names_stays_bare(
