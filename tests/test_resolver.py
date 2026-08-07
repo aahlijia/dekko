@@ -1136,6 +1136,165 @@ def test_receiver_qualified_schema_builder_method_not_guessed() -> None:
     assert len(graph.ambiguous) == 1
 
 
+def test_receiver_qualified_rust_std_method_not_guessed() -> None:
+    # zed's headline finding, round-09 §2.1 part B: exactly one
+    # repo-wide ``then`` symbol (an unrelated CI-tool crate's
+    # ``PathContextCondition.then``); a call through an untyped local
+    # variable is really Rust std's ``bool::then``. Must not be
+    # guessed into the repo symbol's fan-in — same false-positive
+    # shape ``_BUILTIN_METHOD_NAMES`` already guards for JS/TS, just
+    # never extended to Rust std/prelude method names before.
+    then_fn = _fn("ci_tool.rs", "then", "PathContextCondition.then")
+    caller = _fn("editor.rs", "new_internal")
+    files = [
+        FileMap("ci_tool.rs", "rust", symbols=[then_fn]),
+        FileMap(
+            "editor.rs",
+            "rust",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="editor.rs",
+                    text="mode.then",
+                    name="then",
+                    receiver="mode",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, then_fn.id) not in edges
+    assert graph.calls_in.get(then_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+
+
+def test_rust_iter_mut_not_guessed_into_unrelated_repo_symbol() -> None:
+    # zed's second part-B example: ``.iter_mut()`` on an untyped
+    # local must not resolve to an unrelated repo type's own
+    # ``iter_mut`` method just because the name is otherwise unique.
+    iter_mut_fn = _fn("atlas.rs", "iter_mut", "AtlasTextureList.iter_mut")
+    caller = _fn("editor.rs", "new_internal")
+    files = [
+        FileMap("atlas.rs", "rust", symbols=[iter_mut_fn]),
+        FileMap(
+            "editor.rs",
+            "rust",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="editor.rs",
+                    text="highlights.iter_mut",
+                    name="iter_mut",
+                    receiver="highlights",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, iter_mut_fn.id) not in edges
+    assert graph.calls_in.get(iter_mut_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+
+
+def test_explicit_type_receiver_resolves_same_file_new_collision() -> None:
+    # zed's headline finding, round-09 §2.1 part A:
+    # ``BufferDiff::new(...)`` written inside ``BufferDiff``'s own
+    # file, which also defines an unrelated type's same-named ``new``
+    # method — there's no import to key ``_import_match`` off (same
+    # file) and ``same_file`` has 2 same-named candidates, so neither
+    # of those steps (nor self/this, nor a typed parameter) can
+    # disambiguate it. The receiver being the type's own bare name is
+    # stronger evidence than any of those and must resolve
+    # unambiguously — previously fell all the way through to
+    # ``ambiguous`` with the full repo-wide candidate list.
+    buffer_diff_type = Symbol(
+        id="buffer_diff.rs::BufferDiff",
+        name="BufferDiff",
+        qualname="BufferDiff",
+        kind="struct",
+        path="buffer_diff.rs",
+        language="rust",
+    )
+    buffer_diff_new = _fn("buffer_diff.rs", "new", "BufferDiff.new", line=5)
+    other_new = _fn("buffer_diff.rs", "new", "Other.new", line=20)
+    caller = _fn(
+        "buffer_diff.rs",
+        "new_with_base_text",
+        "BufferDiff.new_with_base_text",
+        line=40,
+    )
+    files = [
+        FileMap(
+            "buffer_diff.rs",
+            "rust",
+            symbols=[buffer_diff_type, buffer_diff_new, other_new, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="buffer_diff.rs",
+                    text="BufferDiff::new",
+                    name="new",
+                    receiver="BufferDiff",
+                    line=41,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, buffer_diff_new.id) in edges
+    assert (caller.id, other_new.id) not in edges
+    assert graph.ambiguous == []
+
+
+def test_explicit_type_receiver_no_unique_method_falls_through() -> None:
+    # Negative control: the receiver names a real in-repo type, but
+    # that type has no candidate matching ``Type.name`` — the new step
+    # must decline (return None) rather than guessing, leaving the
+    # rest of the ladder (here: real ambiguity) untouched.
+    widget_type = Symbol(
+        id="widget.rs::Widget",
+        name="Widget",
+        qualname="Widget",
+        kind="struct",
+        path="widget.rs",
+        language="rust",
+    )
+    unrelated_a = _fn("a.rs", "build", "Foo.build")
+    unrelated_b = _fn("b.rs", "build", "Bar.build")
+    caller = _fn("widget.rs", "make", "Widget.make", line=10)
+    files = [
+        FileMap(
+            "widget.rs",
+            "rust",
+            symbols=[widget_type, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="widget.rs",
+                    text="Widget::build",
+                    name="build",
+                    receiver="Widget",
+                    line=11,
+                )
+            ],
+        ),
+        FileMap("a.rs", "rust", symbols=[unrelated_a]),
+        FileMap("b.rs", "rust", symbols=[unrelated_b]),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, unrelated_a.id) not in edges
+    assert (caller.id, unrelated_b.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
 def test_bare_call_shadowed_by_external_import_not_guessed() -> None:
     # A file explicitly imports ``expect`` from an external package
     # (e.g. vitest); a bare ``expect(...)`` call there always means the

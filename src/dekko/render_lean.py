@@ -18,6 +18,7 @@ byte-stable output (NFR3).
 """
 
 import json
+import sys
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -706,6 +707,23 @@ def run(
     lines, report = generate(
         index, root, CapConfig(override=budget), task, dense=dense
     )
+    if budget is not None and report.cap > budget:
+        # ``effective_cap`` never lets the cap fall below the
+        # path-only floor (FR1's backbone must always be renderable —
+        # "the cap bends, not the floor"), so a tight ``--budget`` can
+        # be silently overridden with no visible difference from an
+        # unbudgeted run on a large repo (round-09 §2.4: claude-code's
+        # ``--budget 500`` produced the same ~9,944 tokens as the
+        # default run). ``report.cap`` is exactly what the ladder
+        # actually rendered against, so a mismatch against the
+        # requested ``budget`` is the floor having bent the request
+        # upward.
+        print(
+            f"note: requested budget {budget} is below this repo's "
+            f"~{report.cap}-token path-only floor; using the floor "
+            "instead",
+            file=sys.stderr,
+        )
     text = "\n".join(lines)
     if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)

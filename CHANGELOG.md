@@ -9,6 +9,58 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.30.1] — 2026-08-07
+
+Fixes the 5 follow-up issues from round 09's re-evaluation, documented
+in `.features/plans/investigation-09-round09-followups.md`.
+
+### Fixed
+- **zed-class call-edge gaps in `resolver.py`.** An explicit
+  `Type::method()`/`Type.staticMethod()` receiver (the type's own bare
+  name, not a variable of that type) is now resolved directly via new
+  `_receiver_type_match`, ahead of the typed-parameter step — closing
+  a gap where such calls fell through to the generic ladder and landed
+  ambiguous whenever the repo defined the method name more than once
+  elsewhere. Live-verified on zed: `BufferDiff.new` went from 0 to
+  12/13 callers. `_pick_candidate`'s self/this step was also split out
+  into `_container_match` to keep the growing ladder readable.
+- **Noise-call guard missing Rust std/prelude methods.** New
+  `_RUST_STD_METHOD_NAMES` (`then`, `iter_mut`, `unwrap`, `clone`,
+  etc.) closes the same false-positive shape `_BUILTIN_METHOD_NAMES`
+  already covers for JS/TS, but for Rust — a receiver-qualified call
+  not provably typed as an in-repo class was being misattributed to
+  an unrelated same-named repo method. Live-verified on zed.
+- **`query callees` didn't disclose dropped ambiguous calls** the way
+  `query callers` already discloses `ambiguous_in`. New
+  `MapIndex.ambiguous_out` (caller → names it called ambiguously) and
+  a matching stderr note / `ambiguous_out` JSON field on the callees
+  side, so a low `calls_out` count can be qualified instead of read as
+  exhaustive.
+- **`dekko lean --budget` silently overriding a too-tight request.**
+  `effective_cap` never lets the cap fall below the repo's path-only
+  floor, but this was invisible to the caller — a `--budget 500` on a
+  large repo could render identically to an unbudgeted run with no
+  indication why. `render_lean.run()` now prints a stderr note when
+  the floor overrides the requested budget.
+- **Hardcoded `file.py` in the ambiguous-candidates hint.** `query.py`'s
+  "qualify with `file.py:name`" hint used a literal placeholder instead
+  of an actual candidate path; now uses the first ranked candidate's
+  real path.
+- **MCP `map_status` stale message didn't distinguish version vs. spec
+  staleness.** A long-lived `dekko serve` process can have an
+  identical `tool_version` string on both sides while still running
+  stale extractor code underneath it (a reinstall doesn't change the
+  version every release), which read as a self-contradictory "built by
+  dekko 0.21.3, running 0.21.3" with no explanation. `Freshness` now
+  carries `version_stale`/`spec_stale` flags and the raw built/running
+  values; `tool_map_status` names the actual differentiator and flags
+  the long-lived-process case explicitly.
+- Confirmed (no code fix needed): the resolved/ambiguous edge-count
+  shift observed on cline between rounds 08 and 09 was traced to round
+  08's already-documented stale-binary baseline issue, not a
+  regression introduced by round 09's fixes — `resolver.py`/
+  `extractor.py` are byte-identical between the compared commits.
+
 ## [0.30.0] — 2026-08-07
 
 Two 7-repo evaluation rounds (`test-repos/reports/07-tokentest-7repo-fixcycle/`,

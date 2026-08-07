@@ -275,6 +275,13 @@ class MapIndex:
             module docstring) — this is how a caller can tell "N more
             call sites exist but weren't resolvable to this symbol
             specifically" instead of reading a low fan-in as complete.
+        ambiguous_out: Caller symbol id → names it called ambiguously
+            (2+ repo-wide candidates, none disambiguated). The
+            outgoing-side counterpart to ``ambiguous_in`` — these never
+            contribute to ``calls_out`` either, so ``query callees``
+            can disclose "N outgoing call(s) not counted here" the same
+            way ``query callers`` already discloses ``ambiguous_in``
+            (round-09 §2.1 part A).
         referenced_in: Symbol id → ids that reference it as a value
             (object-literal property, array element, call argument,
             assignment RHS) without calling it — e.g. a callback wired
@@ -310,6 +317,7 @@ class MapIndex:
     ambiguous_in: dict[str, list[tuple[str, str]]] = field(
         default_factory=dict
     )
+    ambiguous_out: dict[str, list[str]] = field(default_factory=dict)
     referenced_in: dict[str, list[str]] = field(default_factory=dict)
     referenced_out: dict[str, list[str]] = field(default_factory=dict)
     ref_lines: dict[tuple[str, str], list[int]] = field(default_factory=dict)
@@ -367,6 +375,11 @@ class MapIndex:
             ]
             if kept_pairs:
                 out.ambiguous_in[cand] = kept_pairs
+        out.ambiguous_out = {
+            caller: names
+            for caller, names in self.ambiguous_out.items()
+            if _prod_id(caller)
+        }
         out.referenced_in = _filter_adjacency(self.referenced_in)
         out.referenced_out = _filter_adjacency(self.referenced_out)
         out.ref_lines = {
@@ -414,6 +427,30 @@ class Freshness:
             or ``spec_hash`` no longer matches, so ``added``/
             ``removed``/``changed`` are not computed), or ``"content"``
             (source files were added, changed, or removed).
+        version_stale: True when the map's recorded ``tool_version``
+            differs from the running process's own installed version.
+            Only meaningful when ``reason == "version"``.
+        spec_stale: True when the map's recorded ``spec_hash`` differs
+            from what the running process's currently-loaded
+            extraction specs would produce — the case a long-lived
+            process (``dekko serve``) can hit silently, since a
+            reinstall underneath it doesn't change ``tool_version``
+            every release, so ``version_stale`` alone can read
+            "identical" while the process is still running stale
+            extractor code (round-09 §2.3: a ``dekko serve`` reported
+            stale with ``built by dekko 0.21.3, running 0.21.3`` — the
+            same string on both sides — with nothing distinguishing
+            which check actually fired). Only meaningful when
+            ``reason == "version"``.
+        built_version: The map's recorded ``tool_version``, or
+            ``None`` unless ``reason == "version"``.
+        running_version: The checking process's own installed
+            version, or ``None`` unless ``reason == "version"``.
+        built_spec_hash: The map's recorded ``spec_hash``, or ``None``
+            unless ``reason == "version"``.
+        running_spec_hash: The checking process's own computed
+            ``languages.spec_fingerprint()``, or ``None`` unless
+            ``reason == "version"``.
     """
 
     fresh: bool
@@ -421,6 +458,12 @@ class Freshness:
     removed: list[str] = field(default_factory=list)
     changed: list[str] = field(default_factory=list)
     reason: str | None = None
+    version_stale: bool = False
+    spec_stale: bool = False
+    built_version: str | None = None
+    running_version: str | None = None
+    built_spec_hash: str | None = None
+    running_spec_hash: str | None = None
 
 
 def _symbol_from_dict(d: dict) -> Symbol:
@@ -523,7 +566,7 @@ def load_map(root: Path) -> MapIndex | None:
         base = _callee_base(ext.callee)
         if base:
             index.externals_by_name.setdefault(base, []).append(ext)
-    index.ambiguous_in = _invert_ambiguous(
+    index.ambiguous_in, index.ambiguous_out = _index_ambiguous(
         (d.get("caller", ""), d.get("name", ""), d.get("candidates", []))
         for d in doc.get("ambiguous", [])
     )
@@ -535,29 +578,39 @@ def load_map(root: Path) -> MapIndex | None:
     return index
 
 
-def _invert_ambiguous(
+def _index_ambiguous(
     entries: Iterator[tuple[str, str, list[str]]],
-) -> dict[str, list[tuple[str, str]]]:
-    """Invert ambiguous-call records into candidate id → callers.
+) -> tuple[dict[str, list[tuple[str, str]]], dict[str, list[str]]]:
+    """Index ambiguous-call records by candidate, and by caller.
 
     An ambiguous call never becomes a resolved edge (see ``resolver``'s
-    module docstring), so it never shows up in any candidate's
-    ``calls_in``. This is the read side of that gap: for each
-    candidate a name collision could have pointed at, record who tried
-    and under what name, so a low fan-in can be qualified as "+N
-    ambiguous call sites not counted" instead of read as exhaustive.
+    module docstring), so it never shows up in either side's
+    ``calls_in``/``calls_out``. This builds both read-side views in
+    one pass over the same records:
+
+    - ``ambiguous_in``: for each candidate a name collision could have
+      pointed at, who tried and under what name — so a low fan-in can
+      be qualified as "+N ambiguous call sites not counted" instead of
+      read as exhaustive.
+    - ``ambiguous_out``: for each caller, the names it called
+      ambiguously — the outgoing-side counterpart, so ``query
+      callees`` can disclose the same kind of gap ``query callers``
+      already discloses via ``ambiguous_in`` (round-09 §2.1 part A).
 
     Args:
         entries: ``(caller_id, name, candidate_ids)`` triples.
 
     Returns:
-        Candidate symbol id → list of ``(caller_id, name)`` pairs.
+        ``(ambiguous_in, ambiguous_out)``.
     """
-    out: dict[str, list[tuple[str, str]]] = {}
+    ambiguous_in: dict[str, list[tuple[str, str]]] = {}
+    ambiguous_out: dict[str, list[str]] = {}
     for caller, name, candidates in entries:
+        if candidates:
+            ambiguous_out.setdefault(caller, []).append(name)
         for cand in candidates:
-            out.setdefault(cand, []).append((caller, name))
-    return out
+            ambiguous_in.setdefault(cand, []).append((caller, name))
+    return ambiguous_in, ambiguous_out
 
 
 def index_from_maps(
@@ -599,7 +652,9 @@ def index_from_maps(
         base = _callee_base(ext.callee)
         if base:
             index.externals_by_name.setdefault(base, []).append(ext)
-    index.ambiguous_in = _invert_ambiguous(iter(graph.ambiguous))
+    index.ambiguous_in, index.ambiguous_out = _index_ambiguous(
+        iter(graph.ambiguous)
+    )
     for edge in graph.referenced:
         index.referenced_out.setdefault(edge.caller, []).append(edge.callee)
         index.referenced_in.setdefault(edge.callee, []).append(edge.caller)
@@ -661,8 +716,12 @@ def check_freshness_provenance(
 
 def _freshness_from_provenance(root: Path, prov: dict) -> Freshness:
     """Shared comparison body for both freshness-check entry points."""
-    version_stale = prov.get("tool_version") != _pkg_version("dekko")
-    spec_stale = prov.get("spec_hash") != spec_fingerprint()
+    built_version = prov.get("tool_version")
+    running_version = _pkg_version("dekko")
+    built_spec_hash = prov.get("spec_hash")
+    running_spec_hash = spec_fingerprint()
+    version_stale = built_version != running_version
+    spec_stale = built_spec_hash != running_spec_hash
     if version_stale or spec_stale:
         # The map was built by a different dekko (or an unreleased
         # extractor change under the same version string). Source
@@ -670,7 +729,22 @@ def _freshness_from_provenance(root: Path, prov: dict) -> Freshness:
         # from it has changed, so no amount of file-hash diffing can
         # answer "is this map still correct" — treat it as stale
         # outright, once, until the next `dekko map` re-stamps it.
-        return Freshness(fresh=False, reason="version")
+        # Both signals (and the raw values behind them) are carried on
+        # the verdict so a caller can tell the two apart — a
+        # long-lived process (``dekko serve``) can have an identical
+        # ``tool_version`` string on both sides while still running
+        # stale extractor code, which ``version_stale`` alone can't
+        # distinguish (round-09 §2.3).
+        return Freshness(
+            fresh=False,
+            reason="version",
+            version_stale=version_stale,
+            spec_stale=spec_stale,
+            built_version=built_version,
+            running_version=running_version,
+            built_spec_hash=built_spec_hash,
+            running_spec_hash=running_spec_hash,
+        )
 
     recorded: dict[str, str] = prov.get("files", {})
     recorded_stat: dict[str, list[int]] = prov.get("stat", {})

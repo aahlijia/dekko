@@ -532,6 +532,61 @@ def tool_ledger(ctx: Context, args: dict) -> str:
     return out.strip()
 
 
+def _version_stale_detail(fresh: mapfile.Freshness) -> str:
+    """Explain *which* staleness signal fired for a "version" verdict.
+
+    ``Freshness.reason == "version"`` collapses two independent
+    signals (``tool_version`` mismatch, ``spec_hash`` mismatch) into
+    one string. A long-lived ``dekko serve`` process can have an
+    identical ``tool_version`` on both sides — Python doesn't hot-
+    reload already-imported modules, so a ``uv tool install
+    --reinstall`` after the server started has no effect on that
+    process's own ``spec_fingerprint()`` output until it restarts —
+    which used to read as a self-contradictory "built by dekko 0.21.3,
+    running 0.21.3" with no explanation of what was actually stale
+    (round-09 §2.3). This names the differentiator explicitly using
+    the raw values ``mapfile._freshness_from_provenance`` already
+    computed.
+
+    Args:
+        fresh: A freshness verdict with ``reason == "version"``.
+
+    Returns:
+        A one-line ``"stale (...)"`` prefix naming which signal(s)
+        fired and their built-vs-running values.
+    """
+    which = "+".join(
+        name
+        for name, stale in (
+            ("version", fresh.version_stale),
+            ("spec_hash", fresh.spec_stale),
+        )
+        if stale
+    )
+    parts: list[str] = []
+    if fresh.version_stale:
+        parts.append(
+            f"tool_version: built by dekko {fresh.built_version}, "
+            f"running {fresh.running_version}"
+        )
+    if fresh.spec_stale:
+        built_hash = (fresh.built_spec_hash or "unknown")[:12]
+        running_hash = (fresh.running_spec_hash or "unknown")[:12]
+        spec_detail = (
+            f"spec_hash: map built with extractor spec {built_hash}, "
+            f"this process is running spec {running_hash}"
+        )
+        if not fresh.version_stale:
+            spec_detail += (
+                f" (same version string {fresh.running_version} on "
+                "both sides — this is a long-lived process running "
+                "older/different extractor code than what's on disk; "
+                "restart it)"
+            )
+        parts.append(spec_detail)
+    return f"stale ({which}): " + "; ".join(parts)
+
+
 def tool_map_status(ctx: Context, args: dict) -> str:
     """Whether the map on disk is fresh, with what changed if stale."""
     root = _root_of(ctx, args)
@@ -547,13 +602,7 @@ def tool_map_status(ctx: Context, args: dict) -> str:
         status = f"fresh ({n} files, commit {commit})"
         return f"{status}\n{note}" if note else status
     if fresh.reason == "version":
-        prov = index.provenance or {}
-        built = prov.get("tool_version", "unknown")
-        running = _pkg_version("dekko")
-        return (
-            f"stale (version): built by dekko {built}, running "
-            f"{running} — call refresh_map"
-        )
+        return f"{_version_stale_detail(fresh)} — call refresh_map"
     parts = [f"stale: {len(fresh.changed)} changed"]
     parts.append(f"{len(fresh.added)} added")
     parts.append(f"{len(fresh.removed)} removed")

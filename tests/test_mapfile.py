@@ -225,6 +225,10 @@ def test_version_stamp_stale_even_with_unchanged_source(
     assert fresh.reason == "version"
     # No file-hash diff was attempted for a version mismatch.
     assert fresh.added == fresh.removed == fresh.changed == []
+    # round-09 §2.3: the raw signal that fired must be readable off
+    # the verdict itself, not just re-derivable by the caller.
+    assert fresh.version_stale is True
+    assert fresh.built_version == "0.0.0-stale"
 
 
 def test_spec_hash_stale_even_with_matching_tool_version(
@@ -244,6 +248,15 @@ def test_spec_hash_stale_even_with_matching_tool_version(
     fresh = mapfile.check_freshness(root, index)
     assert not fresh.fresh
     assert fresh.reason == "version"
+    # round-09 §2.3: this is exactly the "same tool_version, different
+    # spec_hash" shape a long-lived ``dekko serve`` process can hit
+    # silently — ``version_stale`` alone must not claim this fired,
+    # and the raw hash values must be available to build a message
+    # that names the real differentiator.
+    assert fresh.version_stale is False
+    assert fresh.spec_stale is True
+    assert fresh.built_spec_hash == "deadbeef"
+    assert fresh.running_spec_hash != "deadbeef"
 
 
 def test_freshness_reason_missing_for_v1_map(
@@ -455,3 +468,61 @@ def test_without_tests_drops_ref_lines_touching_test_paths() -> None:
     index = mapfile.index_from_maps(files, graph, "demo")
     filtered = index.without_tests()
     assert filtered.ref_lines == {("a.py::f", "b.py::g"): [10]}
+
+
+def test_index_from_maps_builds_ambiguous_out() -> None:
+    # round-09 §2.1 part A's disclosure fix: ``ambiguous_out`` is the
+    # outgoing-side counterpart of ``ambiguous_in`` — for a given
+    # caller, which names it called ambiguously — so ``query callees``
+    # can disclose the same kind of gap ``query callers`` already
+    # discloses.
+    files = [
+        FileMap(path="a.py", language="python", symbols=[_sym("a.py", "f")]),
+        FileMap(path="b.py", language="python", symbols=[_sym("b.py", "g")]),
+        FileMap(path="c.py", language="python", symbols=[_sym("c.py", "g")]),
+    ]
+    graph = CallGraph(ambiguous=[("a.py::f", "g", ["b.py::g", "c.py::g"])])
+    index = mapfile.index_from_maps(files, graph, "demo")
+    assert index.ambiguous_out["a.py::f"] == ["g"]
+    assert index.ambiguous_in["b.py::g"] == [("a.py::f", "g")]
+    assert index.ambiguous_in["c.py::g"] == [("a.py::f", "g")]
+
+
+def test_load_map_reads_ambiguous_out(make_mapped_repo: RepoFactory) -> None:
+    root = make_mapped_repo(CHAIN)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["ambiguous"] = [
+        {
+            "caller": "a.py::main",
+            "name": "g",
+            "candidates": ["b.py::g", "c.py::g"],
+        }
+    ]
+    map_path.write_text(json.dumps(doc))
+
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.ambiguous_out["a.py::main"] == ["g"]
+
+
+def test_without_tests_drops_ambiguous_out_from_test_callers() -> None:
+    files = [
+        FileMap(path="a.py", language="python", symbols=[_sym("a.py", "f")]),
+        FileMap(path="b.py", language="python", symbols=[_sym("b.py", "g")]),
+        FileMap(path="c.py", language="python", symbols=[_sym("c.py", "g")]),
+        FileMap(
+            path="tests/test_a.py",
+            language="python",
+            symbols=[_sym("tests/test_a.py", "h")],
+        ),
+    ]
+    graph = CallGraph(
+        ambiguous=[
+            ("a.py::f", "g", ["b.py::g", "c.py::g"]),
+            ("tests/test_a.py::h", "g", ["b.py::g", "c.py::g"]),
+        ]
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    filtered = index.without_tests()
+    assert filtered.ambiguous_out == {"a.py::f": ["g"]}

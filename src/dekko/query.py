@@ -316,8 +316,10 @@ def report_unresolved(
         )
     if len(ranked) > _MAX_AMBIGUOUS_CANDIDATES:
         more = len(ranked) - _MAX_AMBIGUOUS_CANDIDATES
+        sample = ranked[0]
         print(
-            f"  … +{more} more (qualify with `file.py:{target}` to narrow)",
+            f"  … +{more} more (qualify with `{sample.path}:{target}` "
+            "to narrow)",
             file=sys.stderr,
         )
     if len({(s.path, s.qualname) for s in candidates}) == 1:
@@ -468,6 +470,7 @@ def _print_relation_json(
     limit: int,
     coverage: str | None,
     ambig_in: int,
+    ambig_out: int,
 ) -> None:
     """JSON rendering for ``_run_relation`` (callers/callees)."""
     entries = []
@@ -490,6 +493,8 @@ def _print_relation_json(
         doc["coverage_warning"] = coverage
     if ambig_in:
         doc["ambiguous_in"] = ambig_in
+    if ambig_out:
+        doc["ambiguous_out"] = ambig_out
     if action == "callers" and not entries and not modules:
         referenced = _referenced_entries(index, sym, sites)
         if referenced:
@@ -511,11 +516,18 @@ def _run_relation(
     symbols.sort(key=lambda s: relevance_key(s, index))
     coverage = _coverage_note(index)
     # Ambiguous calls never become a resolved edge (see resolver.py's
-    # module docstring), so a symbol's calls_in can look exhaustive
-    # when name-collision candidates were actually dropped. Only
-    # meaningful for the "who calls this" direction.
+    # module docstring), so a symbol's calls_in/calls_out can look
+    # exhaustive when name-collision candidates were actually dropped.
+    # ambig_in is meaningful for "who calls this" (candidates this
+    # symbol could have been ambiguously called as); ambig_out is the
+    # outgoing-side counterpart for "what does this call" (names this
+    # symbol itself called ambiguously) — round-09 §2.1 part A flagged
+    # that only the callers direction disclosed this gap.
     ambig_in = (
         len(index.ambiguous_in.get(sym.id, [])) if action == "callers" else 0
+    )
+    ambig_out = (
+        len(index.ambiguous_out.get(sym.id, [])) if action == "callees" else 0
     )
     if as_json:
         _print_relation_json(
@@ -529,6 +541,7 @@ def _run_relation(
             limit,
             coverage,
             ambig_in,
+            ambig_out,
         )
         return EXIT_OK, None
     lines: list[str] = []
@@ -540,6 +553,13 @@ def _run_relation(
         print(
             f"  note: {ambig_in} additional call site(s) named "
             f"'{sym.name}' resolved ambiguously — not counted here",
+            file=sys.stderr,
+        )
+    if ambig_out:
+        print(
+            f"  note: {ambig_out} outgoing call(s) from this symbol "
+            "resolved ambiguously (name matched 2+ candidates) — not "
+            "counted here",
             file=sys.stderr,
         )
     if not lines:

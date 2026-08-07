@@ -721,6 +721,36 @@ def test_cli_lean_budget_floors(
     assert "hub() -> int" not in out  # all depth shed
 
 
+def test_cli_lean_tiny_budget_discloses_floor_override(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-09 §2.4: a `--budget` below the path-only floor was
+    # silently bumped up with no indication the request was ever
+    # overridden — `effective_cap`'s own docstring says "the cap
+    # bends, not the floor," but nothing told the caller that
+    # happened. The note goes to stderr, matching query.py's
+    # ambig_in/coverage note convention.
+    root = make_mapped_repo(LADDER_FILES)
+    code = cli.main(["lean", "--root", str(root), "--budget", "1"])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "requested budget 1 is below this repo's" in err
+    assert "path-only floor" in err
+    assert "using the floor instead" in err
+
+
+def test_cli_lean_ample_budget_has_no_floor_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # The disclosure must only fire when the floor actually overrode
+    # the request — an ample budget must stay silent.
+    root = make_mapped_repo(LADDER_FILES)
+    code = cli.main(["lean", "--root", str(root), "--budget", "100000"])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "path-only floor" not in err
+
+
 def test_lean_registered_and_tool_count() -> None:
     assert "lean" in cli.SUBCOMMANDS
     names = {t["name"] for t in server.TOOLS}

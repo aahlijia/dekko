@@ -1,14 +1,30 @@
 """Best-effort static call resolution: raw calls → graph edges.
 
-Resolution order for each call: same class/container → typed
-parameter → same file → imported names → unique repo-wide name match
-→ class/own-constructor pair collapse. Anything still unclear is
-reported as ambiguous rather than guessed; names with no in-repo
-candidates are external. Ambiguous calls contribute to no candidate's
-``calls_in``/fan-in — they are never guessed into an edge — so a
-symbol's fan-in can undercount actual usage when its name collides
-with another definition; see ``mapfile.MapIndex.ambiguous_in`` for how
-many call sites were dropped for a given candidate.
+Resolution order for each call: same class/container → explicit type
+receiver → typed parameter → same file → imported names → unique
+repo-wide name match → class/own-constructor pair collapse. Anything
+still unclear is reported as ambiguous rather than guessed; names with
+no in-repo candidates are external. Ambiguous calls contribute to no
+candidate's ``calls_in``/fan-in — they are never guessed into an edge
+— so a symbol's fan-in can undercount actual usage when its name
+collides with another definition; see ``mapfile.MapIndex.ambiguous_in``
+(who tried to call a given candidate ambiguously) and
+``mapfile.MapIndex.ambiguous_out`` (what a given caller called
+ambiguously) for how many call sites were dropped on each side.
+
+An explicit ``Type::method()``/``Type.staticMethod()`` receiver (the
+type's own bare name, not a variable of that type) is stronger
+evidence than either the self/this or typed-parameter steps, but
+neither of those fires for it — a call like ``BufferDiff::new(...)``
+written inside ``BufferDiff``'s own file (so there's no import to key
+off) used to fall through to the generic same-file/fast-path ladder
+and land ambiguous whenever the repo defined more than one same-named
+method elsewhere, silently dropping the edge (zed's ``BufferDiff.new``
+read zero callers despite 13 real call sites — round-09 §2.1 part A).
+``_receiver_type_match`` closes this by checking, before the typed-
+parameter step, whether the receiver's first segment is itself the
+bare name of an in-repo type (``model.TYPE_KINDS``) and, if so,
+whether it uniquely narrows the same-named candidates by qualname.
 
 A call through one of the *calling function's own declared
 parameters* (``controller.initTask(...)`` where the caller declares
@@ -242,6 +258,7 @@ def _resolve_ref(
         file_imports,
         symbols_by_id.get(ref.caller_id or ""),
         by_name_path,
+        index,
     )
     if target is not None and target.id != caller_id:
         edges.setdefault((caller_id, target.id), set()).add(ref.line)
@@ -287,6 +304,7 @@ def _resolve_call(
         file_imports,
         symbols_by_id.get(call.caller_id or ""),
         by_name_path,
+        index,
         repo_stems,
         raw_imports,
     )
@@ -358,6 +376,7 @@ def _pick_candidate(
     file_imports: dict[str, Import],
     caller: Symbol | None,
     by_name_path: dict[tuple[str, str], list[Symbol]],
+    index: dict[str, list[Symbol]],
     repo_stems: set[str] | None = None,
     raw_imports: list[Import] | None = None,
 ) -> Symbol | None:
@@ -371,6 +390,10 @@ def _pick_candidate(
     calling file, so the same-file and container steps avoid rescanning
     every repo-wide candidate for a common name.
 
+    ``index`` is the full bare-name → symbols index, used only by
+    ``_receiver_type_match`` to check whether a call's receiver names
+    an in-repo type rather than a variable.
+
     ``repo_stems`` gates the built-in/global-name noise check (see
     ``_is_noise_call``) — only ``_resolve_call`` passes it, so
     ``_resolve_ref``'s reference resolution (a separate table from
@@ -382,12 +405,13 @@ def _pick_candidate(
     (C/C++), and used by ``_import_match``'s fallback step. See
     ``_WHOLE_FILE_IMPORT_LANGUAGES``.
     """
-    container = _self_container(call, caller)
-    if container is not None:
-        target_qual = f"{container}.{call.name}"
-        same = [c for c in same_file if c.qualname == target_qual]
-        if len(same) == 1:
-            return same[0]
+    container_match = _container_match(call, caller, same_file)
+    if container_match is not None:
+        return container_match
+
+    receiver_type = _receiver_type_match(call, candidates, index)
+    if receiver_type is not None:
+        return receiver_type
 
     typed = _typed_param_match(call, candidates, caller)
     if typed is not None:
@@ -477,6 +501,32 @@ _BUILTIN_METHOD_NAMES = frozenset(
 # here, not there, if another schema-builder collision turns up.
 _SCHEMA_BUILDER_METHOD_NAMES = frozenset({"describe"})  # fmt: skip
 
+# Well-known Rust std/prelude trait method names (``Iterator``,
+# ``Option``, ``Result``, ``Clone``, ``ToString``, ...). Same
+# false-positive shape as ``_BUILTIN_METHOD_NAMES``, just for Rust
+# instead of JS/TS: a receiver-qualified call whose receiver isn't
+# provably typed as an in-repo class reaches this guard, and these
+# names are called constantly on ordinary local values/std types
+# rather than an in-repo type sharing the name. Confirmed live against
+# zed: ``Editor.new_internal``'s bare ``.then()`` attributed to an
+# unrelated ``PathContextCondition.then`` (a CI-tool crate) and
+# ``.iter_mut()`` to ``AtlasTextureList.iter_mut`` (``gpui``) — see
+# round-09 §2.1 part B (``test-repos/reports/09-tokentest-7repo-postfix/
+# zed.md`` §3). Not gated by language, matching how
+# ``_BUILTIN_METHOD_NAMES`` (JS/TS-flavored) already isn't — these
+# names are unlikely method names to collide with in other languages.
+_RUST_STD_METHOD_NAMES = frozenset(
+    {
+        "then", "then_some", "iter", "iter_mut", "into_iter", "map",
+        "map_err", "and_then", "or_else", "unwrap", "unwrap_or",
+        "unwrap_or_else", "unwrap_or_default", "expect", "clone",
+        "into", "as_ref", "as_mut", "as_str", "as_slice", "to_string",
+        "to_owned", "to_vec", "borrow", "borrow_mut", "lock", "read",
+        "write", "collect", "filter", "for_each", "fold", "is_some",
+        "is_none", "is_ok", "is_err", "ok", "err", "take", "replace",
+    }
+)  # fmt: skip
+
 
 def _is_noise_call(
     call: _Referable,
@@ -522,6 +572,7 @@ def _is_noise_call(
     return (
         call.name in _BUILTIN_METHOD_NAMES
         or call.name in _SCHEMA_BUILDER_METHOD_NAMES
+        or call.name in _RUST_STD_METHOD_NAMES
     )
 
 
@@ -574,6 +625,52 @@ _TYPE_NOISE_WORDS = frozenset(
     }
 )  # fmt: skip
 _TYPE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _receiver_type_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> Symbol | None:
+    """Resolve a call through an explicit ``Type::method()`` receiver.
+
+    ``BufferDiff::new(...)``/``BufferDiff.new(...)`` where the receiver
+    is the type's own bare name (not a variable of that type) is
+    stronger evidence than either the self/this or typed-parameter
+    steps: it names the exact type explicitly, rather than requiring
+    it be inferred from ``self``/``this`` or a declared parameter's
+    annotation. Neither of those steps fires for this shape, so without
+    this check the call falls into the generic same-file/import/fast-
+    path ladder — which silently drops it as ambiguous whenever the
+    repo defines the method name more than once elsewhere (zed's
+    ``BufferDiff.new``, called from inside ``BufferDiff``'s own file,
+    read zero callers despite 13 real call sites — round-09 §2.1
+    part A).
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidates: Every same-named symbol repo-wide (already looked
+            up by the caller).
+        index: Bare symbol name to every symbol sharing it, used to
+            check whether the receiver's first segment names an
+            in-repo type (``model.TYPE_KINDS``) rather than a variable.
+
+    Returns:
+        The uniquely-matching method, or ``None`` when the receiver
+        doesn't name a known in-repo type, or the type doesn't narrow
+        ``candidates`` to exactly one.
+    """
+    if not call.receiver:
+        return None
+    first = _PATH_SPLIT.split(call.receiver)[0]
+    same_name = index.get(first, [])
+    if not any(sym.kind in TYPE_KINDS for sym in same_name):
+        return None
+    target_qual = f"{first}.{call.name}"
+    matched = [c for c in candidates if c.qualname == target_qual]
+    if len(matched) == 1:
+        return matched[0]
+    return None
 
 
 def _typed_param_match(
@@ -708,6 +805,36 @@ def _self_container(call: _Referable, caller: Symbol | None) -> str | None:
     if "." not in caller.qualname:
         return None
     return caller.qualname.rsplit(".", 1)[0]
+
+
+def _container_match(
+    call: _Referable, caller: Symbol | None, same_file: list[Symbol]
+) -> Symbol | None:
+    """Resolve a self/this call against the caller's own container.
+
+    Split out of ``_pick_candidate`` (rather than inlined) to keep its
+    branch count down as the ladder has grown more steps; behavior is
+    unchanged from when this was inline.
+
+    Args:
+        call: The raw call or reference being resolved.
+        caller: The enclosing symbol, or ``None`` for module-level
+            calls.
+        same_file: Like-named symbols in the calling file.
+
+    Returns:
+        The uniquely-matching same-file, same-container method, or
+        ``None`` when the receiver isn't self/this or the container
+        doesn't narrow to exactly one candidate.
+    """
+    container = _self_container(call, caller)
+    if container is None:
+        return None
+    target_qual = f"{container}.{call.name}"
+    same = [c for c in same_file if c.qualname == target_qual]
+    if len(same) == 1:
+        return same[0]
+    return None
 
 
 def _import_match(

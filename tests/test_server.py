@@ -514,6 +514,32 @@ def test_map_status_reports_version_stale(
     assert "call refresh_map" in text
 
 
+def test_map_status_reports_spec_hash_stale_distinctly(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # round-09 §2.3: a long-lived ``dekko serve`` process can have an
+    # identical ``tool_version`` string on both sides while still
+    # running stale extractor code — the old message only ever
+    # printed ``tool_version``, so this case read as the
+    # self-contradictory "built by dekko 0.21.3, running 0.21.3" with
+    # no explanation. The message must name ``spec_hash`` explicitly
+    # and must not claim a ``tool_version`` mismatch that didn't
+    # happen.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["spec_hash"] = "deadbeef"
+    map_path.write_text(json.dumps(doc))
+
+    ctx = _ctx(root)
+    text = _call(ctx, "map_status", {})["content"][0]["text"]
+    assert "stale (spec_hash)" in text
+    assert "tool_version:" not in text
+    assert "deadbeef" in text
+    assert "same version string" in text
+    assert "call refresh_map" in text
+
+
 def test_serve_loop_frames_messages(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:

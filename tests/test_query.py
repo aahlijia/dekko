@@ -94,6 +94,12 @@ def test_ambiguous_candidates_truncated_past_cap(
     candidate_rows = [ln for ln in err.splitlines() if ln.startswith("  mod_")]
     assert len(candidate_rows) == 20
     assert "+5 more (qualify with" in err
+    # round-09 §2.5: the qualifier example must be built from a real
+    # candidate's own path, not a hardcoded ``file.py`` placeholder —
+    # confirmed on two 100%-non-Python monorepos (spring-boot, zed),
+    # neither of which has any ``file.py`` anywhere in the tree.
+    assert "`mod_0.py:dup`" in err
+    assert "file.py" not in err
 
 
 CONTROLLER_COLLISION = {
@@ -207,6 +213,50 @@ def test_get_callers_notes_ambiguous_call_sites(
     captured = capsys.readouterr()
     assert "(no callers of" in captured.out
     assert "ambiguously" in captured.err
+
+
+def test_get_callees_notes_ambiguous_call_sites(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-09 §2.1 part A: only the callers direction disclosed
+    # ambiguous call sites (``ambig_in``) — a caller's own ambiguous
+    # *outgoing* calls (here, ``caller()`` calling the ambiguous
+    # ``target``) had no equivalent surfacing on ``query callees``, so
+    # a genuinely ambiguous callee was silently indistinguishable from
+    # "this function calls nothing else."
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    code = cli.main(["query", "callees", "c.py:caller", "--root", str(root)])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "(no callees of" in captured.out
+    assert "ambiguously" in captured.err
+    assert "1 outgoing call" in captured.err
+
+
+def test_callees_json_carries_ambiguous_out(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    code = cli.main(
+        ["query", "callees", "c.py:caller", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["ambiguous_out"] == 1
+
+
+def test_callers_json_has_no_ambiguous_out_key(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # ``ambig_out`` is only ever computed for the callees direction —
+    # a callers query must not carry a stray/zero key.
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    code = cli.main(
+        ["query", "callers", "a.py:target", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "ambiguous_out" not in doc
 
 
 TS_CALLBACK = {
