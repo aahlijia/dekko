@@ -217,6 +217,59 @@ def test_javascript_template_substitution_captured_as_ref(
     assert "RED" in ref_names
 
 
+def test_go_struct_type_positions_captured_as_refs(tmp_path: Path) -> None:
+    """Track G / bug #1.1a: Go struct types used only as *types*.
+
+    A struct referenced solely as a parameter type, an unnamed pointer
+    return type, a ``var`` declaration's type, and a composite-literal
+    type — never itself constructed via a call-shaped site — must
+    still surface as a ``@ref`` so ``unused.py`` doesn't flag it as
+    dead code.
+    """
+    spec = languages.spec_for_path("data.go")
+    assert spec is not None
+    (tmp_path / "data.go").write_text(
+        "package main\n\n"
+        "type prEvent struct {\n"
+        "	Name string\n"
+        "}\n\n"
+        "type entry struct {\n"
+        "	ID int\n"
+        "}\n\n"
+        "func process(e prEvent) *entry {\n"
+        "	var x entry\n"
+        "	return &x\n"
+        "}\n\n"
+        "func main() {\n"
+        '	process(prEvent{Name: "a"})\n'
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "data.go", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "prEvent" in ref_names
+    assert "entry" in ref_names
+
+
+def test_tsx_jsx_tag_name_captured_as_ref(tmp_path: Path) -> None:
+    """Track G / bug #1.1b: a TSX component used only as ``<Foo />``.
+
+    ``_JS_REFERENCE_QUERY`` already captured JSX *attribute* expression
+    values (``onClick={handleClick}``); it must also capture the JSX
+    element tag name itself, since a component rendered only via
+    ``<Sidebar />`` (never called as a plain function) was previously
+    invisible to the reference pipeline.
+    """
+    spec = languages.spec_for_path("data.tsx")
+    assert spec is not None
+    (tmp_path / "data.tsx").write_text(
+        "function Sidebar() { return null; }\n"
+        "function App() { return <div><Sidebar /></div>; }\n"
+    )
+    fm = extract_file(tmp_path, "data.tsx", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "Sidebar" in ref_names
+
+
 def test_parse_rust_use() -> None:
     assert _parse_rust_use("a::b::c") == [("c", "a::b::c")]
     assert _parse_rust_use("a::b as d") == [("d", "a::b")]

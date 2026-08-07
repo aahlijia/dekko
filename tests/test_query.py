@@ -226,10 +226,41 @@ TS_CALLBACK = {
 def test_symbol_card_notes_zero_fan_for_unreferenced_type(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # B11: a struct/class used only as a parameter/field/return-type
-    # annotation always reads fan-in/fan-out 0/0 (only call/reference
+    # B11: a struct/class used only as a field or return-type
+    # annotation still reads fan-in/fan-out 0/0 (only call/reference
     # edges are tracked) — easy to misread as "unused." The card must
-    # caveat this rather than let 0/0 stand unexplained.
+    # caveat this rather than let 0/0 stand unexplained. (A struct
+    # used as a *parameter* type is exercised separately below — Track
+    # G/bug #1.1a gave Go a ``reference_query`` that captures that
+    # position specifically, so it now reports real referenced-by
+    # evidence instead of falling back to this caveat; a struct
+    # embedded only as a field's type is still outside that query's
+    # coverage, so it remains the right fixture for this caveat path.)
+    files = {
+        "types.go": (
+            "package types\n\ntype RepoMeta struct {\n\tName string\n}\n"
+        ),
+        "user.go": (
+            "package types\n\ntype Wrapper struct {\n\tMeta RepoMeta\n}\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+    code = cli.main(["query", "symbol", "RepoMeta", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "fan-in: 0, fan-out: 0" in out
+    assert "not evidence the type is unused" in out
+
+
+def test_symbol_card_shows_referenced_by_for_go_param_type(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Track G / bug #1.1a's "free correctness bonus" (per the
+    # implementation plan's own Verify section): a Go struct used only
+    # as a parameter type now has real referenced-by evidence instead
+    # of the generic zero-fan caveat, since Go gained a
+    # ``reference_query`` covering parameter/return/var/composite-
+    # literal type positions.
     files = {
         "types.go": (
             "package types\n\ntype RepoMeta struct {\n\tName string\n}\n"
@@ -244,7 +275,8 @@ def test_symbol_card_notes_zero_fan_for_unreferenced_type(
     assert code == 0
     out = capsys.readouterr().out
     assert "fan-in: 0, fan-out: 0" in out
-    assert "not evidence the type is unused" in out
+    assert "referenced-by: 1 (not called)" in out
+    assert "not evidence the type is unused" not in out
 
 
 def test_symbol_card_json_notes_zero_fan_for_type(

@@ -38,16 +38,23 @@ class LanguageSpec:
             types`` never register a function-like node type, so
             there is nothing to accidentally climb through (Python,
             C, C++, Go, Java as of this writing).
-        reference_query: Query capturing bare identifiers used as
-            *values* rather than invoked — object-literal property
-            values, array elements, call arguments, and assignment/
-            declarator right-hand sides — via a single ``@ref``
-            capture. A plain call-expression query structurally
-            cannot see this (a callback passed by reference is never
-            a call site), which used to make it invisible to
-            ``get_callers``/``unused``/fan-in entirely (bug #2b).
-            ``None`` for languages without one yet (JS/TS/TSX only as
-            of this writing).
+        reference_query: Query capturing non-call usage edges — a
+            single ``@ref`` capture per match, fed into the same
+            ``referenced_in``/``referenced_out`` pipeline
+            ``call_query`` feeds. Two distinct shapes so far: bare
+            identifiers used as *values* rather than invoked —
+            object-literal property values, array elements, call
+            arguments, assignment/declarator right-hand sides, and (for
+            JS/TS/TSX) JSX attribute values and JSX element tag names —
+            which a plain call-expression query structurally cannot see
+            (a callback passed by reference, or a component used only
+            as ``<Foo />``, is never a call site; bug #2b/#1.1b); and
+            type-position identifiers — parameter/return/variable/
+            const declaration types and composite-literal types (Go's
+            struct/interface usage, bug #1.1a) — which a
+            definition/call query never visits at all since they name
+            a *type*, not a callable or a value. ``None`` for languages
+            without one yet (JS, TS, TSX, Go as of this writing).
     """
 
     name: str
@@ -265,11 +272,17 @@ _JS_REFERENCE_BASE = """
 """
 
 # JSX attribute/expression values (``<Button onClick={handleClick}
-# />``) — a separate fragment because plain ``.ts`` (non-JSX
-# TypeScript) has no ``jsx_expression`` node type and would fail to
-# compile with it included.
+# />``) plus the JSX element tag name itself (``<Sidebar />``'s
+# ``Sidebar``) — a separate fragment because plain ``.ts`` (non-JSX
+# TypeScript) has no ``jsx_expression``/``jsx_opening_element`` node
+# types and would fail to compile with it included. The tag-name
+# capture also picks up lowercase host elements (``<div>``) — harmless
+# no-ops, since ``resolve_refs`` already drops any ref with zero
+# in-repo candidates, and host element names are never repo symbols.
 _JSX_REFERENCE_EXTRA = """
 (jsx_expression (identifier) @ref)
+(jsx_opening_element name: (identifier) @ref)
+(jsx_self_closing_element name: (identifier) @ref)
 """
 
 _JS_REFERENCE_QUERY = _JS_REFERENCE_BASE + _JSX_REFERENCE_EXTRA
@@ -432,6 +445,43 @@ TSX = LanguageSpec(
     reference_query=_JS_REFERENCE_QUERY,
 )
 
+# Type-reference edges (bug #1.1a): a struct/interface type used only
+# as a parameter type (this also covers a method's *receiver* type,
+# since a receiver is just a ``parameter_declaration`` under a
+# different field name), a named or unnamed return type, a var/const
+# declaration's type, or a composite-literal type — never constructed
+# via a call-shaped site and therefore invisible to ``call_query``
+# alone. A second group of patterns handles every *wrapped* form
+# (``*T``, ``[]T``, ``[N]T``, ``map[K]V``, ``chan T``) via the wrapper
+# node types themselves (``pointer_type``/``slice_type``/
+# ``array_type``/``map_type``/``channel_type``) rather than
+# enumerating each wrapper under each of the plain patterns' parent
+# node types above — safe to leave field-unanchored because none of
+# these wrapper node types ever occur in a *definition*-name position
+# (only ``type_spec``'s bare, unwrapped ``type_identifier`` name field
+# can be that, and it is never reachable through a pointer/slice/
+# array/map/channel wrapper), so every match is a genuine usage, not a
+# symbol's own declaration. This incidentally also closes the
+# ``[]T``/``map[K]V``-shaped false positives the plain patterns alone
+# still missed (confirmed live against awesome-go's ``tagEntry``,
+# referenced only via ``var tags []tagEntry``). Field names and node
+# shapes confirmed against the actual ``tree-sitter-go`` grammar (not
+# just read off the .go source) during implementation.
+_GO_REFERENCE_QUERY = """
+(parameter_declaration type: (type_identifier) @ref)
+(function_declaration result: (type_identifier) @ref)
+(method_declaration result: (type_identifier) @ref)
+(var_spec type: (type_identifier) @ref)
+(const_spec type: (type_identifier) @ref)
+(composite_literal type: (type_identifier) @ref)
+(pointer_type (type_identifier) @ref)
+(slice_type element: (type_identifier) @ref)
+(array_type element: (type_identifier) @ref)
+(map_type key: (type_identifier) @ref)
+(map_type value: (type_identifier) @ref)
+(channel_type value: (type_identifier) @ref)
+"""
+
 GO = LanguageSpec(
     name="go",
     grammar="go",
@@ -467,6 +517,7 @@ GO = LanguageSpec(
   path: (_) @module)
 """,
     param_style="go",
+    reference_query=_GO_REFERENCE_QUERY,
 )
 
 JAVA = LanguageSpec(
