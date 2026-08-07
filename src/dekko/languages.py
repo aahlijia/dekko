@@ -449,24 +449,31 @@ TSX = LanguageSpec(
 # as a parameter type (this also covers a method's *receiver* type,
 # since a receiver is just a ``parameter_declaration`` under a
 # different field name), a named or unnamed return type, a var/const
-# declaration's type, or a composite-literal type — never constructed
-# via a call-shaped site and therefore invisible to ``call_query``
-# alone. A second group of patterns handles every *wrapped* form
-# (``*T``, ``[]T``, ``[N]T``, ``map[K]V``, ``chan T``) via the wrapper
-# node types themselves (``pointer_type``/``slice_type``/
-# ``array_type``/``map_type``/``channel_type``) rather than
-# enumerating each wrapper under each of the plain patterns' parent
-# node types above — safe to leave field-unanchored because none of
-# these wrapper node types ever occur in a *definition*-name position
-# (only ``type_spec``'s bare, unwrapped ``type_identifier`` name field
-# can be that, and it is never reachable through a pointer/slice/
-# array/map/channel wrapper), so every match is a genuine usage, not a
-# symbol's own declaration. This incidentally also closes the
-# ``[]T``/``map[K]V``-shaped false positives the plain patterns alone
-# still missed (confirmed live against awesome-go's ``tagEntry``,
-# referenced only via ``var tags []tagEntry``). Field names and node
-# shapes confirmed against the actual ``tree-sitter-go`` grammar (not
-# just read off the .go source) during implementation.
+# declaration's type, a composite-literal type, or a struct field's own
+# declared type (``field_declaration type: ...`` — also matches an
+# anonymous embedded field, e.g. ``type Wrapper struct { RepoMeta }``,
+# since tree-sitter-go still tags the sole child ``type``-field-named
+# even with no separate field-name node) — never constructed via a
+# call-shaped site and therefore invisible to ``call_query`` alone. A
+# second group of patterns handles every *wrapped* form (``*T``,
+# ``[]T``, ``[N]T``, ``map[K]V``, ``chan T``) via the wrapper node
+# types themselves (``pointer_type``/``slice_type``/``array_type``/
+# ``map_type``/``channel_type``) rather than enumerating each wrapper
+# under each of the plain patterns' parent node types above — safe to
+# leave field-unanchored because none of these wrapper node types ever
+# occur in a *definition*-name position (only ``type_spec``'s bare,
+# unwrapped ``type_identifier`` name field can be that, and it is never
+# reachable through a pointer/slice/array/map/channel wrapper), so
+# every match is a genuine usage, not a symbol's own declaration. This
+# incidentally also closes the ``[]T``/``map[K]V``-shaped false
+# positives the plain patterns alone still missed (confirmed live
+# against awesome-go's ``tagEntry``, referenced only via ``var tags
+# []tagEntry``). Field names and node shapes confirmed against the
+# actual ``tree-sitter-go`` grammar (not just read off the .go source)
+# during implementation, including the new ``field_declaration``
+# pattern (1.1's deliberately-left-uncovered case, closed as a
+# follow-up — see ``field_declaration type:``'s throwaway-parse-script
+# verification).
 _GO_REFERENCE_QUERY = """
 (parameter_declaration type: (type_identifier) @ref)
 (function_declaration result: (type_identifier) @ref)
@@ -474,6 +481,7 @@ _GO_REFERENCE_QUERY = """
 (var_spec type: (type_identifier) @ref)
 (const_spec type: (type_identifier) @ref)
 (composite_literal type: (type_identifier) @ref)
+(field_declaration type: (type_identifier) @ref)
 (pointer_type (type_identifier) @ref)
 (slice_type element: (type_identifier) @ref)
 (array_type element: (type_identifier) @ref)

@@ -199,6 +199,35 @@ def test_unused_does_not_flag_go_struct_used_only_as_param_type(
     assert "no unused symbols" in capsys.readouterr().out
 
 
+GO_FIELD_TYPE_ONLY = {
+    "types.go": ("package main\n\ntype RepoMeta struct {\n\tName string\n}\n"),
+    "main.go": (
+        "package main\n\n"
+        "type Wrapper struct {\n"
+        "\tMeta RepoMeta\n"
+        "}\n\n"
+        "func main() {\n"
+        '\tw := Wrapper{Meta: RepoMeta{Name: "a"}}\n'
+        "\t_ = w\n"
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_go_struct_used_only_as_field_type(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # End-to-end repro of the deliberately-uncovered case documented in
+    # Track G's STATUS block: RepoMeta is used only as another
+    # struct's field type, never as a parameter/return/var type —
+    # before ``field_declaration type:`` was added to
+    # ``_GO_REFERENCE_QUERY``, this was indistinguishable from dead
+    # code.
+    root = make_mapped_repo(GO_FIELD_TYPE_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
 TSX_COMPONENT_ONLY = {
     "sidebar.tsx": (
         "export function Sidebar(): JSX.Element {\n"

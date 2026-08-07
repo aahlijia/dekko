@@ -250,6 +250,61 @@ def test_go_struct_type_positions_captured_as_refs(tmp_path: Path) -> None:
     assert "entry" in ref_names
 
 
+def test_go_struct_field_type_captured_as_ref(tmp_path: Path) -> None:
+    """Follow-up to Track G / bug #1.1a: a struct field's own type.
+
+    A struct used only as another struct's field type (``Meta
+    RepoMeta``), and a struct embedded anonymously (no separate field
+    name), were both outside the original ``_GO_REFERENCE_QUERY``'s
+    coverage — the query had no ``field_declaration type:`` pattern.
+    Both must now surface as a ``@ref``.
+    """
+    spec = languages.spec_for_path("data.go")
+    assert spec is not None
+    (tmp_path / "data.go").write_text(
+        "package main\n\n"
+        "type RepoMeta struct {\n"
+        "	Name string\n"
+        "}\n\n"
+        "type Embedded struct {\n"
+        "	Kind string\n"
+        "}\n\n"
+        "type Wrapper struct {\n"
+        "	Meta RepoMeta\n"
+        "	Embedded\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "data.go", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "RepoMeta" in ref_names
+    assert "Embedded" in ref_names
+
+
+def test_cpp_include_derives_header_stem_as_import_name(
+    tmp_path: Path,
+) -> None:
+    """C++ import-hint fix (1.5-remainder, part 1).
+
+    The generic import fallback derived a C/C++ ``#include``'s "local
+    name" by splitting the include path on ``[./:]`` and keeping the
+    *last* segment — for ``#include "a/b/rewrite_utils.h"`` that's the
+    literal string ``"h"`` (the file extension), never usable and
+    colliding across nearly every include in a file. ``_imports_cpp``
+    derives the header's own stem instead.
+    """
+    spec = languages.spec_for_path("caller.cc")
+    assert spec is not None
+    (tmp_path / "caller.cc").write_text(
+        '#include "tensorflow/core/data/rewrite_utils.h"\n#include <vector>\n'
+    )
+    fm = extract_file(tmp_path, "caller.cc", spec)
+    names = {imp.name for imp in fm.imports}
+    sources = {imp.source for imp in fm.imports}
+    assert "rewrite_utils" in names
+    assert "h" not in names
+    assert "tensorflow/core/data/rewrite_utils.h" in sources
+
+
 def test_tsx_jsx_tag_name_captured_as_ref(tmp_path: Path) -> None:
     """Track G / bug #1.1b: a TSX component used only as ``<Foo />``.
 

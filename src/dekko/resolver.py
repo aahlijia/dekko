@@ -51,6 +51,18 @@ receiver. Confirmed live against cline: a same-file-only helper
 literally named ``trim`` (true fan-in 8) was reported at fan-in 1,404,
 almost entirely misattributed ``String.prototype.trim()`` calls — see
 ``test-repos/reports/investigation-1.2-resolver-fanin.md``.
+
+The "imported names" step (``_import_match``) ordinarily keys on a
+*local binding* name (``from x import y`` / ``import {y} from 'x'``),
+which C/C++'s whole-file ``#include`` has no equivalent of — so for
+those languages it falls back to checking every ``#include`` in the
+caller's file against every candidate's file instead (see
+``_WHOLE_FILE_IMPORT_LANGUAGES``), the same ``_module_matches`` check
+``affected.py``'s ``_import_hits`` already uses for its diff-import
+evidence tier. Without this, a same-named free function defined in two
+different files was unresolvable for C/C++ regardless of which header
+the caller actually included — see
+``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
 """
 
 import re
@@ -72,6 +84,14 @@ from .model import (
 _SELF_RECEIVERS = {"self", "this", "Self", "cls"}
 _PATH_SPLIT = re.compile(r"::|\.|/")
 _INDEX_STEMS = {"__init__", "mod", "lib", "index"}
+# Languages whose imports are whole-*file* (``#include``), not
+# per-symbol bindings (``from x import y`` / ``import {y} from 'x'``)
+# — ``_import_match``'s ordinary name-keyed hint lookups can never
+# fire for these, since neither the call's own name nor its receiver
+# is ever the local name of an import (there is no such thing). See
+# ``_import_match``'s whole-file fallback and
+# ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
+_WHOLE_FILE_IMPORT_LANGUAGES = frozenset({"c", "cpp"})
 # Either raw-usage shape the shared candidate ladder resolves — a
 # call and a bare-value reference expose the same fields
 # (name/receiver/caller_id/path) and only differ in what table the
@@ -102,6 +122,9 @@ def resolve(files: list[FileMap]) -> CallGraph:
 
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
+        raw_imports = (
+            fm.imports if fm.language in _WHOLE_FILE_IMPORT_LANGUAGES else None
+        )
         for call in fm.calls:
             _resolve_call(
                 call,
@@ -113,6 +136,7 @@ def resolve(files: list[FileMap]) -> CallGraph:
                 edges=edges,
                 ambiguous=ambiguous,
                 external=external,
+                raw_imports=raw_imports,
             )
 
     graph = CallGraph(
@@ -233,6 +257,7 @@ def _resolve_call(
     edges: dict[tuple[str, str], set[int]],
     ambiguous: dict[tuple[str, str], list[str]],
     external: dict[tuple[str, str], set[int]],
+    raw_imports: list[Import] | None = None,
 ) -> None:
     """Resolve one call and record it in the right bucket."""
     caller_id = call.caller_id or f"{call.path}{MODULE_CALLER_SUFFIX}"
@@ -263,6 +288,7 @@ def _resolve_call(
         symbols_by_id.get(call.caller_id or ""),
         by_name_path,
         repo_stems,
+        raw_imports,
     )
     if target is not None:
         _add_call_and_constructor(
@@ -333,6 +359,7 @@ def _pick_candidate(
     caller: Symbol | None,
     by_name_path: dict[tuple[str, str], list[Symbol]],
     repo_stems: set[str] | None = None,
+    raw_imports: list[Import] | None = None,
 ) -> Symbol | None:
     """Apply the resolution ladder; ``None`` means ambiguous.
 
@@ -349,6 +376,11 @@ def _pick_candidate(
     ``_resolve_ref``'s reference resolution (a separate table from
     ``calls_in``/fan-in, not affected by the bug this check targets)
     is left byte-for-byte unchanged.
+
+    ``raw_imports``, when given, is the calling file's full (undeduped)
+    import list — passed only for whole-file-include languages
+    (C/C++), and used by ``_import_match``'s fallback step. See
+    ``_WHOLE_FILE_IMPORT_LANGUAGES``.
     """
     container = _self_container(call, caller)
     if container is not None:
@@ -364,7 +396,7 @@ def _pick_candidate(
     if len(same_file) == 1:
         return same_file[0]
 
-    hinted = _import_match(call, candidates, file_imports)
+    hinted = _import_match(call, candidates, file_imports, raw_imports)
     if hinted is not None:
         return hinted
 
@@ -428,6 +460,23 @@ _BUILTIN_METHOD_NAMES = frozenset(
     }
 )  # fmt: skip
 
+# Chain-call method names from popular schema/validation builder
+# libraries (Zod and the like) — ``z.string().describe("...")``. Same
+# shape of false-positive as ``_BUILTIN_METHOD_NAMES``: a
+# receiver-qualified call whose receiver isn't provably typed as an
+# in-repo class, so the only "evidence" for the single-candidate fast
+# path is name uniqueness — which fails whenever a repo also happens
+# to define its own like-named method/function. Confirmed live against
+# cline: ``describe`` (a Zod ``.describe()`` schema call) still read
+# fan-in 60 after ``_BUILTIN_METHOD_NAMES`` alone, because ``describe``
+# isn't a String/Array/Object prototype method — see
+# ``test-repos/reports/investigation-1.2-resolver-fanin.md``'s
+# "residual gap" note. Kept as its own (currently one-entry) set, not
+# folded into ``_BUILTIN_METHOD_NAMES``, since the two lists have
+# different provenance even though they're checked together — extend
+# here, not there, if another schema-builder collision turns up.
+_SCHEMA_BUILDER_METHOD_NAMES = frozenset({"describe"})  # fmt: skip
+
 
 def _is_noise_call(
     call: _Referable,
@@ -470,7 +519,10 @@ def _is_noise_call(
     # itself checks.
     if call.receiver in _SELF_RECEIVERS:
         return False
-    return call.name in _BUILTIN_METHOD_NAMES
+    return (
+        call.name in _BUILTIN_METHOD_NAMES
+        or call.name in _SCHEMA_BUILDER_METHOD_NAMES
+    )
 
 
 def _shadowed_by_external_import(
@@ -659,9 +711,30 @@ def _self_container(call: _Referable, caller: Symbol | None) -> str | None:
 
 
 def _import_match(
-    call: _Referable, candidates: list[Symbol], file_imports: dict[str, Import]
+    call: _Referable,
+    candidates: list[Symbol],
+    file_imports: dict[str, Import],
+    raw_imports: list[Import] | None = None,
 ) -> Symbol | None:
-    """Match candidates against import hints for this file."""
+    """Match candidates against import hints for this file.
+
+    ``raw_imports`` (whole-file-include languages only — see
+    ``_WHOLE_FILE_IMPORT_LANGUAGES``) is tried as a fallback when the
+    per-name hints above find nothing: a C/C++ ``#include`` binds no
+    single symbol name the way ``from x import y``/``import {y} from
+    'x'`` do, so ``file_imports.get(call.name)`` (keyed by a *local
+    binding* name) structurally can never hit for these languages,
+    regardless of what the call's own name or receiver is. Instead,
+    check every ``#include`` in the file against every candidate's
+    file — the same ``_module_matches`` check ``affected.py``'s
+    ``_import_hits`` already does for its diff-import evidence tier —
+    and resolve when exactly one candidate's file is actually included
+    here. Verified against a fixture reproducing tensorflow's
+    ``rewrite_utils.cc``/``rewrite_utils_test.cc`` gtest pair (same
+    file paths, same symbol names, same header) — see
+    ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md`` and
+    ``tests/test_resolver.py::test_cpp_call_disambiguated_via_whole_file_include``.
+    """
     hints: list[str] = []
     imp = file_imports.get(call.name)
     if imp is not None:
@@ -673,6 +746,14 @@ def _import_match(
             hints.append(rec_imp.source)
     for hint in hints:
         matched = [c for c in candidates if _module_matches(hint, c.path)]
+        if len(matched) == 1:
+            return matched[0]
+    if raw_imports:
+        matched = [
+            c
+            for c in candidates
+            if any(_module_matches(i.source, c.path) for i in raw_imports)
+        ]
         if len(matched) == 1:
             return matched[0]
     return None

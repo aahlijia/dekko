@@ -229,13 +229,46 @@ def test_symbol_card_notes_zero_fan_for_unreferenced_type(
     # B11: a struct/class used only as a field or return-type
     # annotation still reads fan-in/fan-out 0/0 (only call/reference
     # edges are tracked) — easy to misread as "unused." The card must
-    # caveat this rather than let 0/0 stand unexplained. (A struct
-    # used as a *parameter* type is exercised separately below — Track
-    # G/bug #1.1a gave Go a ``reference_query`` that captures that
-    # position specifically, so it now reports real referenced-by
-    # evidence instead of falling back to this caveat; a struct
-    # embedded only as a field's type is still outside that query's
-    # coverage, so it remains the right fixture for this caveat path.)
+    # caveat this rather than let 0/0 stand unexplained. (A struct used
+    # as a *parameter* type, or as a struct field's own declared type
+    # (including anonymous embedding), is exercised separately below —
+    # Track G/bug #1.1a and its follow-up gave Go a ``reference_query``
+    # covering both positions, so they now report real referenced-by
+    # evidence instead of falling back to this caveat. A type named
+    # only in a ``switch v := x.(type) { case RepoMeta: ... }`` clause
+    # is still outside that query's coverage — ``type_case``'s
+    # ``type_identifier`` isn't a position any pattern targets — so it
+    # remains a genuine no-evidence fixture for this caveat path.)
+    files = {
+        "types.go": (
+            "package types\n\ntype RepoMeta struct {\n\tName string\n}\n"
+        ),
+        "user.go": (
+            "package types\n\n"
+            "func Show(x interface{}) {\n"
+            "	switch v := x.(type) {\n"
+            "	case RepoMeta:\n"
+            "		_ = v\n"
+            "	}\n"
+            "}\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+    code = cli.main(["query", "symbol", "RepoMeta", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "fan-in: 0, fan-out: 0" in out
+    assert "not evidence the type is unused" in out
+
+
+def test_symbol_card_shows_referenced_by_for_go_field_type(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Follow-up to Track G/bug #1.1a: a struct used only as another
+    # struct's field type (``Meta RepoMeta``, previously the
+    # deliberately-uncovered case above) now has real referenced-by
+    # evidence, since ``_GO_REFERENCE_QUERY`` gained a
+    # ``field_declaration type:`` pattern.
     files = {
         "types.go": (
             "package types\n\ntype RepoMeta struct {\n\tName string\n}\n"
@@ -249,7 +282,8 @@ def test_symbol_card_notes_zero_fan_for_unreferenced_type(
     assert code == 0
     out = capsys.readouterr().out
     assert "fan-in: 0, fan-out: 0" in out
-    assert "not evidence the type is unused" in out
+    assert "referenced-by: 1 (not called)" in out
+    assert "not evidence the type is unused" not in out
 
 
 def test_symbol_card_shows_referenced_by_for_go_param_type(

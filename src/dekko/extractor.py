@@ -922,6 +922,8 @@ def _collect_imports(spec: LanguageSpec, root: Node, rel: str) -> list[Import]:
         return _imports_rust(matches, rel)
     if spec.name in ("javascript", "typescript", "tsx"):
         return _imports_js(matches, rel)
+    if spec.name in ("c", "cpp"):
+        return _imports_cpp(matches, rel)
     return _imports_generic(matches, rel)
 
 
@@ -982,6 +984,42 @@ def _imports_js(
         out.append(
             Import(path=rel, name=local, source=f"{source}/{_text(name)}")
         )
+    return out
+
+
+def _imports_cpp(
+    matches: list[tuple[int, dict[str, list[Node]]]], rel: str
+) -> list[Import]:
+    """Normalize C/C++ ``#include``s.
+
+    Unlike Python/JS/Rust imports, a ``#include`` binds no single
+    symbol name — it textually includes an entire header, so there is
+    no per-symbol local binding the generic fallback's name-derivation
+    can recover. That fallback (``_imports_generic``) splits the
+    include path on ``[./:]`` and keeps the *last* segment, which for
+    ``#include "tensorflow/core/data/rewrite_utils.h"`` is the literal
+    string ``"h"`` (the extension) — never usable as a lookup key, and
+    colliding across nearly every C/C++ ``#include`` in a file (all
+    typically ending in ``.h``/``.hpp``), which silently dropped all
+    but the first such include from ``resolver.py``'s
+    ``_imports_by_file`` dedupe-by-name dict. This derives the
+    header's own stem instead (``rewrite_utils``) — still not a real
+    per-symbol binding, but a stable, mostly-unique-per-file key, and
+    a far more useful label wherever ``Import.name`` is displayed
+    (``contextpack.py``). ``resolver.py``'s ``_import_match`` actually
+    disambiguates C/C++ calls via each import's full ``source`` path
+    (see its whole-file-include fallback), not this ``name`` — see
+    ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
+    """
+    out: list[Import] = []
+    for _, caps in matches:
+        node = _one(caps, "module")
+        if node is None:
+            continue
+        source = _strip_quotes(_text(node))
+        base = source.rsplit("/", 1)[-1]
+        stem = base.rsplit(".", 1)[0] if "." in base else base
+        out.append(Import(path=rel, name=stem or source, source=source))
     return out
 
 

@@ -462,6 +462,141 @@ def test_aliased_import_reference_resolves_to_real_target() -> None:
     assert graph.referenced_out[wire_up.id] == [real.id]
 
 
+def test_cpp_call_disambiguated_via_whole_file_include() -> None:
+    # C++ import-hint fix (1.5-remainder, part 1) — reproduces the
+    # tensorflow ``rewrite_utils.cc``/``rewrite_utils_test.cc`` gtest
+    # pair from investigation-1.5-cpp-gtest-affected.md as a minimal
+    # fixture: two repo-wide same-named free functions (no receiver,
+    # no self/typed-param/same-file evidence — every earlier ladder
+    # step fails), disambiguated only by which header the caller's
+    # file ``#include``s. Before the whole-file-include fallback, this
+    # always landed in ``ambiguous`` — C++'s ``#include`` has no
+    # per-symbol binding, so the ordinary name-keyed import hint could
+    # never fire.
+    real = _fn("tensorflow/core/data/rewrite_utils.cc", "GetGrapplerItem")
+    unrelated = _fn("other/pkg/helpers.cc", "GetGrapplerItem")
+    caller = _fn(
+        "tensorflow/core/data/rewrite_utils_test.cc",
+        "TEST",
+        line=86,
+    )
+    files = [
+        FileMap(
+            "tensorflow/core/data/rewrite_utils.cc",
+            "cpp",
+            symbols=[real],
+        ),
+        FileMap("other/pkg/helpers.cc", "cpp", symbols=[unrelated]),
+        FileMap(
+            "tensorflow/core/data/rewrite_utils_test.cc",
+            "cpp",
+            symbols=[caller],
+            imports=[
+                Import(
+                    path="tensorflow/core/data/rewrite_utils_test.cc",
+                    name="rewrite_utils",
+                    source="tensorflow/core/data/rewrite_utils.h",
+                )
+            ],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="tensorflow/core/data/rewrite_utils_test.cc",
+                    text="GetGrapplerItem",
+                    name="GetGrapplerItem",
+                    line=90,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, real.id) in edges
+    assert (caller.id, unrelated.id) not in edges
+    assert graph.ambiguous == []
+
+
+def test_cpp_call_stays_ambiguous_when_no_include_matches() -> None:
+    # Regression guard: the whole-file-include fallback must not
+    # over-match — when neither candidate's file is actually included
+    # by the caller's file, the call stays genuinely ambiguous rather
+    # than guessing.
+    a_impl = _fn("a/impl.cc", "Frobnicate")
+    b_impl = _fn("b/impl.cc", "Frobnicate")
+    caller = _fn("caller.cc", "Run")
+    files = [
+        FileMap("a/impl.cc", "cpp", symbols=[a_impl]),
+        FileMap("b/impl.cc", "cpp", symbols=[b_impl]),
+        FileMap(
+            "caller.cc",
+            "cpp",
+            symbols=[caller],
+            imports=[
+                Import(
+                    path="caller.cc",
+                    name="unrelated",
+                    source="c/unrelated.h",
+                )
+            ],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.cc",
+                    text="Frobnicate",
+                    name="Frobnicate",
+                    line=5,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, a_impl.id) not in edges
+    assert (caller.id, b_impl.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_non_cpp_call_unaffected_by_whole_file_include_fallback() -> None:
+    # The fallback is gated to ``_WHOLE_FILE_IMPORT_LANGUAGES`` — a
+    # Python file with an unrelated import whose source happens to
+    # share a path segment with an ambiguous candidate's file must
+    # still land in ``ambiguous``, not be swept up by a fallback meant
+    # only for C/C++.
+    a_impl = _fn("pkg/thing.py", "process")
+    b_impl = _fn("other/thing.py", "process")
+    caller = _fn("caller.py", "run")
+    files = [
+        FileMap("pkg/thing.py", "python", symbols=[a_impl]),
+        FileMap("other/thing.py", "python", symbols=[b_impl]),
+        FileMap(
+            "caller.py",
+            "python",
+            symbols=[caller],
+            imports=[
+                Import(
+                    path="caller.py",
+                    name="unrelated_name",
+                    source="pkg.thing",
+                )
+            ],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.py",
+                    text="process",
+                    name="process",
+                    line=3,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, a_impl.id) not in edges
+    assert (caller.id, b_impl.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
 def test_ambiguous_reference_name_is_dropped_not_guessed() -> None:
     # Two same-named repo-wide candidates, no same-file/import hint to
     # disambiguate: dropped rather than guessed (mirrors how an
@@ -964,6 +1099,41 @@ def test_multi_segment_self_chain_builtin_call_not_guessed() -> None:
     graph = resolve(files)
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, trim_fn.id) not in edges
+
+
+def test_receiver_qualified_schema_builder_method_not_guessed() -> None:
+    # Track H's documented residual gap (investigation-1.2-resolver-
+    # fanin.md): a repo's one ``describe`` symbol is an unrelated
+    # internal helper; a Zod schema chain call like
+    # ``z.string().describe("...")`` must not be guessed into its
+    # fan-in just because ``describe`` is otherwise unique repo-wide —
+    # confirmed live against cline (fan-in 60, all Zod ``.describe()``
+    # calls through untyped schema-builder receivers).
+    describe_fn = _fn("definitions.ts", "describe")
+    caller = _fn("schema.ts", "run")
+    files = [
+        FileMap("definitions.ts", "typescript", symbols=[describe_fn]),
+        FileMap(
+            "schema.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="schema.ts",
+                    text="z.string().describe",
+                    name="describe",
+                    receiver="z.string()",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, describe_fn.id) not in edges
+    assert graph.calls_in.get(describe_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
 
 
 def test_bare_call_shadowed_by_external_import_not_guessed() -> None:
