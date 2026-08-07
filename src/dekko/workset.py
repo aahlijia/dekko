@@ -124,7 +124,7 @@ def seed_from_rev(index: MapIndex, root: Path, rev: str | None) -> Seed | None:
     outcome = affected.changes(root, rev)
     if outcome is None:
         return None
-    impacts, result, _new, target_rev = outcome
+    impacts, result, _new, target_rev, _prov = outcome
     touched = [d.symbol for d in result.added + result.changed]
     label = f"changed vs {target_rev[:12]}"
     return _make_seed("rev", label, target_rev, None, touched, impacts, index)

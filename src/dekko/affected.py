@@ -242,8 +242,20 @@ def render(
     limit: int,
     root: Path,
     budget: int | None = None,
+    provenance: dict | None = None,
 ) -> None:
-    """Emit the impacted-test report as text or JSON."""
+    """Emit the impacted-test report as text or JSON.
+
+    ``provenance`` (a map's provenance dict, see ``mapfile.load_map``)
+    qualifies the report with the same "some files weren't mapped"
+    caveat ``query``'s not-found replies already carry — a "no
+    impacted tests" result on a diff that touched only
+    vendored-excluded or unparseable files (e.g. tensorflow's
+    ``third_party/xla``) would otherwise read identically to a
+    genuinely safe change. Omitted (``None``) by default so existing
+    callers that don't have a provenance dict handy are unaffected.
+    """
+    coverage = mapfile.format_unsupported(provenance)
     if as_json:
         entries = [_impact_json(i) for i in impacts]
         serialized = [json.dumps(e) for e in entries]
@@ -254,10 +266,17 @@ def render(
             "command": _test_hint(impacts, root),
             "meta": meter.as_dict(),
         }
+        if coverage:
+            doc["coverage_warning"] = coverage
         print(json.dumps(doc, indent=2))
         return
     if not impacts:
         print(f"dekko: no impacted tests vs {rev[:12]}")
+        if coverage:
+            print(
+                f"  note: {coverage} — this answer may be incomplete",
+                file=sys.stderr,
+            )
         return
     header = f"dekko: {len(impacts)} impacted test files vs {rev[:12]}"
     rows = _impact_rows(impacts, limit)
@@ -403,7 +422,7 @@ def _test_hint(impacts: list[TestImpact], root: Path) -> str:
 
 def changes(
     root: Path, rev: str | None
-) -> tuple[list[TestImpact], diff.DiffResult, diff.Snapshot, str] | None:
+) -> tuple[list[TestImpact], diff.DiffResult, diff.Snapshot, str, dict] | None:
     """Impacted tests plus the underlying diff for worktree-vs-rev.
 
     Maps the working tree and the sources at ``rev``, diffs them, and
@@ -416,9 +435,12 @@ def changes(
         rev: Git rev for the old side, or ``None`` to derive a default.
 
     Returns:
-        ``(impacts, result, new, target_rev)``, or ``None`` when the rev
-        cannot be exported (the explanatory message is printed to
-        stderr before returning).
+        ``(impacts, result, new, target_rev, provenance)``, or ``None``
+        when the rev cannot be exported (the explanatory message is
+        printed to stderr before returning). ``provenance`` is the
+        current map's provenance dict (possibly empty), so callers can
+        qualify a "no impacted tests" result the way ``affected.run``
+        does — see ``render``.
     """
     index = mapfile.load_map(root)
     prov = (index.provenance if index else None) or {}
@@ -449,7 +471,7 @@ def changes(
     new = diff.snapshot_new_side(root, subpath, excludes, max_file_size, index)
     result = diff.compare(target_rev, old, new)
     impacts = analyze(result, new)
-    return impacts, result, new, target_rev
+    return impacts, result, new, target_rev, prov
 
 
 def run(
@@ -474,6 +496,6 @@ def run(
     outcome = changes(root, rev)
     if outcome is None:
         return EXIT_ERROR
-    impacts, _result, _new, target_rev = outcome
-    render(impacts, target_rev, as_json, limit, root, budget)
+    impacts, _result, _new, target_rev, prov = outcome
+    render(impacts, target_rev, as_json, limit, root, budget, prov)
     return EXIT_IMPACTED if impacts else EXIT_NONE

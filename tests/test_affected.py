@@ -190,6 +190,46 @@ def test_bad_rev(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     assert "cannot export git rev" in capsys.readouterr().err
 
 
+VENDORED_ONLY = {
+    **BASE,
+    "third_party/lib.py": "def helper() -> int:\n    return 1\n",
+}
+
+
+def test_no_impact_on_vendored_only_change_carries_coverage_note(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # Track E's optional item, closed as a follow-up: a diff that only
+    # touches vendored-excluded files (e.g. tensorflow's
+    # ``third_party/xla``) is invisible to the diff pipeline entirely
+    # (the walker never mapped it, so it produces no symbol delta), so
+    # "no impacted tests" would otherwise read identically to a
+    # genuinely safe change. The report must carry the same coverage
+    # caveat ``query``'s not-found replies already have.
+    root = _repo(tmp_path, VENDORED_ONLY)
+    (root / "third_party/lib.py").write_text(
+        "def helper() -> int:\n    return 2\n"
+    )
+    assert cli.main(["affected", "--root", str(root)]) == 0
+    out = capsys.readouterr()
+    assert "no impacted tests" in out.out
+    assert "third_party" in out.err
+    assert "default-excluded directories" in out.err
+    assert "this answer may be incomplete" in out.err
+
+
+def test_json_no_impact_on_vendored_only_change_has_coverage_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, VENDORED_ONLY)
+    (root / "third_party/lib.py").write_text(
+        "def helper() -> int:\n    return 2\n"
+    )
+    assert cli.main(["affected", "--root", str(root), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "third_party" in doc["coverage_warning"]
+
+
 def test_mcp_impacted_tests(tmp_path: Path) -> None:
     root = _repo(tmp_path, BASE)
     _change_core(root)
