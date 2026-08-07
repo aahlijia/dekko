@@ -9,6 +9,16 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-08-07
+
+Two 7-repo evaluation rounds (`test-repos/reports/07-tokentest-7repo-fixcycle/`,
+`08-tokentest-7repo-fable5/`, `09-tokentest-7repo-postfix/`) against
+real-world repos (awesome-go, claude-buddy, claude-code, cline,
+spring-boot, tensorflow, zed) drove a two-cycle fix pass. Round 09
+confirms the O(N^2) `lean` hang and the spring-boot vendored-dir bug
+are fixed, disambiguation is a clean win across all 6 re-tested repos,
+and token savings remain strong (12x-765x vs. Read/grep).
+
 ### Added
 - **`dekko search "<query>"` / `search_code` MCP tool (semantic
   search, Phase 1).** Free-text relevance search that ranks every
@@ -36,6 +46,94 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   falling back. Deviates from the plan's original `sentence-
   transformers` sketch — see `.features/plans/SEMANTIC-SEARCH-PLAN.md`
   §8 and "Implementation status" for why.
+- **`dekko[fastjson]` extra** (`orjson`-backed JSON read/write, falls
+  back to stdlib `json` when not installed) and a validated
+  `.dekko/provenance.json` sidecar so `dekko status` can skip a full
+  `map.json` parse.
+- **`query`'s `:LINE` disambiguation qualifier.** `resolve_target`
+  accepts a trailing `:LINE` (e.g. `path:qualname:line`) to pick
+  between overloaded symbols that collide on `(path, qualname)`;
+  `report_unresolved` now hints at the `:LINE` form when candidates
+  share a name and path.
+- `note remove` alias; `--dry-run` for `--claude-install` /
+  `--claude-uninstall`; `DEFAULT_BUDGET` caps for bare `dekko summary`
+  (5000) and `dekko affected` / `impacted_tests` (6000), so neither
+  can render an unbounded report by default.
+
+### Fixed
+- **O(N^2) hang in `dekko lean`** on large repos — `_shed_symbols`'s
+  linear `fits()` walk replaced with a binary search (`_bisect_shed`).
+- **Vendored-dir false positives.** JVM-style source roots
+  (`src/main|test/<lang>/...`, e.g. Spring Boot's
+  `org.springframework.boot.build`) are exempted from
+  `_VENDORED_DIRS` matching so a package literally named `build`
+  isn't mistaken for build output; the no-`.git/` walker fallback now
+  prunes against the same exclude-dir list as the git-aware path
+  instead of leaving the "vendored (<dir>)" skip reason dead code.
+- **Search relevance.** A shared term-coverage discount in
+  `BM25Scorer`/`LexicalScorer` stops partial matches from rescaling
+  to a false `1.00` score, surfaces an "N test-file symbols excluded"
+  hint when the top score is weak, and (via a scorer-agnostic
+  `_CoverageAdjustedScorer` wrapper in `search.rank()`) stops a common
+  term from crowding out a more distinctive one under BM25 or
+  embedding scoring alike.
+- **Resolver false positives on built-in/global calls.** Calls like
+  `.trim()`, `expect()`, or a global `String` reference were
+  silently attributed to a same-named repo symbol whenever a repo
+  happened to define exactly one, inflating fan-in and polluting
+  hotspot rankings. New `_is_noise_call` rejects calls shadowed by an
+  external import, calls to curated ambient globals, and
+  receiver-qualified calls to curated built-in prototype methods
+  (self/this receivers exempted). Live-verified on cline: `trim`
+  fan-in 1404 -> 2, `expect` 603 -> 5, `String` 548 -> 3.
+- **C++/C `#include`-based call disambiguation** and a fix so a
+  header's own stem (not the generic extension-only fallback) is
+  used as its `Import.name`, which was silently colliding across
+  nearly every include in a file.
+- **Zod `.describe()` fan-in collision** — added to the built-in
+  schema-builder-method denylist alongside C++/Go reference-tracking
+  fixes for dead-code false positives (Go value-typed struct usage,
+  JSX-referenced components).
+- **`query.py` resolution/reporting.** `_resolve_exact` merges
+  qualname/name symbol pools instead of or-short-circuiting (bare-name
+  collisions no longer masked by a qualname hit); unresolved rows show
+  `path:start_line  signature(sym)`; `_close_names`' fuzzy tier
+  requires `len(name) >= 3` and raises its cutoff to 0.72 to suppress
+  single-letter junk suggestions.
+- **Change-analysis correctness.** `diff.snapshot` reuses an
+  already-loaded `MapIndex` (freshness-gated) instead of re-parsing;
+  the old-side file list now comes from `git ls-tree` instead of
+  `walker.discover`'s gitignore-reapplying fallback, which produced
+  phantom "added" symbols for already-tracked files an unanchored
+  `.gitignore` pattern happened to match; `affected._test_hint`
+  replaced the pytest-only hint with per-language grouping
+  (pytest/cargo test/go test/npm-bun-pnpm-yarn/gradlew-mvn);
+  `impacts_from_symbol` gained an import-tier fallback for languages
+  without per-symbol import bindings (e.g. C++).
+- **`affected.render()`** now surfaces the same vendored-exclusion
+  coverage caveat `query` already carries when a diff touches only
+  vendored-excluded files (e.g. tensorflow's `third_party/xla`), so
+  "no impacted tests" no longer reads identically to a genuinely safe
+  change dekko never looked at.
+- **`dekko orient`'s preamble** no longer tells an agent to use
+  `search` when the subcommand isn't actually available in-process.
+- Unbounded `dekko summary` parse-error output capped at 15 with a
+  per-language collapse footer.
+
+### Performance
+- **Server-side `MapIndex` caching.** The MCP server now caches the
+  in-process `MapIndex` per session and reuses it while
+  `mapfile.check_freshness` still reports it fresh, skipping
+  redundant JSON parse/rebuild on repeat calls in the same session.
+- **`revcache.py`**, a disk-backed cache of resolved historical git
+  revisions (mtime-evicted, `MAX_ENTRIES=20`), shared between
+  `diff.run` and `affected.changes` instead of each re-exporting/
+  re-parsing the old revision independently.
+- BM25 term tokenization (`_raw_terms`/`_stemmed_terms`) is now
+  `lru_cache`-wrapped, and `search._build_candidates` caches its
+  built candidate list on the `MapIndex` instance, eliminating
+  redundant re-tokenization on repeat `search` calls against an
+  already-loaded index.
 
 ## [0.21.3] — 2026-08-03
 

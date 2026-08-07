@@ -23,6 +23,13 @@ downloaded model — add:
 pip install dekko[search]
 ```
 
+For faster JSON read/write on large repos (`orjson`-backed, falls
+back to stdlib `json` automatically when not installed):
+
+```sh
+pip install dekko[fastjson]
+```
+
 Then add the `/map` command + MCP server to Claude Code:
 
 ```sh
