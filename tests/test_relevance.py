@@ -150,6 +150,93 @@ def test_bm25_suffix_broadening_matches_inflections() -> None:
     assert scores["miss"] == 0.0
 
 
+# --- 2.5: tokenization memoization (search/BM25 performance) ---------
+#
+# Track F (test-repos/reports/IMPLEMENTATION-PLAN.md #2.5): BM25Scorer
+# used to re-tokenize every candidate's text from scratch on every
+# call, with no reuse across repeated searches in the same process —
+# the dominant cost on large repos. These assert the cache is actually
+# hit, not just present, and that results stay identical either way.
+
+
+def _large_candidate_batch(n: int) -> list[Candidate]:
+    """``n`` distinct, moderately long candidates for cache-hit checks."""
+    return [
+        Candidate(
+            id=f"sym{i}",
+            text=f"handle_request_{i} process retry logic for item {i} "
+            f"with backoff and timeout handling number {i}",
+            path=f"src/mod{i}.py",
+        )
+        for i in range(n)
+    ]
+
+
+def test_raw_terms_is_memoized_across_calls() -> None:
+    relevance._raw_terms.cache_clear()
+    text = "retry_request handles the failed http call"
+    first = relevance._raw_terms(text)
+    before = relevance._raw_terms.cache_info().hits
+    second = relevance._raw_terms(text)
+    after = relevance._raw_terms.cache_info().hits
+    assert second is first  # same cached list object, not rebuilt
+    assert after == before + 1
+
+
+def test_stemmed_terms_is_memoized_across_calls() -> None:
+    relevance._stemmed_terms.cache_clear()
+    text = "retrying requests with exponential backoff"
+    first = relevance._stemmed_terms(text)
+    before = relevance._stemmed_terms.cache_info().hits
+    second = relevance._stemmed_terms(text)
+    after = relevance._stemmed_terms.cache_info().hits
+    assert second == first
+    assert after == before + 1
+
+
+def test_bm25_second_score_call_reuses_cached_tokenization() -> None:
+    relevance._raw_terms.cache_clear()
+    relevance._stemmed_terms.cache_clear()
+    task = TaskContext(terms=("retry", "backoff"))
+    cands = _large_candidate_batch(2000)
+
+    first = BM25Scorer().score(task, cands)
+    hits_after_first = relevance._stemmed_terms.cache_info().hits
+
+    second = BM25Scorer().score(task, cands)
+    hits_after_second = relevance._stemmed_terms.cache_info().hits
+
+    # Every candidate's text is identical between the two calls, so a
+    # second scoring pass should hit the memoized term list for every
+    # single one of them — the exact re-tokenization the bug report
+    # described as "no warm-cache benefit" on a repeat query.
+    assert hits_after_second - hits_after_first >= len(cands)
+    assert second == first
+
+
+def test_bm25_second_score_call_is_meaningfully_faster() -> None:
+    import time
+
+    relevance._raw_terms.cache_clear()
+    relevance._stemmed_terms.cache_clear()
+    task = TaskContext(terms=("retry", "backoff", "timeout"))
+    cands = _large_candidate_batch(20_000)
+    scorer = BM25Scorer()
+
+    start = time.perf_counter()
+    scorer.score(task, cands)
+    cold = time.perf_counter() - start
+
+    start = time.perf_counter()
+    scorer.score(task, cands)
+    warm = time.perf_counter() - start
+
+    # Generous margin (not a tight perf assertion) — the point is a
+    # real, structural speedup from skipping re-tokenization, not a
+    # specific ratio tuned to one machine.
+    assert warm < cold * 0.9
+
+
 # --- pure core: blended_scores ---------------------------------------
 
 

@@ -36,6 +36,7 @@ import re
 import subprocess
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
@@ -87,7 +88,15 @@ _STOPWORDS = frozenset(
 _MIN_TERM_LEN = 2
 _MIN_PARTIAL_LEN = 3
 
+# Cache size for the tokenization memoization below. Sized generously
+# above the largest symbol count seen in the 7-repo eval (tensorflow,
+# 157,845 symbols) so a full-corpus search over even the biggest real
+# repo keeps every candidate's terms cached for the lifetime of a
+# process, not just a rolling recent-window subset.
+_TERM_CACHE_SIZE = 200_000
 
+
+@lru_cache(maxsize=_TERM_CACHE_SIZE)
 def _raw_terms(text: str) -> list[str]:
     """Identifier-aware terms, in order, without deduplication.
 
@@ -99,6 +108,14 @@ def _raw_terms(text: str) -> list[str]:
     d)`` term is always 0 or 1 and ``search.py``'s field-weighting-by-
     repetition trick (repeating a symbol's name in its candidate text
     to approximate a name-field boost) would silently do nothing.
+
+    Memoized on the input text (mirrors ``textutil._count_fragment``'s
+    ``lru_cache`` pattern): ``BM25Scorer.score`` previously re-ran this
+    regex tokenization pass over *every* candidate's text on *every*
+    call, with no reuse across repeated searches in the same process —
+    the confirmed dominant cost on large repos (2.5 in the eval
+    analysis). Callers must treat the returned list as read-only —
+    identical input text returns the exact same cached list object.
     """
     terms = []
     for piece in _WORD_RE.findall(text):
@@ -286,6 +303,20 @@ def _stem(term: str) -> str:
     return term
 
 
+@lru_cache(maxsize=_TERM_CACHE_SIZE)
+def _stemmed_terms(text: str) -> tuple[str, ...]:
+    """Tokenized and stemmed terms for one candidate's text, cached.
+
+    The exact per-candidate sequence :class:`BM25Scorer` needs for its
+    ``doc_terms`` table. Combines :func:`_raw_terms` (itself cached)
+    with :func:`_stem` and memoizes the combination too, so a repeat
+    ``BM25Scorer.score`` call against the same candidate text skips
+    both the tokenization *and* the stemming pass, not just the
+    former.
+    """
+    return tuple(_stem(t) for t in _raw_terms(text))
+
+
 class BM25Scorer:
     """BM25 lexical relevance, recomputed fresh over each candidate batch.
 
@@ -324,9 +355,7 @@ class BM25Scorer:
         if not task.terms:
             return {c.id: 0.0 for c in candidates}
         query_terms = [_stem(t) for t in task.terms]
-        doc_terms = {
-            c.id: [_stem(t) for t in _raw_terms(c.text)] for c in candidates
-        }
+        doc_terms = {c.id: _stemmed_terms(c.text) for c in candidates}
         lengths = {cid: len(terms) for cid, terms in doc_terms.items()}
         n = len(candidates)
         avgdl = sum(lengths.values()) / n if n else 0.0
@@ -350,7 +379,7 @@ class BM25Scorer:
         candidate: Candidate,
         task: TaskContext,
         query_terms: list[str],
-        doc_terms: dict[str, list[str]],
+        doc_terms: dict[str, tuple[str, ...]],
         doc_freq: dict[str, int],
         lengths: dict[str, int],
         n: int,

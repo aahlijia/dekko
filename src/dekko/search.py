@@ -142,15 +142,47 @@ def _candidate_text(sym: Symbol) -> str:
     return " ".join([name_part] * 3 + [doc_part] * 2 + [sig_part])
 
 
+# Attribute name for the per-``MapIndex``-instance candidate cache
+# below. A plain string key (not a WeakKeyDictionary/id()-keyed global
+# registry) because ``MapIndex`` is a non-frozen ``@dataclass`` and so
+# has ``__hash__ = None`` — it can't be a dict key at all. Attaching
+# the cache directly to the instance ties its lifetime to the index's
+# own lifetime (no separate registry to leak or go stale on id()
+# reuse) and needs no import beyond what's already here.
+_CANDIDATE_CACHE_ATTR = "_dekko_search_candidate_cache"
+
+
 def _build_candidates(
     index: MapIndex, kinds: frozenset[str] | None
 ) -> list[Candidate]:
-    """Every symbol (optionally kind-filtered) as a search candidate."""
-    return [
+    """Every symbol (optionally kind-filtered) as a search candidate.
+
+    Cached on the ``index`` instance itself, keyed by ``kinds``, so a
+    repeat ``rank()`` call against the *same, already-loaded*
+    ``MapIndex`` — e.g. multiple ``dekko search`` calls served by one
+    long-lived MCP session — skips rebuilding every candidate's text
+    (an O(N) pass over the whole symbol table) after the first call.
+    Safe because nothing mutates ``index.symbols_by_id`` after
+    ``load_map``/``index_from_maps`` hands it back (both populate it
+    only during construction); a single CLI invocation only ever calls
+    this once per process either way, so the cache costs one dict
+    lookup there and never pays off — it's the persisted-index case
+    (Track J's territory) this exists for.
+    """
+    cache = getattr(index, _CANDIDATE_CACHE_ATTR, None)
+    if cache is None:
+        cache = {}
+        setattr(index, _CANDIDATE_CACHE_ATTR, cache)
+    cached = cache.get(kinds)
+    if cached is not None:
+        return cached
+    candidates = [
         Candidate(id=s.id, text=_candidate_text(s), path=s.path)
         for s in index.symbols_by_id.values()
         if kinds is None or s.kind in kinds
     ]
+    cache[kinds] = candidates
+    return candidates
 
 
 def rank(

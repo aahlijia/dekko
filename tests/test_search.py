@@ -474,3 +474,79 @@ def test_search_embedding_scorer_reuses_cache_on_second_run(
     monkeypatch.setattr(embedding.EmbeddingCache, "get", spying_get)
     assert cli.main(args) == 0
     assert seen.get("hit") is True
+
+
+# --- 2.5: per-index candidate-list cache (search/BM25 performance) ---
+#
+# Track F: ``_build_candidates`` used to rebuild the full candidate
+# list (one entry per symbol) from scratch on every ``rank()`` call.
+# Attaching the cache to the ``MapIndex`` instance means a repeated
+# ``rank()`` against the *same* already-loaded index — e.g. multiple
+# ``dekko search`` calls served by one long-lived MCP session — skips
+# rebuilding it.
+
+
+def test_build_candidates_reuses_cache_for_same_index_and_kinds(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    from dekko.mapfile import load_map
+
+    root = make_mapped_repo(SRC)
+    index = load_map(root)
+    assert index is not None
+
+    first = search._build_candidates(index, None)
+    second = search._build_candidates(index, None)
+    assert second is first  # cache hit, not rebuilt
+
+
+def test_build_candidates_cache_is_keyed_by_kinds(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    from dekko.mapfile import load_map
+
+    root = make_mapped_repo(SRC)
+    index = load_map(root)
+    assert index is not None
+
+    unfiltered = search._build_candidates(index, None)
+    filtered = search._build_candidates(index, frozenset({"function"}))
+    assert filtered is not unfiltered
+    assert len(filtered) <= len(unfiltered)
+    # Re-fetching each kind still hits its own cache entry, not the
+    # other kind's.
+    assert search._build_candidates(index, None) is unfiltered
+    assert search._build_candidates(index, frozenset({"function"})) is filtered
+
+
+def test_build_candidates_does_not_leak_across_index_instances(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    from dekko.mapfile import load_map
+
+    root = make_mapped_repo(SRC)
+    index_a = load_map(root)
+    index_b = load_map(root)
+    assert index_a is not None and index_b is not None
+    assert index_a is not index_b
+
+    cands_a = search._build_candidates(index_a, None)
+    cands_b = search._build_candidates(index_b, None)
+    assert cands_a is not cands_b
+    assert {c.id for c in cands_a} == {c.id for c in cands_b}
+
+
+def test_search_rank_still_deterministic_across_repeated_calls(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The candidate cache must not change ranking output, only speed."""
+    from dekko.mapfile import load_map
+
+    root = make_mapped_repo(SRC)
+    index = load_map(root)
+    assert index is not None
+
+    first = search.rank(index, "retries failed http request")
+    second = search.rank(index, "retries failed http request")
+    assert [h.symbol.id for h in first] == [h.symbol.id for h in second]
+    assert [h.score for h in first] == [h.score for h in second]
