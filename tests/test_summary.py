@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from dekko import cli
+from dekko import cli, summary
 from dekko import server
+from dekko.mapfile import MapIndex
 
 from conftest import RepoFactory
 
@@ -110,6 +111,60 @@ def test_cross_dir_edges_counted(
     dirs = {d["path"]: d for d in doc["directories"]}
     assert dirs["a"]["cross_edges"] == 1
     assert dirs["b"]["cross_edges"] == 1
+
+
+def test_entrypoints_exclude_test_methods_and_noncallable_exports(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # 3.5: a decorated, uncalled pytest-style fixture under tests/ and
+    # an uncalled exported (non-callable) constant used to both pass
+    # the old, too-permissive entrypoints heuristic.
+    root = make_mapped_repo(
+        dict(
+            SRC,
+            **{
+                "tests/test_app.py": (
+                    "import pytest\n\n\n"
+                    "@pytest.fixture\n"
+                    "def helper_fixture():\n"
+                    "    pass\n"
+                ),
+                "src/consts.ts": "export const CONFIG = 1;\n",
+            },
+        )
+    )
+    assert _summary(root, "--json") == 0
+    doc = json.loads(capsys.readouterr().out)
+    ids = {e["id"] for e in doc["entrypoints"]}
+    assert not any("helper_fixture" in i for i in ids)
+    assert not any("CONFIG" in i for i in ids)
+    # The real entry point is untouched by the tightened filter.
+    assert any(i == "src/app.py::main" for i in ids)
+
+
+def test_parse_errors_capped_with_language_breakdown() -> None:
+    # 2.3: an uncapped grammar gap used to make one repeated message
+    # dominate the whole digest (spring-boot/tensorflow/zed: 97%+ of
+    # `summary`'s output). Built directly against a MapIndex, since
+    # reproducing a real Tier-1-grammar-missing error needs no actual
+    # source files, just the resulting error/language records.
+    index = MapIndex(root_label="repo")
+    for i in range(20):
+        path = f"gen/file{i}.kt"
+        index.errors_by_path[path] = (
+            "grammar 'kotlin' is not in the offline Tier-1 set"
+        )
+        index.languages_by_path[path] = "kotlin"
+
+    doc = summary.compute(index)
+    assert len(doc["parse_errors"]) == summary._MAX_PARSE_ERRORS
+    assert doc["parse_errors_total"] == 20
+
+    text = summary.render_text(index)
+    assert "parse errors:" in text
+    hidden = 20 - summary._MAX_PARSE_ERRORS
+    assert f"... and {hidden} more" in text
+    assert "kotlin (20)" in text
 
 
 def test_no_tests_filter(
