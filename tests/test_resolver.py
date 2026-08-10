@@ -1136,6 +1136,63 @@ def test_receiver_qualified_schema_builder_method_not_guessed() -> None:
     assert len(graph.ambiguous) == 1
 
 
+def test_receiver_qualified_commander_builder_method_not_guessed() -> None:
+    # Master report #5 (round 11, cline): a top-level
+    # ``const description = ...`` binding in an unrelated script file
+    # (`publish-npm.ts`-shaped) was credited with fan-in 14, all really
+    # Commander.js ``.description("...")`` builder calls on local
+    # ``Command``/``program`` instances scattered across the CLI.
+    # ``description`` must not be guessed into that binding's fan-in
+    # just because it's otherwise unique repo-wide, same as Zod's
+    # ``describe`` above.
+    description_binding = _fn("script/publish-npm.ts", "description")
+    caller_a = _fn("main.ts", "runCli")
+    caller_b = _fn("commands/build.ts", "registerBuild")
+    files = [
+        FileMap(
+            "script/publish-npm.ts",
+            "typescript",
+            symbols=[description_binding],
+        ),
+        FileMap(
+            "main.ts",
+            "typescript",
+            symbols=[caller_a],
+            calls=[
+                RawCall(
+                    caller_id=caller_a.id,
+                    path="main.ts",
+                    text="program.description",
+                    name="description",
+                    receiver="program",
+                    line=3,
+                )
+            ],
+        ),
+        FileMap(
+            "commands/build.ts",
+            "typescript",
+            symbols=[caller_b],
+            calls=[
+                RawCall(
+                    caller_id=caller_b.id,
+                    path="commands/build.ts",
+                    text="cmd.description",
+                    name="description",
+                    receiver="cmd",
+                    line=5,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller_a.id, description_binding.id) not in edges
+    assert (caller_b.id, description_binding.id) not in edges
+    assert graph.calls_in.get(description_binding.id, []) == []
+    assert len(graph.ambiguous) == 2
+
+
 def test_receiver_qualified_rust_std_method_not_guessed() -> None:
     # zed's headline finding, round-09 §2.1 part B: exactly one
     # repo-wide ``then`` symbol (an unrelated CI-tool crate's

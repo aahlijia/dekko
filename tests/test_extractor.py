@@ -139,6 +139,55 @@ def test_rust_nested_fn_not_a_method(tmp_path: Path) -> None:
     assert syms["Point.dist"].kind == "method"
 
 
+def test_rust_inline_test_module_marks_symbol_test(tmp_path: Path) -> None:
+    # Master report #7 (round 11, zed): Rust's idiomatic
+    # ``#[cfg(test)] mod tests { ... }`` co-locates unit tests inside
+    # the same file as the production code they test, so the
+    # file-level `is_test_path` pass in `cli.map_repository` never
+    # sees a test-path file and never sets `Symbol.test`. The
+    # extractor's own `_qualify` already climbs through the `mod_item`
+    # container and knows the qualname prefix is `tests` — it must now
+    # also seed `Symbol.test = True` from that same signal.
+    spec = languages.spec_for_path("buffer_search.rs")
+    assert spec is not None
+    (tmp_path / "buffer_search.rs").write_text(
+        "pub fn update_search_settings(x: i32) -> i32 {\n"
+        "    x + 1\n"
+        "}\n"
+        "\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    use super::*;\n"
+        "\n"
+        "    fn helper() -> i32 {\n"
+        "        update_search_settings(1)\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "buffer_search.rs", spec)
+    assert fm.error is None
+    syms = _by_qualname(fm.symbols)
+    assert set(syms) == {"update_search_settings", "tests.helper"}
+    assert syms["update_search_settings"].test is False
+    assert syms["tests.helper"].test is True
+
+
+def test_rust_non_test_mod_named_something_else_stays_untested(
+    tmp_path: Path,
+) -> None:
+    # A production `mod` that isn't named `tests`/`test` must not be
+    # misclassified — only the specific bare-name heuristic fires.
+    spec = languages.spec_for_path("lib2.rs")
+    assert spec is not None
+    (tmp_path / "lib2.rs").write_text(
+        "mod helpers {\n    pub fn util() -> i32 {\n        1\n    }\n}\n"
+    )
+    fm = extract_file(tmp_path, "lib2.rs", spec)
+    assert fm.error is None
+    syms = _by_qualname(fm.symbols)
+    assert syms["helpers.util"].test is False
+
+
 def test_typescript_variable_export_indexed_as_symbol(
     tmp_path: Path,
 ) -> None:

@@ -258,12 +258,34 @@ def _close_names(needle: str, names: list[str]) -> list[str]:
     return out
 
 
+def _is_qualname_near_miss(qual: str, sym: Symbol) -> bool:
+    """Whether ``sym`` looks like ``qual`` missing a namespace/module.
+
+    True when the symbol's real qualname *is* the requested qualname,
+    or ends with it after a ``.`` segment separator — the exact shape
+    of a C++ "forgot the namespace" or a Rust/Java "forgot the outer
+    module" guess (master report #8, round 11: ``ClientSession.Run``
+    failing to resolve when the real qualname is
+    ``tensorflow.ClientSession.Run``). Requiring a preceding ``.``
+    (not a bare substring) avoids matching an unrelated qualname that
+    merely ends with the same trailing characters. Only meaningful
+    when ``qual`` itself has a container segment (a bare name has
+    nothing to be "missing a prefix" from).
+    """
+    return "." in qual and (
+        sym.qualname == qual or sym.qualname.endswith("." + qual)
+    )
+
+
 def _suggest_symbols(index: MapIndex, target: str) -> list[Symbol]:
     """Symbols worth offering for a target that resolved to nothing.
 
     Matches the qualname part of the target (and its last segment)
     against the name index, so a wrong or stale path qualifier still
-    finds the right symbol. Production code ranks before test code.
+    finds the right symbol. Candidates whose real qualname is the
+    requested qualname with a namespace/module prefix missing (see
+    ``_is_qualname_near_miss``) rank first; within each tier,
+    production code ranks before test code.
     """
     qual = target.rpartition(":")[2]
     seen: dict[str, Symbol] = {}
@@ -273,7 +295,12 @@ def _suggest_symbols(index: MapIndex, target: str) -> list[Symbol]:
                 seen.setdefault(sym.id, sym)
     ranked = sorted(
         seen.values(),
-        key=lambda s: (is_test_path(s.path), s.path, s.qualname),
+        key=lambda s: (
+            not _is_qualname_near_miss(qual, s),
+            is_test_path(s.path),
+            s.path,
+            s.qualname,
+        ),
     )
     return ranked[:_MAX_SUGGESTIONS]
 

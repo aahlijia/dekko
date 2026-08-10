@@ -484,22 +484,40 @@ _BUILTIN_METHOD_NAMES = frozenset(
     }
 )  # fmt: skip
 
-# Chain-call method names from popular schema/validation builder
-# libraries (Zod and the like) — ``z.string().describe("...")``. Same
-# shape of false-positive as ``_BUILTIN_METHOD_NAMES``: a
+# Chain-call method names from popular fluent/builder-pattern
+# libraries (Zod's schema builder, Commander.js's CLI builder, and the
+# like) — ``z.string().describe("...")``, ``program.description("...")``.
+# Same shape of false-positive as ``_BUILTIN_METHOD_NAMES``: a
 # receiver-qualified call whose receiver isn't provably typed as an
 # in-repo class, so the only "evidence" for the single-candidate fast
 # path is name uniqueness — which fails whenever a repo also happens
 # to define its own like-named method/function. Confirmed live against
-# cline: ``describe`` (a Zod ``.describe()`` schema call) still read
-# fan-in 60 after ``_BUILTIN_METHOD_NAMES`` alone, because ``describe``
-# isn't a String/Array/Object prototype method — see
+# cline twice: ``describe`` (a Zod ``.describe()`` schema call) still
+# read fan-in 60 after ``_BUILTIN_METHOD_NAMES`` alone, because
+# ``describe`` isn't a String/Array/Object prototype method — see
 # ``test-repos/reports/investigation-1.2-resolver-fanin.md``'s
-# "residual gap" note. Kept as its own (currently one-entry) set, not
-# folded into ``_BUILTIN_METHOD_NAMES``, since the two lists have
-# different provenance even though they're checked together — extend
-# here, not there, if another schema-builder collision turns up.
-_SCHEMA_BUILDER_METHOD_NAMES = frozenset({"describe"})  # fmt: skip
+# "residual gap" note; and ``description`` (a Commander.js
+# ``.description()`` builder call on a local ``Command``/``program``
+# instance) read fan-in 14, all credited to an unrelated top-level
+# ``const description = ...`` binding in a separate script — see
+# ``test-repos/reports/11-tokentest-7repo-postdaemonfix/cline.md``
+# (master report finding #5). Originally named
+# ``_SCHEMA_BUILDER_METHOD_NAMES`` for the Zod-only case; renamed once
+# a second, unrelated fluent-builder library hit the exact same
+# false-positive shape, since "schema builder" no longer describes the
+# whole set. Extend here whenever another fluent/chain-builder
+# collision turns up — this is the third occurrence of the same
+# pattern class, not a new one.
+_CHAIN_BUILDER_METHOD_NAMES = frozenset(
+    {
+        # Zod (and similar schema/validation builders).
+        "describe",
+        # Commander.js's fluent CLI-builder API.
+        "description", "option", "action", "version", "alias",
+        "arguments", "usage", "command", "parse", "hook", "addCommand",
+        "helpOption", "allowUnknownOption", "showHelpAfterError",
+    }
+)  # fmt: skip
 
 # Well-known Rust std/prelude trait method names (``Iterator``,
 # ``Option``, ``Result``, ``Clone``, ``ToString``, ...). Same
@@ -571,7 +589,7 @@ def _is_noise_call(
         return False
     return (
         call.name in _BUILTIN_METHOD_NAMES
-        or call.name in _SCHEMA_BUILDER_METHOD_NAMES
+        or call.name in _CHAIN_BUILDER_METHOD_NAMES
         or call.name in _RUST_STD_METHOD_NAMES
     )
 
