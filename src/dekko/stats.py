@@ -13,12 +13,32 @@ def _edge_count(index: MapIndex) -> int:
     return sum(len(callees) for callees in index.calls_out.values())
 
 
+# Presentation-layer backstop for `resolver.py`'s `_is_noise_call`
+# guard: a small, curated denylist of names that should never surface
+# in a "load-bearing"/hotspot ranking even if a genuinely-unresolvable
+# edge-count corruption slips past the resolver (e.g. a name this list
+# knows about but the resolver's own narrower checks don't yet cover).
+# Kept intentionally small and hand-curated rather than an attempt at
+# algorithmically detecting "generic-sounding names" — see
+# `test-repos/reports/investigation-1.2-resolver-fanin.md`, whose
+# cline `interface String`/`expect`/`describe` findings motivated this.
+_NOISE_NAMES = frozenset(
+    {
+        "String", "Number", "Boolean", "Array", "Object",
+        "expect", "describe", "it", "test", "beforeEach", "afterEach",
+        "new", "from", "fmt", "clone", "run", "then", "iter_mut",
+    }
+)  # fmt: skip
+
+
 def _hotspots(
     index: MapIndex, adjacency: dict[str, list[str]], top: int
 ) -> list[tuple[Symbol, int]]:
     """Top symbols by adjacency size (fan-in or fan-out)."""
     ranked: list[tuple[Symbol, int]] = []
     for sym_id, sym in index.symbols_by_id.items():
+        if sym.name in _NOISE_NAMES:
+            continue
         count = len(adjacency.get(sym_id, []))
         if count:
             ranked.append((sym, count))

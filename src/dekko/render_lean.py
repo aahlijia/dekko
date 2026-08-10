@@ -18,6 +18,7 @@ byte-stable output (NFR3).
 """
 
 import json
+import sys
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -706,6 +707,23 @@ def run(
     lines, report = generate(
         index, root, CapConfig(override=budget), task, dense=dense
     )
+    if budget is not None and report.cap > budget:
+        # ``effective_cap`` never lets the cap fall below the
+        # path-only floor (FR1's backbone must always be renderable —
+        # "the cap bends, not the floor"), so a tight ``--budget`` can
+        # be silently overridden with no visible difference from an
+        # unbudgeted run on a large repo (round-09 §2.4: claude-code's
+        # ``--budget 500`` produced the same ~9,944 tokens as the
+        # default run). ``report.cap`` is exactly what the ladder
+        # actually rendered against, so a mismatch against the
+        # requested ``budget`` is the floor having bent the request
+        # upward.
+        print(
+            f"note: requested budget {budget} is below this repo's "
+            f"~{report.cap}-token path-only floor; using the floor "
+            "instead",
+            file=sys.stderr,
+        )
     text = "\n".join(lines)
     if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -722,15 +740,56 @@ def run(
 def _shed_symbols(
     state: _LeanState, live: list[SymbolAtom], fits: Callable[[], bool]
 ) -> None:
-    """Ladder rungs 3-4: drop signatures, then names, lowest first."""
-    for atom in live:
-        if fits():
-            return
-        state.dropped_sigs.add(atom.sym_id)
-    for atom in live:
-        if fits():
-            return
-        state.dropped_names.add(atom.sym_id)
+    """Ladder rungs 3-4: drop signatures, then names, lowest first.
+
+    Binary-searches the shed cutoff instead of probing atom-by-atom.
+    ``live`` is sorted ascending by survival score and dropping a
+    prefix of it can only shrink the rendered document, so ``fits()``
+    is monotonic in the cutoff index — this turns an O(N) `fits()`
+    probes (each itself O(N) to re-render) into O(log N) probes per
+    rung, dropping the whole shed pass from O(N^2) to O(N log N).
+    Produces the same final shed sets as the old atom-by-atom walk:
+    the smallest prefix of ``live`` that, once dropped, makes
+    ``fits()`` true (or the whole list, if even that isn't enough).
+    """
+    if fits():
+        return
+    _bisect_shed(live, fits, state.dropped_sigs)
+    if fits():
+        return
+    _bisect_shed(live, fits, state.dropped_names)
+
+
+def _bisect_shed(
+    live: list[SymbolAtom], fits: Callable[[], bool], target: set[str]
+) -> None:
+    """Binary-search the smallest live-atom prefix that satisfies ``fits``.
+
+    Mutates ``target`` in place (it is one of ``state``'s shed sets, and
+    ``fits`` reads ``state`` directly) so that on return it holds
+    exactly ``live[:k]``'s ids for the smallest ``k`` at which
+    ``fits()`` is true — or all of ``live`` if even the full prefix
+    doesn't reach it.
+    """
+    if not live:
+        return
+
+    def probe(k: int) -> bool:
+        target.clear()
+        target.update(a.sym_id for a in live[:k])
+        return fits()
+
+    if not probe(len(live)):
+        return  # even the full prefix isn't enough; caller moves on
+
+    lo, hi = 0, len(live)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if probe(mid):
+            hi = mid
+        else:
+            lo = mid + 1
+    probe(lo)
 
 
 def _shed_purpose(state: _LeanState, fits: Callable[[], bool]) -> None:

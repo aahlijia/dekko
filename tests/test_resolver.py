@@ -462,6 +462,141 @@ def test_aliased_import_reference_resolves_to_real_target() -> None:
     assert graph.referenced_out[wire_up.id] == [real.id]
 
 
+def test_cpp_call_disambiguated_via_whole_file_include() -> None:
+    # C++ import-hint fix (1.5-remainder, part 1) — reproduces the
+    # tensorflow ``rewrite_utils.cc``/``rewrite_utils_test.cc`` gtest
+    # pair from investigation-1.5-cpp-gtest-affected.md as a minimal
+    # fixture: two repo-wide same-named free functions (no receiver,
+    # no self/typed-param/same-file evidence — every earlier ladder
+    # step fails), disambiguated only by which header the caller's
+    # file ``#include``s. Before the whole-file-include fallback, this
+    # always landed in ``ambiguous`` — C++'s ``#include`` has no
+    # per-symbol binding, so the ordinary name-keyed import hint could
+    # never fire.
+    real = _fn("tensorflow/core/data/rewrite_utils.cc", "GetGrapplerItem")
+    unrelated = _fn("other/pkg/helpers.cc", "GetGrapplerItem")
+    caller = _fn(
+        "tensorflow/core/data/rewrite_utils_test.cc",
+        "TEST",
+        line=86,
+    )
+    files = [
+        FileMap(
+            "tensorflow/core/data/rewrite_utils.cc",
+            "cpp",
+            symbols=[real],
+        ),
+        FileMap("other/pkg/helpers.cc", "cpp", symbols=[unrelated]),
+        FileMap(
+            "tensorflow/core/data/rewrite_utils_test.cc",
+            "cpp",
+            symbols=[caller],
+            imports=[
+                Import(
+                    path="tensorflow/core/data/rewrite_utils_test.cc",
+                    name="rewrite_utils",
+                    source="tensorflow/core/data/rewrite_utils.h",
+                )
+            ],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="tensorflow/core/data/rewrite_utils_test.cc",
+                    text="GetGrapplerItem",
+                    name="GetGrapplerItem",
+                    line=90,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, real.id) in edges
+    assert (caller.id, unrelated.id) not in edges
+    assert graph.ambiguous == []
+
+
+def test_cpp_call_stays_ambiguous_when_no_include_matches() -> None:
+    # Regression guard: the whole-file-include fallback must not
+    # over-match — when neither candidate's file is actually included
+    # by the caller's file, the call stays genuinely ambiguous rather
+    # than guessing.
+    a_impl = _fn("a/impl.cc", "Frobnicate")
+    b_impl = _fn("b/impl.cc", "Frobnicate")
+    caller = _fn("caller.cc", "Run")
+    files = [
+        FileMap("a/impl.cc", "cpp", symbols=[a_impl]),
+        FileMap("b/impl.cc", "cpp", symbols=[b_impl]),
+        FileMap(
+            "caller.cc",
+            "cpp",
+            symbols=[caller],
+            imports=[
+                Import(
+                    path="caller.cc",
+                    name="unrelated",
+                    source="c/unrelated.h",
+                )
+            ],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.cc",
+                    text="Frobnicate",
+                    name="Frobnicate",
+                    line=5,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, a_impl.id) not in edges
+    assert (caller.id, b_impl.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_non_cpp_call_unaffected_by_whole_file_include_fallback() -> None:
+    # The fallback is gated to ``_WHOLE_FILE_IMPORT_LANGUAGES`` — a
+    # Python file with an unrelated import whose source happens to
+    # share a path segment with an ambiguous candidate's file must
+    # still land in ``ambiguous``, not be swept up by a fallback meant
+    # only for C/C++.
+    a_impl = _fn("pkg/thing.py", "process")
+    b_impl = _fn("other/thing.py", "process")
+    caller = _fn("caller.py", "run")
+    files = [
+        FileMap("pkg/thing.py", "python", symbols=[a_impl]),
+        FileMap("other/thing.py", "python", symbols=[b_impl]),
+        FileMap(
+            "caller.py",
+            "python",
+            symbols=[caller],
+            imports=[
+                Import(
+                    path="caller.py",
+                    name="unrelated_name",
+                    source="pkg.thing",
+                )
+            ],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.py",
+                    text="process",
+                    name="process",
+                    line=3,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, a_impl.id) not in edges
+    assert (caller.id, b_impl.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
 def test_ambiguous_reference_name_is_dropped_not_guessed() -> None:
     # Two same-named repo-wide candidates, no same-file/import hint to
     # disambiguate: dropped rather than guessed (mirrors how an
@@ -817,3 +952,468 @@ def test_real_ambiguity_between_two_unrelated_classes_still_ambiguous() -> (
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert edges == set()
     assert len(graph.ambiguous) == 1
+
+
+# --- Resolver fan-in noise (investigation-1.2-resolver-fanin.md) ---
+#
+# cline's ``trim``/``expect``/``describe``/``interface String`` hotspots
+# (reported fan-in 1,404/603/676/548) turned out not to be a merge bug —
+# ``_pick_candidate`` never guesses among 2+ genuinely ambiguous
+# candidates — but a false-positive *single*-candidate resolution: a
+# repo defining exactly one symbol sharing a name with a language
+# built-in/ambient global had every unrelated built-in/global call site
+# silently credited to it. These tests cover the three shapes the
+# investigation confirmed live against cline, plus regression guards
+# that legitimate same-shape resolutions are unaffected.
+
+
+def test_receiver_qualified_builtin_method_name_not_guessed() -> None:
+    # cline's headline case: exactly one repo-wide ``trim`` symbol; an
+    # unrelated call through an untyped local variable
+    # (``opts.config.trim()``) is really JS's built-in
+    # ``String.prototype.trim()``. Must not be guessed into the repo
+    # symbol's fan-in.
+    trim_fn = _fn("util.ts", "trim")
+    caller = _fn("caller.ts", "run")
+    files = [
+        FileMap("util.ts", "typescript", symbols=[trim_fn]),
+        FileMap(
+            "caller.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="opts.config.trim",
+                    name="trim",
+                    receiver="opts.config",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, trim_fn.id) not in edges
+    assert graph.calls_in.get(trim_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+
+
+def test_bare_call_to_same_file_builtin_named_function_still_resolves() -> (
+    None
+):
+    # Regression guard: the noise guard only applies to
+    # receiver-qualified calls and known ambient-global bare names — a
+    # genuinely local bare call to a same-file function sharing a
+    # built-in method name (dekko's real cline callers: bare
+    # ``trim(value)``, no receiver) must still resolve normally.
+    trim_fn = _fn("util.ts", "trim")
+    caller = _fn("util.ts", "run", line=5)
+    files = [
+        FileMap(
+            "util.ts",
+            "typescript",
+            symbols=[trim_fn, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="util.ts",
+                    text="trim",
+                    name="trim",
+                    line=6,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, trim_fn.id) in edges
+    assert graph.ambiguous == []
+
+
+def test_exact_self_receiver_builtin_named_method_still_resolves() -> None:
+    # ``this.trim()`` (bare self/this receiver, no further chain) on a
+    # class that defines its own ``trim`` method must still resolve via
+    # ``_self_container`` — the noise guard only rejects a
+    # *multi-segment* chain rooted at self/this, not a direct
+    # sibling-method call.
+    cls = FileMap(
+        path="c.ts",
+        language="typescript",
+        symbols=[
+            _fn("c.ts", "C", "C"),
+            _fn("c.ts", "trim", "C.trim", line=2),
+            _fn("c.ts", "m", "C.m", line=4),
+        ],
+        calls=[
+            RawCall(
+                caller_id="c.ts::C.m",
+                path="c.ts",
+                text="this.trim",
+                name="trim",
+                receiver="this",
+                line=5,
+            )
+        ],
+    )
+    graph = resolve([cls])
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert ("c.ts::C.m", "c.ts::C.trim") in edges
+
+
+def test_multi_segment_self_chain_builtin_call_not_guessed() -> None:
+    # A property chain merely rooted at ``this``
+    # (``this.options.value.trim()``) is a value access, not a
+    # sibling-method call — must not be exempted from the noise guard
+    # just because the chain's first token is ``this``. Confirmed live
+    # against cline's ``this.options.authToken?.trim()``.
+    trim_fn = _fn("util.ts", "trim")
+    cls = _fn("c.ts", "C", "C")
+    caller = Symbol(
+        id="c.ts::C.m",
+        name="m",
+        qualname="C.m",
+        kind="method",
+        path="c.ts",
+        language="typescript",
+    )
+    files = [
+        FileMap("util.ts", "typescript", symbols=[trim_fn]),
+        FileMap(
+            "c.ts",
+            "typescript",
+            symbols=[cls, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="c.ts",
+                    text="this.options.value.trim",
+                    name="trim",
+                    receiver="this.options.value",
+                    line=6,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, trim_fn.id) not in edges
+
+
+def test_receiver_qualified_schema_builder_method_not_guessed() -> None:
+    # Track H's documented residual gap (investigation-1.2-resolver-
+    # fanin.md): a repo's one ``describe`` symbol is an unrelated
+    # internal helper; a Zod schema chain call like
+    # ``z.string().describe("...")`` must not be guessed into its
+    # fan-in just because ``describe`` is otherwise unique repo-wide —
+    # confirmed live against cline (fan-in 60, all Zod ``.describe()``
+    # calls through untyped schema-builder receivers).
+    describe_fn = _fn("definitions.ts", "describe")
+    caller = _fn("schema.ts", "run")
+    files = [
+        FileMap("definitions.ts", "typescript", symbols=[describe_fn]),
+        FileMap(
+            "schema.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="schema.ts",
+                    text="z.string().describe",
+                    name="describe",
+                    receiver="z.string()",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, describe_fn.id) not in edges
+    assert graph.calls_in.get(describe_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+
+
+def test_receiver_qualified_rust_std_method_not_guessed() -> None:
+    # zed's headline finding, round-09 §2.1 part B: exactly one
+    # repo-wide ``then`` symbol (an unrelated CI-tool crate's
+    # ``PathContextCondition.then``); a call through an untyped local
+    # variable is really Rust std's ``bool::then``. Must not be
+    # guessed into the repo symbol's fan-in — same false-positive
+    # shape ``_BUILTIN_METHOD_NAMES`` already guards for JS/TS, just
+    # never extended to Rust std/prelude method names before.
+    then_fn = _fn("ci_tool.rs", "then", "PathContextCondition.then")
+    caller = _fn("editor.rs", "new_internal")
+    files = [
+        FileMap("ci_tool.rs", "rust", symbols=[then_fn]),
+        FileMap(
+            "editor.rs",
+            "rust",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="editor.rs",
+                    text="mode.then",
+                    name="then",
+                    receiver="mode",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, then_fn.id) not in edges
+    assert graph.calls_in.get(then_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+
+
+def test_rust_iter_mut_not_guessed_into_unrelated_repo_symbol() -> None:
+    # zed's second part-B example: ``.iter_mut()`` on an untyped
+    # local must not resolve to an unrelated repo type's own
+    # ``iter_mut`` method just because the name is otherwise unique.
+    iter_mut_fn = _fn("atlas.rs", "iter_mut", "AtlasTextureList.iter_mut")
+    caller = _fn("editor.rs", "new_internal")
+    files = [
+        FileMap("atlas.rs", "rust", symbols=[iter_mut_fn]),
+        FileMap(
+            "editor.rs",
+            "rust",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="editor.rs",
+                    text="highlights.iter_mut",
+                    name="iter_mut",
+                    receiver="highlights",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, iter_mut_fn.id) not in edges
+    assert graph.calls_in.get(iter_mut_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+
+
+def test_explicit_type_receiver_resolves_same_file_new_collision() -> None:
+    # zed's headline finding, round-09 §2.1 part A:
+    # ``BufferDiff::new(...)`` written inside ``BufferDiff``'s own
+    # file, which also defines an unrelated type's same-named ``new``
+    # method — there's no import to key ``_import_match`` off (same
+    # file) and ``same_file`` has 2 same-named candidates, so neither
+    # of those steps (nor self/this, nor a typed parameter) can
+    # disambiguate it. The receiver being the type's own bare name is
+    # stronger evidence than any of those and must resolve
+    # unambiguously — previously fell all the way through to
+    # ``ambiguous`` with the full repo-wide candidate list.
+    buffer_diff_type = Symbol(
+        id="buffer_diff.rs::BufferDiff",
+        name="BufferDiff",
+        qualname="BufferDiff",
+        kind="struct",
+        path="buffer_diff.rs",
+        language="rust",
+    )
+    buffer_diff_new = _fn("buffer_diff.rs", "new", "BufferDiff.new", line=5)
+    other_new = _fn("buffer_diff.rs", "new", "Other.new", line=20)
+    caller = _fn(
+        "buffer_diff.rs",
+        "new_with_base_text",
+        "BufferDiff.new_with_base_text",
+        line=40,
+    )
+    files = [
+        FileMap(
+            "buffer_diff.rs",
+            "rust",
+            symbols=[buffer_diff_type, buffer_diff_new, other_new, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="buffer_diff.rs",
+                    text="BufferDiff::new",
+                    name="new",
+                    receiver="BufferDiff",
+                    line=41,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, buffer_diff_new.id) in edges
+    assert (caller.id, other_new.id) not in edges
+    assert graph.ambiguous == []
+
+
+def test_explicit_type_receiver_no_unique_method_falls_through() -> None:
+    # Negative control: the receiver names a real in-repo type, but
+    # that type has no candidate matching ``Type.name`` — the new step
+    # must decline (return None) rather than guessing, leaving the
+    # rest of the ladder (here: real ambiguity) untouched.
+    widget_type = Symbol(
+        id="widget.rs::Widget",
+        name="Widget",
+        qualname="Widget",
+        kind="struct",
+        path="widget.rs",
+        language="rust",
+    )
+    unrelated_a = _fn("a.rs", "build", "Foo.build")
+    unrelated_b = _fn("b.rs", "build", "Bar.build")
+    caller = _fn("widget.rs", "make", "Widget.make", line=10)
+    files = [
+        FileMap(
+            "widget.rs",
+            "rust",
+            symbols=[widget_type, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="widget.rs",
+                    text="Widget::build",
+                    name="build",
+                    receiver="Widget",
+                    line=11,
+                )
+            ],
+        ),
+        FileMap("a.rs", "rust", symbols=[unrelated_a]),
+        FileMap("b.rs", "rust", symbols=[unrelated_b]),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, unrelated_a.id) not in edges
+    assert (caller.id, unrelated_b.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_bare_call_shadowed_by_external_import_not_guessed() -> None:
+    # A file explicitly imports ``expect`` from an external package
+    # (e.g. vitest); a bare ``expect(...)`` call there always means the
+    # import, never an unrelated same-named repo shim the bare-name
+    # index happens to find.
+    shim = _fn("test-setup.js", "expect")
+    caller = _fn("spec.js", "run")
+    files = [
+        FileMap("test-setup.js", "javascript", symbols=[shim]),
+        FileMap(
+            "spec.js",
+            "javascript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="spec.js",
+                    text="expect",
+                    name="expect",
+                    line=3,
+                )
+            ],
+            imports=[
+                Import(path="spec.js", name="expect", source="vitest"),
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, shim.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_bare_call_to_ambient_global_name_not_guessed_without_import() -> None:
+    # Vitest/jest-style ``globals: true`` injects ``describe``/
+    # ``expect``/etc. with no explicit import at all — the noise guard
+    # must still reject the single-candidate guess from the name alone.
+    local = _fn("helpers.ts", "describe")
+    caller = _fn("spec.ts", "run")
+    files = [
+        FileMap("helpers.ts", "typescript", symbols=[local]),
+        FileMap(
+            "spec.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="spec.ts",
+                    text="describe",
+                    name="describe",
+                    line=3,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, local.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_bare_call_to_global_type_name_not_guessed() -> None:
+    # A TS ``declare global { interface String { ... } }`` augmentation
+    # is not a real callable definition; a bare ``String(x)`` call
+    # elsewhere means the JS global cast/constructor, never that
+    # augmentation symbol. Confirmed live against cline: ``interface
+    # String`` was credited with 548 calls that were actually
+    # ``String(...)`` casts.
+    aug = _fn("path.ts", "String", "String")
+    caller = _fn("caller.ts", "run")
+    files = [
+        FileMap("path.ts", "typescript", symbols=[aug]),
+        FileMap(
+            "caller.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="String",
+                    name="String",
+                    line=3,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, aug.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_reference_resolution_unaffected_by_noise_guard() -> None:
+    # ``_pick_candidate``'s ``repo_stems`` gate is only threaded from
+    # ``_resolve_call`` — ``resolve_refs()``/``_resolve_ref`` never
+    # passes it, so a bare-value *reference* (not a call) to a
+    # noise-listed name resolves exactly as it did before this fix; the
+    # fan-in bug this pass targets never affected the separate
+    # ``referenced``/``referenced_in`` tables.
+    local = _fn("helpers.ts", "describe")
+    caller = _fn("spec.ts", "run")
+    files = [
+        FileMap("helpers.ts", "typescript", symbols=[local]),
+        FileMap(
+            "spec.ts",
+            "typescript",
+            symbols=[caller],
+            refs=[
+                RawRef(
+                    caller_id=caller.id,
+                    path="spec.ts",
+                    name="describe",
+                    line=3,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    ref_edges = {(e.caller, e.callee) for e in graph.referenced}
+    assert (caller.id, local.id) in ref_edges

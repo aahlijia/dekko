@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from dekko import cli
+from dekko import cli, mapfile, query
 
 from conftest import RepoFactory
 
@@ -69,8 +69,11 @@ def test_ambiguous_bare_name(
     code = cli.main(["query", "symbol", "helper", "--root", str(root)])
     assert code == 4
     err = capsys.readouterr().err
-    assert "a.py:helper" in err
-    assert "b.py:helper" in err
+    # 3.3: candidate rows now carry a line number and signature, not
+    # just path:qualname, so same-file/same-name overloads render as
+    # visually distinct rows.
+    assert "a.py:1  helper(x: int) -> int" in err
+    assert "b.py:1  helper(x: int) -> int" in err
 
 
 def test_ambiguous_candidates_truncated_past_cap(
@@ -91,6 +94,78 @@ def test_ambiguous_candidates_truncated_past_cap(
     candidate_rows = [ln for ln in err.splitlines() if ln.startswith("  mod_")]
     assert len(candidate_rows) == 20
     assert "+5 more (qualify with" in err
+    # round-09 §2.5: the qualifier example must be built from a real
+    # candidate's own path, not a hardcoded ``file.py`` placeholder —
+    # confirmed on two 100%-non-Python monorepos (spring-boot, zed),
+    # neither of which has any ``file.py`` anywhere in the tree.
+    assert "`mod_0.py:dup`" in err
+    assert "file.py" not in err
+
+
+CONTROLLER_COLLISION = {
+    # A top-level function whose bare name has no "." in its qualname
+    # (qualname == name == "controller") coexists with several
+    # unrelated nested methods that happen to share the same bare
+    # name but never the same qualname (`Foo.controller`,
+    # `Bar.controller`). Bug #1.4: the old ``or``-short-circuiting
+    # lookup in ``_resolve_exact`` found the single qualname hit and
+    # returned it immediately, never even consulting
+    # ``symbols_by_name`` — silently picking the top-level function
+    # while ignoring two real, same-named collisions.
+    "top.py": "def controller() -> None:\n    pass\n",
+    "foo.py": (
+        "class Foo:\n    def controller(self) -> None:\n        pass\n"
+    ),
+    "bar.py": (
+        "class Bar:\n    def controller(self) -> None:\n        pass\n"
+    ),
+}
+
+
+def test_bare_name_ambiguity_not_masked_by_qualname_shortcut(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CONTROLLER_COLLISION)
+    code = cli.main(["query", "symbol", "controller", "--root", str(root)])
+    assert code == 4
+    err = capsys.readouterr().err
+    assert "top.py:1  controller() -> None" in err
+    assert "foo.py:2  Foo.controller(self) -> None" in err
+    assert "bar.py:2  Bar.controller(self) -> None" in err
+
+
+def test_close_names_suppresses_short_fuzzy_junk(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # 3.4b, mode (b): single-letter symbol names (zed's `B`/`t`/`A`/
+    # `D`) must never win the fuzzy edit-distance tier just because
+    # edit distance is biased toward short strings, even when nothing
+    # else is close.
+    assert query._close_names("zzznonsense", ["B", "t", "A", "D"]) == []
+
+
+def test_close_names_still_surfaces_real_near_typo(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # 3.4b, mode (a): a genuine near-typo of a real (non-trivially-
+    # short) symbol name must still be suggested — the tightened
+    # cutoff/floor must not blind the suggester to real answers
+    # (claude-buddy's `buddyStateDr` case).
+    assert query._close_names(
+        "buddyStateDrx", ["buddyStateDr", "Q", "Z", "W"]
+    ) == ["buddyStateDr"]
+
+
+def test_close_names_raised_cutoff_excludes_marginal_fuzzy_match(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # The edit-distance cutoff was raised from difflib's permissive
+    # 0.6 to 0.72 specifically to trim marginal, not-actually-close
+    # matches — this candidate scores 0.667 (passed under the old
+    # cutoff, fails under the new one) and is long enough that the
+    # separate length floor isn't what's excluding it.
+    assert query._close_names("trix", ["tribe"]) == []
+    assert query._close_names("trix", ["trib"]) == ["trib"]
 
 
 AMBIGUOUS_CALL = {
@@ -140,6 +215,50 @@ def test_get_callers_notes_ambiguous_call_sites(
     assert "ambiguously" in captured.err
 
 
+def test_get_callees_notes_ambiguous_call_sites(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-09 §2.1 part A: only the callers direction disclosed
+    # ambiguous call sites (``ambig_in``) — a caller's own ambiguous
+    # *outgoing* calls (here, ``caller()`` calling the ambiguous
+    # ``target``) had no equivalent surfacing on ``query callees``, so
+    # a genuinely ambiguous callee was silently indistinguishable from
+    # "this function calls nothing else."
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    code = cli.main(["query", "callees", "c.py:caller", "--root", str(root)])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "(no callees of" in captured.out
+    assert "ambiguously" in captured.err
+    assert "1 outgoing call" in captured.err
+
+
+def test_callees_json_carries_ambiguous_out(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    code = cli.main(
+        ["query", "callees", "c.py:caller", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["ambiguous_out"] == 1
+
+
+def test_callers_json_has_no_ambiguous_out_key(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # ``ambig_out`` is only ever computed for the callees direction —
+    # a callers query must not carry a stray/zero key.
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    code = cli.main(
+        ["query", "callers", "a.py:target", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "ambiguous_out" not in doc
+
+
 TS_CALLBACK = {
     "handlers.ts": (
         "export function handleClick(): void {\n  console.log('clicked');\n}\n"
@@ -157,10 +276,75 @@ TS_CALLBACK = {
 def test_symbol_card_notes_zero_fan_for_unreferenced_type(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # B11: a struct/class used only as a parameter/field/return-type
-    # annotation always reads fan-in/fan-out 0/0 (only call/reference
+    # B11: a struct/class used only as a field or return-type
+    # annotation still reads fan-in/fan-out 0/0 (only call/reference
     # edges are tracked) — easy to misread as "unused." The card must
-    # caveat this rather than let 0/0 stand unexplained.
+    # caveat this rather than let 0/0 stand unexplained. (A struct used
+    # as a *parameter* type, or as a struct field's own declared type
+    # (including anonymous embedding), is exercised separately below —
+    # Track G/bug #1.1a and its follow-up gave Go a ``reference_query``
+    # covering both positions, so they now report real referenced-by
+    # evidence instead of falling back to this caveat. A type named
+    # only in a ``switch v := x.(type) { case RepoMeta: ... }`` clause
+    # is still outside that query's coverage — ``type_case``'s
+    # ``type_identifier`` isn't a position any pattern targets — so it
+    # remains a genuine no-evidence fixture for this caveat path.)
+    files = {
+        "types.go": (
+            "package types\n\ntype RepoMeta struct {\n\tName string\n}\n"
+        ),
+        "user.go": (
+            "package types\n\n"
+            "func Show(x interface{}) {\n"
+            "	switch v := x.(type) {\n"
+            "	case RepoMeta:\n"
+            "		_ = v\n"
+            "	}\n"
+            "}\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+    code = cli.main(["query", "symbol", "RepoMeta", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "fan-in: 0, fan-out: 0" in out
+    assert "not evidence the type is unused" in out
+
+
+def test_symbol_card_shows_referenced_by_for_go_field_type(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Follow-up to Track G/bug #1.1a: a struct used only as another
+    # struct's field type (``Meta RepoMeta``, previously the
+    # deliberately-uncovered case above) now has real referenced-by
+    # evidence, since ``_GO_REFERENCE_QUERY`` gained a
+    # ``field_declaration type:`` pattern.
+    files = {
+        "types.go": (
+            "package types\n\ntype RepoMeta struct {\n\tName string\n}\n"
+        ),
+        "user.go": (
+            "package types\n\ntype Wrapper struct {\n\tMeta RepoMeta\n}\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+    code = cli.main(["query", "symbol", "RepoMeta", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "fan-in: 0, fan-out: 0" in out
+    assert "referenced-by: 1 (not called)" in out
+    assert "not evidence the type is unused" not in out
+
+
+def test_symbol_card_shows_referenced_by_for_go_param_type(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Track G / bug #1.1a's "free correctness bonus" (per the
+    # implementation plan's own Verify section): a Go struct used only
+    # as a parameter type now has real referenced-by evidence instead
+    # of the generic zero-fan caveat, since Go gained a
+    # ``reference_query`` covering parameter/return/var/composite-
+    # literal type positions.
     files = {
         "types.go": (
             "package types\n\ntype RepoMeta struct {\n\tName string\n}\n"
@@ -175,7 +359,8 @@ def test_symbol_card_notes_zero_fan_for_unreferenced_type(
     assert code == 0
     out = capsys.readouterr().out
     assert "fan-in: 0, fan-out: 0" in out
-    assert "not evidence the type is unused" in out
+    assert "referenced-by: 1 (not called)" in out
+    assert "not evidence the type is unused" not in out
 
 
 def test_symbol_card_json_notes_zero_fan_for_type(
@@ -442,8 +627,8 @@ def test_not_found_lists_closest_matches(
     err = capsys.readouterr().err
     assert "no symbol matches" in err
     assert "closest matches:" in err
-    assert "a.py:helper" in err
-    assert "b.py:helper" in err
+    assert "a.py:1  helper(x: int) -> int" in err
+    assert "b.py:1  helper(x: int) -> int" in err
 
 
 def test_not_found_with_no_close_names_stays_bare(
@@ -605,3 +790,108 @@ def test_query_callers_reports_unsupported_coverage_gap(
     err = capsys.readouterr().err
     assert "no parser for: astro" in err
     assert "may be incomplete" in err
+
+
+# Round-08 §2.5: Java-style overloads sharing one qualname in one file
+# — `path:qualname` alone can never tell them apart, since that's
+# exactly the key they collide on. `_make_symbol` (extractor.py)
+# disambiguates the *id* with a `#N` suffix, but `qualname`/`path`
+# stay identical across every overload, which is the real repro shape.
+OVERLOADED_METHODS = {
+    "Foo.java": (
+        "class Foo {\n"
+        "    void run(int x) {\n"
+        "    }\n"
+        "\n"
+        "    void run(String x) {\n"
+        "    }\n"
+        "\n"
+        "    void run(int x, int y) {\n"
+        "    }\n"
+        "}\n"
+    ),
+}
+
+
+def test_overload_disambiguation_via_line_qualifier(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """3.2: `path:qualname:line` picks the exact overload out of a set
+    that shares (path, qualname) — the escape hatch `path:qualname`
+    alone can't provide."""
+    root = make_mapped_repo(OVERLOADED_METHODS)
+    index = mapfile.load_map(root)
+    assert index is not None
+
+    match, candidates = query.resolve_target(index, "Foo.java:Foo.run")
+    assert match is None
+    assert len(candidates) == 3
+
+    for sym in candidates:
+        target = f"Foo.java:Foo.run:{sym.start_line}"
+        resolved, _ = query.resolve_target(index, target)
+        assert resolved is not None
+        assert resolved.id == sym.id
+        assert resolved.start_line == sym.start_line
+
+
+def test_overload_line_qualifier_cli_end_to_end(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(OVERLOADED_METHODS)
+    code = cli.main(
+        ["query", "symbol", "Foo.java:Foo.run:5", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Foo.run(x: String) -> void" in out
+    assert "Foo.run(x: int) -> void" not in out
+
+
+def test_overload_stale_line_falls_back_to_ambiguous_report(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """A hand-typed/stale line number that matches zero or more than
+    one candidate must not crash or silently pick the wrong one — it
+    falls back to the ordinary ambiguous-candidates report."""
+    root = make_mapped_repo(OVERLOADED_METHODS)
+    code = cli.main(
+        ["query", "symbol", "Foo.java:Foo.run:9999", "--root", str(root)]
+    )
+    assert code == 4
+    err = capsys.readouterr().err
+    assert "is ambiguous" in err
+    assert "Foo.java:2" in err
+    assert "Foo.java:5" in err
+    assert "Foo.java:8" in err
+
+
+def test_overload_ambiguous_report_hints_line_qualifier(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """report_unresolved's hint must point at the `:LINE` form
+    specifically when every candidate shares (path, qualname) — a
+    plain `file.py:{target}` qualifier (the pre-existing truncation
+    hint) can't narrow an overload set at all."""
+    root = make_mapped_repo(OVERLOADED_METHODS)
+    code = cli.main(
+        ["query", "symbol", "Foo.java:Foo.run", "--root", str(root)]
+    )
+    assert code == 4
+    err = capsys.readouterr().err
+    assert "can't disambiguate" in err
+    assert "Foo.java:Foo.run:2" in err
+
+
+def test_ambiguous_bare_name_no_overload_hint_for_distinct_paths(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """The overload-specific hint must not fire for the ordinary
+    same-name-different-file ambiguity (TWO_FILES) — those candidates
+    don't share (path, qualname), so `file.py:target` already narrows
+    them and the line-qualifier hint would be noise."""
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(["query", "symbol", "helper", "--root", str(root)])
+    assert code == 4
+    err = capsys.readouterr().err
+    assert "can't disambiguate" not in err

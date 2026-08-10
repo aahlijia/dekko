@@ -16,13 +16,12 @@ entry there would make ``notes.json``/``.dekkoignore`` impossible to
 track.
 """
 
-import json
 from dataclasses import asdict
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from .languages import spec_fingerprint
-from .mapfile import _file_hash, _symbol_from_dict
+from .mapfile import _file_hash, _json_dumps, _json_loads, _symbol_from_dict
 from .model import FileMap, Import, RawCall, RawRef
 
 CACHE_VERSION = 1
@@ -152,8 +151,8 @@ def load(root: Path) -> dict[str, dict]:
     """
     path = root / CACHE_DIR / CACHE_FILE
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        doc = _json_loads(path.read_bytes())
+    except (OSError, ValueError):
         return {}
     if doc.get("version") != CACHE_VERSION:
         return {}
@@ -179,9 +178,7 @@ def save(root: Path, cache: IncrementalCache) -> None:
         "spec_hash": spec_fingerprint(),
         "files": cache.entries,
     }
-    (cache_dir / CACHE_FILE).write_text(
-        json.dumps(doc) + "\n", encoding="utf-8"
-    )
+    (cache_dir / CACHE_FILE).write_bytes(_json_dumps(doc) + b"\n")
 
 
 def ensure_dir(root: Path) -> Path:

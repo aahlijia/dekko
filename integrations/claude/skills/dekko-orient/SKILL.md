@@ -19,11 +19,20 @@ once, then use the tools below.
 
 | Need | Use | Not |
 |---|---|---|
+| You know *what the code does* but not its exact name/spelling | `search_code` | grepping guessed keywords across every file |
 | A symbol's signature, doc, or its callers/callees | `query_symbol`, `get_callers`, `get_callees` | grep for the name |
 | A file or directory's shape | `outline` | reading the whole file |
 | Everything needed to work a diff or symbol | `workset` | assembling outlines + packs by hand |
 | Tests a change impacts | `impacted_tests` | guessing from filenames |
 | Text dekko doesn't model — strings, comments, config, prose | grep/Read | — |
+
+`search_code` in particular replaces the "grep for a few plausible
+keywords and hope" impulse: it's BM25-style relevance over symbol
+names, signatures, and doc lines (not substring matching), so it
+finds the right symbol even when your guessed keyword isn't literally
+in the source. Reach for it first whenever the task is phrased as
+behavior ("where do we retry failed requests?") rather than a known
+identifier.
 
 ## Orient first
 
@@ -41,6 +50,18 @@ digest can run ~30k characters. Call the `summary` tool, `dekko
 orient`, or pass `--budget` explicitly instead.
 
 ## Read less of the repo
+
+```
+mcp__dekko__search_code <text>        # or: dekko search "<free-text query>"
+```
+
+Don't know the exact symbol name? Describe what it does instead of
+grepping guessed keywords — `search_code`/`dekko search` ranks
+symbols by relevance to a free-text description (BM25-style over
+names, signatures, and doc lines), not substring matching. Falls back
+to zero hits (not an error) rather than a wrong match; broaden the
+query and retry. Once you have an exact name from a hit, switch to
+`query_symbol`/`get_callers` for the precise picture.
 
 ```
 mcp__dekko__outline <file-or-dir>     # or: dekko outline path/to/file.py

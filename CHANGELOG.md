@@ -9,6 +9,184 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.30.1] — 2026-08-07
+
+Fixes the 5 follow-up issues from round 09's re-evaluation, documented
+in `.features/plans/investigation-09-round09-followups.md`.
+
+### Fixed
+- **zed-class call-edge gaps in `resolver.py`.** An explicit
+  `Type::method()`/`Type.staticMethod()` receiver (the type's own bare
+  name, not a variable of that type) is now resolved directly via new
+  `_receiver_type_match`, ahead of the typed-parameter step — closing
+  a gap where such calls fell through to the generic ladder and landed
+  ambiguous whenever the repo defined the method name more than once
+  elsewhere. Live-verified on zed: `BufferDiff.new` went from 0 to
+  12/13 callers. `_pick_candidate`'s self/this step was also split out
+  into `_container_match` to keep the growing ladder readable.
+- **Noise-call guard missing Rust std/prelude methods.** New
+  `_RUST_STD_METHOD_NAMES` (`then`, `iter_mut`, `unwrap`, `clone`,
+  etc.) closes the same false-positive shape `_BUILTIN_METHOD_NAMES`
+  already covers for JS/TS, but for Rust — a receiver-qualified call
+  not provably typed as an in-repo class was being misattributed to
+  an unrelated same-named repo method. Live-verified on zed.
+- **`query callees` didn't disclose dropped ambiguous calls** the way
+  `query callers` already discloses `ambiguous_in`. New
+  `MapIndex.ambiguous_out` (caller → names it called ambiguously) and
+  a matching stderr note / `ambiguous_out` JSON field on the callees
+  side, so a low `calls_out` count can be qualified instead of read as
+  exhaustive.
+- **`dekko lean --budget` silently overriding a too-tight request.**
+  `effective_cap` never lets the cap fall below the repo's path-only
+  floor, but this was invisible to the caller — a `--budget 500` on a
+  large repo could render identically to an unbudgeted run with no
+  indication why. `render_lean.run()` now prints a stderr note when
+  the floor overrides the requested budget.
+- **Hardcoded `file.py` in the ambiguous-candidates hint.** `query.py`'s
+  "qualify with `file.py:name`" hint used a literal placeholder instead
+  of an actual candidate path; now uses the first ranked candidate's
+  real path.
+- **MCP `map_status` stale message didn't distinguish version vs. spec
+  staleness.** A long-lived `dekko serve` process can have an
+  identical `tool_version` string on both sides while still running
+  stale extractor code underneath it (a reinstall doesn't change the
+  version every release), which read as a self-contradictory "built by
+  dekko 0.21.3, running 0.21.3" with no explanation. `Freshness` now
+  carries `version_stale`/`spec_stale` flags and the raw built/running
+  values; `tool_map_status` names the actual differentiator and flags
+  the long-lived-process case explicitly.
+- Confirmed (no code fix needed): the resolved/ambiguous edge-count
+  shift observed on cline between rounds 08 and 09 was traced to round
+  08's already-documented stale-binary baseline issue, not a
+  regression introduced by round 09's fixes — `resolver.py`/
+  `extractor.py` are byte-identical between the compared commits.
+
+## [0.30.0] — 2026-08-07
+
+Two 7-repo evaluation rounds (`test-repos/reports/07-tokentest-7repo-fixcycle/`,
+`08-tokentest-7repo-fable5/`, `09-tokentest-7repo-postfix/`) against
+real-world repos (awesome-go, claude-buddy, claude-code, cline,
+spring-boot, tensorflow, zed) drove a two-cycle fix pass. Round 09
+confirms the O(N^2) `lean` hang and the spring-boot vendored-dir bug
+are fixed, disambiguation is a clean win across all 6 re-tested repos,
+and token savings remain strong (12x-765x vs. Read/grep).
+
+### Added
+- **`dekko search "<query>"` / `search_code` MCP tool (semantic
+  search, Phase 1).** Free-text relevance search that ranks every
+  symbol in the map by BM25-style lexical scoring (name/qualname/
+  signature/doc), for when you know what code should do but not its
+  name — no new dependencies. New `relevance.BM25Scorer` (alongside
+  the existing `LexicalScorer`, which is unchanged) and new
+  `search.py` module. Options: `--limit`, `--budget`, `--kind`,
+  `--include-tests`, `--json`, `--no-regen`. See
+  `.features/plans/SEMANTIC-SEARCH-PLAN.md` for the design and
+  implementation notes.
+- **`--scorer embedding` for `dekko search` / `search_code` (semantic
+  search, Phase 2), opt-in via `pip install dekko[search]`.** A
+  deterministic hashing-trick embedding scorer (character n-gram
+  feature hashing + signed random projection, `numpy`-only — no
+  pretrained model, no download, fully offline), with a new
+  `embedding.py` module: `EmbeddingScorer` (implements the same
+  `relevance.Scorer` protocol as `BM25Scorer`) and `EmbeddingCache`
+  (mirrors `cache.IncrementalCache`'s reuse/invalidate pattern),
+  persisted to `.dekko/embeddings.json`. The default scorer stays
+  `lexical` (BM25, unflagged, always available) — a base install and
+  every existing `dekko search`/`search_code` call are unaffected.
+  Requesting `--scorer embedding` / `scorer: "embedding"` without the
+  extra installed fails with a clear error rather than silently
+  falling back. Deviates from the plan's original `sentence-
+  transformers` sketch — see `.features/plans/SEMANTIC-SEARCH-PLAN.md`
+  §8 and "Implementation status" for why.
+- **`dekko[fastjson]` extra** (`orjson`-backed JSON read/write, falls
+  back to stdlib `json` when not installed) and a validated
+  `.dekko/provenance.json` sidecar so `dekko status` can skip a full
+  `map.json` parse.
+- **`query`'s `:LINE` disambiguation qualifier.** `resolve_target`
+  accepts a trailing `:LINE` (e.g. `path:qualname:line`) to pick
+  between overloaded symbols that collide on `(path, qualname)`;
+  `report_unresolved` now hints at the `:LINE` form when candidates
+  share a name and path.
+- `note remove` alias; `--dry-run` for `--claude-install` /
+  `--claude-uninstall`; `DEFAULT_BUDGET` caps for bare `dekko summary`
+  (5000) and `dekko affected` / `impacted_tests` (6000), so neither
+  can render an unbounded report by default.
+
+### Fixed
+- **O(N^2) hang in `dekko lean`** on large repos — `_shed_symbols`'s
+  linear `fits()` walk replaced with a binary search (`_bisect_shed`).
+- **Vendored-dir false positives.** JVM-style source roots
+  (`src/main|test/<lang>/...`, e.g. Spring Boot's
+  `org.springframework.boot.build`) are exempted from
+  `_VENDORED_DIRS` matching so a package literally named `build`
+  isn't mistaken for build output; the no-`.git/` walker fallback now
+  prunes against the same exclude-dir list as the git-aware path
+  instead of leaving the "vendored (<dir>)" skip reason dead code.
+- **Search relevance.** A shared term-coverage discount in
+  `BM25Scorer`/`LexicalScorer` stops partial matches from rescaling
+  to a false `1.00` score, surfaces an "N test-file symbols excluded"
+  hint when the top score is weak, and (via a scorer-agnostic
+  `_CoverageAdjustedScorer` wrapper in `search.rank()`) stops a common
+  term from crowding out a more distinctive one under BM25 or
+  embedding scoring alike.
+- **Resolver false positives on built-in/global calls.** Calls like
+  `.trim()`, `expect()`, or a global `String` reference were
+  silently attributed to a same-named repo symbol whenever a repo
+  happened to define exactly one, inflating fan-in and polluting
+  hotspot rankings. New `_is_noise_call` rejects calls shadowed by an
+  external import, calls to curated ambient globals, and
+  receiver-qualified calls to curated built-in prototype methods
+  (self/this receivers exempted). Live-verified on cline: `trim`
+  fan-in 1404 -> 2, `expect` 603 -> 5, `String` 548 -> 3.
+- **C++/C `#include`-based call disambiguation** and a fix so a
+  header's own stem (not the generic extension-only fallback) is
+  used as its `Import.name`, which was silently colliding across
+  nearly every include in a file.
+- **Zod `.describe()` fan-in collision** — added to the built-in
+  schema-builder-method denylist alongside C++/Go reference-tracking
+  fixes for dead-code false positives (Go value-typed struct usage,
+  JSX-referenced components).
+- **`query.py` resolution/reporting.** `_resolve_exact` merges
+  qualname/name symbol pools instead of or-short-circuiting (bare-name
+  collisions no longer masked by a qualname hit); unresolved rows show
+  `path:start_line  signature(sym)`; `_close_names`' fuzzy tier
+  requires `len(name) >= 3` and raises its cutoff to 0.72 to suppress
+  single-letter junk suggestions.
+- **Change-analysis correctness.** `diff.snapshot` reuses an
+  already-loaded `MapIndex` (freshness-gated) instead of re-parsing;
+  the old-side file list now comes from `git ls-tree` instead of
+  `walker.discover`'s gitignore-reapplying fallback, which produced
+  phantom "added" symbols for already-tracked files an unanchored
+  `.gitignore` pattern happened to match; `affected._test_hint`
+  replaced the pytest-only hint with per-language grouping
+  (pytest/cargo test/go test/npm-bun-pnpm-yarn/gradlew-mvn);
+  `impacts_from_symbol` gained an import-tier fallback for languages
+  without per-symbol import bindings (e.g. C++).
+- **`affected.render()`** now surfaces the same vendored-exclusion
+  coverage caveat `query` already carries when a diff touches only
+  vendored-excluded files (e.g. tensorflow's `third_party/xla`), so
+  "no impacted tests" no longer reads identically to a genuinely safe
+  change dekko never looked at.
+- **`dekko orient`'s preamble** no longer tells an agent to use
+  `search` when the subcommand isn't actually available in-process.
+- Unbounded `dekko summary` parse-error output capped at 15 with a
+  per-language collapse footer.
+
+### Performance
+- **Server-side `MapIndex` caching.** The MCP server now caches the
+  in-process `MapIndex` per session and reuses it while
+  `mapfile.check_freshness` still reports it fresh, skipping
+  redundant JSON parse/rebuild on repeat calls in the same session.
+- **`revcache.py`**, a disk-backed cache of resolved historical git
+  revisions (mtime-evicted, `MAX_ENTRIES=20`), shared between
+  `diff.run` and `affected.changes` instead of each re-exporting/
+  re-parsing the old revision independently.
+- BM25 term tokenization (`_raw_terms`/`_stemmed_terms`) is now
+  `lru_cache`-wrapped, and `search._build_candidates` caches its
+  built candidate list on the `MapIndex` instance, eliminating
+  redundant re-tokenization on repeat `search` calls against an
+  already-loaded index.
+
 ## [0.21.3] — 2026-08-03
 
 ### Added

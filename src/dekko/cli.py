@@ -37,6 +37,7 @@ from . import relevance
 from . import render_html
 from . import render_lean
 from . import render_md
+from . import search
 from . import server
 from . import stats
 from . import summary
@@ -46,7 +47,7 @@ from . import walker
 from . import workset as workset_mod
 from .extractor import extract_file
 from .extractor_generic import extract_file_generic
-from .model import TYPE_KINDS, FileMap
+from .model import TYPE_KINDS, CallGraph, FileMap
 from .render_json import render_json
 from .resolver import resolve
 
@@ -61,6 +62,7 @@ SUBCOMMANDS = (
     "diff",
     "affected",
     "workset",
+    "search",
     "status",
     "ledger",
     "hooks",
@@ -108,6 +110,12 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         "--claude-uninstall",
         action="store_true",
         help="remove the dekko plugin from Claude Code",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --claude-install/--claude-uninstall, print the "
+        "command(s) that would run instead of running them",
     )
     parser.add_argument(
         "--mcp-install",
@@ -308,7 +316,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_query.add_argument(
         "target",
         help="symbol (name, Class.method, file.py:func), file path, or "
-        "(for uses) an external base identifier",
+        "(for uses) an external base identifier; append "
+        "':LINE' (file.py:Class.method:LINE) to pick one candidate out "
+        "of an overload set the ambiguous-candidate error reports",
     )
     p_query.add_argument(
         "--limit",
@@ -479,9 +489,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_affected.add_argument(
         "--budget",
         type=int,
-        default=None,
+        default=affected.DEFAULT_BUDGET,
         metavar="TOKENS",
-        help="approximate token budget; drops weakest-tier files first",
+        help="approximate token budget; drops weakest-tier files first "
+        f"(default: {affected.DEFAULT_BUDGET})",
     )
     p_affected.set_defaults(func=run_affected)
 
@@ -537,6 +548,69 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     _add_task_option(p_workset)
     p_workset.set_defaults(func=run_workset)
+
+    p_search = sub.add_parser(
+        "search",
+        help="free-text relevance search over every symbol in the map",
+    )
+    p_search.add_argument(
+        "query",
+        nargs="+",
+        help="free-text description of the code you're looking for "
+        "(quoting is optional; unquoted words are joined with spaces)",
+    )
+    p_search.add_argument(
+        "--limit",
+        type=int,
+        default=search.DEFAULT_LIMIT,
+        help=f"max hits to return (default: {search.DEFAULT_LIMIT})",
+    )
+    p_search.add_argument(
+        "--budget",
+        type=int,
+        default=search.DEFAULT_BUDGET,
+        metavar="TOKENS",
+        help="approximate token budget for the rendered output "
+        f"(default: {search.DEFAULT_BUDGET})",
+    )
+    p_search.add_argument(
+        "--kind",
+        default=None,
+        metavar="KIND[,KIND...]",
+        help="restrict to these comma-separated symbol kinds "
+        "(function, method, class, ...; default: all kinds)",
+    )
+    p_search.add_argument(
+        "--include-tests",
+        action="store_true",
+        help="include test-path symbols (default: excluded)",
+    )
+    p_search.add_argument(
+        "--scorer",
+        choices=list(search.SCORER_CHOICES),
+        default=search.DEFAULT_SCORER,
+        help="relevance scorer: 'lexical' (default, BM25, always "
+        "available) or 'embedding' (Phase 2, hashing-trick "
+        "embedding, requires `pip install dekko[search]`)",
+    )
+    p_search.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_search.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_search.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="fail (exit 5) instead of regenerating a stale map",
+    )
+    p_search.set_defaults(func=run_search)
 
     p_status = sub.add_parser(
         "status", help="report whether map.json is fresh"
@@ -699,9 +773,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_summary.add_argument(
         "--budget",
         type=int,
-        default=None,
+        default=summary.DEFAULT_BUDGET,
         metavar="TOKENS",
-        help="approximate token cap; trailing sections are shed to fit",
+        help="approximate token cap; trailing sections are shed to fit "
+        f"(default: {summary.DEFAULT_BUDGET})",
     )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
@@ -807,7 +882,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="only notes whose symbol is no longer in the map",
     )
-    p_note_rm = note_sub.add_parser("rm", help="remove a note from a symbol")
+    p_note_rm = note_sub.add_parser(
+        "rm", aliases=["remove"], help="remove a note from a symbol"
+    )
     p_note_rm.add_argument(
         "target", help="symbol (name, Class.method, file.py:func)"
     )
@@ -937,6 +1014,7 @@ def map_repository(
     max_file_size: int,
     cache: cache_mod.IncrementalCache | None = None,
     jobs: int = 1,
+    candidates: list[str] | None = None,
 ) -> tuple[list[FileMap], list[tuple[str, str]]]:
     """Discover and extract every mappable file under a root.
 
@@ -953,6 +1031,9 @@ def map_repository(
         cache: Incremental cache to reuse unchanged files from and
             record fresh extractions into, or ``None`` for a cold run.
         jobs: Worker count for extraction (1 = sequential, 0 = all cores).
+        candidates: Explicit repo-relative paths to consider, bypassing
+            ``walker.discover``'s own tracked-file discovery — see that
+            function's ``candidates`` parameter.
 
     Returns:
         ``(file_maps, skipped)`` where ``skipped`` pairs paths with
@@ -963,6 +1044,7 @@ def map_repository(
         subpath=subpath,
         excludes=excludes,
         max_file_size=max_file_size,
+        candidates=candidates,
     )
     extracted: dict[str, FileMap] = {}
     misses: list[str] = []
@@ -1154,8 +1236,12 @@ def _claude_exe() -> str | None:
     return exe
 
 
-def claude_install() -> int:
+def claude_install(dry_run: bool = False) -> int:
     """Register the bundled plugin with the Claude Code CLI.
+
+    Args:
+        dry_run: Print the command(s) that would run instead of running
+            them; leaves Claude Code's config untouched.
 
     Returns:
         Process exit code.
@@ -1171,6 +1257,12 @@ def claude_install() -> int:
             file=sys.stderr,
         )
         return 1
+
+    if dry_run:
+        print("dekko: --dry-run, would run:")
+        print(f"  {exe} plugin marketplace add {plugin_dir}")
+        print(f"  {exe} plugin install dekko@dekko")
+        return 0
 
     added = _run_subprocess(
         [exe, "plugin", "marketplace", "add", str(plugin_dir)]
@@ -1195,7 +1287,7 @@ def claude_install() -> int:
     return 0
 
 
-def claude_uninstall() -> int:
+def claude_uninstall(dry_run: bool = False) -> int:
     """Remove the bundled plugin from the Claude Code CLI.
 
     Reverses :func:`claude_install`: uninstalls the ``dekko`` plugin and
@@ -1203,12 +1295,25 @@ def claude_uninstall() -> int:
     marketplace is already absent is surfaced as a warning rather than a
     failure, so the command is safe to run on a partial install.
 
+    Args:
+        dry_run: Print the command(s) that would run instead of running
+            them; leaves Claude Code's config untouched.
+
     Returns:
         Process exit code (``1`` only when the ``claude`` CLI is missing).
     """
     exe = _claude_exe()
     if exe is None:
         return 1
+
+    if dry_run:
+        print("dekko: --dry-run, would run:")
+        for cmd in (
+            [exe, "plugin", "uninstall", "dekko@dekko"],
+            [exe, "plugin", "marketplace", "remove", "dekko"],
+        ):
+            print(f"  {' '.join(cmd)}")
+        return 0
 
     for cmd in (
         [exe, "plugin", "uninstall", "dekko@dekko"],
@@ -1434,20 +1539,11 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
     )
     outputs += _write_pages(md_path, pages)
     if not args.no_json:
-        provenance = mapfile.compute_provenance(
-            root,
-            [fm.path for fm in files],
-            subpath=args.subpath,
-            excludes=tuple(args.exclude),
-            max_file_size=args.max_file_size,
-            skipped=skipped,
+        outputs.append(
+            _write_json_output(
+                root, args, files, graph, label, json_path, skipped
+            )
         )
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        json_path.write_text(
-            render_json(files, graph, label, provenance),
-            encoding="utf-8",
-        )
-        outputs.append(json_path)
 
     if cache is not None:
         cache_mod.save(root, cache)
@@ -1464,6 +1560,57 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
             )
         )
     return 0
+
+
+def _write_json_output(
+    root: Path,
+    args: argparse.Namespace,
+    files: list[FileMap],
+    graph: CallGraph,
+    label: str,
+    json_path: Path,
+    skipped: list[tuple[str, str]],
+) -> Path:
+    """Write ``map.json`` (and its provenance sidecar) for a map run.
+
+    Split out of ``run_map`` to keep it under the complexity budget.
+
+    The sidecar is written only when this run's ``json_path`` is the
+    canonical ``.dekko/map.json`` location — the fixed path
+    ``load_map``/``check_freshness``/``load_provenance`` always read,
+    regardless of ``--output``. A custom ``--output``/``--json-output``
+    run doesn't touch that canonical file, so writing the sidecar then
+    would desync it from whatever map.json (if any) is still sitting
+    at the canonical path.
+
+    Args:
+        root: Repository root.
+        args: Parsed ``dekko map`` arguments.
+        files: This run's extraction results.
+        graph: Resolved call graph.
+        label: Display label of the mapped root.
+        json_path: Resolved output path for ``map.json``.
+        skipped: ``(path, reason)`` pairs from discovery.
+
+    Returns:
+        ``json_path``, for the caller's ``outputs`` list.
+    """
+    provenance = mapfile.compute_provenance(
+        root,
+        [fm.path for fm in files],
+        subpath=args.subpath,
+        excludes=tuple(args.exclude),
+        max_file_size=args.max_file_size,
+        skipped=skipped,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        render_json(files, graph, label, provenance),
+        encoding="utf-8",
+    )
+    if json_path == root / cache_mod.CACHE_DIR / "map.json":
+        mapfile.write_provenance_sidecar(root, provenance)
+    return json_path
 
 
 def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
@@ -1692,6 +1839,43 @@ def run_workset(args: argparse.Namespace) -> int:
     )
 
 
+def run_search(args: argparse.Namespace) -> int:
+    """Handle ``dekko search "<query>"``.
+
+    Unlike the other read commands, ``search`` defaults to *excluding*
+    test-path symbols (opt in with ``--include-tests``) rather than
+    the ``--no-tests`` opt-out convention every other read command
+    uses — a relevance-ranked result competing for a rank slot
+    shouldn't default to including test noise the way an exhaustive
+    caller list should default to completeness (deliberate deviation,
+    see the search feature plan §9.6).
+    """
+    query_text = " ".join(args.query)
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    excluded_test_count = 0
+    if not args.include_tests:
+        filtered = index.without_tests()
+        excluded_test_count = len(index.symbols_by_id) - len(
+            filtered.symbols_by_id
+        )
+        index = filtered
+    kinds = search.parse_kinds(args.kind)
+    return search.run(
+        index,
+        query_text,
+        kinds=kinds,
+        limit=args.limit,
+        budget=args.budget,
+        as_json=args.as_json,
+        root=root,
+        scorer_name=args.scorer,
+        excluded_test_count=excluded_test_count,
+    )
+
+
 def run_unused(args: argparse.Namespace) -> int:
     """Handle ``dekko unused``."""
     index, code = _read_index(args)
@@ -1785,7 +1969,7 @@ def run_note(args: argparse.Namespace) -> int:
     """Handle ``dekko note add|list|rm``."""
     if args.note_action == "add":
         return _note_add(args)
-    if args.note_action == "rm":
+    if args.note_action in ("rm", "remove"):
         return _note_rm(args)
     return _note_list(args)
 
@@ -1887,21 +2071,35 @@ def run_serve(args: argparse.Namespace) -> int:
 
 
 def run_status(args: argparse.Namespace) -> int:
-    """Handle ``dekko status`` (never regenerates)."""
-    root = Path(args.root).resolve()
-    index = mapfile.load_map(root)
-    if index is None:
-        if args.as_json:
-            print(json.dumps({"status": "missing"}))
-        else:
-            print(
-                f"dekko: no map.json under {root} - run `dekko map`",
-                file=sys.stderr,
-            )
-        return 1
+    """Handle ``dekko status`` (never regenerates).
 
-    fresh = mapfile.check_freshness(root, index)
-    unsupported = (index.provenance or {}).get("unsupported")
+    Reads only the small provenance sidecar (``mapfile.
+    load_provenance``) rather than the full ``map.json`` — this
+    command only ever needs the freshness stamp, not the parsed
+    symbol/call graph other read commands pay to build. Falls back to
+    a full ``mapfile.load_map`` for maps written before the sidecar
+    existed (or with a missing/corrupt one), matching its prior
+    behavior exactly.
+    """
+    root = Path(args.root).resolve()
+    prov = mapfile.load_provenance(root)
+    if prov is not None:
+        fresh = mapfile.check_freshness_provenance(root, prov)
+    else:
+        index = mapfile.load_map(root)
+        if index is None:
+            if args.as_json:
+                print(json.dumps({"status": "missing"}))
+            else:
+                print(
+                    f"dekko: no map.json under {root} - run `dekko map`",
+                    file=sys.stderr,
+                )
+            return 1
+        fresh = mapfile.check_freshness(root, index)
+        prov = index.provenance
+
+    unsupported = (prov or {}).get("unsupported")
     if args.as_json:
         doc = {
             "status": "fresh" if fresh.fresh else "stale",
@@ -1915,10 +2113,10 @@ def run_status(args: argparse.Namespace) -> int:
         return 0 if fresh.fresh else 1
 
     if fresh.fresh:
-        _print_fresh_status(index.provenance)
+        _print_fresh_status(prov)
         return 0
 
-    _print_stale_status(fresh, index.provenance)
+    _print_stale_status(fresh, prov)
     return 1
 
 
@@ -1974,10 +2172,10 @@ def _legacy_main(args_list: list[str]) -> int:
     args = parser.parse_args(args_list)
 
     if args.claude_install:
-        return claude_install()
+        return claude_install(dry_run=args.dry_run)
 
     if args.claude_uninstall:
-        return claude_uninstall()
+        return claude_uninstall(dry_run=args.dry_run)
 
     if args.mcp_install:
         return mcp_install()

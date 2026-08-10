@@ -1,12 +1,10 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/logo-light.svg">
-    <img src="assets/logo-light.svg" alt="dekko" width="88">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-full-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo-full-light.svg">
+    <img src="assets/logo-full-light.svg" alt="dekko" width="460">
   </picture>
 </p>
-
-<h1 align="center">dekko</h1>
 
 <p align="center">
   <a href="https://github.com/aahlijia/dekko/actions/workflows/ci.yml"><img src="https://github.com/aahlijia/dekko/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -74,41 +72,16 @@ call edges (not just definitions), ranks files by load-bearing-ness,
 and speaks directly to agents over MCP or the CLI — no editor plugin
 required.
 
-## Installation
+## Install
 
 ```sh
-uv tool install dekko     # or: pip install dekko / pipx install dekko
+uv tool install dekko      # or: pip install dekko / pipx install dekko
+dekko --claude-install     # add the /map command + MCP server to Claude Code, then restart
 ```
 
-The default install bundles nine Tier-1 languages (Python, Rust, C, C++,
-JavaScript, TypeScript/TSX, Go, Java) as offline grammar packages — no
-network call at parse time. For ~55 additional languages (parsed
-generically), add the extra:
-
-```sh
-pip install dekko[all]
-```
-
-Then add the `/map` command + MCP server to Claude Code:
-
-```sh
-dekko --claude-install     # restart Claude Code afterward
-```
-
-### From a local clone
-
-```sh
-git clone https://github.com/aahlijia/dekko.git
-cd dekko
-./install.sh               # installs the CLI and registers the plugin
-```
-
-### Uninstall
-
-```sh
-dekko --claude-uninstall   # remove the /map plugin (and its MCP server)
-uv tool uninstall dekko    # or: pip uninstall dekko / pipx uninstall dekko
-```
+Extras (`dekko[all]` for ~55 more languages, `dekko[search]` for
+embedding search), installing from a local clone, and uninstalling are
+in [docs/install.md](docs/install.md).
 
 ## Quick start
 
@@ -121,146 +94,14 @@ dekko summary               # ~40-line digest: dirs, hotspots, entry points
 `.dekko/` is git-ignored by default; the map regenerates on demand, so
 you rarely need to run `dekko map` again by hand.
 
-## Core CLI commands
+## Documentation
 
-```sh
-dekko map                            # (re)generate the map
-dekko map src                        # ...restricted to a subtree
-dekko summary                        # repo digest: dirs, hotspots, entry points
-dekko outline src/server.py          # a file's signatures + docs, no bodies
-dekko query symbol run_map           # signature card: doc, location, fan-in/out
-dekko query callers resolve --sites  # who calls resolve, with call sites
-dekko query callees main             # what does main call?
-dekko query uses Path                # who references the external name Path?
-dekko context run_map --budget 1500  # minimal context pack for an edit
-dekko workset                        # one bundle for your current change
-dekko affected                       # test files impacted by your changes
-dekko diff                           # symbols changed since the map's commit
-dekko unused                         # symbols nothing calls (dead-code leads)
-dekko export --format html           # interactive single-file browser
-dekko status                         # is the map still fresh? (exit 0/1)
-```
-
-Symbol targets accept a bare `name`, `Class.method`, or a qualified
-`file.py:name` — ambiguous names list their candidates instead of
-guessing. Every read command takes `--json` for structured output and
-regenerates a stale map automatically (`--no-regen` to fail instead).
-
-Run `dekko <command> --help` for the full flag list, or see
-`dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
-`ledger`, `orient` cover more specialized workflows; `hooks` is
-documented below).
-
-### Excluding files
-
-`--exclude GLOB` (repeatable) skips extra files for `dekko map`,
-matched against both the basename and the full relative path:
-
-```sh
-dekko map --exclude 'fixtures/*' --exclude '*.generated.py'
-```
-
-Every pattern is also persisted to `.dekko/.dekkoignore` (tracked, not
-git-ignored), so a bare `dekko map` afterward keeps honoring it without
-retyping `--exclude`. That file is directly hand-editable too,
-gitignore-style (comments, negation, `**`). The two sources are
-additive — a file is skipped if either matches — but use different
-matching engines (`--exclude` is plain `fnmatch`; `.dekkoignore` is
-gitignore syntax), so an identical pattern can occasionally match a
-slightly different set of nested paths depending on which file it's
-in; run `dekko map --help` for the details. Skips are reported
-separately in the run summary: `excluded` for `--exclude`, `ignored`
-for `.dekkoignore`.
-
-### Notes
-
-Anchor a durable, committed note to a symbol — it shows up in
-`query symbol` and `context` automatically:
-
-```sh
-dekko note add resolver.py:resolve "ambiguous calls are marked, never guessed"
-dekko note list resolver.py:resolve
-```
-
-## Using the Claude Code plugin
-
-```sh
-/map            # map the whole repository
-/map src/       # map a subtree only
-```
-
-`dekko --claude-install` wires up both the `/map` command and the MCP
-server (see below); the plugin just runs the installed `dekko` CLI, so
-install the package first.
-
-### Push hooks (opt-in)
-
-Everything above is *pull* — it only helps once the agent knows to
-ask. `dekko hooks` adds an opt-in *push* layer: three Claude Code hook
-events, enabled individually, that inject context automatically:
-
-```sh
-dekko hooks install                        # session-start only (the default)
-dekko hooks install --enable session-start --enable prompt-submit --enable pre-read
-dekko hooks uninstall                      # remove all dekko hooks
-```
-
-- **`session-start`** — a steering preamble plus a budget-capped `lean`
-  map, so the first turn already has a navigation map.
-- **`prompt-submit`** — for the new prompt, a short pointer to the most
-  task-relevant files not already read, so the agent doesn't `grep` blind.
-- **`pre-read`** — a non-blocking advisory to `outline` a large file
-  first, before a whole-file `Read`.
-
-Installing writes to `.claude/settings.json` (restart Claude Code to
-activate). Every handler is fail-silent — a stale map or hook error
-never blocks a session or a tool call, it just produces no output.
-
-## Using the MCP server
-
-`dekko serve --mcp` speaks the Model Context Protocol over stdio
-(newline-delimited JSON-RPC, no SDK dependency), so an agent can ask
-"who calls X?" with a tool call instead of reading `MAP.md`. It exposes
-13 tools:
-
-| Tool | Backs |
-| --- | --- |
-| `query_symbol` | signature, doc, fan-in/out, notes |
-| `get_callers` / `get_callees` | callers/callees, with call sites |
-| `find_usages` | references to an external name |
-| `get_context_pack` | a symbol's neighborhood, budget-capped |
-| `outline` | a file's structure without bodies |
-| `workset` | one bundle for a change (`rev` or `symbol`) |
-| `summary` | repo digest |
-| `impacted_tests` | test files impacted by changes |
-| `add_note` / `list_notes` | symbol-anchored notes |
-| `map_status` / `refresh_map` | freshness check / regenerate |
-
-`dekko --claude-install` registers this automatically for Claude Code.
-For a standalone registration: `dekko --mcp-install` (runs
-`claude mcp add dekko -- dekko serve --mcp`).
-
-**Note:** a running `dekko serve --mcp` process holds its code in memory
-for its whole lifetime — restart it after any dekko upgrade or source
-change, or its output can silently disagree with the CLI.
-
-### Cline
-
-```sh
-dekko --cline-install      # merge dekko into cline_mcp_settings.json
-dekko --cline-uninstall    # remove just the dekko entry
-```
-
-Cline has no plugin system, so only the MCP tools are available (no
-`/map`-equivalent slash command). See `dekko --cline-install --help`
-for scope/config overrides if auto-detection picks the wrong file.
-
-## Language support
-
-Tier 1 (full fidelity, offline): Python, Rust, C, C++, JavaScript,
-TypeScript/TSX, Go, Java. Tier 2 (generic fallback — names and calls,
-no types): everything else `tree-sitter-language-pack` supports (Ruby,
-PHP, C#, Kotlin, Swift, Lua, and more), via `pip install dekko[all]`.
+- [docs/install.md](docs/install.md) — installation, extras, local
+  clone, uninstall
+- [docs/cli.md](docs/cli.md) — every CLI command, symbol targets,
+  excluding files, notes, language support
+- [docs/claude-code.md](docs/claude-code.md) — the `/map` plugin, push
+  hooks, the MCP server, and Cline
 
 ## Learn more
 

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 580 280" width="580" height="280" role="img" aria-label="dekko">
+  <title>dekko (dark theme)</title>
+  <svg x="50" y="77" width="150" height="150" viewBox="0 0 64 64">
+    <path d="M6,32 C16,14 48,14 58,32 C48,50 16,50 6,32 Z"
+          fill="none" stroke="#E7E7EE" stroke-width="3"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="32" cy="32" r="6" fill="#8F82FF"/>
+  </svg>
+
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-weight="700">
+    <text x="230" y="155" font-size="62" fill="#E7E7EE">dekko</text>
+  </g>
+  <text x="231" y="192" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="20" letter-spacing="1.5" fill="#9498A8">CODE MAPS FOR AGENTS</text>
+</svg>

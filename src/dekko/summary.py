@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import stats
 from .mapfile import MapIndex, format_unsupported
+from .model import TYPE_KINDS
 from .resolver import MODULE_CALLER_SUFFIX
 from .textutil import dir_of, fit_to_budget, oneline, signature
 
@@ -24,8 +25,24 @@ _TOP = 5
 _MAX_DIRS = 12
 _MAX_ENTRYPOINTS = 8
 _MAX_HOTSPOTS = 10
+# 2.3: cap on the parse-errors list so an uncapped grammar-gap doesn't
+# dominate the digest (spring-boot/tensorflow/zed showed 97%+ of
+# `summary`'s output being one repeated "no parser" message).
+_MAX_PARSE_ERRORS = 15
+# Kinds that are never plausible entry points: type definitions and
+# module-scope data bindings, not callables (3.5 entrypoints noise).
+_NON_ENTRYPOINT_KINDS = TYPE_KINDS | {"variable"}
 # How far back churn is measured for the risk view.
 _CHURN_WINDOW_DAYS = 90
+# 2.3 item 2: bare-CLI default token cap. `summary` is meant to be a
+# fuller digest than `orient`'s 1500-token preamble+digest, so this is
+# deliberately larger — big enough to hold every section on a typical
+# repo, small enough that an uncapped-by-accident future addition can't
+# silently blow up an agent's context the way the pre-fix parse-errors
+# list did (see `_MAX_PARSE_ERRORS` above). An explicit `--budget N`
+# (any size) always overrides this default, same escape hatch `orient`
+# already offers for its own default.
+DEFAULT_BUDGET = 5000
 
 
 def _id_dir(sym_id: str) -> str:
@@ -86,9 +103,19 @@ def _directories(index: MapIndex) -> list[dict]:
 
 
 def _entrypoints(index: MapIndex) -> list:
-    """Likely entry points: ``main`` plus uncalled exported/decorated."""
+    """Likely entry points: ``main`` plus uncalled exported/decorated.
+
+    Excludes test-path symbols (a decorated pytest method is not an
+    entry point) and non-callable kinds (module-scope data bindings,
+    type definitions) — those are meaningful for ``unused``'s
+    deliberately-permissive conservative-roots logic, but not for
+    "here's where execution begins" (this is a narrower,
+    presentation-only filter; ``unused._is_root`` is left untouched).
+    """
     found = []
     for sym_id, sym in index.symbols_by_id.items():
+        if sym.test or sym.kind in _NON_ENTRYPOINT_KINDS:
+            continue
         uncalled = not index.calls_in.get(sym_id)
         if sym.name == "main" or (
             uncalled and (sym.decorated or sym.exported)
@@ -118,7 +145,9 @@ def compute(index: MapIndex) -> dict:
         "parse_errors": [
             {"path": p, "error": e}
             for p, e in sorted(index.errors_by_path.items())
-        ],
+        ][:_MAX_PARSE_ERRORS],
+        "parse_errors_total": len(index.errors_by_path),
+        "parse_errors_breakdown": _parse_error_breakdown(index),
         "unsupported": (index.provenance or {}).get("unsupported"),
     }
 
@@ -282,7 +311,28 @@ def render_text(index: MapIndex) -> str:
     if doc["parse_errors"]:
         lines.append("parse errors:")
         lines += [f"  {e['path']}: {e['error']}" for e in doc["parse_errors"]]
+        hidden = doc["parse_errors_total"] - len(doc["parse_errors"])
+        if hidden > 0:
+            lines.append(
+                f"  ... and {hidden} more ({doc['parse_errors_breakdown']})"
+            )
     return "\n".join(lines)
+
+
+def _parse_error_breakdown(index: MapIndex) -> str:
+    """Per-language counts across *all* parse errors, for the capped footer.
+
+    Collapsing to per-language counts is more informative than a raw
+    truncation when the noise is overwhelmingly one repeated message
+    (e.g. a grammar not present in the offline Tier-1 set) — mirrors
+    ``mapfile.format_unsupported``'s "N files unparsed — no parser
+    for: lang (N), ..." shape, but for parse failures rather than
+    unsupported-grammar skips.
+    """
+    by_lang: Counter[str] = Counter()
+    for path in index.errors_by_path:
+        by_lang[index.languages_by_path.get(path) or "unknown"] += 1
+    return ", ".join(f"{lang} ({n})" for lang, n in sorted(by_lang.items()))
 
 
 def _append_ranked(lines: list[str], title: str, ranked: list[dict]) -> None:
@@ -334,7 +384,7 @@ def render_overview(
     lines += _overview_largest(doc.get("largest_files", []), href)
     lines += _overview_hotspots(hotspots or [], href)
     lines += _overview_entrypoints(doc["entrypoints"], href)
-    lines += _overview_errors(doc["parse_errors"], href)
+    lines += _overview_errors(doc, href)
     return lines
 
 
@@ -435,16 +485,20 @@ def _overview_entrypoints(
     return lines
 
 
-def _overview_errors(
-    errors: list[dict], href: Callable[[str], str]
-) -> list[str]:
-    """Linked parse-error list."""
+def _overview_errors(doc: dict, href: Callable[[str], str]) -> list[str]:
+    """Linked parse-error list, capped (2.3) with a per-language footer."""
+    errors = doc["parse_errors"]
     if not errors:
         return []
     lines = ["**Parse errors:**", ""]
     lines += [
         f"- [`{e['path']}`]({href(e['path'])}): {e['error']}" for e in errors
     ]
+    hidden = doc["parse_errors_total"] - len(errors)
+    if hidden > 0:
+        lines.append(
+            f"- ... and {hidden} more ({doc['parse_errors_breakdown']})"
+        )
     lines.append("")
     return lines
 

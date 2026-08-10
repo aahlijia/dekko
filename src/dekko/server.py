@@ -16,7 +16,7 @@ import json
 import sys
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,7 @@ from . import outline as outline_mod
 from . import query
 from . import relevance
 from . import render_lean
+from . import search
 from . import stats
 from . import summary
 from . import trace
@@ -79,10 +80,20 @@ class Context:
     Attributes:
         default_root: Root used when a tool omits ``root``.
         no_regen: Fail instead of regenerating a stale map on reads.
+        index_cache: In-process cache of the last loaded (unfiltered)
+            index per resolved root, reused across tool calls in this
+            server session. A long-lived MCP session used to pay the
+            full ``map.json`` parse + index-rebuild cost
+            (``mapfile.load_map``) on *every single* tool call, even
+            back-to-back calls against an unchanged map (round-08
+            §2.6) — this cache is checked, and only refreshed on a
+            ``mapfile.check_freshness`` miss, so a warm session skips
+            straight to the cheap freshness check instead.
     """
 
     default_root: Path
     no_regen: bool
+    index_cache: dict[Path, mapfile.MapIndex] = field(default_factory=dict)
 
 
 def _capture(fn: Callable[[], int]) -> tuple[int, str, str]:
@@ -126,23 +137,40 @@ def _index_for(
 ) -> mapfile.MapIndex:
     """Load (auto-regenerating) the map for a tool call.
 
+    Checks ``ctx.index_cache`` first: a cached index for this root that
+    ``mapfile.check_freshness`` still reports fresh is reused outright,
+    skipping ``map.json``'s JSON parse and the full symbol/call-graph
+    index rebuild — the dominant cost of a reload, per round-08 §2.6.
+    ``check_freshness`` itself still runs on every call (a cheap
+    provenance/mtime comparison, not a reload), so a map regenerated
+    out-of-band (another process, or this session's own
+    ``refresh_map``) is never served stale: correctness comes from
+    re-checking on every access, not from catching invalidation events.
+
     Args:
         ctx: Server-wide settings.
         args: The tool call's raw arguments (for ``root``).
         include_tests: When false, apply ``MapIndex.without_tests()``
             (mirrors the CLI's ``--no-tests`` flag) so test-path
             symbols, edges, and external calls are dropped before the
-            tool sees the index.
+            tool sees the index. Applied fresh on every call — the
+            cache holds only the unfiltered index, since filtering is
+            already a cheap view rebuild, not a reload.
 
     Returns:
         The loaded (optionally filtered) map index.
     """
-    from . import cli
-
     root = _root_of(ctx, args)
-    index, code = cli._load_or_regen(root, ctx.no_regen)
-    if index is None:
-        raise ToolError(f"no usable map under {root} (exit {code})")
+    cached = ctx.index_cache.get(root)
+    if cached is not None and mapfile.check_freshness(root, cached).fresh:
+        index = cached
+    else:
+        from . import cli
+
+        index, code = cli._load_or_regen(root, ctx.no_regen)
+        if index is None:
+            raise ToolError(f"no usable map under {root} (exit {code})")
+        ctx.index_cache[root] = index
     if not include_tests:
         index = index.without_tests()
     return index
@@ -315,7 +343,7 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     rev = rev if isinstance(rev, str) and rev else None
     limit = int(args.get("limit", 8))
     budget = args.get("budget")
-    budget = int(budget) if budget is not None else None
+    budget = int(budget) if budget is not None else affected.DEFAULT_BUDGET
     code, out, err = _capture(
         lambda: affected.run(
             root, rev, as_json=False, limit=limit, budget=budget
@@ -324,6 +352,45 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     if code == affected.EXIT_ERROR:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
     return out.strip() or "(no impacted tests)"
+
+
+def tool_search_code(ctx: Context, args: dict) -> str:
+    """Free-text relevance search over symbol names, docs, signatures."""
+    query_text = _require(args, "query")
+    include_tests = bool(args.get("include_tests", False))
+    # Load unfiltered first so a not-``include_tests`` call can report
+    # how many test-path symbols ``.without_tests()`` dropped before
+    # ranking ever saw them (round-08 §2.2's exclusion hint) — mirrors
+    # ``cli.run_search``'s own before/after count.
+    index = _index_for(ctx, args, include_tests=True)
+    excluded_test_count = 0
+    if not include_tests:
+        filtered = index.without_tests()
+        excluded_test_count = len(index.symbols_by_id) - len(
+            filtered.symbols_by_id
+        )
+        index = filtered
+    limit = int(args.get("limit", search.DEFAULT_LIMIT))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else search.DEFAULT_BUDGET
+    kinds = search.parse_kinds(args.get("kind"))
+    scorer_name = args.get("scorer") or search.DEFAULT_SCORER
+    code, out, err = _capture(
+        lambda: search.run(
+            index,
+            query_text,
+            kinds=kinds,
+            limit=limit,
+            budget=budget,
+            as_json=False,
+            root=_root_of(ctx, args),
+            scorer_name=scorer_name,
+            excluded_test_count=excluded_test_count,
+        )
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return out.strip() or "(no matches)"
 
 
 def tool_workset(ctx: Context, args: dict) -> str:
@@ -465,6 +532,61 @@ def tool_ledger(ctx: Context, args: dict) -> str:
     return out.strip()
 
 
+def _version_stale_detail(fresh: mapfile.Freshness) -> str:
+    """Explain *which* staleness signal fired for a "version" verdict.
+
+    ``Freshness.reason == "version"`` collapses two independent
+    signals (``tool_version`` mismatch, ``spec_hash`` mismatch) into
+    one string. A long-lived ``dekko serve`` process can have an
+    identical ``tool_version`` on both sides — Python doesn't hot-
+    reload already-imported modules, so a ``uv tool install
+    --reinstall`` after the server started has no effect on that
+    process's own ``spec_fingerprint()`` output until it restarts —
+    which used to read as a self-contradictory "built by dekko 0.21.3,
+    running 0.21.3" with no explanation of what was actually stale
+    (round-09 §2.3). This names the differentiator explicitly using
+    the raw values ``mapfile._freshness_from_provenance`` already
+    computed.
+
+    Args:
+        fresh: A freshness verdict with ``reason == "version"``.
+
+    Returns:
+        A one-line ``"stale (...)"`` prefix naming which signal(s)
+        fired and their built-vs-running values.
+    """
+    which = "+".join(
+        name
+        for name, stale in (
+            ("version", fresh.version_stale),
+            ("spec_hash", fresh.spec_stale),
+        )
+        if stale
+    )
+    parts: list[str] = []
+    if fresh.version_stale:
+        parts.append(
+            f"tool_version: built by dekko {fresh.built_version}, "
+            f"running {fresh.running_version}"
+        )
+    if fresh.spec_stale:
+        built_hash = (fresh.built_spec_hash or "unknown")[:12]
+        running_hash = (fresh.running_spec_hash or "unknown")[:12]
+        spec_detail = (
+            f"spec_hash: map built with extractor spec {built_hash}, "
+            f"this process is running spec {running_hash}"
+        )
+        if not fresh.version_stale:
+            spec_detail += (
+                f" (same version string {fresh.running_version} on "
+                "both sides — this is a long-lived process running "
+                "older/different extractor code than what's on disk; "
+                "restart it)"
+            )
+        parts.append(spec_detail)
+    return f"stale ({which}): " + "; ".join(parts)
+
+
 def tool_map_status(ctx: Context, args: dict) -> str:
     """Whether the map on disk is fresh, with what changed if stale."""
     root = _root_of(ctx, args)
@@ -480,13 +602,7 @@ def tool_map_status(ctx: Context, args: dict) -> str:
         status = f"fresh ({n} files, commit {commit})"
         return f"{status}\n{note}" if note else status
     if fresh.reason == "version":
-        prov = index.provenance or {}
-        built = prov.get("tool_version", "unknown")
-        running = _pkg_version("dekko")
-        return (
-            f"stale (version): built by dekko {built}, running "
-            f"{running} — call refresh_map"
-        )
+        return f"{_version_stale_detail(fresh)} — call refresh_map"
     parts = [f"stale: {len(fresh.changed)} changed"]
     parts.append(f"{len(fresh.added)} added")
     parts.append(f"{len(fresh.removed)} removed")
@@ -517,7 +633,10 @@ _ROOT_PROP = {
 }
 _SYMBOL_PROP = {
     "type": "string",
-    "description": "Symbol: name, Class.method, or file.py:name",
+    "description": "Symbol: name, Class.method, or file.py:name. If the "
+    "reply says the target is ambiguous (an overload set sharing the "
+    "same file+name), append ':LINE' from one of the printed candidate "
+    "rows, e.g. file.py:Class.method:42, to pick that one",
 }
 _SITES_PROP = {
     "type": "boolean",
@@ -549,6 +668,56 @@ _TASK_PROP = {
 # agent usage (2026-07-10 eval transcripts) — their handlers remain
 # callable and `dekko <cmd>` unaffected.
 TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "search_code",
+        "description": "Rank symbols by free-text relevance to a "
+        "natural-language description — for when you know what the code "
+        "should do but not its name. Matches against names, signatures, "
+        "and doc lines with BM25-style scoring, not substring matching. "
+        "Falls back to zero hits (not an error) when nothing matches; try "
+        "broader or different terms. Use query_symbol/get_callers instead "
+        "once you have an exact name.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Free-text description of the code "
+                    "you're looking for",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max hits (default 15)",
+                },
+                "budget": {
+                    "type": "integer",
+                    "description": "Token budget for the output (default 800)",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Comma-separated symbol kinds to "
+                    "restrict to (function, method, class, ...)",
+                },
+                "include_tests": {
+                    "type": "boolean",
+                    "description": "Include test-path symbols "
+                    "(default: false)",
+                },
+                "scorer": {
+                    "type": "string",
+                    "enum": ["lexical", "embedding"],
+                    "description": "Relevance scorer: 'lexical' "
+                    "(default, BM25, always available) or 'embedding' "
+                    "(hashing-trick embedding; only works if the "
+                    "server was installed with the dekko[search] "
+                    "extra)",
+                },
+                "root": _ROOT_PROP,
+            },
+            "required": ["query"],
+        },
+        "handler": tool_search_code,
+    },
     {
         "name": "query_symbol",
         "description": "Signature, kind, location, doc, fan-in/out, and "

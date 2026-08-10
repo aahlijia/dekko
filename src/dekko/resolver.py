@@ -1,14 +1,30 @@
 """Best-effort static call resolution: raw calls → graph edges.
 
-Resolution order for each call: same class/container → typed
-parameter → same file → imported names → unique repo-wide name match
-→ class/own-constructor pair collapse. Anything still unclear is
-reported as ambiguous rather than guessed; names with no in-repo
-candidates are external. Ambiguous calls contribute to no candidate's
-``calls_in``/fan-in — they are never guessed into an edge — so a
-symbol's fan-in can undercount actual usage when its name collides
-with another definition; see ``mapfile.MapIndex.ambiguous_in`` for how
-many call sites were dropped for a given candidate.
+Resolution order for each call: same class/container → explicit type
+receiver → typed parameter → same file → imported names → unique
+repo-wide name match → class/own-constructor pair collapse. Anything
+still unclear is reported as ambiguous rather than guessed; names with
+no in-repo candidates are external. Ambiguous calls contribute to no
+candidate's ``calls_in``/fan-in — they are never guessed into an edge
+— so a symbol's fan-in can undercount actual usage when its name
+collides with another definition; see ``mapfile.MapIndex.ambiguous_in``
+(who tried to call a given candidate ambiguously) and
+``mapfile.MapIndex.ambiguous_out`` (what a given caller called
+ambiguously) for how many call sites were dropped on each side.
+
+An explicit ``Type::method()``/``Type.staticMethod()`` receiver (the
+type's own bare name, not a variable of that type) is stronger
+evidence than either the self/this or typed-parameter steps, but
+neither of those fires for it — a call like ``BufferDiff::new(...)``
+written inside ``BufferDiff``'s own file (so there's no import to key
+off) used to fall through to the generic same-file/fast-path ladder
+and land ambiguous whenever the repo defined more than one same-named
+method elsewhere, silently dropping the edge (zed's ``BufferDiff.new``
+read zero callers despite 13 real call sites — round-09 §2.1 part A).
+``_receiver_type_match`` closes this by checking, before the typed-
+parameter step, whether the receiver's first segment is itself the
+bare name of an in-repo type (``model.TYPE_KINDS``) and, if so,
+whether it uniquely narrows the same-named candidates by qualname.
 
 A call through one of the *calling function's own declared
 parameters* (``controller.initTask(...)`` where the caller declares
@@ -36,6 +52,33 @@ via ``resolve_refs()``, but land in a wholly separate ``referenced``/
 reference is simply dropped rather than recorded as ambiguous — there
 is no "ambiguous references" concept, mirroring how an unresolved call
 already falls through to ``external`` with nothing further tracked.
+
+The "unique repo-wide name match" step (``_pick_candidate``'s
+``len(candidates) == 1`` fast path) is skipped in favor of ambiguous
+when the call looks like a built-in/global rather than a genuine
+repo-symbol reference — see ``_is_noise_call``. Without this guard, a
+repo that happens to define exactly one symbol sharing a name with a
+language built-in or ambient global (``trim``, ``expect``,
+``describe``, a TS ``declare global`` augmentation of ``String``, ...)
+had every unrelated built-in/global call site silently credited to
+that one symbol's fan-in, since nothing else in the ladder ever
+disambiguates a bare-name call with no receiver or an untyped
+receiver. Confirmed live against cline: a same-file-only helper
+literally named ``trim`` (true fan-in 8) was reported at fan-in 1,404,
+almost entirely misattributed ``String.prototype.trim()`` calls — see
+``test-repos/reports/investigation-1.2-resolver-fanin.md``.
+
+The "imported names" step (``_import_match``) ordinarily keys on a
+*local binding* name (``from x import y`` / ``import {y} from 'x'``),
+which C/C++'s whole-file ``#include`` has no equivalent of — so for
+those languages it falls back to checking every ``#include`` in the
+caller's file against every candidate's file instead (see
+``_WHOLE_FILE_IMPORT_LANGUAGES``), the same ``_module_matches`` check
+``affected.py``'s ``_import_hits`` already uses for its diff-import
+evidence tier. Without this, a same-named free function defined in two
+different files was unresolvable for C/C++ regardless of which header
+the caller actually included — see
+``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
 """
 
 import re
@@ -57,6 +100,14 @@ from .model import (
 _SELF_RECEIVERS = {"self", "this", "Self", "cls"}
 _PATH_SPLIT = re.compile(r"::|\.|/")
 _INDEX_STEMS = {"__init__", "mod", "lib", "index"}
+# Languages whose imports are whole-*file* (``#include``), not
+# per-symbol bindings (``from x import y`` / ``import {y} from 'x'``)
+# — ``_import_match``'s ordinary name-keyed hint lookups can never
+# fire for these, since neither the call's own name nor its receiver
+# is ever the local name of an import (there is no such thing). See
+# ``_import_match``'s whole-file fallback and
+# ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
+_WHOLE_FILE_IMPORT_LANGUAGES = frozenset({"c", "cpp"})
 # Either raw-usage shape the shared candidate ladder resolves — a
 # call and a bare-value reference expose the same fields
 # (name/receiver/caller_id/path) and only differ in what table the
@@ -87,6 +138,9 @@ def resolve(files: list[FileMap]) -> CallGraph:
 
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
+        raw_imports = (
+            fm.imports if fm.language in _WHOLE_FILE_IMPORT_LANGUAGES else None
+        )
         for call in fm.calls:
             _resolve_call(
                 call,
@@ -98,6 +152,7 @@ def resolve(files: list[FileMap]) -> CallGraph:
                 edges=edges,
                 ambiguous=ambiguous,
                 external=external,
+                raw_imports=raw_imports,
             )
 
     graph = CallGraph(
@@ -203,6 +258,7 @@ def _resolve_ref(
         file_imports,
         symbols_by_id.get(ref.caller_id or ""),
         by_name_path,
+        index,
     )
     if target is not None and target.id != caller_id:
         edges.setdefault((caller_id, target.id), set()).add(ref.line)
@@ -218,6 +274,7 @@ def _resolve_call(
     edges: dict[tuple[str, str], set[int]],
     ambiguous: dict[tuple[str, str], list[str]],
     external: dict[tuple[str, str], set[int]],
+    raw_imports: list[Import] | None = None,
 ) -> None:
     """Resolve one call and record it in the right bucket."""
     caller_id = call.caller_id or f"{call.path}{MODULE_CALLER_SUFFIX}"
@@ -247,6 +304,9 @@ def _resolve_call(
         file_imports,
         symbols_by_id.get(call.caller_id or ""),
         by_name_path,
+        index,
+        repo_stems,
+        raw_imports,
     )
     if target is not None:
         _add_call_and_constructor(
@@ -316,6 +376,9 @@ def _pick_candidate(
     file_imports: dict[str, Import],
     caller: Symbol | None,
     by_name_path: dict[tuple[str, str], list[Symbol]],
+    index: dict[str, list[Symbol]],
+    repo_stems: set[str] | None = None,
+    raw_imports: list[Import] | None = None,
 ) -> Symbol | None:
     """Apply the resolution ladder; ``None`` means ambiguous.
 
@@ -326,13 +389,29 @@ def _pick_candidate(
     ``same_file`` is the pre-bucketed list of like-named symbols in the
     calling file, so the same-file and container steps avoid rescanning
     every repo-wide candidate for a common name.
+
+    ``index`` is the full bare-name → symbols index, used only by
+    ``_receiver_type_match`` to check whether a call's receiver names
+    an in-repo type rather than a variable.
+
+    ``repo_stems`` gates the built-in/global-name noise check (see
+    ``_is_noise_call``) — only ``_resolve_call`` passes it, so
+    ``_resolve_ref``'s reference resolution (a separate table from
+    ``calls_in``/fan-in, not affected by the bug this check targets)
+    is left byte-for-byte unchanged.
+
+    ``raw_imports``, when given, is the calling file's full (undeduped)
+    import list — passed only for whole-file-include languages
+    (C/C++), and used by ``_import_match``'s fallback step. See
+    ``_WHOLE_FILE_IMPORT_LANGUAGES``.
     """
-    container = _self_container(call, caller)
-    if container is not None:
-        target_qual = f"{container}.{call.name}"
-        same = [c for c in same_file if c.qualname == target_qual]
-        if len(same) == 1:
-            return same[0]
+    container_match = _container_match(call, caller, same_file)
+    if container_match is not None:
+        return container_match
+
+    receiver_type = _receiver_type_match(call, candidates, index)
+    if receiver_type is not None:
+        return receiver_type
 
     typed = _typed_param_match(call, candidates, caller)
     if typed is not None:
@@ -341,9 +420,14 @@ def _pick_candidate(
     if len(same_file) == 1:
         return same_file[0]
 
-    hinted = _import_match(call, candidates, file_imports)
+    hinted = _import_match(call, candidates, file_imports, raw_imports)
     if hinted is not None:
         return hinted
+
+    if repo_stems is not None and _is_noise_call(
+        call, file_imports, repo_stems
+    ):
+        return None
 
     if len(candidates) == 1:
         return candidates[0]
@@ -354,6 +438,176 @@ def _pick_candidate(
             return pair
 
     return None
+
+
+# Well-known JS/TS global constructor/type/cast names (``String(x)``,
+# ``Array.isArray``-shaped bare calls) and ambient test-framework
+# globals (vitest/jest/mocha, commonly injected without an explicit
+# import via ``globals: true``) — a same-named free function/shim a
+# repo happens to define is essentially never what a *bare* call to
+# one of these names means. See
+# ``test-repos/reports/investigation-1.2-resolver-fanin.md``: cline's
+# ``interface String`` (a TS ``declare global`` augmentation, not a
+# real definition) was credited with 548 calls that were actually
+# ``String(...)`` casts; its ``expect``/``describe`` hotspots were an
+# unrelated local shim/helper credited with calls actually aimed at
+# vitest's globals.
+_AMBIENT_GLOBAL_NAMES = frozenset(
+    {
+        "String", "Number", "Boolean", "Array", "Object", "Symbol",
+        "Promise", "Map", "Set", "Date", "RegExp", "Error", "JSON",
+        "Math",
+        "expect", "describe", "it", "test", "beforeEach", "afterEach",
+        "beforeAll", "afterAll",
+    }
+)  # fmt: skip
+
+# Well-known String/Array/Object prototype method names. When a
+# *receiver-qualified* call reaches this point in the ladder, every
+# receiver-aware disambiguation step (self/this, typed parameter,
+# same-file, import hint) has already had its shot and failed — the
+# only remaining "evidence" for the single-candidate fast path is
+# "this name happens to be otherwise unique in the repo," which is
+# false for these names precisely because they are called constantly
+# on ordinary local variables (``opts.config.trim()``) that are never
+# provably typed as the repo's own like-named class. See the same
+# investigation report: cline's ``trim`` (fan-in 1,404, true fan-in 8)
+# was almost entirely misattributed ``String.prototype.trim()`` calls.
+_BUILTIN_METHOD_NAMES = frozenset(
+    {
+        "trim", "trimStart", "trimEnd", "toString", "valueOf",
+        "toLowerCase", "toUpperCase", "includes", "indexOf", "slice",
+        "splice", "concat", "join", "push", "pop", "shift", "unshift",
+        "forEach", "map", "filter", "reduce", "startsWith", "endsWith",
+        "padStart", "padEnd", "repeat", "charAt", "substring",
+        "replace", "replaceAll", "split", "flat", "hasOwnProperty",
+    }
+)  # fmt: skip
+
+# Chain-call method names from popular schema/validation builder
+# libraries (Zod and the like) — ``z.string().describe("...")``. Same
+# shape of false-positive as ``_BUILTIN_METHOD_NAMES``: a
+# receiver-qualified call whose receiver isn't provably typed as an
+# in-repo class, so the only "evidence" for the single-candidate fast
+# path is name uniqueness — which fails whenever a repo also happens
+# to define its own like-named method/function. Confirmed live against
+# cline: ``describe`` (a Zod ``.describe()`` schema call) still read
+# fan-in 60 after ``_BUILTIN_METHOD_NAMES`` alone, because ``describe``
+# isn't a String/Array/Object prototype method — see
+# ``test-repos/reports/investigation-1.2-resolver-fanin.md``'s
+# "residual gap" note. Kept as its own (currently one-entry) set, not
+# folded into ``_BUILTIN_METHOD_NAMES``, since the two lists have
+# different provenance even though they're checked together — extend
+# here, not there, if another schema-builder collision turns up.
+_SCHEMA_BUILDER_METHOD_NAMES = frozenset({"describe"})  # fmt: skip
+
+# Well-known Rust std/prelude trait method names (``Iterator``,
+# ``Option``, ``Result``, ``Clone``, ``ToString``, ...). Same
+# false-positive shape as ``_BUILTIN_METHOD_NAMES``, just for Rust
+# instead of JS/TS: a receiver-qualified call whose receiver isn't
+# provably typed as an in-repo class reaches this guard, and these
+# names are called constantly on ordinary local values/std types
+# rather than an in-repo type sharing the name. Confirmed live against
+# zed: ``Editor.new_internal``'s bare ``.then()`` attributed to an
+# unrelated ``PathContextCondition.then`` (a CI-tool crate) and
+# ``.iter_mut()`` to ``AtlasTextureList.iter_mut`` (``gpui``) — see
+# round-09 §2.1 part B (``test-repos/reports/09-tokentest-7repo-postfix/
+# zed.md`` §3). Not gated by language, matching how
+# ``_BUILTIN_METHOD_NAMES`` (JS/TS-flavored) already isn't — these
+# names are unlikely method names to collide with in other languages.
+_RUST_STD_METHOD_NAMES = frozenset(
+    {
+        "then", "then_some", "iter", "iter_mut", "into_iter", "map",
+        "map_err", "and_then", "or_else", "unwrap", "unwrap_or",
+        "unwrap_or_else", "unwrap_or_default", "expect", "clone",
+        "into", "as_ref", "as_mut", "as_str", "as_slice", "to_string",
+        "to_owned", "to_vec", "borrow", "borrow_mut", "lock", "read",
+        "write", "collect", "filter", "for_each", "fold", "is_some",
+        "is_none", "is_ok", "is_err", "ok", "err", "take", "replace",
+    }
+)  # fmt: skip
+
+
+def _is_noise_call(
+    call: _Referable,
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+) -> bool:
+    """Whether this call is likely a built-in/global, not a repo symbol.
+
+    Checked right before the single-/pair-candidate fast paths in
+    ``_pick_candidate`` — after every receiver-aware disambiguation
+    step has already failed to find real evidence, this rejects the
+    "it happens to be the only same-named repo symbol" guess for
+    names strongly associated with language built-ins or ambient
+    globals, in favor of leaving the call ambiguous/unresolved rather
+    than silently inflating an unrelated symbol's fan-in.
+
+    Args:
+        call: The raw call or reference being resolved.
+        file_imports: Local name to import record for the calling
+            file.
+        repo_stems: Every repo file's matching stem (see
+            ``_repo_stem``), used to tell an external import from a
+            same-repo one.
+
+    Returns:
+        True when the call should be treated as noise rather than
+        resolved via the single-candidate fast path.
+    """
+    if _shadowed_by_external_import(call, file_imports, repo_stems):
+        return True
+    if not call.receiver:
+        return call.name in _AMBIENT_GLOBAL_NAMES
+    # An *exact* self/this receiver (no further chain) is the shape
+    # ``_self_container`` already resolves when the class defines a
+    # like-named method; a multi-segment chain rooted at self/this
+    # (``this.options.authToken.trim()``) is a property/value access,
+    # not a sibling-method call, and must not be exempted here — the
+    # `receiver` text is the raw expression before the final call, so
+    # only an exact match is the single-token shape `_self_container`
+    # itself checks.
+    if call.receiver in _SELF_RECEIVERS:
+        return False
+    return (
+        call.name in _BUILTIN_METHOD_NAMES
+        or call.name in _SCHEMA_BUILDER_METHOD_NAMES
+        or call.name in _RUST_STD_METHOD_NAMES
+    )
+
+
+def _shadowed_by_external_import(
+    call: _Referable,
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+) -> bool:
+    """Whether a bare (no-receiver) call's own name is a local import.
+
+    ``expect(...)`` in a file that does ``import { expect } from
+    "vitest"`` always means the imported ``expect`` — JS/TS lexical
+    scoping means an import binding shadows every other same-named
+    thing in that file, including an unrelated repo symbol the
+    bare-name index happens to find. Restricted to receiver-less calls
+    since an import only binds the identifier itself, not an arbitrary
+    method name reached through some other receiver.
+
+    Args:
+        call: The raw call or reference being resolved.
+        file_imports: Local name to import record for the calling
+            file.
+        repo_stems: Every repo file's matching stem, used to tell an
+            external import from a same-repo one.
+
+    Returns:
+        True when ``call.name`` is imported in this file from a
+        source matching no file in the repo.
+    """
+    if call.receiver:
+        return False
+    imp = file_imports.get(call.name)
+    if imp is None:
+        return False
+    return not (_import_segments(imp.source) & repo_stems)
 
 
 # Type-annotation tokens that never name the receiver's own class —
@@ -371,6 +625,52 @@ _TYPE_NOISE_WORDS = frozenset(
     }
 )  # fmt: skip
 _TYPE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _receiver_type_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> Symbol | None:
+    """Resolve a call through an explicit ``Type::method()`` receiver.
+
+    ``BufferDiff::new(...)``/``BufferDiff.new(...)`` where the receiver
+    is the type's own bare name (not a variable of that type) is
+    stronger evidence than either the self/this or typed-parameter
+    steps: it names the exact type explicitly, rather than requiring
+    it be inferred from ``self``/``this`` or a declared parameter's
+    annotation. Neither of those steps fires for this shape, so without
+    this check the call falls into the generic same-file/import/fast-
+    path ladder — which silently drops it as ambiguous whenever the
+    repo defines the method name more than once elsewhere (zed's
+    ``BufferDiff.new``, called from inside ``BufferDiff``'s own file,
+    read zero callers despite 13 real call sites — round-09 §2.1
+    part A).
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidates: Every same-named symbol repo-wide (already looked
+            up by the caller).
+        index: Bare symbol name to every symbol sharing it, used to
+            check whether the receiver's first segment names an
+            in-repo type (``model.TYPE_KINDS``) rather than a variable.
+
+    Returns:
+        The uniquely-matching method, or ``None`` when the receiver
+        doesn't name a known in-repo type, or the type doesn't narrow
+        ``candidates`` to exactly one.
+    """
+    if not call.receiver:
+        return None
+    first = _PATH_SPLIT.split(call.receiver)[0]
+    same_name = index.get(first, [])
+    if not any(sym.kind in TYPE_KINDS for sym in same_name):
+        return None
+    target_qual = f"{first}.{call.name}"
+    matched = [c for c in candidates if c.qualname == target_qual]
+    if len(matched) == 1:
+        return matched[0]
+    return None
 
 
 def _typed_param_match(
@@ -507,10 +807,61 @@ def _self_container(call: _Referable, caller: Symbol | None) -> str | None:
     return caller.qualname.rsplit(".", 1)[0]
 
 
-def _import_match(
-    call: _Referable, candidates: list[Symbol], file_imports: dict[str, Import]
+def _container_match(
+    call: _Referable, caller: Symbol | None, same_file: list[Symbol]
 ) -> Symbol | None:
-    """Match candidates against import hints for this file."""
+    """Resolve a self/this call against the caller's own container.
+
+    Split out of ``_pick_candidate`` (rather than inlined) to keep its
+    branch count down as the ladder has grown more steps; behavior is
+    unchanged from when this was inline.
+
+    Args:
+        call: The raw call or reference being resolved.
+        caller: The enclosing symbol, or ``None`` for module-level
+            calls.
+        same_file: Like-named symbols in the calling file.
+
+    Returns:
+        The uniquely-matching same-file, same-container method, or
+        ``None`` when the receiver isn't self/this or the container
+        doesn't narrow to exactly one candidate.
+    """
+    container = _self_container(call, caller)
+    if container is None:
+        return None
+    target_qual = f"{container}.{call.name}"
+    same = [c for c in same_file if c.qualname == target_qual]
+    if len(same) == 1:
+        return same[0]
+    return None
+
+
+def _import_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    file_imports: dict[str, Import],
+    raw_imports: list[Import] | None = None,
+) -> Symbol | None:
+    """Match candidates against import hints for this file.
+
+    ``raw_imports`` (whole-file-include languages only — see
+    ``_WHOLE_FILE_IMPORT_LANGUAGES``) is tried as a fallback when the
+    per-name hints above find nothing: a C/C++ ``#include`` binds no
+    single symbol name the way ``from x import y``/``import {y} from
+    'x'`` do, so ``file_imports.get(call.name)`` (keyed by a *local
+    binding* name) structurally can never hit for these languages,
+    regardless of what the call's own name or receiver is. Instead,
+    check every ``#include`` in the file against every candidate's
+    file — the same ``_module_matches`` check ``affected.py``'s
+    ``_import_hits`` already does for its diff-import evidence tier —
+    and resolve when exactly one candidate's file is actually included
+    here. Verified against a fixture reproducing tensorflow's
+    ``rewrite_utils.cc``/``rewrite_utils_test.cc`` gtest pair (same
+    file paths, same symbol names, same header) — see
+    ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md`` and
+    ``tests/test_resolver.py::test_cpp_call_disambiguated_via_whole_file_include``.
+    """
     hints: list[str] = []
     imp = file_imports.get(call.name)
     if imp is not None:
@@ -522,6 +873,14 @@ def _import_match(
             hints.append(rec_imp.source)
     for hint in hints:
         matched = [c for c in candidates if _module_matches(hint, c.path)]
+        if len(matched) == 1:
+            return matched[0]
+    if raw_imports:
+        matched = [
+            c
+            for c in candidates
+            if any(_module_matches(i.source, c.path) for i in raw_imports)
+        ]
         if len(matched) == 1:
             return matched[0]
     return None

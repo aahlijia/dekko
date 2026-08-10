@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from dekko import cli
+from dekko import cli, summary
 from dekko import server
+from dekko.mapfile import MapIndex
 
 from conftest import RepoFactory
 
@@ -112,6 +113,60 @@ def test_cross_dir_edges_counted(
     assert dirs["b"]["cross_edges"] == 1
 
 
+def test_entrypoints_exclude_test_methods_and_noncallable_exports(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # 3.5: a decorated, uncalled pytest-style fixture under tests/ and
+    # an uncalled exported (non-callable) constant used to both pass
+    # the old, too-permissive entrypoints heuristic.
+    root = make_mapped_repo(
+        dict(
+            SRC,
+            **{
+                "tests/test_app.py": (
+                    "import pytest\n\n\n"
+                    "@pytest.fixture\n"
+                    "def helper_fixture():\n"
+                    "    pass\n"
+                ),
+                "src/consts.ts": "export const CONFIG = 1;\n",
+            },
+        )
+    )
+    assert _summary(root, "--json") == 0
+    doc = json.loads(capsys.readouterr().out)
+    ids = {e["id"] for e in doc["entrypoints"]}
+    assert not any("helper_fixture" in i for i in ids)
+    assert not any("CONFIG" in i for i in ids)
+    # The real entry point is untouched by the tightened filter.
+    assert any(i == "src/app.py::main" for i in ids)
+
+
+def test_parse_errors_capped_with_language_breakdown() -> None:
+    # 2.3: an uncapped grammar gap used to make one repeated message
+    # dominate the whole digest (spring-boot/tensorflow/zed: 97%+ of
+    # `summary`'s output). Built directly against a MapIndex, since
+    # reproducing a real Tier-1-grammar-missing error needs no actual
+    # source files, just the resulting error/language records.
+    index = MapIndex(root_label="repo")
+    for i in range(20):
+        path = f"gen/file{i}.kt"
+        index.errors_by_path[path] = (
+            "grammar 'kotlin' is not in the offline Tier-1 set"
+        )
+        index.languages_by_path[path] = "kotlin"
+
+    doc = summary.compute(index)
+    assert len(doc["parse_errors"]) == summary._MAX_PARSE_ERRORS
+    assert doc["parse_errors_total"] == 20
+
+    text = summary.render_text(index)
+    assert "parse errors:" in text
+    hidden = 20 - summary._MAX_PARSE_ERRORS
+    assert f"... and {hidden} more" in text
+    assert "kotlin (20)" in text
+
+
 def test_no_tests_filter(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
@@ -179,6 +234,21 @@ def test_cli_budget_caps_text_and_footers(
     out = capsys.readouterr().out
     assert "omitted" in out.splitlines()[-1]
     assert "entrypoints:" not in out  # trailing sections shed first
+
+
+def test_cli_summary_applies_default_budget_without_flag(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # 2.3 item 2: the bare CLI used to default `--budget` to `None`
+    # (unbounded), the one surface `orient`'s own default cap didn't
+    # reach. A live budget (even one generous enough not to truncate
+    # this small fixture) always prints a token-count footer line, so
+    # its presence proves a cap is now applied by default.
+    root = make_mapped_repo(SRC)
+    assert _summary(root) == 0
+    out = capsys.readouterr().out
+    assert "tokens" in out.splitlines()[-1]
+    assert "entrypoints:" in out  # small fixture: nothing actually shed
 
 
 def test_mcp_summary_tool_applies_default_budget(

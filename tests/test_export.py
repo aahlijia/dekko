@@ -65,6 +65,30 @@ def test_export_max_nodes_guard(
     assert "use --scope file" in capsys.readouterr().err
 
 
+def test_export_max_nodes_guard_omits_scope_file_when_already_used(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SRC)
+    code = cli.main(
+        [
+            "export",
+            "--format",
+            "mermaid",
+            "--scope",
+            "file",
+            "--max-nodes",
+            "1",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--scope file" not in err
+    assert "a subtree map" in err
+    assert "raise --max-nodes" in err
+
+
 def test_export_requires_format(capsys: pytest.CaptureFixture) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["export"])

@@ -71,6 +71,17 @@ def test_rm_by_index_and_all(
     assert "src/app.py::helper" not in notes_mod.load(root)
 
 
+def test_remove_is_an_alias_for_rm(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SRC)
+    _cli(root, "note", "add", "helper", "first")
+    capsys.readouterr()
+
+    assert _cli(root, "note", "remove", "helper") == 0
+    assert "src/app.py::helper" not in notes_mod.load(root)
+
+
 def test_list_all_and_orphaned(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

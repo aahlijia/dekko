@@ -4,7 +4,9 @@ Plus the FR2/FR4 atom layer: name + signature atoms with Q1 centrality.
 """
 
 import json
+import time
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -506,6 +508,109 @@ def test_report_as_dict_shape(make_mapped_repo: RepoFactory) -> None:
     assert d["floored"] is True
 
 
+# --- 2.1: _shed_symbols binary search (was O(N^2), hung on large repos)
+
+
+def _synthetic_model(n: int) -> render_lean.LeanModel:
+    """``n`` single-atom files in one non-demotable group.
+
+    Ascending centrality (``float(i)``) so ``_live_atoms`` sorts them
+    in file order, matching the fixtures' ``modNNNN.py`` naming.
+    """
+    width = len(str(n - 1))
+    rows = []
+    atoms_by_path: dict[str, list[render_lean.SymbolAtom]] = {}
+    for i in range(n):
+        path = f"src/mod{i:0{width}d}.py"
+        rows.append(
+            render_lean.BackboneRow(path=path, purpose="", demotable=False)
+        )
+        atoms_by_path[path] = [
+            render_lean.SymbolAtom(
+                sym_id=f"{path}::fn{i}",
+                name=f"fn{i}",
+                signature=f"fn{i}(x: int, y: int, z: int) -> int",
+                centrality=float(i),
+                path=path,
+                demotable=False,
+            )
+        ]
+    group = render_lean.BackboneGroup(
+        directory="src",
+        rows=tuple(sorted(rows, key=lambda r: r.path)),
+        demotable=False,
+    )
+    return render_lean.LeanModel(
+        groups=[group],
+        atoms_by_path=atoms_by_path,
+        module_edges=[],
+        mermaid=[],
+    )
+
+
+def _reference_shed_symbols(
+    state: render_lean._LeanState,
+    live: list[render_lean.SymbolAtom],
+    fits: Callable[[], bool],
+) -> None:
+    """Pre-fix atom-by-atom walk (O(N) `fits()` probes), for parity."""
+    for atom in live:
+        if fits():
+            return
+        state.dropped_sigs.add(atom.sym_id)
+    for atom in live:
+        if fits():
+            return
+        state.dropped_names.add(atom.sym_id)
+
+
+def test_shed_symbols_bisect_matches_reference_walk() -> None:
+    # Small enough that the O(N) reference walk still finishes quickly,
+    # but big enough (and tight enough a budget) to exercise both the
+    # signature-shedding and name-shedding rungs.
+    model = _synthetic_model(400)
+    live = render_lean._live_atoms(model)
+    body_budget = 200
+
+    new_state = render_lean._LeanState()
+
+    def fits_new() -> bool:
+        doc = render_lean._render_document(model, new_state)
+        return render_lean.count_lines(doc) <= body_budget
+
+    render_lean._shed_symbols(new_state, live, fits_new)
+
+    old_state = render_lean._LeanState()
+
+    def fits_old() -> bool:
+        doc = render_lean._render_document(model, old_state)
+        return render_lean.count_lines(doc) <= body_budget
+
+    _reference_shed_symbols(old_state, live, fits_old)
+
+    assert new_state.dropped_sigs == old_state.dropped_sigs
+    assert new_state.dropped_names == old_state.dropped_names
+    # Both reach the same fitted-or-not outcome.
+    assert fits_new() == fits_old()
+
+
+def test_shed_symbols_handles_large_live_set_without_hanging() -> None:
+    # Regression guard for the O(N^2) hang: 20,000 live atoms under a
+    # cap tight enough to force shedding almost everything. The old
+    # atom-by-atom walk was O(N) `fits()` probes each doing O(N) work;
+    # this must now complete in well under a second via O(N log N)
+    # binary search.
+    model = _synthetic_model(20_000)
+    start = time.monotonic()
+    lines, report = render_lean.render(
+        model, cap=render_lean._HEADER_RESERVE_TOK + 20
+    )
+    elapsed = time.monotonic() - start
+    assert elapsed < 5.0
+    assert lines  # still produces output, not a 0-byte hang victim
+    assert report.names_dropped > 0
+
+
 # --- FR6 mermaid block ----------------------------------------------
 
 
@@ -616,6 +721,36 @@ def test_cli_lean_budget_floors(
     assert "hub() -> int" not in out  # all depth shed
 
 
+def test_cli_lean_tiny_budget_discloses_floor_override(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-09 §2.4: a `--budget` below the path-only floor was
+    # silently bumped up with no indication the request was ever
+    # overridden — `effective_cap`'s own docstring says "the cap
+    # bends, not the floor," but nothing told the caller that
+    # happened. The note goes to stderr, matching query.py's
+    # ambig_in/coverage note convention.
+    root = make_mapped_repo(LADDER_FILES)
+    code = cli.main(["lean", "--root", str(root), "--budget", "1"])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "requested budget 1 is below this repo's" in err
+    assert "path-only floor" in err
+    assert "using the floor instead" in err
+
+
+def test_cli_lean_ample_budget_has_no_floor_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # The disclosure must only fire when the floor actually overrode
+    # the request — an ample budget must stay silent.
+    root = make_mapped_repo(LADDER_FILES)
+    code = cli.main(["lean", "--root", str(root), "--budget", "100000"])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "path-only floor" not in err
+
+
 def test_lean_registered_and_tool_count() -> None:
     assert "lean" in cli.SUBCOMMANDS
     names = {t["name"] for t in server.TOOLS}
@@ -624,8 +759,10 @@ def test_lean_registered_and_tool_count() -> None:
     # in context tokens every session (E5 trim, 2026-07-10).
     assert "lean" not in names
     assert "ledger" not in names
-    # Canonical MCP tool-count assertion now lives here.
-    assert len(server.TOOLS) == 13
+    # Canonical MCP tool-count assertion now lives here. 14, not 13:
+    # search_code (BM25 free-text search, Phase 1 of the semantic
+    # search plan) joined the read surface after the E5 trim.
+    assert len(server.TOOLS) == 14
 
 
 def test_mcp_lean_tool_is_cli_only(make_mapped_repo: RepoFactory) -> None:

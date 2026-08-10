@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from dekko import mapfile
 from dekko.model import CallGraph, Edge, FileMap, Symbol
 
@@ -133,6 +135,76 @@ def test_format_unsupported_none_when_fully_covered(
     assert mapfile.format_unsupported(index.provenance) is None
 
 
+def test_provenance_records_vendored_excluded_files(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Track E / 1.5: files under a default-excluded dir that sometimes
+    # holds first-party code (tensorflow's third_party/xla is the
+    # motivating case) must be aggregated into the map's provenance so
+    # `status`/`summary` can surface a coverage note, distinct from
+    # the "no parser for" note.
+    root = make_mapped_repo(
+        dict(
+            CHAIN,
+            **{
+                "third_party/xla/lib.py": (
+                    "def xla_helper() -> None:\n    pass\n"
+                ),
+                "vendor/pkg/mod.py": "def vendored() -> None:\n    pass\n",
+            },
+        )
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.provenance is not None
+    vendored = index.provenance["vendored_excluded"]
+    assert vendored == {
+        "count": 2,
+        "dirs": {"third_party": 1, "vendor": 1},
+    }
+    assert mapfile.format_unsupported(index.provenance) == (
+        "2 files under default-excluded directories "
+        "(third_party (1), vendor (1)) were not mapped — pass "
+        "--exclude '' or a narrower default-dir allowlist to include "
+        "them if they hold first-party code"
+    )
+
+
+def test_format_unsupported_combines_unsupported_and_vendored_notes(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Both coverage gaps can apply to the same map at once; the
+    # combined note must include both, not just whichever was checked
+    # first.
+    root = make_mapped_repo(
+        dict(
+            CHAIN,
+            **{
+                "Card.astro": "---\nconst x = 1;\n---\n<div/>\n",
+                "third_party/xla/lib.py": (
+                    "def xla_helper() -> None:\n    pass\n"
+                ),
+            },
+        )
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    note = mapfile.format_unsupported(index.provenance)
+    assert note is not None
+    assert "1 files unparsed — no parser for: astro (1)" in note
+    assert "1 files under default-excluded directories" in note
+    assert "third_party (1)" in note
+
+
+def test_vendored_excluded_none_when_no_vendored_dirs_present(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.provenance["vendored_excluded"] is None
+
+
 def test_version_stamp_stale_even_with_unchanged_source(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -153,6 +225,10 @@ def test_version_stamp_stale_even_with_unchanged_source(
     assert fresh.reason == "version"
     # No file-hash diff was attempted for a version mismatch.
     assert fresh.added == fresh.removed == fresh.changed == []
+    # round-09 §2.3: the raw signal that fired must be readable off
+    # the verdict itself, not just re-derivable by the caller.
+    assert fresh.version_stale is True
+    assert fresh.built_version == "0.0.0-stale"
 
 
 def test_spec_hash_stale_even_with_matching_tool_version(
@@ -172,6 +248,15 @@ def test_spec_hash_stale_even_with_matching_tool_version(
     fresh = mapfile.check_freshness(root, index)
     assert not fresh.fresh
     assert fresh.reason == "version"
+    # round-09 §2.3: this is exactly the "same tool_version, different
+    # spec_hash" shape a long-lived ``dekko serve`` process can hit
+    # silently — ``version_stale`` alone must not claim this fired,
+    # and the raw hash values must be available to build a message
+    # that names the real differentiator.
+    assert fresh.version_stale is False
+    assert fresh.spec_stale is True
+    assert fresh.built_spec_hash == "deadbeef"
+    assert fresh.running_spec_hash != "deadbeef"
 
 
 def test_freshness_reason_missing_for_v1_map(
@@ -209,6 +294,110 @@ def test_freshness_reason_none_when_fresh(
     fresh = mapfile.check_freshness(root, index)
     assert fresh.fresh
     assert fresh.reason is None
+
+
+def test_provenance_sidecar_written_and_matches_embedded(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    sidecar = root / ".dekko" / "provenance.json"
+    assert sidecar.exists()
+    embedded = mapfile.load_map(root).provenance
+    from_sidecar = mapfile.load_provenance(root)
+    assert from_sidecar == embedded
+
+
+def test_load_provenance_falls_back_without_sidecar(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Maps written before this sidecar existed (or one a user deleted)
+    # still work — load_provenance re-parses map.json directly and
+    # returns the same dict load_map would expose.
+    root = make_mapped_repo(CHAIN)
+    embedded = mapfile.load_map(root).provenance
+    (root / ".dekko" / "provenance.json").unlink()
+    assert mapfile.load_provenance(root) == embedded
+
+
+def test_load_provenance_falls_back_on_desynced_sidecar(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A hand-edited (or otherwise externally regenerated) map.json
+    # must not be shadowed by a now-stale sidecar still claiming the
+    # old provenance — load_provenance detects the mismatched
+    # map.json stat signature and re-parses instead of trusting it.
+    root = make_mapped_repo(CHAIN)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["tool_version"] = "0.0.0-hand-edited"
+    map_path.write_text(json.dumps(doc))
+
+    prov = mapfile.load_provenance(root)
+    assert prov is not None
+    assert prov["tool_version"] == "0.0.0-hand-edited"
+
+
+def test_load_provenance_none_when_map_missing(tmp_path: Path) -> None:
+    assert mapfile.load_provenance(tmp_path) is None
+
+
+def test_load_provenance_recovers_from_corrupt_sidecar(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    embedded = mapfile.load_map(root).provenance
+    (root / ".dekko" / "provenance.json").write_text("not json {")
+    assert mapfile.load_provenance(root) == embedded
+
+
+def test_check_freshness_provenance_matches_check_freshness(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    index = mapfile.load_map(root)
+    prov = mapfile.load_provenance(root)
+
+    assert (
+        mapfile.check_freshness_provenance(root, prov).fresh
+        == mapfile.check_freshness(root, index).fresh
+    )
+
+    (root / "a.py").write_text(CHAIN["a.py"] + "\n\nX = 1\n")
+    via_index = mapfile.check_freshness(root, index)
+    via_prov = mapfile.check_freshness_provenance(root, prov)
+    assert via_index.fresh == via_prov.fresh is False
+    assert via_index.changed == via_prov.changed == ["a.py"]
+
+
+def test_check_freshness_provenance_version_stale(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    prov = dict(mapfile.load_provenance(root))
+    prov["tool_version"] = "0.0.0-stale"
+    fresh = mapfile.check_freshness_provenance(root, prov)
+    assert not fresh.fresh
+    assert fresh.reason == "version"
+
+
+def test_check_freshness_provenance_none_is_missing() -> None:
+    fresh = mapfile.check_freshness_provenance(Path("/nonexistent"), None)
+    assert not fresh.fresh
+    assert fresh.reason == "missing"
+
+
+def test_load_map_works_without_orjson(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Confirms the stdlib json fallback (no orjson installed) still
+    # round-trips a map correctly, not just whichever backend happens
+    # to be active in the test environment.
+    root = make_mapped_repo(CHAIN)
+    monkeypatch.setattr(mapfile, "orjson", None)
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert "helper" in index.symbols_by_qualname
+    assert mapfile.load_provenance(root) == index.provenance
 
 
 def _sym(path: str, name: str) -> Symbol:
@@ -279,3 +468,61 @@ def test_without_tests_drops_ref_lines_touching_test_paths() -> None:
     index = mapfile.index_from_maps(files, graph, "demo")
     filtered = index.without_tests()
     assert filtered.ref_lines == {("a.py::f", "b.py::g"): [10]}
+
+
+def test_index_from_maps_builds_ambiguous_out() -> None:
+    # round-09 §2.1 part A's disclosure fix: ``ambiguous_out`` is the
+    # outgoing-side counterpart of ``ambiguous_in`` — for a given
+    # caller, which names it called ambiguously — so ``query callees``
+    # can disclose the same kind of gap ``query callers`` already
+    # discloses.
+    files = [
+        FileMap(path="a.py", language="python", symbols=[_sym("a.py", "f")]),
+        FileMap(path="b.py", language="python", symbols=[_sym("b.py", "g")]),
+        FileMap(path="c.py", language="python", symbols=[_sym("c.py", "g")]),
+    ]
+    graph = CallGraph(ambiguous=[("a.py::f", "g", ["b.py::g", "c.py::g"])])
+    index = mapfile.index_from_maps(files, graph, "demo")
+    assert index.ambiguous_out["a.py::f"] == ["g"]
+    assert index.ambiguous_in["b.py::g"] == [("a.py::f", "g")]
+    assert index.ambiguous_in["c.py::g"] == [("a.py::f", "g")]
+
+
+def test_load_map_reads_ambiguous_out(make_mapped_repo: RepoFactory) -> None:
+    root = make_mapped_repo(CHAIN)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["ambiguous"] = [
+        {
+            "caller": "a.py::main",
+            "name": "g",
+            "candidates": ["b.py::g", "c.py::g"],
+        }
+    ]
+    map_path.write_text(json.dumps(doc))
+
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.ambiguous_out["a.py::main"] == ["g"]
+
+
+def test_without_tests_drops_ambiguous_out_from_test_callers() -> None:
+    files = [
+        FileMap(path="a.py", language="python", symbols=[_sym("a.py", "f")]),
+        FileMap(path="b.py", language="python", symbols=[_sym("b.py", "g")]),
+        FileMap(path="c.py", language="python", symbols=[_sym("c.py", "g")]),
+        FileMap(
+            path="tests/test_a.py",
+            language="python",
+            symbols=[_sym("tests/test_a.py", "h")],
+        ),
+    ]
+    graph = CallGraph(
+        ambiguous=[
+            ("a.py::f", "g", ["b.py::g", "c.py::g"]),
+            ("tests/test_a.py::h", "g", ["b.py::g", "c.py::g"]),
+        ]
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    filtered = index.without_tests()
+    assert filtered.ambiguous_out == {"a.py::f": ["g"]}
