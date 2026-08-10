@@ -440,7 +440,9 @@ def run(root: Path, rev: str | None, as_json: bool, limit: int) -> int:
     Returns:
         Process exit code (0 no changes, 1 changes, 2 error).
     """
-    index = mapfile.load_map(root)
+    from . import cli
+
+    index = cli.load_current_index_no_regen(root)
     prov = (index.provenance if index else None) or {}
     subpath = prov.get("subpath")
     excludes = tuple(prov.get("excludes", []))

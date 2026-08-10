@@ -1801,6 +1801,65 @@ def _load_or_regen(
     return index, 0
 
 
+def load_current_index_no_regen(root: Path) -> mapfile.MapIndex | None:
+    """Load the current-tree map, checking the daemon's warm cache first.
+
+    ``diff.run``/``affected.changes`` are the one partial exception to
+    ``_load_or_regen`` being the single daemon-cache chokepoint every
+    other read subcommand funnels through (see
+    ``.features/daemon-mode/daemon-mode-cli-plan.md`` §2.4's last
+    bullet and Phase 4 of ``.features/daemon-mode/TRACKER.md``): their
+    current-tree side calls ``mapfile.load_map`` directly, so a
+    daemon-routed ``diff``/``affected`` request previously always paid
+    a full JSON-parse/index-rebuild, even with a warm cache populated
+    by a prior ``query``/``search``/... request against the same
+    root. This function is the fix — it checks the same
+    ``_daemon_cache_get``/``_daemon_cache_put`` hooks
+    ``_load_or_regen`` uses, so a cache hit here skips the reload the
+    same way it would for any other daemon-eligible command.
+
+    It deliberately does **not** reuse ``_load_or_regen`` itself,
+    because that function's stale/missing-map behavior is to call
+    ``regen_map`` (writing a fresh ``map.json`` to disk) — a side
+    effect ``diff``/``affected`` don't want and have never had: they
+    already tolerate a stale on-disk index by falling back to an
+    in-memory re-parse (``diff.snapshot_new_side`` -> ``diff.
+    snapshot()``) that never touches ``map.json``. Adopting
+    ``_load_or_regen``'s regen-on-stale behavior here would be a
+    real behavior change (an on-disk write a plain ``diff``/
+    ``affected`` call never made before), not just a cache-hit
+    optimization, so this seam only ever *reads* — same contract as
+    the ``mapfile.load_map(root)`` call it replaces.
+
+    Outside the daemon process (``_daemon_cache_get``/``_put`` are
+    both ``None``, true for every direct CLI invocation), this is
+    exactly ``mapfile.load_map(root)`` — same return value, same
+    possibly-``None``/possibly-stale semantics ``diff.run``/
+    ``affected.changes`` already handle via their own freshness checks
+    downstream (``diff.snapshot_new_side``).
+
+    Args:
+        root: Repository root containing map.json.
+
+    Returns:
+        The loaded index (possibly stale, possibly ``None``) — never
+        regenerated as a side effect of this call.
+    """
+    if _daemon_cache_get is not None:
+        cached = _daemon_cache_get(root)
+        if cached is not None:
+            return cached
+
+    index = mapfile.load_map(root)
+    if (
+        index is not None
+        and _daemon_cache_put is not None
+        and mapfile.check_freshness(root, index).fresh
+    ):
+        _daemon_cache_put(root, index)
+    return index
+
+
 def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
     """Re-generate the map at ``root`` with its recorded options.
 

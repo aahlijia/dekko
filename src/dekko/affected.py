@@ -448,7 +448,9 @@ def changes(
         qualify a "no impacted tests" result the way ``affected.run``
         does — see ``render``.
     """
-    index = mapfile.load_map(root)
+    from . import cli
+
+    index = cli.load_current_index_no_regen(root)
     prov = (index.provenance if index else None) or {}
     subpath = prov.get("subpath")
     excludes = tuple(prov.get("excludes", []))

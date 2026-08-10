@@ -16,6 +16,7 @@ test that didn't clean up (workflow doc §3, point 3).
 
 import json as _json
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -478,6 +479,171 @@ def test_daemon_status_reports_cache_state_after_a_request(
     assert cache["cached_root"] == str(root.resolve())
     assert cache["fresh"] is True
     assert cache["hits"] + cache["misses"] >= 1
+
+
+# ---------------------------------------------------------------------
+# Phase 4: diff/affected's current-tree load shares the warm cache.
+#
+# diff.run/affected.changes used to call mapfile.load_map(root)
+# directly, bypassing _load_or_regen (and therefore the daemon's
+# warm-cache hook) entirely -- the "partial exception" the design doc
+# flagged at §2.4's last bullet. cli.load_current_index_no_regen()
+# closes that gap: it checks the same _daemon_cache_get/_put hooks
+# _load_or_regen uses, without adopting its regen-on-stale side
+# effect (diff/affected never wrote map.json as a side effect before,
+# and still don't). These tests prove the cache is now genuinely
+# shared -- a query warms it for diff/affected and vice versa -- and
+# that a working-tree edit is still never served stale.
+# ---------------------------------------------------------------------
+
+
+def _git(root: Path, *args: str) -> None:
+    """Run a git command in ``root``, raising on failure."""
+    subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def daemon_thread_git_root(short_root: Path) -> Iterator[Path]:
+    """A committed git repo (``_CACHE_SRC``), mapped, served by an
+    in-thread daemon -- diff/affected need real git history for their
+    old-side snapshot, unlike ``daemon_thread_cached_root``."""
+    root = short_root
+    _git(root, "init", "-q")
+    for name, text in _CACHE_SRC.items():
+        (root / name).write_text(text)
+    _git(root, "add", "-A")
+    _git(
+        root,
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-m",
+        "base",
+    )
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+
+    thread = threading.Thread(
+        target=daemon.serve_daemon,
+        kwargs={"root": root, "idle_timeout": 30.0},
+        daemon=True,
+    )
+    thread.start()
+    transport = dt.default_transport_for(root)
+    assert _wait_until(transport.exists), "daemon did not bind in time"
+    try:
+        yield root
+    finally:
+        daemon.stop(root)
+        thread.join(timeout=_POLL_DEADLINE)
+
+
+def _diff_args(root: Path) -> object:
+    return cli.build_subcommand_parser().parse_args(
+        ["diff", "--root", str(root)]
+    )
+
+
+def _affected_args(root: Path) -> object:
+    return cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+
+
+def test_daemon_diff_and_affected_reuse_query_warmed_cache(
+    daemon_thread_git_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``diff``/``affected`` request's current-tree load reuses a
+    cache a prior ``query`` request already warmed -- the fix for
+    Phase 4's partial-exception investigation."""
+    root = daemon_thread_git_root
+    calls: list[Path] = []
+    real_load_map = mapfile.load_map
+
+    def spy(root_arg: Path) -> mapfile.MapIndex | None:
+        calls.append(root_arg)
+        return real_load_map(root_arg)
+
+    monkeypatch.setattr(mapfile, "load_map", spy)
+
+    result1 = daemon.try_daemon(_query_symbol_args(root, "f"))
+    assert result1 is not None and result1[0] == 0
+    assert len(calls) == 1  # cache miss: query populates the cache
+
+    result2 = daemon.try_daemon(_diff_args(root))
+    assert result2 is not None
+    assert result2[0] == 0  # clean tree vs the committed base
+    assert len(calls) == 1  # diff reused query's warm cache
+
+    result3 = daemon.try_daemon(_affected_args(root))
+    assert result3 is not None
+    assert result3[0] == 0  # no impacted tests, clean tree
+    assert len(calls) == 1  # affected reused the same warm cache
+
+
+def test_daemon_diff_populates_cache_for_a_later_query(
+    daemon_thread_git_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reverse direction: ``diff`` runs first and its own
+    current-tree load populates the cache; a later ``query`` reuses
+    it -- proves the seam is a genuine two-way shared cache, not a
+    one-directional special case."""
+    root = daemon_thread_git_root
+    calls: list[Path] = []
+    real_load_map = mapfile.load_map
+
+    def spy(root_arg: Path) -> mapfile.MapIndex | None:
+        calls.append(root_arg)
+        return real_load_map(root_arg)
+
+    monkeypatch.setattr(mapfile, "load_map", spy)
+
+    result1 = daemon.try_daemon(_diff_args(root))
+    assert result1 is not None and result1[0] == 0
+    assert len(calls) == 1  # diff's own current-tree load populates it
+
+    result2 = daemon.try_daemon(_query_symbol_args(root, "g"))
+    assert result2 is not None and result2[0] == 0
+    assert len(calls) == 1  # query reused diff's warm cache
+    assert "g() -> int" in result2[1]
+
+
+def test_daemon_diff_cache_miss_on_edit_still_reports_correctly(
+    daemon_thread_git_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A working-tree edit between a warming ``query`` and a following
+    ``diff`` must not be served a stale answer: the shared cache
+    reports a miss (forcing a fresh ``mapfile.load_map``), and
+    ``diff.run``'s own stale-index fallback (an in-memory re-parse via
+    ``diff.snapshot()``, never touching ``map.json``) still reports
+    the edit correctly -- correctness is unchanged by this seam, only
+    the cache-hit rate is."""
+    root = daemon_thread_git_root
+    calls: list[Path] = []
+    real_load_map = mapfile.load_map
+
+    def spy(root_arg: Path) -> mapfile.MapIndex | None:
+        calls.append(root_arg)
+        return real_load_map(root_arg)
+
+    monkeypatch.setattr(mapfile, "load_map", spy)
+
+    result1 = daemon.try_daemon(_query_symbol_args(root, "f"))
+    assert result1 is not None and result1[0] == 0
+    assert len(calls) == 1  # cache miss: query populates the cache
+
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+
+    result2 = daemon.try_daemon(_diff_args(root))
+    assert result2 is not None
+    assert result2[0] == 1  # a real change detected (f's body changed)
+    assert "~ a.py:1" in result2[1]
+    assert len(calls) == 2  # cache miss on the now-stale index: reloaded
 
 
 # ---------------------------------------------------------------------

@@ -2,11 +2,11 @@
   "generator": "dekko",
   "version": 4,
   "root": "dekko",
-  "generated_at": "2026-08-10T12:47:41+00:00",
+  "generated_at": "2026-08-10T13:02:55+00:00",
   "provenance": {
     "tool_version": "0.30.1",
     "spec_hash": "1514e0ca67cb08dfb9109b6bbc9e0652aa17a9576ab54b400ac13f8b94b5643b",
-    "git_commit": "6ef440e0c97e8f0a183280051c5c51a8c76bb935",
+    "git_commit": "087b361321c05fa1490d72a3ca1ef9a6a1191844",
     "subpath": null,
     "excludes": [],
     "max_file_size": 1000000,
@@ -14,15 +14,15 @@
       "benchmarks/measure.py": "bc3abf60b2c436dc",
       "install.sh": "95d13654ef75cf11",
       "src/dekko/__init__.py": "cb857bf1f4daf292",
-      "src/dekko/affected.py": "1c37b1d15b686156",
+      "src/dekko/affected.py": "6322dd8a12da968a",
       "src/dekko/cache.py": "3c12fea8b2bf1c17",
       "src/dekko/classify.py": "18df7e9b2c9f99fd",
-      "src/dekko/cli.py": "9a7982393c54c2cf",
+      "src/dekko/cli.py": "a7d443dc5f3d1610",
       "src/dekko/cline.py": "35c55c66cdd054fe",
       "src/dekko/contextpack.py": "fb5aa65852b71ec3",
       "src/dekko/daemon.py": "13c74ae3a5a16abf",
       "src/dekko/daemon_transport.py": "8b52fdc86b7e2b21",
-      "src/dekko/diff.py": "079d3e36820ac0e5",
+      "src/dekko/diff.py": "916f8228891f01ad",
       "src/dekko/embedding.py": "94c5b8f55ed7735b",
       "src/dekko/export.py": "02da11b1d81727e6",
       "src/dekko/extractor.py": "2cdf7f49d3ef67c5",
@@ -79,7 +79,7 @@
       "tests/test_cline.py": "84cd4a207bea09c3",
       "tests/test_contextpack.py": "c14ece83239ef209",
       "tests/test_contextpack_v2.py": "9b816a6366b1c7a2",
-      "tests/test_daemon.py": "627183a9577959fe",
+      "tests/test_daemon.py": "63fd9f6d92e8fb5a",
       "tests/test_daemon_transport.py": "1703ef42e9045a4c",
       "tests/test_density.py": "c2e1a917d00f5020",
       "tests/test_diagram.py": "1d2c9b01df56923b",
@@ -138,8 +138,8 @@
         60
       ],
       "src/dekko/affected.py": [
-        1786118649520762645,
-        18055
+        1786366224277253930,
+        18093
       ],
       "src/dekko/cache.py": [
         1786095364193631211,
@@ -150,8 +150,8 @@
         1805
       ],
       "src/dekko/cli.py": [
-        1786365440595717910,
-        74644
+        1786366212547581440,
+        77352
       ],
       "src/dekko/cline.py": [
         1786013276733852415,
@@ -170,8 +170,8 @@
         18551
       ],
       "src/dekko/diff.py": [
-        1786118669487241795,
-        16359
+        1786366216329204142,
+        16397
       ],
       "src/dekko/embedding.py": [
         1785928746642398593,
@@ -398,8 +398,8 @@
         3964
       ],
       "tests/test_daemon.py": [
-        1786365632361723380,
-        19289
+        1786366324384047056,
+        25340
       ],
       "tests/test_daemon_transport.py": [
         1786364034126051030,
@@ -770,6 +770,11 @@
           "path": "src/dekko/affected.py",
           "name": "_module_matches",
           "source": ".resolver._module_matches"
+        },
+        {
+          "path": "src/dekko/affected.py",
+          "name": "cli",
+          "source": ".cli"
         }
       ]
     },
@@ -1529,6 +1534,11 @@
           "path": "src/dekko/diff.py",
           "name": "resolve",
           "source": ".resolver.resolve"
+        },
+        {
+          "path": "src/dekko/diff.py",
+          "name": "cli",
+          "source": ".cli"
         },
         {
           "path": "src/dekko/diff.py",
@@ -4016,6 +4026,11 @@
           "path": "tests/test_daemon.py",
           "name": "shutil",
           "source": "shutil"
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "name": "subprocess",
+          "source": "subprocess"
         },
         {
           "path": "tests/test_daemon.py",
@@ -6905,7 +6920,7 @@
       ],
       "returns": "tuple[list[TestImpact], diff.DiffResult, diff.Snapshot, str, dict] | None",
       "start_line": 429,
-      "end_line": 473,
+      "end_line": 475,
       "decorated": false,
       "exported": false,
       "doc": "Impacted tests plus the underlying diff for worktree-vs-rev.",
@@ -6941,8 +6956,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 476,
-      "end_line": 500,
+      "start_line": 478,
+      "end_line": 502,
       "decorated": false,
       "exported": false,
       "doc": "Execute ``dekko affected`` against a repository.",
@@ -7993,6 +8008,27 @@
       "test": false
     },
     {
+      "id": "src/dekko/cli.py::load_current_index_no_regen",
+      "name": "load_current_index_no_regen",
+      "qualname": "load_current_index_no_regen",
+      "kind": "function",
+      "path": "src/dekko/cli.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "root",
+          "type": "Path"
+        }
+      ],
+      "returns": "mapfile.MapIndex | None",
+      "start_line": 1804,
+      "end_line": 1860,
+      "decorated": false,
+      "exported": false,
+      "doc": "Load the current-tree map, checking the daemon's warm cache first.",
+      "test": false
+    },
+    {
       "id": "src/dekko/cli.py::regen_map",
       "name": "regen_map",
       "qualname": "regen_map",
@@ -8014,8 +8050,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1804,
-      "end_line": 1834,
+      "start_line": 1863,
+      "end_line": 1893,
       "decorated": false,
       "exported": false,
       "doc": "Re-generate the map at ``root`` with its recorded options.",
@@ -8035,8 +8071,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1837,
-      "end_line": 1840,
+      "start_line": 1896,
+      "end_line": 1899,
       "decorated": false,
       "exported": false,
       "doc": "Adapter: ``dekko map DIR`` \u2192 ``run_map`` namespace.",
@@ -8056,8 +8092,8 @@
         }
       ],
       "returns": "tuple[mapfile.MapIndex | None, int]",
-      "start_line": 1843,
-      "end_line": 1861,
+      "start_line": 1902,
+      "end_line": 1920,
       "decorated": false,
       "exported": false,
       "doc": "Load (auto-regen) the index for a read command, applying filters.",
@@ -8077,8 +8113,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1864,
-      "end_line": 1878,
+      "start_line": 1923,
+      "end_line": 1937,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko query``.",
@@ -8098,8 +8134,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1881,
-      "end_line": 1893,
+      "start_line": 1940,
+      "end_line": 1952,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko outline <path>``.",
@@ -8119,8 +8155,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1896,
-      "end_line": 1913,
+      "start_line": 1955,
+      "end_line": 1972,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko context``.",
@@ -8140,8 +8176,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1916,
-      "end_line": 1927,
+      "start_line": 1975,
+      "end_line": 1986,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko trace <from> <to>``.",
@@ -8161,8 +8197,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1930,
-      "end_line": 1938,
+      "start_line": 1989,
+      "end_line": 1997,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko diff [REV]``.",
@@ -8182,8 +8218,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1941,
-      "end_line": 1950,
+      "start_line": 2000,
+      "end_line": 2009,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko affected [REV]``.",
@@ -8203,8 +8239,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1953,
-      "end_line": 1969,
+      "start_line": 2012,
+      "end_line": 2028,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko workset [REV] | --symbol NAME``.",
@@ -8224,8 +8260,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 1972,
-      "end_line": 2006,
+      "start_line": 2031,
+      "end_line": 2065,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko search \"<query>\"``.",
@@ -8245,8 +8281,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2009,
-      "end_line": 2020,
+      "start_line": 2068,
+      "end_line": 2079,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko unused``.",
@@ -8266,8 +8302,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2023,
-      "end_line": 2028,
+      "start_line": 2082,
+      "end_line": 2087,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko stats``.",
@@ -8287,8 +8323,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2031,
-      "end_line": 2036,
+      "start_line": 2090,
+      "end_line": 2095,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko summary``.",
@@ -8308,8 +8344,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2039,
-      "end_line": 2055,
+      "start_line": 2098,
+      "end_line": 2114,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko lean``.",
@@ -8329,8 +8365,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2058,
-      "end_line": 2067,
+      "start_line": 2117,
+      "end_line": 2126,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko ledger``.",
@@ -8350,8 +8386,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2070,
-      "end_line": 2073,
+      "start_line": 2129,
+      "end_line": 2132,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko hooks install``.",
@@ -8371,8 +8407,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2076,
-      "end_line": 2078,
+      "start_line": 2135,
+      "end_line": 2137,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko hooks uninstall``.",
@@ -8392,8 +8428,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2081,
-      "end_line": 2083,
+      "start_line": 2140,
+      "end_line": 2142,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko hooks run <event>`` (reads JSON on stdin).",
@@ -8413,8 +8449,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2086,
-      "end_line": 2088,
+      "start_line": 2145,
+      "end_line": 2147,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko daemon start``.",
@@ -8434,8 +8470,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2091,
-      "end_line": 2093,
+      "start_line": 2150,
+      "end_line": 2152,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko daemon stop``.",
@@ -8455,8 +8491,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2096,
-      "end_line": 2098,
+      "start_line": 2155,
+      "end_line": 2157,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko daemon status``.",
@@ -8476,8 +8512,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2101,
-      "end_line": 2111,
+      "start_line": 2160,
+      "end_line": 2170,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko daemon _serve`` (internal daemon process entry).",
@@ -8497,8 +8533,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2114,
-      "end_line": 2123,
+      "start_line": 2173,
+      "end_line": 2182,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko orient [--read PATH]``.",
@@ -8518,8 +8554,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2126,
-      "end_line": 2132,
+      "start_line": 2185,
+      "end_line": 2191,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko note add|list|rm``.",
@@ -8543,8 +8579,8 @@
         }
       ],
       "returns": "tuple[str | None, int]",
-      "start_line": 2135,
-      "end_line": 2144,
+      "start_line": 2194,
+      "end_line": 2203,
       "decorated": false,
       "exported": false,
       "doc": "Resolve a note target to a symbol id (no map regeneration).",
@@ -8564,8 +8600,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2147,
-      "end_line": 2158,
+      "start_line": 2206,
+      "end_line": 2217,
       "decorated": false,
       "exported": false,
       "doc": "Anchor a note to a resolved symbol.",
@@ -8585,8 +8621,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2161,
-      "end_line": 2172,
+      "start_line": 2220,
+      "end_line": 2231,
       "decorated": false,
       "exported": false,
       "doc": "Remove one note (or all) from a resolved symbol.",
@@ -8606,8 +8642,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2175,
-      "end_line": 2200,
+      "start_line": 2234,
+      "end_line": 2259,
       "decorated": false,
       "exported": false,
       "doc": "List notes: all, orphaned, or for a single symbol.",
@@ -8627,8 +8663,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2203,
-      "end_line": 2217,
+      "start_line": 2262,
+      "end_line": 2276,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko export``.",
@@ -8648,8 +8684,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2220,
-      "end_line": 2228,
+      "start_line": 2279,
+      "end_line": 2287,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko serve --mcp``.",
@@ -8669,8 +8705,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2231,
-      "end_line": 2278,
+      "start_line": 2290,
+      "end_line": 2337,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko status`` (never regenerates).",
@@ -8690,8 +8726,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 2281,
-      "end_line": 2289,
+      "start_line": 2340,
+      "end_line": 2348,
       "decorated": false,
       "exported": false,
       "doc": "Print the one-line ``dekko status`` message for a fresh map.",
@@ -8715,8 +8751,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 2292,
-      "end_line": 2317,
+      "start_line": 2351,
+      "end_line": 2376,
       "decorated": false,
       "exported": false,
       "doc": "Print the ``dekko status`` message for a stale map.",
@@ -8736,8 +8772,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 2320,
-      "end_line": 2324,
+      "start_line": 2379,
+      "end_line": 2383,
       "decorated": false,
       "exported": false,
       "doc": "One-line explanation for a ``reason=\"version\"`` freshness verdict.",
@@ -8757,8 +8793,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2327,
-      "end_line": 2361,
+      "start_line": 2386,
+      "end_line": 2420,
       "decorated": false,
       "exported": false,
       "doc": "Parse and dispatch the legacy flag-based invocation.",
@@ -8778,8 +8814,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 2364,
-      "end_line": 2396,
+      "start_line": 2423,
+      "end_line": 2455,
       "decorated": false,
       "exported": false,
       "doc": "CLI entry point.",
@@ -11203,7 +11239,7 @@
       ],
       "returns": "int",
       "start_line": 431,
-      "end_line": 465,
+      "end_line": 467,
       "decorated": false,
       "exported": false,
       "doc": "Execute ``dekko diff`` against a repository.",
@@ -29297,8 +29333,8 @@
       "language": "python",
       "params": [],
       "returns": "Path",
-      "start_line": 43,
-      "end_line": 55,
+      "start_line": 44,
+      "end_line": 56,
       "decorated": true,
       "exported": false,
       "doc": "A short-path temp dir, safe for a real ``AF_UNIX`` bind.",
@@ -29322,8 +29358,8 @@
         }
       ],
       "returns": "bool",
-      "start_line": 58,
-      "end_line": 67,
+      "start_line": 59,
+      "end_line": 68,
       "decorated": false,
       "exported": false,
       "doc": "Poll ``predicate`` until true or ``deadline`` seconds pass.",
@@ -29343,8 +29379,8 @@
         }
       ],
       "returns": "Iterator[Path]",
-      "start_line": 71,
-      "end_line": 91,
+      "start_line": 72,
+      "end_line": 92,
       "decorated": true,
       "exported": false,
       "doc": "A repo root with an in-thread daemon already serving it.",
@@ -29364,8 +29400,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 99,
-      "end_line": 103,
+      "start_line": 100,
+      "end_line": 104,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29385,8 +29421,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 106,
-      "end_line": 114,
+      "start_line": 107,
+      "end_line": 115,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29406,8 +29442,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 117,
-      "end_line": 130,
+      "start_line": 118,
+      "end_line": 131,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29427,8 +29463,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 133,
-      "end_line": 139,
+      "start_line": 134,
+      "end_line": 140,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29448,8 +29484,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 142,
-      "end_line": 155,
+      "start_line": 143,
+      "end_line": 156,
       "decorated": false,
       "exported": false,
       "doc": "A dead transport artifact (no listener) must fall open, silently.",
@@ -29473,8 +29509,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 164,
-      "end_line": 180,
+      "start_line": 165,
+      "end_line": 181,
       "decorated": true,
       "exported": false,
       "doc": null,
@@ -29494,8 +29530,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 183,
-      "end_line": 218,
+      "start_line": 184,
+      "end_line": 219,
       "decorated": false,
       "exported": false,
       "doc": "Routing correctness against an actual mapped repo, not just",
@@ -29515,8 +29551,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 221,
-      "end_line": 241,
+      "start_line": 222,
+      "end_line": 242,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29540,8 +29576,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 249,
-      "end_line": 269,
+      "start_line": 250,
+      "end_line": 270,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29561,8 +29597,8 @@
         }
       ],
       "returns": null,
-      "start_line": 255,
-      "end_line": 257,
+      "start_line": 256,
+      "end_line": 258,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29582,8 +29618,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 277,
-      "end_line": 289,
+      "start_line": 278,
+      "end_line": 290,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29603,8 +29639,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 297,
-      "end_line": 311,
+      "start_line": 298,
+      "end_line": 312,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29624,8 +29660,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 314,
-      "end_line": 315,
+      "start_line": 315,
+      "end_line": 316,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29645,8 +29681,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 323,
-      "end_line": 325,
+      "start_line": 324,
+      "end_line": 326,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29670,8 +29706,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 328,
-      "end_line": 339,
+      "start_line": 329,
+      "end_line": 340,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29691,8 +29727,8 @@
         }
       ],
       "returns": "Iterator[Path]",
-      "start_line": 352,
-      "end_line": 370,
+      "start_line": 353,
+      "end_line": 371,
       "decorated": true,
       "exported": false,
       "doc": "A mapped repo (``_CACHE_SRC``) served by an in-thread daemon.",
@@ -29716,8 +29752,8 @@
         }
       ],
       "returns": "object",
-      "start_line": 373,
-      "end_line": 376,
+      "start_line": 374,
+      "end_line": 377,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29741,8 +29777,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 379,
-      "end_line": 410,
+      "start_line": 380,
+      "end_line": 411,
       "decorated": false,
       "exported": false,
       "doc": "Several daemon-routed reads against an unchanged map must make",
@@ -29762,8 +29798,8 @@
         }
       ],
       "returns": "mapfile.MapIndex | None",
-      "start_line": 390,
-      "end_line": 392,
+      "start_line": 391,
+      "end_line": 393,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29787,8 +29823,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 413,
-      "end_line": 454,
+      "start_line": 414,
+      "end_line": 455,
       "decorated": false,
       "exported": false,
       "doc": "A working-tree edit between daemon-routed requests must not be",
@@ -29808,8 +29844,8 @@
         }
       ],
       "returns": "mapfile.MapIndex | None",
-      "start_line": 425,
-      "end_line": 427,
+      "start_line": 426,
+      "end_line": 428,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29833,11 +29869,237 @@
         }
       ],
       "returns": "None",
-      "start_line": 457,
-      "end_line": 480,
+      "start_line": 458,
+      "end_line": 481,
       "decorated": false,
       "exported": false,
       "doc": "``dekko daemon status``'s cache field is ``None`` until the",
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::_git",
+      "name": "_git",
+      "qualname": "_git",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "root",
+          "type": "Path"
+        },
+        {
+          "name": "*args",
+          "type": "str"
+        }
+      ],
+      "returns": "None",
+      "start_line": 500,
+      "end_line": 506,
+      "decorated": false,
+      "exported": false,
+      "doc": "Run a git command in ``root``, raising on failure.",
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::daemon_thread_git_root",
+      "name": "daemon_thread_git_root",
+      "qualname": "daemon_thread_git_root",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "short_root",
+          "type": "Path"
+        }
+      ],
+      "returns": "Iterator[Path]",
+      "start_line": 510,
+      "end_line": 543,
+      "decorated": true,
+      "exported": false,
+      "doc": "A committed git repo (``_CACHE_SRC``), mapped, served by an",
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::_diff_args",
+      "name": "_diff_args",
+      "qualname": "_diff_args",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "root",
+          "type": "Path"
+        }
+      ],
+      "returns": "object",
+      "start_line": 546,
+      "end_line": 549,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::_affected_args",
+      "name": "_affected_args",
+      "qualname": "_affected_args",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "root",
+          "type": "Path"
+        }
+      ],
+      "returns": "object",
+      "start_line": 552,
+      "end_line": 555,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
+      "name": "test_daemon_diff_and_affected_reuse_query_warmed_cache",
+      "qualname": "test_daemon_diff_and_affected_reuse_query_warmed_cache",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "daemon_thread_git_root",
+          "type": "Path"
+        },
+        {
+          "name": "monkeypatch",
+          "type": "pytest.MonkeyPatch"
+        }
+      ],
+      "returns": "None",
+      "start_line": 558,
+      "end_line": 586,
+      "decorated": false,
+      "exported": false,
+      "doc": "A ``diff``/``affected`` request's current-tree load reuses a",
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::spy#3",
+      "name": "spy",
+      "qualname": "spy",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "root_arg",
+          "type": "Path"
+        }
+      ],
+      "returns": "mapfile.MapIndex | None",
+      "start_line": 568,
+      "end_line": 570,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
+      "name": "test_daemon_diff_populates_cache_for_a_later_query",
+      "qualname": "test_daemon_diff_populates_cache_for_a_later_query",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "daemon_thread_git_root",
+          "type": "Path"
+        },
+        {
+          "name": "monkeypatch",
+          "type": "pytest.MonkeyPatch"
+        }
+      ],
+      "returns": "None",
+      "start_line": 589,
+      "end_line": 613,
+      "decorated": false,
+      "exported": false,
+      "doc": "The reverse direction: ``diff`` runs first and its own",
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::spy#4",
+      "name": "spy",
+      "qualname": "spy",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "root_arg",
+          "type": "Path"
+        }
+      ],
+      "returns": "mapfile.MapIndex | None",
+      "start_line": 600,
+      "end_line": 602,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
+      "name": "test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
+      "qualname": "test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "daemon_thread_git_root",
+          "type": "Path"
+        },
+        {
+          "name": "monkeypatch",
+          "type": "pytest.MonkeyPatch"
+        }
+      ],
+      "returns": "None",
+      "start_line": 616,
+      "end_line": 646,
+      "decorated": false,
+      "exported": false,
+      "doc": "A working-tree edit between a warming ``query`` and a following",
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::spy#5",
+      "name": "spy",
+      "qualname": "spy",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "root_arg",
+          "type": "Path"
+        }
+      ],
+      "returns": "mapfile.MapIndex | None",
+      "start_line": 630,
+      "end_line": 632,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
       "test": true
     },
     {
@@ -29854,8 +30116,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 488,
-      "end_line": 536,
+      "start_line": 654,
+      "end_line": 702,
       "decorated": false,
       "exported": false,
       "doc": "serve_daemon()'s accept loop is transport-agnostic -- prove it",
@@ -29875,8 +30137,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 544,
-      "end_line": 572,
+      "start_line": 710,
+      "end_line": 738,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -46191,56 +46453,56 @@
       "caller": "src/dekko/affected.py::changes",
       "callee": "src/dekko/affected.py::analyze",
       "lines": [
-        472
+        474
       ]
     },
     {
       "caller": "src/dekko/affected.py::changes",
       "callee": "src/dekko/cache.py::IncrementalCache",
       "lines": [
-        458
+        460
       ]
     },
     {
       "caller": "src/dekko/affected.py::changes",
       "callee": "src/dekko/cache.py::IncrementalCache.__init__",
       "lines": [
-        458
+        460
       ]
     },
     {
       "caller": "src/dekko/affected.py::changes",
       "callee": "src/dekko/cache.py::load",
       "lines": [
-        458
+        460
+      ]
+    },
+    {
+      "caller": "src/dekko/affected.py::changes",
+      "callee": "src/dekko/cli.py::load_current_index_no_regen",
+      "lines": [
+        453
       ]
     },
     {
       "caller": "src/dekko/affected.py::changes",
       "callee": "src/dekko/diff.py::compare",
       "lines": [
-        471
+        473
       ]
     },
     {
       "caller": "src/dekko/affected.py::changes",
       "callee": "src/dekko/diff.py::old_snapshot",
       "lines": [
-        459
+        461
       ]
     },
     {
       "caller": "src/dekko/affected.py::changes",
       "callee": "src/dekko/diff.py::snapshot_new_side",
       "lines": [
-        470
-      ]
-    },
-    {
-      "caller": "src/dekko/affected.py::changes",
-      "callee": "src/dekko/mapfile.py::load_map",
-      "lines": [
-        451
+        472
       ]
     },
     {
@@ -46312,14 +46574,14 @@
       "caller": "src/dekko/affected.py::run",
       "callee": "src/dekko/affected.py::changes",
       "lines": [
-        495
+        497
       ]
     },
     {
       "caller": "src/dekko/affected.py::run",
       "callee": "src/dekko/affected.py::render",
       "lines": [
-        499
+        501
       ]
     },
     {
@@ -46487,14 +46749,14 @@
       "caller": "src/dekko/cli.py::<module>",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        2400
+        2459
       ]
     },
     {
       "caller": "src/dekko/cli.py::_cmd_map",
       "callee": "src/dekko/cli.py::run_map",
       "lines": [
-        1840
+        1899
       ]
     },
     {
@@ -46508,63 +46770,63 @@
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "src/dekko/cli.py::build_legacy_parser",
       "lines": [
-        2329
+        2388
       ]
     },
     {
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        2357
+        2416
       ]
     },
     {
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "src/dekko/cli.py::claude_install",
       "lines": [
-        2333
+        2392
       ]
     },
     {
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "src/dekko/cli.py::claude_uninstall",
       "lines": [
-        2336
+        2395
       ]
     },
     {
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "src/dekko/cli.py::mcp_install",
       "lines": [
-        2339
+        2398
       ]
     },
     {
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "src/dekko/cli.py::mcp_uninstall",
       "lines": [
-        2342
+        2401
       ]
     },
     {
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "src/dekko/cli.py::run_map",
       "lines": [
-        2361
+        2420
       ]
     },
     {
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "src/dekko/cline.py::install",
       "lines": [
-        2346
+        2405
       ]
     },
     {
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "src/dekko/cline.py::uninstall",
       "lines": [
-        2352
+        2411
       ]
     },
     {
@@ -46642,141 +46904,141 @@
       "caller": "src/dekko/cli.py::_note_add",
       "callee": "src/dekko/cli.py::_resolve_for_note",
       "lines": [
-        2150
+        2209
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_add",
       "callee": "src/dekko/notes.py::add",
       "lines": [
-        2153
+        2212
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_add",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2149
+        2208
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "src/dekko/cli.py::_load_or_regen",
       "lines": [
-        2179
+        2238
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "src/dekko/cli.py::_resolve_for_note",
       "lines": [
-        2184
+        2243
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "src/dekko/notes.py::load",
       "lines": [
-        2187,
-        2190
+        2246,
+        2249
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "src/dekko/notes.py::orphaned",
       "lines": [
-        2182
+        2241
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2177
+        2236
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_rm",
       "callee": "src/dekko/cli.py::_resolve_for_note",
       "lines": [
-        2164
+        2223
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_rm",
       "callee": "src/dekko/notes.py::remove",
       "lines": [
-        2167
+        2226
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_rm",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2163
+        2222
       ]
     },
     {
       "caller": "src/dekko/cli.py::_print_fresh_status",
       "callee": "src/dekko/mapfile.py::format_unsupported",
       "lines": [
-        2287
+        2346
       ]
     },
     {
       "caller": "src/dekko/cli.py::_print_stale_status",
       "callee": "src/dekko/cli.py::_version_stale_note",
       "lines": [
-        2304
+        2363
       ]
     },
     {
       "caller": "src/dekko/cli.py::_print_stale_status",
       "callee": "src/dekko/mapfile.py::format_unsupported",
       "lines": [
-        2306
+        2365
       ]
     },
     {
       "caller": "src/dekko/cli.py::_read_index",
       "callee": "src/dekko/cli.py::_load_or_regen",
       "lines": [
-        1856
+        1915
       ]
     },
     {
       "caller": "src/dekko/cli.py::_read_index",
       "callee": "src/dekko/mapfile.py::MapIndex.without_tests",
       "lines": [
-        1860
+        1919
       ]
     },
     {
       "caller": "src/dekko/cli.py::_read_index",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        1855
+        1914
       ]
     },
     {
       "caller": "src/dekko/cli.py::_resolve_for_note",
       "callee": "src/dekko/mapfile.py::load_map",
       "lines": [
-        2137
+        2196
       ]
     },
     {
       "caller": "src/dekko/cli.py::_resolve_for_note",
       "callee": "src/dekko/query.py::report_unresolved",
       "lines": [
-        2143
+        2202
       ]
     },
     {
       "caller": "src/dekko/cli.py::_resolve_for_note",
       "callee": "src/dekko/query.py::resolve_target",
       "lines": [
-        2141
+        2200
       ]
     },
     {
@@ -46896,25 +47158,39 @@
       ]
     },
     {
+      "caller": "src/dekko/cli.py::load_current_index_no_regen",
+      "callee": "src/dekko/mapfile.py::check_freshness",
+      "lines": [
+        1857
+      ]
+    },
+    {
+      "caller": "src/dekko/cli.py::load_current_index_no_regen",
+      "callee": "src/dekko/mapfile.py::load_map",
+      "lines": [
+        1853
+      ]
+    },
+    {
       "caller": "src/dekko/cli.py::main",
       "callee": "src/dekko/cli.py::_legacy_main",
       "lines": [
-        2396
+        2455
       ]
     },
     {
       "caller": "src/dekko/cli.py::main",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        2380,
-        2393
+        2439,
+        2452
       ]
     },
     {
       "caller": "src/dekko/cli.py::main",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        2382
+        2441
       ]
     },
     {
@@ -46991,233 +47267,233 @@
       "caller": "src/dekko/cli.py::regen_map",
       "callee": "src/dekko/cli.py::run_map",
       "lines": [
-        1834
+        1893
       ]
     },
     {
       "caller": "src/dekko/cli.py::regen_map",
       "callee": "src/dekko/mapfile.py::load_map",
       "lines": [
-        1819
+        1878
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_affected",
       "callee": "src/dekko/affected.py::run",
       "lines": [
-        1944
+        2003
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_affected",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        1943
+        2002
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_context",
       "callee": "src/dekko/cli.py::_read_index",
       "lines": [
-        1898
+        1957
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_context",
       "callee": "src/dekko/contextpack.py::run",
       "lines": [
-        1903
+        1962
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_context",
       "callee": "src/dekko/relevance.py::task_context",
       "lines": [
-        1902
+        1961
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_context",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        1901
+        1960
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_serve",
       "callee": "src/dekko/daemon.py::serve_daemon",
       "lines": [
-        2109
+        2168
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_serve",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2110
+        2169
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_start",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        2088
+        2147
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_start",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2088
+        2147
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_status",
       "callee": "src/dekko/daemon.py::status",
       "lines": [
-        2098
+        2157
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_status",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2098
+        2157
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_stop",
       "callee": "src/dekko/daemon.py::stop",
       "lines": [
-        2093
+        2152
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_stop",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2093
+        2152
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_diff",
       "callee": "src/dekko/diff.py::run",
       "lines": [
-        1933
+        1992
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_diff",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        1932
+        1991
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_export",
       "callee": "src/dekko/cli.py::_load_or_regen",
       "lines": [
-        2206
+        2265
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_export",
       "callee": "src/dekko/export.py::run",
       "lines": [
-        2217
+        2276
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_export",
       "callee": "src/dekko/render_html.py::run",
       "lines": [
-        2215
+        2274
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_export",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2205
+        2264
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_hooks_install",
       "callee": "src/dekko/hooks.py::install",
       "lines": [
-        2073
+        2132
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_hooks_install",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2073
+        2132
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_hooks_run",
       "callee": "src/dekko/hooks.py::dispatch",
       "lines": [
-        2083
+        2142
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_hooks_uninstall",
       "callee": "src/dekko/hooks.py::uninstall",
       "lines": [
-        2078
+        2137
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_hooks_uninstall",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2078
+        2137
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_lean",
       "callee": "src/dekko/cli.py::_read_index",
       "lines": [
-        2041
+        2100
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_lean",
       "callee": "src/dekko/relevance.py::task_context",
       "lines": [
-        2046
+        2105
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_lean",
       "callee": "src/dekko/render_lean.py::run",
       "lines": [
-        2047
+        2106
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_lean",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2044,
-        2045
+        2103,
+        2104
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_ledger",
       "callee": "src/dekko/ledger.py::run",
       "lines": [
-        2061
+        2120
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_ledger",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2060,
-        2062
+        2119,
+        2121
       ]
     },
     {
@@ -47344,238 +47620,238 @@
       "caller": "src/dekko/cli.py::run_note",
       "callee": "src/dekko/cli.py::_note_add",
       "lines": [
-        2129
+        2188
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_note",
       "callee": "src/dekko/cli.py::_note_list",
       "lines": [
-        2132
+        2191
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_note",
       "callee": "src/dekko/cli.py::_note_rm",
       "lines": [
-        2131
+        2190
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_orient",
       "callee": "src/dekko/orient.py::run",
       "lines": [
-        2116
+        2175
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_orient",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2117
+        2176
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_outline",
       "callee": "src/dekko/cli.py::_read_index",
       "lines": [
-        1883
+        1942
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_outline",
       "callee": "src/dekko/outline.py::run",
       "lines": [
-        1886
+        1945
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_outline",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        1889
+        1948
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_query",
       "callee": "src/dekko/cli.py::_read_index",
       "lines": [
-        1866
+        1925
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_query",
       "callee": "src/dekko/query.py::run",
       "lines": [
-        1869
+        1928
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_search",
       "callee": "src/dekko/cli.py::_load_or_regen",
       "lines": [
-        1985
+        2044
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_search",
       "callee": "src/dekko/mapfile.py::MapIndex.without_tests",
       "lines": [
-        1990
+        2049
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_search",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        1984
+        2043
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_search",
       "callee": "src/dekko/search.py::parse_kinds",
       "lines": [
-        1995
+        2054
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_search",
       "callee": "src/dekko/search.py::run",
       "lines": [
-        1996
+        2055
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_serve",
       "callee": "src/dekko/server.py::serve",
       "lines": [
-        2228
+        2287
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_stats",
       "callee": "src/dekko/cli.py::_read_index",
       "lines": [
-        2025
+        2084
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_stats",
       "callee": "src/dekko/stats.py::run",
       "lines": [
-        2028
+        2087
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_status",
       "callee": "src/dekko/cli.py::_print_fresh_status",
       "lines": [
-        2274
+        2333
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_status",
       "callee": "src/dekko/cli.py::_print_stale_status",
       "lines": [
-        2277
+        2336
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_status",
       "callee": "src/dekko/mapfile.py::check_freshness",
       "lines": [
-        2257
+        2316
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_status",
       "callee": "src/dekko/mapfile.py::check_freshness_provenance",
       "lines": [
-        2245
+        2304
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_status",
       "callee": "src/dekko/mapfile.py::load_map",
       "lines": [
-        2247
+        2306
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_status",
       "callee": "src/dekko/mapfile.py::load_provenance",
       "lines": [
-        2243
+        2302
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_status",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        2242
+        2301
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_summary",
       "callee": "src/dekko/cli.py::_read_index",
       "lines": [
-        2033
+        2092
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_summary",
       "callee": "src/dekko/summary.py::run",
       "lines": [
-        2036
+        2095
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_trace",
       "callee": "src/dekko/cli.py::_read_index",
       "lines": [
-        1918
+        1977
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_trace",
       "callee": "src/dekko/trace.py::run",
       "lines": [
-        1921
+        1980
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_unused",
       "callee": "src/dekko/cli.py::_read_index",
       "lines": [
-        2011
+        2070
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_unused",
       "callee": "src/dekko/unused.py::run",
       "lines": [
-        2014
+        2073
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_workset",
       "callee": "src/dekko/relevance.py::task_context",
       "lines": [
-        1959
+        2018
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_workset",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        1958
+        2017
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_workset",
       "callee": "src/dekko/workset.py::run",
       "lines": [
-        1960
+        2019
       ]
     },
     {
@@ -48599,63 +48875,63 @@
       "caller": "src/dekko/diff.py::run",
       "callee": "src/dekko/cache.py::IncrementalCache",
       "lines": [
-        450
+        452
       ]
     },
     {
       "caller": "src/dekko/diff.py::run",
       "callee": "src/dekko/cache.py::IncrementalCache.__init__",
       "lines": [
-        450
+        452
       ]
     },
     {
       "caller": "src/dekko/diff.py::run",
       "callee": "src/dekko/cache.py::load",
       "lines": [
-        450
+        452
+      ]
+    },
+    {
+      "caller": "src/dekko/diff.py::run",
+      "callee": "src/dekko/cli.py::load_current_index_no_regen",
+      "lines": [
+        445
       ]
     },
     {
       "caller": "src/dekko/diff.py::run",
       "callee": "src/dekko/diff.py::DiffResult.empty",
       "lines": [
-        465
+        467
       ]
     },
     {
       "caller": "src/dekko/diff.py::run",
       "callee": "src/dekko/diff.py::compare",
       "lines": [
-        463
+        465
       ]
     },
     {
       "caller": "src/dekko/diff.py::run",
       "callee": "src/dekko/diff.py::old_snapshot",
       "lines": [
-        451
+        453
       ]
     },
     {
       "caller": "src/dekko/diff.py::run",
       "callee": "src/dekko/diff.py::render",
       "lines": [
-        464
+        466
       ]
     },
     {
       "caller": "src/dekko/diff.py::run",
       "callee": "src/dekko/diff.py::snapshot_new_side",
       "lines": [
-        462
-      ]
-    },
-    {
-      "caller": "src/dekko/diff.py::run",
-      "callee": "src/dekko/mapfile.py::load_map",
-      "lines": [
-        443
+        464
       ]
     },
     {
@@ -57235,498 +57511,630 @@
       ]
     },
     {
+      "caller": "tests/test_daemon.py::_affected_args",
+      "callee": "src/dekko/cli.py::build_subcommand_parser",
+      "lines": [
+        553
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::_diff_args",
+      "callee": "src/dekko/cli.py::build_subcommand_parser",
+      "lines": [
+        547
+      ]
+    },
+    {
       "caller": "tests/test_daemon.py::_query_symbol_args",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        374
+        375
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        356
+        357
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "src/dekko/daemon.py::start",
-      "lines": [
-        363
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::daemon_thread_cached_root",
-      "callee": "src/dekko/daemon.py::stop",
-      "lines": [
-        369
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::daemon_thread_cached_root",
-      "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
         364
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
-      "callee": "tests/test_daemon.py::_wait_until",
+      "callee": "src/dekko/daemon.py::stop",
+      "lines": [
+        370
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_cached_root",
+      "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
         365
       ]
     },
     {
-      "caller": "tests/test_daemon.py::daemon_thread_root",
+      "caller": "tests/test_daemon.py::daemon_thread_cached_root",
+      "callee": "tests/test_daemon.py::_wait_until",
+      "lines": [
+        366
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "src/dekko/cli.py::main",
+      "lines": [
+        529
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        84
+        536
       ]
     },
     {
-      "caller": "tests/test_daemon.py::daemon_thread_root",
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "src/dekko/daemon.py::stop",
       "lines": [
-        90
+        542
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "src/dekko/daemon_transport.py::default_transport_for",
+      "lines": [
+        537
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "tests/test_daemon.py::_git",
+      "lines": [
+        515,
+        518,
+        519
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "tests/test_daemon.py::_wait_until",
+      "lines": [
+        538
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_root",
-      "callee": "src/dekko/daemon_transport.py::default_transport_for",
+      "callee": "src/dekko/daemon.py::start",
       "lines": [
         85
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_root",
-      "callee": "tests/test_daemon.py::_wait_until",
+      "callee": "src/dekko/daemon.py::stop",
+      "lines": [
+        91
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_root",
+      "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
         86
       ]
     },
     {
+      "caller": "tests/test_daemon.py::daemon_thread_root",
+      "callee": "tests/test_daemon.py::_wait_until",
+      "lines": [
+        87
+      ]
+    },
+    {
       "caller": "tests/test_daemon.py::test_daemon_cache_busts_on_working_tree_change",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        431,
-        435,
-        445,
-        452
+        432,
+        436,
+        446,
+        453
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_busts_on_working_tree_change",
       "callee": "tests/test_daemon.py::_query_symbol_args",
       "lines": [
-        431,
-        435,
-        445,
-        452
+        432,
+        436,
+        446,
+        453
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_hits_across_repeated_requests",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        396,
-        401,
-        406
+        397,
+        402,
+        407
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_hits_across_repeated_requests",
       "callee": "tests/test_daemon.py::_query_symbol_args",
       "lines": [
-        396,
-        401,
-        406
+        397,
+        402,
+        407
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
+      "callee": "src/dekko/daemon.py::try_daemon",
+      "lines": [
+        574,
+        578,
+        583
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
+      "callee": "tests/test_daemon.py::_affected_args",
+      "lines": [
+        583
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
+      "callee": "tests/test_daemon.py::_diff_args",
+      "lines": [
+        578
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
+      "callee": "tests/test_daemon.py::_query_symbol_args",
+      "lines": [
+        574
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
+      "callee": "src/dekko/daemon.py::try_daemon",
+      "lines": [
+        636,
+        642
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
+      "callee": "tests/test_daemon.py::_diff_args",
+      "lines": [
+        642
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
+      "callee": "tests/test_daemon.py::_query_symbol_args",
+      "lines": [
+        636
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
+      "callee": "src/dekko/daemon.py::try_daemon",
+      "lines": [
+        606,
+        610
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
+      "callee": "tests/test_daemon.py::_diff_args",
+      "lines": [
+        606
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
+      "callee": "tests/test_daemon.py::_query_symbol_args",
+      "lines": [
+        610
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "src/dekko/daemon.py::status",
       "lines": [
-        468
+        469
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        464
+        465
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        478
+        479
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "tests/test_daemon.py::_query_symbol_args",
       "lines": [
-        464
+        465
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        284
+        285
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        278
+        279
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
       "callee": "tests/test_daemon.py::_wait_until",
       "lines": [
-        285
+        286
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_no_daemon_flag_skips_routing",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        261,
-        267
+        262,
+        268
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_real_process_start_stop_status_roundtrip",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        549,
-        562,
-        569,
-        571
+        715,
+        728,
+        735,
+        737
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_real_process_start_stop_status_roundtrip",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        547
+        713
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_real_process_start_stop_status_roundtrip",
       "callee": "src/dekko/daemon_transport.py::is_daemon_reachable",
       "lines": [
-        560
+        726
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_real_process_start_stop_status_roundtrip",
       "callee": "tests/test_daemon.py::_wait_until",
       "lines": [
-        560,
-        572
+        726,
+        738
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        171
+        172
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "src/dekko/cli.py::run_status",
       "lines": [
-        174
+        175
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        178
+        179
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "src/dekko/server.py::_capture",
       "lines": [
-        173
+        174
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
-      "lines": [
-        209
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/cli.py::main",
-      "lines": [
-        189
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/cli.py::run_search",
-      "lines": [
-        211
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/daemon.py::start",
-      "lines": [
-        196
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/daemon.py::stop",
-      "lines": [
-        217
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/daemon.py::try_daemon",
-      "lines": [
-        213
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/daemon_transport.py::default_transport_for",
-      "lines": [
-        197
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/server.py::_capture",
       "lines": [
         210
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "tests/test_daemon.py::_wait_until",
+      "callee": "src/dekko/cli.py::main",
+      "lines": [
+        190
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/cli.py::run_search",
+      "lines": [
+        212
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/daemon.py::start",
+      "lines": [
+        197
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/daemon.py::stop",
+      "lines": [
+        218
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/daemon.py::try_daemon",
+      "lines": [
+        214
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
         198
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/server.py::_capture",
+      "lines": [
+        211
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "tests/test_daemon.py::_wait_until",
+      "lines": [
+        199
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        148
+        149
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        151
+        152
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_status_json_shape_when_running",
       "callee": "src/dekko/daemon.py::status",
       "lines": [
-        331
+        332
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_status_reports_not_running",
       "callee": "src/dekko/daemon.py::status",
       "lines": [
-        324,
-        325
+        325,
+        326
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_is_a_noop_when_nothing_is_running",
       "callee": "src/dekko/daemon.py::stop",
       "lines": [
-        315
+        316
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        304
+        305
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "src/dekko/daemon.py::stop",
       "lines": [
-        308
+        309
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        298
+        299
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "src/dekko/daemon_transport.py::is_daemon_reachable",
       "lines": [
-        306
+        307
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "tests/test_daemon.py::_wait_until",
       "lines": [
-        305
+        306
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "src/dekko/daemon.py::_recv_line",
       "lines": [
-        512,
-        525,
-        533
+        678,
+        691,
+        699
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "src/dekko/daemon.py::_send_line",
       "lines": [
-        511,
-        532
+        677,
+        698
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        504
+        670
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport",
       "lines": [
-        494
+        660
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.__init__",
       "lines": [
-        494
+        660
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "tests/test_daemon.py::_wait_until",
       "lines": [
-        505
+        671
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_ineligible_command_returns_none",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        111
+        112
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_ineligible_command_returns_none",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        114
+        115
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_no_socket_returns_none",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        100
+        101
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_no_socket_returns_none",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        103
+        104
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_add_not_eligible",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        120
+        121
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_add_not_eligible",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        130
+        131
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_list_is_eligible",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        136
+        137
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_list_is_eligible",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        139
+        140
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        238
+        239
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "src/dekko/daemon.py::_recv_line",
       "lines": [
-        229
+        230
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "src/dekko/daemon.py::_send_line",
       "lines": [
-        228
+        229
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        241
+        242
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        224
+        225
       ]
     },
     {
@@ -73012,14 +73420,14 @@
       "caller": "src/dekko/affected.py::changes",
       "callee": "print",
       "lines": [
-        463
+        465
       ]
     },
     {
       "caller": "src/dekko/affected.py::changes",
       "callee": "tuple",
       "lines": [
-        454
+        456
       ]
     },
     {
@@ -73188,7 +73596,7 @@
       "caller": "src/dekko/cli.py::<module>",
       "callee": "sys.exit",
       "lines": [
-        2400
+        2459
       ]
     },
     {
@@ -73276,22 +73684,22 @@
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "Path",
       "lines": [
-        2345,
-        2351
+        2404,
+        2410
       ]
     },
     {
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "build_subcommand_parser().print_help",
       "lines": [
-        2357
+        2416
       ]
     },
     {
       "caller": "src/dekko/cli.py::_legacy_main",
       "callee": "parser.parse_args",
       "lines": [
-        2330
+        2389
       ]
     },
     {
@@ -73377,157 +73785,157 @@
       "caller": "src/dekko/cli.py::_note_add",
       "callee": "Path",
       "lines": [
-        2149
+        2208
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_add",
       "callee": "json.dumps",
       "lines": [
-        2155
+        2214
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_add",
       "callee": "print",
       "lines": [
-        2155,
-        2157
+        2214,
+        2216
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "Path",
       "lines": [
-        2177
+        2236
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "any",
       "lines": [
-        2194
+        2253
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "data.items",
       "lines": [
-        2197
+        2256
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "data.values",
       "lines": [
-        2194
+        2253
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "json.dumps",
       "lines": [
-        2192
+        2251
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "print",
       "lines": [
-        2192,
-        2195,
-        2199
+        2251,
+        2254,
+        2258
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "set",
       "lines": [
-        2182
+        2241
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_list",
       "callee": "sorted",
       "lines": [
-        2197
+        2256
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_rm",
       "callee": "Path",
       "lines": [
-        2163
+        2222
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_rm",
       "callee": "json.dumps",
       "lines": [
-        2169
+        2228
       ]
     },
     {
       "caller": "src/dekko/cli.py::_note_rm",
       "callee": "print",
       "lines": [
-        2169,
-        2171
+        2228,
+        2230
       ]
     },
     {
       "caller": "src/dekko/cli.py::_print_fresh_status",
       "callee": "len",
       "lines": [
-        2285
+        2344
       ]
     },
     {
       "caller": "src/dekko/cli.py::_print_fresh_status",
       "callee": "print",
       "lines": [
-        2286,
-        2289
+        2345,
+        2348
       ]
     },
     {
       "caller": "src/dekko/cli.py::_print_stale_status",
       "callee": "len",
       "lines": [
-        2316,
-        2317
+        2375,
+        2376
       ]
     },
     {
       "caller": "src/dekko/cli.py::_print_stale_status",
       "callee": "print",
       "lines": [
-        2302,
-        2304,
-        2308,
-        2315,
-        2317
+        2361,
+        2363,
+        2367,
+        2374,
+        2376
       ]
     },
     {
       "caller": "src/dekko/cli.py::_read_index",
       "callee": "Path",
       "lines": [
-        1855
+        1914
       ]
     },
     {
       "caller": "src/dekko/cli.py::_read_index",
       "callee": "getattr",
       "lines": [
-        1859
+        1918
       ]
     },
     {
       "caller": "src/dekko/cli.py::_resolve_for_note",
       "callee": "print",
       "lines": [
-        2139
+        2198
       ]
     },
     {
@@ -73634,7 +74042,7 @@
       "caller": "src/dekko/cli.py::_version_stale_note",
       "callee": "_pkg_version",
       "lines": [
-        2323
+        2382
       ]
     },
     {
@@ -74382,45 +74790,59 @@
       ]
     },
     {
+      "caller": "src/dekko/cli.py::load_current_index_no_regen",
+      "callee": "_daemon_cache_get",
+      "lines": [
+        1849
+      ]
+    },
+    {
+      "caller": "src/dekko/cli.py::load_current_index_no_regen",
+      "callee": "_daemon_cache_put",
+      "lines": [
+        1859
+      ]
+    },
+    {
       "caller": "src/dekko/cli.py::main",
       "callee": "args.func",
       "lines": [
-        2390
+        2449
       ]
     },
     {
       "caller": "src/dekko/cli.py::main",
       "callee": "build_subcommand_parser().parse_args",
       "lines": [
-        2380
+        2439
       ]
     },
     {
       "caller": "src/dekko/cli.py::main",
       "callee": "build_subcommand_parser().print_help",
       "lines": [
-        2393
+        2452
       ]
     },
     {
       "caller": "src/dekko/cli.py::main",
       "callee": "list",
       "lines": [
-        2373
+        2432
       ]
     },
     {
       "caller": "src/dekko/cli.py::main",
       "callee": "sys.stderr.write",
       "lines": [
-        2388
+        2447
       ]
     },
     {
       "caller": "src/dekko/cli.py::main",
       "callee": "sys.stdout.write",
       "lines": [
-        2386
+        2445
       ]
     },
     {
@@ -74471,21 +74893,21 @@
       "caller": "src/dekko/cli.py::regen_map",
       "callee": "argparse.Namespace",
       "lines": [
-        1821
+        1880
       ]
     },
     {
       "caller": "src/dekko/cli.py::regen_map",
       "callee": "list",
       "lines": [
-        1824
+        1883
       ]
     },
     {
       "caller": "src/dekko/cli.py::regen_map",
       "callee": "str",
       "lines": [
-        1822
+        1881
       ]
     },
     {
@@ -74521,95 +74943,95 @@
       "caller": "src/dekko/cli.py::run_affected",
       "callee": "Path",
       "lines": [
-        1943
+        2002
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_context",
       "callee": "Path",
       "lines": [
-        1901
+        1960
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_serve",
       "callee": "Path",
       "lines": [
-        2110
+        2169
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_start",
       "callee": "Path",
       "lines": [
-        2088
+        2147
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_status",
       "callee": "Path",
       "lines": [
-        2098
+        2157
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_daemon_stop",
       "callee": "Path",
       "lines": [
-        2093
+        2152
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_diff",
       "callee": "Path",
       "lines": [
-        1932
+        1991
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_export",
       "callee": "Path",
       "lines": [
-        2205,
-        2211,
-        2216
+        2264,
+        2270,
+        2275
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_hooks_install",
       "callee": "Path",
       "lines": [
-        2073
+        2132
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_hooks_run",
       "callee": "sys.stdin.read",
       "lines": [
-        2083
+        2142
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_hooks_uninstall",
       "callee": "Path",
       "lines": [
-        2078
+        2137
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_lean",
       "callee": "Path",
       "lines": [
-        2044,
-        2045
+        2103,
+        2104
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_ledger",
       "callee": "Path",
       "lines": [
-        2060,
-        2062
+        2119,
+        2121
       ]
     },
     {
@@ -74696,94 +75118,94 @@
       "caller": "src/dekko/cli.py::run_orient",
       "callee": "Path",
       "lines": [
-        2117
+        2176
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_outline",
       "callee": "Path",
       "lines": [
-        1889
+        1948
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_search",
       "callee": "\" \".join",
       "lines": [
-        1983
+        2042
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_search",
       "callee": "Path",
       "lines": [
-        1984
+        2043
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_search",
       "callee": "len",
       "lines": [
-        1991
+        2050
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_serve",
       "callee": "Path",
       "lines": [
-        2228
+        2287
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_serve",
       "callee": "print",
       "lines": [
-        2223
+        2282
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_status",
       "callee": "Path",
       "lines": [
-        2242
+        2301
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_status",
       "callee": "json.dumps",
       "lines": [
-        2250,
-        2270
+        2309,
+        2329
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_status",
       "callee": "print",
       "lines": [
-        2250,
-        2252,
-        2270
+        2309,
+        2311,
+        2329
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_unused",
       "callee": "tuple",
       "lines": [
-        2016
+        2075
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_workset",
       "callee": "Path",
       "lines": [
-        1958
+        2017
       ]
     },
     {
       "caller": "src/dekko/cli.py::run_workset",
       "callee": "print",
       "lines": [
-        1956
+        2015
       ]
     },
     {
@@ -76121,14 +76543,14 @@
       "caller": "src/dekko/diff.py::run",
       "callee": "print",
       "lines": [
-        455
+        457
       ]
     },
     {
       "caller": "src/dekko/diff.py::run",
       "callee": "tuple",
       "lines": [
-        446
+        448
       ]
     },
     {
@@ -86825,542 +87247,714 @@
       "caller": "tests/test_daemon.py::<module>",
       "callee": "pytest.mark.parametrize",
       "lines": [
-        163
+        164
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::_affected_args",
+      "callee": "cli.build_subcommand_parser().parse_args",
+      "lines": [
+        553
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::_affected_args",
+      "callee": "str",
+      "lines": [
+        554
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::_diff_args",
+      "callee": "cli.build_subcommand_parser().parse_args",
+      "lines": [
+        547
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::_diff_args",
+      "callee": "str",
+      "lines": [
+        548
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::_git",
+      "callee": "str",
+      "lines": [
+        503
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::_git",
+      "callee": "subprocess.run",
+      "lines": [
+        502
       ]
     },
     {
       "caller": "tests/test_daemon.py::_query_symbol_args",
       "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
-        374
+        375
       ]
     },
     {
       "caller": "tests/test_daemon.py::_query_symbol_args",
       "callee": "str",
       "lines": [
-        375
+        376
       ]
     },
     {
       "caller": "tests/test_daemon.py::_spy",
       "callee": "calls.append",
       "lines": [
-        256
+        257
       ]
     },
     {
       "caller": "tests/test_daemon.py::_spy",
       "callee": "getattr",
       "lines": [
-        256
+        257
       ]
     },
     {
       "caller": "tests/test_daemon.py::_spy",
       "callee": "original",
       "lines": [
-        257
+        258
       ]
     },
     {
       "caller": "tests/test_daemon.py::_wait_until",
       "callee": "predicate",
       "lines": [
-        64,
-        67
+        65,
+        68
       ]
     },
     {
       "caller": "tests/test_daemon.py::_wait_until",
       "callee": "time.monotonic",
       "lines": [
-        62,
-        63
+        63,
+        64
       ]
     },
     {
       "caller": "tests/test_daemon.py::_wait_until",
       "callee": "time.sleep",
       "lines": [
-        66
+        67
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "(short_root / name).write_text",
       "lines": [
-        355
+        356
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "_CACHE_SRC.items",
       "lines": [
-        354
+        355
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "str",
       "lines": [
-        356
+        357
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "thread.join",
       "lines": [
-        370
+        371
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "threading.Thread",
       "lines": [
-        358
+        359
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "(root / name).write_text",
+      "lines": [
+        517
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "_CACHE_SRC.items",
+      "lines": [
+        516
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "str",
+      "lines": [
+        529
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "thread.join",
+      "lines": [
+        543
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "threading.Thread",
+      "lines": [
+        531
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_root",
       "callee": "thread.join",
       "lines": [
-        91
+        92
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_root",
       "callee": "threading.Thread",
       "lines": [
-        79
+        80
       ]
     },
     {
       "caller": "tests/test_daemon.py::short_root",
       "callee": "Path",
       "lines": [
-        51
+        52
       ]
     },
     {
       "caller": "tests/test_daemon.py::short_root",
       "callee": "shutil.rmtree",
       "lines": [
-        55
+        56
       ]
     },
     {
       "caller": "tests/test_daemon.py::short_root",
       "callee": "tempfile.mkdtemp",
       "lines": [
-        51
+        52
       ]
     },
     {
       "caller": "tests/test_daemon.py::spy",
       "callee": "calls.append",
-      "lines": [
-        391
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::spy",
-      "callee": "real_load_map",
       "lines": [
         392
       ]
     },
     {
+      "caller": "tests/test_daemon.py::spy",
+      "callee": "real_load_map",
+      "lines": [
+        393
+      ]
+    },
+    {
       "caller": "tests/test_daemon.py::spy#2",
       "callee": "calls.append",
       "lines": [
-        426
+        427
       ]
     },
     {
       "caller": "tests/test_daemon.py::spy#2",
       "callee": "real_load_map",
       "lines": [
-        427
+        428
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::spy#3",
+      "callee": "calls.append",
+      "lines": [
+        569
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::spy#3",
+      "callee": "real_load_map",
+      "lines": [
+        570
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::spy#4",
+      "callee": "calls.append",
+      "lines": [
+        601
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::spy#4",
+      "callee": "real_load_map",
+      "lines": [
+        602
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::spy#5",
+      "callee": "calls.append",
+      "lines": [
+        631
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::spy#5",
+      "callee": "real_load_map",
+      "lines": [
+        632
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_busts_on_working_tree_change",
       "callee": "(root / \"a.py\").write_text",
       "lines": [
-        440
+        441
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_busts_on_working_tree_change",
       "callee": "len",
       "lines": [
-        433,
-        438,
-        444,
-        448,
-        451,
-        454
+        434,
+        439,
+        445,
+        449,
+        452,
+        455
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_busts_on_working_tree_change",
       "callee": "monkeypatch.setattr",
       "lines": [
-        429
+        430
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_hits_across_repeated_requests",
       "callee": "len",
       "lines": [
-        399,
-        404,
-        409
+        400,
+        405,
+        410
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_hits_across_repeated_requests",
       "callee": "monkeypatch.setattr",
       "lines": [
-        394
+        395
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
+      "callee": "len",
+      "lines": [
+        576,
+        581,
+        586
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
+      "callee": "monkeypatch.setattr",
+      "lines": [
+        572
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
+      "callee": "(root / \"a.py\").write_text",
+      "lines": [
+        640
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
+      "callee": "len",
+      "lines": [
+        638,
+        646
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
+      "callee": "monkeypatch.setattr",
+      "lines": [
+        634
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
+      "callee": "len",
+      "lines": [
+        608,
+        612
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
+      "callee": "monkeypatch.setattr",
+      "lines": [
+        604
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "_json.loads",
       "lines": [
-        470
+        471
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "capsys.readouterr",
       "lines": [
-        467,
-        470
+        468,
+        471
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "str",
       "lines": [
-        478
+        479
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
       "callee": "thread.is_alive",
+      "lines": [
+        289
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
+      "callee": "thread.join",
       "lines": [
         288
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
-      "callee": "thread.join",
-      "lines": [
-        287
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
       "callee": "threading.Thread",
       "lines": [
-        279
+        280
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_no_daemon_flag_skips_routing",
       "callee": "monkeypatch.setattr",
       "lines": [
-        259
+        260
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_no_daemon_flag_skips_routing",
       "callee": "str",
       "lines": [
-        262,
-        267
+        263,
+        268
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_real_process_start_stop_status_roundtrip",
       "callee": "str",
       "lines": [
-        554,
-        563,
-        569,
-        571
+        720,
+        729,
+        735,
+        737
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "argv.append",
       "lines": [
-        169
+        170
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "parser.parse_args",
       "lines": [
-        172,
-        177
+        173,
+        178
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "str",
       "lines": [
-        167
+        168
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "(short_root / \"a.py\").write_text",
       "lines": [
-        186
+        187
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "parser.parse_args",
       "lines": [
-        211,
-        213
+        212,
+        214
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "str",
       "lines": [
-        189,
-        206
+        190,
+        207
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "thread.join",
       "lines": [
-        218
+        219
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "threading.Thread",
       "lines": [
-        191
+        192
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "(sock_dir / \"daemon.sock\").write_bytes",
       "lines": [
-        146
+        147
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
-        148
+        149
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "sock_dir.mkdir",
       "lines": [
-        145
+        146
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "str",
       "lines": [
-        149
+        150
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_status_json_shape_when_running",
       "callee": "_json.loads",
       "lines": [
-        335
+        336
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_status_json_shape_when_running",
       "callee": "capsys.readouterr",
       "lines": [
-        333
+        334
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_status_json_shape_when_running",
       "callee": "isinstance",
       "lines": [
-        337
+        338
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "thread.is_alive",
       "lines": [
-        310
+        311
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "thread.join",
       "lines": [
-        309
+        310
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "threading.Thread",
       "lines": [
-        299
+        300
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "_json.loads",
       "lines": [
-        517
+        683
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "bad_sock.close",
       "lines": [
-        527
+        693
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "bad_sock.sendall",
       "lines": [
-        523
+        689
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "bad_sock.settimeout",
       "lines": [
-        524
+        690
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "sock.close",
       "lines": [
-        514
+        680
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "sock2.close",
       "lines": [
-        535
+        701
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "thread.join",
       "lines": [
-        536
+        702
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "threading.Thread",
       "lines": [
-        495
+        661
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_ineligible_command_returns_none",
       "callee": "cli.build_subcommand_parser().parse_args",
-      "lines": [
-        111
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_try_daemon_ineligible_command_returns_none",
-      "callee": "str",
       "lines": [
         112
       ]
     },
     {
-      "caller": "tests/test_daemon.py::test_try_daemon_no_socket_returns_none",
-      "callee": "cli.build_subcommand_parser().parse_args",
+      "caller": "tests/test_daemon.py::test_try_daemon_ineligible_command_returns_none",
+      "callee": "str",
       "lines": [
-        100
+        113
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_no_socket_returns_none",
-      "callee": "str",
+      "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
         101
       ]
     },
     {
+      "caller": "tests/test_daemon.py::test_try_daemon_no_socket_returns_none",
+      "callee": "str",
+      "lines": [
+        102
+      ]
+    },
+    {
       "caller": "tests/test_daemon.py::test_try_daemon_note_add_not_eligible",
       "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
-        120
+        121
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_add_not_eligible",
       "callee": "str",
       "lines": [
-        127
+        128
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_list_is_eligible",
       "callee": "cli.build_subcommand_parser().parse_args",
-      "lines": [
-        136
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_try_daemon_note_list_is_eligible",
-      "callee": "str",
       "lines": [
         137
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_try_daemon_note_list_is_eligible",
+      "callee": "str",
+      "lines": [
+        138
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "_json.loads",
       "lines": [
-        234
+        235
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
-        238
+        239
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "sock.close",
       "lines": [
-        231
+        232
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "str",
       "lines": [
-        239
+        240
       ]
     },
     {
