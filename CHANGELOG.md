@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Added
+- **Daemon-mode CLI** (`dekko daemon start/stop/status`). A per-repo
+  background process the bare `dekko` CLI talks to over a socket
+  (Unix domain socket on macOS/Linux, token-authenticated TCP
+  loopback on Windows) so repeated CLI invocations share a warm
+  `MapIndex` instead of each one reloading `map.json` from scratch.
+  `diff`/`affected` share the same warm cache. Explicit start/stop in
+  v1, no auto-spawn; every daemon-routing check fails open to direct-
+  process behavior on any daemon absence/error.
+
+### Fixed
+- **`dekko daemon start` false success on an oversized socket path.**
+  When the daemon's Unix socket path exceeded `AF_UNIX`'s `sun_path`
+  length limit, `daemon start` reported success (exit 0) and the
+  failure only surfaced later on a `daemon status` call. New
+  `DaemonTransport.preflight_check()` runs before the daemon process
+  is spawned, so an oversized path now fails `daemon start` itself
+  with exit 1 and a clear message.
+
 ## [0.30.1] — 2026-08-07
 
 Fixes the 5 follow-up issues from round 09's re-evaluation, documented

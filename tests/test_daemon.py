@@ -17,6 +17,7 @@ test that didn't clean up (workflow doc §3, point 3).
 import json as _json
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -705,6 +706,55 @@ def test_tcp_loopback_transport_accept_loop_parity(
 # ---------------------------------------------------------------------
 # Real subprocess lifecycle: dekko daemon start/stop/status
 # ---------------------------------------------------------------------
+
+
+def _deep_root(short_root: Path) -> Path:
+    """Build a root deep enough that ``<root>/.dekko/daemon.sock``
+    exceeds the ``AF_UNIX`` ``sun_path`` limit -- mirrors
+    ``tests/test_daemon_transport.py``'s helper of the same shape."""
+    deep = short_root
+    segment = "x" * 40
+    while len(str(deep / ".dekko" / "daemon.sock")) < dt._SUN_PATH_LIMIT + 20:
+        deep = deep / segment
+    deep.mkdir(parents=True)
+    return deep
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is POSIX-only")
+def test_start_fails_fast_on_unbindable_socket_path(
+    short_root: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """Round-10's headline daemon-mode finding: ``dekko daemon start``
+    used to print "started" and exit 0 even though the detached
+    child's own ``bind_and_listen()`` silently failed on a too-long
+    ``AF_UNIX`` ``sun_path`` -- the failure only surfaced later, on a
+    subsequent ``daemon status`` call, because the parent never waited
+    for or captured the child's stderr. ``start()`` now runs
+    ``transport.preflight_check()`` in the foreground before spawning
+    anything, so this case is caught immediately with a non-zero exit
+    code and a clear message, and no detached process is ever
+    spawned."""
+    deep = _deep_root(short_root)
+
+    code = daemon.start(deep)
+    assert code == 1
+
+    captured = capsys.readouterr()
+    assert "started" not in captured.out
+    assert "cannot start" in captured.err
+    assert "too long" in captured.err
+
+    transport = dt.default_transport_for(deep)
+    assert not transport.exists()
+
+    # A second attempt against the same broken root must fail exactly
+    # the same deterministic way -- not the flaky "sometimes prints
+    # only 'started' with no error at all" behavior the round-10
+    # report flagged for the old race between the child's async
+    # stderr write and the parent's own stdout flush.
+    code2 = daemon.start(deep)
+    assert code2 == 1
+    assert "started" not in capsys.readouterr().out
 
 
 def test_real_process_start_stop_status_roundtrip(

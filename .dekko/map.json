@@ -2,11 +2,11 @@
   "generator": "dekko",
   "version": 4,
   "root": "dekko",
-  "generated_at": "2026-08-10T13:02:55+00:00",
+  "generated_at": "2026-08-10T17:38:21+00:00",
   "provenance": {
-    "tool_version": "0.30.1",
+    "tool_version": "0.30.2",
     "spec_hash": "1514e0ca67cb08dfb9109b6bbc9e0652aa17a9576ab54b400ac13f8b94b5643b",
-    "git_commit": "087b361321c05fa1490d72a3ca1ef9a6a1191844",
+    "git_commit": "6a9519a77e6226298857f3739f25adb893a00f61",
     "subpath": null,
     "excludes": [],
     "max_file_size": 1000000,
@@ -20,8 +20,8 @@
       "src/dekko/cli.py": "a7d443dc5f3d1610",
       "src/dekko/cline.py": "35c55c66cdd054fe",
       "src/dekko/contextpack.py": "fb5aa65852b71ec3",
-      "src/dekko/daemon.py": "13c74ae3a5a16abf",
-      "src/dekko/daemon_transport.py": "8b52fdc86b7e2b21",
+      "src/dekko/daemon.py": "ff71c94e4e5d9400",
+      "src/dekko/daemon_transport.py": "0b5772b862ea2df8",
       "src/dekko/diff.py": "916f8228891f01ad",
       "src/dekko/embedding.py": "94c5b8f55ed7735b",
       "src/dekko/export.py": "02da11b1d81727e6",
@@ -79,8 +79,8 @@
       "tests/test_cline.py": "84cd4a207bea09c3",
       "tests/test_contextpack.py": "c14ece83239ef209",
       "tests/test_contextpack_v2.py": "9b816a6366b1c7a2",
-      "tests/test_daemon.py": "63fd9f6d92e8fb5a",
-      "tests/test_daemon_transport.py": "1703ef42e9045a4c",
+      "tests/test_daemon.py": "c50c677163ef6c6b",
+      "tests/test_daemon_transport.py": "9ad34b2be5dfa2f8",
       "tests/test_density.py": "c2e1a917d00f5020",
       "tests/test_diagram.py": "1d2c9b01df56923b",
       "tests/test_diff.py": "bb8cf859b61b8e95",
@@ -162,12 +162,12 @@
         21660
       ],
       "src/dekko/daemon.py": [
-        1786365501369694865,
-        23810
+        1786382807479356384,
+        25139
       ],
       "src/dekko/daemon_transport.py": [
-        1786364042424189376,
-        18551
+        1786382782296246116,
+        19896
       ],
       "src/dekko/diff.py": [
         1786366216329204142,
@@ -398,12 +398,12 @@
         3964
       ],
       "tests/test_daemon.py": [
-        1786366324384047056,
-        25340
+        1786382964520839762,
+        27359
       ],
       "tests/test_daemon_transport.py": [
-        1786364034126051030,
-        13474
+        1786382903332296495,
+        15015
       ],
       "tests/test_density.py": [
         1781693026712541034,
@@ -4031,6 +4031,11 @@
           "path": "tests/test_daemon.py",
           "name": "subprocess",
           "source": "subprocess"
+        },
+        {
+          "path": "tests/test_daemon.py",
+          "name": "sys",
+          "source": "sys"
         },
         {
           "path": "tests/test_daemon.py",
@@ -9948,7 +9953,7 @@
       ],
       "returns": "int",
       "start_line": 520,
-      "end_line": 572,
+      "end_line": 596,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko daemon start``.",
@@ -9968,8 +9973,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 575,
-      "end_line": 622,
+      "start_line": 599,
+      "end_line": 646,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko daemon stop``.",
@@ -9993,8 +9998,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 625,
-      "end_line": 679,
+      "start_line": 649,
+      "end_line": 703,
       "decorated": false,
       "exported": false,
       "doc": "Handle ``dekko daemon status``.",
@@ -10063,7 +10068,7 @@
       "params": [],
       "returns": null,
       "start_line": 122,
-      "end_line": 200,
+      "end_line": 219,
       "decorated": false,
       "exported": false,
       "doc": "OS-specific channel between the CLI client and the daemon.",
@@ -10112,6 +10117,27 @@
       "test": false
     },
     {
+      "id": "src/dekko/daemon_transport.py::DaemonTransport.preflight_check",
+      "name": "preflight_check",
+      "qualname": "DaemonTransport.preflight_check",
+      "kind": "method",
+      "path": "src/dekko/daemon_transport.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "self",
+          "type": null
+        }
+      ],
+      "returns": "None",
+      "start_line": 151,
+      "end_line": 167,
+      "decorated": true,
+      "exported": false,
+      "doc": "Parent-process-side: cheaply predict a ``bind_and_listen()``",
+      "test": false
+    },
+    {
       "id": "src/dekko/daemon_transport.py::DaemonTransport.client_connect",
       "name": "client_connect",
       "qualname": "DaemonTransport.client_connect",
@@ -10129,8 +10155,8 @@
         }
       ],
       "returns": "socket.socket",
-      "start_line": 151,
-      "end_line": 162,
+      "start_line": 170,
+      "end_line": 181,
       "decorated": true,
       "exported": false,
       "doc": "CLI-side: connect to a live daemon.",
@@ -10154,8 +10180,8 @@
         }
       ],
       "returns": "bool",
-      "start_line": 165,
-      "end_line": 178,
+      "start_line": 184,
+      "end_line": 197,
       "decorated": true,
       "exported": false,
       "doc": "Daemon-side: validate a freshly accepted connection.",
@@ -10179,8 +10205,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 181,
-      "end_line": 187,
+      "start_line": 200,
+      "end_line": 206,
       "decorated": true,
       "exported": false,
       "doc": "CLI-side: write this transport's auth preamble, if any.",
@@ -10200,8 +10226,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 190,
-      "end_line": 196,
+      "start_line": 209,
+      "end_line": 215,
       "decorated": true,
       "exported": false,
       "doc": "Remove the on-disk artifact for this transport, best-effort.",
@@ -10221,8 +10247,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 199,
-      "end_line": 200,
+      "start_line": 218,
+      "end_line": 219,
       "decorated": true,
       "exported": false,
       "doc": "Human-readable summary for ``dekko daemon status``.",
@@ -10237,8 +10263,8 @@
       "language": "python",
       "params": [],
       "returns": null,
-      "start_line": 203,
-      "end_line": 282,
+      "start_line": 222,
+      "end_line": 304,
       "decorated": false,
       "exported": false,
       "doc": "Unix domain socket at ``<root>/.dekko/daemon.sock`` (POSIX only).",
@@ -10262,8 +10288,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 213,
-      "end_line": 215,
+      "start_line": 232,
+      "end_line": 234,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10283,8 +10309,29 @@
         }
       ],
       "returns": "bool",
-      "start_line": 217,
-      "end_line": 218,
+      "start_line": 236,
+      "end_line": 237,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": false
+    },
+    {
+      "id": "src/dekko/daemon_transport.py::UnixSocketTransport.preflight_check",
+      "name": "preflight_check",
+      "qualname": "UnixSocketTransport.preflight_check",
+      "kind": "method",
+      "path": "src/dekko/daemon_transport.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "self",
+          "type": null
+        }
+      ],
+      "returns": "None",
+      "start_line": 239,
+      "end_line": 246,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10304,8 +10351,8 @@
         }
       ],
       "returns": "socket.socket",
-      "start_line": 220,
-      "end_line": 251,
+      "start_line": 248,
+      "end_line": 273,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10329,8 +10376,8 @@
         }
       ],
       "returns": "socket.socket",
-      "start_line": 253,
-      "end_line": 267,
+      "start_line": 275,
+      "end_line": 289,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10354,8 +10401,8 @@
         }
       ],
       "returns": "bool",
-      "start_line": 269,
-      "end_line": 270,
+      "start_line": 291,
+      "end_line": 292,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10379,8 +10426,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 272,
-      "end_line": 273,
+      "start_line": 294,
+      "end_line": 295,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10400,8 +10447,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 275,
-      "end_line": 279,
+      "start_line": 297,
+      "end_line": 301,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10421,8 +10468,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 281,
-      "end_line": 282,
+      "start_line": 303,
+      "end_line": 304,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10437,8 +10484,8 @@
       "language": "python",
       "params": [],
       "returns": null,
-      "start_line": 285,
-      "end_line": 387,
+      "start_line": 307,
+      "end_line": 418,
       "decorated": false,
       "exported": false,
       "doc": "Token-authenticated TCP loopback socket (Windows default).",
@@ -10462,8 +10509,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 303,
-      "end_line": 306,
+      "start_line": 325,
+      "end_line": 328,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10483,8 +10530,29 @@
         }
       ],
       "returns": "bool",
-      "start_line": 308,
-      "end_line": 309,
+      "start_line": 330,
+      "end_line": 331,
+      "decorated": false,
+      "exported": false,
+      "doc": null,
+      "test": false
+    },
+    {
+      "id": "src/dekko/daemon_transport.py::TcpLoopbackTransport.preflight_check",
+      "name": "preflight_check",
+      "qualname": "TcpLoopbackTransport.preflight_check",
+      "kind": "method",
+      "path": "src/dekko/daemon_transport.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "self",
+          "type": null
+        }
+      ],
+      "returns": "None",
+      "start_line": 333,
+      "end_line": 340,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10504,8 +10572,8 @@
         }
       ],
       "returns": "tuple[int, str]",
-      "start_line": 311,
-      "end_line": 318,
+      "start_line": 342,
+      "end_line": 349,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10525,8 +10593,8 @@
         }
       ],
       "returns": "socket.socket",
-      "start_line": 320,
-      "end_line": 329,
+      "start_line": 351,
+      "end_line": 360,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10550,8 +10618,8 @@
         }
       ],
       "returns": "socket.socket",
-      "start_line": 331,
-      "end_line": 347,
+      "start_line": 362,
+      "end_line": 378,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10575,8 +10643,8 @@
         }
       ],
       "returns": "bool",
-      "start_line": 349,
-      "end_line": 367,
+      "start_line": 380,
+      "end_line": 398,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10600,8 +10668,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 369,
-      "end_line": 372,
+      "start_line": 400,
+      "end_line": 403,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10621,8 +10689,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 374,
-      "end_line": 378,
+      "start_line": 405,
+      "end_line": 409,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10642,8 +10710,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 380,
-      "end_line": 387,
+      "start_line": 411,
+      "end_line": 418,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -10663,8 +10731,8 @@
         }
       ],
       "returns": "DaemonTransport",
-      "start_line": 390,
-      "end_line": 407,
+      "start_line": 421,
+      "end_line": 438,
       "decorated": false,
       "exported": false,
       "doc": "Pick the right transport for the current platform.",
@@ -10684,8 +10752,8 @@
         }
       ],
       "returns": "subprocess.Popen",
-      "start_line": 410,
-      "end_line": 429,
+      "start_line": 441,
+      "end_line": 460,
       "decorated": false,
       "exported": false,
       "doc": "Launch ``cmd`` as a detached background process.",
@@ -10705,8 +10773,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 432,
-      "end_line": 453,
+      "start_line": 463,
+      "end_line": 484,
       "decorated": false,
       "exported": false,
       "doc": "Send an unconditional stop signal to the process at ``pid``.",
@@ -10730,8 +10798,8 @@
         }
       ],
       "returns": "bool",
-      "start_line": 456,
-      "end_line": 485,
+      "start_line": 487,
+      "end_line": 516,
       "decorated": false,
       "exported": false,
       "doc": "Best-effort liveness check: does a connect actually succeed?",
@@ -29333,8 +29401,8 @@
       "language": "python",
       "params": [],
       "returns": "Path",
-      "start_line": 44,
-      "end_line": 56,
+      "start_line": 45,
+      "end_line": 57,
       "decorated": true,
       "exported": false,
       "doc": "A short-path temp dir, safe for a real ``AF_UNIX`` bind.",
@@ -29358,8 +29426,8 @@
         }
       ],
       "returns": "bool",
-      "start_line": 59,
-      "end_line": 68,
+      "start_line": 60,
+      "end_line": 69,
       "decorated": false,
       "exported": false,
       "doc": "Poll ``predicate`` until true or ``deadline`` seconds pass.",
@@ -29379,8 +29447,8 @@
         }
       ],
       "returns": "Iterator[Path]",
-      "start_line": 72,
-      "end_line": 92,
+      "start_line": 73,
+      "end_line": 93,
       "decorated": true,
       "exported": false,
       "doc": "A repo root with an in-thread daemon already serving it.",
@@ -29400,8 +29468,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 100,
-      "end_line": 104,
+      "start_line": 101,
+      "end_line": 105,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29421,8 +29489,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 107,
-      "end_line": 115,
+      "start_line": 108,
+      "end_line": 116,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29442,8 +29510,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 118,
-      "end_line": 131,
+      "start_line": 119,
+      "end_line": 132,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29463,8 +29531,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 134,
-      "end_line": 140,
+      "start_line": 135,
+      "end_line": 141,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29484,8 +29552,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 143,
-      "end_line": 156,
+      "start_line": 144,
+      "end_line": 157,
       "decorated": false,
       "exported": false,
       "doc": "A dead transport artifact (no listener) must fall open, silently.",
@@ -29509,8 +29577,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 165,
-      "end_line": 181,
+      "start_line": 166,
+      "end_line": 182,
       "decorated": true,
       "exported": false,
       "doc": null,
@@ -29530,8 +29598,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 184,
-      "end_line": 219,
+      "start_line": 185,
+      "end_line": 220,
       "decorated": false,
       "exported": false,
       "doc": "Routing correctness against an actual mapped repo, not just",
@@ -29551,8 +29619,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 222,
-      "end_line": 242,
+      "start_line": 223,
+      "end_line": 243,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29576,8 +29644,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 250,
-      "end_line": 270,
+      "start_line": 251,
+      "end_line": 271,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29597,8 +29665,8 @@
         }
       ],
       "returns": null,
-      "start_line": 256,
-      "end_line": 258,
+      "start_line": 257,
+      "end_line": 259,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29618,8 +29686,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 278,
-      "end_line": 290,
+      "start_line": 279,
+      "end_line": 291,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29639,8 +29707,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 298,
-      "end_line": 312,
+      "start_line": 299,
+      "end_line": 313,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29660,8 +29728,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 315,
-      "end_line": 316,
+      "start_line": 316,
+      "end_line": 317,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29681,8 +29749,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 324,
-      "end_line": 326,
+      "start_line": 325,
+      "end_line": 327,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29706,8 +29774,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 329,
-      "end_line": 340,
+      "start_line": 330,
+      "end_line": 341,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29727,8 +29795,8 @@
         }
       ],
       "returns": "Iterator[Path]",
-      "start_line": 353,
-      "end_line": 371,
+      "start_line": 354,
+      "end_line": 372,
       "decorated": true,
       "exported": false,
       "doc": "A mapped repo (``_CACHE_SRC``) served by an in-thread daemon.",
@@ -29752,8 +29820,8 @@
         }
       ],
       "returns": "object",
-      "start_line": 374,
-      "end_line": 377,
+      "start_line": 375,
+      "end_line": 378,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29777,8 +29845,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 380,
-      "end_line": 411,
+      "start_line": 381,
+      "end_line": 412,
       "decorated": false,
       "exported": false,
       "doc": "Several daemon-routed reads against an unchanged map must make",
@@ -29798,8 +29866,8 @@
         }
       ],
       "returns": "mapfile.MapIndex | None",
-      "start_line": 391,
-      "end_line": 393,
+      "start_line": 392,
+      "end_line": 394,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29823,8 +29891,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 414,
-      "end_line": 455,
+      "start_line": 415,
+      "end_line": 456,
       "decorated": false,
       "exported": false,
       "doc": "A working-tree edit between daemon-routed requests must not be",
@@ -29844,8 +29912,8 @@
         }
       ],
       "returns": "mapfile.MapIndex | None",
-      "start_line": 426,
-      "end_line": 428,
+      "start_line": 427,
+      "end_line": 429,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29869,8 +29937,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 458,
-      "end_line": 481,
+      "start_line": 459,
+      "end_line": 482,
       "decorated": false,
       "exported": false,
       "doc": "``dekko daemon status``'s cache field is ``None`` until the",
@@ -29894,8 +29962,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 500,
-      "end_line": 506,
+      "start_line": 501,
+      "end_line": 507,
       "decorated": false,
       "exported": false,
       "doc": "Run a git command in ``root``, raising on failure.",
@@ -29915,8 +29983,8 @@
         }
       ],
       "returns": "Iterator[Path]",
-      "start_line": 510,
-      "end_line": 543,
+      "start_line": 511,
+      "end_line": 544,
       "decorated": true,
       "exported": false,
       "doc": "A committed git repo (``_CACHE_SRC``), mapped, served by an",
@@ -29936,8 +30004,8 @@
         }
       ],
       "returns": "object",
-      "start_line": 546,
-      "end_line": 549,
+      "start_line": 547,
+      "end_line": 550,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29957,8 +30025,8 @@
         }
       ],
       "returns": "object",
-      "start_line": 552,
-      "end_line": 555,
+      "start_line": 553,
+      "end_line": 556,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -29982,8 +30050,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 558,
-      "end_line": 586,
+      "start_line": 559,
+      "end_line": 587,
       "decorated": false,
       "exported": false,
       "doc": "A ``diff``/``affected`` request's current-tree load reuses a",
@@ -30003,8 +30071,8 @@
         }
       ],
       "returns": "mapfile.MapIndex | None",
-      "start_line": 568,
-      "end_line": 570,
+      "start_line": 569,
+      "end_line": 571,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30028,8 +30096,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 589,
-      "end_line": 613,
+      "start_line": 590,
+      "end_line": 614,
       "decorated": false,
       "exported": false,
       "doc": "The reverse direction: ``diff`` runs first and its own",
@@ -30049,8 +30117,8 @@
         }
       ],
       "returns": "mapfile.MapIndex | None",
-      "start_line": 600,
-      "end_line": 602,
+      "start_line": 601,
+      "end_line": 603,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30074,8 +30142,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 616,
-      "end_line": 646,
+      "start_line": 617,
+      "end_line": 647,
       "decorated": false,
       "exported": false,
       "doc": "A working-tree edit between a warming ``query`` and a following",
@@ -30095,8 +30163,8 @@
         }
       ],
       "returns": "mapfile.MapIndex | None",
-      "start_line": 630,
-      "end_line": 632,
+      "start_line": 631,
+      "end_line": 633,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30116,11 +30184,57 @@
         }
       ],
       "returns": "None",
-      "start_line": 654,
-      "end_line": 702,
+      "start_line": 655,
+      "end_line": 703,
       "decorated": false,
       "exported": false,
       "doc": "serve_daemon()'s accept loop is transport-agnostic -- prove it",
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::_deep_root",
+      "name": "_deep_root",
+      "qualname": "_deep_root",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "short_root",
+          "type": "Path"
+        }
+      ],
+      "returns": "Path",
+      "start_line": 711,
+      "end_line": 720,
+      "decorated": false,
+      "exported": false,
+      "doc": "Build a root deep enough that ``<root>/.dekko/daemon.sock``",
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon.py::test_start_fails_fast_on_unbindable_socket_path",
+      "name": "test_start_fails_fast_on_unbindable_socket_path",
+      "qualname": "test_start_fails_fast_on_unbindable_socket_path",
+      "kind": "function",
+      "path": "tests/test_daemon.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "short_root",
+          "type": "Path"
+        },
+        {
+          "name": "capsys",
+          "type": "pytest.CaptureFixture"
+        }
+      ],
+      "returns": "None",
+      "start_line": 724,
+      "end_line": 757,
+      "decorated": true,
+      "exported": false,
+      "doc": "Round-10's headline daemon-mode finding: ``dekko daemon start``",
       "test": true
     },
     {
@@ -30137,8 +30251,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 710,
-      "end_line": 738,
+      "start_line": 760,
+      "end_line": 788,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30294,6 +30408,27 @@
       "test": true
     },
     {
+      "id": "tests/test_daemon_transport.py::_deep_root",
+      "name": "_deep_root",
+      "qualname": "_deep_root",
+      "kind": "function",
+      "path": "tests/test_daemon_transport.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "short_root",
+          "type": "Path"
+        }
+      ],
+      "returns": "Path",
+      "start_line": 148,
+      "end_line": 158,
+      "decorated": false,
+      "exported": false,
+      "doc": "Build a root path deep enough that ``<root>/.dekko/daemon.sock``",
+      "test": true
+    },
+    {
       "id": "tests/test_daemon_transport.py::test_unix_socket_sun_path_too_long_raises_transport_unavailable",
       "name": "test_unix_socket_sun_path_too_long_raises_transport_unavailable",
       "qualname": "test_unix_socket_sun_path_too_long_raises_transport_unavailable",
@@ -30307,11 +30442,74 @@
         }
       ],
       "returns": "None",
-      "start_line": 149,
-      "end_line": 170,
+      "start_line": 162,
+      "end_line": 175,
       "decorated": true,
       "exported": false,
       "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_catches_long_path_without_binding",
+      "name": "test_unix_socket_preflight_check_catches_long_path_without_binding",
+      "qualname": "test_unix_socket_preflight_check_catches_long_path_without_binding",
+      "kind": "function",
+      "path": "tests/test_daemon_transport.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "short_root",
+          "type": "Path"
+        }
+      ],
+      "returns": "None",
+      "start_line": 179,
+      "end_line": 196,
+      "decorated": true,
+      "exported": false,
+      "doc": "``preflight_check()`` must raise the same",
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_passes_for_a_short_path",
+      "name": "test_unix_socket_preflight_check_passes_for_a_short_path",
+      "qualname": "test_unix_socket_preflight_check_passes_for_a_short_path",
+      "kind": "function",
+      "path": "tests/test_daemon_transport.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "short_root",
+          "type": "Path"
+        }
+      ],
+      "returns": "None",
+      "start_line": 200,
+      "end_line": 204,
+      "decorated": true,
+      "exported": false,
+      "doc": null,
+      "test": true
+    },
+    {
+      "id": "tests/test_daemon_transport.py::test_tcp_loopback_preflight_check_is_a_noop",
+      "name": "test_tcp_loopback_preflight_check_is_a_noop",
+      "qualname": "test_tcp_loopback_preflight_check_is_a_noop",
+      "kind": "function",
+      "path": "tests/test_daemon_transport.py",
+      "language": "python",
+      "params": [
+        {
+          "name": "tmp_path",
+          "type": "Path"
+        }
+      ],
+      "returns": "None",
+      "start_line": 212,
+      "end_line": 215,
+      "decorated": false,
+      "exported": false,
+      "doc": "Nothing is cheaply predictable ahead of a real bind for a TCP",
       "test": true
     },
     {
@@ -30328,8 +30526,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 178,
-      "end_line": 193,
+      "start_line": 218,
+      "end_line": 233,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30349,8 +30547,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 196,
-      "end_line": 232,
+      "start_line": 236,
+      "end_line": 272,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30365,8 +30563,8 @@
       "language": "python",
       "params": [],
       "returns": "None",
-      "start_line": 203,
-      "end_line": 204,
+      "start_line": 243,
+      "end_line": 244,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30386,8 +30584,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 235,
-      "end_line": 261,
+      "start_line": 275,
+      "end_line": 301,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30402,8 +30600,8 @@
       "language": "python",
       "params": [],
       "returns": "None",
-      "start_line": 242,
-      "end_line": 243,
+      "start_line": 282,
+      "end_line": 283,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30423,8 +30621,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 264,
-      "end_line": 290,
+      "start_line": 304,
+      "end_line": 330,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30439,8 +30637,8 @@
       "language": "python",
       "params": [],
       "returns": "None",
-      "start_line": 271,
-      "end_line": 272,
+      "start_line": 311,
+      "end_line": 312,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30460,8 +30658,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 297,
-      "end_line": 299,
+      "start_line": 337,
+      "end_line": 339,
       "decorated": true,
       "exported": false,
       "doc": null,
@@ -30481,8 +30679,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 309,
-      "end_line": 324,
+      "start_line": 349,
+      "end_line": 364,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30506,8 +30704,8 @@
         }
       ],
       "returns": null,
-      "start_line": 313,
-      "end_line": 316,
+      "start_line": 353,
+      "end_line": 356,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30527,8 +30725,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 327,
-      "end_line": 349,
+      "start_line": 367,
+      "end_line": 389,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30552,8 +30750,8 @@
         }
       ],
       "returns": null,
-      "start_line": 333,
-      "end_line": 336,
+      "start_line": 373,
+      "end_line": 376,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30573,8 +30771,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 357,
-      "end_line": 365,
+      "start_line": 397,
+      "end_line": 405,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30594,8 +30792,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 368,
-      "end_line": 377,
+      "start_line": 408,
+      "end_line": 417,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30619,8 +30817,8 @@
         }
       ],
       "returns": null,
-      "start_line": 371,
-      "end_line": 372,
+      "start_line": 411,
+      "end_line": 412,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30640,8 +30838,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 380,
-      "end_line": 382,
+      "start_line": 420,
+      "end_line": 422,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30661,8 +30859,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 385,
-      "end_line": 405,
+      "start_line": 425,
+      "end_line": 445,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -30677,8 +30875,8 @@
       "language": "python",
       "params": [],
       "returns": "None",
-      "start_line": 390,
-      "end_line": 395,
+      "start_line": 430,
+      "end_line": 435,
       "decorated": false,
       "exported": false,
       "doc": null,
@@ -48467,89 +48665,89 @@
       "caller": "src/dekko/daemon.py::start",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        536
+        554
       ]
     },
     {
       "caller": "src/dekko/daemon.py::start",
       "callee": "src/dekko/daemon_transport.py::is_daemon_reachable",
       "lines": [
-        537
+        555
       ]
     },
     {
       "caller": "src/dekko/daemon.py::start",
       "callee": "src/dekko/daemon_transport.py::spawn_detached",
       "lines": [
-        566
+        590
       ]
     },
     {
       "caller": "src/dekko/daemon.py::status",
       "callee": "src/dekko/daemon.py::_WarmCache.get",
       "lines": [
-        667,
-        668,
-        669,
-        670,
-        674,
-        677
+        691,
+        692,
+        693,
+        694,
+        698,
+        701
       ]
     },
     {
       "caller": "src/dekko/daemon.py::status",
       "callee": "src/dekko/daemon.py::_recv_line",
       "lines": [
-        647
+        671
       ]
     },
     {
       "caller": "src/dekko/daemon.py::status",
       "callee": "src/dekko/daemon.py::_send_line",
       "lines": [
-        646
+        670
       ]
     },
     {
       "caller": "src/dekko/daemon.py::status",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        636
+        660
       ]
     },
     {
       "caller": "src/dekko/daemon.py::stop",
       "callee": "src/dekko/daemon.py::_query_pid",
       "lines": [
-        613
+        637
       ]
     },
     {
       "caller": "src/dekko/daemon.py::stop",
       "callee": "src/dekko/daemon.py::_recv_line",
       "lines": [
-        606
+        630
       ]
     },
     {
       "caller": "src/dekko/daemon.py::stop",
       "callee": "src/dekko/daemon.py::_send_line",
       "lines": [
-        605
+        629
       ]
     },
     {
       "caller": "src/dekko/daemon.py::stop",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        591
+        615
       ]
     },
     {
       "caller": "src/dekko/daemon.py::stop",
       "callee": "src/dekko/daemon_transport.py::force_stop",
       "lines": [
-        616
+        640
       ]
     },
     {
@@ -48592,150 +48790,163 @@
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
       "callee": "src/dekko/daemon_transport.py::DaemonUnavailableError",
       "lines": [
-        316
+        347
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.authenticate",
-      "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
-      "lines": [
-        352
-      ]
-    },
-    {
-      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.authenticate",
-      "callee": "src/dekko/daemon_transport.py::_recv_line",
-      "lines": [
-        359
-      ]
-    },
-    {
-      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
-      "callee": "src/dekko/daemon_transport.py::DaemonUnavailableError",
-      "lines": [
-        333,
-        344
-      ]
-    },
-    {
-      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
-      "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
-      "lines": [
-        335
-      ]
-    },
-    {
-      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
-      "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.cleanup",
-      "lines": [
-        343
-      ]
-    },
-    {
-      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
-      "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.exists",
-      "lines": [
-        332
-      ]
-    },
-    {
-      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.describe",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
       "lines": [
         383
       ]
     },
     {
+      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.authenticate",
+      "callee": "src/dekko/daemon_transport.py::_recv_line",
+      "lines": [
+        390
+      ]
+    },
+    {
+      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
+      "callee": "src/dekko/daemon_transport.py::DaemonUnavailableError",
+      "lines": [
+        364,
+        375
+      ]
+    },
+    {
+      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
+      "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
+      "lines": [
+        366
+      ]
+    },
+    {
+      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
+      "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.cleanup",
+      "lines": [
+        374
+      ]
+    },
+    {
+      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
+      "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.exists",
+      "lines": [
+        363
+      ]
+    },
+    {
+      "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.describe",
+      "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
+      "lines": [
+        414
+      ]
+    },
+    {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.describe",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.exists",
       "lines": [
-        381
+        412
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.send_auth_preamble",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
       "lines": [
-        371
+        402
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.send_auth_preamble",
       "callee": "tests/test_tokenizer.py::_Boom.encode",
       "lines": [
-        372
+        403
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
       "callee": "src/dekko/daemon_transport.py::TransportUnavailable",
       "lines": [
-        223,
-        246
+        268
+      ]
+    },
+    {
+      "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
+      "callee": "src/dekko/daemon_transport.py::UnixSocketTransport.preflight_check",
+      "lines": [
+        249
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.client_connect",
       "callee": "src/dekko/daemon_transport.py::DaemonUnavailableError",
       "lines": [
-        255,
-        264
+        277,
+        286
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.client_connect",
       "callee": "src/dekko/daemon_transport.py::UnixSocketTransport.cleanup",
       "lines": [
-        263
+        285
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.client_connect",
       "callee": "src/dekko/daemon_transport.py::UnixSocketTransport.exists",
       "lines": [
-        254
+        276
+      ]
+    },
+    {
+      "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.preflight_check",
+      "callee": "src/dekko/daemon_transport.py::TransportUnavailable",
+      "lines": [
+        242
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::default_transport_for",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport",
       "lines": [
-        406
+        437
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::default_transport_for",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.__init__",
       "lines": [
-        406
+        437
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::default_transport_for",
       "callee": "src/dekko/daemon_transport.py::UnixSocketTransport",
       "lines": [
-        407
+        438
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::default_transport_for",
       "callee": "src/dekko/daemon_transport.py::UnixSocketTransport.__init__",
       "lines": [
-        407
+        438
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::is_daemon_reachable",
       "callee": "src/dekko/daemon_transport.py::DaemonTransport.client_connect",
       "lines": [
-        481
+        512
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::is_daemon_reachable",
       "callee": "src/dekko/daemon_transport.py::DaemonTransport.exists",
       "lines": [
-        478
+        509
       ]
     },
     {
@@ -57514,627 +57725,649 @@
       "caller": "tests/test_daemon.py::_affected_args",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        553
+        554
       ]
     },
     {
       "caller": "tests/test_daemon.py::_diff_args",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        547
+        548
       ]
     },
     {
       "caller": "tests/test_daemon.py::_query_symbol_args",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        375
+        376
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        357
+        358
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "src/dekko/daemon.py::start",
-      "lines": [
-        364
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::daemon_thread_cached_root",
-      "callee": "src/dekko/daemon.py::stop",
-      "lines": [
-        370
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::daemon_thread_cached_root",
-      "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
         365
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
-      "callee": "tests/test_daemon.py::_wait_until",
+      "callee": "src/dekko/daemon.py::stop",
+      "lines": [
+        371
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_cached_root",
+      "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
         366
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_cached_root",
+      "callee": "tests/test_daemon.py::_wait_until",
+      "lines": [
+        367
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        529
+        530
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "src/dekko/daemon.py::start",
-      "lines": [
-        536
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::daemon_thread_git_root",
-      "callee": "src/dekko/daemon.py::stop",
-      "lines": [
-        542
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::daemon_thread_git_root",
-      "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
         537
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "src/dekko/daemon.py::stop",
+      "lines": [
+        543
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
+      "callee": "src/dekko/daemon_transport.py::default_transport_for",
+      "lines": [
+        538
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "tests/test_daemon.py::_git",
       "lines": [
-        515,
-        518,
-        519
+        516,
+        519,
+        520
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "tests/test_daemon.py::_wait_until",
       "lines": [
-        538
+        539
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_root",
       "callee": "src/dekko/daemon.py::start",
-      "lines": [
-        85
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::daemon_thread_root",
-      "callee": "src/dekko/daemon.py::stop",
-      "lines": [
-        91
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::daemon_thread_root",
-      "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
         86
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_root",
-      "callee": "tests/test_daemon.py::_wait_until",
+      "callee": "src/dekko/daemon.py::stop",
+      "lines": [
+        92
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::daemon_thread_root",
+      "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
         87
       ]
     },
     {
+      "caller": "tests/test_daemon.py::daemon_thread_root",
+      "callee": "tests/test_daemon.py::_wait_until",
+      "lines": [
+        88
+      ]
+    },
+    {
       "caller": "tests/test_daemon.py::test_daemon_cache_busts_on_working_tree_change",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        432,
-        436,
-        446,
-        453
+        433,
+        437,
+        447,
+        454
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_busts_on_working_tree_change",
       "callee": "tests/test_daemon.py::_query_symbol_args",
       "lines": [
-        432,
-        436,
-        446,
-        453
+        433,
+        437,
+        447,
+        454
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_hits_across_repeated_requests",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        397,
-        402,
-        407
+        398,
+        403,
+        408
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_hits_across_repeated_requests",
       "callee": "tests/test_daemon.py::_query_symbol_args",
       "lines": [
-        397,
-        402,
-        407
+        398,
+        403,
+        408
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        574,
-        578,
-        583
+        575,
+        579,
+        584
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
       "callee": "tests/test_daemon.py::_affected_args",
       "lines": [
-        583
+        584
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
       "callee": "tests/test_daemon.py::_diff_args",
       "lines": [
-        578
+        579
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
       "callee": "tests/test_daemon.py::_query_symbol_args",
       "lines": [
-        574
+        575
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        636,
-        642
+        637,
+        643
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
       "callee": "tests/test_daemon.py::_diff_args",
       "lines": [
-        642
+        643
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
       "callee": "tests/test_daemon.py::_query_symbol_args",
       "lines": [
-        636
+        637
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        606,
-        610
+        607,
+        611
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
       "callee": "tests/test_daemon.py::_diff_args",
       "lines": [
-        606
+        607
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
       "callee": "tests/test_daemon.py::_query_symbol_args",
       "lines": [
-        610
+        611
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "src/dekko/daemon.py::status",
       "lines": [
-        469
+        470
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        465
+        466
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "src/dekko/resolver.py::resolve",
       "lines": [
-        479
+        480
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "tests/test_daemon.py::_query_symbol_args",
       "lines": [
-        465
+        466
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        285
+        286
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        279
+        280
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
       "callee": "tests/test_daemon.py::_wait_until",
       "lines": [
-        286
+        287
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_no_daemon_flag_skips_routing",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        262,
-        268
+        263,
+        269
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_real_process_start_stop_status_roundtrip",
       "callee": "src/dekko/cli.py::main",
       "lines": [
-        715,
-        728,
-        735,
-        737
+        765,
+        778,
+        785,
+        787
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_real_process_start_stop_status_roundtrip",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        713
+        763
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_real_process_start_stop_status_roundtrip",
       "callee": "src/dekko/daemon_transport.py::is_daemon_reachable",
       "lines": [
-        726
+        776
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_real_process_start_stop_status_roundtrip",
       "callee": "tests/test_daemon.py::_wait_until",
       "lines": [
-        726,
-        738
+        776,
+        788
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        172
+        173
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "src/dekko/cli.py::run_status",
       "lines": [
-        175
+        176
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        179
+        180
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "src/dekko/server.py::_capture",
       "lines": [
-        174
+        175
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
-      "lines": [
-        210
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/cli.py::main",
-      "lines": [
-        190
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/cli.py::run_search",
-      "lines": [
-        212
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/daemon.py::start",
-      "lines": [
-        197
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/daemon.py::stop",
-      "lines": [
-        218
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/daemon.py::try_daemon",
-      "lines": [
-        214
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/daemon_transport.py::default_transport_for",
-      "lines": [
-        198
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "src/dekko/server.py::_capture",
       "lines": [
         211
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
-      "callee": "tests/test_daemon.py::_wait_until",
+      "callee": "src/dekko/cli.py::main",
+      "lines": [
+        191
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/cli.py::run_search",
+      "lines": [
+        213
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/daemon.py::start",
+      "lines": [
+        198
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/daemon.py::stop",
+      "lines": [
+        219
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/daemon.py::try_daemon",
+      "lines": [
+        215
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
         199
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "src/dekko/server.py::_capture",
+      "lines": [
+        212
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
+      "callee": "tests/test_daemon.py::_wait_until",
+      "lines": [
+        200
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        149
+        150
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        152
+        153
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_start_fails_fast_on_unbindable_socket_path",
+      "callee": "src/dekko/daemon.py::start",
+      "lines": [
+        739,
+        755
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_start_fails_fast_on_unbindable_socket_path",
+      "callee": "src/dekko/daemon_transport.py::default_transport_for",
+      "lines": [
+        747
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_start_fails_fast_on_unbindable_socket_path",
+      "callee": "tests/test_daemon.py::_deep_root",
+      "lines": [
+        737
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_status_json_shape_when_running",
       "callee": "src/dekko/daemon.py::status",
       "lines": [
-        332
+        333
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_status_reports_not_running",
       "callee": "src/dekko/daemon.py::status",
       "lines": [
-        325,
-        326
+        326,
+        327
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_is_a_noop_when_nothing_is_running",
       "callee": "src/dekko/daemon.py::stop",
       "lines": [
-        316
+        317
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        305
+        306
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "src/dekko/daemon.py::stop",
       "lines": [
-        309
+        310
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        299
+        300
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "src/dekko/daemon_transport.py::is_daemon_reachable",
       "lines": [
-        307
+        308
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "tests/test_daemon.py::_wait_until",
       "lines": [
-        306
+        307
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "src/dekko/daemon.py::_recv_line",
       "lines": [
-        678,
-        691,
-        699
+        679,
+        692,
+        700
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "src/dekko/daemon.py::_send_line",
       "lines": [
-        677,
-        698
+        678,
+        699
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        670
+        671
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport",
       "lines": [
-        660
+        661
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.__init__",
       "lines": [
-        660
+        661
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "tests/test_daemon.py::_wait_until",
       "lines": [
-        671
+        672
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_ineligible_command_returns_none",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        112
+        113
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_ineligible_command_returns_none",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        115
+        116
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_no_socket_returns_none",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        101
+        102
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_no_socket_returns_none",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        104
+        105
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_add_not_eligible",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        121
+        122
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_add_not_eligible",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        131
+        132
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_list_is_eligible",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        137
+        138
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_list_is_eligible",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        140
+        141
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "src/dekko/cli.py::build_subcommand_parser",
       "lines": [
-        239
+        240
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "src/dekko/daemon.py::_recv_line",
       "lines": [
-        230
+        231
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "src/dekko/daemon.py::_send_line",
       "lines": [
-        229
+        230
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "src/dekko/daemon.py::try_daemon",
       "lines": [
-        242
+        243
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        225
+        226
       ]
     },
     {
@@ -58148,21 +58381,21 @@
       "caller": "tests/test_daemon_transport.py::_serve#2",
       "callee": "tests/test_daemon_transport.py::_serve_one_line",
       "lines": [
-        204
+        244
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::_serve#3",
       "callee": "tests/test_daemon_transport.py::_serve_one_line",
       "lines": [
-        243
+        283
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::_serve#4",
       "callee": "tests/test_daemon_transport.py::_serve_one_line",
       "lines": [
-        272
+        312
       ]
     },
     {
@@ -58190,49 +58423,49 @@
       "caller": "tests/test_daemon_transport.py::test_force_stop_missing_pid_raises",
       "callee": "src/dekko/daemon_transport.py::force_stop",
       "lines": [
-        377
+        417
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_force_stop_sends_sigterm",
       "callee": "src/dekko/daemon_transport.py::force_stop",
       "lines": [
-        363
+        403
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_is_daemon_reachable_false_when_no_artifact",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        381
+        421
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_is_daemon_reachable_false_when_no_artifact",
       "callee": "src/dekko/daemon_transport.py::is_daemon_reachable",
       "lines": [
-        382
+        422
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_is_daemon_reachable_true_when_listening",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        398
+        438
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_is_daemon_reachable_true_when_listening",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        386
+        426
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_is_daemon_reachable_true_when_listening",
       "callee": "src/dekko/daemon_transport.py::is_daemon_reachable",
       "lines": [
-        401
+        441
       ]
     },
     {
@@ -58253,112 +58486,126 @@
       "caller": "tests/test_daemon_transport.py::test_spawn_detached_posix_branch",
       "callee": "src/dekko/daemon_transport.py::spawn_detached",
       "lines": [
-        320
+        360
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_spawn_detached_windows_branch",
       "callee": "src/dekko/daemon_transport.py::spawn_detached",
       "lines": [
-        340
+        380
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        275
+        315
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport",
       "lines": [
-        265
+        305
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.__init__",
       "lines": [
-        265
+        305
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_default_on_windows",
       "callee": "src/dekko/daemon_transport.py::default_transport_for",
       "lines": [
-        298
+        338
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport",
       "lines": [
-        179
+        219
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.__init__",
       "lines": [
-        179
+        219
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::test_tcp_loopback_preflight_check_is_a_noop",
+      "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport",
+      "lines": [
+        215
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::test_tcp_loopback_preflight_check_is_a_noop",
+      "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.__init__",
+      "lines": [
+        215
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        246
+        286
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport",
       "lines": [
-        236
+        276
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.__init__",
       "lines": [
-        236
+        276
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
       "lines": [
-        250
+        290
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "src/dekko/daemon.py::start",
       "lines": [
-        207
+        247
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport",
       "lines": [
-        197
+        237
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport.__init__",
       "lines": [
-        197
+        237
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
       "lines": [
-        211
+        251
       ]
     },
     {
@@ -58383,17 +58630,59 @@
       ]
     },
     {
+      "caller": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_catches_long_path_without_binding",
+      "callee": "src/dekko/daemon_transport.py::UnixSocketTransport",
+      "lines": [
+        190
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_catches_long_path_without_binding",
+      "callee": "src/dekko/daemon_transport.py::UnixSocketTransport.__init__",
+      "lines": [
+        190
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_catches_long_path_without_binding",
+      "callee": "tests/test_daemon_transport.py::_deep_root",
+      "lines": [
+        188
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_passes_for_a_short_path",
+      "callee": "src/dekko/daemon_transport.py::UnixSocketTransport",
+      "lines": [
+        203
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_passes_for_a_short_path",
+      "callee": "src/dekko/daemon_transport.py::UnixSocketTransport.__init__",
+      "lines": [
+        203
+      ]
+    },
+    {
       "caller": "tests/test_daemon_transport.py::test_unix_socket_sun_path_too_long_raises_transport_unavailable",
       "callee": "src/dekko/daemon_transport.py::UnixSocketTransport",
       "lines": [
-        162
+        167
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_unix_socket_sun_path_too_long_raises_transport_unavailable",
       "callee": "src/dekko/daemon_transport.py::UnixSocketTransport.__init__",
       "lines": [
-        162
+        167
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::test_unix_socket_sun_path_too_long_raises_transport_unavailable",
+      "callee": "tests/test_daemon_transport.py::_deep_root",
+      "lines": [
+        165
       ]
     },
     {
@@ -70565,6 +70854,15 @@
       ]
     },
     {
+      "caller": "src/dekko/daemon.py::start",
+      "name": "preflight_check",
+      "candidates": [
+        "src/dekko/daemon_transport.py::DaemonTransport.preflight_check",
+        "src/dekko/daemon_transport.py::TcpLoopbackTransport.preflight_check",
+        "src/dekko/daemon_transport.py::UnixSocketTransport.preflight_check"
+      ]
+    },
+    {
       "caller": "src/dekko/daemon.py::status",
       "name": "client_connect",
       "candidates": [
@@ -72172,6 +72470,15 @@
       ]
     },
     {
+      "caller": "tests/test_daemon.py::test_start_fails_fast_on_unbindable_socket_path",
+      "name": "exists",
+      "candidates": [
+        "src/dekko/daemon_transport.py::DaemonTransport.exists",
+        "src/dekko/daemon_transport.py::TcpLoopbackTransport.exists",
+        "src/dekko/daemon_transport.py::UnixSocketTransport.exists"
+      ]
+    },
+    {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "name": "exists",
       "candidates": [
@@ -72334,6 +72641,15 @@
       ]
     },
     {
+      "caller": "tests/test_daemon_transport.py::test_tcp_loopback_preflight_check_is_a_noop",
+      "name": "preflight_check",
+      "candidates": [
+        "src/dekko/daemon_transport.py::DaemonTransport.preflight_check",
+        "src/dekko/daemon_transport.py::TcpLoopbackTransport.preflight_check",
+        "src/dekko/daemon_transport.py::UnixSocketTransport.preflight_check"
+      ]
+    },
+    {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "name": "bind_and_listen",
       "candidates": [
@@ -72385,6 +72701,33 @@
         "src/dekko/daemon_transport.py::DaemonTransport.cleanup",
         "src/dekko/daemon_transport.py::TcpLoopbackTransport.cleanup",
         "src/dekko/daemon_transport.py::UnixSocketTransport.cleanup"
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_catches_long_path_without_binding",
+      "name": "exists",
+      "candidates": [
+        "src/dekko/daemon_transport.py::DaemonTransport.exists",
+        "src/dekko/daemon_transport.py::TcpLoopbackTransport.exists",
+        "src/dekko/daemon_transport.py::UnixSocketTransport.exists"
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_catches_long_path_without_binding",
+      "name": "preflight_check",
+      "candidates": [
+        "src/dekko/daemon_transport.py::DaemonTransport.preflight_check",
+        "src/dekko/daemon_transport.py::TcpLoopbackTransport.preflight_check",
+        "src/dekko/daemon_transport.py::UnixSocketTransport.preflight_check"
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_passes_for_a_short_path",
+      "name": "preflight_check",
+      "candidates": [
+        "src/dekko/daemon_transport.py::DaemonTransport.preflight_check",
+        "src/dekko/daemon_transport.py::TcpLoopbackTransport.preflight_check",
+        "src/dekko/daemon_transport.py::UnixSocketTransport.preflight_check"
       ]
     },
     {
@@ -75898,78 +76241,79 @@
       "caller": "src/dekko/daemon.py::start",
       "callee": "print",
       "lines": [
-        538,
-        568,
-        571
+        556,
+        565,
+        592,
+        595
       ]
     },
     {
       "caller": "src/dekko/daemon.py::start",
       "callee": "str",
       "lines": [
-        561,
-        563
+        585,
+        587
       ]
     },
     {
       "caller": "src/dekko/daemon.py::status",
       "callee": "json.dumps",
       "lines": [
-        656,
-        663
+        680,
+        687
       ]
     },
     {
       "caller": "src/dekko/daemon.py::status",
       "callee": "json.loads",
       "lines": [
-        648
+        672
       ]
     },
     {
       "caller": "src/dekko/daemon.py::status",
       "callee": "print",
       "lines": [
-        656,
-        658,
-        663,
-        666,
-        667,
-        668,
-        669,
-        672,
-        675
+        680,
+        682,
+        687,
+        690,
+        691,
+        692,
+        693,
+        696,
+        699
       ]
     },
     {
       "caller": "src/dekko/daemon.py::status",
       "callee": "sock.close",
       "lines": [
-        652
+        676
       ]
     },
     {
       "caller": "src/dekko/daemon.py::status",
       "callee": "str",
       "lines": [
-        656,
-        661
+        680,
+        685
       ]
     },
     {
       "caller": "src/dekko/daemon.py::stop",
       "callee": "print",
       "lines": [
-        593,
-        599,
-        621
+        617,
+        623,
+        645
       ]
     },
     {
       "caller": "src/dekko/daemon.py::stop",
       "callee": "sock.close",
       "lines": [
-        610
+        634
       ]
     },
     {
@@ -76043,262 +76387,268 @@
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
       "callee": "int",
       "lines": [
-        314
+        345
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
       "callee": "json.loads",
       "lines": [
-        313
+        344
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
       "callee": "self.port_file.read_text",
       "lines": [
-        313
+        344
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport._read_port_file",
       "callee": "str",
       "lines": [
-        314
+        345
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.authenticate",
       "callee": "conn.gettimeout",
       "lines": [
-        356
+        387
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.authenticate",
       "callee": "conn.settimeout",
       "lines": [
-        357,
-        363
+        388,
+        394
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.authenticate",
       "callee": "line.strip",
       "lines": [
-        367
+        398
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.bind_and_listen",
       "callee": "json.dumps",
       "lines": [
-        327
+        358
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.bind_and_listen",
       "callee": "secrets.token_hex",
       "lines": [
-        325
+        356
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.bind_and_listen",
       "callee": "self.port_file.parent.mkdir",
       "lines": [
-        321
+        352
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.bind_and_listen",
       "callee": "self.port_file.write_text",
       "lines": [
-        327
+        358
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.bind_and_listen",
       "callee": "sock.bind",
       "lines": [
-        323
+        354
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.bind_and_listen",
       "callee": "sock.getsockname",
       "lines": [
-        324
+        355
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.bind_and_listen",
       "callee": "sock.listen",
       "lines": [
-        328
+        359
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.bind_and_listen",
       "callee": "socket.socket",
       "lines": [
-        322
+        353
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.cleanup",
       "callee": "self.port_file.unlink",
       "lines": [
-        376
+        407
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
       "callee": "sock.close",
       "lines": [
-        342
+        373
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
       "callee": "sock.connect",
       "lines": [
-        340
+        371
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
       "callee": "sock.settimeout",
       "lines": [
-        338
+        369
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.client_connect",
       "callee": "socket.socket",
       "lines": [
-        337
+        368
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::TcpLoopbackTransport.send_auth_preamble",
       "callee": "sock.sendall",
       "lines": [
-        372
-      ]
-    },
-    {
-      "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
-      "callee": "len",
-      "lines": [
-        222,
-        225
+        403
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
       "callee": "os.chmod",
       "lines": [
-        249
-      ]
-    },
-    {
-      "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
-      "callee": "os.fsencode",
-      "lines": [
-        221
+        271
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
       "callee": "self.socket_path.parent.mkdir",
       "lines": [
-        229
+        251
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
       "callee": "self.socket_path.unlink",
       "lines": [
-        237
+        259
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
       "callee": "sock.bind",
       "lines": [
-        243
+        265
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
       "callee": "sock.close",
       "lines": [
-        245
+        267
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
       "callee": "sock.listen",
       "lines": [
-        250
+        272
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
       "callee": "socket.socket",
       "lines": [
-        241
+        263
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.bind_and_listen",
       "callee": "str",
       "lines": [
-        221,
-        243
+        265
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.cleanup",
       "callee": "self.socket_path.unlink",
       "lines": [
-        277
+        299
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.client_connect",
       "callee": "sock.close",
       "lines": [
-        262
+        284
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.client_connect",
       "callee": "sock.connect",
       "lines": [
-        260
+        282
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.client_connect",
       "callee": "sock.settimeout",
       "lines": [
-        258
+        280
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.client_connect",
       "callee": "socket.socket",
       "lines": [
-        257
+        279
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.client_connect",
       "callee": "str",
       "lines": [
-        260
+        282
+      ]
+    },
+    {
+      "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.preflight_check",
+      "callee": "len",
+      "lines": [
+        241,
+        244
+      ]
+    },
+    {
+      "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.preflight_check",
+      "callee": "os.fsencode",
+      "lines": [
+        240
+      ]
+    },
+    {
+      "caller": "src/dekko/daemon_transport.py::UnixSocketTransport.preflight_check",
+      "callee": "str",
+      "lines": [
+        240
       ]
     },
     {
@@ -76333,22 +76683,22 @@
       "caller": "src/dekko/daemon_transport.py::force_stop",
       "callee": "os.kill",
       "lines": [
-        453
+        484
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::is_daemon_reachable",
       "callee": "sock.close",
       "lines": [
-        484
+        515
       ]
     },
     {
       "caller": "src/dekko/daemon_transport.py::spawn_detached",
       "callee": "subprocess.Popen",
       "lines": [
-        428,
-        429
+        459,
+        460
       ]
     },
     {
@@ -87247,714 +87597,750 @@
       "caller": "tests/test_daemon.py::<module>",
       "callee": "pytest.mark.parametrize",
       "lines": [
-        164
+        165
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::<module>",
+      "callee": "pytest.mark.skipif",
+      "lines": [
+        723
       ]
     },
     {
       "caller": "tests/test_daemon.py::_affected_args",
       "callee": "cli.build_subcommand_parser().parse_args",
-      "lines": [
-        553
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::_affected_args",
-      "callee": "str",
       "lines": [
         554
       ]
     },
     {
+      "caller": "tests/test_daemon.py::_affected_args",
+      "callee": "str",
+      "lines": [
+        555
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::_deep_root",
+      "callee": "deep.mkdir",
+      "lines": [
+        719
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::_deep_root",
+      "callee": "len",
+      "lines": [
+        717
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::_deep_root",
+      "callee": "str",
+      "lines": [
+        717
+      ]
+    },
+    {
       "caller": "tests/test_daemon.py::_diff_args",
       "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
-        547
+        548
       ]
     },
     {
       "caller": "tests/test_daemon.py::_diff_args",
       "callee": "str",
       "lines": [
-        548
+        549
       ]
     },
     {
       "caller": "tests/test_daemon.py::_git",
       "callee": "str",
       "lines": [
-        503
+        504
       ]
     },
     {
       "caller": "tests/test_daemon.py::_git",
       "callee": "subprocess.run",
       "lines": [
-        502
+        503
       ]
     },
     {
       "caller": "tests/test_daemon.py::_query_symbol_args",
       "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
-        375
+        376
       ]
     },
     {
       "caller": "tests/test_daemon.py::_query_symbol_args",
       "callee": "str",
       "lines": [
-        376
+        377
       ]
     },
     {
       "caller": "tests/test_daemon.py::_spy",
       "callee": "calls.append",
       "lines": [
-        257
+        258
       ]
     },
     {
       "caller": "tests/test_daemon.py::_spy",
       "callee": "getattr",
       "lines": [
-        257
+        258
       ]
     },
     {
       "caller": "tests/test_daemon.py::_spy",
       "callee": "original",
       "lines": [
-        258
+        259
       ]
     },
     {
       "caller": "tests/test_daemon.py::_wait_until",
       "callee": "predicate",
       "lines": [
-        65,
-        68
+        66,
+        69
       ]
     },
     {
       "caller": "tests/test_daemon.py::_wait_until",
       "callee": "time.monotonic",
       "lines": [
-        63,
-        64
+        64,
+        65
       ]
     },
     {
       "caller": "tests/test_daemon.py::_wait_until",
       "callee": "time.sleep",
       "lines": [
-        67
+        68
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "(short_root / name).write_text",
       "lines": [
-        356
+        357
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "_CACHE_SRC.items",
       "lines": [
-        355
+        356
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "str",
       "lines": [
-        357
+        358
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "thread.join",
       "lines": [
-        371
+        372
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_cached_root",
       "callee": "threading.Thread",
       "lines": [
-        359
+        360
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "(root / name).write_text",
       "lines": [
-        517
+        518
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "_CACHE_SRC.items",
       "lines": [
-        516
+        517
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "str",
       "lines": [
-        529
+        530
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "thread.join",
       "lines": [
-        543
+        544
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_git_root",
       "callee": "threading.Thread",
       "lines": [
-        531
+        532
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_root",
       "callee": "thread.join",
       "lines": [
-        92
+        93
       ]
     },
     {
       "caller": "tests/test_daemon.py::daemon_thread_root",
       "callee": "threading.Thread",
       "lines": [
-        80
+        81
       ]
     },
     {
       "caller": "tests/test_daemon.py::short_root",
       "callee": "Path",
       "lines": [
-        52
+        53
       ]
     },
     {
       "caller": "tests/test_daemon.py::short_root",
       "callee": "shutil.rmtree",
       "lines": [
-        56
+        57
       ]
     },
     {
       "caller": "tests/test_daemon.py::short_root",
       "callee": "tempfile.mkdtemp",
       "lines": [
-        52
+        53
       ]
     },
     {
       "caller": "tests/test_daemon.py::spy",
       "callee": "calls.append",
-      "lines": [
-        392
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::spy",
-      "callee": "real_load_map",
       "lines": [
         393
       ]
     },
     {
-      "caller": "tests/test_daemon.py::spy#2",
-      "callee": "calls.append",
+      "caller": "tests/test_daemon.py::spy",
+      "callee": "real_load_map",
       "lines": [
-        427
+        394
       ]
     },
     {
       "caller": "tests/test_daemon.py::spy#2",
-      "callee": "real_load_map",
+      "callee": "calls.append",
       "lines": [
         428
       ]
     },
     {
-      "caller": "tests/test_daemon.py::spy#3",
-      "callee": "calls.append",
+      "caller": "tests/test_daemon.py::spy#2",
+      "callee": "real_load_map",
       "lines": [
-        569
+        429
       ]
     },
     {
       "caller": "tests/test_daemon.py::spy#3",
-      "callee": "real_load_map",
+      "callee": "calls.append",
       "lines": [
         570
       ]
     },
     {
-      "caller": "tests/test_daemon.py::spy#4",
-      "callee": "calls.append",
+      "caller": "tests/test_daemon.py::spy#3",
+      "callee": "real_load_map",
       "lines": [
-        601
+        571
       ]
     },
     {
       "caller": "tests/test_daemon.py::spy#4",
-      "callee": "real_load_map",
+      "callee": "calls.append",
       "lines": [
         602
       ]
     },
     {
+      "caller": "tests/test_daemon.py::spy#4",
+      "callee": "real_load_map",
+      "lines": [
+        603
+      ]
+    },
+    {
       "caller": "tests/test_daemon.py::spy#5",
       "callee": "calls.append",
       "lines": [
-        631
+        632
       ]
     },
     {
       "caller": "tests/test_daemon.py::spy#5",
       "callee": "real_load_map",
       "lines": [
-        632
+        633
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_busts_on_working_tree_change",
       "callee": "(root / \"a.py\").write_text",
       "lines": [
-        441
+        442
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_busts_on_working_tree_change",
       "callee": "len",
       "lines": [
-        434,
-        439,
-        445,
-        449,
-        452,
-        455
+        435,
+        440,
+        446,
+        450,
+        453,
+        456
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_busts_on_working_tree_change",
       "callee": "monkeypatch.setattr",
       "lines": [
-        430
+        431
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_hits_across_repeated_requests",
       "callee": "len",
       "lines": [
-        400,
-        405,
-        410
+        401,
+        406,
+        411
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_cache_hits_across_repeated_requests",
       "callee": "monkeypatch.setattr",
       "lines": [
-        395
+        396
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
       "callee": "len",
       "lines": [
-        576,
-        581,
-        586
+        577,
+        582,
+        587
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_and_affected_reuse_query_warmed_cache",
       "callee": "monkeypatch.setattr",
       "lines": [
-        572
+        573
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
       "callee": "(root / \"a.py\").write_text",
       "lines": [
-        640
+        641
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
       "callee": "len",
       "lines": [
-        638,
-        646
+        639,
+        647
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_cache_miss_on_edit_still_reports_correctly",
       "callee": "monkeypatch.setattr",
       "lines": [
-        634
+        635
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
       "callee": "len",
       "lines": [
-        608,
-        612
+        609,
+        613
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_diff_populates_cache_for_a_later_query",
       "callee": "monkeypatch.setattr",
       "lines": [
-        604
+        605
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "_json.loads",
       "lines": [
-        471
+        472
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "capsys.readouterr",
       "lines": [
-        468,
-        471
+        469,
+        472
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_daemon_status_reports_cache_state_after_a_request",
       "callee": "str",
       "lines": [
-        479
+        480
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
       "callee": "thread.is_alive",
+      "lines": [
+        290
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
+      "callee": "thread.join",
       "lines": [
         289
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
-      "callee": "thread.join",
-      "lines": [
-        288
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_idle_timeout_self_shutdown",
       "callee": "threading.Thread",
       "lines": [
-        280
+        281
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_no_daemon_flag_skips_routing",
       "callee": "monkeypatch.setattr",
       "lines": [
-        260
+        261
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_no_daemon_flag_skips_routing",
       "callee": "str",
       "lines": [
-        263,
-        268
+        264,
+        269
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_real_process_start_stop_status_roundtrip",
       "callee": "str",
       "lines": [
-        720,
-        729,
-        735,
-        737
+        770,
+        779,
+        785,
+        787
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "argv.append",
       "lines": [
-        170
+        171
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "parser.parse_args",
       "lines": [
-        173,
-        178
+        174,
+        179
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_byte_identical_output",
       "callee": "str",
       "lines": [
-        168
+        169
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "(short_root / \"a.py\").write_text",
       "lines": [
-        187
+        188
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "parser.parse_args",
       "lines": [
-        212,
-        214
+        213,
+        215
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "str",
       "lines": [
-        190,
-        207
+        191,
+        208
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "thread.join",
       "lines": [
-        219
+        220
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_routing_search_over_real_repo",
       "callee": "threading.Thread",
       "lines": [
-        192
+        193
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "(sock_dir / \"daemon.sock\").write_bytes",
       "lines": [
-        147
+        148
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
-        149
+        150
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "sock_dir.mkdir",
       "lines": [
-        146
+        147
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stale_socket_falls_open",
       "callee": "str",
       "lines": [
-        150
+        151
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_start_fails_fast_on_unbindable_socket_path",
+      "callee": "capsys.readouterr",
+      "lines": [
+        742,
+        757
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_status_json_shape_when_running",
       "callee": "_json.loads",
       "lines": [
-        336
+        337
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_status_json_shape_when_running",
       "callee": "capsys.readouterr",
       "lines": [
-        334
+        335
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_status_json_shape_when_running",
       "callee": "isinstance",
       "lines": [
-        338
+        339
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "thread.is_alive",
       "lines": [
-        311
+        312
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "thread.join",
       "lines": [
-        310
+        311
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_stop_shuts_down_a_reachable_daemon",
       "callee": "threading.Thread",
       "lines": [
-        300
+        301
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "_json.loads",
       "lines": [
-        683
+        684
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "bad_sock.close",
       "lines": [
-        693
+        694
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "bad_sock.sendall",
       "lines": [
-        689
+        690
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "bad_sock.settimeout",
       "lines": [
-        690
+        691
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "sock.close",
       "lines": [
-        680
+        681
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "sock2.close",
       "lines": [
-        701
+        702
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "thread.join",
       "lines": [
-        702
+        703
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_tcp_loopback_transport_accept_loop_parity",
       "callee": "threading.Thread",
       "lines": [
-        661
+        662
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_ineligible_command_returns_none",
       "callee": "cli.build_subcommand_parser().parse_args",
-      "lines": [
-        112
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_try_daemon_ineligible_command_returns_none",
-      "callee": "str",
       "lines": [
         113
       ]
     },
     {
-      "caller": "tests/test_daemon.py::test_try_daemon_no_socket_returns_none",
-      "callee": "cli.build_subcommand_parser().parse_args",
+      "caller": "tests/test_daemon.py::test_try_daemon_ineligible_command_returns_none",
+      "callee": "str",
       "lines": [
-        101
+        114
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_no_socket_returns_none",
-      "callee": "str",
+      "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
         102
       ]
     },
     {
+      "caller": "tests/test_daemon.py::test_try_daemon_no_socket_returns_none",
+      "callee": "str",
+      "lines": [
+        103
+      ]
+    },
+    {
       "caller": "tests/test_daemon.py::test_try_daemon_note_add_not_eligible",
       "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
-        121
+        122
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_add_not_eligible",
       "callee": "str",
       "lines": [
-        128
+        129
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_try_daemon_note_list_is_eligible",
       "callee": "cli.build_subcommand_parser().parse_args",
-      "lines": [
-        137
-      ]
-    },
-    {
-      "caller": "tests/test_daemon.py::test_try_daemon_note_list_is_eligible",
-      "callee": "str",
       "lines": [
         138
+      ]
+    },
+    {
+      "caller": "tests/test_daemon.py::test_try_daemon_note_list_is_eligible",
+      "callee": "str",
+      "lines": [
+        139
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "_json.loads",
       "lines": [
-        235
+        236
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "cli.build_subcommand_parser().parse_args",
       "lines": [
-        239
+        240
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "sock.close",
       "lines": [
-        232
+        233
       ]
     },
     {
       "caller": "tests/test_daemon.py::test_unknown_command_returns_error_and_daemon_keeps_serving",
       "callee": "str",
       "lines": [
-        240
+        241
       ]
     },
     {
@@ -87963,29 +88349,52 @@
       "lines": [
         130,
         142,
-        148,
-        293
+        161,
+        178,
+        199,
+        333
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::_accept_once",
       "callee": "conn.close",
       "lines": [
-        395
+        435
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::_accept_once",
       "callee": "listener.accept",
       "lines": [
-        392
+        432
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::_deep_root",
+      "callee": "deep.mkdir",
+      "lines": [
+        157
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::_deep_root",
+      "callee": "len",
+      "lines": [
+        155
+      ]
+    },
+    {
+      "caller": "tests/test_daemon_transport.py::_deep_root",
+      "callee": "str",
+      "lines": [
+        155
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::_raise",
       "callee": "ProcessLookupError",
       "lines": [
-        372
+        412
       ]
     },
     {
@@ -87999,21 +88408,21 @@
       "caller": "tests/test_daemon_transport.py::_serve#2",
       "callee": "received.extend",
       "lines": [
-        204
+        244
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::_serve#3",
       "callee": "received.extend",
       "lines": [
-        243
+        283
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::_serve#4",
       "callee": "received.extend",
       "lines": [
-        272
+        312
       ]
     },
     {
@@ -88112,56 +88521,56 @@
       "caller": "tests/test_daemon_transport.py::test_force_stop_missing_pid_raises",
       "callee": "monkeypatch.setattr",
       "lines": [
-        374
+        414
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_force_stop_missing_pid_raises",
       "callee": "pytest.raises",
       "lines": [
-        376
+        416
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_force_stop_sends_sigterm",
       "callee": "calls.append",
       "lines": [
-        360
+        400
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_force_stop_sends_sigterm",
       "callee": "monkeypatch.setattr",
       "lines": [
-        359
+        399
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_is_daemon_reachable_true_when_listening",
       "callee": "accept_thread.join",
       "lines": [
-        403
+        443
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_is_daemon_reachable_true_when_listening",
       "callee": "listener.close",
       "lines": [
-        404
+        444
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_is_daemon_reachable_true_when_listening",
       "callee": "listener.settimeout",
       "lines": [
-        388
+        428
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_is_daemon_reachable_true_when_listening",
       "callee": "threading.Thread",
       "lines": [
-        397
+        437
       ]
     },
     {
@@ -88238,310 +88647,310 @@
       "caller": "tests/test_daemon_transport.py::test_spawn_detached_posix_branch",
       "callee": "monkeypatch.setattr",
       "lines": [
-        310,
-        318
+        350,
+        358
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_spawn_detached_windows_branch",
       "callee": "monkeypatch.setattr",
       "lines": [
-        330,
-        338
+        370,
+        378
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "listener.close",
       "lines": [
-        286
+        326
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "ready.wait",
       "lines": [
-        276
+        316
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "reply.strip",
       "lines": [
-        290
+        330
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "server_thread.join",
       "lines": [
-        285
+        325
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "sock.close",
       "lines": [
-        283
+        323
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "sock.makefile",
       "lines": [
-        282
+        322
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "sock.makefile(\"r\", encoding=\"utf-8\", newline=\"\\n\").readline",
       "lines": [
-        282
+        322
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "sock.sendall",
       "lines": [
-        281
+        321
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "threading.Event",
       "lines": [
-        268
+        308
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_accepts_correct_token",
       "callee": "threading.Thread",
       "lines": [
-        274
+        314
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_default_on_windows",
       "callee": "isinstance",
       "lines": [
-        299
+        339
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "int",
       "lines": [
-        185
+        225
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "isinstance",
       "lines": [
-        183
+        223
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "json.loads",
       "lines": [
-        182
+        222
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "len",
       "lines": [
-        184
+        224
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "listener.close",
       "lines": [
-        192
+        232
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "probe.close",
       "lines": [
-        190
+        230
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "probe.connect",
       "lines": [
-        189
+        229
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "probe.settimeout",
       "lines": [
-        188
+        228
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "socket.socket",
       "lines": [
-        187
+        227
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_port_file_contents",
       "callee": "transport.port_file.read_text",
       "lines": [
-        182
+        222
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "listener.close",
       "lines": [
-        257
+        297
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "raw.close",
       "lines": [
-        259
+        299
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "raw.connect",
       "lines": [
-        253
+        293
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "raw.sendall",
       "lines": [
-        254
+        294
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "raw.settimeout",
       "lines": [
-        252
+        292
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "ready.wait",
       "lines": [
-        247
+        287
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "server_thread.join",
       "lines": [
-        256
+        296
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "socket.socket",
       "lines": [
-        251
+        291
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "threading.Event",
       "lines": [
-        239
+        279
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_mismatched_token",
       "callee": "threading.Thread",
       "lines": [
-        245
+        285
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "listener.close",
       "lines": [
-        226
+        266
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "raw.close",
       "lines": [
-        228
+        268
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "raw.connect",
       "lines": [
-        214
+        254
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "raw.recv",
       "lines": [
-        222
+        262
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "raw.sendall",
       "lines": [
-        218
+        258
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "raw.settimeout",
       "lines": [
-        213
+        253
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "ready.wait",
       "lines": [
-        208
+        248
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "server_thread.join",
       "lines": [
-        225
+        265
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "socket.socket",
       "lines": [
-        212
+        252
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "threading.Event",
       "lines": [
-        200
+        240
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_tcp_loopback_rejects_missing_token",
       "callee": "threading.Thread",
       "lines": [
-        206
+        246
       ]
     },
     {
@@ -88573,32 +88982,18 @@
       ]
     },
     {
-      "caller": "tests/test_daemon_transport.py::test_unix_socket_sun_path_too_long_raises_transport_unavailable",
-      "callee": "deep.mkdir",
+      "caller": "tests/test_daemon_transport.py::test_unix_socket_preflight_check_catches_long_path_without_binding",
+      "callee": "pytest.raises",
       "lines": [
-        160
-      ]
-    },
-    {
-      "caller": "tests/test_daemon_transport.py::test_unix_socket_sun_path_too_long_raises_transport_unavailable",
-      "callee": "len",
-      "lines": [
-        158
+        191
       ]
     },
     {
       "caller": "tests/test_daemon_transport.py::test_unix_socket_sun_path_too_long_raises_transport_unavailable",
       "callee": "pytest.raises",
       "lines": [
-        163,
-        169
-      ]
-    },
-    {
-      "caller": "tests/test_daemon_transport.py::test_unix_socket_sun_path_too_long_raises_transport_unavailable",
-      "callee": "str",
-      "lines": [
-        158
+        168,
+        174
       ]
     },
     {

@@ -525,13 +525,31 @@ def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
     immediately -- it does not wait for the daemon to finish binding
     (design doc §2.1: "returns immediately, does not block").
 
+    Before spawning, runs ``transport.preflight_check()`` in the
+    foreground and fails fast with a non-zero exit code if it raises.
+    This exists specifically to catch the ``AF_UNIX`` ``sun_path``-
+    length case (and any other cheaply-predictable bind failure) here
+    rather than only in the detached child: without it, the child's
+    own ``bind_and_listen()`` failure is written to stdio nobody reads
+    (see ``daemon_transport.spawn_detached``), so ``start()`` used to
+    print "started" and exit 0 even though no daemon ever came up --
+    the failure only surfaced later, on a subsequent ``daemon
+    status``/routed call. This does not close every possible bind
+    failure (a real ``bind()`` can still fail for reasons the
+    preflight check can't predict, e.g. a permissions error), but it
+    closes the one this round's testing actually hit, deterministically,
+    every time -- including on a second ``start`` attempt against the
+    same broken root, which used to sometimes print the bare "started"
+    line with no error at all (an async stderr write from the child
+    racing past the parent's own flush).
+
     Args:
         root: Resolved repo root to serve.
         idle_timeout: Self-shutdown window to pass to the daemon.
 
     Returns:
         ``0`` on a successful spawn (or an already-running daemon),
-        ``1`` if the spawn itself failed.
+        ``1`` if the preflight check or the spawn itself failed.
     """
     transport = default_transport_for(root)
     if is_daemon_reachable(transport):
@@ -540,6 +558,12 @@ def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
             f"({transport.describe()})"
         )
         return 0
+
+    try:
+        transport.preflight_check()
+    except TransportUnavailable as exc:
+        print(f"dekko daemon: cannot start: {exc}", file=sys.stderr)
+        return 1
 
     # A transport artifact can exist without a live daemon behind it
     # (an ungracefully-killed process) -- best-effort clear it before

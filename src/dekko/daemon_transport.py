@@ -148,6 +148,25 @@ class DaemonTransport(ABC):
         """
 
     @abstractmethod
+    def preflight_check(self) -> None:
+        """Parent-process-side: cheaply predict a ``bind_and_listen()``
+        failure before spawning the detached daemon.
+
+        Exists so ``daemon.start()`` can fail fast, in the foreground,
+        with a real non-zero exit code -- rather than reporting false
+        success because the actual bind happens in a detached child
+        process whose stdio the parent never reads. Must only check
+        conditions knowable without a real bind attempt (e.g. a path
+        length limit); it is not a substitute for ``bind_and_listen()``
+        itself, and a transport with nothing cheap to pre-check may
+        simply no-op here.
+
+        Raises:
+            TransportUnavailable: If this transport is already known
+                to be unbindable in the current environment.
+        """
+
+    @abstractmethod
     def client_connect(self, timeout: float) -> socket.socket:
         """CLI-side: connect to a live daemon.
 
@@ -217,7 +236,7 @@ class UnixSocketTransport(DaemonTransport):
     def exists(self) -> bool:
         return self.socket_path.exists()
 
-    def bind_and_listen(self) -> socket.socket:
+    def preflight_check(self) -> None:
         encoded = os.fsencode(str(self.socket_path))
         if len(encoded) > _SUN_PATH_LIMIT:
             raise TransportUnavailable(
@@ -225,6 +244,9 @@ class UnixSocketTransport(DaemonTransport):
                 f"({len(encoded)} bytes > {_SUN_PATH_LIMIT}): "
                 f"{self.socket_path}"
             )
+
+    def bind_and_listen(self) -> socket.socket:
+        self.preflight_check()
 
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         # A stale socket file left behind by an ungracefully-killed
@@ -307,6 +329,15 @@ class TcpLoopbackTransport(DaemonTransport):
 
     def exists(self) -> bool:
         return self.port_file.exists()
+
+    def preflight_check(self) -> None:
+        # Nothing cheaply knowable ahead of a real bind for a TCP
+        # loopback socket -- an OS-assigned ephemeral port has no
+        # length-style limit analogous to AF_UNIX's sun_path, and any
+        # other bind failure (e.g. no loopback interface) is rare
+        # enough that a real bind_and_listen() attempt is the only
+        # meaningful check.
+        pass
 
     def _read_port_file(self) -> tuple[int, str]:
         try:

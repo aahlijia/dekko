@@ -145,19 +145,24 @@ def test_unix_socket_default_on_posix(tmp_path: Path) -> None:
     assert isinstance(transport, dt.UnixSocketTransport)
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is POSIX-only")
-def test_unix_socket_sun_path_too_long_raises_transport_unavailable(
-    short_root: Path,
-) -> None:
-    # Build a root path deep enough that
-    # "<root>/.dekko/daemon.sock" exceeds the sun_path limit, starting
-    # from a known-short base so the result is deterministic
-    # regardless of how long the platform's own temp-dir prefix is.
+def _deep_root(short_root: Path) -> Path:
+    """Build a root path deep enough that ``<root>/.dekko/daemon.sock``
+    exceeds the sun_path limit, starting from a known-short base so the
+    result is deterministic regardless of how long the platform's own
+    temp-dir prefix is."""
     deep = short_root
     segment = "x" * 40
     while len(str(deep / ".dekko" / "daemon.sock")) < dt._SUN_PATH_LIMIT + 20:
         deep = deep / segment
     deep.mkdir(parents=True)
+    return deep
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is POSIX-only")
+def test_unix_socket_sun_path_too_long_raises_transport_unavailable(
+    short_root: Path,
+) -> None:
+    deep = _deep_root(short_root)
 
     transport = dt.UnixSocketTransport(deep)
     with pytest.raises(dt.TransportUnavailable):
@@ -170,9 +175,44 @@ def test_unix_socket_sun_path_too_long_raises_transport_unavailable(
         transport.client_connect(timeout=1.0)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is POSIX-only")
+def test_unix_socket_preflight_check_catches_long_path_without_binding(
+    short_root: Path,
+) -> None:
+    """``preflight_check()`` must raise the same
+    ``TransportUnavailable`` ``bind_and_listen()`` would, without ever
+    touching the filesystem or a real socket -- this is what lets
+    ``daemon.start()`` fail fast in the foreground before spawning the
+    detached child that would otherwise hit this same failure
+    invisibly (see round-10's daemon-start-false-success finding)."""
+    deep = _deep_root(short_root)
+
+    transport = dt.UnixSocketTransport(deep)
+    with pytest.raises(dt.TransportUnavailable):
+        transport.preflight_check()
+
+    # A pure prediction -- no socket file, no directory side effect
+    # beyond what the fixture itself created.
+    assert not transport.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is POSIX-only")
+def test_unix_socket_preflight_check_passes_for_a_short_path(
+    short_root: Path,
+) -> None:
+    transport = dt.UnixSocketTransport(short_root)
+    transport.preflight_check()  # must not raise
+
+
 # ---------------------------------------------------------------------
 # TcpLoopbackTransport-specific (unconditional -- usable everywhere)
 # ---------------------------------------------------------------------
+
+
+def test_tcp_loopback_preflight_check_is_a_noop(tmp_path: Path) -> None:
+    """Nothing is cheaply predictable ahead of a real bind for a TCP
+    loopback socket, so ``preflight_check()`` must never raise."""
+    dt.TcpLoopbackTransport(tmp_path).preflight_check()  # must not raise
 
 
 def test_tcp_loopback_port_file_contents(tmp_path: Path) -> None:
