@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from importlib.metadata import version as _pkg_version
 from importlib.resources import files as _pkg_files
@@ -1709,10 +1710,62 @@ def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
     return True
 
 
+# Optional daemon-installed warm-cache hook (Phase 3 of
+# ``.features/daemon-mode/``). ``_load_or_regen`` is the single
+# chokepoint essentially every read subcommand funnels through
+# directly or via ``_read_index`` (``query``/``outline``/``context``/
+# ``trace``/``unused``/``stats``/``summary``/``lean``), or calls
+# directly (``run_search``, ``run_export``, ``workset.run``) — caching
+# at this one point benefits every daemon-eligible subcommand without
+# each one needing its own cache-awareness, the same "one choke
+# point" property that makes ``server.py``'s ``Context.index_cache``
+# sufficient for the whole MCP tool surface (see ``server.py``'s
+# ``_index_for``).
+#
+# Both hooks are ``None`` for every direct CLI invocation — the
+# overwhelming majority of calls — so ``cli.py``'s own behavior is
+# completely unchanged unless a daemon process has explicitly
+# installed them via ``set_daemon_cache_hook``. Only
+# ``daemon.serve_daemon`` ever calls that, once at startup (and clears
+# it again on shutdown).
+_daemon_cache_get: Callable[[Path], mapfile.MapIndex | None] | None = None
+_daemon_cache_put: Callable[[Path, mapfile.MapIndex], None] | None = None
+
+
+def set_daemon_cache_hook(
+    get: Callable[[Path], mapfile.MapIndex | None] | None,
+    put: Callable[[Path, mapfile.MapIndex], None] | None,
+) -> None:
+    """Install (or clear, passing ``None``/``None``) the daemon's cache.
+
+    ``get(root)`` must return a still-fresh cached index for ``root``
+    (having already re-validated it via ``mapfile.check_freshness``
+    itself — this seam trusts the hook's own answer, it does not
+    re-check), or ``None`` on a miss/stale hit. ``put(root, index)``
+    records a freshly loaded index for later ``get`` calls.
+
+    Args:
+        get: Cache-check callback, or ``None`` to disable cache
+            lookups (the default, direct-CLI behavior).
+        put: Cache-store callback, or ``None`` to disable caching.
+    """
+    global _daemon_cache_get, _daemon_cache_put
+    _daemon_cache_get = get
+    _daemon_cache_put = put
+
+
 def _load_or_regen(
     root: Path, no_regen: bool
 ) -> tuple[mapfile.MapIndex | None, int]:
     """Load the map at root, regenerating when missing or stale.
+
+    When running inside the daemon process (``set_daemon_cache_hook``
+    has installed a hook), a still-fresh cached index is returned
+    outright, skipping ``map.json``'s JSON parse and the full symbol/
+    call-graph index rebuild entirely — the dominant cost of a reload
+    (Phase 3 of ``.features/daemon-mode/``, mirroring ``server.py``'s
+    ``Context.index_cache``/``_index_for``). A direct CLI invocation
+    never installs this hook, so its behavior here is unchanged.
 
     Args:
         root: Repo root containing map.json.
@@ -1721,8 +1774,15 @@ def _load_or_regen(
     Returns:
         ``(index, exit_code)`` — index is ``None`` on failure.
     """
+    if _daemon_cache_get is not None:
+        cached = _daemon_cache_get(root)
+        if cached is not None:
+            return cached, 0
+
     index = mapfile.load_map(root)
     if index is not None and mapfile.check_freshness(root, index).fresh:
+        if _daemon_cache_put is not None:
+            _daemon_cache_put(root, index)
         return index, 0
     if no_regen:
         print(
@@ -1735,7 +1795,10 @@ def _load_or_regen(
     code = regen_map(root, quiet=True)
     if code != 0:
         return None, code
-    return mapfile.load_map(root), 0
+    index = mapfile.load_map(root)
+    if index is not None and _daemon_cache_put is not None:
+        _daemon_cache_put(root, index)
+    return index, 0
 
 
 def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:

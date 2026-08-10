@@ -20,10 +20,16 @@ reload on every invocation. This module owns:
   helpers (``start``/``stop``/``status``) backing ``dekko daemon
   start/stop/status``.
 
-No cache yet -- every daemon-routed request calls straight through to
-the same ``_load_or_regen`` path a direct process would use. The
-warm single-slot index cache is Phase 3's scope
-(``.features/daemon-mode/TRACKER.md``).
+Phase 3 (``.features/daemon-mode/TRACKER.md``) adds a single-slot warm
+``MapIndex`` cache (``_WarmCache``) that ``serve_daemon`` installs into
+``cli.py``'s ``_load_or_regen`` via ``cli.set_daemon_cache_hook`` at
+startup, re-validated on every access via ``mapfile.check_freshness``
+-- the same freshness oracle ``server.py``'s ``Context.index_cache``
+already uses for the MCP server's analogous cache. A daemon serving
+repeated requests against an unchanged map skips the JSON-parse/
+index-rebuild step entirely after the first request; a working-tree
+change (or an out-of-band ``dekko map`` regen) is picked up on the
+next request, never served stale.
 """
 
 import argparse
@@ -35,6 +41,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from . import mapfile
 from .daemon_transport import (
     DaemonTransport,
     DaemonUnavailableError,
@@ -142,6 +149,61 @@ def _dispatch_table() -> dict[str, Callable[[argparse.Namespace], int]]:
     }
 
 
+class _WarmCache:
+    """Single-slot warm ``MapIndex`` cache for one daemon process.
+
+    One daemon serves exactly one repo root (its transport artifact
+    lives inside that root's own ``.dekko/``), so this doesn't need
+    ``server.Context.index_cache``'s dict-keyed shape the way a
+    multi-root MCP server session does -- a single slot is enough,
+    re-validated via ``mapfile.check_freshness`` on every access
+    exactly as that cache is (design doc §2.4). Installed into
+    ``cli._load_or_regen`` via ``cli.set_daemon_cache_hook`` for the
+    lifetime of ``serve_daemon``'s accept loop.
+    """
+
+    def __init__(self) -> None:
+        self._index: mapfile.MapIndex | None = None
+        self._root: Path | None = None
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, root: Path) -> mapfile.MapIndex | None:
+        """Return the cached index for ``root`` if still fresh, else
+        ``None``.
+
+        Every call that doesn't return a fresh hit counts as a miss --
+        including the very first call before anything has ever been
+        cached -- so ``snapshot()``'s hit/miss counters describe every
+        cache-check ``_load_or_regen`` made, not just the ones that
+        found something to check.
+        """
+        if self._index is not None and self._root == root:
+            if mapfile.check_freshness(root, self._index).fresh:
+                self.hits += 1
+                return self._index
+        self.misses += 1
+        return None
+
+    def put(self, root: Path, index: mapfile.MapIndex) -> None:
+        """Record a freshly loaded ``index`` for ``root``."""
+        self._root = root
+        self._index = index
+
+    def snapshot(self) -> dict | None:
+        """Status-reportable cache state, or ``None`` before any
+        request has populated the cache."""
+        if self._index is None or self._root is None:
+            return None
+        fresh = mapfile.check_freshness(self._root, self._index).fresh
+        return {
+            "cached_root": str(self._root),
+            "fresh": fresh,
+            "hits": self.hits,
+            "misses": self.misses,
+        }
+
+
 def _recv_line(sock: socket.socket) -> str | None:
     """Read one newline-terminated line from ``sock``.
 
@@ -181,16 +243,19 @@ def _send_line(sock: socket.socket, payload: dict) -> None:
     sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
 
 
-def _status_payload(transport: DaemonTransport, start_time: float) -> dict:
+def _status_payload(
+    transport: DaemonTransport, start_time: float, cache: "_WarmCache"
+) -> dict:
     """Build the response body for a ``_status`` protocol request."""
     return {
         "running": True,
         "pid": os.getpid(),
         "uptime_seconds": round(time.monotonic() - start_time, 3),
         "transport": transport.describe(),
-        # Phase 3 adds the warm single-slot index cache; nothing to
-        # report about it yet.
-        "cache": None,
+        # None until the first daemon-routed read populates the
+        # cache; a dict with the cached root, its current freshness,
+        # and cumulative hit/miss counts afterward.
+        "cache": cache.snapshot(),
     }
 
 
@@ -199,6 +264,7 @@ def _handle_connection(
     transport: DaemonTransport,
     dispatch: dict[str, Callable[[argparse.Namespace], int]],
     start_time: float,
+    cache: "_WarmCache",
 ) -> bool:
     """Handle exactly one accepted connection.
 
@@ -209,6 +275,8 @@ def _handle_connection(
         dispatch: ``{command -> cli.py function}``, built once at
             daemon startup.
         start_time: ``time.monotonic()`` value at daemon startup.
+        cache: This daemon's warm single-slot index cache, for the
+            ``_status`` payload's cache-state report.
 
     Returns:
         ``False`` if the accept loop should stop after this
@@ -243,7 +311,7 @@ def _handle_connection(
             _send_line(conn, {"exit_code": 0, "stdout": "", "stderr": ""})
             return False
         if cmd == _STATUS_CMD:
-            _send_line(conn, _status_payload(transport, start_time))
+            _send_line(conn, _status_payload(transport, start_time, cache))
             return True
 
         func = dispatch.get(cmd)
@@ -330,7 +398,14 @@ def serve_daemon(
         print(f"dekko daemon: cannot start: {exc}", file=sys.stderr)
         return 1
 
+    # Deferred import: avoids a circular import at module load time
+    # with cli.py, which imports this module (see _dispatch_table's
+    # docstring for the same reasoning).
+    from . import cli
+
     dispatch = _dispatch_table()
+    cache = _WarmCache()
+    cli.set_daemon_cache_hook(cache.get, cache.put)
     start_time = time.monotonic()
     sock.settimeout(idle_timeout)
     try:
@@ -339,11 +414,19 @@ def serve_daemon(
                 conn, _addr = sock.accept()
             except socket.timeout:
                 break
-            if not _handle_connection(conn, transport, dispatch, start_time):
+            if not _handle_connection(
+                conn, transport, dispatch, start_time, cache
+            ):
                 break
     finally:
         sock.close()
         transport.cleanup()
+        # Uninstall so this process-global hook never leaks past this
+        # daemon's lifetime -- matters for tests running serve_daemon
+        # in-thread (same process, same cli module) across several
+        # daemon instances, and simply keeps a stopped daemon's stale
+        # cache from being reachable through cli.py by anything else.
+        cli.set_daemon_cache_hook(None, None)
     return 0
 
 
@@ -584,5 +667,13 @@ def status(root: Path, as_json: bool = False) -> int:
     print(f"  pid: {data.get('pid')}")
     print(f"  uptime: {data.get('uptime_seconds', 0):.1f}s")
     print(f"  transport: {data.get('transport')}")
-    print("  cache: none yet (the warm cache lands in Phase 3)")
+    cache = data.get("cache")
+    if cache is None:
+        print("  cache: empty (no daemon-routed read yet)")
+    else:
+        state = "fresh" if cache.get("fresh") else "stale-pending-refresh"
+        print(
+            f"  cache: {state} "
+            f"(hits={cache.get('hits', 0)}, misses={cache.get('misses', 0)})"
+        )
     return 0

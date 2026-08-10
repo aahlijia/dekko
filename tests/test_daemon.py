@@ -14,6 +14,7 @@ known history of hanging on orphaned child processes left behind by a
 test that didn't clean up (workflow doc §3, point 3).
 """
 
+import json as _json
 import shutil
 import tempfile
 import threading
@@ -26,10 +27,16 @@ import pytest
 from dekko import cli
 from dekko import daemon
 from dekko import daemon_transport as dt
+from dekko import mapfile
 from dekko.server import _capture
 
 _POLL_DEADLINE = 5.0
 _POLL_INTERVAL = 0.02
+
+_CACHE_SRC = {
+    "a.py": "def f() -> int:\n    return 1\n",
+    "b.py": "from a import f\n\n\ndef g() -> int:\n    return f()\n",
+}
 
 
 @pytest.fixture
@@ -223,7 +230,6 @@ def test_unknown_command_returns_error_and_daemon_keeps_serving(
     finally:
         sock.close()
     assert raw is not None
-    import json as _json
 
     response = _json.loads(raw)
     assert response["exit_code"] != 0
@@ -325,13 +331,153 @@ def test_status_json_shape_when_running(
     code = daemon.status(daemon_thread_root, as_json=True)
     assert code == 0
     out = capsys.readouterr().out
-    import json as _json
 
     data = _json.loads(out)
     assert data["running"] is True
     assert isinstance(data["pid"], int)
     assert "uptime_seconds" in data
     assert data["cache"] is None
+
+
+# ---------------------------------------------------------------------
+# Warm cache (Phase 3): repeated daemon-routed reads against an
+# unchanged map skip mapfile.load_map entirely, and a working-tree
+# change between requests is picked up on the next one, never served
+# stale. Mirrors tests/test_server.py's Context.index_cache tests for
+# the MCP server's analogous cache.
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def daemon_thread_cached_root(short_root: Path) -> Iterator[Path]:
+    """A mapped repo (``_CACHE_SRC``) served by an in-thread daemon."""
+    for name, text in _CACHE_SRC.items():
+        (short_root / name).write_text(text)
+    assert cli.main(["map", str(short_root), "--quiet"]) == 0
+
+    thread = threading.Thread(
+        target=daemon.serve_daemon,
+        kwargs={"root": short_root, "idle_timeout": 30.0},
+        daemon=True,
+    )
+    thread.start()
+    transport = dt.default_transport_for(short_root)
+    assert _wait_until(transport.exists), "daemon did not bind in time"
+    try:
+        yield short_root
+    finally:
+        daemon.stop(short_root)
+        thread.join(timeout=_POLL_DEADLINE)
+
+
+def _query_symbol_args(root: Path, symbol: str) -> object:
+    return cli.build_subcommand_parser().parse_args(
+        ["query", "symbol", symbol, "--root", str(root)]
+    )
+
+
+def test_daemon_cache_hits_across_repeated_requests(
+    daemon_thread_cached_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Several daemon-routed reads against an unchanged map must make
+    exactly one real ``mapfile.load_map`` call -- mirrors
+    ``test_server.py``'s
+    ``test_index_for_caches_across_calls_when_unchanged``."""
+    root = daemon_thread_cached_root
+    calls: list[Path] = []
+    real_load_map = mapfile.load_map
+
+    def spy(root_arg: Path) -> mapfile.MapIndex | None:
+        calls.append(root_arg)
+        return real_load_map(root_arg)
+
+    monkeypatch.setattr(mapfile, "load_map", spy)
+
+    result1 = daemon.try_daemon(_query_symbol_args(root, "f"))
+    assert result1 is not None
+    assert result1[0] == 0
+    assert len(calls) == 1  # cache miss: first request loads the map
+
+    result2 = daemon.try_daemon(_query_symbol_args(root, "g"))
+    assert result2 is not None
+    assert result2[0] == 0
+    assert len(calls) == 1  # cache hit: no second load_map call
+
+    result3 = daemon.try_daemon(_query_symbol_args(root, "f"))
+    assert result3 is not None
+    assert result3[0] == 0
+    assert len(calls) == 1  # still cached
+    assert "g() -> int" in result2[1]
+
+
+def test_daemon_cache_busts_on_working_tree_change(
+    daemon_thread_cached_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A working-tree edit between daemon-routed requests must not be
+    served stale -- correctness comes from re-checking
+    ``mapfile.check_freshness`` on every access, not from observing an
+    invalidation event. Mirrors ``test_server.py``'s
+    ``test_index_for_busts_cache_when_map_goes_stale``."""
+    root = daemon_thread_cached_root
+    calls: list[Path] = []
+    real_load_map = mapfile.load_map
+
+    def spy(root_arg: Path) -> mapfile.MapIndex | None:
+        calls.append(root_arg)
+        return real_load_map(root_arg)
+
+    monkeypatch.setattr(mapfile, "load_map", spy)
+
+    result1 = daemon.try_daemon(_query_symbol_args(root, "f"))
+    assert result1 is not None and result1[0] == 0
+    assert len(calls) == 1  # cache miss: populates the cache
+
+    not_yet = daemon.try_daemon(_query_symbol_args(root, "brand_new"))
+    assert not_yet is not None
+    assert not_yet[0] != 0  # cache still serving the old (pre-edit) index
+    assert len(calls) == 1  # served from cache, no reload triggered
+
+    (root / "a.py").write_text(
+        "def f() -> int:\n    return 1\n\n\ndef brand_new() -> int:\n"
+        "    return 2\n"
+    )
+    before_refresh = len(calls)
+    result2 = daemon.try_daemon(_query_symbol_args(root, "brand_new"))
+    assert result2 is not None
+    assert result2[0] == 0  # staleness detected, cache refreshed
+    assert len(calls) > before_refresh  # a reload actually happened
+    assert "brand_new() -> int" in result2[1]
+
+    after_refresh = len(calls)
+    result3 = daemon.try_daemon(_query_symbol_args(root, "brand_new"))
+    assert result3 is not None and result3[0] == 0
+    assert len(calls) == after_refresh  # re-cached after the refresh
+
+
+def test_daemon_status_reports_cache_state_after_a_request(
+    daemon_thread_cached_root: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """``dekko daemon status``'s cache field is ``None`` until the
+    first daemon-routed read populates it, then reports the cached
+    root, its current freshness, and cumulative hit/miss counts."""
+    root = daemon_thread_cached_root
+    result = daemon.try_daemon(_query_symbol_args(root, "f"))
+    assert result is not None and result[0] == 0
+
+    capsys.readouterr()  # discard anything printed so far, if any
+    code = daemon.status(root, as_json=True)
+    assert code == 0
+    data = _json.loads(capsys.readouterr().out)
+    cache = data["cache"]
+    assert cache is not None
+    # The daemon-side handler resolves args.root itself (mirroring
+    # every other subcommand's Path(args.root).resolve()), which can
+    # differ textually from the fixture's own root on platforms where
+    # the temp dir sits behind a symlink (macOS: /var -> /private/var)
+    # -- compare against the same resolution, not raw text.
+    assert cache["cached_root"] == str(root.resolve())
+    assert cache["fresh"] is True
+    assert cache["hits"] + cache["misses"] >= 1
 
 
 # ---------------------------------------------------------------------
@@ -367,7 +513,6 @@ def test_tcp_loopback_transport_accept_loop_parity(
         finally:
             sock.close()
         assert raw is not None
-        import json as _json
 
         assert _json.loads(raw)["running"] is True
 
