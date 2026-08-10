@@ -195,8 +195,14 @@ def _relation_tool(
             ``False`` here since test callers are usually noise.
 
     Returns:
-        Rendered text result, or a placeholder when there are none.
+        Rendered text result, or a placeholder when there are none. When
+        ``include_tests`` was silently defaulted to false (the caller
+        omitted the argument and ``default_include_tests`` is false for
+        this tool), a trailing ``note:`` line discloses the exclusion —
+        an explicit ``include_tests=false`` from the caller needs no
+        such note, since that filtering was requested, not implicit.
     """
+    explicit_include_tests = "include_tests" in args
     include_tests = bool(args.get("include_tests", default_include_tests))
     index = _index_for(ctx, args, include_tests=include_tests)
     target = _require(args, "symbol")
@@ -217,7 +223,13 @@ def _relation_tool(
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip() or f"(no {action} for {target})"
+    result = out.strip() or f"(no {action} for {target})"
+    if not include_tests and not explicit_include_tests:
+        result += (
+            f"\n\nnote: test-file {action} excluded by default for "
+            "this tool; pass include_tests=true to see them."
+        )
+    return result
 
 
 def tool_query_symbol(ctx: Context, args: dict) -> str:

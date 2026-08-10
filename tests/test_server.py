@@ -820,3 +820,92 @@ def test_get_callees_and_query_symbol_include_tests_by_default(
         0
     ]["text"]
     assert "f() -> int" in callees_text
+
+
+def test_get_callers_discloses_silent_test_exclusion(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-11 §6: a caller who never mentions ``include_tests`` gets
+    a ``note:`` disclosing that test-file callers were dropped by this
+    tool's own default (which diverges from the CLI's). A caller who
+    explicitly asks for either value gets no such note — they already
+    know what they asked for."""
+    files = {
+        "a.py": "def f() -> int:\n    return 1\n",
+        "b.py": "from a import f\n\n\ndef g() -> int:\n    return f()\n",
+    }
+    ctx = _ctx(make_mapped_repo(files))
+
+    silent_default = _call(ctx, "get_callers", {"symbol": "f"})["content"][0][
+        "text"
+    ]
+    assert "excluded by default for this tool" in silent_default
+
+    explicit_opt_out = _call(
+        ctx, "get_callers", {"symbol": "f", "include_tests": False}
+    )["content"][0]["text"]
+    assert "excluded by default for this tool" not in explicit_opt_out
+
+    explicit_opt_in = _call(
+        ctx, "get_callers", {"symbol": "f", "include_tests": True}
+    )["content"][0]["text"]
+    assert "excluded by default for this tool" not in explicit_opt_in
+
+
+def test_get_callees_never_discloses_test_exclusion(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``get_callees``' default is already ``include_tests=True``, so
+    nothing is silently excluded and the disclosure note never fires."""
+    files = {
+        "a.py": "def f() -> int:\n    return 1\n",
+        "b.py": "from a import f\n\n\ndef g() -> int:\n    return f()\n",
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    text = _call(ctx, "get_callees", {"symbol": "g"})["content"][0]["text"]
+    assert "excluded by default" not in text
+
+
+def test_get_callers_resolves_java_package_named_test(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-11 §3: a Java package segment literally named `test`
+    (org.springframework.boot.test, under src/main/) used to make
+    classify.is_test_path() misclassify the *definition's own file* as
+    a test file, so MCP's default (without_tests()) filtering removed
+    the target symbol itself and get_callers returned "no symbol
+    matches" even though the CLI (include_tests=True by default)
+    resolved it fine. Reproduces the exact spring-boot repro shape."""
+    path = (
+        "core/spring-boot-test/src/main/java/org/springframework/boot/"
+        "test/context/runner/AbstractApplicationContextRunner.java"
+    )
+    files = {
+        path: (
+            "package org.springframework.boot.test.context.runner;\n"
+            "\n"
+            "class AbstractApplicationContextRunner {\n"
+            "    void withUserConfiguration() {\n"
+            "    }\n"
+            "}\n"
+        ),
+        path.replace("AbstractApplicationContextRunner.java", "Caller.java"): (
+            "package org.springframework.boot.test.context.runner;\n"
+            "\n"
+            "class Caller {\n"
+            "    void run() {\n"
+            "        AbstractApplicationContextRunner runner =\n"
+            "            new AbstractApplicationContextRunner();\n"
+            "        runner.withUserConfiguration();\n"
+            "    }\n"
+            "}\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(
+        ctx, "get_callers", {"symbol": f"{path}:withUserConfiguration"}
+    )
+    text = result["content"][0]["text"]
+    assert result["isError"] is False
+    assert "no symbol matches" not in text
+    assert "Caller.run" in text
