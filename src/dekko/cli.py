@@ -23,6 +23,7 @@ from . import cache as cache_mod
 from . import classify
 from . import cline as cline_mod
 from . import contextpack
+from . import daemon as daemon_mod
 from . import diff
 from . import export
 from . import hooks as hooks_mod
@@ -66,6 +67,7 @@ SUBCOMMANDS = (
     "status",
     "ledger",
     "hooks",
+    "daemon",
     "serve",
     "unused",
     "stats",
@@ -709,6 +711,71 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_hooks_run.add_argument("event", choices=list(hooks_mod.EVENTS))
     p_hooks_run.set_defaults(func=run_hooks_run)
+
+    p_daemon = sub.add_parser(
+        "daemon",
+        help="manage the per-repo warm-cache daemon (start/stop/status)",
+    )
+    daemon_sub = p_daemon.add_subparsers(
+        dest="daemon_action", required=True, metavar="ACTION"
+    )
+    p_daemon_start = daemon_sub.add_parser(
+        "start", help="start the daemon for this repo root"
+    )
+    p_daemon_start.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root to serve (default: cwd)",
+    )
+    p_daemon_start.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=daemon_mod.DEFAULT_IDLE_TIMEOUT,
+        metavar="SECONDS",
+        help="self-shutdown after this many idle seconds "
+        f"(default: {daemon_mod.DEFAULT_IDLE_TIMEOUT:.0f})",
+    )
+    p_daemon_start.set_defaults(func=run_daemon_start)
+
+    p_daemon_stop = daemon_sub.add_parser(
+        "stop", help="stop the daemon for this repo root"
+    )
+    p_daemon_stop.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root whose daemon to stop (default: cwd)",
+    )
+    p_daemon_stop.set_defaults(func=run_daemon_stop)
+
+    p_daemon_status = daemon_sub.add_parser(
+        "status",
+        help="report whether a daemon is running for this repo root",
+    )
+    p_daemon_status.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root to check (default: cwd)",
+    )
+    p_daemon_status.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_daemon_status.set_defaults(func=run_daemon_status)
+
+    p_daemon_serve = daemon_sub.add_parser("_serve", help=argparse.SUPPRESS)
+    p_daemon_serve.add_argument("--root", default=".", metavar="DIR")
+    p_daemon_serve.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=daemon_mod.DEFAULT_IDLE_TIMEOUT,
+        metavar="SECONDS",
+    )
+    p_daemon_serve.set_defaults(func=run_daemon_serve)
 
     p_serve = sub.add_parser("serve", help="run the MCP server over stdio")
     p_serve.add_argument(
@@ -1953,6 +2020,34 @@ def run_hooks_run(args: argparse.Namespace) -> int:
     return hooks_mod.dispatch(args.event, sys.stdin.read())
 
 
+def run_daemon_start(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon start``."""
+    return daemon_mod.start(Path(args.root).resolve(), args.idle_timeout)
+
+
+def run_daemon_stop(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon stop``."""
+    return daemon_mod.stop(Path(args.root).resolve())
+
+
+def run_daemon_status(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon status``."""
+    return daemon_mod.status(Path(args.root).resolve(), args.as_json)
+
+
+def run_daemon_serve(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon _serve`` (internal daemon process entry).
+
+    Not meant to be invoked directly by a human -- this is the
+    command ``daemon.start()`` spawns as a detached background
+    process; it blocks in ``serve_daemon``'s accept loop until an
+    explicit ``dekko daemon stop`` or the idle timeout fires.
+    """
+    return daemon_mod.serve_daemon(
+        Path(args.root).resolve(), args.idle_timeout
+    )
+
+
 def run_orient(args: argparse.Namespace) -> int:
     """Handle ``dekko orient [--read PATH]``."""
     return orient_mod.run(
@@ -2214,8 +2309,21 @@ def main(argv: list[str] | None = None) -> int:
     """
     args_list = list(sys.argv[1:] if argv is None else argv)
 
+    no_daemon = "--no-daemon" in args_list
+    if no_daemon:
+        args_list = [a for a in args_list if a != "--no-daemon"]
+
     if args_list and args_list[0] in SUBCOMMANDS:
         args = build_subcommand_parser().parse_args(args_list)
+        if not no_daemon:
+            routed = daemon_mod.try_daemon(args)
+            if routed is not None:
+                exit_code, out, err = routed
+                if out:
+                    sys.stdout.write(out)
+                if err:
+                    sys.stderr.write(err)
+                return exit_code
         return args.func(args)
 
     if args_list and args_list[0] in ("-h", "--help"):
