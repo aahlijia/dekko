@@ -18,6 +18,7 @@ dekko diff                           # symbols changed since the map's commit
 dekko unused                         # symbols nothing calls (dead-code leads)
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
+dekko daemon start                   # warm-cache background process (see below)
 ```
 
 Symbol targets accept a bare `name`, `Class.method`, or a qualified
@@ -60,6 +61,42 @@ Anchor a durable, committed note to a symbol — it shows up in
 dekko note add resolver.py:resolve "ambiguous calls are marked, never guessed"
 dekko note list resolver.py:resolve
 ```
+
+## Daemon mode
+
+`dekko daemon start` spawns a small per-repo background process that
+keeps a warm, in-memory index across CLI calls instead of every
+invocation reparsing `map.json` from scratch:
+
+```sh
+dekko daemon start                   # spawn it, returns immediately
+dekko daemon status                  # running? pid, uptime, cache hits/misses
+dekko daemon status --json           # structured form of the above
+dekko daemon stop                    # graceful shutdown
+```
+
+Once running, every read-only subcommand (`query`, `search`,
+`workset`, `diff`, `affected`, `outline`, `context`, `trace`, `stats`,
+`summary`, `lean`, `unused`, `status`, `note list`, `export`)
+transparently routes through the daemon: identical output and exit
+code, just without the reload. Write-path commands (`map`, `note add`/
+`note rm`, `hooks ...`) always run directly, sidestepping
+write-concurrency entirely. Pass `--no-daemon` on any command to force
+direct execution for that one call regardless of whether a daemon is
+running.
+
+The daemon fails open: a stale socket, an unreachable process, or any
+transport error falls back silently to normal direct execution, so a
+dead or never-started daemon is never a hard failure. It self-shuts-
+down after 30 minutes idle by default (`dekko daemon start
+--idle-timeout SECONDS` to change it), and re-validates its cached
+index on every read the same way a direct invocation would, so a
+working-tree edit or an out-of-band `dekko map` is never served stale.
+
+All three subcommands take `--root DIR` (default: cwd) for a repo
+other than the current directory. Transport is a Unix domain socket at
+`.dekko/daemon.sock` on macOS/Linux, or a token-authenticated TCP
+loopback connection on Windows.
 
 ## Language support
 
