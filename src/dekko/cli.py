@@ -27,6 +27,7 @@ from . import contextpack
 from . import daemon as daemon_mod
 from . import diff
 from . import export
+from . import filelock
 from . import grammars
 from . import hooks as hooks_mod
 from . import languages
@@ -1794,6 +1795,79 @@ def set_daemon_cache_hook(
     _daemon_cache_put = put
 
 
+# Regen-lock wait: how often to re-check freshness while another
+# process holds the ``.dekko/regen.lock`` (round-12 §4.1b), and how
+# long to wait before giving up and fail-opening into a redundant
+# local regen anyway. The cap matches daemon.py's own "generous but
+# bounded" convention (_CLIENT_TIMEOUT/_REQUEST_TIMEOUT, both 30s) —
+# never block indefinitely on another process.
+_REGEN_LOCK_POLL_INTERVAL = 0.2
+_REGEN_LOCK_WAIT_CAP = 30.0
+
+
+def _wait_for_other_regen(root: Path) -> mapfile.MapIndex | None:
+    """Poll for another process's in-flight regen to land.
+
+    Called after ``filelock.try_regen_lock`` reports that a different
+    process already holds the regen lock for ``root`` — rather than
+    redundantly regenerating in parallel, wait a short bounded
+    interval for that process's regen to finish and re-check
+    freshness.
+
+    Args:
+        root: Repository root another process is regenerating.
+
+    Returns:
+        A freshly loaded, fresh index if the wait succeeded within
+        the cap; ``None`` if the cap was hit first (caller should
+        fail open and regen locally).
+    """
+    deadline = time.monotonic() + _REGEN_LOCK_WAIT_CAP
+    while time.monotonic() < deadline:
+        time.sleep(_REGEN_LOCK_POLL_INTERVAL)
+        index = mapfile.load_map(root)
+        if index is not None and mapfile.check_freshness(root, index).fresh:
+            return index
+    return None
+
+
+def _locked_regen(root: Path) -> tuple[mapfile.MapIndex | None, int]:
+    """Regenerate ``root``'s map, coordinating via the advisory regen
+    lock (round-12 §4.1b).
+
+    A best-effort advisory lock (``filelock.try_regen_lock``)
+    coordinates against other processes (bare CLI, daemon-triggered
+    regen, MCP server) regenerating the same root concurrently: the
+    lock holder regens as before; a non-holder waits briefly for the
+    holder's regen to land rather than redundantly repeating the same
+    work, falling open to its own local regen if the wait cap is hit
+    or locking isn't available at all.
+
+    Args:
+        root: Repo root containing (or about to contain) map.json.
+
+    Returns:
+        ``(index, exit_code)`` — index is ``None`` on failure.
+    """
+    with filelock.try_regen_lock(root) as acquired:
+        if not acquired:
+            fresh = _wait_for_other_regen(root)
+            if fresh is not None:
+                if _daemon_cache_put is not None:
+                    _daemon_cache_put(root, fresh)
+                return fresh, 0
+            # Wait cap hit without the other process's regen landing
+            # -- fail open, fall through to a local regen below.
+
+        code = regen_map(root, quiet=True)
+        if code != 0:
+            return None, code
+        index = mapfile.load_map(root)
+        if index is not None and _daemon_cache_put is not None:
+            _daemon_cache_put(root, index)
+        return index, 0
+
+
 def _load_or_regen(
     root: Path, no_regen: bool
 ) -> tuple[mapfile.MapIndex | None, int]:
@@ -1806,6 +1880,9 @@ def _load_or_regen(
     (Phase 3 of ``.features/daemon-mode/``, mirroring ``server.py``'s
     ``Context.index_cache``/``_index_for``). A direct CLI invocation
     never installs this hook, so its behavior here is unchanged.
+
+    On a missing/stale map, the regen itself is coordinated with other
+    concurrent processes via ``_locked_regen`` (round-12 §4.1b).
 
     Args:
         root: Repo root containing map.json.
@@ -1832,13 +1909,7 @@ def _load_or_regen(
         )
         return None, 5
 
-    code = regen_map(root, quiet=True)
-    if code != 0:
-        return None, code
-    index = mapfile.load_map(root)
-    if index is not None and _daemon_cache_put is not None:
-        _daemon_cache_put(root, index)
-    return index, 0
+    return _locked_regen(root)
 
 
 def load_current_index_no_regen(root: Path) -> mapfile.MapIndex | None:

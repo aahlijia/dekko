@@ -32,6 +32,14 @@ rather than writing a fresh `map.json` to disk, so `dekko status`
 right after a `dekko diff`/`dekko affected` on a fresh edit can still
 report the map as stale.
 
+`--json` governs the shape of *successful* (exit 0) output only. Any
+error — an ambiguous match, a not-found symbol, a stale map under
+`--no-regen`, an invalid argument — is always reported as a plain-text
+message on stderr with a distinct nonzero exit code, regardless of
+`--json`. This is deliberate and consistent project-wide, not a
+per-command gap: check the exit code first, and only parse stdout as
+JSON when it is 0.
+
 Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
 `ledger`, `orient` cover more specialized workflows; hooks are

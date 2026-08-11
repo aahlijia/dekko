@@ -318,6 +318,17 @@ def report_unresolved(
     the caller can retry inside the map instead of falling back to
     grep (the 2026-07-10 eval transcripts show a bare not-found ejects
     agents into reading whole files).
+
+    Always prints plain text to stderr, regardless of ``--json`` —
+    this is a deliberate, project-wide contract (round-12 §3.15/§6),
+    not an oversight specific to this function. Every CLI error path
+    behaves the same way (see ``docs/cli.md``'s ``--json`` section):
+    ``--json`` governs the shape of successful (exit 0) output only. A
+    caller should check the exit code first (``EXIT_AMBIGUOUS``/
+    ``EXIT_NOT_FOUND`` here) and only parse stdout as JSON when it is
+    0. This function is shared by ``query``, ``trace``, ``workset``,
+    and ``contextpack`` — do not "fix" it as a one-off without also
+    revisiting the other three call sites and the documented contract.
     """
     if not candidates:
         print(f"dekko: no symbol matches '{target}'", file=sys.stderr)
