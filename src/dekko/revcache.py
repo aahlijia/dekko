@@ -26,7 +26,12 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .mapfile import _json_dumps, _json_loads, _symbol_from_dict
+from .mapfile import (
+    _json_dumps,
+    _json_loads,
+    _symbol_from_dict,
+    atomic_write_bytes,
+)
 from .model import Import
 
 if TYPE_CHECKING:
@@ -120,7 +125,9 @@ def save(root: Path, sha: str, snap: "Snapshot") -> None:
     """
     cache_dir = _cache_dir(root)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    _entry_path(root, sha).write_bytes(_json_dumps(_snapshot_to_dict(snap)))
+    atomic_write_bytes(
+        _entry_path(root, sha), _json_dumps(_snapshot_to_dict(snap))
+    )
     _evict(cache_dir)
 
 

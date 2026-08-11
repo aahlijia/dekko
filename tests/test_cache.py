@@ -149,6 +149,64 @@ def test_parallel_extraction_matches_sequential(
     )
 
 
+def test_jobs_flag_also_parallelizes_resolution(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1.4: ``--jobs`` used to parallelize extraction only —
+    resolve()/resolve_refs() ran single-threaded regardless, which is
+    why a one-file-edit auto-regen could cost as much as a full remap
+    on a large repo (round 11 §1). ``run_map`` now threads the same
+    ``--jobs`` value into ``resolve()``'s new ``workers`` parameter;
+    this forces the resolution-side parallel path too (via the
+    resolver's own low item-count threshold) and confirms the output
+    is still byte-identical to a sequential run."""
+    from dekko import resolver as resolver_mod
+
+    root = make_mapped_repo(SRC)
+    monkeypatch.setattr(cli, "_PARALLEL_MIN", 1)
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+
+    assert (
+        cli.main(["map", str(root), "--quiet", "--full", "--jobs", "2"]) == 0
+    )
+    parallel = (root / ".dekko" / "map.json").read_text()
+
+    assert (
+        cli.main(["map", str(root), "--quiet", "--full", "--jobs", "1"]) == 0
+    )
+    sequential = (root / ".dekko" / "map.json").read_text()
+
+    def _strip(text: str) -> str:
+        return "\n".join(
+            ln for ln in text.splitlines() if "generated_at" not in ln
+        )
+
+    assert _strip(parallel) == _strip(sequential)
+
+
+def test_regen_map_uses_all_cores_for_resolution(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """1.4: the auto-regen path (``cli.regen_map``, used by every read
+    subcommand's ``_load_or_regen`` on a stale map) used to hardcode
+    ``jobs=1`` in its synthetic ``argparse.Namespace`` -- the exact
+    scenario round 11 §1 flagged (a single-file edit's auto-regen
+    paying the full single-threaded resolution cost). It must now
+    request all cores (``jobs=0``) so the same fix that speeds up
+    ``dekko map --jobs 0`` also reaches auto-regen."""
+    root = make_mapped_repo(SRC)
+    seen_jobs: list[int] = []
+    real_run_map = cli.run_map
+
+    def spy(args, persist_excludes: bool = True):  # noqa: ANN001, ANN202
+        seen_jobs.append(args.jobs)
+        return real_run_map(args, persist_excludes=persist_excludes)
+
+    monkeypatch.setattr(cli, "run_map", spy)
+    assert cli.regen_map(root) == 0
+    assert seen_jobs == [0]
+
+
 def test_no_json_skips_cache(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text(SRC["a.py"])
     assert cli.main(["map", str(tmp_path), "--quiet", "--no-json"]) == 0
@@ -240,6 +298,31 @@ def test_reused_map_matches_cold_map(
         )
 
     assert _strip(incremental) == _strip(cold)
+
+
+def test_save_leaves_no_temp_file_and_overwrites(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """cache.json is written atomically: no ``.tmp`` sibling survives,
+    and a second ``save`` fully replaces the prior content (round-12
+    master report §4.1b: no atomic write previously guarded this
+    file, so a concurrent reader could observe a partial write)."""
+    root = make_mapped_repo(SRC)
+    cache_dir = root / cache_mod.CACHE_DIR
+    cache_file = cache_dir / cache_mod.CACHE_FILE
+    assert cache_file.is_file()
+    leftovers = [p for p in cache_dir.iterdir() if p.name != cache_file.name]
+    assert not any(cache_mod.CACHE_FILE in p.name for p in leftovers)
+
+    cache = cache_mod.IncrementalCache(cache_mod.load(root))
+    cache.entries["a.py"] = {"hash": "deadbeef", "file": {}}
+    cache_mod.save(root, cache)
+
+    reloaded = cache_mod.load(root)
+    assert reloaded["a.py"]["hash"] == "deadbeef"
+    assert set(reloaded) == {"a.py"}
+    leftovers = [p for p in cache_dir.iterdir() if p.name != cache_file.name]
+    assert not any(cache_mod.CACHE_FILE in p.name for p in leftovers)
 
 
 def test_persist_dekkoignore_creates_and_dedupes(

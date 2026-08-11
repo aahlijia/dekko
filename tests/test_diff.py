@@ -1,6 +1,7 @@
 """The diff subcommand: added/removed/changed symbols and exit codes."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -225,6 +226,73 @@ def test_diff_run_reuses_index_for_new_side_when_fresh(
     assert cli.main(["diff", "--root", str(root)]) == 0
     assert len(calls) == 1
     assert calls[0] != root
+
+
+def test_body_hashes_read_each_file_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """4.4: a file with several symbols must be read+split exactly
+    once per snapshot build, not once per symbol — the regression
+    test that actually catches a reintroduction of the O(total
+    symbols) file-read bug (output-equality alone wouldn't, since the
+    memoized and unmemoized versions produce byte-identical hashes)."""
+    files = {
+        "multi.py": (
+            "def f() -> int:\n    return 1\n\n\n"
+            "def g() -> int:\n    return 2\n\n\n"
+            "def h() -> int:\n    return 3\n"
+        ),
+    }
+    root = _repo(tmp_path, files)
+    index = mapfile.load_map(root)
+    assert index is not None
+
+    calls: list[Path] = []
+    real_read_text = Path.read_text
+
+    def spy(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "multi.py":
+            calls.append(self)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy)
+
+    from_index = diff.snapshot_from_index(index, root)
+    assert len(from_index.symbols) == 3
+    assert len(calls) == 1  # one read for all three symbols
+
+    calls.clear()
+    full = diff.snapshot(root, None, (), 1_000_000)
+    assert len(full.symbols) == 3
+    assert len(calls) == 1  # one read for all three symbols
+
+    assert from_index.body == full.body
+
+
+def test_diff_jobs_flag_reaches_old_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-12 master report §3.3: ``old_snapshot()``'s rev-cache-miss
+    re-parse/resolve used to always run single-threaded no matter what
+    ``--jobs`` was passed, because ``dekko diff`` never had a
+    ``--jobs`` flag to begin with -- a separate, unparallelized code
+    path from ``dekko map --full --jobs``. ``dekko diff --jobs N``
+    must now reach ``diff.old_snapshot`` with the resolved worker
+    count (``0`` maps to "all cores" via ``cli._resolve_workers``,
+    same as ``map``)."""
+    root = _repo(tmp_path, BASE)
+
+    seen_jobs: list[int] = []
+    real_old_snapshot = diff.old_snapshot
+
+    def spy(*args: object, **kwargs: object) -> diff.Snapshot | None:
+        seen_jobs.append(kwargs["jobs"])
+        return real_old_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(diff, "old_snapshot", spy)
+    assert cli.main(["diff", "--root", str(root), "--jobs", "0"]) == 0
+    assert len(seen_jobs) == 1
+    assert seen_jobs[0] == (os.cpu_count() or 1)
 
 
 def test_diff_rev_cache_hit_skips_reexport(

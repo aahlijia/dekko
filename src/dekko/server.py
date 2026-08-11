@@ -77,6 +77,19 @@ class ToolError(Exception):
 class Context:
     """Server-wide settings shared across tool calls.
 
+    ``index_cache`` is intentionally independent of ``daemon.py``'s own
+    ``_WarmCache``: this module never imports or talks to ``daemon.py``
+    (no ``try_daemon``/socket round trip), so an MCP session and a
+    ``dekko daemon start``-ed background process for the same root each
+    hold their own separate warm copy of the index in memory, with no
+    shared invalidation between them (round-12 master report §3.7/§4.4).
+    That's a deliberate, self-contained design for MCP's own
+    already-long-lived process, not a stub someone forgot to wire up to
+    the daemon — but it does mean ``dekko daemon status``'s cache
+    counters never reflect MCP tool-call activity, and, on a repo where
+    both are active at once, the map is held warm twice rather than
+    shared.
+
     Attributes:
         default_root: Root used when a tool omits ``root``.
         no_regen: Fail instead of regenerating a stale map on reads.
@@ -106,6 +119,36 @@ def _capture(fn: Callable[[], int]) -> tuple[int, str, str]:
     with redirect_stdout(out), redirect_stderr(err):
         code = fn()
     return code, out.getvalue(), err.getvalue()
+
+
+def _with_notes(out: str, err: str, fallback: str = "") -> str:
+    """Append a successful run's stderr disclosure notes to its result.
+
+    ``_capture()``-based tool handlers reuse the CLI's renderers,
+    which print ambiguous-call-count, coverage, and budget-floor
+    disclosure notes to stderr rather than stdout even on an
+    otherwise-successful (exit 0) run — the CLI shows a human both
+    streams, so this loses nothing there. An MCP tool result is
+    stdout-only, so without this call every one of those notes
+    silently vanished (round-12 master report §3.1): a "47 callers"
+    answer looked identical whether or not another 1,385 call sites
+    were resolved ambiguously and excluded.
+
+    Args:
+        out: Captured stdout from a successful run.
+        err: Captured stderr from the same run.
+        fallback: Text to use when ``out`` is empty (e.g. "(no
+            matches)"); notes are still appended after it.
+
+    Returns:
+        ``out`` (or ``fallback``) with any stderr notes appended,
+        separated by a blank line.
+    """
+    text = out.strip() or fallback
+    notes = err.strip()
+    if not notes:
+        return text
+    return f"{text}\n\n{notes}" if text else notes
 
 
 def _require(args: dict, key: str) -> str:
@@ -223,7 +266,7 @@ def _relation_tool(
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    result = out.strip() or f"(no {action} for {target})"
+    result = _with_notes(out, err, fallback=f"(no {action} for {target})")
     if not include_tests and not explicit_include_tests:
         result += (
             f"\n\nnote: test-file {action} excluded by default for "
@@ -261,7 +304,7 @@ def tool_find_usages(ctx: Context, args: dict) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip()
+    return _with_notes(out, err)
 
 
 def tool_get_context_pack(ctx: Context, args: dict) -> str:
@@ -288,7 +331,7 @@ def tool_get_context_pack(ctx: Context, args: dict) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip()
+    return _with_notes(out, err)
 
 
 def tool_outline(ctx: Context, args: dict) -> str:
@@ -310,7 +353,7 @@ def tool_outline(ctx: Context, args: dict) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip()
+    return _with_notes(out, err)
 
 
 def tool_trace_path(ctx: Context, args: dict) -> str:
@@ -326,7 +369,7 @@ def tool_trace_path(ctx: Context, args: dict) -> str:
         return out.strip() or err.strip() or f"no path from {frm} to {to}"
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip()
+    return _with_notes(out, err)
 
 
 def tool_find_unused(ctx: Context, args: dict) -> str:
@@ -345,7 +388,7 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     )
     if code not in (0, 1):
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip() or "(no unused symbols)"
+    return _with_notes(out, err, fallback="(no unused symbols)")
 
 
 def tool_impacted_tests(ctx: Context, args: dict) -> str:
@@ -363,7 +406,7 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     )
     if code == affected.EXIT_ERROR:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip() or "(no impacted tests)"
+    return _with_notes(out, err, fallback="(no impacted tests)")
 
 
 def tool_search_code(ctx: Context, args: dict) -> str:
@@ -402,7 +445,7 @@ def tool_search_code(ctx: Context, args: dict) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip() or "(no matches)"
+    return _with_notes(out, err, fallback="(no matches)")
 
 
 def tool_workset(ctx: Context, args: dict) -> str:
@@ -432,7 +475,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip()
+    return _with_notes(out, err)
 
 
 def tool_stats(ctx: Context, args: dict) -> str:
@@ -442,7 +485,7 @@ def tool_stats(ctx: Context, args: dict) -> str:
     code, out, err = _capture(lambda: stats.run(index, top, as_json=False))
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip()
+    return _with_notes(out, err)
 
 
 def _summary_text(ctx: Context, args: dict, budget: int | None = None) -> str:
@@ -453,7 +496,7 @@ def _summary_text(ctx: Context, args: dict, budget: int | None = None) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip()
+    return _with_notes(out, err)
 
 
 def tool_summary(ctx: Context, args: dict) -> str:
@@ -482,7 +525,7 @@ def tool_lean(ctx: Context, args: dict) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip()
+    return _with_notes(out, err)
 
 
 def tool_add_note(ctx: Context, args: dict) -> str:
@@ -541,7 +584,7 @@ def tool_ledger(ctx: Context, args: dict) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip()
+    return _with_notes(out, err)
 
 
 def _version_stale_detail(fresh: mapfile.Freshness) -> str:
@@ -636,7 +679,7 @@ def tool_refresh_map(ctx: Context, args: dict) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return out.strip() or "map refreshed"
+    return _with_notes(out, err, fallback="map refreshed")
 
 
 _ROOT_PROP = {

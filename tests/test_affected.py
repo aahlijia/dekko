@@ -447,3 +447,76 @@ def test_impacts_from_symbol_still_finds_direct_call_edges() -> None:
 
     assert [i.path for i in impacts] == ["tests/test_a.py"]
     assert impacts[0].tier == "direct"
+
+
+def test_changes_default_index_still_loads_current_tree(
+    tmp_path: Path,
+) -> None:
+    """2.4: ``affected.changes()``'s new ``index`` parameter defaults
+    to ``None`` and must behave exactly as before for callers with no
+    index to hand in (``affected.run``'s own call site) — it loads the
+    current-tree index itself."""
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+
+    outcome = affected.changes(root, None)
+    assert outcome is not None
+    impacts, _result, _new, _target_rev, prov = outcome
+    assert prov  # provenance was loaded from the current-tree map
+    assert {i.path for i in impacts} == {
+        "tests/test_direct.py",
+        "tests/test_transitive.py",
+        "tests/test_import_only.py",
+    }
+
+
+def test_changes_reuses_provided_index_no_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2.4 primary fix: when a caller already has a loaded index (as
+    ``workset.seed_from_rev`` does), ``affected.changes()`` must reuse
+    it outright rather than paying a second, redundant
+    ``mapfile.load_map`` for the same map.json."""
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    index = mapfile.load_map(root)
+    assert index is not None
+
+    calls: list[Path] = []
+    real_load_map = mapfile.load_map
+
+    def spy(root_arg: Path) -> mapfile.MapIndex | None:
+        calls.append(root_arg)
+        return real_load_map(root_arg)
+
+    monkeypatch.setattr(mapfile, "load_map", spy)
+    outcome = affected.changes(root, None, index=index)
+    assert outcome is not None
+    assert calls == []  # no reload -- the provided index was reused
+
+
+def test_affected_jobs_flag_reaches_old_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-12 master report §3.3: ``dekko affected`` shares
+    ``diff``'s rev-cache-miss old-side re-parse/resolve path
+    (``diff.old_snapshot``), which used to always run single-threaded
+    regardless of core count because ``dekko affected`` never had a
+    ``--jobs`` flag to pass through. ``dekko affected --jobs N`` must
+    now reach ``diff.old_snapshot`` with the resolved worker count."""
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+
+    seen_jobs: list[int] = []
+    real_old_snapshot = diff.old_snapshot
+
+    def spy(*args: object, **kwargs: object) -> diff.Snapshot | None:
+        seen_jobs.append(kwargs["jobs"])
+        return real_old_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(diff, "old_snapshot", spy)
+    assert cli.main(["affected", "--root", str(root), "--jobs", "2"]) in (
+        0,
+        1,
+    )
+    assert seen_jobs == [2]

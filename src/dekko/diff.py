@@ -76,18 +76,41 @@ class DiffResult:
         return not (self.added or self.removed or self.changed)
 
 
-def _body_hash(root: Path, sym: Symbol) -> str:
-    """Short hash of a symbol's defining source lines."""
+def _body_hashes_for_path(
+    root: Path, path: str, syms: list[Symbol]
+) -> dict[str, str]:
+    """Hash every symbol defined in one file from a single read+split.
+
+    Reading and re-splitting a symbol's whole defining file from disk
+    once per symbol (the previous approach) meant a file with several
+    symbols paid that cost once per symbol. Grouping by path first
+    cuts snapshot construction from O(total symbols) file reads to
+    O(total files).
+    """
     try:
         lines = (
-            (root / sym.path)
+            (root / path)
             .read_text(encoding="utf-8", errors="replace")
             .splitlines()
         )
     except OSError:
-        return ""
-    body = "\n".join(lines[sym.start_line - 1 : sym.end_line])
-    return hashlib.sha256(body.encode()).hexdigest()[:16]
+        return {s.id: "" for s in syms}
+    out: dict[str, str] = {}
+    for s in syms:
+        body = "\n".join(lines[s.start_line - 1 : s.end_line])
+        out[s.id] = hashlib.sha256(body.encode()).hexdigest()[:16]
+    return out
+
+
+def _body_hashes(root: Path, syms: list[Symbol]) -> dict[str, str]:
+    """Body-hash every symbol in ``syms``, reading each file once."""
+    by_path: dict[str, list[Symbol]] = {}
+    for sym in syms:
+        by_path.setdefault(sym.path, []).append(sym)
+    out: dict[str, str] = {}
+    for path, path_syms in by_path.items():
+        out.update(_body_hashes_for_path(root, path, path_syms))
+    return out
 
 
 def snapshot(
@@ -97,6 +120,7 @@ def snapshot(
     max_file_size: int,
     cache: cache_mod.IncrementalCache | None = None,
     candidates: list[str] | None = None,
+    jobs: int = 1,
 ) -> Snapshot:
     """Map a tree and capture its symbols, callers, and body hashes.
 
@@ -120,6 +144,18 @@ def snapshot(
             already-tracked path. Callers building the old side should
             pass ``tracked_at_rev(root, rev)`` (queried against the
             *real* repo, which does have ``.git/``) here instead.
+        jobs: Resolved worker count (1 = sequential) for both file
+            extraction (``cli.map_repository``) and call-graph
+            resolution (``resolve``). Round-12 master report §3.3:
+            this call used to always run both single-threaded
+            regardless of ``dekko map --full``'s own ``--jobs``
+            fix — a separate, unparallelized code path that made a
+            first-touch/cold-rev-cache ``diff``/``affected``/
+            ``workset`` call minutes slower than it needed to be on
+            a large repo. Callers pass an already-resolved concrete
+            count (see ``cli._resolve_workers``), not the raw
+            ``--jobs`` CLI value (which allows ``0`` for "all
+            cores").
     """
     from . import cli
 
@@ -129,16 +165,19 @@ def snapshot(
         excludes,
         max_file_size,
         cache=cache,
+        jobs=jobs,
         candidates=candidates,
     )
-    graph = resolve(files)
+    graph = resolve(files, workers=jobs)
     snap = Snapshot()
+    all_syms: list[Symbol] = []
     for fm in files:
         for sym in fm.symbols:
             snap.symbols[sym.id] = sym
-            snap.body[sym.id] = _body_hash(root, sym)
+            all_syms.append(sym)
         if fm.imports:
             snap.imports[fm.path] = fm.imports
+    snap.body = _body_hashes(root, all_syms)
     snap.callers = graph.calls_in
     return snap
 
@@ -148,13 +187,13 @@ def snapshot_from_index(index: mapfile.MapIndex, root: Path) -> Snapshot:
 
     Reuses the index's symbol/caller/import tables outright instead of
     a full tree-sitter re-parse plus ``resolve()`` pass — only each
-    symbol's body hash needs fresh work (one file read + hash, via
-    ``_body_hash``). This is the fix for the redundant-reparse
-    performance defect: ``affected.changes()``/``diff.run()`` already
-    load a fully-populated ``MapIndex`` for the current working tree
-    before ever touching ``snapshot()``; using it here instead of
-    re-parsing every file from scratch is the dominant cost saving on a
-    large repo.
+    symbol's body hash needs fresh work (one file read + hash per
+    distinct path, via ``_body_hashes``). This is the fix for the
+    redundant-reparse performance defect: ``affected.changes()``/
+    ``diff.run()`` already load a fully-populated ``MapIndex`` for the
+    current working tree before ever touching ``snapshot()``; using it
+    here instead of re-parsing every file from scratch is the dominant
+    cost saving on a large repo.
 
     Callers must confirm ``index`` is fresh against the working tree
     first (see ``snapshot_new_side``) — a stale index's symbol table no
@@ -175,8 +214,7 @@ def snapshot_from_index(index: mapfile.MapIndex, root: Path) -> Snapshot:
         for path, imports in index.imports_by_path.items()
         if imports
     }
-    for sym_id, sym in snap.symbols.items():
-        snap.body[sym_id] = _body_hash(root, sym)
+    snap.body = _body_hashes(root, list(snap.symbols.values()))
     return snap
 
 
@@ -186,6 +224,7 @@ def snapshot_new_side(
     excludes: tuple[str, ...],
     max_file_size: int,
     index: mapfile.MapIndex | None,
+    jobs: int = 1,
 ) -> Snapshot:
     """New-side (working tree) snapshot, reusing a fresh index when possible.
 
@@ -193,11 +232,12 @@ def snapshot_new_side(
     missing or stale against the current working tree, so the
     performance win never comes at the cost of correctness — a caller
     that forgot to regenerate the map first still gets an accurate
-    diff, just without the speedup.
+    diff, just without the speedup. ``jobs`` (see ``snapshot``) only
+    matters on that fallback path.
     """
     if index is not None and mapfile.check_freshness(root, index).fresh:
         return snapshot_from_index(index, root)
-    return snapshot(root, subpath, excludes, max_file_size)
+    return snapshot(root, subpath, excludes, max_file_size, jobs=jobs)
 
 
 def old_snapshot(
@@ -207,6 +247,7 @@ def old_snapshot(
     excludes: tuple[str, ...],
     max_file_size: int,
     old_cache: cache_mod.IncrementalCache,
+    jobs: int = 1,
 ) -> Snapshot | None:
     """Old-side snapshot for ``target_rev``, from the rev-cache when possible.
 
@@ -230,6 +271,9 @@ def old_snapshot(
         max_file_size: Size cap in bytes.
         old_cache: Incremental extraction cache to pass through to
             ``snapshot()`` on a rev-cache miss.
+        jobs: Resolved worker count for the rev-cache-miss export/
+            re-parse/resolve path — see ``snapshot``. No effect on a
+            rev-cache hit, which skips ``snapshot()`` entirely.
 
     Returns:
         The old-side ``Snapshot``, or ``None`` if ``target_rev`` cannot
@@ -251,6 +295,7 @@ def old_snapshot(
             max_file_size,
             cache=old_cache,
             candidates=tracked_at_rev(root, target_rev),
+            jobs=jobs,
         )
     if sha is not None:
         revcache.save(root, sha, old)
@@ -428,7 +473,13 @@ def render(result: DiffResult, as_json: bool, limit: int) -> None:
             _print_delta(marker, delta, limit)
 
 
-def run(root: Path, rev: str | None, as_json: bool, limit: int) -> int:
+def run(
+    root: Path,
+    rev: str | None,
+    as_json: bool,
+    limit: int,
+    jobs: int = 1,
+) -> int:
     """Execute ``dekko diff`` against a repository.
 
     Args:
@@ -436,6 +487,10 @@ def run(root: Path, rev: str | None, as_json: bool, limit: int) -> int:
         rev: Git rev for the old side, or ``None`` to derive a default.
         as_json: Emit structured JSON instead of text.
         limit: Max impacted callers shown per symbol.
+        jobs: Resolved worker count for a rev-cache-miss old-side
+            snapshot or a stale-index new-side re-parse — see
+            ``snapshot``. No effect when both sides are already warm
+            (rev-cache hit, fresh index).
 
     Returns:
         Process exit code (0 no changes, 1 changes, 2 error).
@@ -451,7 +506,13 @@ def run(root: Path, rev: str | None, as_json: bool, limit: int) -> int:
 
     old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
     old = old_snapshot(
-        root, target_rev, subpath, excludes, max_file_size, old_cache
+        root,
+        target_rev,
+        subpath,
+        excludes,
+        max_file_size,
+        old_cache,
+        jobs=jobs,
     )
     if old is None:
         print(
@@ -461,7 +522,9 @@ def run(root: Path, rev: str | None, as_json: bool, limit: int) -> int:
         )
         return EXIT_ERROR
 
-    new = snapshot_new_side(root, subpath, excludes, max_file_size, index)
+    new = snapshot_new_side(
+        root, subpath, excludes, max_file_size, index, jobs=jobs
+    )
     result = compare(target_rev, old, new)
     render(result, as_json, limit)
     return EXIT_SAME if result.empty() else EXIT_DIFFERENT

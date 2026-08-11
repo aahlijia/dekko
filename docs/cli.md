@@ -14,7 +14,7 @@ dekko search "retries failed http requests"  # free-text relevance search
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
 dekko workset                        # one bundle for your current change
 dekko affected                       # test files impacted by your changes
-dekko diff                           # symbols changed since the map's commit
+dekko diff                           # symbols changed since the map's commit (exit 0/1)
 dekko unused                         # symbols nothing calls (dead-code leads)
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
@@ -23,8 +23,14 @@ dekko daemon start                   # warm-cache background process (see below)
 
 Symbol targets accept a bare `name`, `Class.method`, or a qualified
 `file.py:name` — ambiguous names list their candidates instead of
-guessing. Every read command takes `--json` for structured output and
-regenerates a stale map automatically (`--no-regen` to fail instead).
+guessing. Every read command takes `--json` for structured output.
+Most also regenerate a stale map automatically (`--no-regen` to fail
+instead) — `diff`, `affected`, `status`, and `ledger` don't accept
+`--no-regen` at all: `status`/`ledger` never regenerate regardless,
+and `diff`/`affected` always re-parse the current tree in memory
+rather than writing a fresh `map.json` to disk, so `dekko status`
+right after a `dekko diff`/`dekko affected` on a fresh edit can still
+report the map as stale.
 
 Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
@@ -97,6 +103,14 @@ All three subcommands take `--root DIR` (default: cwd) for a repo
 other than the current directory. Transport is a Unix domain socket at
 `.dekko/daemon.sock` on macOS/Linux, or a token-authenticated TCP
 loopback connection on Windows.
+
+`dekko serve --mcp` (the MCP server, see below) does **not** talk to
+the daemon — it keeps its own independent in-memory index for the
+lifetime of that MCP session instead. Running both a daemon and an MCP
+session against the same repo works fine, but they don't share a warm
+cache or invalidation with each other: `dekko daemon status`'s cache
+hit/miss counters only reflect daemon-routed CLI calls, never MCP tool
+calls.
 
 ## Language support
 

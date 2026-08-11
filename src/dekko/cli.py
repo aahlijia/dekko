@@ -27,6 +27,7 @@ from . import contextpack
 from . import daemon as daemon_mod
 from . import diff
 from . import export
+from . import grammars
 from . import hooks as hooks_mod
 from . import languages
 from . import ledger as ledger_mod
@@ -459,6 +460,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=8,
         help="max impacted callers shown per symbol (default: 8)",
     )
+    p_diff.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="parallel workers for a rev-cache-miss old-side re-parse/"
+        "resolve (1 = sequential, 0 = all cores)",
+    )
     p_diff.set_defaults(func=run_diff)
 
     p_affected = sub.add_parser(
@@ -496,6 +505,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         metavar="TOKENS",
         help="approximate token budget; drops weakest-tier files first "
         f"(default: {affected.DEFAULT_BUDGET})",
+    )
+    p_affected.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="parallel workers for a rev-cache-miss old-side re-parse/"
+        "resolve (1 = sequential, 0 = all cores)",
     )
     p_affected.set_defaults(func=run_affected)
 
@@ -548,6 +565,15 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "--no-regen",
         action="store_true",
         help="fail (exit 5) instead of regenerating a stale map",
+    )
+    p_workset.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="parallel workers for a rev-cache-miss old-side re-parse/"
+        "resolve on a rev seed (1 = sequential, 0 = all cores); no "
+        "effect on a --symbol seed",
     )
     _add_task_option(p_workset)
     p_workset.set_defaults(func=run_workset)
@@ -997,7 +1023,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "--scope",
         choices=export.SCOPES,
         default="symbol",
-        help="node granularity (default: symbol)",
+        help="node granularity for the whole rendered graph -- symbol "
+        "or file (default: symbol); does not scope the graph to a "
+        "single symbol's neighborhood, use 'dekko context' for that",
     )
     p_export.add_argument(
         "--max-nodes",
@@ -1248,7 +1276,17 @@ def _summary(
     variables = sum(
         1 for fm in files for s in fm.symbols if s.kind == "variable"
     )
-    errors = sum(1 for fm in files if fm.error)
+    # round-12 master report §3.10/§3.16: a missing *optional* grammar
+    # (``pip install dekko[all]``) and a genuine parse failure used to
+    # share one alarming "parse error N" bucket, even though the
+    # per-file detail line already named the missing grammar
+    # accurately -- see ``grammars.is_grammar_unavailable_message``.
+    no_grammar = sum(
+        1
+        for fm in files
+        if fm.error and grammars.is_grammar_unavailable_message(fm.error)
+    )
+    errors = sum(1 for fm in files if fm.error) - no_grammar
     lines = [
         f"dekko: mapped {len(files)} files ({langs})",
         f"  symbols: {funcs} functions/methods, {classes} types, "
@@ -1257,10 +1295,12 @@ def _summary(
         f"{external} external",
     ]
 
-    if skipped or errors:
+    if skipped or errors or no_grammar:
         reasons = Counter(reason for _, reason in skipped)
         if errors:
             reasons["parse error"] = errors
+        if no_grammar:
+            reasons["no grammar installed"] = no_grammar
 
         detail = ", ".join(
             f"{reason} {n}" for reason, n in reasons.most_common()
@@ -1578,7 +1618,7 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
     if _map_run_is_noop(root, args, cache, files):
         return 0
 
-    graph = resolve(files)
+    graph = resolve(files, workers=_resolve_workers(getattr(args, "jobs", 1)))
     label = root.name + (f"/{args.subpath}" if args.subpath else "")
 
     md_path, json_path = resolve_outputs(root, args.output, args.json_output)
@@ -1672,9 +1712,9 @@ def _write_json_output(
         skipped=skipped,
     )
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(
-        render_json(files, graph, label, provenance),
-        encoding="utf-8",
+    mapfile.atomic_write_bytes(
+        json_path,
+        render_json(files, graph, label, provenance).encode("utf-8"),
     )
     if json_path == root / cache_mod.CACHE_DIR / "map.json":
         mapfile.write_provenance_sidecar(root, provenance)
@@ -1888,7 +1928,17 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
         quiet=quiet,
         if_stale=False,
         full=full,
-        jobs=1,
+        # 0 = all cores. This is the auto-regen path every other read
+        # subcommand funnels through on a stale map (a single-file
+        # edit included) — its own extraction work is tiny (usually
+        # one changed file, via the incremental cache), but call-graph
+        # resolution (resolve()/resolve_refs(), see resolver.py's
+        # ``_resolve_all``) is O(the whole repo's calls) regardless of
+        # diff size, and was previously left sequential here even on a
+        # many-core machine. See round 11 §1: a one-file edit's
+        # auto-regen on tensorflow (14,285 files) took *longer* than a
+        # from-scratch --full remap because of exactly this.
+        jobs=0,
     )
     return run_map(regen_args, persist_excludes=False)
 
@@ -1994,6 +2044,7 @@ def run_diff(args: argparse.Namespace) -> int:
         args.rev,
         as_json=args.as_json,
         limit=args.limit,
+        jobs=_resolve_workers(getattr(args, "jobs", 1)),
     )
 
 
@@ -2006,6 +2057,7 @@ def run_affected(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         limit=args.limit,
         budget=args.budget,
+        jobs=_resolve_workers(getattr(args, "jobs", 1)),
     )
 
 
@@ -2025,6 +2077,7 @@ def run_workset(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         no_regen=args.no_regen,
         task=task,
+        jobs=_resolve_workers(getattr(args, "jobs", 1)),
     )
 
 

@@ -341,6 +341,80 @@ def test_status_json_shape_when_running(
     assert data["cache"] is None
 
 
+def test_client_timeout_matches_request_timeout() -> None:
+    """Round-12 master report §3.5: ``_CLIENT_TIMEOUT`` used to be a
+    separate, much tighter 2.0s constant covering the client's entire
+    connect+send+recv cycle -- shorter than the server's own
+    per-request budget (``_REQUEST_TIMEOUT``), so a client could give
+    up on a request the daemon was still legitimately servicing. It
+    must never again drift below what the server itself allows a
+    single request."""
+    assert daemon._CLIENT_TIMEOUT == daemon._REQUEST_TIMEOUT
+
+
+def test_status_true_positive_while_daemon_busy_on_slow_request(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Round-12 master report §3.5: ``serve_daemon``'s accept loop is
+    single-threaded, so a concurrent ``daemon status`` request can't
+    be accepted -- let alone answered -- until whatever the daemon is
+    currently servicing finishes. With the old 2.0s ``_CLIENT_TIMEOUT``,
+    any in-flight request slower than that made a concurrent
+    ``status()`` call misreport "not running" for a daemon that was
+    alive and busy (and, separately, made the slow request's own
+    caller silently abandon the daemon and duplicate the work
+    locally). This deliberately slows one dispatched command to 3s
+    (comfortably past the old 2.0s timeout, well inside the now-
+    matching ``_REQUEST_TIMEOUT``) and confirms a ``status()`` call
+    made while it's in flight still reports the daemon as running."""
+    started = threading.Event()
+    real_run_stats = cli.run_stats
+
+    def slow_run_stats(args: object) -> int:
+        started.set()
+        time.sleep(3.0)
+        return real_run_stats(args)
+
+    monkeypatch.setattr(cli, "run_stats", slow_run_stats)
+
+    root = short_root
+    (root / "a.py").write_text("def f() -> int:\n    return 1\n")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+
+    transport = dt.default_transport_for(root)
+    thread = threading.Thread(
+        target=daemon.serve_daemon,
+        kwargs={"root": root, "idle_timeout": 30.0},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert _wait_until(transport.exists)
+
+        def send_slow_request() -> None:
+            args = cli.build_subcommand_parser().parse_args(
+                ["stats", "--root", str(root)]
+            )
+            daemon.try_daemon(args)
+
+        requester = threading.Thread(target=send_slow_request, daemon=True)
+        requester.start()
+        try:
+            assert started.wait(timeout=5.0), "slow request never started"
+
+            code = daemon.status(root, as_json=True)
+            assert code == 0
+            data = _json.loads(capsys.readouterr().out)
+            assert data["running"] is True
+        finally:
+            requester.join(timeout=6.0)
+    finally:
+        daemon.stop(root)
+        thread.join(timeout=_POLL_DEADLINE)
+
+
 # ---------------------------------------------------------------------
 # Warm cache (Phase 3): repeated daemon-routed reads against an
 # unchanged map skip mapfile.load_map entirely, and a working-tree

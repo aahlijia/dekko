@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from dekko import affected, cli
+from dekko.model import FileMap
 
 
 def test_version_flag(capsys: pytest.CaptureFixture) -> None:
@@ -200,6 +201,32 @@ def test_map_summary_counts_variable_symbols(
     assert cli.main(["--map", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "0 functions/methods, 0 types, 1 variables" in out
+
+
+def test_summary_separates_missing_grammar_from_real_parse_errors() -> None:
+    """Round-12 master report §3.10/§3.16: a missing *optional*
+    grammar (``pip install dekko[all]``) used to share one alarming
+    "parse error N" bucket with genuine parse failures in the run
+    summary. They must now be broken out into distinct buckets, built
+    directly against synthetic ``FileMap``s (no real Tier-2 grammar
+    dependency needed to reproduce the message shape)."""
+    files = [
+        FileMap(
+            path="gen/file.kt",
+            language="kotlin",
+            error="grammar 'kotlin' is not in the offline Tier-1 set; "
+            "install the extras with `pip install dekko[all]`",
+        ),
+        FileMap(
+            path="src/broken.py",
+            language="python",
+            error="[Errno 13] Permission denied: 'src/broken.py'",
+        ),
+        FileMap(path="src/a.py", language="python"),
+    ]
+    out = cli._summary(files, 0, 0, 0, [], [])
+    assert "no grammar installed 1" in out
+    assert "parse error 1" in out
 
 
 def test_output_as_directory(tmp_path: Path) -> None:

@@ -909,3 +909,63 @@ def test_get_callers_resolves_java_package_named_test(
     assert result["isError"] is False
     assert "no symbol matches" not in text
     assert "Caller.run" in text
+
+
+AMBIGUOUS_CALL = {
+    "a.py": "def target() -> int:\n    return 1\n",
+    "b.py": "def target() -> int:\n    return 2\n",
+    "c.py": "def caller() -> int:\n    return target()\n",
+}
+
+
+def test_get_callers_discloses_ambiguous_call_sites_over_mcp(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-12 master report §3.1: ``query.run`` prints its
+    "N additional call site(s) ... resolved ambiguously — not counted
+    here" disclosure to stderr on an otherwise-successful (exit 0)
+    run. The CLI shows both streams to a human, but every
+    ``_capture()``-based MCP tool handler used to return only
+    ``out.strip()``, silently discarding that note — an MCP-only
+    caller's "no callers" answer looked complete even though a real
+    ambiguous call site existed. ``get_callers`` must now surface it.
+    """
+    ctx = _ctx(make_mapped_repo(AMBIGUOUS_CALL))
+    text = _call(ctx, "get_callers", {"symbol": "a.py:target"})["content"][0][
+        "text"
+    ]
+    assert "(no callers of" in text
+    assert "resolved ambiguously" in text
+    assert "not counted here" in text
+
+
+def test_get_callees_discloses_ambiguous_outgoing_calls_over_mcp(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Same fix, outgoing-call direction (``ambiguous_out``) via
+    ``get_callees`` — round-12 master report §3.1."""
+    ctx = _ctx(make_mapped_repo(AMBIGUOUS_CALL))
+    text = _call(ctx, "get_callees", {"symbol": "c.py:caller"})["content"][0][
+        "text"
+    ]
+    assert "(no callees of" in text
+    assert "resolved ambiguously" in text
+    assert "not counted here" in text
+
+
+def test_lean_discloses_budget_floor_note(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-12 master report §3.1: ``render_lean.run`` prints a
+    "requested budget N is below this repo's ~M-token path-only
+    floor" note to stderr on success when a caller's ``budget`` is
+    too tight to honor. ``tool_lean`` (not currently a registered MCP
+    tool, exercised directly like ``tool_trace_path``/``tool_stats``
+    elsewhere in this file) must not silently drop that note."""
+    files = {
+        "a.py": "def f() -> int:\n    return 1\n",
+        "b.py": "from a import f\n\n\ndef g() -> int:\n    return f()\n",
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    text = server.tool_lean(ctx, {"budget": 1})
+    assert "path-only floor" in text

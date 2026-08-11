@@ -21,7 +21,13 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from .languages import spec_fingerprint
-from .mapfile import _file_hash, _json_dumps, _json_loads, _symbol_from_dict
+from .mapfile import (
+    _file_hash,
+    _json_dumps,
+    _json_loads,
+    _symbol_from_dict,
+    atomic_write_bytes,
+)
 from .model import FileMap, Import, RawCall, RawRef
 
 CACHE_VERSION = 1
@@ -178,7 +184,7 @@ def save(root: Path, cache: IncrementalCache) -> None:
         "spec_hash": spec_fingerprint(),
         "files": cache.entries,
     }
-    (cache_dir / CACHE_FILE).write_bytes(_json_dumps(doc) + b"\n")
+    atomic_write_bytes(cache_dir / CACHE_FILE, _json_dumps(doc) + b"\n")
 
 
 def ensure_dir(root: Path) -> Path:

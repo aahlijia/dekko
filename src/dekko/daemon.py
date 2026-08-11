@@ -97,8 +97,27 @@ _REQUEST_TIMEOUT = 30.0
 # relative to the reload times this whole feature exists to avoid,
 # tight enough that a genuinely hung daemon doesn't make every
 # subsequent `dekko` call visibly slower than not having a daemon at
-# all").
-_CLIENT_TIMEOUT = 2.0
+# all"). Originally a separate, much tighter 2.0s constant -- round-12
+# master report §3.5: ``socket.settimeout()`` covers the *entire*
+# connect-send-recv cycle, not just connection setup, and the
+# single-threaded accept loop (see ``serve_daemon``'s docstring) means
+# a concurrent request can't even be accepted, let alone answered,
+# until whatever the daemon is currently servicing finishes. 2.0s was
+# tighter than a routine cold-cache reload on a large repo (round 11's
+# own numbers: 6-8s just to reload map.json on tensorflow), so both
+# ``status()`` and ``try_daemon()`` would misreport/time out on
+# entirely ordinary requests, not just pathological ones --
+# ``status()`` printed a false "not running" while the daemon was
+# alive and busy, and ``try_daemon()`` abandoned the original slow
+# request mid-flight and silently duplicated the work locally, while
+# the daemon kept computing the orphaned request in the background.
+# Matching the server's own per-request budget (``_REQUEST_TIMEOUT``)
+# means a client never gives up before the daemon itself would --
+# turning the false-negative into an honest wait when the daemon is
+# genuinely busy, not fixing the daemon's single-request-at-a-time
+# design (a separate, larger architectural change; see that
+# docstring for why it's single-threaded on purpose).
+_CLIENT_TIMEOUT = _REQUEST_TIMEOUT
 
 # Bootstrap script used to spawn the detached daemon process. There is
 # no ``src/dekko/__main__.py`` (the packaged entry point is the

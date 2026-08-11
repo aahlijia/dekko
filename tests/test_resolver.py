@@ -2,9 +2,12 @@
 
 from pathlib import Path
 
+import pytest
+
+from dekko import resolver as resolver_mod
 from dekko.cli import map_repository
 from dekko.model import FileMap, Import, Param, RawCall, RawRef, Symbol
-from dekko.resolver import resolve
+from dekko.resolver import resolve, resolve_refs
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -1474,3 +1477,282 @@ def test_reference_resolution_unaffected_by_noise_guard() -> None:
     graph = resolve(files)
     ref_edges = {(e.caller, e.callee) for e in graph.referenced}
     assert (caller.id, local.id) in ref_edges
+
+
+# 1.4: resolve()/resolve_refs() gained a process-pool parallelization
+# split (``_resolve_all``/``_chunk_files``) for large repos. These
+# tests force the parallel path (by monkeypatching the item-count
+# threshold down to 0) on modest, hand-built fixtures rather than a
+# huge repo, and assert byte-identical output against the sequential
+# (``workers=1``) path — the merge step must not reorder, drop, or
+# double-count any edge/ambiguous/external/reference entry regardless
+# of which worker resolved which file.
+
+
+def _multi_file_call_fixture() -> list[FileMap]:
+    """20 files, each defining a same-named ``run`` plus a caller that
+    invokes a mix of same-file, cross-file, and ambiguous same-named
+    targets — enough shape to actually exercise chunk boundaries."""
+    files = [
+        FileMap(
+            path=f"mod{i}.py",
+            language="python",
+            symbols=[_fn(f"mod{i}.py", "run"), _fn(f"mod{i}.py", "helper")],
+            calls=[
+                RawCall(
+                    caller_id=f"mod{i}.py::run",
+                    path=f"mod{i}.py",
+                    text="run",
+                    name="run",
+                    line=2,
+                ),
+                RawCall(
+                    caller_id=f"mod{i}.py::run",
+                    path=f"mod{i}.py",
+                    text="helper",
+                    name="helper",
+                    line=3,
+                ),
+            ],
+        )
+        for i in range(20)
+    ]
+    return files
+
+
+def _multi_file_ref_fixture() -> list[FileMap]:
+    """20 files, each with a value-reference to a bare, repo-wide
+    same-named binding (ambiguous by construction) — the reference
+    analog of ``_multi_file_call_fixture``."""
+    files = [
+        FileMap(
+            path=f"mod{i}.py",
+            language="python",
+            symbols=[_fn(f"mod{i}.py", "target"), _fn(f"mod{i}.py", "entry")],
+            refs=[
+                RawRef(
+                    caller_id=f"mod{i}.py::entry",
+                    path=f"mod{i}.py",
+                    name="target",
+                    line=2,
+                )
+            ],
+        )
+        for i in range(20)
+    ]
+    return files
+
+
+def _graph_shape(graph: object) -> tuple:
+    return (
+        sorted((e.caller, e.callee, tuple(e.lines)) for e in graph.edges),
+        sorted(graph.ambiguous),
+        sorted((e.caller, e.callee, tuple(e.lines)) for e in graph.external),
+        sorted(graph.calls_in.items()),
+        sorted(graph.calls_out.items()),
+        sorted((e.caller, e.callee, tuple(e.lines)) for e in graph.referenced),
+        sorted(graph.referenced_in.items()),
+        sorted(graph.referenced_out.items()),
+    )
+
+
+def test_chunk_files_splits_evenly() -> None:
+    files = _multi_file_call_fixture()
+    chunks = resolver_mod._chunk_files(files, 4)
+    assert len(chunks) == 4
+    assert sum(len(c) for c in chunks) == len(files)
+    # No file dropped or duplicated across chunks.
+    assert sorted(fm.path for c in chunks for fm in c) == sorted(
+        fm.path for fm in files
+    )
+
+
+def test_chunk_files_workers_le_1_is_a_single_chunk() -> None:
+    files = _multi_file_call_fixture()
+    assert resolver_mod._chunk_files(files, 1) == [files]
+    assert resolver_mod._chunk_files(files, 0) == [files]
+
+
+def test_chunk_files_never_makes_more_chunks_than_files() -> None:
+    files = _multi_file_call_fixture()[:3]
+    chunks = resolver_mod._chunk_files(files, 8)
+    assert len(chunks) == 3
+
+
+def test_resolve_parallel_matches_sequential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    files = _multi_file_call_fixture()
+
+    sequential = resolve(files, workers=1)
+    parallel = resolve(files, workers=4)
+
+    assert _graph_shape(sequential) == _graph_shape(parallel)
+    # Sanity: the parallel run actually did real work, not a no-op.
+    assert sequential.edges
+
+
+def test_resolve_refs_parallel_matches_sequential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    files = _multi_file_ref_fixture()
+
+    seq_edges, seq_in, seq_out = resolve_refs(files, workers=1)
+    par_edges, par_in, par_out = resolve_refs(files, workers=4)
+
+    def shape(edges: list, rin: dict, rout: dict) -> tuple:
+        return (
+            sorted((e.caller, e.callee, tuple(e.lines)) for e in edges),
+            sorted(rin.items()),
+            sorted(rout.items()),
+        )
+
+    assert shape(seq_edges, seq_in, seq_out) == shape(
+        par_edges, par_in, par_out
+    )
+    assert seq_edges  # sanity: real work happened
+
+
+def test_resolve_below_threshold_stays_sequential_by_default() -> None:
+    """The default ``workers=1`` (every caller except ``cli.py``'s
+    ``run_map``) must behave exactly as before this change — no pool,
+    no chunking, single-pass resolution."""
+    files = _multi_file_call_fixture()
+    graph = resolve(files)
+    assert graph.edges  # unchanged baseline behavior, still resolves
+
+
+# --- Bare-call vs. unrelated method collision (round-12 §3.2) ---
+
+
+def test_bare_call_resolves_to_free_function_over_unrelated_method() -> None:
+    """Round-12 master report §3.2: a bare (receiverless) call to a
+    same-package Go free function (``Generate``) used to misresolve
+    as ambiguous against an unrelated *method* sharing the same bare
+    name in a different package (``(g *IDGenerator) Generate(...)``),
+    causing ``dekko affected``/``workset`` to report zero impacted
+    tests for a change a same-package unit test directly covered. A
+    bare call can never syntactically reach a method, so the free
+    function must win."""
+    free_fn = Symbol(
+        id="pkg/slug/generator.go::Generate",
+        name="Generate",
+        qualname="Generate",
+        kind="function",
+        path="pkg/slug/generator.go",
+        language="go",
+    )
+    method = Symbol(
+        id="pkg/markdown/id.go::IDGenerator.Generate",
+        name="Generate",
+        qualname="IDGenerator.Generate",
+        kind="method",
+        path="pkg/markdown/id.go",
+        language="go",
+    )
+    caller = _fn("pkg/slug/generator_test.go", "TestGenerate")
+    files = [
+        FileMap("pkg/slug/generator.go", "go", symbols=[free_fn]),
+        FileMap("pkg/markdown/id.go", "go", symbols=[method]),
+        FileMap(
+            "pkg/slug/generator_test.go",
+            "go",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="pkg/slug/generator_test.go",
+                    text="Generate",
+                    name="Generate",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, free_fn.id) in edges
+    assert graph.ambiguous == []
+
+
+def test_bare_call_stays_ambiguous_among_multiple_non_methods() -> None:
+    """Regression guard: the bare-call/non-method fix must only kick
+    in when it narrows the field to exactly one candidate. Two
+    genuinely unrelated free functions sharing a bare name must still
+    land in ``ambiguous`` — this isn't a general "prefer functions"
+    rule, only a "methods are impossible for a bare call" one."""
+    a = _fn("a.py", "helper")
+    b = _fn("b.py", "helper")
+    caller = _fn("caller.py", "entry")
+    files = [
+        FileMap("a.py", "python", symbols=[a]),
+        FileMap("b.py", "python", symbols=[b]),
+        FileMap(
+            "caller.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.py",
+                    text="helper",
+                    name="helper",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert edges == set()
+    assert len(graph.ambiguous) == 1
+
+
+def test_receiver_qualified_call_unaffected_by_non_method_fallback() -> None:
+    """Regression guard: a call *with* a receiver must never reach the
+    bare-call fallback -- it's gated on ``call.receiver`` being falsy.
+    A receiver-qualified call to an ambiguous method-vs-function pair
+    should stay ambiguous rather than being silently steered to the
+    function just because the fallback exists."""
+    free_fn = Symbol(
+        id="a.py::helper",
+        name="helper",
+        qualname="helper",
+        kind="function",
+        path="a.py",
+        language="python",
+    )
+    method = Symbol(
+        id="b.py::Thing.helper",
+        name="helper",
+        qualname="Thing.helper",
+        kind="method",
+        path="b.py",
+        language="python",
+    )
+    caller = _fn("caller.py", "entry")
+    files = [
+        FileMap("a.py", "python", symbols=[free_fn]),
+        FileMap("b.py", "python", symbols=[method]),
+        FileMap(
+            "caller.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.py",
+                    text="obj.helper",
+                    name="helper",
+                    receiver="obj",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert edges == set()
+    assert len(graph.ambiguous) == 1
