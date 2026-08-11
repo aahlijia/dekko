@@ -351,13 +351,16 @@ def term_coverage(terms: tuple[str, ...], text: str) -> float:
     ``retry``, and vice versa), so coverage isn't sensitive to which
     side happens to carry the inflected spelling.
 
-    Shared by :class:`BM25Scorer`/:class:`LexicalScorer` (discounting
-    a false ``1.00`` on a weak field, round-08 §2.2) and
-    ``search.rank`` (discounting a lexically-dominant common term that
-    crowds out a candidate covering every distinctive query term,
-    round-08 §2.3) — one shared notion of "how much of the query does
-    this text actually cover" so both fixes agree on what coverage
-    means.
+    Shared by :class:`LexicalScorer` (discounting a false ``1.00`` on
+    a weak field, round-08 §2.2) and ``search.rank`` (discounting a
+    lexically-dominant common term that crowds out a candidate
+    covering every distinctive query term, round-08 §2.3) — one shared
+    notion of "how much of the query does this text actually cover"
+    so both fixes agree on what coverage means. A flat special case of
+    :func:`weighted_term_coverage` (every term weighted equally); see
+    that function for the IDF-weighted variant :class:`BM25Scorer`
+    uses instead (round-12 §3.13), which this delegates to so the two
+    can never drift apart.
 
     Args:
         terms: Normalized query terms (already stopword-filtered).
@@ -367,12 +370,61 @@ def term_coverage(terms: tuple[str, ...], text: str) -> float:
         ``hits / len(terms)`` in ``[0, 1]``; ``1.0`` when ``terms`` is
         empty (nothing to fail to cover).
     """
+    return weighted_term_coverage(terms, text)
+
+
+def weighted_term_coverage(
+    terms: tuple[str, ...],
+    text: str,
+    term_weights: dict[str, float] | None = None,
+) -> float:
+    """IDF-weighted fraction of ``terms`` present in ``text``.
+
+    Like :func:`term_coverage`, but a missing rare/distinctive term
+    costs more than a missing common one, when ``term_weights`` (e.g.
+    each query term's BM25 IDF over the current candidate batch, from
+    :func:`idf_term_weights`) is supplied. A term absent from
+    ``term_weights`` falls back to a flat weight of ``1.0`` for that
+    term specifically; passing ``term_weights=None`` (the default)
+    makes every term flat, which is numerically identical to
+    :func:`term_coverage` — the two must never diverge, since
+    :class:`LexicalScorer` (no natural corpus-wide IDF signal of its
+    own) relies on that equivalence by continuing to call the
+    unweighted name.
+
+    Round-12 §3.13: introduced because coverage-fraction ties don't
+    discriminate a candidate missing a rare, distinguishing term (e.g.
+    "yaml" in a Java/Kotlin codebase) from one missing a common term
+    (e.g. "parse") — both cost the same under a flat fraction, even
+    though BM25's own IDF machinery already knows the former is a more
+    telling miss than the latter.
+
+    Args:
+        terms: Normalized query terms (already stopword-filtered).
+        text: Candidate text to check coverage against.
+        term_weights: Per-term importance weight (typically IDF),
+            keyed by the raw entries of ``terms``. ``None`` (or a
+            missing entry for a given term) means "flat, weight 1.0."
+
+    Returns:
+        ``hit_weight / total_weight`` in ``[0, 1]``; ``1.0`` when
+        ``terms`` is empty or every weight is non-positive (nothing
+        meaningful left to fail to cover).
+    """
     if not terms:
         return 1.0
+    weights = term_weights or {}
     present = set(normalize_terms(text))
     stemmed_present = {_stem(t) for t in present}
-    hits = sum(1 for t in terms if t in present or _stem(t) in stemmed_present)
-    return hits / len(terms)
+    total = sum(weights.get(t, 1.0) for t in terms)
+    if total <= 0:
+        return 1.0
+    hit_weight = sum(
+        weights.get(t, 1.0)
+        for t in terms
+        if t in present or _stem(t) in stemmed_present
+    )
+    return hit_weight / total
 
 
 def coverage_factor(coverage: float) -> float:
@@ -400,6 +452,68 @@ def _stemmed_terms(text: str) -> tuple[str, ...]:
     former.
     """
     return tuple(_stem(t) for t in _raw_terms(text))
+
+
+def _idf(n: int, n_t: int) -> float:
+    """BM25's smoothed inverse document frequency for one term.
+
+    Always non-negative: the ``+ 1`` inside the log keeps its argument
+    at or above ``1`` for any ``0 <= n_t <= n``, so a term appearing
+    in every candidate contributes ~0 weight instead of going
+    negative. The one IDF formula in this module -- :meth:`BM25Scorer.
+    _bm25` and :func:`idf_term_weights` both call this rather than
+    each inlining their own copy, so a future retune only has one
+    place to change.
+
+    Args:
+        n: Candidate batch size (corpus size for this computation).
+        n_t: Number of candidates containing the term.
+
+    Returns:
+        The smoothed IDF value.
+    """
+    return math.log((n - n_t + 0.5) / (n_t + 0.5) + 1)
+
+
+def idf_term_weights(
+    terms: tuple[str, ...], texts: list[str]
+) -> dict[str, float]:
+    """Per-``terms`` entry BM25 IDF weight across a batch of texts.
+
+    For use with :func:`weighted_term_coverage`: a term rare across
+    ``texts`` gets a higher weight (missing it costs the coverage
+    discount more) than a term that's common. :class:`BM25Scorer`
+    already builds an equivalent document-frequency table internally
+    for scoring and reuses it directly instead of calling this a
+    second time (see its ``score()``); this standalone version exists
+    for callers with no such internal state of their own --
+    ``search.py``'s scorer-agnostic ``_CoverageAdjustedScorer``
+    wrapper, which discounts whatever scorer it's given (lexical,
+    embedding, or otherwise) and needs to derive the same notion of
+    term rarity independently, from the same candidate batch.
+
+    Args:
+        terms: Normalized query terms (already stopword-filtered).
+        texts: Every candidate's searchable text in the current batch
+            -- the corpus this IDF is computed relative to.
+
+    Returns:
+        ``term -> idf`` for every entry in ``terms``, using
+        :func:`_stem`-folded document-frequency counting so it agrees
+        with :func:`weighted_term_coverage`'s own inflection
+        tolerance.
+    """
+    if not terms:
+        return {}
+    n = len(texts)
+    if n == 0:
+        return dict.fromkeys(terms, 1.0)
+    stemmed_docs = [set(_stemmed_terms(text)) for text in texts]
+    doc_freq = {
+        stem: sum(1 for doc in stemmed_docs if stem in doc)
+        for stem in {_stem(t) for t in terms}
+    }
+    return {t: _idf(n, doc_freq[_stem(t)]) for t in terms}
 
 
 class BM25Scorer:
@@ -435,8 +549,13 @@ class BM25Scorer:
             ``candidate.id -> score`` in ``[0, 1]``; all-zero when no
             candidate matches any query term at all. For a 2+-term
             task, the top-of-batch score is additionally discounted
-            by :func:`coverage_factor` so "best of a weak field" can't
-            renormalize to a misleading ``1.00`` — see round-08 §2.2.
+            by :func:`coverage_factor` on an *IDF-weighted* coverage
+            fraction (round-12 §3.13; :func:`weighted_term_coverage`)
+            rather than a flat one, so missing a rare, distinctive
+            query term costs more than missing a common one — "best
+            of a weak field" can't renormalize to a misleading
+            ``1.00`` (round-08 §2.2) *and* a coverage tie between two
+            candidates now breaks toward the more specific match.
         """
         if not candidates:
             return {}
@@ -463,9 +582,17 @@ class BM25Scorer:
         normalized = {cid: value / top for cid, value in raw.items()}
         if len(task.terms) < 2:
             return normalized
+        # Reuse this same batch's already-computed doc_freq for the
+        # coverage weights, rather than calling idf_term_weights (which
+        # would redo an equivalent document-frequency pass) — the two
+        # agree because both are keyed by _stem(t) over the same
+        # candidate batch.
+        term_weights = {t: _idf(n, doc_freq[_stem(t)]) for t in task.terms}
         return {
             c.id: normalized[c.id]
-            * coverage_factor(term_coverage(task.terms, c.text))
+            * coverage_factor(
+                weighted_term_coverage(task.terms, c.text, term_weights)
+            )
             for c in candidates
         }
 
@@ -490,7 +617,7 @@ class BM25Scorer:
             if f == 0:
                 continue
             n_t = doc_freq[qt]
-            idf = math.log((n - n_t + 0.5) / (n_t + 0.5) + 1)
+            idf = _idf(n, n_t)
             denom = f + self.K1 * (1 - self.B + self.B * norm_len)
             total += idf * (f * (self.K1 + 1)) / denom
         return total + self._path_boost(task, candidate.path)

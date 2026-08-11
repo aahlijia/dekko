@@ -232,14 +232,28 @@ class _CoverageAdjustedScorer:
 
         Only engages for 2+-term queries — a one-term query has no
         "crowded out by a different term" failure mode to correct.
+        The coverage discount is IDF-weighted (round-12 §3.13,
+        :func:`relevance.idf_term_weights`/``weighted_term_coverage``)
+        rather than a flat fraction, so missing a rare, distinctive
+        query term costs more than missing a common one — this is a
+        second, independent IDF computation from whatever the wrapped
+        scorer may have used internally (e.g. :class:`BM25Scorer`
+        already computes its own for the same reason), since this
+        wrapper is deliberately scorer-agnostic and can't assume the
+        inner scorer exposes one.
         """
         scores = self._inner.score(task, candidates)
         if len(task.terms) < 2:
             return scores
+        term_weights = relevance.idf_term_weights(
+            task.terms, [c.text for c in candidates]
+        )
         return {
             c.id: scores.get(c.id, 0.0)
             * relevance.coverage_factor(
-                relevance.term_coverage(task.terms, c.text)
+                relevance.weighted_term_coverage(
+                    task.terms, c.text, term_weights
+                )
             )
             for c in candidates
         }

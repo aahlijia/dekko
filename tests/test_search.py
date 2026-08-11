@@ -762,3 +762,97 @@ def test_search_coverage_multiplier_discounts_common_term_only_matches(
     _, ceiling_without_fix = _target_and_ceiling(hits_unadjusted)
 
     assert ceiling_with_fix < ceiling_without_fix
+
+
+# --- round-12 §3.13: golden-query regression -- a lexically-common
+# term shouldn't let a generic match outrank a lexically-narrower but
+# semantically-correct one. Reproduces spring-boot's reported shape
+# ("parse yaml configuration properties" ranking a generic ``*Parser.
+# parse()`` ahead of ``YamlPropertySourceLoader``): "parse" is common
+# across the corpus, "yaml" is rare -- a candidate missing the rare
+# term should no longer tie-and-then-lose to one missing the common
+# term on raw magnitude alone. Uses a relative-ordering assertion
+# between two known symbols (not "must be #1"), per the design doc's
+# own framing -- more robust across future retuning than an exact-rank
+# pin.
+# --------------------------------------------------------------------
+
+
+def test_search_specific_match_not_buried_by_generic_common_term_match(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """ "yaml" (rare) missing should cost the ranking more than "parse"
+    (common) missing, once both candidates cover the same number of
+    the query's distinct terms. Comparing against the same ranking
+    with the coverage discount forced flat (round-08's original,
+    unweighted behavior) proves the IDF-weighting actually engages --
+    not just that the specific match already happened to win here for
+    unrelated reasons -- by showing its margin over the generic match
+    widens once the discount is weighted.
+    """
+    from dekko import relevance as relevance_mod
+    from dekko.mapfile import load_map
+
+    files = {}
+    for i in range(8):
+        files[f"src/parser_{i}.py"] = (
+            f'"""Parsing helper {i}."""\n\n\n'
+            f"def parse_thing_{i}(s):\n"
+            f'    """Parse parse parse the input, parse it well."""\n'
+            f"    pass\n"
+        )
+    files["src/elements_parser.py"] = (
+        '"""Configuration property element parsing."""\n\n\n'
+        "class ElementsParser:\n"
+        '    """Parses configuration properties from a source."""\n\n'
+        "    def parse(self, name):\n"
+        '        """Parse one configuration properties element."""\n'
+        "        pass\n"
+    )
+    files["src/yaml_loader.py"] = (
+        '"""YAML property source loading."""\n\n\n'
+        "class YamlPropertySourceLoader:\n"
+        '    """Loads YAML configuration properties from a source."""\n\n'
+        "    def load(self, name):\n"
+        '        """Load a YAML configuration properties file."""\n'
+        "        pass\n"
+    )
+    root = make_mapped_repo(files)
+    index = load_map(root)
+    assert index is not None
+
+    def _margin(hits: list[search.SearchHit]) -> float:
+        by_qualname = {h.symbol.qualname: h for h in hits}
+        generic = by_qualname["ElementsParser.parse"]
+        specific = by_qualname["YamlPropertySourceLoader"]
+        return specific.score - generic.score
+
+    hits = search.rank(index, "parse yaml configuration properties")
+    margin_with_fix = _margin(hits)
+    assert margin_with_fix > 0  # the specific match must not be buried
+
+    def _flat_weighted_coverage(
+        terms: tuple[str, ...],
+        text: str,
+        term_weights: dict[str, float] | None = None,
+    ) -> float:
+        if not terms:
+            return 1.0
+        present = set(relevance_mod.normalize_terms(text))
+        stemmed_present = {relevance_mod._stem(t) for t in present}
+        hits_ = sum(
+            1
+            for t in terms
+            if t in present or relevance_mod._stem(t) in stemmed_present
+        )
+        return hits_ / len(terms)
+
+    original = relevance_mod.weighted_term_coverage
+    relevance_mod.weighted_term_coverage = _flat_weighted_coverage
+    try:
+        hits_flat = search.rank(index, "parse yaml configuration properties")
+    finally:
+        relevance_mod.weighted_term_coverage = original
+    margin_without_fix = _margin(hits_flat)
+
+    assert margin_with_fix > margin_without_fix

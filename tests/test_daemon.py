@@ -272,6 +272,58 @@ def test_no_daemon_flag_skips_routing(
 
 
 # ---------------------------------------------------------------------
+# Abandoned requests (round-12 master report §3.8): a client-side
+# timeout after a request has already been sent to the daemon must
+# not be treated like "no daemon reachable" -- silently falling back
+# to a local re-run would duplicate the (possibly still-running)
+# daemon-side work.
+# ---------------------------------------------------------------------
+
+
+def test_main_reports_abandoned_daemon_request_without_local_fallback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """``cli.main()`` must not call ``args.func`` when ``try_daemon``
+    raises ``DaemonRequestAbandonedError`` -- that would duplicate
+    whatever the daemon may still be computing. It should surface the
+    distinct exit code and a clear message instead."""
+    calls: list[str] = []
+
+    def _spy_run_status(args: object) -> int:
+        calls.append("run_status")
+        return 0
+
+    def _raise(args: object) -> tuple[int, str, str] | None:
+        raise daemon.DaemonRequestAbandonedError("simulated timeout")
+
+    monkeypatch.setattr(cli, "run_status", _spy_run_status)
+    monkeypatch.setattr(cli.daemon_mod, "try_daemon", _raise)
+
+    code = cli.main(["status", "--root", "/nonexistent"])
+
+    assert code == daemon.EXIT_DAEMON_ABANDONED
+    assert calls == []  # args.func must never have run
+    err = capsys.readouterr().err
+    assert "did not respond in time" in err
+    assert "--no-daemon" in err
+
+
+def test_no_daemon_flag_bypasses_abandoned_request_handling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--no-daemon`` must skip ``try_daemon`` entirely, so it can
+    never observe (or be blocked by) an abandoned-request signal."""
+
+    def _raise(args: object) -> tuple[int, str, str] | None:
+        raise daemon.DaemonRequestAbandonedError("should never be called")
+
+    monkeypatch.setattr(cli.daemon_mod, "try_daemon", _raise)
+
+    code = cli.main(["status", "--root", "/nonexistent", "--no-daemon"])
+    assert code in (0, 1)
+
+
+# ---------------------------------------------------------------------
 # Idle-timeout self-shutdown
 # ---------------------------------------------------------------------
 
@@ -411,6 +463,66 @@ def test_status_true_positive_while_daemon_busy_on_slow_request(
         finally:
             requester.join(timeout=6.0)
     finally:
+        daemon.stop(root)
+        thread.join(timeout=_POLL_DEADLINE)
+
+
+def test_try_daemon_raises_abandoned_error_on_client_timeout(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-12 master report §3.8: once a request has actually been
+    sent to the daemon, a client-side timeout must surface as
+    ``DaemonRequestAbandonedError``, not a plain ``None`` return --
+    the daemon (single-threaded, no cancellation, see
+    ``_handle_connection``'s docstring) may still be computing the
+    abandoned request in the background, so the caller must not treat
+    this the same as "no daemon reachable, a free fallback." Shortens
+    ``_CLIENT_TIMEOUT`` well below a deliberately slowed dispatched
+    command's duration to force exactly that race."""
+    started = threading.Event()
+    finished = threading.Event()
+    real_run_stats = cli.run_stats
+
+    def slow_run_stats(args: object) -> int:
+        started.set()
+        time.sleep(1.5)
+        finished.set()
+        return real_run_stats(args)
+
+    monkeypatch.setattr(cli, "run_stats", slow_run_stats)
+    original_timeout = daemon._CLIENT_TIMEOUT
+    monkeypatch.setattr(daemon, "_CLIENT_TIMEOUT", 0.3)
+
+    root = short_root
+    (root / "a.py").write_text("def f() -> int:\n    return 1\n")
+    daemon._CLIENT_TIMEOUT = original_timeout
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    daemon._CLIENT_TIMEOUT = 0.3
+
+    transport = dt.default_transport_for(root)
+    thread = threading.Thread(
+        target=daemon.serve_daemon,
+        kwargs={"root": root, "idle_timeout": 30.0},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert _wait_until(transport.exists)
+
+        args = cli.build_subcommand_parser().parse_args(
+            ["stats", "--root", str(root)]
+        )
+        with pytest.raises(daemon.DaemonRequestAbandonedError):
+            daemon.try_daemon(args)
+        assert started.is_set()
+
+        # Let the daemon-side slow command actually finish (and
+        # restore a sane timeout) before teardown, so `stop()` below
+        # doesn't itself race the daemon's single-threaded accept
+        # loop while it's still busy with the abandoned request.
+        assert finished.wait(timeout=5.0)
+    finally:
+        daemon._CLIENT_TIMEOUT = original_timeout
         daemon.stop(root)
         thread.join(timeout=_POLL_DEADLINE)
 

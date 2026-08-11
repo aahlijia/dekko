@@ -84,6 +84,15 @@ _DAEMON_ELIGIBLE = frozenset(
 _SHUTDOWN_CMD = "_shutdown"
 _STATUS_CMD = "_status"
 
+# cli.py's main() returns this when a daemon-routed request was sent
+# but abandoned (see DaemonRequestAbandonedError below) -- distinct from
+# every other exit code already in use across the CLI (0-6; see
+# query.py/outline.py's EXIT_NOT_FOUND/EXIT_AMBIGUOUS, ledger.py's
+# EXIT_NO_TRANSCRIPT=6, cli.py's own literal 5 for --no-regen
+# staleness) so a caller can distinguish "the daemon may still be
+# working on this in the background" from every other failure shape.
+EXIT_DAEMON_ABANDONED = 7
+
 # Default self-shutdown window: 30 minutes with no requests (design
 # doc §2.1).
 DEFAULT_IDLE_TIMEOUT = 1800.0
@@ -449,15 +458,97 @@ def serve_daemon(
     return 0
 
 
+class DaemonRequestAbandonedError(Exception):
+    """A request reached the daemon, but its response never arrived.
+
+    Round-12 master report §3.8: ``serve_daemon``'s accept loop is
+    single-threaded (see its own docstring), so once the daemon has
+    started ``_run_captured(func, args)`` for a dispatched request, it
+    runs to completion regardless of whether the client is still
+    listening -- there is no cancellation. If the client's own
+    ``_CLIENT_TIMEOUT`` expires first (a timeout, a dropped
+    connection, or a malformed reply), the daemon may still be
+    computing that abandoned request in the background. Falling back
+    to a local re-run in that situation duplicates the expensive work
+    and contends with the orphaned daemon-side copy for CPU -- which
+    is why this is raised instead of returned as another ``None``:
+    ``None`` means "the daemon was never reached, a local fallback is
+    free," this means "the daemon *was* reached and may still be
+    working, a local fallback is not free." ``cli.py``'s ``main()``
+    must not treat the two the same way.
+    """
+
+
+def _send_daemon_request(
+    sock: socket.socket,
+    transport: DaemonTransport,
+    command: str,
+    args: argparse.Namespace,
+) -> bool:
+    """Authenticate and send one request line on an open ``sock``.
+
+    Returns:
+        ``True`` once the request has been fully sent. ``False`` if a
+        socket error occurred during authentication or the send
+        itself -- safe to treat as "the daemon never started work on
+        this request," since nothing was dispatched for it to act on.
+    """
+    try:
+        transport.send_auth_preamble(sock)
+        payload = {k: v for k, v in vars(args).items() if k != "func"}
+        _send_line(sock, {"cmd": command, "args": payload})
+    except OSError:
+        return False
+    return True
+
+
+def _recv_daemon_response(sock: socket.socket) -> tuple[int, str, str]:
+    """Read and decode the daemon's response line on ``sock``.
+
+    Raises:
+        DaemonRequestAbandonedError: on a timeout, a dropped connection, or
+            a malformed reply -- always *after* a request was already
+            sent, so see that exception's docstring for why this must
+            not be swallowed into a plain ``None`` return the way a
+            pre-send failure is.
+    """
+    try:
+        raw = _recv_line(sock)
+    except OSError as exc:
+        raise DaemonRequestAbandonedError(str(exc)) from exc
+    if raw is None:
+        raise DaemonRequestAbandonedError(
+            "connection closed before a response arrived"
+        )
+    try:
+        response = json.loads(raw)
+        return (
+            int(response["exit_code"]),
+            str(response.get("stdout", "")),
+            str(response.get("stderr", "")),
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        raise DaemonRequestAbandonedError(
+            f"malformed daemon response: {exc}"
+        ) from exc
+
+
 def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
     """Attempt to route a parsed CLI invocation through a live daemon.
 
-    Returns ``None`` on *every* absence/error condition (design doc
-    §2.5) so ``cli.py``'s ``main()`` integration is the one-line
-    ``if result is None: return args.func(args)`` the design doc
-    calls for. Never raises -- every failure path here means "fall
-    back to direct execution, silently," not "surface an error the
-    caller never asked for."
+    Returns ``None`` on every "the daemon was never actually reached
+    for this request" condition (design doc §2.5) so ``cli.py``'s
+    ``main()`` integration can treat those as "fall back to direct
+    execution, silently." Once a request has been sent, though, a
+    failure to get its response back is raised as
+    :class:`DaemonRequestAbandonedError` rather than folded into the same
+    ``None`` return -- round-12 master report §3.8 traced a silent
+    local fallback in that specific case to a duplicate-execution bug
+    (the daemon keeps computing the abandoned request in the
+    background while the client redoes the same work locally,
+    contending for the same CPU). ``main()`` must let that exception
+    propagate to a clear message and a distinct exit code instead of
+    catching it here.
 
     Args:
         args: The already-parsed ``argparse.Namespace`` for a
@@ -467,6 +558,10 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
     Returns:
         ``(exit_code, stdout, stderr)`` from the daemon, or ``None``
         to signal "run directly instead."
+
+    Raises:
+        DaemonRequestAbandonedError: if a request was sent to a live
+            daemon but no usable response came back.
     """
     command = getattr(args, "command", None)
     if command not in _DAEMON_ELIGIBLE:
@@ -491,20 +586,9 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
         return None
 
     try:
-        transport.send_auth_preamble(sock)
-        payload = {k: v for k, v in vars(args).items() if k != "func"}
-        _send_line(sock, {"cmd": command, "args": payload})
-        raw = _recv_line(sock)
-        if raw is None:
+        if not _send_daemon_request(sock, transport, command, args):
             return None
-        response = json.loads(raw)
-        return (
-            int(response["exit_code"]),
-            str(response.get("stdout", "")),
-            str(response.get("stderr", "")),
-        )
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+        return _recv_daemon_response(sock)
     finally:
         sock.close()
 

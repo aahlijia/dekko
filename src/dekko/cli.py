@@ -2544,6 +2544,37 @@ def _legacy_main(args_list: list[str]) -> int:
     return run_map(args)
 
 
+def _report_daemon_request_abandoned(
+    exc: "daemon_mod.DaemonRequestAbandonedError",
+) -> int:
+    """Report a timed-out/dropped daemon-routed request, no fallback.
+
+    Round-12 master report §3.8: a client that silently falls back to
+    a local ``args.func(args)`` re-run after abandoning a daemon
+    request duplicates whatever work the daemon (which has no notion
+    of "the client hung up," see ``daemon.py``'s ``_handle_connection``
+    docstring) may still be doing in the background, contending with
+    it for CPU. ``main()`` calls this instead of falling back whenever
+    ``daemon_mod.try_daemon`` raises ``DaemonRequestAbandonedError``.
+
+    Args:
+        exc: The abandoned-request exception; its message names the
+            underlying cause (timeout, disconnect, malformed reply).
+
+    Returns:
+        ``daemon_mod.EXIT_DAEMON_ABANDONED``.
+    """
+    print(
+        f"dekko: a daemon-routed request did not respond in time ({exc}). "
+        "The daemon may still be processing it in the background -- "
+        "re-running the same command here would duplicate that work "
+        "rather than speed it up. Retry with --no-daemon to force a "
+        "fresh local run, or retry normally once the daemon is done.",
+        file=sys.stderr,
+    )
+    return daemon_mod.EXIT_DAEMON_ABANDONED
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point.
 
@@ -2562,7 +2593,10 @@ def main(argv: list[str] | None = None) -> int:
     if args_list and args_list[0] in SUBCOMMANDS:
         args = build_subcommand_parser().parse_args(args_list)
         if not no_daemon:
-            routed = daemon_mod.try_daemon(args)
+            try:
+                routed = daemon_mod.try_daemon(args)
+            except daemon_mod.DaemonRequestAbandonedError as exc:
+                return _report_daemon_request_abandoned(exc)
             if routed is not None:
                 exit_code, out, err = routed
                 if out:

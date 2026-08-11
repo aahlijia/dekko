@@ -100,12 +100,38 @@ direct execution for that one call regardless of whether a daemon is
 running.
 
 The daemon fails open: a stale socket, an unreachable process, or any
-transport error falls back silently to normal direct execution, so a
-dead or never-started daemon is never a hard failure. It self-shuts-
-down after 30 minutes idle by default (`dekko daemon start
---idle-timeout SECONDS` to change it), and re-validates its cached
-index on every read the same way a direct invocation would, so a
-working-tree edit or an out-of-band `dekko map` is never served stale.
+transport error *before* a request is sent falls back silently to
+normal direct execution, so a dead or never-started daemon is never a
+hard failure. It self-shuts-down after 30 minutes idle by default
+(`dekko daemon start --idle-timeout SECONDS` to change it), and
+re-validates its cached index on every read the same way a direct
+invocation would, so a working-tree edit or an out-of-band `dekko map`
+is never served stale.
+
+One case is deliberately *not* a silent fallback: if a request has
+already been sent to the daemon and no response comes back in time
+(a slow request outlasting the connection's own timeout, or the
+connection dropping mid-wait), the CLI does **not** transparently
+re-run the command locally — the daemon's accept loop is
+single-threaded and has no notion of "the client gave up," so it
+keeps computing the abandoned request in the background regardless;
+silently duplicating that same work locally would waste CPU racing
+against its own orphaned daemon-side copy. Instead this prints a
+message to stderr and exits with a distinct code (`7`) so the
+difference from every other daemon-unavailable case is visible. Retry
+with `--no-daemon` to force a fresh local run, or just retry normally
+once the daemon has had time to finish.
+
+`diff` and `affected`'s dominant cost — re-parsing and resolving the
+*old* side of the comparison (the git rev being diffed against) — is
+**not** covered by the daemon's warm cache at all: that cache only
+ever holds the current working tree's index. Only the separate,
+on-disk `.dekko/rev-cache/` (shared by daemon-routed and direct calls
+alike, keyed by resolved commit SHA) makes a *repeat* comparison
+against the same rev faster. A daemon-routed `diff`/`affected` against
+a rev it hasn't seen before pays the same old-side reparse cost a
+direct invocation would — daemon routing speeds up the current-tree
+side only.
 
 All three subcommands take `--root DIR` (default: cwd) for a repo
 other than the current directory. Transport is a Unix domain socket at
