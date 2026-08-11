@@ -37,9 +37,34 @@ def is_test_path(path: str) -> bool:
         basename matches a test filename pattern.
     """
     parts = path.split("/")
+    if "src" in parts:
+        idx = parts.index("src")
+        after = parts[idx + 1] if idx + 1 < len(parts) else None
+        if after == "main":
+            # Maven/Gradle standard directory layout: everything under
+            # src/main/ is production code by definition, regardless of
+            # whether a later path segment happens to spell a package/
+            # module name that collides with a test-directory keyword
+            # (e.g. `org.springframework.boot.test`, a real, large,
+            # production namespace, not a test directory). Only the
+            # filename-glob check still applies.
+            return _basename_is_test(parts[-1])
+        if after in TEST_DIR_PARTS:
+            return True
     if TEST_DIR_PARTS.intersection(parts):
         return True
-    base = parts[-1]
+    return _basename_is_test(parts[-1])
+
+
+def _basename_is_test(base: str) -> bool:
+    """Whether a filename alone looks like a test file.
+
+    Args:
+        base: The final path component (filename).
+
+    Returns:
+        True when the basename matches a known test filename pattern.
+    """
     return any(fnmatch.fnmatch(base, pat) for pat in TEST_NAME_GLOBS)
 
 

@@ -93,3 +93,21 @@ def test_export_requires_format(capsys: pytest.CaptureFixture) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["export"])
     assert exc.value.code == 2
+
+
+def test_export_scope_help_clarifies_whole_graph_not_per_symbol(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """9.1: ``--scope``'s help text used to just say "node granularity
+    (default: symbol)", easily misread as a per-symbol root/filter.
+    It must now make explicit that --scope controls the whole
+    rendered graph's node granularity and point at 'dekko context' for
+    a single symbol's neighborhood."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["export", "--help"])
+    assert exc.value.code == 0
+    # argparse wraps help text at a fixed width, so a phrase can be
+    # split across lines -- normalize whitespace before checking.
+    out = " ".join(capsys.readouterr().out.split())
+    assert "whole rendered graph" in out
+    assert "dekko context" in out

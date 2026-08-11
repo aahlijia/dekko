@@ -5,6 +5,7 @@ import json
 import pytest
 
 from dekko import cli, mapfile, query
+from dekko.model import Symbol
 
 from conftest import RepoFactory
 
@@ -166,6 +167,45 @@ def test_close_names_raised_cutoff_excludes_marginal_fuzzy_match(
     # separate length floor isn't what's excluding it.
     assert query._close_names("trix", ["tribe"]) == []
     assert query._close_names("trix", ["trib"]) == ["trib"]
+
+
+def test_qualname_near_miss_requires_segment_boundary() -> None:
+    # ``_is_qualname_near_miss`` requires a preceding ``.`` before the
+    # requested qualname, not a bare substring match — a qualname that
+    # merely ends with the same trailing characters (no segment
+    # boundary) must not count as a namespace-missing near-miss.
+    real = Symbol(
+        id="ns.cpp::tensorflow.ClientSession.Run",
+        name="Run",
+        qualname="tensorflow.ClientSession.Run",
+        kind="method",
+        path="ns.cpp",
+        language="cpp",
+    )
+    unrelated_suffix = Symbol(
+        id="other.cpp::NotClientSession.Run",
+        name="Run",
+        qualname="NotClientSession.Run",
+        kind="method",
+        path="other.cpp",
+        language="cpp",
+    )
+    bare = Symbol(
+        id="bare.cpp::Run",
+        name="Run",
+        qualname="Run",
+        kind="function",
+        path="bare.cpp",
+        language="cpp",
+    )
+    assert query._is_qualname_near_miss("ClientSession.Run", real) is True
+    assert (
+        query._is_qualname_near_miss("ClientSession.Run", unrelated_suffix)
+        is False
+    )
+    # A bare (no-dot) requested qualname has no container segment to
+    # be "missing a prefix" from, so it never counts as a near-miss.
+    assert query._is_qualname_near_miss("Run", bare) is False
 
 
 AMBIGUOUS_CALL = {
@@ -629,6 +669,48 @@ def test_not_found_lists_closest_matches(
     assert "closest matches:" in err
     assert "a.py:1  helper(x: int) -> int" in err
     assert "b.py:1  helper(x: int) -> int" in err
+
+
+def test_not_found_ranks_namespace_missing_near_miss_first(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Master report #8 (round 11, tensorflow): a C++ namespace-
+    # qualified target copied without its namespace prefix
+    # (``ClientSession.Run`` instead of the real
+    # ``tensorflow.ClientSession.Run``) used to rank unrelated
+    # same-bare-name (``Run``) candidates ahead of the real match
+    # purely by alphabetically-earliest path. File names are chosen so
+    # the unrelated candidates would have sorted first under the old
+    # pure-alphabetical ranking, proving the qualname-suffix near-miss
+    # tier now wins instead.
+    root = make_mapped_repo(
+        {
+            "aaa_csession.cpp": (
+                "class CSession {\npublic:\n    void Run() {}\n};\n"
+            ),
+            "bbb_other.cpp": "void Run() {}\n",
+            "zzz_session.cpp": (
+                "namespace tensorflow {\n"
+                "class ClientSession {\n"
+                "public:\n"
+                "    void Run() {}\n"
+                "};\n"
+                "}\n"
+            ),
+        }
+    )
+    code = cli.main(
+        ["query", "symbol", "ClientSession.Run", "--root", str(root)]
+    )
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "closest matches:" in err
+    lines = [
+        line
+        for line in err.splitlines()
+        if line.startswith("  ") and "Run" in line
+    ]
+    assert lines[0].startswith("  zzz_session.cpp:")
 
 
 def test_not_found_with_no_close_names_stays_bare(

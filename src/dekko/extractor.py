@@ -222,7 +222,7 @@ def _make_symbol(
     receiver: str | None = None,
 ) -> Symbol:
     """Build a ``Symbol`` with container qualification and unique id."""
-    containers, is_method = _qualify(spec, def_node)
+    containers, is_method, in_test_module = _qualify(spec, def_node)
     if receiver is not None:
         containers.append(receiver)
         is_method = True
@@ -258,6 +258,7 @@ def _make_symbol(
         decorated=decorated,
         exported=exported,
         doc=_doc_for_symbol(spec.name, def_node),
+        test=in_test_module,
     )
 
 
@@ -359,7 +360,19 @@ def _modifiers_keyword(def_node: Node, keyword: str) -> bool:
     return any(child.type == keyword for child in modifiers.children)
 
 
-def _qualify(spec: LanguageSpec, def_node: Node) -> tuple[list[str], bool]:
+# Rust ``mod`` names conventionally used for inline ``#[cfg(test)]``
+# unit-test submodules co-located with the production code they test
+# (``mod tests { ... }`` at the bottom of the same file). Shares the
+# same two literal values as ``classify.TEST_DIR_PARTS``' bare-name
+# test-directory check, kept as a separate constant here since this is
+# an AST-context signal, not a path-segment one — see ``_qualify``'s
+# ``in_test_module`` return value and round 11 master report #7.
+_RUST_TEST_MOD_NAMES = frozenset({"tests", "test"})
+
+
+def _qualify(
+    spec: LanguageSpec, def_node: Node
+) -> tuple[list[str], bool, bool]:
     """Collect container names above a definition, outermost first.
 
     The climb stops dead at the first enclosing function/method/
@@ -370,15 +383,22 @@ def _qualify(spec: LanguageSpec, def_node: Node) -> tuple[list[str], bool]:
     attributed to a class several levels further up.
 
     Returns:
-        ``(container_names, is_method)`` where ``is_method`` is true
-        when the immediate class-like container makes this a method.
+        ``(container_names, is_method, in_test_module)`` — ``is_method``
+        is true when the immediate class-like container makes this a
+        method; ``in_test_module`` is true when the climb passed
+        through a Rust ``mod_item`` container conventionally used for
+        inline unit tests (a bare module name of ``tests``/``test``),
+        the dominant Rust pattern for co-locating
+        ``#[cfg(test)]``-gated test code with the production code it
+        tests. Always ``False`` for every other language.
     """
     containers: list[str] = []
     is_method = False
+    in_test_module = False
     node = def_node.parent
     while node is not None:
         if node.type in spec.function_boundary_types:
-            return [], False
+            return [], False, False
 
         name_field = spec.container_types.get(node.type)
 
@@ -386,15 +406,23 @@ def _qualify(spec: LanguageSpec, def_node: Node) -> tuple[list[str], bool]:
             name_node = node.child_by_field_name(name_field)
 
             if name_node is not None:
-                containers.append(_strip_generics(_text(name_node)))
+                name_text = _strip_generics(_text(name_node))
+                containers.append(name_text)
 
                 if node.type in spec.method_containers:
                     is_method = True
 
+                if (
+                    spec.name == "rust"
+                    and node.type == "mod_item"
+                    and name_text in _RUST_TEST_MOD_NAMES
+                ):
+                    in_test_module = True
+
         node = node.parent
 
     containers.reverse()
-    return containers, is_method
+    return containers, is_method, in_test_module
 
 
 def _strip_generics(name: str) -> str:

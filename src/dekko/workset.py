@@ -119,9 +119,21 @@ def _make_seed(
     )
 
 
-def seed_from_rev(index: MapIndex, root: Path, rev: str | None) -> Seed | None:
-    """Seed from a worktree-vs-rev diff; ``None`` on an unexportable rev."""
-    outcome = affected.changes(root, rev)
+def seed_from_rev(
+    index: MapIndex, root: Path, rev: str | None, jobs: int = 1
+) -> Seed | None:
+    """Seed from a worktree-vs-rev diff; ``None`` on an unexportable rev.
+
+    Args:
+        index: Already-loaded current-tree index (reused, not
+            reloaded — see ``affected.changes``).
+        root: Repository root.
+        rev: Git rev for the old side, or ``None`` to derive a default.
+        jobs: Resolved worker count for a rev-cache-miss old-side
+            re-parse/resolve — see ``diff.snapshot``. Round-12 master
+            report §3.3.
+    """
+    outcome = affected.changes(root, rev, index=index, jobs=jobs)
     if outcome is None:
         return None
     impacts, result, _new, target_rev, _prov = outcome
@@ -425,6 +437,7 @@ def run(
     as_json: bool,
     no_regen: bool,
     task: TaskContext | None = None,
+    jobs: int = 1,
 ) -> int:
     """Build and render a work-set bundle for a change or a symbol.
 
@@ -438,6 +451,9 @@ def run(
         no_regen: Fail instead of regenerating a stale map.
         task: Optional task context; when set, the bundle's packs and
             outlines are ordered most task-relevant first.
+        jobs: Resolved worker count for a rev-cache-miss old-side
+            re-parse/resolve on a rev seed — see ``seed_from_rev``. No
+            effect on a ``symbol`` seed.
 
     Returns:
         ``0`` ok, ``2`` bad rev, ``3`` symbol not found, ``4`` ambiguous,
@@ -453,7 +469,7 @@ def run(
         if seed is None:
             return report_unresolved(symbol, candidates, index)
     else:
-        seed = seed_from_rev(index, root, rev)
+        seed = seed_from_rev(index, root, rev, jobs=jobs)
         if seed is None:
             return EXIT_ERROR
     if task is not None and not task.is_empty:

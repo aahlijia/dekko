@@ -267,6 +267,20 @@ def test_search_budget_trims_and_reports_total(
     assert len(doc["hits"]) == doc["meta"]["returned"]
 
 
+def test_search_header_uses_scored_candidate_wording(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """9.1: the header used to read "N hits", which sounds alarming
+    even when the shown results are excellent -- it implied every one
+    of them matched strongly. It now reads "N candidates scored"."""
+    root = make_mapped_repo(SRC)
+    assert cli.main(["search", "retry", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "candidates scored" in out or "candidate scored" in out
+    assert " hits" not in out.splitlines()[0]
+    assert " hit\n" not in out
+
+
 def test_search_zero_hits_is_exit_ok_with_no_matches(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

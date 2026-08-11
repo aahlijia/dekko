@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from dekko import cli
+from dekko import cli, outline
 
 from conftest import RepoFactory
 
@@ -91,6 +91,33 @@ def test_size_framing_present(
     out = capsys.readouterr().out
     assert "full ≈" in out
     assert "outline ≈" in out
+
+
+def test_size_line_shows_one_decimal_instead_of_misleading_zero() -> None:
+    """9.1: rounding a true ~0.1% savings ratio to the nearest integer
+    reads as "(0%)" -- misleadingly implying no savings at all. A
+    ratio that rounds to 0 but isn't actually zero should render with
+    one decimal place instead."""
+    line = outline._size_line(full=10_000, outline_tokens=5)
+    assert line is not None
+    assert "(0.1%)" in line
+    assert "(0%)" not in line
+
+
+def test_size_line_normal_cases_unchanged() -> None:
+    """Ordinary percentages still render as plain rounded integers,
+    with no ".0" noise introduced by the 0% fix."""
+    assert "(1%)" in outline._size_line(full=1000, outline_tokens=10)
+    assert "(45%)" in outline._size_line(full=100, outline_tokens=45)
+
+
+def test_size_line_true_zero_stays_zero() -> None:
+    """A genuinely empty outline (0 tokens) must still render as a
+    plain "(0%)", not "(0.0%)" -- the one-decimal fallback is only for
+    a nonzero ratio that rounds down to 0."""
+    line = outline._size_line(full=1000, outline_tokens=0)
+    assert line is not None
+    assert "(0%)" in line
 
 
 def test_docless_file_has_no_emdash(
@@ -201,3 +228,29 @@ def test_normal_small_file_has_no_sparse_caveat(
     code = cli.main(["outline", "a.py", "--root", str(root)])
     assert code == 0
     assert "very few named symbols" not in capsys.readouterr().err
+
+
+def test_sparse_note_suppressed_when_file_failed_to_parse() -> None:
+    """Round-12 master report §3.9: a file that failed to parse
+    entirely (most often an unsupported/uninstalled Tier-2 grammar --
+    Kotlin/Groovy without ``pip install dekko[all]``) always has 0
+    symbols, which used to trip the "few named symbols" heuristic en
+    masse -- misleadingly implying a callback-heavy file the outline
+    is silently missing content from, when the real (and already
+    disclosed, via the file's own header line) cause is that nothing
+    was extracted at all. Same shape/size that would otherwise trip
+    the heuristic (see the passing case just below), differing only
+    in whether ``error`` is set."""
+    assert (
+        outline._sparse_note(full=1000, outline_tokens=20, symbol_count=0)
+        is not None
+    )
+    assert (
+        outline._sparse_note(
+            full=1000,
+            outline_tokens=20,
+            symbol_count=0,
+            error="grammar 'kotlin' is not in the offline Tier-1 set",
+        )
+        is None
+    )

@@ -526,3 +526,95 @@ def test_without_tests_drops_ambiguous_out_from_test_callers() -> None:
     index = mapfile.index_from_maps(files, graph, "demo")
     filtered = index.without_tests()
     assert filtered.ambiguous_out == {"a.py::f": ["g"]}
+
+
+def test_without_tests_drops_symbol_test_flag_not_just_path() -> None:
+    # round-12 master report §3.4 / §2: the round-11 fix taught the
+    # Rust extractor to set ``Symbol.test = True`` for definitions
+    # nested in an inline ``#[cfg(test)] mod tests { ... }`` block
+    # (a file path that is *not* itself a test path, e.g. plain
+    # ``src/lib.rs``), but ``without_tests()`` only ever consulted
+    # ``classify.is_test_path`` and never read the flag — so nothing
+    # was actually excluded. This reproduces that shape without a
+    # real Rust parse: a symbol living at a non-test path with
+    # ``test=True`` set directly, alongside an ordinary production
+    # symbol at the same path.
+    prod = _sym("src/lib.rs", "real_fn")
+    inline_test = Symbol(
+        id="src/lib.rs::tests::test_bounds_intersects",
+        name="test_bounds_intersects",
+        qualname="tests::test_bounds_intersects",
+        kind="function",
+        path="src/lib.rs",
+        language="rust",
+        start_line=10,
+        end_line=12,
+        test=True,
+    )
+    files = [
+        FileMap(
+            path="src/lib.rs", language="rust", symbols=[prod, inline_test]
+        ),
+    ]
+    graph = CallGraph(
+        referenced=[
+            Edge(
+                caller=inline_test.id,
+                callee=prod.id,
+                lines=[11],
+            )
+        ]
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    filtered = index.without_tests()
+    assert inline_test.id not in filtered.symbols_by_id
+    assert prod.id in filtered.symbols_by_id
+    assert filtered.referenced_in.get(prod.id, []) == []
+    assert filtered.ref_lines == {}
+
+
+def test_atomic_write_bytes_writes_full_content(tmp_path: Path) -> None:
+    target = tmp_path / "map.json"
+    mapfile.atomic_write_bytes(target, b'{"hello": "world"}')
+    assert target.read_bytes() == b'{"hello": "world"}'
+
+
+def test_atomic_write_bytes_overwrites_existing_file(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "map.json"
+    target.write_bytes(b"stale content")
+    mapfile.atomic_write_bytes(target, b"fresh content")
+    assert target.read_bytes() == b"fresh content"
+
+
+def test_atomic_write_bytes_leaves_no_temp_file_behind(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "map.json"
+    mapfile.atomic_write_bytes(target, b"data")
+    remaining = list(tmp_path.iterdir())
+    assert remaining == [target]
+
+
+def test_atomic_write_bytes_never_exposes_partial_content(
+    tmp_path: Path,
+) -> None:
+    """A reader never sees a half-written file, only old-or-new.
+
+    Round-12 master report §4.1b: a concurrent reader that opened
+    ``map.json``/``cache.json`` mid-``write_text`` could observe
+    however many bytes had been flushed so far. Since ``os.replace``
+    is atomic on the same filesystem, a reader opening ``target`` at
+    any point either sees the complete old content or the complete
+    new content -- this simulates the "before the replace" and
+    "after the replace" observation points directly.
+    """
+    target = tmp_path / "map.json"
+    target.write_bytes(b"old-complete-content")
+    before = target.read_bytes()
+    assert before == b"old-complete-content"
+
+    mapfile.atomic_write_bytes(target, b"new-complete-content")
+    after = target.read_bytes()
+    assert after == b"new-complete-content"

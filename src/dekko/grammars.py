@@ -44,6 +44,49 @@ class GrammarUnavailableError(ValueError):
     """
 
 
+# Substrings unique to this module's two ``GrammarUnavailableError``
+# messages (below), used by ``is_grammar_unavailable_message`` to tell
+# a missing-optional-grammar skip apart from a genuine parse failure
+# after both have collapsed into a plain string on ``FileMap.error``/
+# ``MapIndex.errors_by_path`` — there is no separate error-kind field
+# on the wire (``extractor_generic.extract_file_generic`` catches
+# ``GrammarUnavailableError`` alongside every other read/parse
+# exception, and only ``str(exc)`` survives).
+_UNAVAILABLE_MARKERS = (
+    "is not in the offline Tier-1 set",
+    "is not available",
+)
+
+
+def is_grammar_unavailable_message(error: str) -> bool:
+    """Whether a ``FileMap.error``/``errors_by_path`` message names a
+    missing optional grammar rather than a genuine parse failure.
+
+    Round-12 master report §3.9/§3.10/§3.16: ``dekko map``'s top-line
+    "skipped: parse error N" summary bucket, and ``outline``'s "few
+    named symbols for its size" heuristic, both used to lump "this
+    file genuinely failed to parse" together with "this optional
+    grammar (``pip install dekko[all]``) isn't installed" — the
+    per-file detail line already named the missing grammar
+    accurately, but the terse top-line/heuristic wording read as
+    alarming ("broken") for what is really just an opt-in dependency
+    gap. This is a message-substring check (not a distinct exception
+    type check) because the type information doesn't survive past
+    ``extract_file_generic``'s broad ``except Exception`` -- see that
+    function's docstring.
+
+    Args:
+        error: A ``FileMap.error`` or ``MapIndex.errors_by_path``
+            value.
+
+    Returns:
+        True when the message came from ``get_grammar`` raising
+        ``GrammarUnavailableError``, not from an unrelated
+        read/parse failure.
+    """
+    return any(marker in error for marker in _UNAVAILABLE_MARKERS)
+
+
 @lru_cache(maxsize=None)
 def get_grammar(name: str) -> Language:
     """Resolve a grammar name to a ``tree_sitter.Language``.

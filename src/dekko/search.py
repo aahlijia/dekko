@@ -307,9 +307,17 @@ def rank(
 
 
 def _manifest(query_text: str, total: int) -> str:
-    """The non-droppable header: query text and total hit count."""
-    noun = "hit" if total == 1 else "hits"
-    return f'search: "{query_text}"  —  {total} {noun}'
+    """The non-droppable header: query text and total candidate count.
+
+    "N hits" reads as alarming even when the shown results are
+    excellent -- it implies every one of them matched strongly. "N
+    candidates scored" is honest about what the number actually means
+    (everything considered, not everything relevant); the existing
+    budget-omission line lower in the output already covers "showing
+    top N" when results were trimmed.
+    """
+    noun = "candidate" if total == 1 else "candidates"
+    return f'search: "{query_text}"  —  {total} {noun} scored'
 
 
 def _hit_row(hit: SearchHit) -> str:

@@ -8,8 +8,10 @@ working tree to decide whether the map is still fresh.
 
 import hashlib
 import json
+import os
 import re
 import subprocess
+import tempfile
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -55,6 +57,47 @@ def _json_dumps(obj: object) -> bytes:
     if orjson is not None:
         return orjson.dumps(obj)
     return json.dumps(obj).encode("utf-8")
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` without ever exposing a partial file.
+
+    Writes to a sibling temp file in the same directory, then
+    ``os.replace()``s it into place — a single filesystem-level rename
+    rather than an in-place ``write_text``/``write_bytes``. The
+    temp file lives alongside ``path`` (not in a system temp dir) so
+    the rename is guaranteed atomic (same filesystem).
+
+    Without this, a reader (``load_map``, a concurrent daemon/MCP/CLI
+    process's own regen) that opens ``path`` mid-write can observe
+    however many bytes the writer has flushed so far — a truncated
+    ``map.json``/``cache.json`` that fails JSON parsing outright, or
+    worse, parses successfully as a valid-but-incomplete document.
+    Round-12 master report §4.1b: no synchronization primitive of any
+    kind previously guarded these writes, and multiple independent
+    processes (bare CLI, daemon-triggered regen, MCP server) can each
+    trigger one against the same root with zero coordination. Atomic
+    replacement doesn't prevent two writers from racing each other,
+    but it guarantees every reader sees either the old complete file
+    or the new complete file, never a half-written one.
+
+    Args:
+        path: Destination file path; parent directory must exist.
+        data: Exact bytes to write.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as tmp_file:
+            tmp_file.write(data)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _unsupported_summary(
@@ -331,77 +374,113 @@ class MapIndex:
         )
 
     def without_tests(self) -> "MapIndex":
-        """A filtered view with all test-path code removed.
+        """A filtered view with all test code removed.
 
-        Drops symbols defined in test files, edges touching them
+        Drops symbols classified as test code, edges touching them
         (including module-level test callers), and external calls made
-        from test files. Classification is path-based so it also works
-        on pre-v3 documents that lack the ``test`` flag.
+        from test files. A symbol is dropped when either its file path
+        is a test path (``classify.is_test_path``, works even on
+        pre-v3 documents that lack the ``test`` flag) or the extractor
+        set ``Symbol.test`` (path-based classification plus
+        language-specific containers such as Rust's inline
+        ``mod tests { ... }``).
 
         Returns:
             A new ``MapIndex``; ``self`` is left untouched.
         """
         out = MapIndex(root_label=self.root_label, provenance=self.provenance)
         for sid, sym in self.symbols_by_id.items():
-            if not _prod_id(sid):
+            if _symbol_is_test(sym):
                 continue
             out.symbols_by_id[sid] = sym
             out.symbols_by_name.setdefault(sym.name, []).append(sym)
             out.symbols_by_qualname.setdefault(sym.qualname, []).append(sym)
             out.symbols_by_path.setdefault(sym.path, []).append(sym)
-        out.calls_in = _filter_adjacency(self.calls_in)
-        out.calls_out = _filter_adjacency(self.calls_out)
+        by_id = self.symbols_by_id
+        out.calls_in = _filter_adjacency(self.calls_in, by_id)
+        out.calls_out = _filter_adjacency(self.calls_out, by_id)
         out.edge_lines = {
             key: lines
             for key, lines in self.edge_lines.items()
-            if _prod_id(key[0]) and _prod_id(key[1])
+            if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
         }
         out.imports_by_path = _filter_paths(self.imports_by_path)
         out.languages_by_path = _filter_paths(self.languages_by_path)
         out.docs_by_path = _filter_paths(self.docs_by_path)
         out.errors_by_path = _filter_paths(self.errors_by_path)
         out.notes = {
-            sid: texts for sid, texts in self.notes.items() if _prod_id(sid)
+            sid: texts
+            for sid, texts in self.notes.items()
+            if _prod_id(sid, by_id)
         }
         for name, exts in self.externals_by_name.items():
-            kept = [e for e in exts if _prod_id(e.caller)]
+            kept = [e for e in exts if _prod_id(e.caller, by_id)]
             if kept:
                 out.externals_by_name[name] = kept
         for cand, pairs in self.ambiguous_in.items():
-            if not _prod_id(cand):
+            if not _prod_id(cand, by_id):
                 continue
             kept_pairs = [
-                (caller, name) for caller, name in pairs if _prod_id(caller)
+                (caller, name)
+                for caller, name in pairs
+                if _prod_id(caller, by_id)
             ]
             if kept_pairs:
                 out.ambiguous_in[cand] = kept_pairs
         out.ambiguous_out = {
             caller: names
             for caller, names in self.ambiguous_out.items()
-            if _prod_id(caller)
+            if _prod_id(caller, by_id)
         }
-        out.referenced_in = _filter_adjacency(self.referenced_in)
-        out.referenced_out = _filter_adjacency(self.referenced_out)
+        out.referenced_in = _filter_adjacency(self.referenced_in, by_id)
+        out.referenced_out = _filter_adjacency(self.referenced_out, by_id)
         out.ref_lines = {
             key: lines
             for key, lines in self.ref_lines.items()
-            if _prod_id(key[0]) and _prod_id(key[1])
+            if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
         }
         return out
 
 
-def _prod_id(sym_or_module_id: str) -> bool:
-    """Whether a symbol/module id belongs to production (non-test) code."""
+def _symbol_is_test(sym: Symbol) -> bool:
+    """Whether a symbol is test code, by path or extractor flag.
+
+    Two independent signals can mark test code: the defining file's
+    path (``classify.is_test_path``) and the extractor's per-symbol
+    ``Symbol.test`` flag (path-based classification plus
+    language-specific containers such as Rust's inline
+    ``mod tests { ... }`` — see ``Symbol.test``'s docstring). Either
+    one is sufficient; this is the single place both are combined so
+    ``without_tests()`` actually excludes everything ``Symbol.test``
+    flags, not just what the path alone would catch.
+    """
+    return sym.test or is_test_path(sym.path)
+
+
+def _prod_id(sym_or_module_id: str, symbols_by_id: dict[str, Symbol]) -> bool:
+    """Whether a symbol/module id belongs to production (non-test) code.
+
+    Resolves the id against ``symbols_by_id`` and defers to
+    ``_symbol_is_test`` when it names a real symbol. Ids that don't
+    resolve (module-level pseudo-callers, ``path::<module>``, which
+    are never entered into ``symbols_by_id``) fall back to a
+    path-only check.
+    """
+    sym = symbols_by_id.get(sym_or_module_id)
+    if sym is not None:
+        return not _symbol_is_test(sym)
     return not is_test_path(sym_or_module_id.split("::", 1)[0])
 
 
-def _filter_adjacency(table: dict[str, list[str]]) -> dict[str, list[str]]:
+def _filter_adjacency(
+    table: dict[str, list[str]], symbols_by_id: dict[str, Symbol]
+) -> dict[str, list[str]]:
     """Drop test-path nodes from an adjacency table, keys and values."""
     out: dict[str, list[str]] = {}
     for sid, others in table.items():
-        if not _prod_id(sid):
+        if not _prod_id(sid, symbols_by_id):
             continue
-        kept = [o for o in others if _prod_id(o)]
+        kept = [o for o in others if _prod_id(o, symbols_by_id)]
         if kept:
             out[sid] = kept
     return out
@@ -857,4 +936,4 @@ def write_provenance_sidecar(root: Path, provenance: dict) -> None:
     map_path = root / _MAP_DIR / "map.json"
     path = root / _MAP_DIR / _PROVENANCE_FILE
     doc = {"provenance": provenance, "map_stat": _stat_sig(map_path)}
-    path.write_bytes(_json_dumps(doc))
+    atomic_write_bytes(path, _json_dumps(doc))

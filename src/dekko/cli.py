@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from importlib.metadata import version as _pkg_version
 from importlib.resources import files as _pkg_files
@@ -23,8 +24,10 @@ from . import cache as cache_mod
 from . import classify
 from . import cline as cline_mod
 from . import contextpack
+from . import daemon as daemon_mod
 from . import diff
 from . import export
+from . import grammars
 from . import hooks as hooks_mod
 from . import languages
 from . import ledger as ledger_mod
@@ -66,6 +69,7 @@ SUBCOMMANDS = (
     "status",
     "ledger",
     "hooks",
+    "daemon",
     "serve",
     "unused",
     "stats",
@@ -456,6 +460,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=8,
         help="max impacted callers shown per symbol (default: 8)",
     )
+    p_diff.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="parallel workers for a rev-cache-miss old-side re-parse/"
+        "resolve (1 = sequential, 0 = all cores)",
+    )
     p_diff.set_defaults(func=run_diff)
 
     p_affected = sub.add_parser(
@@ -493,6 +505,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         metavar="TOKENS",
         help="approximate token budget; drops weakest-tier files first "
         f"(default: {affected.DEFAULT_BUDGET})",
+    )
+    p_affected.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="parallel workers for a rev-cache-miss old-side re-parse/"
+        "resolve (1 = sequential, 0 = all cores)",
     )
     p_affected.set_defaults(func=run_affected)
 
@@ -545,6 +565,15 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "--no-regen",
         action="store_true",
         help="fail (exit 5) instead of regenerating a stale map",
+    )
+    p_workset.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="parallel workers for a rev-cache-miss old-side re-parse/"
+        "resolve on a rev seed (1 = sequential, 0 = all cores); no "
+        "effect on a --symbol seed",
     )
     _add_task_option(p_workset)
     p_workset.set_defaults(func=run_workset)
@@ -709,6 +738,71 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_hooks_run.add_argument("event", choices=list(hooks_mod.EVENTS))
     p_hooks_run.set_defaults(func=run_hooks_run)
+
+    p_daemon = sub.add_parser(
+        "daemon",
+        help="manage the per-repo warm-cache daemon (start/stop/status)",
+    )
+    daemon_sub = p_daemon.add_subparsers(
+        dest="daemon_action", required=True, metavar="ACTION"
+    )
+    p_daemon_start = daemon_sub.add_parser(
+        "start", help="start the daemon for this repo root"
+    )
+    p_daemon_start.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root to serve (default: cwd)",
+    )
+    p_daemon_start.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=daemon_mod.DEFAULT_IDLE_TIMEOUT,
+        metavar="SECONDS",
+        help="self-shutdown after this many idle seconds "
+        f"(default: {daemon_mod.DEFAULT_IDLE_TIMEOUT:.0f})",
+    )
+    p_daemon_start.set_defaults(func=run_daemon_start)
+
+    p_daemon_stop = daemon_sub.add_parser(
+        "stop", help="stop the daemon for this repo root"
+    )
+    p_daemon_stop.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root whose daemon to stop (default: cwd)",
+    )
+    p_daemon_stop.set_defaults(func=run_daemon_stop)
+
+    p_daemon_status = daemon_sub.add_parser(
+        "status",
+        help="report whether a daemon is running for this repo root",
+    )
+    p_daemon_status.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root to check (default: cwd)",
+    )
+    p_daemon_status.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_daemon_status.set_defaults(func=run_daemon_status)
+
+    p_daemon_serve = daemon_sub.add_parser("_serve", help=argparse.SUPPRESS)
+    p_daemon_serve.add_argument("--root", default=".", metavar="DIR")
+    p_daemon_serve.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=daemon_mod.DEFAULT_IDLE_TIMEOUT,
+        metavar="SECONDS",
+    )
+    p_daemon_serve.set_defaults(func=run_daemon_serve)
 
     p_serve = sub.add_parser("serve", help="run the MCP server over stdio")
     p_serve.add_argument(
@@ -929,7 +1023,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "--scope",
         choices=export.SCOPES,
         default="symbol",
-        help="node granularity (default: symbol)",
+        help="node granularity for the whole rendered graph -- symbol "
+        "or file (default: symbol); does not scope the graph to a "
+        "single symbol's neighborhood, use 'dekko context' for that",
     )
     p_export.add_argument(
         "--max-nodes",
@@ -1180,7 +1276,17 @@ def _summary(
     variables = sum(
         1 for fm in files for s in fm.symbols if s.kind == "variable"
     )
-    errors = sum(1 for fm in files if fm.error)
+    # round-12 master report §3.10/§3.16: a missing *optional* grammar
+    # (``pip install dekko[all]``) and a genuine parse failure used to
+    # share one alarming "parse error N" bucket, even though the
+    # per-file detail line already named the missing grammar
+    # accurately -- see ``grammars.is_grammar_unavailable_message``.
+    no_grammar = sum(
+        1
+        for fm in files
+        if fm.error and grammars.is_grammar_unavailable_message(fm.error)
+    )
+    errors = sum(1 for fm in files if fm.error) - no_grammar
     lines = [
         f"dekko: mapped {len(files)} files ({langs})",
         f"  symbols: {funcs} functions/methods, {classes} types, "
@@ -1189,10 +1295,12 @@ def _summary(
         f"{external} external",
     ]
 
-    if skipped or errors:
+    if skipped or errors or no_grammar:
         reasons = Counter(reason for _, reason in skipped)
         if errors:
             reasons["parse error"] = errors
+        if no_grammar:
+            reasons["no grammar installed"] = no_grammar
 
         detail = ", ".join(
             f"{reason} {n}" for reason, n in reasons.most_common()
@@ -1510,7 +1618,7 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
     if _map_run_is_noop(root, args, cache, files):
         return 0
 
-    graph = resolve(files)
+    graph = resolve(files, workers=_resolve_workers(getattr(args, "jobs", 1)))
     label = root.name + (f"/{args.subpath}" if args.subpath else "")
 
     md_path, json_path = resolve_outputs(root, args.output, args.json_output)
@@ -1604,9 +1712,9 @@ def _write_json_output(
         skipped=skipped,
     )
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(
-        render_json(files, graph, label, provenance),
-        encoding="utf-8",
+    mapfile.atomic_write_bytes(
+        json_path,
+        render_json(files, graph, label, provenance).encode("utf-8"),
     )
     if json_path == root / cache_mod.CACHE_DIR / "map.json":
         mapfile.write_provenance_sidecar(root, provenance)
@@ -1642,10 +1750,62 @@ def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
     return True
 
 
+# Optional daemon-installed warm-cache hook (Phase 3 of
+# ``.features/daemon-mode/``). ``_load_or_regen`` is the single
+# chokepoint essentially every read subcommand funnels through
+# directly or via ``_read_index`` (``query``/``outline``/``context``/
+# ``trace``/``unused``/``stats``/``summary``/``lean``), or calls
+# directly (``run_search``, ``run_export``, ``workset.run``) — caching
+# at this one point benefits every daemon-eligible subcommand without
+# each one needing its own cache-awareness, the same "one choke
+# point" property that makes ``server.py``'s ``Context.index_cache``
+# sufficient for the whole MCP tool surface (see ``server.py``'s
+# ``_index_for``).
+#
+# Both hooks are ``None`` for every direct CLI invocation — the
+# overwhelming majority of calls — so ``cli.py``'s own behavior is
+# completely unchanged unless a daemon process has explicitly
+# installed them via ``set_daemon_cache_hook``. Only
+# ``daemon.serve_daemon`` ever calls that, once at startup (and clears
+# it again on shutdown).
+_daemon_cache_get: Callable[[Path], mapfile.MapIndex | None] | None = None
+_daemon_cache_put: Callable[[Path, mapfile.MapIndex], None] | None = None
+
+
+def set_daemon_cache_hook(
+    get: Callable[[Path], mapfile.MapIndex | None] | None,
+    put: Callable[[Path, mapfile.MapIndex], None] | None,
+) -> None:
+    """Install (or clear, passing ``None``/``None``) the daemon's cache.
+
+    ``get(root)`` must return a still-fresh cached index for ``root``
+    (having already re-validated it via ``mapfile.check_freshness``
+    itself — this seam trusts the hook's own answer, it does not
+    re-check), or ``None`` on a miss/stale hit. ``put(root, index)``
+    records a freshly loaded index for later ``get`` calls.
+
+    Args:
+        get: Cache-check callback, or ``None`` to disable cache
+            lookups (the default, direct-CLI behavior).
+        put: Cache-store callback, or ``None`` to disable caching.
+    """
+    global _daemon_cache_get, _daemon_cache_put
+    _daemon_cache_get = get
+    _daemon_cache_put = put
+
+
 def _load_or_regen(
     root: Path, no_regen: bool
 ) -> tuple[mapfile.MapIndex | None, int]:
     """Load the map at root, regenerating when missing or stale.
+
+    When running inside the daemon process (``set_daemon_cache_hook``
+    has installed a hook), a still-fresh cached index is returned
+    outright, skipping ``map.json``'s JSON parse and the full symbol/
+    call-graph index rebuild entirely — the dominant cost of a reload
+    (Phase 3 of ``.features/daemon-mode/``, mirroring ``server.py``'s
+    ``Context.index_cache``/``_index_for``). A direct CLI invocation
+    never installs this hook, so its behavior here is unchanged.
 
     Args:
         root: Repo root containing map.json.
@@ -1654,8 +1814,15 @@ def _load_or_regen(
     Returns:
         ``(index, exit_code)`` — index is ``None`` on failure.
     """
+    if _daemon_cache_get is not None:
+        cached = _daemon_cache_get(root)
+        if cached is not None:
+            return cached, 0
+
     index = mapfile.load_map(root)
     if index is not None and mapfile.check_freshness(root, index).fresh:
+        if _daemon_cache_put is not None:
+            _daemon_cache_put(root, index)
         return index, 0
     if no_regen:
         print(
@@ -1668,7 +1835,69 @@ def _load_or_regen(
     code = regen_map(root, quiet=True)
     if code != 0:
         return None, code
-    return mapfile.load_map(root), 0
+    index = mapfile.load_map(root)
+    if index is not None and _daemon_cache_put is not None:
+        _daemon_cache_put(root, index)
+    return index, 0
+
+
+def load_current_index_no_regen(root: Path) -> mapfile.MapIndex | None:
+    """Load the current-tree map, checking the daemon's warm cache first.
+
+    ``diff.run``/``affected.changes`` are the one partial exception to
+    ``_load_or_regen`` being the single daemon-cache chokepoint every
+    other read subcommand funnels through (see
+    ``.features/daemon-mode/daemon-mode-cli-plan.md`` §2.4's last
+    bullet and Phase 4 of ``.features/daemon-mode/TRACKER.md``): their
+    current-tree side calls ``mapfile.load_map`` directly, so a
+    daemon-routed ``diff``/``affected`` request previously always paid
+    a full JSON-parse/index-rebuild, even with a warm cache populated
+    by a prior ``query``/``search``/... request against the same
+    root. This function is the fix — it checks the same
+    ``_daemon_cache_get``/``_daemon_cache_put`` hooks
+    ``_load_or_regen`` uses, so a cache hit here skips the reload the
+    same way it would for any other daemon-eligible command.
+
+    It deliberately does **not** reuse ``_load_or_regen`` itself,
+    because that function's stale/missing-map behavior is to call
+    ``regen_map`` (writing a fresh ``map.json`` to disk) — a side
+    effect ``diff``/``affected`` don't want and have never had: they
+    already tolerate a stale on-disk index by falling back to an
+    in-memory re-parse (``diff.snapshot_new_side`` -> ``diff.
+    snapshot()``) that never touches ``map.json``. Adopting
+    ``_load_or_regen``'s regen-on-stale behavior here would be a
+    real behavior change (an on-disk write a plain ``diff``/
+    ``affected`` call never made before), not just a cache-hit
+    optimization, so this seam only ever *reads* — same contract as
+    the ``mapfile.load_map(root)`` call it replaces.
+
+    Outside the daemon process (``_daemon_cache_get``/``_put`` are
+    both ``None``, true for every direct CLI invocation), this is
+    exactly ``mapfile.load_map(root)`` — same return value, same
+    possibly-``None``/possibly-stale semantics ``diff.run``/
+    ``affected.changes`` already handle via their own freshness checks
+    downstream (``diff.snapshot_new_side``).
+
+    Args:
+        root: Repository root containing map.json.
+
+    Returns:
+        The loaded index (possibly stale, possibly ``None``) — never
+        regenerated as a side effect of this call.
+    """
+    if _daemon_cache_get is not None:
+        cached = _daemon_cache_get(root)
+        if cached is not None:
+            return cached
+
+    index = mapfile.load_map(root)
+    if (
+        index is not None
+        and _daemon_cache_put is not None
+        and mapfile.check_freshness(root, index).fresh
+    ):
+        _daemon_cache_put(root, index)
+    return index
 
 
 def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
@@ -1699,7 +1928,17 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
         quiet=quiet,
         if_stale=False,
         full=full,
-        jobs=1,
+        # 0 = all cores. This is the auto-regen path every other read
+        # subcommand funnels through on a stale map (a single-file
+        # edit included) — its own extraction work is tiny (usually
+        # one changed file, via the incremental cache), but call-graph
+        # resolution (resolve()/resolve_refs(), see resolver.py's
+        # ``_resolve_all``) is O(the whole repo's calls) regardless of
+        # diff size, and was previously left sequential here even on a
+        # many-core machine. See round 11 §1: a one-file edit's
+        # auto-regen on tensorflow (14,285 files) took *longer* than a
+        # from-scratch --full remap because of exactly this.
+        jobs=0,
     )
     return run_map(regen_args, persist_excludes=False)
 
@@ -1805,6 +2044,7 @@ def run_diff(args: argparse.Namespace) -> int:
         args.rev,
         as_json=args.as_json,
         limit=args.limit,
+        jobs=_resolve_workers(getattr(args, "jobs", 1)),
     )
 
 
@@ -1817,6 +2057,7 @@ def run_affected(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         limit=args.limit,
         budget=args.budget,
+        jobs=_resolve_workers(getattr(args, "jobs", 1)),
     )
 
 
@@ -1836,6 +2077,7 @@ def run_workset(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         no_regen=args.no_regen,
         task=task,
+        jobs=_resolve_workers(getattr(args, "jobs", 1)),
     )
 
 
@@ -1951,6 +2193,34 @@ def run_hooks_uninstall(args: argparse.Namespace) -> int:
 def run_hooks_run(args: argparse.Namespace) -> int:
     """Handle ``dekko hooks run <event>`` (reads JSON on stdin)."""
     return hooks_mod.dispatch(args.event, sys.stdin.read())
+
+
+def run_daemon_start(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon start``."""
+    return daemon_mod.start(Path(args.root).resolve(), args.idle_timeout)
+
+
+def run_daemon_stop(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon stop``."""
+    return daemon_mod.stop(Path(args.root).resolve())
+
+
+def run_daemon_status(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon status``."""
+    return daemon_mod.status(Path(args.root).resolve(), args.as_json)
+
+
+def run_daemon_serve(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon _serve`` (internal daemon process entry).
+
+    Not meant to be invoked directly by a human -- this is the
+    command ``daemon.start()`` spawns as a detached background
+    process; it blocks in ``serve_daemon``'s accept loop until an
+    explicit ``dekko daemon stop`` or the idle timeout fires.
+    """
+    return daemon_mod.serve_daemon(
+        Path(args.root).resolve(), args.idle_timeout
+    )
 
 
 def run_orient(args: argparse.Namespace) -> int:
@@ -2214,8 +2484,21 @@ def main(argv: list[str] | None = None) -> int:
     """
     args_list = list(sys.argv[1:] if argv is None else argv)
 
+    no_daemon = "--no-daemon" in args_list
+    if no_daemon:
+        args_list = [a for a in args_list if a != "--no-daemon"]
+
     if args_list and args_list[0] in SUBCOMMANDS:
         args = build_subcommand_parser().parse_args(args_list)
+        if not no_daemon:
+            routed = daemon_mod.try_daemon(args)
+            if routed is not None:
+                exit_code, out, err = routed
+                if out:
+                    sys.stdout.write(out)
+                if err:
+                    sys.stderr.write(err)
+                return exit_code
         return args.func(args)
 
     if args_list and args_list[0] in ("-h", "--help"):

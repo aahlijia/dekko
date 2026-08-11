@@ -427,7 +427,10 @@ def _test_hint(impacts: list[TestImpact], root: Path) -> str:
 
 
 def changes(
-    root: Path, rev: str | None
+    root: Path,
+    rev: str | None,
+    index: mapfile.MapIndex | None = None,
+    jobs: int = 1,
 ) -> tuple[list[TestImpact], diff.DiffResult, diff.Snapshot, str, dict] | None:
     """Impacted tests plus the underlying diff for worktree-vs-rev.
 
@@ -439,6 +442,18 @@ def changes(
     Args:
         root: Repository root (its working tree is the new side).
         rev: Git rev for the old side, or ``None`` to derive a default.
+        index: An already-loaded current-tree index, if the caller has
+            one (e.g. ``workset.seed_from_rev``, which loads its own
+            index before calling here). Avoids a second, redundant
+            ``mapfile.load_map`` for the same map.json. Falls back to
+            loading it here when ``None``, matching prior behavior for
+            callers with no index to hand in (``affected.run``).
+        jobs: Resolved worker count passed through to
+            ``diff.old_snapshot``/``diff.snapshot_new_side`` — see
+            ``diff.snapshot``. Round-12 master report §3.3: this is
+            the dominant cost on a first-touch/cold-rev-cache call, a
+            separate code path ``dekko map --full``'s own ``--jobs``
+            fix never reached.
 
     Returns:
         ``(impacts, result, new, target_rev, provenance)``, or ``None``
@@ -448,7 +463,10 @@ def changes(
         qualify a "no impacted tests" result the way ``affected.run``
         does — see ``render``.
     """
-    index = mapfile.load_map(root)
+    from . import cli
+
+    if index is None:
+        index = cli.load_current_index_no_regen(root)
     prov = (index.provenance if index else None) or {}
     subpath = prov.get("subpath")
     excludes = tuple(prov.get("excludes", []))
@@ -457,7 +475,13 @@ def changes(
 
     old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
     old = diff.old_snapshot(
-        root, target_rev, subpath, excludes, max_file_size, old_cache
+        root,
+        target_rev,
+        subpath,
+        excludes,
+        max_file_size,
+        old_cache,
+        jobs=jobs,
     )
     if old is None:
         print(
@@ -467,7 +491,9 @@ def changes(
         )
         return None
 
-    new = diff.snapshot_new_side(root, subpath, excludes, max_file_size, index)
+    new = diff.snapshot_new_side(
+        root, subpath, excludes, max_file_size, index, jobs=jobs
+    )
     result = diff.compare(target_rev, old, new)
     impacts = analyze(result, new)
     return impacts, result, new, target_rev, prov
@@ -479,6 +505,7 @@ def run(
     as_json: bool,
     limit: int,
     budget: int | None = None,
+    jobs: int = 1,
 ) -> int:
     """Execute ``dekko affected`` against a repository.
 
@@ -488,11 +515,12 @@ def run(
         as_json: Emit structured JSON instead of text.
         limit: Max impacted symbols shown per test file.
         budget: Approximate token budget for the report, or ``None``.
+        jobs: Resolved worker count — see ``changes``.
 
     Returns:
         ``0`` no impact, ``1`` impacted tests found, ``2`` bad rev.
     """
-    outcome = changes(root, rev)
+    outcome = changes(root, rev, jobs=jobs)
     if outcome is None:
         return EXIT_ERROR
     impacts, _result, _new, target_rev, prov = outcome

@@ -820,3 +820,152 @@ def test_get_callees_and_query_symbol_include_tests_by_default(
         0
     ]["text"]
     assert "f() -> int" in callees_text
+
+
+def test_get_callers_discloses_silent_test_exclusion(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-11 §6: a caller who never mentions ``include_tests`` gets
+    a ``note:`` disclosing that test-file callers were dropped by this
+    tool's own default (which diverges from the CLI's). A caller who
+    explicitly asks for either value gets no such note — they already
+    know what they asked for."""
+    files = {
+        "a.py": "def f() -> int:\n    return 1\n",
+        "b.py": "from a import f\n\n\ndef g() -> int:\n    return f()\n",
+    }
+    ctx = _ctx(make_mapped_repo(files))
+
+    silent_default = _call(ctx, "get_callers", {"symbol": "f"})["content"][0][
+        "text"
+    ]
+    assert "excluded by default for this tool" in silent_default
+
+    explicit_opt_out = _call(
+        ctx, "get_callers", {"symbol": "f", "include_tests": False}
+    )["content"][0]["text"]
+    assert "excluded by default for this tool" not in explicit_opt_out
+
+    explicit_opt_in = _call(
+        ctx, "get_callers", {"symbol": "f", "include_tests": True}
+    )["content"][0]["text"]
+    assert "excluded by default for this tool" not in explicit_opt_in
+
+
+def test_get_callees_never_discloses_test_exclusion(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``get_callees``' default is already ``include_tests=True``, so
+    nothing is silently excluded and the disclosure note never fires."""
+    files = {
+        "a.py": "def f() -> int:\n    return 1\n",
+        "b.py": "from a import f\n\n\ndef g() -> int:\n    return f()\n",
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    text = _call(ctx, "get_callees", {"symbol": "g"})["content"][0]["text"]
+    assert "excluded by default" not in text
+
+
+def test_get_callers_resolves_java_package_named_test(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-11 §3: a Java package segment literally named `test`
+    (org.springframework.boot.test, under src/main/) used to make
+    classify.is_test_path() misclassify the *definition's own file* as
+    a test file, so MCP's default (without_tests()) filtering removed
+    the target symbol itself and get_callers returned "no symbol
+    matches" even though the CLI (include_tests=True by default)
+    resolved it fine. Reproduces the exact spring-boot repro shape."""
+    path = (
+        "core/spring-boot-test/src/main/java/org/springframework/boot/"
+        "test/context/runner/AbstractApplicationContextRunner.java"
+    )
+    files = {
+        path: (
+            "package org.springframework.boot.test.context.runner;\n"
+            "\n"
+            "class AbstractApplicationContextRunner {\n"
+            "    void withUserConfiguration() {\n"
+            "    }\n"
+            "}\n"
+        ),
+        path.replace("AbstractApplicationContextRunner.java", "Caller.java"): (
+            "package org.springframework.boot.test.context.runner;\n"
+            "\n"
+            "class Caller {\n"
+            "    void run() {\n"
+            "        AbstractApplicationContextRunner runner =\n"
+            "            new AbstractApplicationContextRunner();\n"
+            "        runner.withUserConfiguration();\n"
+            "    }\n"
+            "}\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(
+        ctx, "get_callers", {"symbol": f"{path}:withUserConfiguration"}
+    )
+    text = result["content"][0]["text"]
+    assert result["isError"] is False
+    assert "no symbol matches" not in text
+    assert "Caller.run" in text
+
+
+AMBIGUOUS_CALL = {
+    "a.py": "def target() -> int:\n    return 1\n",
+    "b.py": "def target() -> int:\n    return 2\n",
+    "c.py": "def caller() -> int:\n    return target()\n",
+}
+
+
+def test_get_callers_discloses_ambiguous_call_sites_over_mcp(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-12 master report §3.1: ``query.run`` prints its
+    "N additional call site(s) ... resolved ambiguously — not counted
+    here" disclosure to stderr on an otherwise-successful (exit 0)
+    run. The CLI shows both streams to a human, but every
+    ``_capture()``-based MCP tool handler used to return only
+    ``out.strip()``, silently discarding that note — an MCP-only
+    caller's "no callers" answer looked complete even though a real
+    ambiguous call site existed. ``get_callers`` must now surface it.
+    """
+    ctx = _ctx(make_mapped_repo(AMBIGUOUS_CALL))
+    text = _call(ctx, "get_callers", {"symbol": "a.py:target"})["content"][0][
+        "text"
+    ]
+    assert "(no callers of" in text
+    assert "resolved ambiguously" in text
+    assert "not counted here" in text
+
+
+def test_get_callees_discloses_ambiguous_outgoing_calls_over_mcp(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Same fix, outgoing-call direction (``ambiguous_out``) via
+    ``get_callees`` — round-12 master report §3.1."""
+    ctx = _ctx(make_mapped_repo(AMBIGUOUS_CALL))
+    text = _call(ctx, "get_callees", {"symbol": "c.py:caller"})["content"][0][
+        "text"
+    ]
+    assert "(no callees of" in text
+    assert "resolved ambiguously" in text
+    assert "not counted here" in text
+
+
+def test_lean_discloses_budget_floor_note(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-12 master report §3.1: ``render_lean.run`` prints a
+    "requested budget N is below this repo's ~M-token path-only
+    floor" note to stderr on success when a caller's ``budget`` is
+    too tight to honor. ``tool_lean`` (not currently a registered MCP
+    tool, exercised directly like ``tool_trace_path``/``tool_stats``
+    elsewhere in this file) must not silently drop that note."""
+    files = {
+        "a.py": "def f() -> int:\n    return 1\n",
+        "b.py": "from a import f\n\n\ndef g() -> int:\n    return f()\n",
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    text = server.tool_lean(ctx, {"budget": 1})
+    assert "path-only floor" in text

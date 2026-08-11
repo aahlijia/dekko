@@ -2,9 +2,10 @@
 
 Resolution order for each call: same class/container → explicit type
 receiver → typed parameter → same file → imported names → unique
-repo-wide name match → class/own-constructor pair collapse. Anything
-still unclear is reported as ambiguous rather than guessed; names with
-no in-repo candidates are external. Ambiguous calls contribute to no
+repo-wide name match → class/own-constructor pair collapse → lone
+non-method candidate for a bare call. Anything still unclear is
+reported as ambiguous rather than guessed; names with no in-repo
+candidates are external. Ambiguous calls contribute to no
 candidate's ``calls_in``/fan-in — they are never guessed into an edge
 — so a symbol's fan-in can undercount actual usage when its name
 collides with another definition; see ``mapfile.MapIndex.ambiguous_in``
@@ -79,9 +80,25 @@ evidence tier. Without this, a same-named free function defined in two
 different files was unresolvable for C/C++ regardless of which header
 the caller actually included — see
 ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
+
+The final fallback, ``_bare_call_non_method_match``, uses ``Symbol.kind``
+itself as a disambiguator: a syntactically bare (receiverless) call
+can never invoke a *method* in any language dekko parses — reaching
+one always requires some receiver/qualifier at the call site
+(``recv.Method()``, ``obj.method()``, ``Type::method()``). Dropping
+method-kind candidates from an otherwise-ambiguous set and checking
+whether exactly one non-method candidate remains turns a real
+same-name collision into a correct resolution without guessing.
+Round-12 master report §3.2: awesome-go's bare, same-package
+``Generate(tt.input)`` (``pkg/slug``'s free function) misresolved as
+ambiguous against an unrelated method with a completely different
+receiver/arity, ``(g *IDGenerator) Generate(...)`` in ``pkg/markdown``
+— causing ``dekko affected``/``workset`` to report zero impacted
+tests for a change a same-package unit test directly covered.
 """
 
 import re
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import PurePosixPath
 
 from .classify import is_test_path
@@ -116,12 +133,28 @@ _Referable = RawCall | RawRef
 
 MODULE_CALLER_SUFFIX = "::<module>"
 
+# Below this many raw calls/refs across the whole repo, resolution is
+# fast enough single-threaded that a process pool's own startup +
+# index-pickling overhead isn't worth paying — parallelization only
+# pays off once the per-file/per-call loop itself is the bottleneck.
+# See round 11's tensorflow finding (~857K raw calls, single-threaded
+# resolve()/resolve_refs() dominating wall-clock even on an 11-core
+# machine): this threshold is deliberately well below that scale so
+# medium repos see a win too, while trivial ones (most test fixtures)
+# stay sequential.
+_RESOLVE_PARALLEL_MIN_ITEMS = 5_000
 
-def resolve(files: list[FileMap]) -> CallGraph:
+
+def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
     """Resolve every raw call across the repo into a call graph.
 
     Args:
         files: Per-file extraction results.
+        workers: Worker count for parallel call-graph resolution
+            (1 = sequential, the default — every caller except
+            ``cli.py``'s ``run_map`` leaves this at 1, matching prior
+            behavior exactly). See ``_resolve_all`` for how chunking
+            and the parallelization threshold work.
 
     Returns:
         The resolved ``CallGraph`` with bidirectional adjacency.
@@ -132,10 +165,62 @@ def resolve(files: list[FileMap]) -> CallGraph:
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
 
+    edges, ambiguous, external = _resolve_all(
+        files,
+        index,
+        by_name_path,
+        imports_by_file,
+        repo_stems,
+        symbols_by_id,
+        workers,
+    )
+
+    graph = CallGraph(
+        edges=[
+            Edge(caller=c, callee=e, lines=sorted(lines))
+            for (c, e), lines in sorted(edges.items())
+        ],
+        ambiguous=[
+            (caller, name, cands)
+            for (caller, name), cands in sorted(ambiguous.items())
+        ],
+        external=[
+            ExternalCall(caller=c, callee=t, lines=sorted(lines))
+            for (c, t), lines in sorted(external.items())
+        ],
+    )
+    _build_adjacency(graph)
+    graph.referenced, graph.referenced_in, graph.referenced_out = resolve_refs(
+        files, workers
+    )
+    return graph
+
+
+def _resolve_files_chunk(
+    files: list[FileMap],
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    imports_by_file: dict[str, dict[str, Import]],
+    repo_stems: set[str],
+    symbols_by_id: dict[str, Symbol],
+) -> tuple[
+    dict[tuple[str, str], set[int]],
+    dict[tuple[str, str], list[str]],
+    dict[tuple[str, str], set[int]],
+]:
+    """Resolve every call in ``files`` into fresh, local accumulators.
+
+    A pure function of its arguments — reads the shared, already-built
+    indices but never mutates anything outside its own local
+    ``edges``/``ambiguous``/``external`` dicts — so it can run
+    standalone inside a worker process with no cross-worker locking.
+    Module-level (not a closure) so ``ProcessPoolExecutor`` can pickle
+    it; also the sequential (``workers <= 1``) code path, called
+    directly with the full file list.
+    """
     edges: dict[tuple[str, str], set[int]] = {}
     ambiguous: dict[tuple[str, str], list[str]] = {}
     external: dict[tuple[str, str], set[int]] = {}
-
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
         raw_imports = (
@@ -154,51 +239,109 @@ def resolve(files: list[FileMap]) -> CallGraph:
                 external=external,
                 raw_imports=raw_imports,
             )
-
-    graph = CallGraph(
-        edges=[
-            Edge(caller=c, callee=e, lines=sorted(lines))
-            for (c, e), lines in sorted(edges.items())
-        ],
-        ambiguous=[
-            (caller, name, cands)
-            for (caller, name), cands in sorted(ambiguous.items())
-        ],
-        external=[
-            ExternalCall(caller=c, callee=t, lines=sorted(lines))
-            for (c, t), lines in sorted(external.items())
-        ],
-    )
-    _build_adjacency(graph)
-    graph.referenced, graph.referenced_in, graph.referenced_out = resolve_refs(
-        files
-    )
-    return graph
+    return edges, ambiguous, external
 
 
-def resolve_refs(
+def _chunk_files(files: list[FileMap], n: int) -> list[list[FileMap]]:
+    """Split ``files`` into up to ``n`` contiguous, roughly-even chunks."""
+    if n <= 1 or len(files) < 2:
+        return [files]
+    n = min(n, len(files))
+    chunk_size = -(-len(files) // n)  # ceil division
+    return [
+        files[i : i + chunk_size] for i in range(0, len(files), chunk_size)
+    ]
+
+
+def _resolve_all(
     files: list[FileMap],
-) -> tuple[list[Edge], dict[str, list[str]], dict[str, list[str]]]:
-    """Resolve every raw value reference across the repo.
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    imports_by_file: dict[str, dict[str, Import]],
+    repo_stems: set[str],
+    symbols_by_id: dict[str, Symbol],
+    workers: int,
+) -> tuple[
+    dict[tuple[str, str], set[int]],
+    dict[tuple[str, str], list[str]],
+    dict[tuple[str, str], set[int]],
+]:
+    """Resolve every file's calls, across a process pool when it pays off.
 
-    Mirrors ``resolve()``'s resolution ladder, but for ``RawRef``s
-    (bare identifiers used as values — see ``model.RawRef``) instead
-    of ``RawCall``s. Kept as a distinct pass with its own return
-    shape/tables rather than folding into ``edges``/``calls_in``/
-    ``calls_out`` — see the module docstring for why.
-
-    Args:
-        files: Per-file extraction results.
-
-    Returns:
-        ``(edges, referenced_in, referenced_out)``, the same shape
-        ``resolve()`` builds for calls, but for references.
+    Below ``_RESOLVE_PARALLEL_MIN_ITEMS`` total raw calls, or with
+    ``workers <= 1``, this is exactly the old single-process loop (via
+    ``_resolve_files_chunk`` called once on the full file list) — same
+    result, same cost, no pool startup overhead paid for nothing.
+    Above the threshold, ``files`` is split into up to ``workers``
+    chunks; each chunk resolves independently against the same
+    shared, read-only indices (safe: a call's ``caller_id`` always
+    belongs to the file it was extracted from, so no two chunks ever
+    produce a colliding edge/ambiguous/external key), and results are
+    merged. The final ``edges``/``ambiguous``/``external`` dicts are
+    then sorted in ``resolve()`` exactly as before, so output order
+    (and therefore ``map.json``) is independent of how many workers
+    ran or which one finished first — a parallel run must be
+    byte-identical to a sequential one.
     """
-    index = _build_index(files)
-    by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files)
-    symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
+    total_calls = sum(len(fm.calls) for fm in files)
+    if workers <= 1 or total_calls < _RESOLVE_PARALLEL_MIN_ITEMS:
+        return _resolve_files_chunk(
+            files,
+            index,
+            by_name_path,
+            imports_by_file,
+            repo_stems,
+            symbols_by_id,
+        )
 
+    chunks = _chunk_files(files, workers)
+    if len(chunks) < 2:
+        return _resolve_files_chunk(
+            files,
+            index,
+            by_name_path,
+            imports_by_file,
+            repo_stems,
+            symbols_by_id,
+        )
+
+    edges: dict[tuple[str, str], set[int]] = {}
+    ambiguous: dict[tuple[str, str], list[str]] = {}
+    external: dict[tuple[str, str], set[int]] = {}
+    with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
+        futures = [
+            pool.submit(
+                _resolve_files_chunk,
+                chunk,
+                index,
+                by_name_path,
+                imports_by_file,
+                repo_stems,
+                symbols_by_id,
+            )
+            for chunk in chunks
+        ]
+        for future in futures:
+            chunk_edges, chunk_ambiguous, chunk_external = future.result()
+            for key, lines in chunk_edges.items():
+                edges.setdefault(key, set()).update(lines)
+            for key, cands in chunk_ambiguous.items():
+                ambiguous.setdefault(key, cands)
+            for key, lines in chunk_external.items():
+                external.setdefault(key, set()).update(lines)
+    return edges, ambiguous, external
+
+
+def _resolve_refs_chunk(
+    files: list[FileMap],
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    imports_by_file: dict[str, dict[str, Import]],
+    symbols_by_id: dict[str, Symbol],
+) -> dict[tuple[str, str], set[int]]:
+    """Resolve every reference in ``files`` into a fresh, local ``edges``
+    dict — the reference-resolution analog of ``_resolve_files_chunk``,
+    same pure-function/worker-safety shape."""
     edges: dict[tuple[str, str], set[int]] = {}
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
@@ -211,6 +354,63 @@ def resolve_refs(
                 symbols_by_id=symbols_by_id,
                 edges=edges,
             )
+    return edges
+
+
+def resolve_refs(
+    files: list[FileMap], workers: int = 1
+) -> tuple[list[Edge], dict[str, list[str]], dict[str, list[str]]]:
+    """Resolve every raw value reference across the repo.
+
+    Mirrors ``resolve()``'s resolution ladder, but for ``RawRef``s
+    (bare identifiers used as values — see ``model.RawRef``) instead
+    of ``RawCall``s. Kept as a distinct pass with its own return
+    shape/tables rather than folding into ``edges``/``calls_in``/
+    ``calls_out`` — see the module docstring for why.
+
+    Args:
+        files: Per-file extraction results.
+        workers: Worker count for parallel resolution (1 = sequential,
+            the default). See ``resolve``'s own ``workers`` parameter
+            and ``_resolve_all``'s docstring for the parallelization
+            shape this mirrors.
+
+    Returns:
+        ``(edges, referenced_in, referenced_out)``, the same shape
+        ``resolve()`` builds for calls, but for references.
+    """
+    index = _build_index(files)
+    by_name_path = _build_name_path_index(files)
+    imports_by_file = _imports_by_file(files)
+    symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
+
+    total_refs = sum(len(fm.refs) for fm in files)
+    chunks = (
+        _chunk_files(files, workers)
+        if workers > 1 and total_refs >= _RESOLVE_PARALLEL_MIN_ITEMS
+        else [files]
+    )
+    edges: dict[tuple[str, str], set[int]] = {}
+    if len(chunks) < 2:
+        edges = _resolve_refs_chunk(
+            files, index, by_name_path, imports_by_file, symbols_by_id
+        )
+    else:
+        with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
+            futures = [
+                pool.submit(
+                    _resolve_refs_chunk,
+                    chunk,
+                    index,
+                    by_name_path,
+                    imports_by_file,
+                    symbols_by_id,
+                )
+                for chunk in chunks
+            ]
+            for future in futures:
+                for key, lines in future.result().items():
+                    edges.setdefault(key, set()).update(lines)
 
     edge_list = [
         Edge(caller=c, callee=e, lines=sorted(lines))
@@ -432,11 +632,67 @@ def _pick_candidate(
     if len(candidates) == 1:
         return candidates[0]
 
+    return _last_resort_match(call, candidates, by_name_path)
+
+
+def _last_resort_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+) -> Symbol | None:
+    """The final two ``_pick_candidate`` ladder steps for 2+ candidates.
+
+    Split out from ``_pick_candidate`` itself purely to keep that
+    function's cyclomatic complexity under the project's Ruff limit —
+    behaviorally this is still just the next two rungs of the same
+    ladder, tried in order: the class/own-constructor pair collapse
+    (``_construction_pick``, only ever applicable to exactly 2
+    candidates), then the bare-call/non-method fallback
+    (``_bare_call_non_method_match``, which works for any candidate
+    count).
+    """
     if len(candidates) == 2:
         pair = _construction_pick(candidates, by_name_path)
         if pair is not None:
             return pair
 
+    return _bare_call_non_method_match(call, candidates)
+
+
+def _bare_call_non_method_match(
+    call: _Referable, candidates: list[Symbol]
+) -> Symbol | None:
+    """Prefer a lone non-method candidate for a receiverless call.
+
+    A syntactically bare call/reference (``call.receiver`` falsy) can
+    never invoke a *method* — every language dekko parses requires
+    some receiver/qualifier at the call site to reach a symbol with a
+    receiver (Go's ``recv.Method()``, Python/JS/TS's ``obj.method()``,
+    Rust/C++'s ``Type::method()``). When a bare name collides with an
+    unrelated method elsewhere in the repo, narrowing to non-method
+    candidates can turn a real name collision into a correct
+    single-candidate resolution. Round-12 master report §3.2:
+    awesome-go's bare, same-package ``Generate(tt.input)`` (a call to
+    ``pkg/slug``'s free function ``Generate``) misresolved as
+    ambiguous against an unrelated method with a completely different
+    receiver/arity, ``(g *IDGenerator) Generate(...)`` in
+    ``pkg/markdown`` — this is trivially distinguishable, since a bare
+    call can never mean the method.
+
+    Only used as a last resort, after every earlier ladder step
+    (receiver-aware matches, same-file, import hints, the noise
+    guard, and the single-/pair-candidate fast paths) has already had
+    its shot — a candidate list that already resolved via one of
+    those never reaches this check. Returns ``None`` (deferring to
+    the ambiguous fallback) unless dropping method-kind candidates
+    narrows the list to exactly one; 2+ remaining non-method
+    candidates are still a genuine, unresolved collision.
+    """
+    if call.receiver:
+        return None
+    non_methods = [c for c in candidates if c.kind != "method"]
+    if len(non_methods) == 1:
+        return non_methods[0]
     return None
 
 
@@ -484,22 +740,40 @@ _BUILTIN_METHOD_NAMES = frozenset(
     }
 )  # fmt: skip
 
-# Chain-call method names from popular schema/validation builder
-# libraries (Zod and the like) — ``z.string().describe("...")``. Same
-# shape of false-positive as ``_BUILTIN_METHOD_NAMES``: a
+# Chain-call method names from popular fluent/builder-pattern
+# libraries (Zod's schema builder, Commander.js's CLI builder, and the
+# like) — ``z.string().describe("...")``, ``program.description("...")``.
+# Same shape of false-positive as ``_BUILTIN_METHOD_NAMES``: a
 # receiver-qualified call whose receiver isn't provably typed as an
 # in-repo class, so the only "evidence" for the single-candidate fast
 # path is name uniqueness — which fails whenever a repo also happens
 # to define its own like-named method/function. Confirmed live against
-# cline: ``describe`` (a Zod ``.describe()`` schema call) still read
-# fan-in 60 after ``_BUILTIN_METHOD_NAMES`` alone, because ``describe``
-# isn't a String/Array/Object prototype method — see
+# cline twice: ``describe`` (a Zod ``.describe()`` schema call) still
+# read fan-in 60 after ``_BUILTIN_METHOD_NAMES`` alone, because
+# ``describe`` isn't a String/Array/Object prototype method — see
 # ``test-repos/reports/investigation-1.2-resolver-fanin.md``'s
-# "residual gap" note. Kept as its own (currently one-entry) set, not
-# folded into ``_BUILTIN_METHOD_NAMES``, since the two lists have
-# different provenance even though they're checked together — extend
-# here, not there, if another schema-builder collision turns up.
-_SCHEMA_BUILDER_METHOD_NAMES = frozenset({"describe"})  # fmt: skip
+# "residual gap" note; and ``description`` (a Commander.js
+# ``.description()`` builder call on a local ``Command``/``program``
+# instance) read fan-in 14, all credited to an unrelated top-level
+# ``const description = ...`` binding in a separate script — see
+# ``test-repos/reports/11-tokentest-7repo-postdaemonfix/cline.md``
+# (master report finding #5). Originally named
+# ``_SCHEMA_BUILDER_METHOD_NAMES`` for the Zod-only case; renamed once
+# a second, unrelated fluent-builder library hit the exact same
+# false-positive shape, since "schema builder" no longer describes the
+# whole set. Extend here whenever another fluent/chain-builder
+# collision turns up — this is the third occurrence of the same
+# pattern class, not a new one.
+_CHAIN_BUILDER_METHOD_NAMES = frozenset(
+    {
+        # Zod (and similar schema/validation builders).
+        "describe",
+        # Commander.js's fluent CLI-builder API.
+        "description", "option", "action", "version", "alias",
+        "arguments", "usage", "command", "parse", "hook", "addCommand",
+        "helpOption", "allowUnknownOption", "showHelpAfterError",
+    }
+)  # fmt: skip
 
 # Well-known Rust std/prelude trait method names (``Iterator``,
 # ``Option``, ``Result``, ``Clone``, ``ToString``, ...). Same
@@ -571,7 +845,7 @@ def _is_noise_call(
         return False
     return (
         call.name in _BUILTIN_METHOD_NAMES
-        or call.name in _SCHEMA_BUILDER_METHOD_NAMES
+        or call.name in _CHAIN_BUILDER_METHOD_NAMES
         or call.name in _RUST_STD_METHOD_NAMES
     )
 

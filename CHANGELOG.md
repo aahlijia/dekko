@@ -9,6 +9,57 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Added
+- **Daemon-mode CLI** (`dekko daemon start/stop/status`). A per-repo
+  background process the bare `dekko` CLI talks to over a socket
+  (Unix domain socket on macOS/Linux, token-authenticated TCP
+  loopback on Windows) so repeated CLI invocations share a warm
+  `MapIndex` instead of each one reloading `map.json` from scratch.
+  `diff`/`affected` share the same warm cache. Explicit start/stop in
+  v1, no auto-spawn; every daemon-routing check fails open to direct-
+  process behavior on any daemon absence/error.
+
+### Fixed
+- **Round-12 7-repo eval fixes.** From a live eval against 7 real
+  repos post-round-11 (`test-repos/reports/12-tokentest-7repo-postround11fixes/`):
+  - **Resolver: bare receiverless call misresolved against an
+    unrelated same-named method.** A call with no receiver can never
+    target a method, so `resolver.py`'s last-resort ladder now prefers
+    a lone non-method candidate instead of falling through to
+    ambiguous. Live-verified on awesome-go.
+  - **`--jobs` was unwired on `diff`/`affected`/`workset`.** The
+    library-level parallel-extraction plumbing existed but no CLI flag
+    threaded through to it; `--jobs` is now accepted on all three
+    subcommands. Confirmed a real ~25-27% wall-clock win on a
+    repeated-run benchmark against tensorflow.
+  - **`dekko daemon status` false "not running."** `_CLIENT_TIMEOUT`
+    was a separate, shorter constant (2s) than the server's own
+    request timeout, so a daemon still warming its cache could read as
+    down. It now matches `_REQUEST_TIMEOUT` (30s).
+  - **Parse-error vs. missing-grammar conflation.** `dekko map`'s
+    summary and `outline`'s sparse-file heuristic treated a genuine
+    parse error the same as an unsupported/missing grammar. New
+    `grammars.is_grammar_unavailable_message()` splits the two so each
+    is reported and suppressed correctly. Live-verified against
+    spring-boot's Kotlin files and zed's Scheme files.
+  - **Non-atomic `map.json`/`cache.json`/rev-cache writes.** A reader
+    (daemon, concurrent CLI invocation) could observe a truncated or
+    partially-written file mid-save. New
+    `mapfile.atomic_write_bytes()` (temp file + `os.replace`) backs
+    all four write sites. Confirmed via concurrent-read races against
+    a live repo with zero corruption.
+  - Documented (no fix needed): the MCP server's warm cache
+    (`Context.index_cache`) is independent of the daemon's
+    `_WarmCache` by design — noted in `server.py`'s docstring and
+    `docs/cli.md` to head off future confusion between the two.
+- **`dekko daemon start` false success on an oversized socket path.**
+  When the daemon's Unix socket path exceeded `AF_UNIX`'s `sun_path`
+  length limit, `daemon start` reported success (exit 0) and the
+  failure only surfaced later on a `daemon status` call. New
+  `DaemonTransport.preflight_check()` runs before the daemon process
+  is spawned, so an oversized path now fails `daemon start` itself
+  with exit 1 and a clear message.
+
 ## [0.30.1] — 2026-08-07
 
 Fixes the 5 follow-up issues from round 09's re-evaluation, documented
