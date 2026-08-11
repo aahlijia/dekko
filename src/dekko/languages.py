@@ -261,9 +261,25 @@ _JS_FUNCTION_BOUNDARIES = (
 # can never be mistaken for one; a same-named local variable
 # shadowing a repo-wide function is a real ambiguity, resolved by
 # reusing ``resolver.py``'s existing candidate ladder.
+#
+# The shorthand-property capture is scoped to an ``object`` (value)
+# parent, not a bare ``(shorthand_property_identifier) @ref`` — this
+# is belt-and-suspenders, not a behavior change on the currently
+# pinned grammar: tree-sitter-javascript (>=0.23, 0.25.0 verified
+# live) already uses a *distinct* node type,
+# ``shorthand_property_identifier_pattern``, for the destructuring-
+# binding case (``const { x } = y`` / ``function f({ x }) {}``), so
+# an unscoped ``(shorthand_property_identifier) @ref`` never actually
+# matched a destructuring binding to begin with — confirmed by
+# parsing both shapes and diffing the query's captures. Scoping to
+# ``object`` documents that invariant in the query itself and guards
+# against an older/future grammar release that might not keep the
+# node types split. ``array`` vs. ``array_pattern`` already has this
+# same split for the same reason (the existing
+# ``(array (identifier) @ref)`` line is already parent-scoped).
 _JS_REFERENCE_BASE = """
 (pair value: (identifier) @ref)
-(shorthand_property_identifier) @ref
+(object (shorthand_property_identifier) @ref)
 (array (identifier) @ref)
 (arguments (identifier) @ref)
 (variable_declarator value: (identifier) @ref)
