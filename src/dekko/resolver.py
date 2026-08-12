@@ -1261,8 +1261,26 @@ def _repo_stem(path: PurePosixPath) -> str:
 
     Returns:
         The file's stem, or its parent directory's name for index
-        files (``__init__.py``, ``mod.rs``, ...).
+        files (``__init__.py``, ``mod.rs``, ...) and for every Go
+        file (see below).
+
+    Go's importable unit is the *package*, declared per-directory --
+    every ``.go`` file in ``pkg/slug/`` belongs to package ``slug``
+    regardless of its own filename (``generator.go``, ``helpers.go``,
+    ...). Unlike Python/JS/Rust/C++, where "the file's own stem is the
+    importable unit" holds, a Go file's individual stem must never be
+    the matching unit -- round-13 master report §1: a qualified
+    cross-package call (``slug.Generate(...)`` importing
+    ``.../pkg/slug``) against ``pkg/slug/generator.go`` used to compare
+    the import source against ``"generator"`` (the file's own stem,
+    absent from the import path's segments) instead of ``"slug"`` (the
+    package/directory name, present in it), so the call fell through
+    to ``external`` instead of resolving. This mirrors the existing
+    ``_INDEX_STEMS`` directory-name fallback but applies
+    unconditionally to every ``.go`` file, not just index files.
     """
+    if path.suffix == ".go" and path.parent.name:
+        return path.parent.name
     stem = path.stem
     if stem in _INDEX_STEMS and path.parent.name:
         return path.parent.name
