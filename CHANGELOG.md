@@ -52,6 +52,45 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
     (`Context.index_cache`) is independent of the daemon's
     `_WarmCache` by design — noted in `server.py`'s docstring and
     `docs/cli.md` to head off future confusion between the two.
+- **Round-12 open-items implementation pass.** From
+  `.features/plans/round-12-open-items-implementation-guide.md`,
+  design work following the round-12 eval fixes above:
+  - **`dekko search` 30-40s+ latency on large repos.** The actual
+    bottleneck wasn't BM25/embedding scoring but an uncached
+    `classify.is_test_path()` reached millions of times via
+    `MapIndex.without_tests()`. `lru_cache` on `is_test_path()` cut
+    search on zed from ~30s to single-digit seconds.
+  - **Silent local re-work on an abandoned daemon request.**
+    `daemon.try_daemon()` now raises `DaemonRequestAbandonedError`
+    instead of returning `None` once a request has actually been
+    sent and no response arrives, so `cli.main()` reports a clear
+    message and a distinct exit code (`EXIT_DAEMON_ABANDONED = 7`)
+    instead of silently duplicating the work locally.
+  - **Concurrent CLI invocations racing to regen the same stale
+    `.dekko/` state.** New `filelock.py` (POSIX `fcntl`/Windows
+    `msvcrt`, fail-open) wired into `cli.py`'s stale-map path so a
+    second invocation waits for and reuses an in-flight regen
+    instead of re-parsing the repo a second time.
+  - **`--json` on the ambiguous-symbol error path.** Formalized the
+    existing plain-text-on-stderr behavior as documented, tested
+    contract rather than an inconsistency to fix.
+  - **Search relevance ties favoring a generic term over a more
+    specific one.** New IDF-weighted term coverage in `BM25Scorer`/
+    `search.py`'s `_CoverageAdjustedScorer` breaks coverage-fraction
+    ties toward the rarer, more distinctive term. Live-verified
+    fixed on spring-boot's reported case; claude-buddy's case
+    remains unresolved (corpus-relative IDF cuts the wrong way
+    there) and is documented as still open.
+  - **`referenced-by` noise on generic bare identifiers, phase A.**
+    Scoped `languages.py`'s JS/TS shorthand-property reference query
+    to object shorthand properties specifically. Live-verified as a
+    no-op on the pinned tree-sitter grammar (already splits the
+    conflated node types) — the real noise source is JSX/template-
+    literal reads of shadowed locals, needing lexical scope tracking
+    (phase B, deliberately deferred as a larger design effort).
+  - Independently re-verified: all of the above except phase B hold
+    up against live repro on the relevant `test-repos/` targets; see
+    `.features/plans/round-12-implementation-verification.md`.
 - **`dekko daemon start` false success on an oversized socket path.**
   When the daemon's Unix socket path exceeded `AF_UNIX`'s `sun_path`
   length limit, `daemon start` reported success (exit 0) and the
