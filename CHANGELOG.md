@@ -68,19 +68,31 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
     comparison granularity, and `dekko unused`'s expected
     false-positive shape on reflective/dynamic-dispatch-heavy
     frameworks.
-  - **Deferred as design work** (not same-session patches): a Go
-    cross-package call-resolution gap (`resolver.py`'s file-stem-based
-    import matching doesn't fit Go's directory-based package model —
-    awesome-go), and two daemon findings — `dekko daemon start`
-    orphaning a healthy daemon and spawning a duplicate, and `daemon
-    status` reporting `running: false` while the daemon is alive and
-    busy (claude-code, tensorflow) — confirmed via investigation to
-    share one root cause: the accept loop is deliberately
-    single-threaded and can't answer any request while busy on a slow
-    one. All three are written up in
-    `.features/plans/round-13-fixes-plan.md` (gitignored, disk-only);
-    the daemon fix direction is a dedicated status-only listener
-    thread, not timeout tuning.
+  - **Go cross-package call-resolution gap**, deferred from the
+    first pass as design work and closed in a follow-up (awesome-go):
+    `resolver.py`'s `_repo_stem()` compared a qualified `pkg.Func()`
+    call's import source against the *calling file's own filename
+    stem* rather than its package directory, silently dropping every
+    cross-package call through an imported first-party subpackage —
+    Go packages are directory-scoped, not file-scoped. `_repo_stem()`
+    now resolves every `.go` file to its parent directory
+    unconditionally.
+  - **Two daemon false-negative findings**, also deferred and then
+    closed (claude-code, tensorflow): `dekko daemon start` could
+    orphan a healthy daemon and spawn a duplicate for the same root,
+    and `dekko daemon status` could report `running: false` for the
+    full duration of a slow request while the daemon was alive and
+    busy — both traced to the same root cause, a deliberately
+    single-threaded accept loop that can't answer any request while
+    busy on another. Fixed with a dedicated status-only listener
+    (separate socket/port, its own background thread) that `daemon
+    status` and `is_daemon_reachable()` now probe instead of the busy
+    main command socket; `client_connect()`'s stale-artifact cleanup
+    was also narrowed so a connect-level timeout (busy daemon) no
+    longer deletes a live daemon's transport artifact — only a
+    genuine "nothing listening" failure does. Fail-open guarantees
+    (silent fallback to direct execution on any pre-request transport
+    error) preserved throughout; both fixes have regression tests.
 - **Round-12 7-repo eval fixes.** From a live eval against 7 real
   repos post-round-11 (`test-repos/reports/12-tokentest-7repo-postround11fixes/`):
   - **Resolver: bare receiverless call misresolved against an
