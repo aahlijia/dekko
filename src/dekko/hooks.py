@@ -105,7 +105,26 @@ def session_start(payload: dict) -> dict | None:
     )
     if report.total_symbols == 0 and not index.languages_by_path:
         return None
-    text = _PREAMBLE + "\n\n" + "\n".join(lines)
+    parts = [_PREAMBLE]
+    if report.cap > SESSION_MAP_BUDGET:
+        # round-13 tensorflow.md: on a repo whose path-only floor alone
+        # exceeds SESSION_MAP_BUDGET (a large monorepo can need
+        # ~80K tokens just to list every file), `effective_cap` bends
+        # the cap upward the same way `render_lean.run()`'s `--budget`
+        # floor already does for the `lean` CLI command -- but this
+        # hook called `generate()` directly and never surfaced that,
+        # so the injected map silently cost up to ~40x its documented
+        # budget with no visible signal anywhere. Mirror the CLI
+        # wrapper's disclosure so an agent (and anyone reading the
+        # transcript) can see why the map below is larger than
+        # SESSION_MAP_BUDGET.
+        parts.append(
+            f"note: this repo's path-only floor (~{report.cap} tok) "
+            f"exceeds dekko's {SESSION_MAP_BUDGET}-token session-start "
+            "budget; the map below uses the floor instead."
+        )
+    parts.append("\n".join(lines))
+    text = "\n\n".join(parts)
     return _additional_context("SessionStart", text)
 
 

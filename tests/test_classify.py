@@ -3,6 +3,27 @@
 from dekko.classify import is_test_path
 
 
+def test_is_test_path_is_cached() -> None:
+    # Round-12 §1 fix: is_test_path is called ~7.9M times per search
+    # on a large repo (all rediscovering the same ~2K distinct paths),
+    # so it is lru_cache-wrapped. Build a distinct-but-equal string
+    # (not the same object) so a hit can only come from the cache
+    # comparing by value, not from Python's small-string interning.
+    is_test_path.cache_clear()
+    path = "".join(["tests/", "test_cache", "_probe.py"])
+    other = "tests/test_cache_probe.py"
+    assert path is not other
+    assert path == other
+
+    first = is_test_path.cache_info()
+    assert is_test_path(path) is True
+    assert is_test_path(other) is True
+
+    info = is_test_path.cache_info()
+    assert info.hits == first.hits + 1
+    assert info.misses == first.misses + 1
+
+
 def test_plain_test_dir_is_test() -> None:
     assert is_test_path("tests/test_cli.py") is True
     assert is_test_path("src/app.py") is False

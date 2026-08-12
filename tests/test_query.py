@@ -145,6 +145,28 @@ def test_close_names_suppresses_short_fuzzy_junk(
     assert query._close_names("zzznonsense", ["B", "t", "A", "D"]) == []
 
 
+def test_close_names_suppresses_coincidental_single_char_substring(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # round-13 claude-buddy.md: a totally unrelated, long query
+    # (`totallyMadeUpSymbolXYZ123`) coincidentally contains a lowercase
+    # "b" (from "...Symbol...") and "d" (from "...Made..."), so the
+    # substring tier used to surface single-letter symbol names `B`/`D`
+    # as "closest matches" even though neither has any real relation to
+    # the query -- unlike `test_close_names_suppresses_short_fuzzy_junk`
+    # above (a needle with no such coincidental substrings), this one
+    # reproduces the actual reported shape.
+    assert query._close_names("totallyMadeUpSymbolXYZ123", ["B", "D"]) == []
+
+
+def test_close_names_keeps_two_char_substring_match(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # The new floor targets single-character candidates specifically;
+    # a genuine 2+ character substring match must stay eligible.
+    assert query._close_names("checkOkStatus", ["ok"]) == ["ok"]
+
+
 def test_close_names_still_surfaces_real_near_typo(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -977,3 +999,40 @@ def test_ambiguous_bare_name_no_overload_hint_for_distinct_paths(
     assert code == 4
     err = capsys.readouterr().err
     assert "can't disambiguate" not in err
+
+
+def test_json_flag_has_no_effect_on_ambiguous_error_output(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """Round-12 §3.15/§6: `--json` is a deliberate, documented no-op
+    on every error path — `report_unresolved` always prints plain text
+    to stderr regardless of `--json`, and the exit code is the only
+    machine-readable signal for this case. This locks in the current,
+    now-deliberate contract so any future accidental drift toward
+    "sometimes emits JSON errors" is caught."""
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(
+        ["query", "symbol", "helper", "--root", str(root), "--json"]
+    )
+    assert code == query.EXIT_AMBIGUOUS
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "is ambiguous" in err
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(err)
+
+
+def test_json_flag_has_no_effect_on_not_found_error_output(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """Same contract as the ambiguous case, for the not-found path."""
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(
+        ["query", "symbol", "does_not_exist", "--root", str(root), "--json"]
+    )
+    assert code == query.EXIT_NOT_FOUND
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "no symbol matches" in err
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(err)

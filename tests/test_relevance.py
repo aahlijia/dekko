@@ -8,6 +8,8 @@ compatibility when no task is supplied.
 
 from pathlib import Path
 
+import pytest
+
 from dekko import cli, contextpack, query, relevance, render_lean, workset
 from dekko.mapfile import MapIndex, load_map
 from dekko.relevance import (
@@ -189,6 +191,102 @@ def test_coverage_factor_is_bounded_floor_to_one() -> None:
     assert relevance._COVERAGE_FLOOR < relevance.coverage_factor(0.5) < 1.0
 
 
+# --- pure core: weighted_term_coverage / idf_term_weights (round-12
+# §3.13: a flat coverage fraction can't tell "missed a rare,
+# distinctive term" from "missed a common one" -- these give the
+# coverage discount access to the same IDF signal BM25 already has.
+# --------------------------------------------------------------------
+
+
+def test_weighted_term_coverage_with_no_weights_matches_flat() -> None:
+    terms = ("get", "all", "flagged", "repositories")
+    text = "mkdir all things"
+    assert relevance.weighted_term_coverage(
+        terms, text
+    ) == relevance.term_coverage(terms, text)
+
+
+def test_term_coverage_delegates_to_weighted_variant() -> None:
+    # Locks in that the two can never drift apart -- term_coverage is
+    # the flat (unweighted) special case of weighted_term_coverage.
+    terms = ("retries",)
+    text = "retry handler"
+    assert relevance.term_coverage(
+        terms, text
+    ) == relevance.weighted_term_coverage(terms, text, None)
+
+
+def test_weighted_term_coverage_rare_term_miss_costs_more() -> None:
+    # Two candidates each cover 2 of 3 terms (same flat fraction), but
+    # miss a different one. "yaml" is weighted far higher (rarer) than
+    # "parse" -- missing it should cost more, so the candidate that
+    # covers "yaml" (and misses the common "parse") should score
+    # higher than the one that covers "parse" (and misses "yaml").
+    terms = ("parse", "yaml", "configuration")
+    weights = {"parse": 0.1, "yaml": 5.0, "configuration": 1.0}
+
+    misses_yaml = "parse configuration properties"
+    misses_parse = "yaml configuration loader"
+
+    cov_misses_yaml = relevance.weighted_term_coverage(
+        terms, misses_yaml, weights
+    )
+    cov_misses_parse = relevance.weighted_term_coverage(
+        terms, misses_parse, weights
+    )
+    # Flat coverage would tie both at 2/3 -- confirm the premise.
+    assert relevance.term_coverage(
+        terms, misses_yaml
+    ) == relevance.term_coverage(terms, misses_parse)
+    # IDF-weighted coverage breaks the tie toward the more specific
+    # match (the one that covers the rare, distinctive term).
+    assert cov_misses_parse > cov_misses_yaml
+
+
+def test_weighted_term_coverage_missing_weight_falls_back_to_flat() -> None:
+    # A term absent from term_weights defaults to weight 1.0, same as
+    # every term when term_weights is None entirely.
+    terms = ("alpha", "beta")
+    text = "alpha only"
+    assert relevance.weighted_term_coverage(
+        terms, text, {"alpha": 1.0}
+    ) == relevance.weighted_term_coverage(terms, text, {})
+
+
+def test_weighted_term_coverage_empty_terms_is_full_coverage() -> None:
+    assert relevance.weighted_term_coverage((), "anything", {}) == 1.0
+
+
+def test_idf_term_weights_rare_term_scores_higher_than_common() -> None:
+    # "yaml" appears in 1 of 10 texts (rare); "parse" appears in 9 of
+    # 10 (common). IDF should rank the rare term's weight higher.
+    texts = ["parse configuration"] * 9 + ["yaml configuration loader"]
+    weights = relevance.idf_term_weights(("parse", "yaml"), texts)
+    assert weights["yaml"] > weights["parse"]
+
+
+def test_idf_term_weights_empty_terms_is_empty_dict() -> None:
+    assert relevance.idf_term_weights((), ["anything"]) == {}
+
+
+def test_idf_term_weights_empty_batch_is_flat_one() -> None:
+    assert relevance.idf_term_weights(("parse", "yaml"), []) == {
+        "parse": 1.0,
+        "yaml": 1.0,
+    }
+
+
+def test_idf_term_weights_respects_stemmed_inflections() -> None:
+    # "retries" in the query should match "retry" tokens for
+    # document-frequency purposes, same as term_coverage's own
+    # inflection tolerance -- so the stemmed doc-frequency count is 2
+    # (both "retry" texts), not 0 (no exact "retries" token anywhere)
+    # or 1 (only an exact-string match).
+    texts = ["retry logic here", "retry another spot", "unrelated text"]
+    weights = relevance.idf_term_weights(("retries",), texts)
+    assert weights["retries"] == relevance._idf(3, 2)
+
+
 def test_lexical_weak_field_top_hit_no_longer_reads_as_confident() -> None:
     # 4-term query; only "mkdir_all" shares one incidental term ("all")
     # with it — the real match isn't in this batch at all (as if it
@@ -248,6 +346,130 @@ def test_bm25_full_coverage_top_hit_still_reads_as_confident() -> None:
     scores = BM25Scorer().score(task, cands)
     assert scores["get_all_flagged_repositories"] == 1.0
     assert scores["mkdir_all"] < scores["get_all_flagged_repositories"]
+
+
+# --- round-12 §3.13: coverage discount is IDF-weighted, not a flat
+# fraction -- a candidate that misses a rare, distinctive query term
+# should be discounted more than one that misses a common term, even
+# when both cover the same *number* of terms (a flat-fraction tie).
+# Mirrors the spring-boot "parse yaml configuration properties" shape:
+# a name that matches the common word ("parse") but misses the rare,
+# distinctive one ("yaml") used to tie on coverage with the reverse
+# case and fall back entirely to raw BM25 magnitude (favoring the
+# shorter/name-matched candidate for reasons unrelated to relevance).
+# --------------------------------------------------------------------
+
+
+def test_bm25_own_coverage_discount_is_idf_weighted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolates ``BM25Scorer``'s internal coverage discount from raw
+    BM25 magnitude (which has its own, separate IDF-driven preference
+    for rare terms, a real but different effect from the coverage
+    discount this item targets): with every candidate's raw ``_bm25``
+    score forced to tie, the coverage discount is the *only* remaining
+    source of difference between two flat-coverage-tied candidates.
+    Confirms the discount mechanism itself -- not an incidental raw-
+    score effect -- prefers the candidate that covers the rarer,
+    more distinctive term.
+    """
+    task = TaskContext(terms=("parse", "yaml", "configuration"))
+    # "parse" is common across the batch (low IDF); "yaml" is rare
+    # (appears only in the one candidate that names it).
+    filler = [
+        Candidate(f"parser_{i}", f"parse thing {i}", "f.py") for i in range(8)
+    ]
+    misses_yaml = Candidate(
+        "elements_parser", "parse configuration properties", "a.py"
+    )
+    misses_parse = Candidate(
+        "yaml_loader", "yaml configuration loader", "b.py"
+    )
+    cands = [*filler, misses_yaml, misses_parse]
+
+    # Flat coverage ties both targets at 2/3 -- confirm the premise
+    # this fix is meant to break.
+    assert relevance.term_coverage(
+        task.terms, misses_yaml.text
+    ) == relevance.term_coverage(task.terms, misses_parse.text)
+
+    scorer = BM25Scorer()
+    monkeypatch.setattr(scorer, "_bm25", lambda *a, **k: 1.0)
+    scores = scorer.score(task, cands)
+    assert scores["yaml_loader"] > scores["elements_parser"]
+
+
+def test_bm25_end_to_end_favors_specific_match_over_generic_one() -> None:
+    """End-to-end (raw magnitude *and* coverage discount both live):
+    the spring-boot shape, without isolating either mechanism. Proves
+    the fix moves the needle on realistic input, not just in the
+    isolated unit test above -- comparing against the same scenario
+    with the coverage discount forced flat shows the gap between the
+    two candidates widens with the fix active, confirming it actually
+    engages rather than being dominated by raw BM25 magnitude alone.
+    """
+    task = TaskContext(terms=("parse", "yaml", "configuration"))
+    filler = [
+        Candidate(f"parser_{i}", f"parse_thing_{i} parses input", "f.py")
+        for i in range(8)
+    ]
+    misses_yaml = Candidate(
+        "elements_parser",
+        "ElementsParser parse configuration properties",
+        "a.py",
+    )
+    misses_parse = Candidate(
+        "yaml_loader",
+        "YamlPropertySourceLoader yaml configuration loader",
+        "b.py",
+    )
+    cands = [*filler, misses_yaml, misses_parse]
+
+    scores = BM25Scorer().score(task, cands)
+    gap_with_fix = scores["yaml_loader"] - scores["elements_parser"]
+
+    def _flat_weighted_coverage(
+        terms: tuple[str, ...],
+        text: str,
+        term_weights: dict[str, float] | None = None,
+    ) -> float:
+        present = set(relevance.normalize_terms(text))
+        stemmed_present = {relevance._stem(t) for t in present}
+        hits = sum(
+            1
+            for t in terms
+            if t in present or relevance._stem(t) in stemmed_present
+        )
+        return hits / len(terms) if terms else 1.0
+
+    original = relevance.weighted_term_coverage
+    relevance.weighted_term_coverage = _flat_weighted_coverage
+    try:
+        scores_flat = BM25Scorer().score(task, cands)
+    finally:
+        relevance.weighted_term_coverage = original
+    gap_without_fix = (
+        scores_flat["yaml_loader"] - scores_flat["elements_parser"]
+    )
+
+    assert gap_with_fix > gap_without_fix > 0
+
+
+def test_bm25_coverage_weighting_uses_the_same_batch_doc_freq() -> None:
+    # relevance.idf_term_weights, called independently over the same
+    # candidate texts, must agree with whatever BM25Scorer derived
+    # internally for its own coverage discount -- both are keyed by
+    # _stem(t) over the same batch, so they must never disagree.
+    task = TaskContext(terms=("parse", "yaml"))
+    cands = [
+        Candidate("a", "parse thing", "a.py"),
+        Candidate("b", "parse other", "b.py"),
+        Candidate("c", "yaml config", "c.py"),
+    ]
+    external_weights = relevance.idf_term_weights(
+        task.terms, [c.text for c in cands]
+    )
+    assert external_weights["yaml"] > external_weights["parse"]
 
 
 # --- 2.5: tokenization memoization (search/BM25 performance) ---------

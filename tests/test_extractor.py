@@ -374,6 +374,105 @@ def test_tsx_jsx_tag_name_captured_as_ref(tmp_path: Path) -> None:
     assert "Sidebar" in ref_names
 
 
+def test_ts_object_literal_shorthand_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """Object-literal shorthand (a genuine value read) is captured.
+
+    ``{ helper }`` as an object-literal value is a real reference to
+    whatever ``helper`` currently resolves to — must still surface as
+    a ``@ref``, matching the pre-existing (unscoped) behavior.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "function helper() {}\nconst bundle = { helper };\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "helper" in ref_names
+
+
+def test_ts_destructured_const_shorthand_not_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """A destructured local binding is not a reference to anything.
+
+    ``const { helper } = source`` *introduces* a new local name
+    ``helper``; it is not a read of any existing ``helper`` binding
+    (repo-wide or otherwise). tree-sitter-javascript already gives
+    this shape a distinct node type
+    (``shorthand_property_identifier_pattern``, not
+    ``shorthand_property_identifier``), so the ``_JS_REFERENCE_BASE``
+    shorthand-property pattern must not — and, verified live against
+    the pinned grammar, does not — capture it.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "function helper() {}\n"
+        "const source = { helper: 1 };\n"
+        "const { helper } = source;\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "helper" not in ref_names
+
+
+def test_ts_destructured_parameter_shorthand_not_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """Round-12 §3.11/§4.5's exact reported shape: a destructured
+    function parameter must not be attributed as a reference.
+
+    ``function f({ description }) {}`` declares a new parameter named
+    ``description``; it must not register as a "reference" to an
+    unrelated repo-wide symbol of the same name (the cline
+    ``description`` false-positive report's dominant shape).
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "function description() {}\n"
+        "function f({ description }: { description: string }) {\n"
+        "  return description;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    # The parameter's own declaration site must never surface as a
+    # @ref. (The bare `return description;` inside the function body
+    # is a separate, still-open shadowing gap — Phase B of round-12
+    # §3's design, real lexical scope tracking — since no query-level
+    # pattern in `_JS_REFERENCE_BASE` matches a standalone identifier
+    # in `return` position at all, so it isn't asserted either way
+    # here.)
+    param_line = 2
+    assert not any(
+        ref.name == "description" and ref.line == param_line for ref in fm.refs
+    )
+
+
+def test_ts_array_destructuring_not_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """Confirms ``array`` vs. ``array_pattern`` is already handled.
+
+    The existing ``(array (identifier) @ref)`` pattern is already
+    parent-scoped, so ``const [a, b] = pair`` (an ``array_pattern``,
+    not an ``array``) was never captured — verified here rather than
+    assumed, per round-12 §3's own verification-plan ask.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const pair = [1, 2];\nconst [a, b] = pair;\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "a" not in ref_names
+    assert "b" not in ref_names
+
+
 def test_parse_rust_use() -> None:
     assert _parse_rust_use("a::b::c") == [("c", "a::b::c")]
     assert _parse_rust_use("a::b as d") == [("d", "a::b")]

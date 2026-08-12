@@ -7,6 +7,7 @@ deterministic, and language-independent.
 """
 
 import fnmatch
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,9 +26,25 @@ TEST_DIR_PARTS = frozenset(
     {"test", "tests", "__tests__", "spec", "specs", "testing"}
 )
 
+# Cache size for the memoization below. Sized generously above the
+# largest distinct-path count seen in the 7-repo eval (tensorflow,
+# 14,285 files) — a path is a much smaller-cardinality key than
+# relevance.py's per-symbol-text cache, so this can stay modest.
+# Mirrors relevance._TERM_CACHE_SIZE's sizing rationale.
+_PATH_CACHE_SIZE = 50_000
 
+
+@lru_cache(maxsize=_PATH_CACHE_SIZE)
 def is_test_path(path: str) -> bool:
     """Whether a repo-relative POSIX path looks like test code.
+
+    Memoized: ``mapfile.without_tests()`` calls this (directly and via
+    ``_symbol_is_test``/``_prod_id``) for every symbol and both
+    endpoints of every edge, re-deriving the same answer for the same
+    small set of distinct paths millions of times on a large repo. A
+    pure function of an immutable string with no side effects, so
+    caching is behavior-preserving by construction — only performance
+    changes.
 
     Args:
         path: Repo-relative path, e.g. ``tests/test_cli.py``.

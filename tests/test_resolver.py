@@ -1756,3 +1756,108 @@ def test_receiver_qualified_call_unaffected_by_non_method_fallback() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert edges == set()
     assert len(graph.ambiguous) == 1
+
+
+# --- Go cross-package qualified-call resolution (round-13 §1) -------------
+
+
+def test_go_qualified_call_resolves_to_correct_subpackage() -> None:
+    """Round-13 master report §1: a qualified call through an imported
+    first-party Go subpackage selector (``slug.Generate(...)``) used
+    to be dropped entirely -- ``_repo_stem`` compared the import
+    source against the *file's own* stem (``"generator"``), which
+    never appears in a Go import path, instead of the package
+    directory name (``"slug"``), which does. Reproduces the exact
+    awesome-go shape: two same-named-symbol packages, a caller
+    importing only one, calling it via selector -- the call must
+    resolve to that package's ``Generate``, not fall through to
+    ``external`` or land in ``ambiguous``."""
+    slug_generate = Symbol(
+        id="pkg/slug/generator.go::Generate",
+        name="Generate",
+        qualname="Generate",
+        kind="function",
+        path="pkg/slug/generator.go",
+        language="go",
+    )
+    markdown_generate = Symbol(
+        id="pkg/markdown/id.go::Generate",
+        name="Generate",
+        qualname="Generate",
+        kind="function",
+        path="pkg/markdown/id.go",
+        language="go",
+    )
+    caller = _fn("cmd/main.go", "main")
+    files = [
+        FileMap("pkg/slug/generator.go", "go", symbols=[slug_generate]),
+        FileMap("pkg/markdown/id.go", "go", symbols=[markdown_generate]),
+        FileMap(
+            "cmd/main.go",
+            "go",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="cmd/main.go",
+                    text="slug.Generate",
+                    name="Generate",
+                    receiver="slug",
+                    line=3,
+                )
+            ],
+            imports=[
+                Import(
+                    path="cmd/main.go",
+                    name="slug",
+                    source="github.com/avelino/awesome-go/pkg/slug",
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, slug_generate.id) in edges
+    assert (caller.id, markdown_generate.id) not in edges
+    assert graph.ambiguous == []
+    assert not any(ext.callee.startswith("slug.") for ext in graph.external)
+
+
+def test_go_same_package_split_across_files_unaffected_by_stem_fix() -> None:
+    """Regression guard: a single Go package split across two files
+    (``pkg/a/one.go`` calling into ``pkg/a/two.go``) has no import
+    statement for its own package, so it never reaches
+    ``_import_match``/``_repo_stem`` at all -- resolution goes through
+    the same-file/bare-name ladder instead. Confirms the directory-
+    name stem change doesn't accidentally change that path's
+    outcome."""
+    helper = Symbol(
+        id="pkg/a/two.go::Helper",
+        name="Helper",
+        qualname="Helper",
+        kind="function",
+        path="pkg/a/two.go",
+        language="go",
+    )
+    caller = _fn("pkg/a/one.go", "Entry")
+    files = [
+        FileMap("pkg/a/two.go", "go", symbols=[helper]),
+        FileMap(
+            "pkg/a/one.go",
+            "go",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="pkg/a/one.go",
+                    text="Helper",
+                    name="Helper",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, helper.id) in edges
+    assert graph.ambiguous == []

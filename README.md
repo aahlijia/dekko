@@ -99,9 +99,9 @@ you rarely need to run `dekko map` again by hand.
 - [docs/install.md](docs/install.md) — installation, extras, local
   clone, uninstall
 - [docs/cli.md](docs/cli.md) — every CLI command, symbol targets,
-  excluding files, notes, language support
+  excluding files, notes, daemon mode, language support
 - [docs/claude-code.md](docs/claude-code.md) — the `/map` plugin, push
-  hooks, the MCP server, and Cline
+  hooks, Claude Code skills, the MCP server, and Cline
 
 ## Learn more
 

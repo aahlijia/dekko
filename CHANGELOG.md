@@ -18,8 +18,81 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   `diff`/`affected` share the same warm cache. Explicit start/stop in
   v1, no auto-spawn; every daemon-routing check fails open to direct-
   process behavior on any daemon absence/error.
+- **Two new Claude Code skills.** `dekko-verify`: sanity-check a
+  suspiciously low or zero call-graph result (`get_callers`,
+  `get_callees`, `find_usages`, `impacted_tests`, `unused`) with a
+  targeted grep before concluding "no callers"/"dead code" — codifies
+  the known resolver blind spots repeated eval rounds keep finding
+  (cross-package/qualified calls, trait/interface dispatch, unparsed-
+  language files, the `--no-tests` default, high-symbol-density common
+  method names). `dekko-daemon`: when to start the daemon ahead of a
+  Bash-CLI-heavy stretch of work, what its warm cache does and doesn't
+  cover (the `diff`/`affected` old-side reparse is never covered), and
+  how to handle a `--no-daemon`/exit-7 abandoned-request retry.
+  Also closed a documentation gap in the existing `dekko-orient`
+  skill: `find_usages`, `map_status`, and `refresh_map` are three of
+  the MCP server's 14 tools that were never listed there, leaving an
+  MCP-only agent (no Bash) with no way to discover them.
 
 ### Fixed
+- **Round-13 7-repo eval fixes.** From a live eval against 7 real
+  repos post-round-12 (`test-repos/reports/13-tokentest-7repo-postround12fixes/`,
+  `MASTER_REPORT.md`):
+  - **Session-start hook silently blowing its token budget ~40x.**
+    On a very large repo (tensorflow), the hook's path-only backbone
+    floor could exceed `SESSION_MAP_BUDGET` with no signal anywhere
+    that it happened, unlike the equivalent `dekko lean` CLI path
+    which already warns. `hooks.py`'s session-start now discloses
+    when this floor is exceeded.
+  - **`dekko trace` false "no call path."** A route that exists only
+    through ambiguously-resolved edges read as an indistinguishable
+    genuine negative (spring-boot), inconsistent with `query callees`'
+    own honest ambiguous-edge disclosure. `trace.py` now
+    distinguishes the two cases.
+  - **`dekko summary`'s "parse errors:" section mislabeling
+    no-grammar skips as real failures.** Round-12 fixed this
+    conflation in `dekko map`'s own summary but missed `dekko
+    summary`'s separate code path (tensorflow, zed);
+    `summary.py` and its `--json` fields now share the same
+    distinction.
+  - **Fuzzy "closest matches" noise.** Single-character symbol names
+    could coincidentally surface as a substring match against an
+    unrelated, long query (claude-buddy); `query.py`'s suggestion
+    ranking now excludes these.
+  - **A `FileNotFoundError` race in `dekko map`'s page writer.**
+    Seen once right after a full `.dekko/` reset (spring-boot,
+    corroborated by a softer non-crashing variant in claude-buddy);
+    `cli.py`'s `_write_pages()` now re-asserts its parent directory
+    exists immediately before its first write.
+  - Documentation clarifications: `diff`/`affected`'s symbol-body-hash
+    comparison granularity, and `dekko unused`'s expected
+    false-positive shape on reflective/dynamic-dispatch-heavy
+    frameworks.
+  - **Go cross-package call-resolution gap**, deferred from the
+    first pass as design work and closed in a follow-up (awesome-go):
+    `resolver.py`'s `_repo_stem()` compared a qualified `pkg.Func()`
+    call's import source against the *calling file's own filename
+    stem* rather than its package directory, silently dropping every
+    cross-package call through an imported first-party subpackage —
+    Go packages are directory-scoped, not file-scoped. `_repo_stem()`
+    now resolves every `.go` file to its parent directory
+    unconditionally.
+  - **Two daemon false-negative findings**, also deferred and then
+    closed (claude-code, tensorflow): `dekko daemon start` could
+    orphan a healthy daemon and spawn a duplicate for the same root,
+    and `dekko daemon status` could report `running: false` for the
+    full duration of a slow request while the daemon was alive and
+    busy — both traced to the same root cause, a deliberately
+    single-threaded accept loop that can't answer any request while
+    busy on another. Fixed with a dedicated status-only listener
+    (separate socket/port, its own background thread) that `daemon
+    status` and `is_daemon_reachable()` now probe instead of the busy
+    main command socket; `client_connect()`'s stale-artifact cleanup
+    was also narrowed so a connect-level timeout (busy daemon) no
+    longer deletes a live daemon's transport artifact — only a
+    genuine "nothing listening" failure does. Fail-open guarantees
+    (silent fallback to direct execution on any pre-request transport
+    error) preserved throughout; both fixes have regression tests.
 - **Round-12 7-repo eval fixes.** From a live eval against 7 real
   repos post-round-11 (`test-repos/reports/12-tokentest-7repo-postround11fixes/`):
   - **Resolver: bare receiverless call misresolved against an
@@ -52,6 +125,45 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
     (`Context.index_cache`) is independent of the daemon's
     `_WarmCache` by design — noted in `server.py`'s docstring and
     `docs/cli.md` to head off future confusion between the two.
+- **Round-12 open-items implementation pass.** From
+  `.features/plans/round-12-open-items-implementation-guide.md`,
+  design work following the round-12 eval fixes above:
+  - **`dekko search` 30-40s+ latency on large repos.** The actual
+    bottleneck wasn't BM25/embedding scoring but an uncached
+    `classify.is_test_path()` reached millions of times via
+    `MapIndex.without_tests()`. `lru_cache` on `is_test_path()` cut
+    search on zed from ~30s to single-digit seconds.
+  - **Silent local re-work on an abandoned daemon request.**
+    `daemon.try_daemon()` now raises `DaemonRequestAbandonedError`
+    instead of returning `None` once a request has actually been
+    sent and no response arrives, so `cli.main()` reports a clear
+    message and a distinct exit code (`EXIT_DAEMON_ABANDONED = 7`)
+    instead of silently duplicating the work locally.
+  - **Concurrent CLI invocations racing to regen the same stale
+    `.dekko/` state.** New `filelock.py` (POSIX `fcntl`/Windows
+    `msvcrt`, fail-open) wired into `cli.py`'s stale-map path so a
+    second invocation waits for and reuses an in-flight regen
+    instead of re-parsing the repo a second time.
+  - **`--json` on the ambiguous-symbol error path.** Formalized the
+    existing plain-text-on-stderr behavior as documented, tested
+    contract rather than an inconsistency to fix.
+  - **Search relevance ties favoring a generic term over a more
+    specific one.** New IDF-weighted term coverage in `BM25Scorer`/
+    `search.py`'s `_CoverageAdjustedScorer` breaks coverage-fraction
+    ties toward the rarer, more distinctive term. Live-verified
+    fixed on spring-boot's reported case; claude-buddy's case
+    remains unresolved (corpus-relative IDF cuts the wrong way
+    there) and is documented as still open.
+  - **`referenced-by` noise on generic bare identifiers, phase A.**
+    Scoped `languages.py`'s JS/TS shorthand-property reference query
+    to object shorthand properties specifically. Live-verified as a
+    no-op on the pinned tree-sitter grammar (already splits the
+    conflated node types) — the real noise source is JSX/template-
+    literal reads of shadowed locals, needing lexical scope tracking
+    (phase B, deliberately deferred as a larger design effort).
+  - Independently re-verified: all of the above except phase B hold
+    up against live repro on the relevant `test-repos/` targets; see
+    `.features/plans/round-12-implementation-verification.md`.
 - **`dekko daemon start` false success on an oversized socket path.**
   When the daemon's Unix socket path exceeded `AF_UNIX`'s `sun_path`
   length limit, `daemon start` reported success (exit 0) and the

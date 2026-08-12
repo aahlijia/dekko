@@ -204,6 +204,20 @@ _MAX_SUGGESTIONS = 5
 # against claude-buddy's `buddyStateDr` case).
 _MIN_FUZZY_NAME_LEN = 3
 _FUZZY_CUTOFF = 0.72
+# round-13 claude-buddy.md: a single-character candidate name (a
+# throwaway loop variable like `B`/`D`) is a coincidental substring of
+# almost any sufficiently long, unrelated needle -- `totallyMade
+# UpSymbolXYZ123` contains a "b" (from "symbol") and a "d" (from
+# "made") purely by chance, so the substring tier surfaced both as
+# "closest matches" for a query with no real relationship to either.
+# Distinct from ``_MIN_FUZZY_NAME_LEN`` (which only gates the fuzzy
+# edit-distance tier, and is deliberately looser so short symbol names
+# stay reachable via a genuine prefix/substring match): this floor
+# only gates the "tiny candidate happens to appear inside a much
+# longer needle" direction of the substring tier, not the reverse
+# (a short *query* matching inside a longer real candidate name stays
+# fully eligible, and 2+ character names are unaffected either way).
+_MIN_SUBSTRING_CANDIDATE_LEN = 2
 # Cap on how many ambiguous candidates ``report_unresolved`` prints
 # unconditionally. Without this, a very-high-cardinality bare-name
 # collision (zed's 99 same-named ``fn main`` candidates across a Rust
@@ -228,7 +242,9 @@ def _close_names(needle: str, names: list[str]) -> list[str]:
             scored.append((0, name))
         elif cand.startswith(low) or low.startswith(cand):
             scored.append((1, name))
-        elif low in cand or cand in low:
+        elif low in cand or (
+            cand in low and len(cand) >= _MIN_SUBSTRING_CANDIDATE_LEN
+        ):
             scored.append((2, name))
         else:
             rest.append(name)
@@ -318,6 +334,17 @@ def report_unresolved(
     the caller can retry inside the map instead of falling back to
     grep (the 2026-07-10 eval transcripts show a bare not-found ejects
     agents into reading whole files).
+
+    Always prints plain text to stderr, regardless of ``--json`` —
+    this is a deliberate, project-wide contract (round-12 §3.15/§6),
+    not an oversight specific to this function. Every CLI error path
+    behaves the same way (see ``docs/cli.md``'s ``--json`` section):
+    ``--json`` governs the shape of successful (exit 0) output only. A
+    caller should check the exit code first (``EXIT_AMBIGUOUS``/
+    ``EXIT_NOT_FOUND`` here) and only parse stdout as JSON when it is
+    0. This function is shared by ``query``, ``trace``, ``workset``,
+    and ``contextpack`` — do not "fix" it as a one-off without also
+    revisiting the other three call sites and the documented contract.
     """
     if not candidates:
         print(f"dekko: no symbol matches '{target}'", file=sys.stderr)

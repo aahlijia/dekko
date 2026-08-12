@@ -37,6 +37,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -83,6 +84,15 @@ _DAEMON_ELIGIBLE = frozenset(
 # a routed command.
 _SHUTDOWN_CMD = "_shutdown"
 _STATUS_CMD = "_status"
+
+# cli.py's main() returns this when a daemon-routed request was sent
+# but abandoned (see DaemonRequestAbandonedError below) -- distinct from
+# every other exit code already in use across the CLI (0-6; see
+# query.py/outline.py's EXIT_NOT_FOUND/EXIT_AMBIGUOUS, ledger.py's
+# EXIT_NO_TRANSCRIPT=6, cli.py's own literal 5 for --no-regen
+# staleness) so a caller can distinguish "the daemon may still be
+# working on this in the background" from every other failure shape.
+EXIT_DAEMON_ABANDONED = 7
 
 # Default self-shutdown window: 30 minutes with no requests (design
 # doc §2.1).
@@ -179,6 +189,16 @@ class _WarmCache:
     exactly as that cache is (design doc §2.4). Installed into
     ``cli._load_or_regen`` via ``cli.set_daemon_cache_hook`` for the
     lifetime of ``serve_daemon``'s accept loop.
+
+    ``get``/``put`` are only ever called from the main accept loop's
+    thread (single-threaded by design). ``snapshot()`` is also called
+    from the dedicated status-listener thread (round-13 master report
+    §2), which runs concurrently with the main loop -- ``_lock`` guards
+    the ``(root, index)`` pair so a snapshot can never observe a torn
+    read (a new root paired with a stale index, or vice versa) from a
+    ``put()`` happening mid-read. The (potentially slower)
+    ``mapfile.check_freshness`` stat call itself runs outside the lock
+    in ``snapshot()`` so a status probe never blocks behind it.
     """
 
     def __init__(self) -> None:
@@ -186,6 +206,7 @@ class _WarmCache:
         self._root: Path | None = None
         self.hits = 0
         self.misses = 0
+        self._lock = threading.Lock()
 
     def get(self, root: Path) -> mapfile.MapIndex | None:
         """Return the cached index for ``root`` if still fresh, else
@@ -197,26 +218,30 @@ class _WarmCache:
         cache-check ``_load_or_regen`` made, not just the ones that
         found something to check.
         """
-        if self._index is not None and self._root == root:
-            if mapfile.check_freshness(root, self._index).fresh:
-                self.hits += 1
-                return self._index
-        self.misses += 1
-        return None
+        with self._lock:
+            if self._index is not None and self._root == root:
+                if mapfile.check_freshness(root, self._index).fresh:
+                    self.hits += 1
+                    return self._index
+            self.misses += 1
+            return None
 
     def put(self, root: Path, index: mapfile.MapIndex) -> None:
         """Record a freshly loaded ``index`` for ``root``."""
-        self._root = root
-        self._index = index
+        with self._lock:
+            self._root = root
+            self._index = index
 
     def snapshot(self) -> dict | None:
         """Status-reportable cache state, or ``None`` before any
         request has populated the cache."""
-        if self._index is None or self._root is None:
-            return None
-        fresh = mapfile.check_freshness(self._root, self._index).fresh
+        with self._lock:
+            if self._index is None or self._root is None:
+                return None
+            root, index = self._root, self._index
+        fresh = mapfile.check_freshness(root, index).fresh
         return {
-            "cached_root": str(self._root),
+            "cached_root": str(root),
             "fresh": fresh,
             "hits": self.hits,
             "misses": self.misses,
@@ -263,13 +288,30 @@ def _send_line(sock: socket.socket, payload: dict) -> None:
 
 
 def _status_payload(
-    transport: DaemonTransport, start_time: float, cache: "_WarmCache"
+    transport: DaemonTransport,
+    start_time: float,
+    cache: "_WarmCache",
+    busy: bool,
 ) -> dict:
-    """Build the response body for a ``_status`` protocol request."""
+    """Build the response body for a ``_status`` protocol request.
+
+    Args:
+        transport: The transport being probed (for its ``describe()``).
+        start_time: ``time.monotonic()`` value at daemon startup.
+        cache: This daemon's warm cache, for its snapshot.
+        busy: Whether the main accept loop is currently mid-request
+            (round-13 master report §2) -- always ``False`` when this
+            is built from inside the main loop's own ``_status``
+            handling (it can't be handling two requests at once by
+            definition), meaningfully ``True``/``False`` when built by
+            the independent status-listener thread while the main loop
+            may be busy elsewhere.
+    """
     return {
         "running": True,
         "pid": os.getpid(),
         "uptime_seconds": round(time.monotonic() - start_time, 3),
+        "busy": busy,
         "transport": transport.describe(),
         # None until the first daemon-routed read populates the
         # cache; a dict with the cached root, its current freshness,
@@ -284,6 +326,7 @@ def _handle_connection(
     dispatch: dict[str, Callable[[argparse.Namespace], int]],
     start_time: float,
     cache: "_WarmCache",
+    busy_event: threading.Event,
 ) -> bool:
     """Handle exactly one accepted connection.
 
@@ -296,6 +339,10 @@ def _handle_connection(
         start_time: ``time.monotonic()`` value at daemon startup.
         cache: This daemon's warm single-slot index cache, for the
             ``_status`` payload's cache-state report.
+        busy_event: Set immediately before a routed command runs and
+            cleared immediately after, so the independent status-
+            listener thread (round-13 master report §2) can report an
+            honest ``busy`` flag while this connection is in flight.
 
     Returns:
         ``False`` if the accept loop should stop after this
@@ -330,7 +377,12 @@ def _handle_connection(
             _send_line(conn, {"exit_code": 0, "stdout": "", "stderr": ""})
             return False
         if cmd == _STATUS_CMD:
-            _send_line(conn, _status_payload(transport, start_time, cache))
+            _send_line(
+                conn,
+                _status_payload(
+                    transport, start_time, cache, busy_event.is_set()
+                ),
+            )
             return True
 
         func = dispatch.get(cmd)
@@ -348,7 +400,11 @@ def _handle_connection(
             return True
 
         args = argparse.Namespace(**(request.get("args") or {}))
-        exit_code, out, err = _run_captured(func, args)
+        busy_event.set()
+        try:
+            exit_code, out, err = _run_captured(func, args)
+        finally:
+            busy_event.clear()
         _send_line(
             conn, {"exit_code": exit_code, "stdout": out, "stderr": err}
         )
@@ -384,6 +440,93 @@ def _run_captured(
         return 1, "", f"dekko daemon: internal error: {exc}"
 
 
+def _serve_status_connection(
+    conn: socket.socket,
+    transport: DaemonTransport,
+    start_time: float,
+    cache: "_WarmCache",
+    busy_event: threading.Event,
+) -> None:
+    """Handle exactly one connection on the status-only listener.
+
+    Deliberately minimal (round-13 master report §2): authenticates,
+    expects a single ``_status`` request, and replies -- anything else
+    (a malformed line, an unexpected command) gets an error envelope
+    or is simply dropped, never dispatched to a routed ``cli.py``
+    function. This listener exists solely so ``daemon status``/
+    ``is_daemon_reachable`` stay fast and honest while the main accept
+    loop is busy on a slow routed request; it must never grow a second
+    copy of real command routing -- that would reopen exactly the
+    concurrent-shared-state questions ``serve_daemon``'s single-
+    threaded design exists to sidestep.
+    """
+    conn.settimeout(_REQUEST_TIMEOUT)
+    try:
+        if not transport.authenticate(conn):
+            return
+        raw = _recv_line(conn)
+        if raw is None:
+            return
+        try:
+            request = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        if request.get("cmd") != _STATUS_CMD:
+            _send_line(
+                conn,
+                {
+                    "exit_code": 1,
+                    "stdout": "",
+                    "stderr": (
+                        "dekko daemon: status listener only answers "
+                        "status probes"
+                    ),
+                },
+            )
+            return
+        payload = _status_payload(
+            transport, start_time, cache, busy_event.is_set()
+        )
+        _send_line(conn, payload)
+    except OSError:
+        # Mirrors _handle_connection: a transient socket error here
+        # must not take this thread's loop down.
+        pass
+    finally:
+        conn.close()
+
+
+def _serve_status_loop(
+    status_sock: socket.socket,
+    transport: DaemonTransport,
+    start_time: float,
+    cache: "_WarmCache",
+    busy_event: threading.Event,
+    stop_event: threading.Event,
+) -> None:
+    """Dedicated accept loop for the status-only listener.
+
+    Runs in a background thread for the lifetime of ``serve_daemon``'s
+    main accept loop, on a socket the main loop never touches. A short
+    (1s) socket timeout on ``status_sock`` lets this loop wake
+    periodically to check ``stop_event`` rather than blocking forever
+    in ``accept()`` past the point ``serve_daemon`` wants to shut down.
+    """
+    status_sock.settimeout(1.0)
+    while not stop_event.is_set():
+        try:
+            conn, _addr = status_sock.accept()
+        except socket.timeout:
+            continue
+        except OSError:
+            # status_sock was closed out from under this thread during
+            # shutdown -- exit the loop rather than spin on the error.
+            break
+        _serve_status_connection(
+            conn, transport, start_time, cache, busy_event
+        )
+
+
 def serve_daemon(
     root: Path,
     idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
@@ -399,6 +542,21 @@ def serve_daemon(
     received or when ``idle_timeout`` seconds pass with no new
     connection since the last one was handled.
 
+    Round-13 master report §2: alongside the main command socket, this
+    also binds and serves a second, status-only listener
+    (``DaemonTransport.bind_status_listener``) on a dedicated
+    background thread (``_serve_status_loop``). That thread's contract
+    is deliberately narrow -- it only ever answers ``_status`` probes,
+    reading nothing but already-lock-guarded state
+    (``_WarmCache.snapshot``) and a ``threading.Event`` the main loop
+    flips before/after each routed command -- so liveness/status
+    queries (``dekko daemon status``, ``is_daemon_reachable()``) stay
+    fast and honest even while the main loop is mid-request. This adds
+    exactly one narrowly-scoped thread; it does not make the main
+    command loop itself concurrent, and does not touch the concerns
+    that loop's single-threaded design was protecting (no second
+    thread ever dispatches a routed command or mutates the cache).
+
     Args:
         root: Repo root this daemon serves.
         idle_timeout: Self-shutdown window, in seconds, with no
@@ -408,13 +566,24 @@ def serve_daemon(
 
     Returns:
         ``0`` on a clean shutdown (explicit or idle timeout), ``1``
-        if the transport could not be bound at all.
+        if either listener could not be bound.
     """
     transport = transport or default_transport_for(root)
     try:
         sock = transport.bind_and_listen()
     except TransportUnavailable as exc:
         print(f"dekko daemon: cannot start: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        status_sock = transport.bind_status_listener()
+    except TransportUnavailable as exc:
+        print(
+            f"dekko daemon: cannot start status listener: {exc}",
+            file=sys.stderr,
+        )
+        sock.close()
+        transport.cleanup()
         return 1
 
     # Deferred import: avoids a circular import at module load time
@@ -426,6 +595,22 @@ def serve_daemon(
     cache = _WarmCache()
     cli.set_daemon_cache_hook(cache.get, cache.put)
     start_time = time.monotonic()
+    busy_event = threading.Event()
+    status_stop = threading.Event()
+    status_thread = threading.Thread(
+        target=_serve_status_loop,
+        args=(
+            status_sock,
+            transport,
+            start_time,
+            cache,
+            busy_event,
+            status_stop,
+        ),
+        daemon=True,
+    )
+    status_thread.start()
+
     sock.settimeout(idle_timeout)
     try:
         while True:
@@ -434,10 +619,13 @@ def serve_daemon(
             except socket.timeout:
                 break
             if not _handle_connection(
-                conn, transport, dispatch, start_time, cache
+                conn, transport, dispatch, start_time, cache, busy_event
             ):
                 break
     finally:
+        status_stop.set()
+        status_sock.close()
+        status_thread.join(timeout=2.0)
         sock.close()
         transport.cleanup()
         # Uninstall so this process-global hook never leaks past this
@@ -449,15 +637,97 @@ def serve_daemon(
     return 0
 
 
+class DaemonRequestAbandonedError(Exception):
+    """A request reached the daemon, but its response never arrived.
+
+    Round-12 master report §3.8: ``serve_daemon``'s accept loop is
+    single-threaded (see its own docstring), so once the daemon has
+    started ``_run_captured(func, args)`` for a dispatched request, it
+    runs to completion regardless of whether the client is still
+    listening -- there is no cancellation. If the client's own
+    ``_CLIENT_TIMEOUT`` expires first (a timeout, a dropped
+    connection, or a malformed reply), the daemon may still be
+    computing that abandoned request in the background. Falling back
+    to a local re-run in that situation duplicates the expensive work
+    and contends with the orphaned daemon-side copy for CPU -- which
+    is why this is raised instead of returned as another ``None``:
+    ``None`` means "the daemon was never reached, a local fallback is
+    free," this means "the daemon *was* reached and may still be
+    working, a local fallback is not free." ``cli.py``'s ``main()``
+    must not treat the two the same way.
+    """
+
+
+def _send_daemon_request(
+    sock: socket.socket,
+    transport: DaemonTransport,
+    command: str,
+    args: argparse.Namespace,
+) -> bool:
+    """Authenticate and send one request line on an open ``sock``.
+
+    Returns:
+        ``True`` once the request has been fully sent. ``False`` if a
+        socket error occurred during authentication or the send
+        itself -- safe to treat as "the daemon never started work on
+        this request," since nothing was dispatched for it to act on.
+    """
+    try:
+        transport.send_auth_preamble(sock)
+        payload = {k: v for k, v in vars(args).items() if k != "func"}
+        _send_line(sock, {"cmd": command, "args": payload})
+    except OSError:
+        return False
+    return True
+
+
+def _recv_daemon_response(sock: socket.socket) -> tuple[int, str, str]:
+    """Read and decode the daemon's response line on ``sock``.
+
+    Raises:
+        DaemonRequestAbandonedError: on a timeout, a dropped connection, or
+            a malformed reply -- always *after* a request was already
+            sent, so see that exception's docstring for why this must
+            not be swallowed into a plain ``None`` return the way a
+            pre-send failure is.
+    """
+    try:
+        raw = _recv_line(sock)
+    except OSError as exc:
+        raise DaemonRequestAbandonedError(str(exc)) from exc
+    if raw is None:
+        raise DaemonRequestAbandonedError(
+            "connection closed before a response arrived"
+        )
+    try:
+        response = json.loads(raw)
+        return (
+            int(response["exit_code"]),
+            str(response.get("stdout", "")),
+            str(response.get("stderr", "")),
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        raise DaemonRequestAbandonedError(
+            f"malformed daemon response: {exc}"
+        ) from exc
+
+
 def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
     """Attempt to route a parsed CLI invocation through a live daemon.
 
-    Returns ``None`` on *every* absence/error condition (design doc
-    §2.5) so ``cli.py``'s ``main()`` integration is the one-line
-    ``if result is None: return args.func(args)`` the design doc
-    calls for. Never raises -- every failure path here means "fall
-    back to direct execution, silently," not "surface an error the
-    caller never asked for."
+    Returns ``None`` on every "the daemon was never actually reached
+    for this request" condition (design doc §2.5) so ``cli.py``'s
+    ``main()`` integration can treat those as "fall back to direct
+    execution, silently." Once a request has been sent, though, a
+    failure to get its response back is raised as
+    :class:`DaemonRequestAbandonedError` rather than folded into the same
+    ``None`` return -- round-12 master report §3.8 traced a silent
+    local fallback in that specific case to a duplicate-execution bug
+    (the daemon keeps computing the abandoned request in the
+    background while the client redoes the same work locally,
+    contending for the same CPU). ``main()`` must let that exception
+    propagate to a clear message and a distinct exit code instead of
+    catching it here.
 
     Args:
         args: The already-parsed ``argparse.Namespace`` for a
@@ -467,6 +737,10 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
     Returns:
         ``(exit_code, stdout, stderr)`` from the daemon, or ``None``
         to signal "run directly instead."
+
+    Raises:
+        DaemonRequestAbandonedError: if a request was sent to a live
+            daemon but no usable response came back.
     """
     command = getattr(args, "command", None)
     if command not in _DAEMON_ELIGIBLE:
@@ -491,20 +765,9 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
         return None
 
     try:
-        transport.send_auth_preamble(sock)
-        payload = {k: v for k, v in vars(args).items() if k != "func"}
-        _send_line(sock, {"cmd": command, "args": payload})
-        raw = _recv_line(sock)
-        if raw is None:
+        if not _send_daemon_request(sock, transport, command, args):
             return None
-        response = json.loads(raw)
-        return (
-            int(response["exit_code"]),
-            str(response.get("stdout", "")),
-            str(response.get("stderr", "")),
-        )
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
+        return _recv_daemon_response(sock)
     finally:
         sock.close()
 
@@ -513,13 +776,15 @@ def _query_pid(transport: DaemonTransport) -> int | None:
     """Best-effort PID lookup via a ``_status`` round-trip.
 
     Used only by ``stop()``'s forced-fallback path, when a graceful
-    shutdown request didn't get an answer. Returns ``None`` on any
-    failure -- the caller already treats a missing PID as "can't
-    force-stop," not as an error to surface.
+    shutdown request didn't get an answer -- prefers the status-only
+    listener (fast even if the main loop is still busy) and falls back
+    to the main socket for a daemon started before that listener
+    existed. Returns ``None`` on any failure -- the caller already
+    treats a missing PID as "can't force-stop," not as an error to
+    surface.
     """
-    try:
-        sock = transport.client_connect(_CLIENT_TIMEOUT)
-    except DaemonUnavailableError:
+    sock = _status_connect(transport, _CLIENT_TIMEOUT)
+    if sock is None:
         return None
     try:
         transport.send_auth_preamble(sock)
@@ -665,6 +930,29 @@ def stop(root: Path) -> int:
     return 0
 
 
+def _status_connect(
+    transport: DaemonTransport, timeout: float
+) -> socket.socket | None:
+    """Connect for a ``_status`` round-trip, preferring the status-only
+    listener.
+
+    Round-13 master report §2: the dedicated status-only listener
+    stays fast and honest even while the daemon is mid-request on the
+    main command socket. Falls back to the main socket only for a
+    daemon started before that listener existed (an in-place upgrade
+    with the old daemon still running). Returns ``None`` on total
+    failure -- callers treat that identically to "not running."
+    """
+    try:
+        return transport.status_client_connect(timeout)
+    except DaemonUnavailableError:
+        pass
+    try:
+        return transport.client_connect(timeout)
+    except DaemonUnavailableError:
+        return None
+
+
 def status(root: Path, as_json: bool = False) -> int:
     """Handle ``dekko daemon status``.
 
@@ -679,10 +967,7 @@ def status(root: Path, as_json: bool = False) -> int:
     transport = default_transport_for(root)
     data: dict | None = None
     if transport.exists():
-        try:
-            sock = transport.client_connect(_CLIENT_TIMEOUT)
-        except DaemonUnavailableError:
-            sock = None
+        sock = _status_connect(transport, _CLIENT_TIMEOUT)
         if sock is not None:
             try:
                 transport.send_auth_preamble(sock)
@@ -709,6 +994,8 @@ def status(root: Path, as_json: bool = False) -> int:
     print(f"dekko daemon: running for {root}")
     print(f"  pid: {data.get('pid')}")
     print(f"  uptime: {data.get('uptime_seconds', 0):.1f}s")
+    if "busy" in data:
+        print(f"  busy: {data.get('busy')}")
     print(f"  transport: {data.get('transport')}")
     cache = data.get("cache")
     if cache is None:

@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "dekko — static code map generator for Claude Code",
-    "version": "0.30.3"
+    "version": "0.30.7"
   },
   "plugins": [
     {
