@@ -35,6 +35,52 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   MCP-only agent (no Bash) with no way to discover them.
 
 ### Fixed
+- **Round-13 7-repo eval fixes.** From a live eval against 7 real
+  repos post-round-12 (`test-repos/reports/13-tokentest-7repo-postround12fixes/`,
+  `MASTER_REPORT.md`):
+  - **Session-start hook silently blowing its token budget ~40x.**
+    On a very large repo (tensorflow), the hook's path-only backbone
+    floor could exceed `SESSION_MAP_BUDGET` with no signal anywhere
+    that it happened, unlike the equivalent `dekko lean` CLI path
+    which already warns. `hooks.py`'s session-start now discloses
+    when this floor is exceeded.
+  - **`dekko trace` false "no call path."** A route that exists only
+    through ambiguously-resolved edges read as an indistinguishable
+    genuine negative (spring-boot), inconsistent with `query callees`'
+    own honest ambiguous-edge disclosure. `trace.py` now
+    distinguishes the two cases.
+  - **`dekko summary`'s "parse errors:" section mislabeling
+    no-grammar skips as real failures.** Round-12 fixed this
+    conflation in `dekko map`'s own summary but missed `dekko
+    summary`'s separate code path (tensorflow, zed);
+    `summary.py` and its `--json` fields now share the same
+    distinction.
+  - **Fuzzy "closest matches" noise.** Single-character symbol names
+    could coincidentally surface as a substring match against an
+    unrelated, long query (claude-buddy); `query.py`'s suggestion
+    ranking now excludes these.
+  - **A `FileNotFoundError` race in `dekko map`'s page writer.**
+    Seen once right after a full `.dekko/` reset (spring-boot,
+    corroborated by a softer non-crashing variant in claude-buddy);
+    `cli.py`'s `_write_pages()` now re-asserts its parent directory
+    exists immediately before its first write.
+  - Documentation clarifications: `diff`/`affected`'s symbol-body-hash
+    comparison granularity, and `dekko unused`'s expected
+    false-positive shape on reflective/dynamic-dispatch-heavy
+    frameworks.
+  - **Deferred as design work** (not same-session patches): a Go
+    cross-package call-resolution gap (`resolver.py`'s file-stem-based
+    import matching doesn't fit Go's directory-based package model —
+    awesome-go), and two daemon findings — `dekko daemon start`
+    orphaning a healthy daemon and spawning a duplicate, and `daemon
+    status` reporting `running: false` while the daemon is alive and
+    busy (claude-code, tensorflow) — confirmed via investigation to
+    share one root cause: the accept loop is deliberately
+    single-threaded and can't answer any request while busy on a slow
+    one. All three are written up in
+    `.features/plans/round-13-fixes-plan.md` (gitignored, disk-only);
+    the daemon fix direction is a dedicated status-only listener
+    thread, not timeout tuning.
 - **Round-12 7-repo eval fixes.** From a live eval against 7 real
   repos post-round-11 (`test-repos/reports/12-tokentest-7repo-postround11fixes/`):
   - **Resolver: bare receiverless call misresolved against an
