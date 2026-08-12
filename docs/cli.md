@@ -107,7 +107,7 @@ invocation reparsing `map.json` from scratch:
 
 ```sh
 dekko daemon start                   # spawn it, returns immediately
-dekko daemon status                  # running? pid, uptime, cache hits/misses
+dekko daemon status                  # running? pid, uptime, busy, cache hits/misses
 dekko daemon status --json           # structured form of the above
 dekko daemon stop                    # graceful shutdown
 ```
@@ -156,10 +156,20 @@ a rev it hasn't seen before pays the same old-side reparse cost a
 direct invocation would — daemon routing speeds up the current-tree
 side only.
 
+`dekko daemon status` answers off a dedicated status-only listener
+(a second socket, separate from the one routed commands use), not the
+daemon's main accept loop — which is deliberately single-threaded and
+can't answer anything while busy on another request. So `status` stays
+fast and honest even while the daemon is mid-request on a slow query:
+it replies immediately with `busy: true` instead of blocking until the
+other request finishes or timing out and falsely reporting "not
+running."
+
 All three subcommands take `--root DIR` (default: cwd) for a repo
 other than the current directory. Transport is a Unix domain socket at
-`.dekko/daemon.sock` on macOS/Linux, or a token-authenticated TCP
-loopback connection on Windows.
+`.dekko/daemon.sock` on macOS/Linux (with a second, status-only socket
+alongside it), or a token-authenticated TCP loopback connection on
+Windows (likewise a second port for status).
 
 `dekko serve --mcp` (the MCP server, see below) does **not** talk to
 the daemon — it keeps its own independent in-memory index for the

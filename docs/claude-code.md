@@ -34,6 +34,23 @@ Installing writes to `.claude/settings.json` (restart Claude Code to
 activate). Every handler is fail-silent — a stale map or hook error
 never blocks a session or a tool call, it just produces no output.
 
+## Skills
+
+`dekko --claude-install` also ships four Claude Code skills alongside
+the `/map` command and MCP server — Claude discovers and invokes them
+automatically when their trigger conditions match, no separate install
+step:
+
+| Skill | Nudges toward |
+| --- | --- |
+| `dekko-orient` | reaching for dekko's tools instead of grep/`Read` whenever a repo has a `.dekko/` directory |
+| `dekko-verify` | a targeted grep sanity-check before trusting a suspiciously low or zero call-graph result (`get_callers`, `find_usages`, `unused`, ...) — dekko's known resolver blind spots (cross-package/qualified calls, trait/interface dispatch, unparsed-language files) |
+| `dekko-daemon` | starting `dekko daemon start` ahead of a Bash-CLI-heavy stretch of work, and how to handle a `--no-daemon`/exit-7 abandoned-request retry |
+| `dekko-notes` | reading a symbol's notes before editing it and writing one after a non-obvious change, via `dekko note add`/`add_note` |
+
+See each skill's `SKILL.md` under `integrations/claude/skills/` for the
+full guidance.
+
 ## The MCP server
 
 `dekko serve --mcp` speaks the Model Context Protocol over stdio
