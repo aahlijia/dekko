@@ -18,6 +18,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   `diff`/`affected` share the same warm cache. Explicit start/stop in
   v1, no auto-spawn; every daemon-routing check fails open to direct-
   process behavior on any daemon absence/error.
+- **Two new Claude Code skills.** `dekko-verify`: sanity-check a
+  suspiciously low or zero call-graph result (`get_callers`,
+  `get_callees`, `find_usages`, `impacted_tests`, `unused`) with a
+  targeted grep before concluding "no callers"/"dead code" — codifies
+  the known resolver blind spots repeated eval rounds keep finding
+  (cross-package/qualified calls, trait/interface dispatch, unparsed-
+  language files, the `--no-tests` default, high-symbol-density common
+  method names). `dekko-daemon`: when to start the daemon ahead of a
+  Bash-CLI-heavy stretch of work, what its warm cache does and doesn't
+  cover (the `diff`/`affected` old-side reparse is never covered), and
+  how to handle a `--no-daemon`/exit-7 abandoned-request retry.
+  Also closed a documentation gap in the existing `dekko-orient`
+  skill: `find_usages`, `map_status`, and `refresh_map` are three of
+  the MCP server's 14 tools that were never listed there, leaving an
+  MCP-only agent (no Bash) with no way to discover them.
 
 ### Fixed
 - **Round-12 7-repo eval fixes.** From a live eval against 7 real
