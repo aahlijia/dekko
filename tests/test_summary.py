@@ -147,14 +147,15 @@ def test_parse_errors_capped_with_language_breakdown() -> None:
     # dominate the whole digest (spring-boot/tensorflow/zed: 97%+ of
     # `summary`'s output). Built directly against a MapIndex, since
     # reproducing a real Tier-1-grammar-missing error needs no actual
-    # source files, just the resulting error/language records.
+    # source files, just the resulting error/language records. This
+    # index has a genuine parse failure, not a missing-grammar skip, so
+    # it belongs in the "parse errors:" section (see the round-13
+    # no-grammar-vs-real-error test below for that distinction).
     index = MapIndex(root_label="repo")
     for i in range(20):
-        path = f"gen/file{i}.kt"
-        index.errors_by_path[path] = (
-            "grammar 'kotlin' is not in the offline Tier-1 set"
-        )
-        index.languages_by_path[path] = "kotlin"
+        path = f"gen/file{i}.py"
+        index.errors_by_path[path] = "unexpected indent at line 3"
+        index.languages_by_path[path] = "python"
 
     doc = summary.compute(index)
     assert len(doc["parse_errors"]) == summary._MAX_PARSE_ERRORS
@@ -164,7 +165,62 @@ def test_parse_errors_capped_with_language_breakdown() -> None:
     assert "parse errors:" in text
     hidden = 20 - summary._MAX_PARSE_ERRORS
     assert f"... and {hidden} more" in text
+    assert "python (20)" in text
+
+
+def test_no_grammar_skips_are_not_labeled_parse_errors() -> None:
+    # round-13 tensorflow.md/zed.md: `summary`'s "parse errors:" section
+    # (and its `--json` parse_errors*/fields) used to lump genuine parse
+    # failures together with "grammar not in the offline Tier-1 set"
+    # skips under one alarming "parse error" label, even though
+    # `dekko map`'s own top-line summary already told the two apart
+    # (round-12's cli.py fix). A repo whose only `errors_by_path`
+    # entries are missing-grammar skips should report zero parse
+    # errors and a separate "grammars not installed" bucket instead.
+    index = MapIndex(root_label="repo")
+    for i in range(20):
+        path = f"gen/file{i}.kt"
+        index.errors_by_path[path] = (
+            "grammar 'kotlin' is not in the offline Tier-1 set"
+        )
+        index.languages_by_path[path] = "kotlin"
+
+    doc = summary.compute(index)
+    assert doc["parse_errors"] == []
+    assert doc["parse_errors_total"] == 0
+    assert len(doc["no_grammar_installed"]) == summary._MAX_PARSE_ERRORS
+    assert doc["no_grammar_installed_total"] == 20
+
+    text = summary.render_text(index)
+    assert "parse errors:" not in text
+    assert "grammars not installed:" in text
+    hidden = 20 - summary._MAX_PARSE_ERRORS
+    assert f"... and {hidden} more" in text
     assert "kotlin (20)" in text
+
+
+def test_mixed_real_errors_and_no_grammar_skips_split_correctly() -> None:
+    # A repo with both a genuine parse failure and a missing-grammar
+    # skip should show both sections, each with only its own kind.
+    index = MapIndex(root_label="repo")
+    index.errors_by_path["src/broken.py"] = "unexpected EOF"
+    index.languages_by_path["src/broken.py"] = "python"
+    index.errors_by_path["gen/file.kt"] = (
+        "grammar 'kotlin' is not in the offline Tier-1 set"
+    )
+    index.languages_by_path["gen/file.kt"] = "kotlin"
+
+    doc = summary.compute(index)
+    assert doc["parse_errors_total"] == 1
+    assert doc["parse_errors"][0]["path"] == "src/broken.py"
+    assert doc["no_grammar_installed_total"] == 1
+    assert doc["no_grammar_installed"][0]["path"] == "gen/file.kt"
+
+    text = summary.render_text(index)
+    assert "parse errors:" in text
+    assert "src/broken.py: unexpected EOF" in text
+    assert "grammars not installed:" in text
+    assert "gen/file.kt: grammar 'kotlin'" in text
 
 
 def test_no_tests_filter(

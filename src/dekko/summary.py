@@ -13,7 +13,7 @@ from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
-from . import stats
+from . import grammars, stats
 from .mapfile import MapIndex, format_unsupported
 from .model import TYPE_KINDS
 from .resolver import MODULE_CALLER_SUFFIX
@@ -128,6 +128,7 @@ def _entrypoints(index: MapIndex) -> list:
 def compute(index: MapIndex) -> dict:
     """Build the summary document."""
     base = stats.compute(index, _TOP)
+    real_errors, no_grammar_errors = _split_errors(index)
     return {
         "root": index.root_label,
         "files": base["files"],
@@ -143,11 +144,18 @@ def compute(index: MapIndex) -> dict:
             for s in _entrypoints(index)[:_MAX_ENTRYPOINTS]
         ],
         "parse_errors": [
-            {"path": p, "error": e}
-            for p, e in sorted(index.errors_by_path.items())
+            {"path": p, "error": e} for p, e in sorted(real_errors.items())
         ][:_MAX_PARSE_ERRORS],
-        "parse_errors_total": len(index.errors_by_path),
-        "parse_errors_breakdown": _parse_error_breakdown(index),
+        "parse_errors_total": len(real_errors),
+        "parse_errors_breakdown": _error_breakdown(index, real_errors),
+        "no_grammar_installed": [
+            {"path": p, "error": e}
+            for p, e in sorted(no_grammar_errors.items())
+        ][:_MAX_PARSE_ERRORS],
+        "no_grammar_installed_total": len(no_grammar_errors),
+        "no_grammar_installed_breakdown": _error_breakdown(
+            index, no_grammar_errors
+        ),
         "unsupported": (index.provenance or {}).get("unsupported"),
     }
 
@@ -316,21 +324,64 @@ def render_text(index: MapIndex) -> str:
             lines.append(
                 f"  ... and {hidden} more ({doc['parse_errors_breakdown']})"
             )
+    if doc["no_grammar_installed"]:
+        lines.append("grammars not installed:")
+        lines += [
+            f"  {e['path']}: {e['error']}" for e in doc["no_grammar_installed"]
+        ]
+        hidden = doc["no_grammar_installed_total"] - len(
+            doc["no_grammar_installed"]
+        )
+        if hidden > 0:
+            lines.append(
+                f"  ... and {hidden} more "
+                f"({doc['no_grammar_installed_breakdown']})"
+            )
     return "\n".join(lines)
 
 
-def _parse_error_breakdown(index: MapIndex) -> str:
-    """Per-language counts across *all* parse errors, for the capped footer.
+def _split_errors(
+    index: MapIndex,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Split ``errors_by_path`` into genuine failures vs. missing-grammar
+    skips.
+
+    round-13 tensorflow.md/zed.md: both independently found ``summary``'s
+    "parse errors:" section (and its ``--json`` ``parse_errors``/
+    ``parse_errors_total`` fields) labeling every entry in
+    ``errors_by_path`` as a "parse error," even when every single one is
+    actually a Tier-2-grammar-not-installed skip — the same conflation
+    the round-12 fix already resolved for ``dekko map``'s own top-line
+    summary (see ``cli.py``'s ``no_grammar``/``errors`` split), just not
+    wired into this command too. ``grammars.is_grammar_unavailable_message``
+    is the same helper that fix uses to tell the two apart.
+
+    Returns:
+        A ``(real_errors, no_grammar_errors)`` pair of path→message dicts,
+        partitioning ``index.errors_by_path``.
+    """
+    real_errors: dict[str, str] = {}
+    no_grammar_errors: dict[str, str] = {}
+    for path, error in index.errors_by_path.items():
+        if grammars.is_grammar_unavailable_message(error):
+            no_grammar_errors[path] = error
+        else:
+            real_errors[path] = error
+    return real_errors, no_grammar_errors
+
+
+def _error_breakdown(index: MapIndex, errors: dict[str, str]) -> str:
+    """Per-language counts across *all* entries in ``errors``, for the
+    capped footer.
 
     Collapsing to per-language counts is more informative than a raw
     truncation when the noise is overwhelmingly one repeated message
     (e.g. a grammar not present in the offline Tier-1 set) — mirrors
     ``mapfile.format_unsupported``'s "N files unparsed — no parser
-    for: lang (N), ..." shape, but for parse failures rather than
-    unsupported-grammar skips.
+    for: lang (N), ..." shape.
     """
     by_lang: Counter[str] = Counter()
-    for path in index.errors_by_path:
+    for path in errors:
         by_lang[index.languages_by_path.get(path) or "unknown"] += 1
     return ", ".join(f"{lang} ({n})" for lang, n in sorted(by_lang.items()))
 

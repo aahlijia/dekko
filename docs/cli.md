@@ -32,6 +32,15 @@ rather than writing a fresh `map.json` to disk, so `dekko status`
 right after a `dekko diff`/`dekko affected` on a fresh edit can still
 report the map as stale.
 
+`diff`/`affected` compare at symbol-body-hash granularity, not a whole-file
+diff: an edit outside every symbol's body span (a trailing comment after the
+last function's closing brace, a blank line, a module-level comment) doesn't
+change any symbol's hash, so it won't show up as a changed symbol or trigger
+an impacted-test report. This is deliberate — comment/whitespace noise
+shouldn't spuriously flag every test in a file as impacted — but it's worth
+knowing before assuming a "no changes detected" result means the file itself
+is byte-identical to the compared rev.
+
 `--json` governs the shape of *successful* (exit 0) output only. Any
 error — an ambiguous match, a not-found symbol, a stale map under
 `--no-regen`, an invalid argument — is always reported as a plain-text
@@ -75,6 +84,20 @@ Anchor a durable, committed note to a symbol — it shows up in
 dekko note add resolver.py:resolve "ambiguous calls are marked, never guessed"
 dekko note list resolver.py:resolve
 ```
+
+## Interpreting `dekko unused`
+
+`unused` finds symbols with no *statically resolvable* inbound call — it
+cannot see reflective or dynamic-dispatch invocation, so frameworks that
+call code by convention or configuration rather than a direct source-level
+call are a predictable source of false positives: Gradle/Maven
+plugin-action callbacks invoked through reflective wiring, Rust trait
+methods invoked only through `format!`/`.into()`/other trait-dispatch
+machinery, and similar "called by the framework, not by name" patterns.
+This isn't a bug in the detector — it's an inherent limit of static
+call-graph analysis — but treat a raw `unused` count as a set of leads to
+spot-check, not a list to delete from unread, especially on
+framework-heavy or trait-heavy codebases.
 
 ## Daemon mode
 

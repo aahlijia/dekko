@@ -204,6 +204,20 @@ _MAX_SUGGESTIONS = 5
 # against claude-buddy's `buddyStateDr` case).
 _MIN_FUZZY_NAME_LEN = 3
 _FUZZY_CUTOFF = 0.72
+# round-13 claude-buddy.md: a single-character candidate name (a
+# throwaway loop variable like `B`/`D`) is a coincidental substring of
+# almost any sufficiently long, unrelated needle -- `totallyMade
+# UpSymbolXYZ123` contains a "b" (from "symbol") and a "d" (from
+# "made") purely by chance, so the substring tier surfaced both as
+# "closest matches" for a query with no real relationship to either.
+# Distinct from ``_MIN_FUZZY_NAME_LEN`` (which only gates the fuzzy
+# edit-distance tier, and is deliberately looser so short symbol names
+# stay reachable via a genuine prefix/substring match): this floor
+# only gates the "tiny candidate happens to appear inside a much
+# longer needle" direction of the substring tier, not the reverse
+# (a short *query* matching inside a longer real candidate name stays
+# fully eligible, and 2+ character names are unaffected either way).
+_MIN_SUBSTRING_CANDIDATE_LEN = 2
 # Cap on how many ambiguous candidates ``report_unresolved`` prints
 # unconditionally. Without this, a very-high-cardinality bare-name
 # collision (zed's 99 same-named ``fn main`` candidates across a Rust
@@ -228,7 +242,9 @@ def _close_names(needle: str, names: list[str]) -> list[str]:
             scored.append((0, name))
         elif cand.startswith(low) or low.startswith(cand):
             scored.append((1, name))
-        elif low in cand or cand in low:
+        elif low in cand or (
+            cand in low and len(cand) >= _MIN_SUBSTRING_CANDIDATE_LEN
+        ):
             scored.append((2, name))
         else:
             rest.append(name)

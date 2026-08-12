@@ -8,6 +8,8 @@ and the idempotent settings.json install/uninstall merge.
 import json
 from pathlib import Path
 
+import pytest
+
 from dekko import cli, hooks, ledger, relevance
 from dekko.mapfile import MapIndex, load_map
 
@@ -49,6 +51,38 @@ def test_session_start_injects_lean_map(
 
 def test_session_start_empty_repo_is_silent(tmp_path: Path) -> None:
     assert hooks.session_start({"cwd": str(tmp_path)}) is None
+
+
+def test_session_start_discloses_when_floor_exceeds_budget(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # round-13 tensorflow.md: on a large monorepo, the path-only floor
+    # (~80K tok there) silently overrode SESSION_MAP_BUDGET (2000 tok)
+    # by ~40x with no note anywhere -- `dekko lean --budget` has
+    # disclosed this same override on stderr since round 09, but
+    # `session_start` called `render_lean.generate()` directly and
+    # skipped that check entirely. Shrinking the budget constant below
+    # any repo's real floor is the same technique
+    # `test_cli_lean_tiny_budget_discloses_floor_override` uses for the
+    # CLI path.
+    monkeypatch.setattr(hooks, "SESSION_MAP_BUDGET", 1)
+    root = make_mapped_repo(_FILES)
+    out = hooks.session_start({"cwd": str(root)})
+    assert out is not None
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "path-only floor" in ctx
+    assert "exceeds dekko's 1-token session-start budget" in ctx
+    assert "src/" in ctx and "auth.py" in ctx  # the lean map still renders
+
+
+def test_session_start_ample_budget_has_no_floor_note(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_FILES)
+    out = hooks.session_start({"cwd": str(root)})
+    assert out is not None
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "path-only floor" not in ctx
 
 
 # --- UserPromptSubmit ------------------------------------------------

@@ -145,6 +145,28 @@ def test_close_names_suppresses_short_fuzzy_junk(
     assert query._close_names("zzznonsense", ["B", "t", "A", "D"]) == []
 
 
+def test_close_names_suppresses_coincidental_single_char_substring(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # round-13 claude-buddy.md: a totally unrelated, long query
+    # (`totallyMadeUpSymbolXYZ123`) coincidentally contains a lowercase
+    # "b" (from "...Symbol...") and "d" (from "...Made..."), so the
+    # substring tier used to surface single-letter symbol names `B`/`D`
+    # as "closest matches" even though neither has any real relation to
+    # the query -- unlike `test_close_names_suppresses_short_fuzzy_junk`
+    # above (a needle with no such coincidental substrings), this one
+    # reproduces the actual reported shape.
+    assert query._close_names("totallyMadeUpSymbolXYZ123", ["B", "D"]) == []
+
+
+def test_close_names_keeps_two_char_substring_match(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # The new floor targets single-character candidates specifically;
+    # a genuine 2+ character substring match must stay eligible.
+    assert query._close_names("checkOkStatus", ["ok"]) == ["ok"]
+
+
 def test_close_names_still_surfaces_real_near_typo(
     make_mapped_repo: RepoFactory,
 ) -> None:

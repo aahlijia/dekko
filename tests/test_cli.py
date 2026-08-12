@@ -51,6 +51,22 @@ def test_map_rejects_missing_dir(tmp_path: Path) -> None:
     assert cli.main(["--map", str(tmp_path / "nope")]) == 2
 
 
+def test_write_pages_creates_missing_parent_dir(tmp_path: Path) -> None:
+    # round-13 spring-boot.md: `_write_pages` used to write the index
+    # page (`md_path`) without first re-asserting its parent directory
+    # exists, unlike every subsequent page write in the same loop --
+    # a `FileNotFoundError` was seen once, right after `.dekko/` had
+    # just been removed by `test-repos/reset.sh`. `md_path.parent` not
+    # existing at all when `_write_pages` runs is exactly that
+    # scenario, reproduced directly rather than relying on a timing
+    # race to hit the same code path.
+    md_path = tmp_path / ".dekko" / "MAP.md"
+    assert not md_path.parent.exists()
+    written = cli._write_pages(md_path, [("MAP.md", "# hello\n")])
+    assert written == [md_path]
+    assert md_path.read_text(encoding="utf-8") == "# hello\n"
+
+
 def test_map_second_run_is_noop_and_writes_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:

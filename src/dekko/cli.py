@@ -1243,6 +1243,22 @@ def _write_pages(md_path: Path, pages: list[tuple[str, str]]) -> list[Path]:
             stale.unlink()
 
     written = [md_path]
+    # round-13 spring-boot.md: a `FileNotFoundError` writing MAP.md was
+    # seen once, immediately after `test-repos/reset.sh` (which removes
+    # `.dekko/` entirely), and claude-buddy.md's report independently
+    # saw the softer, non-crashing shape of the same thing (a write
+    # reporting success before `.dekko/` was visible on disk). This
+    # function already re-asserts `page_path.parent.mkdir(...)` for
+    # every *subsequent* page below, guarding against exactly this --
+    # the index page was the one write in this function that instead
+    # relied entirely on `run_map`'s much-earlier `md_path.parent.mkdir`
+    # call (well before the potentially long `resolve()`/`render_map`
+    # call in between) still holding by the time this line runs. This
+    # call is idempotent (`exist_ok=True`) and effectively free, so
+    # there's no reason the index write should be the only one in this
+    # function not self-sufficient against the directory transiently
+    # not existing yet.
+    md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(pages[0][1], encoding="utf-8")
     for name, content in pages[1:]:
         page_path = md_path.parent / name
