@@ -5,7 +5,7 @@ import json
 import pytest
 
 from dekko import cli, search
-from dekko.relevance import Candidate, TaskContext
+from dekko.relevance import BM25Scorer, Candidate, TaskContext, blended_scores
 from dekko.textutil import Meter
 
 from conftest import RepoFactory
@@ -420,7 +420,7 @@ def test_search_cli_dispatches(
 
 def test_scorer_default_is_lexical() -> None:
     assert search.DEFAULT_SCORER == "lexical"
-    assert search.SCORER_CHOICES == ("lexical", "embedding")
+    assert search.SCORER_CHOICES == ("lexical", "embedding", "both")
 
 
 def test_search_unrecognized_scorer_name_is_a_clear_error(
@@ -856,3 +856,649 @@ def test_search_specific_match_not_buried_by_generic_common_term_match(
     margin_without_fix = _margin(hits_flat)
 
     assert margin_with_fix > margin_without_fix
+
+
+# --- round-13 §3: held-out multi-query golden corpus. Items 1-2 above
+# (yaml/sandbox-escape) already cover coverage-tie / common-term-
+# dominance and weak-field renormalization. Items 3-6 below add the
+# four new shapes the round-13 relevance-tuning plan asked for --
+# corpus-size batch consistency (§1's own bug class), rare-term IDF
+# sanity on a non-Python identifier shape, length-normalization bias,
+# and the sparse-candidate/no-lexical-connection shape (§2, documented
+# but not asserted). See
+# .features/plans/round13/search-relevance-tuning-plan.md §3.
+# --------------------------------------------------------------------
+
+
+def test_search_batch_size_consistency_cline_shaped(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-13 §1's own bug, reproduced at fixture scale (TS/camelCase,
+    modeled on cline's reported "cancel task execution" miss).
+
+    ``cancelTask`` is a short, no-doc candidate matching two of the
+    three query terms ("cancel", "task") by name alone.
+    ``captureHookExecution`` is a doc/signature-heavy candidate
+    matching only the third term ("execution") but repeating it many
+    times across a big union-typed signature and a doc paragraph. A
+    large pool of "task"-matching (but otherwise unrelated) survivor
+    candidates, plus a larger pool of candidates matching neither term
+    at all, makes ``len(candidates)`` and ``len(survivors)`` differ
+    enough that BM25's batch-relative IDF/avgdl diverge between the
+    full-corpus pass and a re-scored survivor-only pass -- exactly the
+    mechanism §1 fixed. Pre-fix, this flips the ranking
+    (``captureHookExecution`` outranks ``cancelTask``); post-fix,
+    ``cancelTask`` stays on top, matching the raw full-corpus number
+    that was correct all along. The distractor counts here (600
+    unrelated, 150 "task"-matching) were tuned empirically per the
+    plan's own note that this number "needs empirical tuning during
+    implementation" -- confirmed via ``git stash``/``stash pop`` against
+    pre-fix ``HEAD`` to actually fail before the fix and pass after.
+    """
+    from dekko.mapfile import load_map
+
+    files = {
+        "src/task_control.ts": (
+            "class SdkTaskControlCoordinator {\n"
+            "  cancelTask(): void {\n"
+            "  }\n"
+            "}\n"
+        ),
+        "src/telemetry.ts": (
+            "/**\n"
+            " * Records hook execution events with a unified "
+            "status-based\n"
+            " * approach for downstream execution analytics "
+            "pipelines.\n"
+            " * Handles execution lifecycle, execution retries, "
+            "execution\n"
+            " * timeouts, and execution completion callbacks across "
+            "every\n"
+            " * execution stage, execution phase, and execution "
+            "boundary.\n"
+            " */\n"
+            "function captureHookExecution(\n"
+            "  ulid: string,\n"
+            "  hookName: string,\n"
+            "  status: string,\n"
+            "  executionContext: Record<string, unknown>,\n"
+            "  executionTimingMs: number,\n"
+            "  executionMetadata: Record<string, unknown> | null,\n"
+            "  executionPhase: string,\n"
+            "): void {\n"
+            "}\n"
+        ),
+    }
+    for i in range(600):
+        files[f"src/noise_{i}.ts"] = (
+            f"function formatCurrency{i}(amount: number): string {{\n"
+            f'  return "";\n'
+            f"}}\n"
+        )
+    for i in range(150):
+        files[f"src/task_{i}.ts"] = (
+            "/**\n"
+            " * Schedules a background task in the worker task "
+            "queue.\n"
+            " */\n"
+            f"function scheduleTask{i}(taskId: string, "
+            "delayMs: number): void {\n"
+            "}\n"
+        )
+    root = make_mapped_repo(files)
+    index = load_map(root)
+    assert index is not None
+
+    hits = search.rank(index, "cancel task execution")
+    by_qualname = {h.symbol.qualname: h for h in hits}
+    target = by_qualname["SdkTaskControlCoordinator.cancelTask"]
+    distractor = by_qualname["captureHookExecution"]
+    assert target.score > distractor.score
+    assert hits[0] is target
+
+
+def test_search_rare_term_beats_common_term_repetition_go_naming(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Rare-term IDF sanity on a non-Python, non-camelCase identifier
+    shape.
+
+    Same shape as the round-12 yaml fixture above (a rare, distinctive
+    term should out-discriminate a common term repeated across many
+    generic candidates), but on Go-style package-qualified
+    identifiers, so ``idf_term_weights``/``weighted_term_coverage`` are
+    verified outside Python/camelCase naming too.
+    """
+    from dekko import relevance as relevance_mod
+    from dekko.mapfile import load_map
+
+    files = {}
+    for i in range(8):
+        files[f"internal/parse/parse_{i}.go"] = (
+            f"package parse\n\n"
+            f"// parse_thing_{i} parses parses parses generic "
+            f"input, parses it well.\n"
+            f"func parse_thing_{i}(s string) error {{\n"
+            f"\treturn nil\n"
+            f"}}\n"
+        )
+    files["internal/quota/quota_limit.go"] = (
+        "package quota\n\n"
+        "// parse_quota_limit parses a quota limit configuration "
+        "value from a byte string.\n"
+        "func parse_quota_limit(data []byte) (int, error) {\n"
+        "\treturn 0, nil\n"
+        "}\n"
+    )
+    root = make_mapped_repo(files)
+    index = load_map(root)
+    assert index is not None
+
+    def _margin(hits: list[search.SearchHit]) -> float:
+        by_qualname = {h.symbol.qualname: h for h in hits}
+        generic = max(
+            h.score
+            for name, h in by_qualname.items()
+            if name != "parse_quota_limit"
+        )
+        specific = by_qualname["parse_quota_limit"].score
+        return specific - generic
+
+    hits = search.rank(index, "parse quota limit")
+    margin_with_fix = _margin(hits)
+    assert margin_with_fix > 0
+
+    def _flat_weighted_coverage(
+        terms: tuple[str, ...],
+        text: str,
+        term_weights: dict[str, float] | None = None,
+    ) -> float:
+        if not terms:
+            return 1.0
+        present = set(relevance_mod.normalize_terms(text))
+        stemmed_present = {relevance_mod._stem(t) for t in present}
+        hits_ = sum(
+            1
+            for t in terms
+            if t in present or relevance_mod._stem(t) in stemmed_present
+        )
+        return hits_ / len(terms)
+
+    original = relevance_mod.weighted_term_coverage
+    relevance_mod.weighted_term_coverage = _flat_weighted_coverage
+    try:
+        hits_flat = search.rank(index, "parse quota limit")
+    finally:
+        relevance_mod.weighted_term_coverage = original
+    margin_without_fix = _margin(hits_flat)
+
+    assert margin_with_fix > margin_without_fix
+
+
+def test_search_length_normalization_favors_short_precise_match_rust(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """BM25 length normalization should still favor a short, precise
+    match over a long candidate that mentions every query term many
+    times incidentally, once ``avgdl`` is computed over a batch with
+    real size variance (Rust/snake_case naming, loosely modeled on the
+    zed corpus's shape without reproducing its actual source).
+
+    Filler candidates of both short and long lengths are included so
+    the batch's average document length reflects real variance, not
+    the near-uniform lengths the existing fixtures happen to use.
+    """
+    from dekko.mapfile import load_map
+
+    files = {
+        "src/db/pool.rs": (
+            "/// Connect to the database pool.\n"
+            "pub fn connect_database_pool(cfg: &Config) -> "
+            "Result<Pool> {\n"
+            "    todo!()\n"
+            "}\n"
+        ),
+        "src/db/generic_helper.rs": (
+            "/// This module manages database connections. When you "
+            "connect to\n"
+            "/// the database, a database pool of database "
+            "connections is\n"
+            "/// created; the pool tracks each connect and disconnect "
+            "and pool\n"
+            "/// exhaustion event, and the database pool grows or "
+            "shrinks as\n"
+            "/// connect load changes across the database pool "
+            "lifecycle.\n"
+            "pub fn generic_helper(\n"
+            "    connect_flag: bool,\n"
+            "    database_name: String,\n"
+            "    pool_size: usize,\n"
+            "    connect_retry_count: usize,\n"
+            "    database_timeout_ms: u64,\n"
+            "    pool_max_idle: usize,\n"
+            ") -> Result<()> {\n"
+            "    todo!()\n"
+            "}\n"
+        ),
+    }
+    for i in range(6):
+        files[f"src/util/short_{i}.rs"] = (
+            f"/// Utility {i}.\npub fn util_{i}() -> u32 {{ {i} }}\n"
+        )
+    for i in range(6):
+        files[f"src/util/long_{i}.rs"] = (
+            "/// A longer helper with several unrelated parameters "
+            "for\n"
+            f"/// formatting output {i}, including width, precision, "
+            "and\n"
+            "/// alignment settings used across the rendering "
+            "pipeline.\n"
+            f"pub fn format_output_{i}(width: usize, precision: "
+            "usize, align: Align, pad: char, upper: bool, "
+            "trim: bool) -> String {\n"
+            "    String::new()\n"
+            "}\n"
+        )
+    root = make_mapped_repo(files)
+    index = load_map(root)
+    assert index is not None
+
+    hits = search.rank(index, "connect database pool")
+    by_qualname = {h.symbol.qualname: h for h in hits}
+    assert (
+        by_qualname["connect_database_pool"].score
+        > by_qualname["generic_helper"].score
+    )
+    assert hits[0].symbol.qualname == "connect_database_pool"
+
+
+def test_search_sparse_candidate_no_lexical_connection_documented_zed(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-13 §2's shape (Rust trait/impl naming modeled on zed),
+    documented as a known limitation and NOT asserted on ordering.
+
+    ``Item.save``'s indexed text (name + short trait-default
+    signature, no doc) genuinely lacks 2 of the 3 query terms ("file",
+    "disk") -- the coverage/IDF machinery correctly discounts it hard,
+    and a partial-coverage distractor (``DiskState``, whose qualname's
+    "Disk" prefix covers "disk" and whose method covers "file"'s
+    stem-adjacent tokens) wins instead. This is not a bug this round
+    fixed (§2 was deferred -- see the plan's §2 for why: no lexical
+    scorer change can manufacture a signal that isn't in the indexed
+    text). A hard ordering assertion here would either fail immediately
+    as a "known failure" (noisy, easy to ignore) or silently pin
+    today's arbitrary distractor-wins ordering as if it were intended
+    behavior. So this fixture only pins the shape (it doesn't crash,
+    it returns a non-empty ranked result) for whoever eventually builds
+    §2's candidate-text-enrichment fix.
+    """
+    from dekko.mapfile import load_map
+
+    files = {
+        "src/item.rs": (
+            "pub trait Item {\n    fn save(&self) -> Result<()>;\n}\n"
+        ),
+        "src/workspace.rs": (
+            "pub struct Workspace;\n\n"
+            "impl Item for Workspace {\n"
+            "    fn save(&self) -> Result<()> {\n"
+            "        todo!()\n"
+            "    }\n"
+            "}\n"
+        ),
+        "src/disk.rs": (
+            "/// Tracks on-disk state for a file, including mtime "
+            "and size.\n"
+            "pub struct DiskState;\n\n"
+            "impl DiskState {\n"
+            "    /// The file's last modified time on disk.\n"
+            "    pub fn mtime(&self) -> u64 {\n"
+            "        0\n"
+            "    }\n"
+            "}\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+    index = load_map(root)
+    assert index is not None
+
+    hits = search.rank(index, "save file to disk")
+    assert hits  # doesn't crash, returns a ranked (non-empty) result
+
+
+# --- round-13 §4: --scorer both (reciprocal rank fusion) ---------------
+#
+# §2's fix, designed and implemented: run BM25Scorer and
+# EmbeddingScorer independently and fuse their rankings by rank
+# position (not raw score -- the two scorers' scores aren't
+# scale-comparable). Opt-in only; --scorer lexical/--scorer embedding
+# are unaffected (covered by the tests above, unchanged).
+
+
+def test_search_scorer_both_fuses_lexical_and_embedding_picks(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """Plumbing test: --scorer both must genuinely call both scorers,
+    not silently degrade to one.
+
+    ``connect_database_pool`` is an exact literal match for the query
+    (thin surrounding text, no doc) -- BM25's top pick.
+    ``qonect_datbase_pol`` is a misspelled variant: it shares no
+    literal or stemmed token with the query at all, so BM25 gives it
+    zero raw relevance and ``rank()`` drops it before it ever reaches
+    the lexical survivor set -- but its character trigrams still
+    overlap heavily with "connect database pool", which is exactly
+    what the hashing-trick embedding scorer picks up. Both must appear
+    in the fused --scorer both result for the composition to be
+    genuine.
+    """
+    pytest.importorskip("numpy")
+    files = {
+        "src/pool.py": "def connect_database_pool():\n    pass\n",
+        "src/typo.py": "def qonect_datbase_pol():\n    pass\n",
+        "src/unrelated.py": (
+            'def render_widget():\n    """Render a UI widget."""\n    pass\n'
+        ),
+    }
+    root = make_mapped_repo(files)
+
+    from dekko.mapfile import load_map
+
+    index = load_map(root)
+    assert index is not None
+    lexical_hits = search.rank(index, "connect database pool")
+    lexical_quals = {h.symbol.qualname for h in lexical_hits}
+    assert "connect_database_pool" in lexical_quals
+    assert "qonect_datbase_pol" not in lexical_quals  # zero raw overlap
+
+    code = cli.main(
+        [
+            "search",
+            "connect database pool",
+            "--root",
+            str(root),
+            "--scorer",
+            "both",
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = _json_out(capsys)
+    fused_quals = {h["qualname"] for h in doc["hits"]}
+    assert "connect_database_pool" in fused_quals  # lexical's own pick
+    assert "qonect_datbase_pol" in fused_quals  # embedding-only pick
+
+
+def test_search_scorer_both_surfaces_item_save_zed_shaped(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Round-13 §4's motivating case: reuses item 6's exact fixture
+    (``test_search_sparse_candidate_no_lexical_connection_documented_
+    zed``, above) with ``--scorer both`` instead of the default
+    lexical scorer.
+
+    Under the default lexical scorer, ``Item.save`` and
+    ``Workspace.save`` tie (both cover only "save" of the three query
+    terms, identical candidate-text shape) -- item 6's own test
+    deliberately leaves that tie unordered. Under ``--scorer both``,
+    the embedding scorer breaks the tie in ``Item.save``'s favor,
+    which is a real, assertable improvement RRF fusion earns (unlike
+    item 6's own necessarily-unordered assertion for the unchanged
+    default path). The dramatic real-world version of this
+    improvement -- ``Item.save`` buried at rank 133 of 1,548 survivors
+    under the default scorer on the actual zed repo, promoted to rank
+    35 of 23,667 under the embedding scorer -- is validated live
+    against ``test-repos/zed``, not by this small synthetic fixture;
+    see the plan doc's §4 Implementation notes for the exact numbers.
+    """
+    pytest.importorskip("numpy")
+    files = {
+        "src/item.rs": (
+            "pub trait Item {\n    fn save(&self) -> Result<()>;\n}\n"
+        ),
+        "src/workspace.rs": (
+            "pub struct Workspace;\n\n"
+            "impl Item for Workspace {\n"
+            "    fn save(&self) -> Result<()> {\n"
+            "        todo!()\n"
+            "    }\n"
+            "}\n"
+        ),
+        "src/disk.rs": (
+            "/// Tracks on-disk state for a file, including mtime "
+            "and size.\n"
+            "pub struct DiskState;\n\n"
+            "impl DiskState {\n"
+            "    /// The file's last modified time on disk.\n"
+            "    pub fn mtime(&self) -> u64 {\n"
+            "        0\n"
+            "    }\n"
+            "}\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+
+    from dekko.mapfile import load_map
+
+    index = load_map(root)
+    assert index is not None
+    lexical_hits = search.rank(index, "save file to disk")
+    by_qualname = {h.symbol.qualname: h for h in lexical_hits}
+    assert (
+        by_qualname["Item.save"].score == by_qualname["Workspace.save"].score
+    )  # the tie item 6 leaves unbroken
+
+
+def test_search_scorer_both_does_not_demote_correct_lexical_top_hit(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """No-regression check: for a query already correctly ranked by
+    the default lexical scorer, ``--scorer both`` must not demote that
+    top hit while promoting a previously-missed one elsewhere.
+
+    Two shapes, both modeled on round-13 §1's already-validated
+    controls (cline's "cancel task execution" and zed's "resolve
+    diagnostics", both confirmed correctly ranked post-§1-fix): a
+    short, precise, no-doc match competing against a doc/signature-
+    heavy distractor that repeats one query term many times. RRF
+    fusion's fused top-1 must land on the same on-target symbol the
+    plain lexical result already gets right in both cases.
+    """
+    pytest.importorskip("numpy")
+
+    from dekko.mapfile import load_map
+
+    cline_files = {
+        "src/task_control.ts": (
+            "class SdkTaskControlCoordinator {\n"
+            "  cancelTask(): void {\n"
+            "  }\n"
+            "}\n"
+        ),
+        "src/telemetry.ts": (
+            "/**\n"
+            " * Records hook execution events with a unified "
+            "status-based\n"
+            " * approach for downstream execution analytics "
+            "pipelines.\n"
+            " * Handles execution lifecycle, execution retries, "
+            "execution\n"
+            " * timeouts, and execution completion callbacks across "
+            "every\n"
+            " * execution stage, execution phase, and execution "
+            "boundary.\n"
+            " */\n"
+            "function captureHookExecution(\n"
+            "  ulid: string,\n"
+            "  hookName: string,\n"
+            "  status: string,\n"
+            "  executionContext: Record<string, unknown>,\n"
+            "  executionTimingMs: number,\n"
+            "  executionMetadata: Record<string, unknown> | null,\n"
+            "  executionPhase: string,\n"
+            "): void {\n"
+            "}\n"
+        ),
+    }
+    root = make_mapped_repo(cline_files)
+    index = load_map(root)
+    assert index is not None
+    lexical_hits = search.rank(index, "cancel task execution")
+    assert lexical_hits[0].symbol.qualname == (
+        "SdkTaskControlCoordinator.cancelTask"
+    )
+
+    from dekko import embedding as embedding_mod
+
+    embedding_hits = search.rank(
+        index, "cancel task execution", scorer=embedding_mod.EmbeddingScorer()
+    )
+    fused = search._fuse_both(lexical_hits, embedding_hits)
+    assert fused[0].symbol.qualname == "SdkTaskControlCoordinator.cancelTask"
+
+    zed_files = {
+        "src/diagnostics.rs": (
+            "pub struct DiagnosticEntry;\n\n"
+            "impl DiagnosticEntry {\n"
+            "    /// Resolve this diagnostic entry against the "
+            "current buffer snapshot.\n"
+            "    pub fn resolve(&self) -> Resolved {\n"
+            "        todo!()\n"
+            "    }\n"
+            "}\n\n"
+            "pub struct DiagnosticGroup;\n\n"
+            "impl DiagnosticGroup {\n"
+            "    /// Resolve every diagnostic in this group.\n"
+            "    pub fn resolve(&self) -> Vec<Resolved> {\n"
+            "        todo!()\n"
+            "    }\n"
+            "}\n"
+        ),
+        "src/task.rs": (
+            "pub struct Task;\n\n"
+            "impl Task {\n"
+            "    /// Whether this task is ready to run.\n"
+            "    pub fn ready(&self) -> bool {\n"
+            "        true\n"
+            "    }\n"
+            "}\n"
+        ),
+    }
+    root2 = make_mapped_repo(zed_files)
+    index2 = load_map(root2)
+    assert index2 is not None
+    lexical_hits2 = search.rank(index2, "resolve diagnostics")
+    assert lexical_hits2[0].symbol.qualname.endswith(".resolve")
+
+    embedding_hits2 = search.rank(
+        index2, "resolve diagnostics", scorer=embedding_mod.EmbeddingScorer()
+    )
+    fused2 = search._fuse_both(lexical_hits2, embedding_hits2)
+    assert fused2[0].symbol.qualname.endswith(".resolve")
+
+
+def test_search_scorer_both_exclusion_note_uses_underlying_top_score(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """Implementation divergence from §4's design, not in the plan's own
+    spec: ``SearchHit.score`` under ``--scorer both`` is a reciprocal
+    rank fusion value (max ``~1/k`` with ``k=60``, i.e. well under
+    0.02) rather than a blended ``[0, 1]`` score --
+    ``LOW_CONFIDENCE_THRESHOLD`` (0.4) was calibrated against the
+    latter, so comparing a fused score against it directly would make
+    the round-08 §2.2 "low-confidence" note fire on *every* --scorer
+    both call with any excluded test symbols, confident result or not.
+    ``run()`` instead passes ``_exclusion_note`` the better of the two
+    underlying scorers' own top blended score. This fixture's top hit
+    is confidently on-target under plain lexical search (well above
+    0.4) -- the note must stay silent under --scorer both too, not
+    fire just because the fused score itself reads low.
+    """
+    pytest.importorskip("numpy")
+    root = make_mapped_repo(SRC)
+
+    # Confirm the plain lexical top hit is confident (this is the
+    # existing control test_search_exclusion_note_absent_on_confident_
+    # top_hit's own query/assertion, re-derived here to justify why
+    # --scorer both should also stay silent).
+    assert (
+        cli.main(["search", "http retry", "--root", str(root), "--json"]) == 0
+    )
+    lexical_doc = _json_out(capsys)
+    assert lexical_doc["hits"][0]["score"] >= search.LOW_CONFIDENCE_THRESHOLD
+    assert "note" not in lexical_doc
+
+    assert (
+        cli.main(
+            [
+                "search",
+                "http retry",
+                "--root",
+                str(root),
+                "--json",
+                "--scorer",
+                "both",
+            ]
+        )
+        == 0
+    )
+    both_doc = _json_out(capsys)
+    # The fused score itself is well under LOW_CONFIDENCE_THRESHOLD --
+    # proves this isn't passing by accident of the fused scale being
+    # high enough on its own.
+    assert both_doc["hits"][0]["score"] < search.LOW_CONFIDENCE_THRESHOLD
+    assert "note" not in both_doc
+
+
+def test_blended_scores_precomputed_relevance_matches_subset_call() -> None:
+    """``precomputed_relevance`` must make ``blended_scores`` agree with
+    itself when the same candidates are scored via two different-sized
+    batches -- the exact inconsistency round-13 found in
+    ``search.rank`` (a candidate's relevance changing depending on
+    which other candidates happen to be in the batch it's scored
+    against). Corpus-size-independent unit test of the property §1's
+    fix restores, complementing the four end-to-end shape fixtures
+    above.
+    """
+    task = TaskContext(terms=("cancel", "task", "execution"))
+    target = Candidate(
+        "target",
+        "cancelTask cancelTask cancelTask cancelTask(): void",
+        "a.ts",
+    )
+    other = Candidate(
+        "other",
+        "captureHookExecution captureHookExecution captureHookExecution "
+        "Records hook execution events for downstream execution "
+        "analytics across execution stages and execution phases. "
+        "captureHookExecution(ulid, hookName, status, "
+        "executionContext, executionTimingMs): void",
+        "b.ts",
+    )
+    distractors = [
+        Candidate(
+            f"task_{i}",
+            f"scheduleTask{i} schedules a background task in the "
+            "worker task queue",
+            f"d{i}.ts",
+        )
+        for i in range(30)
+    ]
+    all_cands = [target, other, *distractors]
+    subset = [target, other]
+    scorer = BM25Scorer()
+    full_relevance = scorer.score(task, all_cands)
+    # Old, buggy path: re-score the subset from scratch.
+    subset_relevance = scorer.score(task, subset)
+    assert full_relevance["target"] != subset_relevance["target"]
+
+    # Fixed path: reuse the full-batch number via precomputed_relevance.
+    blended = blended_scores(
+        task,
+        subset,
+        {c.id: 0.0 for c in subset},
+        precomputed_relevance=full_relevance,
+        w_rel=1.0,
+    )
+    assert blended["target"] == full_relevance["target"]

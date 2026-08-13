@@ -143,18 +143,31 @@ def test_try_daemon_note_list_is_eligible(
 
 def test_stale_socket_falls_open(short_root: Path) -> None:
     """A dead transport artifact (no listener) must fall open, silently."""
+    transport = dt.default_transport_for(short_root)
     sock_dir = short_root / ".dekko"
     sock_dir.mkdir(parents=True)
-    (sock_dir / "daemon.sock").write_bytes(b"")  # not a real socket
+    # Empty bytes are simultaneously "not a real AF_UNIX socket" (Unix)
+    # and "not valid JSON" (TCP loopback's port file) -- a genuinely
+    # unusable artifact on whichever transport this platform selects,
+    # per this module's own stated convention (see module docstring)
+    # of driving everything through default_transport_for() rather
+    # than hardcoding one platform's artifact name.
+    artifact = (
+        transport.socket_path
+        if isinstance(transport, dt.UnixSocketTransport)
+        else transport.port_file
+    )
+    artifact.write_bytes(b"")
 
     args = cli.build_subcommand_parser().parse_args(
         ["status", "--root", str(short_root)]
     )
     assert daemon.try_daemon(args) is None
     # try_daemon's failure path best-effort unlinks the stale artifact
-    # (via client_connect's own cleanup on OSError), so a later
-    # daemon start doesn't trip over it.
-    assert not (sock_dir / "daemon.sock").exists()
+    # (via client_connect's own cleanup on a genuinely unusable
+    # artifact -- a failed connect or, for TCP loopback, a failed port-
+    # file read), so a later daemon start doesn't trip over it.
+    assert not artifact.exists()
 
 
 # ---------------------------------------------------------------------

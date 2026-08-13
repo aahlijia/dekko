@@ -405,6 +405,23 @@ def test_tcp_client_connect_timeout_does_not_delete_port_file(
         transport.cleanup()
 
 
+def test_tcp_client_connect_malformed_port_file_cleans_up(
+    tmp_path: Path,
+) -> None:
+    """A malformed/corrupt port file is TCP loopback's equivalent of a
+    genuinely dead Unix socket -- unlike a connect-level timeout, it
+    must be cleaned up so a later ``daemon start`` doesn't trip over
+    it."""
+    transport = dt.TcpLoopbackTransport(tmp_path)
+    transport.port_file.parent.mkdir(parents=True, exist_ok=True)
+    transport.port_file.write_text("not valid json")
+
+    with pytest.raises(dt.DaemonUnavailableError):
+        transport.client_connect(timeout=1.0)
+
+    assert not transport.port_file.exists()
+
+
 # ---------------------------------------------------------------------
 # TcpLoopbackTransport-specific (unconditional -- usable everywhere)
 # ---------------------------------------------------------------------
