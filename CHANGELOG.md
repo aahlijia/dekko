@@ -126,6 +126,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
     invariant test pinning the batch-consistency bug class) so future
     relevance tuning has a fast regression check instead of needing
     live multi-repo re-testing.
+- **Windows CI: daemon stale-artifact test hardcoded the Unix-only
+  transport.** `test_stale_socket_falls_open` wrote a bogus file at
+  `.dekko/daemon.sock` and asserted it got cleaned up — correct on
+  macOS/Linux, but Windows selects `TcpLoopbackTransport` (artifact:
+  `daemon.port`), so `client_connect()` never touched the irrelevant
+  `daemon.sock` file the test wrote, and the assertion failed on
+  every windows-latest CI run. Fixed by routing the test through
+  `default_transport_for()`, per `test_daemon.py`'s own stated
+  convention of never needing a `skipif`. Investigating this surfaced
+  a real parity gap alongside it: `TcpLoopbackTransport`'s
+  `client_connect()`/`status_client_connect()` read the port file
+  *before* connecting, and a malformed/corrupt port file raised
+  `DaemonUnavailableError` with no cleanup — unlike
+  `UnixSocketTransport`'s stale-socket case (round-13 §2) or this
+  same transport's own connect-level `OSError` branch, both of which
+  do clean up. A failed port-file read now triggers the same
+  cleanup, with a new regression test
+  (`test_tcp_client_connect_malformed_port_file_cleans_up`).
 - **Round-12 7-repo eval fixes.** From a live eval against 7 real
   repos post-round-11 (`test-repos/reports/12-tokentest-7repo-postround11fixes/`):
   - **Resolver: bare receiverless call misresolved against an
