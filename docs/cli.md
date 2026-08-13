@@ -12,6 +12,7 @@ dekko query uses Path                # who references the external name Path?
 dekko context run_map --budget 1500  # minimal context pack for an edit
 dekko search "retries failed http requests"  # free-text relevance search
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
+dekko search "..." --scorer both             # fuses lexical+embedding; needs dekko[search]
 dekko workset                        # one bundle for your current change
 dekko affected                       # test files impacted by your changes
 dekko diff                           # symbols changed since the map's commit (exit 0/1)

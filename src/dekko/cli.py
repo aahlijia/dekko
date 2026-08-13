@@ -620,8 +620,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         choices=list(search.SCORER_CHOICES),
         default=search.DEFAULT_SCORER,
         help="relevance scorer: 'lexical' (default, BM25, always "
-        "available) or 'embedding' (Phase 2, hashing-trick "
-        "embedding, requires `pip install dekko[search]`)",
+        "available), 'embedding' (Phase 2, hashing-trick embedding, "
+        "requires `pip install dekko[search]`), or 'both' (round-13, "
+        "fuses lexical + embedding rankings via reciprocal rank "
+        "fusion, requires `pip install dekko[search]`)",
     )
     p_search.add_argument(
         "--root",

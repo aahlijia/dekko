@@ -24,6 +24,14 @@ completely unaffected by Phase 2's addition. See ``embedding.py``'s
 module docstring for the scorer itself and the plan's §8 for why this
 diverges from the plan's original ``sentence-transformers`` sketch.
 
+``--scorer both`` (round-13 §4) runs the lexical and embedding scorers
+independently and fuses their rankings via reciprocal rank fusion
+(:func:`_fuse_both`) — for a query whose correct answer has little or
+no lexical overlap with its indexed text (thin-docstring code, a
+misspelled/rephrased term), one scorer can surface an answer the other
+misses entirely. Opt-in only; ``--scorer lexical``/``--scorer
+embedding`` are byte-for-byte unaffected by this addition.
+
 Two round-08 corrections layer on top of whichever scorer runs:
 :class:`_CoverageAdjustedScorer` (wrapped around ``scorer`` in
 :func:`rank`) discounts a candidate that only covers some of a 2+-term
@@ -65,8 +73,16 @@ LOW_CONFIDENCE_THRESHOLD = 0.4
 # Phase 1 (BM25, always available) vs. Phase 2 (hashing-trick
 # embedding, requires `pip install dekko[search]`). See embedding.py's
 # module docstring for why the latter isn't a pretrained model.
+# "both" (round-13 §4) fuses the two via reciprocal rank fusion — see
+# _fuse_both — and requires the same `dekko[search]` extra as
+# "embedding" does, since it runs the embedding scorer internally.
 DEFAULT_SCORER = "lexical"
-SCORER_CHOICES = ("lexical", "embedding")
+SCORER_CHOICES = ("lexical", "embedding", "both")
+
+# Reciprocal rank fusion's rank-damping constant (Cormack, Clarke &
+# Buettcher 2009) -- the standard default from the source literature,
+# not tuned against any corpus this repo indexes. See _fuse_both.
+_RRF_K = 60
 
 # Lexical relevance dominates ranking; centrality only breaks
 # near-ties between otherwise-comparable matches. Contrast with
@@ -105,11 +121,18 @@ class SearchHit:
     Attributes:
         symbol: The matched symbol.
         score: Blended score in ``[0, 1]`` (scorer relevance +
-            structural centrality), the ranking key.
+            structural centrality), the ranking key. Under
+            ``--scorer both`` this field is instead the reciprocal
+            rank fusion value (see :func:`_fuse_both`) — a different,
+            smaller scale, since it's a rank-position fusion rather
+            than a blended relevance score.
         relevance: The raw scorer component, pre-blend, for
             debuggability — BM25 lexical relevance by default, or
             embedding cosine similarity under ``--scorer embedding``
-            (see ``embedding.EmbeddingScorer``).
+            (see ``embedding.EmbeddingScorer``). Under ``--scorer
+            both`` this is ``max(lexical_raw, embedding_raw)`` for the
+            candidate — diagnostic only in that mode; RRF, not this
+            number, decides the rank.
     """
 
     symbol: Symbol
@@ -306,7 +329,11 @@ def rank(
         return []
     centrality = {c.id: float(index.degree(c.id)) for c in survivors}
     blended = relevance.blended_scores(
-        task, survivors, centrality, scorer=scorer, w_rel=SEARCH_W_REL
+        task,
+        survivors,
+        centrality,
+        w_rel=SEARCH_W_REL,
+        precomputed_relevance=raw_relevance,
     )
     hits = [
         SearchHit(
@@ -315,6 +342,73 @@ def rank(
             relevance=raw_relevance.get(c.id, 0.0),
         )
         for c in survivors
+    ]
+    hits.sort(key=lambda h: (-h.score, h.symbol.path, h.symbol.start_line))
+    return hits
+
+
+def _fuse_both(
+    lexical_hits: list[SearchHit],
+    embedding_hits: list[SearchHit],
+    k: int = _RRF_K,
+) -> list[SearchHit]:
+    """Fuse two independently-ranked hit lists via reciprocal rank fusion.
+
+    Round-13 §4: ``--scorer both`` runs :func:`rank` twice — once with
+    :class:`relevance.BM25Scorer`, once with
+    :class:`embedding.EmbeddingScorer` — and combines the two rankings
+    here by rank *position*, not raw score magnitude. The two scorers'
+    raw scores aren't on a comparable scale: each is independently
+    top-of-batch-normalized over a *different-sized* survivor set (see
+    :func:`rank`'s docstring), which is the same "two different-sized
+    batches, two genuinely different numbers for the same candidate"
+    hazard round-13 §1's ``precomputed_relevance`` fix addressed for
+    one scorer reused inconsistently — fusing on rank sidesteps that
+    hazard entirely for two genuinely *different* scorers, with no
+    cross-scorer score-scale reconciliation needed.
+
+    Args:
+        lexical_hits: :func:`rank`'s output with ``BM25Scorer``,
+            already sorted descending by blended score.
+        embedding_hits: :func:`rank`'s output with
+            ``EmbeddingScorer``, already sorted descending by blended
+            score.
+        k: RRF's rank-damping constant — the standard default from the
+            source literature (Cormack, Clarke & Buettcher 2009), not
+            tuned against any corpus this repo indexes.
+
+    Returns:
+        Fused hits sorted by descending RRF score; ties broken by
+        ``(path, start_line)``, matching :func:`rank`'s own
+        convention. Each hit's ``score`` is the RRF value (the ranking
+        key in this mode); ``relevance`` is ``max(lexical_raw,
+        embedding_raw)`` for that candidate — diagnostic only here.
+    """
+    lexical_rank = {h.symbol.id: i + 1 for i, h in enumerate(lexical_hits)}
+    embedding_rank = {h.symbol.id: i + 1 for i, h in enumerate(embedding_hits)}
+    lexical_relevance = {h.symbol.id: h.relevance for h in lexical_hits}
+    embedding_relevance = {h.symbol.id: h.relevance for h in embedding_hits}
+    symbols = {h.symbol.id: h.symbol for h in lexical_hits}
+    for h in embedding_hits:
+        symbols.setdefault(h.symbol.id, h.symbol)
+
+    hits = [
+        SearchHit(
+            symbol=sym,
+            score=(
+                1.0 / (k + lexical_rank[sid]) if sid in lexical_rank else 0.0
+            )
+            + (
+                1.0 / (k + embedding_rank[sid])
+                if sid in embedding_rank
+                else 0.0
+            ),
+            relevance=max(
+                lexical_relevance.get(sid, 0.0),
+                embedding_relevance.get(sid, 0.0),
+            ),
+        )
+        for sid, sym in symbols.items()
     ]
     hits.sort(key=lambda h: (-h.score, h.symbol.path, h.symbol.start_line))
     return hits
@@ -371,7 +465,9 @@ def _fit(
 
 
 def _exclusion_note(
-    hits: list[SearchHit], excluded_test_count: int
+    hits: list[SearchHit],
+    excluded_test_count: int,
+    top_score: float | None = None,
 ) -> str | None:
     """A hint when test-path exclusion may have hidden the real match.
 
@@ -387,13 +483,24 @@ def _exclusion_note(
         hits: The ranked hits, already scored (pre-budget-fit).
         excluded_test_count: Symbols dropped by ``.without_tests()``
             before ranking, or ``0`` if nothing was excluded.
-
+        top_score: The confidence score to compare against
+            :data:`LOW_CONFIDENCE_THRESHOLD`, or ``None`` to default
+            to ``hits[0].score``. Round-13 §4: ``--scorer both``'s
+            fused ``hits[0].score`` is a reciprocal-rank-fusion value
+            (max ``~1/k``, far below the ``[0, 1]`` blended-score
+            scale this threshold was calibrated against) rather than a
+            confidence-comparable number, so ``run()`` passes the
+            underlying lexical/embedding top blended score instead —
+            otherwise this note would fire on every ``--scorer both``
+            call with any excluded test symbols, confident or not.
     Returns:
         A one-line hint, or ``None`` when nothing is worth flagging.
     """
     if excluded_test_count <= 0:
         return None
-    if hits and hits[0].score >= LOW_CONFIDENCE_THRESHOLD:
+    if top_score is None:
+        top_score = hits[0].score if hits else None
+    if top_score is not None and top_score >= LOW_CONFIDENCE_THRESHOLD:
         return None
     noun = "symbol" if excluded_test_count == 1 else "symbols"
     return (
@@ -504,9 +611,15 @@ def run(
         as_json: Emit structured JSON instead of text.
         root: Repository root. Only needed to persist an embedding
             cache under ``.dekko/`` when ``scorer_name`` is
-            ``"embedding"`` — ignored for the default lexical scorer.
+            ``"embedding"`` or ``"both"`` — ignored for the default
+            lexical scorer.
         scorer_name: One of :data:`SCORER_CHOICES`; defaults to
             :data:`DEFAULT_SCORER` (Phase 1's BM25 lexical scorer).
+            ``"both"`` (round-13 §4) runs the lexical and embedding
+            scorers independently and fuses their rankings via
+            reciprocal rank fusion — see :func:`_fuse_both` — and
+            requires the same ``dekko[search]`` extra ``"embedding"``
+            does, since it runs the embedding scorer internally.
         excluded_test_count: Symbols the caller already dropped via
             ``.without_tests()`` before ``index`` was passed in, or
             ``0`` when nothing was excluded (including whenever
@@ -519,17 +632,46 @@ def run(
         legitimate, non-error result — unlike ``query``'s
         ``EXIT_NOT_FOUND``, which means "you typo'd a name");
         :data:`EXIT_ERROR` when ``scorer_name`` can't be satisfied
-        (unknown name, or ``embedding`` without the extra installed).
+        (unknown name, or ``embedding``/``both`` without the extra
+        installed).
     """
+    # "both" can't resolve to a single Scorer (its whole point is two),
+    # so it's special-cased here rather than reshaping
+    # _resolve_scorer's one-Scorer-in, one-Scorer-out contract for
+    # every other caller. Each half still goes through _resolve_scorer
+    # itself, so the "embedding half unavailable" error message is the
+    # exact same one --scorer embedding already raises, not a
+    # duplicate.
     try:
-        scorer, cache = _resolve_scorer(scorer_name, root)
+        if scorer_name == "both":
+            lexical_scorer, _ = _resolve_scorer(DEFAULT_SCORER, root)
+            embedding_scorer, cache = _resolve_scorer("embedding", root)
+        else:
+            scorer, cache = _resolve_scorer(scorer_name, root)
     except ValueError as exc:
         print(f"dekko search: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    hits = rank(index, query_text, kinds, scorer=scorer)
+    top_score = None
+    if scorer_name == "both":
+        lexical_hits = rank(index, query_text, kinds, scorer=lexical_scorer)
+        embedding_hits = rank(
+            index, query_text, kinds, scorer=embedding_scorer
+        )
+        hits = _fuse_both(lexical_hits, embedding_hits)
+        # hits[0].score here is an RRF value, not a blended [0, 1]
+        # score -- not confidence-comparable against
+        # LOW_CONFIDENCE_THRESHOLD. Use the better of the two
+        # underlying scorers' own top blended score instead (see
+        # _exclusion_note's top_score docstring).
+        underlying_top_scores = [
+            h[0].score for h in (lexical_hits, embedding_hits) if h
+        ]
+        top_score = max(underlying_top_scores, default=None)
+    else:
+        hits = rank(index, query_text, kinds, scorer=scorer)
     if cache is not None and root is not None:
         embedding.save(root, cache)
-    note = _exclusion_note(hits, excluded_test_count)
+    note = _exclusion_note(hits, excluded_test_count, top_score=top_score)
     if as_json:
         return _render_json(query_text, hits, budget, limit, note)
     return _render_text(query_text, hits, budget, limit, note)

@@ -655,6 +655,7 @@ def blended_scores(
     *,
     scorer: Scorer | None = None,
     w_rel: float = DEFAULT_W_REL,
+    precomputed_relevance: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Blend task relevance with structural centrality.
 
@@ -671,12 +672,33 @@ def blended_scores(
             min-max normalized here before blending.
         scorer: Relevance scorer; defaults to :class:`LexicalScorer`.
         w_rel: Weight on the relevance term in ``[0, 1]``.
+        precomputed_relevance: A relevance score map already computed
+            by a caller over some candidate batch (typically the same
+            scorer, over a *larger* batch than ``candidates`` — e.g.
+            ``search.rank``'s full-corpus pass before filtering to
+            survivors). When given, this is used directly instead of
+            calling ``scorer.score(task, candidates)`` again — the
+            caller is asserting ``candidates`` is a subset of whatever
+            batch ``precomputed_relevance`` was computed over. Passing
+            ``None`` (the default) preserves the exact current
+            behavior for every other caller (workset, contextpack,
+            render_lean, hooks): compute relevance from scratch over
+            ``candidates`` itself. Round-13: introduced because
+            re-deriving relevance over a *different-sized* batch than
+            the one a caller already scored produces a different
+            number — IDF and BM25's length normalization are
+            batch-relative by construction — silently overriding a
+            correct upstream relevance judgment with an inconsistent
+            one (search.py's ``rank``, before this fix).
 
     Returns:
         ``candidate.id -> blended score`` in ``[0, 1]``.
     """
-    scorer = scorer or LexicalScorer()
-    relevance = scorer.score(task, candidates)
+    relevance = (
+        precomputed_relevance
+        if precomputed_relevance is not None
+        else (scorer or LexicalScorer()).score(task, candidates)
+    )
     central_norm = _min_max(centrality)
     w_central = 1.0 - w_rel
     return {

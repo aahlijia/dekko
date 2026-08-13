@@ -93,6 +93,39 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
     genuine "nothing listening" failure does. Fail-open guarantees
     (silent fallback to direct execution on any pre-request transport
     error) preserved throughout; both fixes have regression tests.
+- **Round-13 search-relevance follow-up.** From the master report's
+  one remaining open item (`.features/plans/round13/
+  search-relevance-tuning-plan.md`), deferred at first because
+  round-12's own precedent showed a same-session patch reacting to
+  one reported query can regress a different one:
+  - **`dekko search`'s relevance score computed inconsistently
+    across two differently-sized candidate batches.** `search.rank()`
+    filtered to zero-relevance survivors, then re-scored that smaller
+    survivor set from scratch for the final blend — since BM25's
+    IDF/length-normalization are corpus-relative, re-deriving over a
+    different-sized batch produced a genuinely different number,
+    occasionally flipping the rank of the query's own correct answer
+    (cline: `"cancel task execution"` outranked `cancelTask()` with a
+    telemetry method matching only one term). `relevance.
+    blended_scores()` gained an optional `precomputed_relevance` param
+    so `rank()` now reuses its already-computed full-batch relevance
+    instead of re-deriving it; every other caller (workset,
+    contextpack, render_lean, hooks) is untouched.
+  - **New `--scorer both`.** For a separate, unrelated finding
+    (zed: `"save file to disk"` missing `Item.save()`, which
+    genuinely has no lexical overlap with the query at all — no
+    scoring-weight change could safely fix that without overfitting)
+    `dekko search` gained an opt-in third scorer choice that runs the
+    lexical (BM25) and embedding scorers independently and fuses their
+    rankings by rank position via reciprocal rank fusion, not raw
+    score (the two scorers' scores aren't on a comparable scale).
+    Requires the same `dekko[search]` extra as `--scorer embedding`;
+    `lexical`/`embedding` alone are byte-for-byte unaffected.
+  - A 6-fixture golden-query regression corpus was added to
+    `tests/test_search.py` (multi-language, including a direct
+    invariant test pinning the batch-consistency bug class) so future
+    relevance tuning has a fast regression check instead of needing
+    live multi-repo re-testing.
 - **Round-12 7-repo eval fixes.** From a live eval against 7 real
   repos post-round-11 (`test-repos/reports/12-tokentest-7repo-postround11fixes/`):
   - **Resolver: bare receiverless call misresolved against an
