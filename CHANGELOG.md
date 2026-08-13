@@ -35,6 +35,28 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   MCP-only agent (no Bash) with no way to discover them.
 
 ### Fixed
+- **`dekko daemon stop` reported success up to ~1.1s before the
+  daemon process had actually torn down.** From a live eval against
+  6 of 7 real repos post-round-13 search fix
+  (`test-repos/reports/14-tokentest-7repo-postround13searchfix/`,
+  `MASTER_REPORT.md`), triple-independently confirmed (cline,
+  claude-buddy, claude-code): `_handle_connection` acked a `_shutdown`
+  request the instant it arrived, before `serve_daemon()`'s own
+  teardown (joining the status-listener thread — bounded by that
+  thread's own 1.0s `accept()` timeout, the dominant term in the
+  measured lag — closing both sockets, then unlinking their transport
+  artifacts) had actually run. A command issued in that window either
+  hard-failed (exit 7, misclassifying "daemon just torn down" as
+  "daemon still busy," violating the documented fail-open contract) or
+  raced a concurrent `daemon start` into spawning a genuine duplicate
+  live process. `daemon.py::stop()` now blocks (bounded, 5s cap) until
+  the daemon's transport artifacts are confirmed gone — a race-free,
+  filesystem-only check, since unlinking them is the literal last step
+  of the teardown it's waiting on — before reporting success. This
+  also structurally narrows a related daemon `start`→`stop`→`start`
+  orphan race a sibling report (tensorflow) found under heavy machine
+  contention, though that item stays open pending a contended re-test
+  (see `.features/plans/round14/daemon-lifecycle-fixes-plan.md`).
 - **Round-13 7-repo eval fixes.** From a live eval against 7 real
   repos post-round-12 (`test-repos/reports/13-tokentest-7repo-postround12fixes/`,
   `MASTER_REPORT.md`):
@@ -126,6 +148,28 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
     invariant test pinning the batch-consistency bug class) so future
     relevance tuning has a fast regression check instead of needing
     live multi-repo re-testing.
+- **`dekko search --scorer both`'s fused score was unlabeled and easy
+  to misread against `lexical`/`embedding`-only scores.** From the
+  round-14 7-repo eval master report (`test-repos/reports/
+  14-tokentest-7repo-postround13searchfix/MASTER_REPORT.md`,
+  corroborated 2/6 — cline, claude-code): `--scorer both`'s reciprocal
+  rank fusion score lands in a much lower, differently-shaped range
+  (~0.03 typical) than a blended `[0, 1]` lexical/embedding score, with
+  no in-band note explaining the scale changed — expected behavior
+  (RRF fuses by rank position, not score magnitude), but a rough edge
+  for anything comparing confidence *across* scorer modes. `search.py`
+  gained `_scale_note()`, an unconditional `note:`/`"note"` hint on
+  every `--scorer both` call (joined with the existing round-08 §2.2
+  exclusion note when both fire); `lexical`/`embedding` alone are
+  unaffected.
+- Documentation: `docs/cli.md`'s daemon-mode section now notes that
+  the warm cache's win is specifically about skipping map *loading*,
+  not every part of a query's own cost — a query whose per-hit
+  rendering dominates (e.g. `get_callers`/`find_usages` on a very
+  high-fan-in "hub" symbol) can show little or no measurable
+  wall-clock difference between a cold and warm daemon call even
+  though `hits`/`misses` correctly show it was served warm (round-14
+  eval, tensorflow §4.4 — not a bug, just an under-documented nuance).
 - **Windows CI: daemon stale-artifact test hardcoded the Unix-only
   transport.** `test_stale_socket_falls_open` wrote a bogus file at
   `.dekko/daemon.sock` and asserted it got cleaned up — correct on

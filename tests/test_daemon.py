@@ -382,6 +382,110 @@ def test_stop_is_a_noop_when_nothing_is_running(short_root: Path) -> None:
     assert daemon.stop(short_root) == 0
 
 
+def test_stop_blocks_until_artifacts_are_gone_before_returning(
+    short_root: Path,
+) -> None:
+    """Round-14 master report ("daemon stop returns success ~1s
+    before the process actually dies"): ``stop()`` used to report
+    success as soon as the daemon's graceful-shutdown ack arrived,
+    which is *before* ``serve_daemon()``'s own teardown (joining the
+    status thread, closing both sockets, unlinking transport
+    artifacts) actually runs -- see ``daemon._wait_for_teardown``'s
+    docstring for the full root cause. Unlike
+    ``test_stop_shuts_down_a_reachable_daemon`` above (which joins the
+    daemon thread directly -- something only a white-box, in-thread
+    test can do), this checks exactly what a real CLI client can
+    observe: ``transport.exists()`` must already be ``False`` the
+    instant ``daemon.stop()`` returns, with no extra wait of any kind
+    on this test's own side."""
+    transport = dt.default_transport_for(short_root)
+    thread = threading.Thread(
+        target=daemon.serve_daemon,
+        kwargs={"root": short_root, "idle_timeout": 30.0},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert _wait_until(transport.exists)
+        assert dt.is_daemon_reachable(transport)
+
+        assert daemon.stop(short_root) == 0
+        assert not transport.exists()
+    finally:
+        thread.join(timeout=_POLL_DEADLINE)
+
+
+def test_stop_then_immediate_command_falls_back_not_abandoned(
+    short_root: Path,
+) -> None:
+    """Round-14 master report: three independent evaluators
+    (``cline.md`` §5.2, ``claude-buddy.md`` §3.3, ``claude-code.md``
+    §1) found a command issued within ~1s of ``daemon stop`` hard-
+    failing with exit 7 ("a daemon-routed request did not respond in
+    time") instead of silently falling back to direct-process mode,
+    violating the documented §3.3 fail-open contract for an entirely
+    ordinary stop-then-continue-working sequence. Uses a real
+    subprocess daemon (not the in-thread fixture used elsewhere in
+    this module) since the bug is specifically about what a separate
+    client process observes -- an in-thread test can't reproduce the
+    client-side race a real ``dekko daemon stop`` process leaves
+    behind."""
+    root = short_root
+    (root / "a.py").write_text("def f() -> int:\n    return 1\n")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+
+    transport = dt.default_transport_for(root)
+    assert (
+        cli.main(
+            [
+                "daemon",
+                "start",
+                "--root",
+                str(root),
+                "--idle-timeout",
+                "60",
+            ]
+        )
+        == 0
+    )
+    try:
+        assert _wait_until(lambda: dt.is_daemon_reachable(transport))
+
+        assert cli.main(["daemon", "stop", "--root", str(root)]) == 0
+
+        code = cli.main(["query", "symbol", "f", "--root", str(root)])
+        assert code != daemon.EXIT_DAEMON_ABANDONED
+        assert code == 0
+    finally:
+        cli.main(["daemon", "stop", "--root", str(root)])
+
+
+class _FakeArtifactTransport:
+    """Minimal ``exists()``-only stand-in for ``_wait_for_teardown``'s
+    polling contract, exercised in isolation from any real socket."""
+
+    def __init__(self, false_after: int) -> None:
+        self.calls = 0
+        self._false_after = false_after
+
+    def exists(self) -> bool:
+        self.calls += 1
+        return self.calls <= self._false_after
+
+
+def test_wait_for_teardown_returns_once_artifacts_disappear() -> None:
+    transport = _FakeArtifactTransport(false_after=3)
+    daemon._wait_for_teardown(transport, timeout=2.0)
+    assert not transport.exists()
+
+
+def test_wait_for_teardown_gives_up_after_its_own_timeout() -> None:
+    transport = _FakeArtifactTransport(false_after=10_000)
+    started = time.monotonic()
+    daemon._wait_for_teardown(transport, timeout=0.1)
+    assert time.monotonic() - started < 1.0
+
+
 # ---------------------------------------------------------------------
 # Status: text and JSON shape
 # ---------------------------------------------------------------------

@@ -129,6 +129,18 @@ _REQUEST_TIMEOUT = 30.0
 # docstring for why it's single-threaded on purpose).
 _CLIENT_TIMEOUT = _REQUEST_TIMEOUT
 
+# Round-14 master report §"Daemon-lifecycle investigation": bound on
+# how long stop() will poll for the daemon's transport artifacts to
+# actually disappear before giving up and reporting success anyway
+# (this command's contract is "always returns 0" -- see stop()'s own
+# docstring). Comfortably above the ~1.0-1.1s worst-case teardown lag
+# that motivated the poll in the first place (bounded by
+# _serve_status_loop's own 1.0s accept() timeout, the slowest single
+# step in serve_daemon()'s shutdown finally-block), with real margin
+# for a slower machine.
+_STOP_TEARDOWN_TIMEOUT = 5.0
+_STOP_TEARDOWN_POLL_INTERVAL = 0.02
+
 # Bootstrap script used to spawn the detached daemon process. There is
 # no ``src/dekko/__main__.py`` (the packaged entry point is the
 # ``dekko`` console script, ``dekko.cli:main``, per pyproject.toml),
@@ -880,6 +892,50 @@ def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
     return 0
 
 
+def _wait_for_teardown(
+    transport: DaemonTransport, timeout: float = _STOP_TEARDOWN_TIMEOUT
+) -> None:
+    """Block until a gracefully-shutting-down daemon's artifacts are gone.
+
+    Round-14 master report ("Daemon-lifecycle investigation"): three
+    independent evaluators (``cline.md`` §5.2, ``claude-buddy.md``
+    §3.3, ``claude-code.md`` §1) found ``dekko daemon stop`` printing
+    "stopped" and returning success up to ~1.0-1.1s *before* the
+    daemon process actually exits. Root cause: ``_handle_connection``
+    acks a ``_shutdown`` request (and returns) the moment it's
+    received, but ``serve_daemon()``'s own teardown -- joining the
+    status-listener thread (bounded by that thread's 1.0s ``accept()``
+    timeout, the dominant term in the measured ~1s lag),
+    closing both sockets, then unlinking their on-disk artifacts via
+    ``DaemonTransport.cleanup()`` as the very last step -- all happens
+    *after* that ack is already on the wire. A command issued in that
+    window either connects to a listening-but-about-to-vanish main
+    socket and gets its connection reset mid-request (misread by the
+    client as "still busy," not "already gone" -- exit 7, violating
+    the documented fail-open contract), or races a concurrent
+    ``daemon start`` into spawning a genuine duplicate live process
+    before the old one has actually released its transport artifacts.
+
+    Polling ``transport.exists()`` (the main socket/port file,
+    unlinked only as literally the last act of ``serve_daemon()``'s
+    shutdown) is a race-free, filesystem-only signal that teardown has
+    actually finished -- unlike a network probe, it can't be fooled by
+    a listening socket that's still accepting into the OS backlog even
+    though nothing will ever call ``accept()`` on it again.
+
+    Args:
+        transport: The transport whose artifacts to poll.
+        timeout: Maximum time to wait before giving up. ``stop()``
+            reports success either way once this returns -- matching
+            this command's existing "always returns 0" contract, this
+            is a best-effort wait to close the race, not a new failure
+            mode of its own.
+    """
+    deadline = time.monotonic() + timeout
+    while transport.exists() and time.monotonic() < deadline:
+        time.sleep(_STOP_TEARDOWN_POLL_INTERVAL)
+
+
 def stop(root: Path) -> int:
     """Handle ``dekko daemon stop``.
 
@@ -887,7 +943,11 @@ def stop(root: Path) -> int:
     Attempts a graceful shutdown first; if that doesn't get an answer
     (a wedged daemon, not merely "none running"), falls back to
     ``force_stop`` via a PID obtained through a best-effort ``status``
-    round-trip.
+    round-trip. Either way, blocks (bounded by
+    ``_STOP_TEARDOWN_TIMEOUT``) until the daemon's transport artifacts
+    are actually gone before reporting success -- see
+    ``_wait_for_teardown`` for why a graceful shutdown's own ack
+    arrives before the daemon has actually finished tearing down.
 
     Args:
         root: Resolved repo root whose daemon to stop.
@@ -925,6 +985,8 @@ def stop(root: Path) -> int:
             except ProcessLookupError:
                 pass
         transport.cleanup()
+    else:
+        _wait_for_teardown(transport)
 
     print(f"dekko daemon: stopped for {root}")
     return 0
