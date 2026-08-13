@@ -494,7 +494,16 @@ class TcpLoopbackTransport(DaemonTransport):
         if not self.port_file.exists():
             raise DaemonUnavailableError(f"no port file at {self.port_file}")
 
-        port, token = self._read_port_file()
+        try:
+            port, token = self._read_port_file()
+        except DaemonUnavailableError:
+            # A malformed/corrupt port file is the TCP-loopback
+            # equivalent of UnixSocketTransport's stale-socket case --
+            # genuinely unusable, not "busy," so it's safe (and
+            # necessary) to clean it up the same way _connect()'s own
+            # OSError branch does for a refused/failed connect.
+            self.cleanup()
+            raise
         self._token = token
         return self._connect(port, timeout, "main")
 
@@ -502,7 +511,11 @@ class TcpLoopbackTransport(DaemonTransport):
         if not self.port_file.exists():
             raise DaemonUnavailableError(f"no port file at {self.port_file}")
 
-        port, token = self._read_status_port()
+        try:
+            port, token = self._read_status_port()
+        except DaemonUnavailableError:
+            self.cleanup()
+            raise
         self._token = token
         return self._connect(port, timeout, "status")
 
