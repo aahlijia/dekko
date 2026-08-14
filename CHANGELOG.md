@@ -35,6 +35,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   MCP-only agent (no Bash) with no way to discover them.
 
 ### Fixed
+- **`resolver.py` could self-resolve a bare-name call to its own
+  enclosing symbol instead of the real cross-file target, silently
+  dropping the call.** When two symbols in different files share a
+  bare method name (e.g. Go's `IDGenerator.Generate` and an imported
+  `slug.Generate`), `_pick_candidate`'s same-file candidate step
+  could match the call's *own caller* as the sole same-file hit, not
+  a genuine same-file target, just a coincidental name collision, and
+  return it immediately. `_add_edge`'s self-recursion filter then
+  silently discarded the resulting self-edge, so the real, cross-file
+  call via an import hint was never tried and the call vanished from
+  the graph. `_pick_candidate` now falls through to later ladder
+  steps (import hints, in particular) whenever the same-file
+  candidate is the caller itself, while a genuine self/this-qualified
+  recursive call (already handled earlier via `_container_match`) is
+  unaffected. See `.features/plans/round14/
+  go-resolver-bare-name-collision-plan.md`.
 - **Windows daemon transport (`TcpLoopbackTransport`) could wipe its
   own shared port file, and with it a still-valid daemon connection,
   whenever a status listener simply hadn't been bound yet.**
