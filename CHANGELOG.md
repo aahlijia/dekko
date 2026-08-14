@@ -35,6 +35,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   MCP-only agent (no Bash) with no way to discover them.
 
 ### Fixed
+- **Windows daemon transport (`TcpLoopbackTransport`) could wipe its
+  own shared port file, and with it a still-valid daemon connection,
+  whenever a status listener simply hadn't been bound yet.**
+  `status_client_connect()` treated any `DaemonUnavailableError` from
+  reading the status port as corruption and deleted the whole port
+  file, including the main `port`/`token` entry
+  `is_daemon_reachable()`'s fallback `client_connect()` needs, even
+  for the benign case of a daemon started before
+  `bind_status_listener()` existed, which simply lacks a
+  `status_port` key. `daemon_transport.py` now raises a distinct
+  `_StatusPortNotBoundError` for that case so cleanup only fires on
+  genuine file corruption (unreadable, malformed JSON, or a
+  missing/invalid main entry). Windows-only in origin (macOS/Linux's
+  Unix-socket transport has no equivalent cleanup path), diagnosed
+  from a Windows CI run failure; see `.features/fixes/
+  windows-ci-failure-investigation.md`.
 - **`dekko daemon status` could report `running: false` for a daemon
   that was alive but slow to reply, and `stop` could unlink a live
   daemon's transport artifacts on the same false-negative evidence.**
