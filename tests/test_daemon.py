@@ -415,6 +415,90 @@ def test_stop_blocks_until_artifacts_are_gone_before_returning(
         thread.join(timeout=_POLL_DEADLINE)
 
 
+def test_stop_does_not_unlink_live_daemon_when_ack_and_pid_query_both_fail(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-14 daemon-status-contention-plan.md §3: ``stop()``'s
+    forced-fallback branch used to call ``transport.cleanup()``
+    unconditionally whenever neither the shutdown-ack round trip nor a
+    ``_query_pid`` lookup confirmed anything -- even when the daemon
+    was still genuinely alive and listening. This reproduced
+    tensorflow.md §4.3's exact symptom (``ps``/``lsof`` confirm a
+    live, listening process; the directory entries for its bound
+    socket paths are gone) *without* needing the ``start``-races-
+    self-cleanup timing window a different item in this round's plan
+    doc describes -- a single ``stop()`` call against a busy daemon is
+    sufficient.
+
+    Forces ``graceful = False`` for real: a sleep-based slow routed
+    command occupies the single-threaded main accept loop long enough
+    that a shortened ``_CLIENT_TIMEOUT`` genuinely lapses on the
+    shutdown-ack wait, exactly as a wedged daemon would. ``_query_pid``
+    is monkeypatched to also return ``None``: a real daemon's
+    dedicated status listener stays responsive under a sleep-based
+    busy double (it's a separate thread untouched by the main loop
+    sleeping -- see ``test_status_true_positive_while_daemon_busy_
+    on_slow_request``), so making it *also* time out for real needs
+    the CPU-bound GIL-starvation double this round's status-probe
+    fix is about, not this test's own charter; monkeypatching isolates
+    *this* fix's new conditional logic in ``stop()`` -- whether to
+    unlink once both signals have failed to confirm anything -- from
+    that separate concern.
+
+    Confirms the final, unmocked ``is_daemon_reachable`` probe still
+    finds the daemon alive, and that ``stop()`` leaves its transport
+    artifacts (and the process itself) alone as a result, rather than
+    orphaning a live, now-unreachable-by-path daemon.
+    """
+    started = threading.Event()
+    real_run_stats = cli.run_stats
+
+    def slow_run_stats(args: object) -> int:
+        started.set()
+        time.sleep(2.0)
+        return real_run_stats(args)
+
+    monkeypatch.setattr(cli, "run_stats", slow_run_stats)
+    monkeypatch.setattr(daemon, "_query_pid", lambda transport: None)
+
+    root = short_root
+    (root / "a.py").write_text("def f() -> int:\n    return 1\n")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+
+    transport = dt.default_transport_for(root)
+    thread = threading.Thread(
+        target=daemon.serve_daemon,
+        kwargs={"root": root, "idle_timeout": 30.0},
+        daemon=True,
+    )
+    thread.start()
+    original_timeout = daemon._CLIENT_TIMEOUT
+    try:
+        assert _wait_until(transport.exists)
+
+        args = cli.build_subcommand_parser().parse_args(
+            ["stats", "--root", str(root)]
+        )
+        sock = transport.client_connect(30.0)
+        try:
+            daemon._send_daemon_request(sock, transport, "stats", args)
+        finally:
+            sock.close()
+        assert started.wait(timeout=5.0), "slow request never started"
+
+        daemon._CLIENT_TIMEOUT = 0.3
+        assert daemon.stop(root) == 0
+
+        assert transport.exists()
+        assert dt.is_daemon_reachable(transport, timeout=2.0)
+        assert thread.is_alive()
+    finally:
+        daemon._CLIENT_TIMEOUT = original_timeout
+        daemon.stop(root)
+        thread.join(timeout=_POLL_DEADLINE)
+
+
 def test_stop_then_immediate_command_falls_back_not_abandoned(
     short_root: Path,
 ) -> None:
@@ -509,6 +593,104 @@ def test_status_json_shape_when_running(
     assert "uptime_seconds" in data
     assert data["cache"] is None
     assert data["busy"] is False
+
+
+def test_status_probe_timeout_reports_confirmed_false_not_not_running(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Round-14 daemon-status-contention-plan.md §1-2: before this fix,
+    a post-connect ``TimeoutError`` in ``status()``'s ``_recv_line``
+    call (raised only *after* a live listener already accepted the
+    connection -- see ``_status_connect``'s docstring for why a
+    genuinely dead/absent daemon can never reach this point, since a
+    Unix-socket connect to a path with no listener behind it fails
+    immediately with ``ConnectionRefusedError``, not a timeout) used
+    to be caught by the same ``except (OSError, ValueError): data =
+    None`` clause as every other failure, folding "alive but hasn't
+    replied yet" into the identical "not running" outcome as a
+    genuine absence -- tensorflow.md §4.2's exact symptom (~30.0s
+    calls returning ``{"running": false}`` for a confirmed-alive
+    daemon).
+
+    Reproduces the mechanism deterministically with a raw listener
+    that accepts the status connection and then simply never replies,
+    standing in for a status thread starved of CPU under sustained
+    GIL/OS-scheduling contention -- this is the *same* code path a
+    real starved status thread would trigger (a connected-but-
+    unanswered socket, timing out in ``_recv_line``), without needing
+    genuine contention itself, which this project's own daemon tests
+    otherwise reproduce with sleep-based slow commands that a
+    dedicated status listener stays responsive under (see
+    ``test_status_true_positive_while_daemon_busy_on_slow_request``)
+    -- only real CPU-bound work reaches the exposure this fix covers,
+    which a raw non-replying listener triggers directly instead of
+    needing to construct.
+    """
+    monkeypatch.setattr(daemon, "_STATUS_PROBE_TIMEOUT", 0.3)
+    root = short_root
+    transport = dt.default_transport_for(root)
+    main_sock = transport.bind_and_listen()
+    status_sock = transport.bind_status_listener()
+
+    def accept_and_hang() -> None:
+        conn, _ = status_sock.accept()
+        time.sleep(2.0)
+        conn.close()
+
+    server_thread = threading.Thread(target=accept_and_hang, daemon=True)
+    server_thread.start()
+    try:
+        code = daemon.status(root, as_json=True)
+    finally:
+        server_thread.join(timeout=3.0)
+        main_sock.close()
+        status_sock.close()
+        transport.cleanup()
+
+    assert code == 0
+    data = _json.loads(capsys.readouterr().out)
+    assert data["running"] is True
+    assert data["confirmed"] is False
+    assert "note" in data
+
+
+def test_query_pid_timeout_returns_none_same_as_daemon_absent(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_query_pid``'s contract intentionally stays "``None`` on any
+    failure, including a timeout" (round-14 daemon-status-contention-
+    plan.md §3's "open question": the extra confirmation ``stop()``
+    needs when a pid lookup fails to confirm anything is added at the
+    call site via ``is_daemon_reachable``, not by growing this
+    function's own return type into a three-state contract). Confirms
+    a post-connect timeout here still returns ``None`` rather than
+    raising -- exactly like every other failure mode it already
+    covers -- using the same raw-non-replying-listener technique as
+    the ``status()`` probe-timeout test above.
+    """
+    monkeypatch.setattr(daemon, "_STATUS_PROBE_TIMEOUT", 0.3)
+    root = short_root
+    transport = dt.default_transport_for(root)
+    main_sock = transport.bind_and_listen()
+    status_sock = transport.bind_status_listener()
+
+    def accept_and_hang() -> None:
+        conn, _ = status_sock.accept()
+        time.sleep(2.0)
+        conn.close()
+
+    server_thread = threading.Thread(target=accept_and_hang, daemon=True)
+    server_thread.start()
+    try:
+        assert daemon._query_pid(transport) is None
+    finally:
+        server_thread.join(timeout=3.0)
+        main_sock.close()
+        status_sock.close()
+        transport.cleanup()
 
 
 def test_client_timeout_matches_request_timeout() -> None:

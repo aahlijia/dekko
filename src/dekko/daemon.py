@@ -141,6 +141,19 @@ _CLIENT_TIMEOUT = _REQUEST_TIMEOUT
 _STOP_TEARDOWN_TIMEOUT = 5.0
 _STOP_TEARDOWN_POLL_INTERVAL = 0.02
 
+# Budget for the liveness/status *round trip* specifically (status(),
+# _query_pid(), and stop()'s forced-fallback reachability probe) --
+# distinct from _CLIENT_TIMEOUT, which stays 30s for an actual routed
+# command's own reply. Round-14 daemon-status-contention-plan.md §2:
+# round-12's reason for making the old, single liveness timeout
+# generous (a short probe timeout used to mean "lie and say not
+# running") no longer applies once a probe timeout produces an honest
+# degraded report instead of a false negative -- see status()'s own
+# handling of a post-connect TimeoutError. Matches is_daemon_
+# reachable's own existing default (daemon_transport.py) for
+# consistency between the two liveness checks.
+_STATUS_PROBE_TIMEOUT = 2.0
+
 # Bootstrap script used to spawn the detached daemon process. There is
 # no ``src/dekko/__main__.py`` (the packaged entry point is the
 # ``dekko`` console script, ``dekko.cli:main``, per pyproject.toml),
@@ -793,9 +806,15 @@ def _query_pid(transport: DaemonTransport) -> int | None:
     to the main socket for a daemon started before that listener
     existed. Returns ``None`` on any failure -- the caller already
     treats a missing PID as "can't force-stop," not as an error to
-    surface.
+    surface. Uses ``_STATUS_PROBE_TIMEOUT`` (not ``_CLIENT_TIMEOUT``):
+    this is a liveness probe, not a routed command, so it should give
+    up quickly rather than tie up ``stop()`` for up to 30s (round-14
+    daemon-status-contention-plan.md §2) -- ``stop()``'s own call site
+    treats a timeout here the same as any other failure to confirm a
+    PID, and falls back to ``is_daemon_reachable`` as a second opinion
+    before deciding whether it's safe to unlink the transport (§3).
     """
-    sock = _status_connect(transport, _CLIENT_TIMEOUT)
+    sock = _status_connect(transport, _STATUS_PROBE_TIMEOUT)
     if sock is None:
         return None
     try:
@@ -949,6 +968,17 @@ def stop(root: Path) -> int:
     ``_wait_for_teardown`` for why a graceful shutdown's own ack
     arrives before the daemon has actually finished tearing down.
 
+    The forced-fallback branch only unlinks the daemon's transport
+    artifacts when there is *positive* evidence it's actually gone --
+    either a confirmed PID it just force-stopped, or a final
+    reachability probe that itself fails (round-14 daemon-status-
+    contention-plan.md §3: under sustained CPU contention, both the
+    graceful-ack wait and the PID lookup can time out without
+    confirming anything even though the daemon is genuinely still
+    alive and listening; unlinking unconditionally in that case
+    stranded a live, unreachable daemon process -- see that document
+    for the full root cause).
+
     Args:
         root: Resolved repo root whose daemon to stop.
 
@@ -984,7 +1014,20 @@ def stop(root: Path) -> int:
                 force_stop(pid)
             except ProcessLookupError:
                 pass
-        transport.cleanup()
+            transport.cleanup()
+        elif not is_daemon_reachable(transport, timeout=_STATUS_PROBE_TIMEOUT):
+            # Neither the shutdown ack nor a pid lookup confirmed
+            # anything, AND a final direct reachability probe also
+            # fails -- now there's real (if not airtight) evidence
+            # nothing is listening. Safe to clean up.
+            transport.cleanup()
+        # else: pid lookup failed but the daemon still answers a plain
+        # reachability probe -- it's alive, just hasn't replied to
+        # either of our two attempts. Leave its transport alone; a
+        # subsequent stop() (or the daemon's own idle-timeout) can
+        # retry. Matches this command's existing "always returns 0"
+        # contract without silently orphaning a live process to keep
+        # that contract.
     else:
         _wait_for_teardown(transport)
 
@@ -1015,6 +1058,70 @@ def _status_connect(
         return None
 
 
+def _probe_status(transport: DaemonTransport) -> tuple[dict | None, bool]:
+    """Run the ``_status`` round-trip, distinguishing a timeout from
+    every other failure.
+
+    Round-14 daemon-status-contention-plan.md §1-2: a connect to a
+    genuinely dead/absent daemon fails immediately at
+    ``_status_connect()`` (``ConnectionRefusedError``, not a timeout)
+    -- reaching the ``TimeoutError`` branch below at all means a live
+    listener already accepted the connection and just hasn't replied
+    yet, almost certainly GIL/OS-scheduling starvation on the status
+    thread under sustained CPU contention, not a dead daemon.
+    ``status()`` reports that honestly instead of folding it into the
+    same "not running" outcome as a genuine absence.
+
+    Returns:
+        A ``(data, timed_out)`` pair: ``data`` is the parsed response
+        (or ``None`` on any failure), ``timed_out`` is ``True`` only
+        for the post-connect-timeout case described above.
+    """
+    if not transport.exists():
+        return None, False
+    sock = _status_connect(transport, _STATUS_PROBE_TIMEOUT)
+    if sock is None:
+        return None, False
+    try:
+        transport.send_auth_preamble(sock)
+        _send_line(sock, {"cmd": _STATUS_CMD})
+        raw = _recv_line(sock)
+        data = json.loads(raw) if raw is not None else None
+        return data, False
+    except TimeoutError:
+        return None, True
+    except (OSError, ValueError):
+        return None, False
+    finally:
+        sock.close()
+
+
+def _print_unconfirmed_status(root: Path, as_json: bool) -> None:
+    """Report the "connected, but didn't reply in time" degraded state.
+
+    Distinct from the plain "not running" report: ``busy``/``uptime``/
+    ``cache`` are genuinely unknown here (the round trip that would
+    report them is exactly what didn't complete), so they're reported
+    as absent rather than guessed, matching this codebase's existing
+    "ambiguous rather than guessed" philosophy.
+    """
+    payload = {
+        "running": True,
+        "confirmed": False,
+        "root": str(root),
+        "note": (
+            "connected to a live daemon but it did not reply within "
+            f"{_STATUS_PROBE_TIMEOUT}s -- likely busy under CPU "
+            "contention; state below is unknown"
+        ),
+    }
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"dekko daemon: running for {root} (unconfirmed)")
+        print(f"  note: {payload['note']}")
+
+
 def status(root: Path, as_json: bool = False) -> int:
     """Handle ``dekko daemon status``.
 
@@ -1027,21 +1134,12 @@ def status(root: Path, as_json: bool = False) -> int:
         not a failure.
     """
     transport = default_transport_for(root)
-    data: dict | None = None
-    if transport.exists():
-        sock = _status_connect(transport, _CLIENT_TIMEOUT)
-        if sock is not None:
-            try:
-                transport.send_auth_preamble(sock)
-                _send_line(sock, {"cmd": _STATUS_CMD})
-                raw = _recv_line(sock)
-                data = json.loads(raw) if raw is not None else None
-            except (OSError, ValueError):
-                data = None
-            finally:
-                sock.close()
+    data, timed_out = _probe_status(transport)
 
     if data is None:
+        if timed_out:
+            _print_unconfirmed_status(root, as_json)
+            return 0
         if as_json:
             print(json.dumps({"running": False, "root": str(root)}))
         else:

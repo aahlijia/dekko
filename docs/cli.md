@@ -177,6 +177,16 @@ it replies immediately with `busy: true` instead of blocking until the
 other request finishes or timing out and falsely reporting "not
 running."
 
+Under sustained CPU contention on the host machine (many competing
+processes, or an unset-`--jobs` cold resolve on a huge repo pegging a
+core), even the status-only listener's own reply can be delayed by
+GIL/OS scheduling, independent of the main loop being busy. `status`
+distinguishes this from a genuinely dead daemon: a connect that
+succeeds but doesn't get an answer within a short probe window (2s)
+reports `{"running": true, "confirmed": false, "note": "..."}` instead
+of lying with `"running": false` — a live-but-momentarily-unanswering
+daemon is never misreported as not running.
+
 All three subcommands take `--root DIR` (default: cwd) for a repo
 other than the current directory. Transport is a Unix domain socket at
 `.dekko/daemon.sock` on macOS/Linux (with a second, status-only socket
