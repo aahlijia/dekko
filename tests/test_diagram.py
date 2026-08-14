@@ -4,9 +4,9 @@ import re
 
 import pytest
 
-from dekko import export, mapfile
-from dekko.model import CallGraph, Edge, FileMap, Symbol
-from dekko.render_md import _overview_diagram
+from dekko.render import export, mapfile
+from dekko.core.model import CallGraph, Edge, FileMap, Symbol
+from dekko.render.render_md import _overview_diagram
 
 
 def _sym(path: str, name: str) -> Symbol:

@@ -1,6 +1,6 @@
 [project]
 name = "dekko"
-version = "0.31.0"
+version = "0.31.1"
 description = "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin"
 readme = "README.md"
 license = "MIT"
@@ -69,7 +69,7 @@ Issues = "https://github.com/aahlijia/dekko/issues"
 Changelog = "https://github.com/aahlijia/dekko/blob/main/CHANGELOG.md"
 
 [project.scripts]
-dekko = "dekko.cli:main"
+dekko = "dekko.integrations.cli:main"
 
 [build-system]
 requires = ["hatchling"]

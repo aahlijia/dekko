@@ -9,6 +9,30 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.31.1] — 2026-08-14
+
+### Changed
+- **`src/dekko/` reorganized from 42 flat modules into six role-based
+  subpackages**: `core/` (parsing primitives — `model`, `extractor`,
+  `extractor_generic`, `grammars`, `languages`, `walker`, `resolver`),
+  `render/` (`mapfile`, `render_html`, `render_json`, `render_lean`,
+  `render_md`, `export`), `analysis/` (`query`, `outline`, `search`,
+  `affected`, `trace`, `unused`, `stats`, `summary`, `workset`,
+  `contextpack`, `diff`, `relevance`), `daemon/` (`daemon`,
+  `daemon_transport`), `integrations/` (`cli`, `server`, `hooks`,
+  `cline`, `orient`, `claude_md`), and `storage/` (`cache`,
+  `revcache`, `filelock`, `notes`, `ledger`, `embedding`).
+  `classify.py`/`textutil.py`/`source.py` stay top-level. Purely
+  structural — no behavior change; `tests/` partially mirrors the new
+  layout (1:1-matching unit tests moved into per-subpackage
+  directories, cross-cutting/end-to-end tests stayed flat).
+  **Compatibility note:** anything importing dekko internals directly
+  (e.g. `from dekko.cli import main` rather than via the `dekko`
+  console script or MCP server) must update to the new paths (e.g.
+  `dekko.integrations.cli`); the `[project.scripts]` entry point was
+  updated accordingly and the built wheel layout was verified
+  unaffected otherwise.
+
 ## [0.31.0] — 2026-08-14
 
 ### Added

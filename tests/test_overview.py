@@ -4,9 +4,10 @@ import re
 
 from conftest import RepoFactory
 
-from dekko import mapfile, summary
-from dekko.model import CallGraph, Edge, FileMap, Symbol
-from dekko.render_md import render_markdown
+from dekko.render import mapfile
+from dekko.analysis import summary
+from dekko.core.model import CallGraph, Edge, FileMap, Symbol
+from dekko.render.render_md import render_markdown
 
 
 def _sym(path: str, name: str) -> Symbol:

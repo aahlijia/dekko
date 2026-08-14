@@ -11,8 +11,8 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .mapfile import MapIndex
-    from .model import Symbol
+    from dekko.render.mapfile import MapIndex
+    from dekko.core.model import Symbol
 
 TEST_NAME_GLOBS = (
     "test_*",

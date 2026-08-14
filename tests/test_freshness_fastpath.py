@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko import mapfile
+from dekko.render import mapfile
 
 from conftest import RepoFactory
 

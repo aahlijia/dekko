@@ -26,8 +26,12 @@ tests skip on a default install (same as a user install). CI runs across
 - Keep PRs focused: one conceptual change per PR.
 - `ruff` is the linter/formatter and `pytest` the test runner; CI will fail if
   either does.
-- Tests live in `tests/`, mirroring `src/dekko/` module-for-module.
-  Fixtures (tiny sample-language files) live in `tests/fixtures/`.
+- Tests live in `tests/`, mirroring `src/dekko/`'s subpackages
+  (`core/`, `render/`, `analysis/`, `daemon/`, `integrations/`,
+  `storage/`) where a test maps cleanly to one moved module;
+  cross-cutting/behavioral tests and top-level-module tests stay flat
+  under `tests/`. Fixtures (tiny sample-language files) live in
+  `tests/fixtures/`.
   `test-repos/` holds real, unmodified open-source repos used for
   manual/agent evaluation of dekko itself, not pytest fixtures — see
   `test-repos/TESTING-GUIDE.md`.

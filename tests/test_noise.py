@@ -1,7 +1,7 @@
 """B6: minor-file collapse, test grouping, and ``--order``."""
 
-from dekko.model import CallGraph, Edge, FileMap, Symbol
-from dekko.render_md import render_markdown
+from dekko.core.model import CallGraph, Edge, FileMap, Symbol
+from dekko.render.render_md import render_markdown
 
 
 def _sym(path: str, name: str, line: int = 1) -> Symbol:
