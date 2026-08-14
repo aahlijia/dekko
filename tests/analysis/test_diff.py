@@ -297,6 +297,75 @@ def test_diff_jobs_flag_reaches_old_snapshot(
     assert seen_jobs[0] == (os.cpu_count() or 1)
 
 
+def test_maybe_warn_sequential_fires_above_threshold(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Round-15 finding: a jobs=1 rev-cache-miss over enough files gets
+    a stderr disclosure note before the slow single-threaded work
+    starts, mirroring ``render_lean.run``'s own floor-disclosure
+    pattern."""
+    monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 3)
+    diff._maybe_warn_sequential(1, ["a.py", "b.py", "c.py"])
+    err = capsys.readouterr().err
+    assert "single-threaded resolve on 3 files" in err
+    assert "--jobs 0" in err
+
+
+def test_maybe_warn_sequential_silent_below_threshold(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Small repos stay silent -- the note is only for the cases
+    where a single-threaded resolve would plausibly take a while."""
+    monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 10)
+    diff._maybe_warn_sequential(1, ["a.py", "b.py", "c.py"])
+    assert capsys.readouterr().err == ""
+
+
+def test_maybe_warn_sequential_silent_when_parallel(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """``--jobs 0``/``-N`` (resolved to >1 workers) never needs the
+    disclosure -- the whole point is a sequential-only cost."""
+    monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
+    diff._maybe_warn_sequential(4, ["a.py", "b.py", "c.py"])
+    assert capsys.readouterr().err == ""
+
+
+def test_maybe_warn_sequential_silent_when_candidates_unknown(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """An unresolvable rev (``candidates is None``) has nothing to
+    count -- ``snapshot()`` will fall back to its own discovery and
+    fail/succeed on its own terms; no note to print here."""
+    monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
+    diff._maybe_warn_sequential(1, None)
+    assert capsys.readouterr().err == ""
+
+
+def test_old_snapshot_disclosure_note_on_a_real_cache_miss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """End-to-end: a real ``dekko diff`` rev-cache miss at the default
+    ``--jobs 1`` prints the note when the repo is (per a lowered
+    threshold) "large"; a rev-cache *hit* on a second identical call
+    prints nothing, since ``old_snapshot`` returns before
+    ``_maybe_warn_sequential`` is ever reached."""
+    monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+    _commit_all(root, "change f")
+
+    assert cli.main(["diff", "HEAD~1", "--root", str(root)]) == 1
+    first_err = capsys.readouterr().err
+    assert "single-threaded resolve" in first_err
+    assert "--jobs 0" in first_err
+
+    assert cli.main(["diff", "HEAD~1", "--root", str(root)]) == 1
+    assert "single-threaded resolve" not in capsys.readouterr().err
+
+
 def test_diff_rev_cache_hit_skips_reexport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

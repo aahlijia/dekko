@@ -36,6 +36,21 @@ EXIT_SAME = 0
 EXIT_DIFFERENT = 1
 EXIT_ERROR = 2
 
+# Round-15 finding (round15-jobs-default-latency-plan.md): a bare
+# `diff`/`affected`/`workset` invocation with no rev-cache entry for
+# its target commit falls into old_snapshot()'s cache-miss path,
+# which -- at the default `--jobs 1` -- re-parses and resolves every
+# tracked file at that rev single-threaded. On the fleet's largest
+# repos this produced several minutes of zero-feedback silence
+# indistinguishable from a hang (tensorflow, 14,285 files: 5+ minutes
+# sequential vs. ~35s with `--jobs 0`). Chosen empirically from
+# round-15's own per-repo file counts: comfortably above cline/zed/
+# claude-code (up to ~2,730 files, none flagged as slow) and well
+# below spring-boot/tensorflow (9,942/14,285 files, the two repos
+# where this was actually noticeable), so the note only fires where
+# it's likely to matter.
+_SEQUENTIAL_DISCLOSURE_THRESHOLD = 5000
+
 
 @dataclass
 class Snapshot:
@@ -287,18 +302,52 @@ def old_snapshot(
         old_root = Path(tmp)
         if not export_rev(root, target_rev, old_root):
             return None
+        candidates = tracked_at_rev(root, target_rev)
+        _maybe_warn_sequential(jobs, candidates)
         old = snapshot(
             old_root,
             subpath,
             excludes,
             max_file_size,
             cache=old_cache,
-            candidates=tracked_at_rev(root, target_rev),
+            candidates=candidates,
             jobs=jobs,
         )
     if sha is not None:
         revcache.save(root, sha, old)
     return old
+
+
+def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
+    """Disclose a slow single-threaded rev-cache-miss re-parse/resolve.
+
+    Round-15 finding: at the default ``--jobs 1``, a first-touch
+    ``diff``/``affected``/``workset`` call on a large repo re-parses
+    and resolves every tracked file at the target rev single-threaded
+    with no progress output -- on the largest repos in the fleet this
+    ran for several minutes, indistinguishable from a hang (see
+    ``_SEQUENTIAL_DISCLOSURE_THRESHOLD``). Mirrors the pattern
+    ``render_lean.run`` already uses for its own budget-floor
+    disclosure: a one-line ``note:`` to stderr, printed once, before
+    the slow work starts -- no behavior change, purely additive.
+
+    Args:
+        jobs: Resolved worker count about to be passed to
+            ``snapshot()`` (1 = sequential).
+        candidates: The file list about to be re-parsed, or ``None``
+            (an unreadable rev -- ``snapshot()`` will fall back to its
+            own discovery, so there's nothing to count here).
+    """
+    if jobs > 1 or candidates is None:
+        return
+    if len(candidates) < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
+        return
+    print(
+        f"note: no rev-cache for this commit; single-threaded resolve "
+        f"on {len(candidates)} files may take a while -- pass --jobs 0 "
+        f"to use all cores",
+        file=sys.stderr,
+    )
 
 
 def tracked_at_rev(root: Path, rev: str) -> list[str] | None:
