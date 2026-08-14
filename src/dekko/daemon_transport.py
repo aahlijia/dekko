@@ -125,6 +125,22 @@ class DaemonUnavailableError(Exception):
     """
 
 
+class _StatusPortNotBoundError(DaemonUnavailableError):
+    """``TcpLoopbackTransport``-only: the port file is present and
+    parses fine, but simply has no ``status_port`` entry yet.
+
+    A ``DaemonUnavailableError`` subclass so existing broad
+    ``except DaemonUnavailableError`` callers keep working unchanged,
+    but distinguishable from a genuinely corrupt/stale port file so
+    ``status_client_connect()`` knows *not* to delete it -- the main
+    ``port``/``token`` entry in the same file is still valid and
+    ``is_daemon_reachable()``'s fallback to ``client_connect()`` needs
+    it to still be there. Never raised across the public
+    ``DaemonTransport`` interface; caught internally within this
+    module only.
+    """
+
+
 class DaemonTransport(ABC):
     """OS-specific channel between the CLI client and the daemon.
 
@@ -425,8 +441,29 @@ class TcpLoopbackTransport(DaemonTransport):
     def _read_status_port(self) -> tuple[int, str]:
         try:
             data = json.loads(self.port_file.read_text())
+        except (OSError, ValueError) as exc:
+            raise DaemonUnavailableError(
+                f"could not read status port from {self.port_file}: {exc}"
+            ) from exc
+        if not isinstance(data, dict):
+            raise DaemonUnavailableError(
+                f"malformed port file {self.port_file}: expected a "
+                f"JSON object, got {type(data).__name__}"
+            )
+        if "status_port" not in data:
+            # Benign, expected case: a daemon started by a
+            # pre-status-listener build never called
+            # bind_status_listener(), so the otherwise-valid,
+            # perfectly parseable port file just doesn't have this
+            # key -- not a corrupt/stale artifact. Distinguish this
+            # from the broad except below so status_client_connect()
+            # doesn't destroy the still-valid main port/token entry.
+            raise _StatusPortNotBoundError(
+                f"no status_port entry in {self.port_file}"
+            )
+        try:
             return int(data["status_port"]), str(data["token"])
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             raise DaemonUnavailableError(
                 f"could not read status port from {self.port_file}: {exc}"
             ) from exc
@@ -513,7 +550,16 @@ class TcpLoopbackTransport(DaemonTransport):
 
         try:
             port, token = self._read_status_port()
+        except _StatusPortNotBoundError:
+            # No status listener bound yet -- leave the port file
+            # alone. It still holds a valid main port/token pair that
+            # is_daemon_reachable()'s client_connect() fallback needs.
+            raise
         except DaemonUnavailableError:
+            # Port file itself is unreadable/corrupt -- same
+            # genuine-staleness case client_connect() treats as
+            # cleanup-worthy, and (unlike the missing-key case above)
+            # the main port/token entry can't be trusted either.
             self.cleanup()
             raise
         self._token = token
