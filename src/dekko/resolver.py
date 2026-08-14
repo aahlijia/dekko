@@ -618,7 +618,18 @@ def _pick_candidate(
         return typed
 
     if len(same_file) == 1:
-        return same_file[0]
+        only = same_file[0]
+        if caller is None or only.id != caller.id:
+            return only
+        # same_file's sole match is the caller's own symbol -- a
+        # coincidental bare-name collision between the call and its
+        # own enclosing symbol, not a genuine same-file target (a
+        # real self/this-qualified recursive call is already handled
+        # earlier, by _container_match). Fall through instead of
+        # "resolving" a call to itself and having _add_edge's self-
+        # recursion filter silently discard it -- give the later
+        # ladder steps (import hints, in particular) a chance to find
+        # the real target.
 
     hinted = _import_match(call, candidates, file_imports, raw_imports)
     if hinted is not None:

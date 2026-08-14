@@ -422,6 +422,59 @@ def test_tcp_client_connect_malformed_port_file_cleans_up(
     assert not transport.port_file.exists()
 
 
+def test_tcp_status_client_connect_without_status_listener_preserves_port_file(
+    tmp_path: Path,
+) -> None:
+    """Direct unit-level regression test for the bug this module's
+    ``status_client_connect()`` used to have: a port file that never
+    got a ``status_port`` entry (daemon started by a
+    pre-status-listener build, or simply hasn't called
+    ``bind_status_listener()`` yet) is a benign, expected case -- not
+    a corrupt/stale artifact -- so it must not be deleted.
+
+    Unlike
+    ``test_is_daemon_reachable_falls_back_to_main_socket_without_status_listener``
+    in this file (which only exercises this through
+    ``is_daemon_reachable()`` and is therefore Windows-only, since
+    that's the only CI leg where ``default_transport_for()`` picks
+    ``TcpLoopbackTransport``), this test exercises
+    ``TcpLoopbackTransport`` directly and so runs unconditionally on
+    every platform.
+    """
+    transport = dt.TcpLoopbackTransport(tmp_path)
+    listener = transport.bind_and_listen()  # no bind_status_listener()
+    try:
+        with pytest.raises(dt.DaemonUnavailableError):
+            transport.status_client_connect(timeout=1.0)
+
+        # The main port/token entry must survive so a fallback
+        # client_connect() can still reach the (genuinely live) main
+        # socket.
+        assert transport.port_file.exists()
+        sock = transport.client_connect(timeout=1.0)
+        sock.close()
+    finally:
+        listener.close()
+        transport.cleanup()
+
+
+def test_tcp_status_client_connect_malformed_port_file_cleans_up(
+    tmp_path: Path,
+) -> None:
+    """Contrast with the case above: a port file that fails to parse
+    at all (not merely missing ``status_port``) is genuinely
+    unusable -- the main port/token entry can't be trusted either --
+    so ``status_client_connect()`` must still clean it up here."""
+    transport = dt.TcpLoopbackTransport(tmp_path)
+    transport.port_file.parent.mkdir(parents=True, exist_ok=True)
+    transport.port_file.write_text("not valid json")
+
+    with pytest.raises(dt.DaemonUnavailableError):
+        transport.status_client_connect(timeout=1.0)
+
+    assert not transport.port_file.exists()
+
+
 # ---------------------------------------------------------------------
 # TcpLoopbackTransport-specific (unconditional -- usable everywhere)
 # ---------------------------------------------------------------------

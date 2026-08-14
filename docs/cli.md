@@ -157,6 +157,17 @@ a rev it hasn't seen before pays the same old-side reparse cost a
 direct invocation would — daemon routing speeds up the current-tree
 side only.
 
+Even for the current-tree side, the warm cache's win is specifically
+skipping map *loading* (re-parsing `map.json` into an in-memory
+index), not every part of a query's own cost. A query whose per-hit
+rendering dominates — `get_callers`/`find_usages` on a very
+high-fan-in "hub" symbol, where formatting hundreds or thousands of
+fan-in rows costs more than the index load ever did — can show little
+or no measurable wall-clock difference between a cold and warm daemon
+call even though `dekko daemon status`'s `hits`/`misses` counters
+correctly show the request was served warm. That's expected, not a
+sign the cache isn't working.
+
 `dekko daemon status` answers off a dedicated status-only listener
 (a second socket, separate from the one routed commands use), not the
 daemon's main accept loop — which is deliberately single-threaded and
@@ -165,6 +176,16 @@ fast and honest even while the daemon is mid-request on a slow query:
 it replies immediately with `busy: true` instead of blocking until the
 other request finishes or timing out and falsely reporting "not
 running."
+
+Under sustained CPU contention on the host machine (many competing
+processes, or an unset-`--jobs` cold resolve on a huge repo pegging a
+core), even the status-only listener's own reply can be delayed by
+GIL/OS scheduling, independent of the main loop being busy. `status`
+distinguishes this from a genuinely dead daemon: a connect that
+succeeds but doesn't get an answer within a short probe window (2s)
+reports `{"running": true, "confirmed": false, "note": "..."}` instead
+of lying with `"running": false` — a live-but-momentarily-unanswering
+daemon is never misreported as not running.
 
 All three subcommands take `--root DIR` (default: cwd) for a repo
 other than the current directory. Transport is a Unix domain socket at

@@ -42,6 +42,14 @@ relevant test-path symbol can be silently excluded before ranking ever
 sees it — :func:`run` prints a ``note:`` hint (a JSON ``"note"`` key)
 when the surviving top hit is weak and symbols were in fact excluded,
 so a low-confidence result doesn't read as a confident one (§2.2).
+
+``--scorer both`` also always prints a second, unconditional note
+(round-14 master report, LOW): its fused score is a reciprocal rank
+fusion value on a different scale than ``lexical``/``embedding``
+scores (see :func:`_scale_note`), so a caller comparing scores across
+scorer modes isn't misled by the scale change. Both notes, when
+present, are joined with ``"; "`` into the same single ``note:``
+line/``"note"`` key.
 """
 
 import json
@@ -509,6 +517,36 @@ def _exclusion_note(
     )
 
 
+def _scale_note(scorer_name: str) -> str | None:
+    """A hint that ``--scorer both``'s score isn't on the usual scale.
+
+    Round-14 master report (cline §4.3, claude-code §2.2, both LOW):
+    ``--scorer lexical``/``--scorer embedding`` scores land in a
+    familiar ``~0.25-0.9`` blended range, but ``--scorer both``'s fused
+    ``hits[0].score`` is a reciprocal rank fusion value (see
+    :func:`_fuse_both`) that compresses everything to roughly
+    ``~0.03`` — expected, since RRF fuses by rank position rather than
+    score magnitude, but with no in-band note previously explaining
+    why the scale changed. Only relevant when comparing scores
+    *across* scorer modes; ranking order within one ``--scorer both``
+    call is unaffected and needs no caveat.
+
+    Args:
+        scorer_name: One of :data:`SCORER_CHOICES`.
+
+    Returns:
+        A one-line hint when ``scorer_name`` is ``"both"``, else
+        ``None``.
+    """
+    if scorer_name != "both":
+        return None
+    return (
+        "--scorer both's score is a reciprocal-rank-fusion value, on a "
+        "different scale than --scorer lexical/embedding scores "
+        "(ranking order within this result is unaffected)"
+    )
+
+
 def _render_text(
     query_text: str,
     hits: list[SearchHit],
@@ -671,7 +709,11 @@ def run(
         hits = rank(index, query_text, kinds, scorer=scorer)
     if cache is not None and root is not None:
         embedding.save(root, cache)
-    note = _exclusion_note(hits, excluded_test_count, top_score=top_score)
+    exclusion_note = _exclusion_note(
+        hits, excluded_test_count, top_score=top_score
+    )
+    scale_note = _scale_note(scorer_name)
+    note = "; ".join(n for n in (exclusion_note, scale_note) if n) or None
     if as_json:
         return _render_json(query_text, hits, budget, limit, note)
     return _render_text(query_text, hits, budget, limit, note)

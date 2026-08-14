@@ -35,6 +35,77 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   MCP-only agent (no Bash) with no way to discover them.
 
 ### Fixed
+- **`resolver.py` could self-resolve a bare-name call to its own
+  enclosing symbol instead of the real cross-file target, silently
+  dropping the call.** When two symbols in different files share a
+  bare method name (e.g. Go's `IDGenerator.Generate` and an imported
+  `slug.Generate`), `_pick_candidate`'s same-file candidate step
+  could match the call's *own caller* as the sole same-file hit, not
+  a genuine same-file target, just a coincidental name collision, and
+  return it immediately. `_add_edge`'s self-recursion filter then
+  silently discarded the resulting self-edge, so the real, cross-file
+  call via an import hint was never tried and the call vanished from
+  the graph. `_pick_candidate` now falls through to later ladder
+  steps (import hints, in particular) whenever the same-file
+  candidate is the caller itself, while a genuine self/this-qualified
+  recursive call (already handled earlier via `_container_match`) is
+  unaffected. See `.features/plans/round14/
+  go-resolver-bare-name-collision-plan.md`.
+- **Windows daemon transport (`TcpLoopbackTransport`) could wipe its
+  own shared port file, and with it a still-valid daemon connection,
+  whenever a status listener simply hadn't been bound yet.**
+  `status_client_connect()` treated any `DaemonUnavailableError` from
+  reading the status port as corruption and deleted the whole port
+  file, including the main `port`/`token` entry
+  `is_daemon_reachable()`'s fallback `client_connect()` needs, even
+  for the benign case of a daemon started before
+  `bind_status_listener()` existed, which simply lacks a
+  `status_port` key. `daemon_transport.py` now raises a distinct
+  `_StatusPortNotBoundError` for that case so cleanup only fires on
+  genuine file corruption (unreadable, malformed JSON, or a
+  missing/invalid main entry). Windows-only in origin (macOS/Linux's
+  Unix-socket transport has no equivalent cleanup path), diagnosed
+  from a Windows CI run failure; see `.features/fixes/
+  windows-ci-failure-investigation.md`.
+- **`dekko daemon status` could report `running: false` for a daemon
+  that was alive but slow to reply, and `stop` could unlink a live
+  daemon's transport artifacts on the same false-negative evidence.**
+  Under sustained CPU contention, a status round-trip that had
+  already connected to a genuine listener could still time out
+  waiting for a reply, previously indistinguishable from a plain
+  connection refusal, so `status()` folded both into the same "not
+  running" report. `stop()`'s forced-fallback path (used when neither
+  a graceful-shutdown ack nor a PID lookup confirmed the daemon was
+  gone) had the mirror problem: it unlinked the transport
+  unconditionally, capable of orphaning a still-listening process.
+  `daemon.py`'s `status()`/`_query_pid()` now distinguish a
+  post-connect timeout from a genuine absence and report
+  `confirmed: false` instead of guessing; `stop()`'s forced-fallback
+  now only cleans up when a final reachability probe itself fails,
+  positive evidence, not silence. See `.features/plans/round14/
+  daemon-lifecycle-fixes-plan.md`.
+- **`dekko daemon stop` reported success up to ~1.1s before the
+  daemon process had actually torn down.** From a live eval against
+  6 of 7 real repos post-round-13 search fix
+  (`test-repos/reports/14-tokentest-7repo-postround13searchfix/`,
+  `MASTER_REPORT.md`), triple-independently confirmed (cline,
+  claude-buddy, claude-code): `_handle_connection` acked a `_shutdown`
+  request the instant it arrived, before `serve_daemon()`'s own
+  teardown (joining the status-listener thread — bounded by that
+  thread's own 1.0s `accept()` timeout, the dominant term in the
+  measured lag — closing both sockets, then unlinking their transport
+  artifacts) had actually run. A command issued in that window either
+  hard-failed (exit 7, misclassifying "daemon just torn down" as
+  "daemon still busy," violating the documented fail-open contract) or
+  raced a concurrent `daemon start` into spawning a genuine duplicate
+  live process. `daemon.py::stop()` now blocks (bounded, 5s cap) until
+  the daemon's transport artifacts are confirmed gone — a race-free,
+  filesystem-only check, since unlinking them is the literal last step
+  of the teardown it's waiting on — before reporting success. This
+  also structurally narrows a related daemon `start`→`stop`→`start`
+  orphan race a sibling report (tensorflow) found under heavy machine
+  contention, though that item stays open pending a contended re-test
+  (see `.features/plans/round14/daemon-lifecycle-fixes-plan.md`).
 - **Round-13 7-repo eval fixes.** From a live eval against 7 real
   repos post-round-12 (`test-repos/reports/13-tokentest-7repo-postround12fixes/`,
   `MASTER_REPORT.md`):
@@ -126,6 +197,28 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
     invariant test pinning the batch-consistency bug class) so future
     relevance tuning has a fast regression check instead of needing
     live multi-repo re-testing.
+- **`dekko search --scorer both`'s fused score was unlabeled and easy
+  to misread against `lexical`/`embedding`-only scores.** From the
+  round-14 7-repo eval master report (`test-repos/reports/
+  14-tokentest-7repo-postround13searchfix/MASTER_REPORT.md`,
+  corroborated 2/6 — cline, claude-code): `--scorer both`'s reciprocal
+  rank fusion score lands in a much lower, differently-shaped range
+  (~0.03 typical) than a blended `[0, 1]` lexical/embedding score, with
+  no in-band note explaining the scale changed — expected behavior
+  (RRF fuses by rank position, not score magnitude), but a rough edge
+  for anything comparing confidence *across* scorer modes. `search.py`
+  gained `_scale_note()`, an unconditional `note:`/`"note"` hint on
+  every `--scorer both` call (joined with the existing round-08 §2.2
+  exclusion note when both fire); `lexical`/`embedding` alone are
+  unaffected.
+- Documentation: `docs/cli.md`'s daemon-mode section now notes that
+  the warm cache's win is specifically about skipping map *loading*,
+  not every part of a query's own cost — a query whose per-hit
+  rendering dominates (e.g. `get_callers`/`find_usages` on a very
+  high-fan-in "hub" symbol) can show little or no measurable
+  wall-clock difference between a cold and warm daemon call even
+  though `hits`/`misses` correctly show it was served warm (round-14
+  eval, tensorflow §4.4 — not a bug, just an under-documented nuance).
 - **Windows CI: daemon stale-artifact test hardcoded the Unix-only
   transport.** `test_stale_socket_falls_open` wrote a bogus file at
   `.dekko/daemon.sock` and asserted it got cleaned up — correct on

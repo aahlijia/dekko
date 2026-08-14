@@ -1398,6 +1398,108 @@ def test_search_scorer_both_does_not_demote_correct_lexical_top_hit(
     assert fused2[0].symbol.qualname.endswith(".resolve")
 
 
+def test_search_scorer_both_scale_note_fires_unconditionally(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """Round-14 master report (cline §4.3, claude-code §2.2, LOW):
+    ``--scorer both``'s fused score is a reciprocal-rank-fusion value
+    on a different scale than ``lexical``/``embedding`` scores, with
+    no in-band explanation. ``_scale_note`` fixes this: it must fire
+    on every ``--scorer both`` call, JSON and text alike, regardless
+    of whether the round-08 §2.2 exclusion note also fires.
+    """
+    pytest.importorskip("numpy")
+    root = make_mapped_repo(SRC)
+    assert (
+        cli.main(
+            [
+                "search",
+                "http retry",
+                "--root",
+                str(root),
+                "--json",
+                "--scorer",
+                "both",
+            ]
+        )
+        == 0
+    )
+    doc = _json_out(capsys)
+    assert "note" in doc
+    assert "reciprocal-rank-fusion" in doc["note"]
+
+    assert (
+        cli.main(
+            [
+                "search",
+                "http retry",
+                "--root",
+                str(root),
+                "--scorer",
+                "both",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "note: --scorer both's score is a reciprocal-rank-fusion" in out
+
+
+def test_search_scorer_lexical_and_embedding_have_no_scale_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """``_scale_note`` is specific to ``--scorer both`` -- the default
+    lexical scorer and plain ``--scorer embedding`` must stay exactly
+    as before (no note absent an exclusion hint)."""
+    pytest.importorskip("numpy")
+    root = make_mapped_repo(SRC)
+    for scorer_name in ("lexical", "embedding"):
+        assert (
+            cli.main(
+                [
+                    "search",
+                    "http retry",
+                    "--root",
+                    str(root),
+                    "--json",
+                    "--scorer",
+                    scorer_name,
+                ]
+            )
+            == 0
+        )
+        doc = _json_out(capsys)
+        assert "note" not in doc
+
+
+def test_search_scorer_both_combines_scale_note_with_exclusion_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """When both notes fire (a weak top hit *and* ``--scorer both``),
+    they're joined into the same single ``note`` field, not just the
+    last one to run clobbering the other."""
+    pytest.importorskip("numpy")
+    root = make_mapped_repo(SRC)
+    assert (
+        cli.main(
+            [
+                "search",
+                "500 status code retry",
+                "--root",
+                str(root),
+                "--json",
+                "--scorer",
+                "both",
+            ]
+        )
+        == 0
+    )
+    doc = _json_out(capsys)
+    assert "note" in doc
+    assert "test-file" in doc["note"]
+    assert "reciprocal-rank-fusion" in doc["note"]
+
+
 def test_search_scorer_both_exclusion_note_uses_underlying_top_score(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
@@ -1448,7 +1550,13 @@ def test_search_scorer_both_exclusion_note_uses_underlying_top_score(
     # proves this isn't passing by accident of the fused scale being
     # high enough on its own.
     assert both_doc["hits"][0]["score"] < search.LOW_CONFIDENCE_THRESHOLD
-    assert "note" not in both_doc
+    # The exclusion note itself must still stay silent (the underlying
+    # top score is confident) -- but --scorer both's own scale note
+    # fires unconditionally, so "note" is present with only that text,
+    # not the exclusion hint.
+    assert "note" in both_doc
+    assert "test-file" not in both_doc["note"]
+    assert "reciprocal-rank-fusion" in both_doc["note"]
 
 
 def test_blended_scores_precomputed_relevance_matches_subset_call() -> None:
