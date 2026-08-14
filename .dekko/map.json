@@ -2,31 +2,31 @@
   "generator": "dekko",
   "version": 4,
   "root": "dekko",
-  "generated_at": "2026-08-14T12:02:15+00:00",
+  "generated_at": "2026-08-14T13:16:46+00:00",
   "provenance": {
-    "tool_version": "0.31.0",
+    "tool_version": "0.31.1",
     "spec_hash": "c826ad1278b7aafff9e22f8be8055da05975a6fe911238d34e952b7f939daf21",
-    "git_commit": "a0e9b89b5d232f2b23bbee87307331228594f179",
+    "git_commit": "154e37a69a9a099c0d35c94acec849ed56439caa",
     "subpath": null,
     "excludes": [],
     "max_file_size": 1000000,
     "files": {
-      "benchmarks/measure.py": "a719df8561c81623",
+      "benchmarks/measure.py": "68dbe55463ec0537",
       "install.sh": "95d13654ef75cf11",
       "src/dekko/__init__.py": "cb857bf1f4daf292",
       "src/dekko/analysis/__init__.py": "0f446a26924405c7",
-      "src/dekko/analysis/affected.py": "ab5ec7f376d4d3fb",
+      "src/dekko/analysis/affected.py": "d5f7f05940421090",
       "src/dekko/analysis/contextpack.py": "0c46ce6adff84749",
-      "src/dekko/analysis/diff.py": "fb4ffd43e7772375",
+      "src/dekko/analysis/diff.py": "94639956783fb4e0",
       "src/dekko/analysis/outline.py": "6e6ccfe60e1c5852",
       "src/dekko/analysis/query.py": "243d2208e778e8aa",
-      "src/dekko/analysis/relevance.py": "0a6262e049715466",
+      "src/dekko/analysis/relevance.py": "c65758f20fb9d1d5",
       "src/dekko/analysis/search.py": "345c3cff616c8bbe",
       "src/dekko/analysis/stats.py": "66145b45384fd777",
       "src/dekko/analysis/summary.py": "134059e286d09bf0",
       "src/dekko/analysis/trace.py": "ea71d69bf625955d",
       "src/dekko/analysis/unused.py": "1844c578df25bece",
-      "src/dekko/analysis/workset.py": "2af987f62c6c5922",
+      "src/dekko/analysis/workset.py": "fe8f66f68cc9c5e6",
       "src/dekko/classify.py": "0f81469259294640",
       "src/dekko/core/__init__.py": "223f017d1dbf4859",
       "src/dekko/core/extractor.py": "8619dfc611081d0e",
@@ -37,18 +37,18 @@
       "src/dekko/core/resolver.py": "2be28b597ff1158c",
       "src/dekko/core/walker.py": "e8037f14316a9ca8",
       "src/dekko/daemon/__init__.py": "62c454b107cefb8c",
-      "src/dekko/daemon/daemon.py": "7a922dbfb9041d6a",
+      "src/dekko/daemon/daemon.py": "17d5b3b6e9760f5b",
       "src/dekko/daemon/daemon_transport.py": "c1443a2013ed2dff",
       "src/dekko/integrations/__init__.py": "e0828a20692ddc08",
       "src/dekko/integrations/claude_md.py": "f6ba675b2a655d36",
       "src/dekko/integrations/cli.py": "56e6d56799eec077",
       "src/dekko/integrations/cline.py": "35c55c66cdd054fe",
-      "src/dekko/integrations/hooks.py": "1de19b584684d868",
-      "src/dekko/integrations/orient.py": "829fbb7b225c5369",
-      "src/dekko/integrations/server.py": "a29ca84479d70e94",
+      "src/dekko/integrations/hooks.py": "924f9545fe9b81be",
+      "src/dekko/integrations/orient.py": "dc22c74b5df2923f",
+      "src/dekko/integrations/server.py": "b7ca8a5c7ac4e409",
       "src/dekko/render/__init__.py": "d74ea6841369d074",
       "src/dekko/render/export.py": "5744a55c72098737",
-      "src/dekko/render/mapfile.py": "93c2b7cc2ad838aa",
+      "src/dekko/render/mapfile.py": "3451384f279c35cc",
       "src/dekko/render/render_html.py": "13a41ddd8bdb3332",
       "src/dekko/render/render_json.py": "94b9791b0411493b",
       "src/dekko/render/render_lean.py": "c1f79a71764c4c8c",
@@ -58,7 +58,7 @@
       "src/dekko/storage/cache.py": "92d53907897c3988",
       "src/dekko/storage/embedding.py": "1e91921cfe81b4fa",
       "src/dekko/storage/filelock.py": "3bf1045fca94348e",
-      "src/dekko/storage/ledger.py": "cf4a691f6cf0a264",
+      "src/dekko/storage/ledger.py": "faad230a55a7b4ed",
       "src/dekko/storage/notes.py": "0efb1665497b2caa",
       "src/dekko/storage/revcache.py": "3edff766dea9a374",
       "src/dekko/textutil.py": "2fdafe747b80462b",
@@ -69,7 +69,7 @@
       "tests/analysis/test_outline.py": "dce317d2cfa41d85",
       "tests/analysis/test_query.py": "008f43ee4350a065",
       "tests/analysis/test_relevance.py": "015726c8e6381841",
-      "tests/analysis/test_search.py": "04ff45ad5ee8f4d8",
+      "tests/analysis/test_search.py": "fad2218c7cab8cfb",
       "tests/analysis/test_stats.py": "2b3fbbc26b439054",
       "tests/analysis/test_summary.py": "5058c8daf1db4607",
       "tests/analysis/test_trace.py": "b59dadd9dc2da53e",
@@ -103,15 +103,15 @@
       "tests/integrations/test_cli.py": "1728871571e3ea3d",
       "tests/integrations/test_cline.py": "0c01cfff435c63ef",
       "tests/integrations/test_hooks.py": "ae96a33260c4270d",
-      "tests/integrations/test_orient.py": "704e6df2aea64c87",
+      "tests/integrations/test_orient.py": "61d803330e04291b",
       "tests/integrations/test_server.py": "f8010dab72790986",
       "tests/render/test_export.py": "a8a13449ace8f973",
       "tests/render/test_mapfile.py": "5ede6332cf822a50",
       "tests/render/test_render_md.py": "94823cff79c997b2",
-      "tests/storage/test_cache.py": "c8f505180ab5c2a8",
+      "tests/storage/test_cache.py": "d528cadbfd1f5ac7",
       "tests/storage/test_embedding.py": "65dc4dc3afba6c3c",
-      "tests/storage/test_filelock.py": "5fe794d6cc6acebe",
-      "tests/storage/test_ledger.py": "42f88b7fe017bcd6",
+      "tests/storage/test_filelock.py": "b7ccf4b9ca0ace4c",
+      "tests/storage/test_ledger.py": "0f949cede3275bea",
       "tests/storage/test_notes.py": "c24917722650e90d",
       "tests/storage/test_revcache.py": "bebe1af9f1f416f6",
       "tests/test_benchmark.py": "4e521188b7c86701",
@@ -137,8 +137,8 @@
     },
     "stat": {
       "benchmarks/measure.py": [
-        1786708564713658389,
-        11186
+        1786711129070172700,
+        11193
       ],
       "install.sh": [
         1781297498828563776,
@@ -149,159 +149,159 @@
         60
       ],
       "src/dekko/analysis/__init__.py": [
-        1786708561126541274,
+        1786711129071451450,
         70
       ],
       "src/dekko/analysis/affected.py": [
-        1786708506347681520,
-        19208
+        1786711129071647200,
+        19225
       ],
       "src/dekko/analysis/contextpack.py": [
-        1786708506351025880,
+        1786711129071890284,
         21748
       ],
       "src/dekko/analysis/diff.py": [
-        1786708506352157749,
-        18867
+        1786711129072312034,
+        18901
       ],
       "src/dekko/analysis/outline.py": [
-        1786708506357572308,
+        1786711129072721826,
         13053
       ],
       "src/dekko/analysis/query.py": [
-        1786708506357926764,
+        1786711129072999743,
         35683
       ],
       "src/dekko/analysis/relevance.py": [
-        1786705881872763998,
-        29623
+        1786711129073321868,
+        29636
       ],
       "src/dekko/analysis/search.py": [
-        1786708506361535831,
+        1786711129073639410,
         29378
       ],
       "src/dekko/analysis/stats.py": [
-        1786708506363605363,
+        1786711129073809576,
         4799
       ],
       "src/dekko/analysis/summary.py": [
-        1786708506363896445,
+        1786713358049115842,
         20808
       ],
       "src/dekko/analysis/trace.py": [
-        1786708506364952065,
+        1786711129074284202,
         8938
       ],
       "src/dekko/analysis/unused.py": [
-        1786708506365390022,
+        1786711129074554994,
         5516
       ],
       "src/dekko/analysis/workset.py": [
-        1786708506365972561,
-        16530
+        1786711129074804577,
+        16547
       ],
       "src/dekko/classify.py": [
-        1786708506348487391,
+        1786711129075040077,
         3670
       ],
       "src/dekko/core/__init__.py": [
-        1786708561126286984,
+        1786711129075361952,
         68
       ],
       "src/dekko/core/extractor.py": [
-        1786708506353333619,
+        1786711129075626952,
         38822
       ],
       "src/dekko/core/extractor_generic.py": [
-        1786708506353872908,
+        1786711129075888411,
         8079
       ],
       "src/dekko/core/grammars.py": [
-        1786705881870238144,
+        1786711129075996869,
         4991
       ],
       "src/dekko/core/languages.py": [
-        1786705881870903025,
+        1786711129076111619,
         24937
       ],
       "src/dekko/core/model.py": [
-        1786705881871586447,
+        1786711129076214411,
         8356
       ],
       "src/dekko/core/resolver.py": [
-        1786708506360636211,
+        1786711129076556245,
         55984
       ],
       "src/dekko/core/walker.py": [
-        1786708600925534303,
+        1786711129076739453,
         14240
       ],
       "src/dekko/daemon/__init__.py": [
-        1786708561126643399,
+        1786711129076977203,
         44
       ],
       "src/dekko/daemon/daemon.py": [
-        1786708539270560868,
-        45975
+        1786711129077384037,
+        46009
       ],
       "src/dekko/daemon/daemon_transport.py": [
-        1786705881868191503,
+        1786711129077510495,
         29417
       ],
       "src/dekko/integrations/__init__.py": [
-        1786708561126729274,
+        1786711129077752579,
         53
       ],
       "src/dekko/integrations/claude_md.py": [
-        1786707238898065758,
+        1786711129077871287,
         5180
       ],
       "src/dekko/integrations/cli.py": [
-        1786708506349561845,
+        1786713358049510799,
         87313
       ],
       "src/dekko/integrations/cline.py": [
-        1786013276733852415,
+        1786711129078379954,
         9040
       ],
       "src/dekko/integrations/hooks.py": [
-        1786708506354815112,
-        21795
+        1786711129078584787,
+        21840
       ],
       "src/dekko/integrations/orient.py": [
-        1786708506357324892,
-        6496
+        1786713358049898256,
+        6526
       ],
       "src/dekko/integrations/server.py": [
-        1786708506362397786,
-        47535
+        1786713358050055631,
+        47569
       ],
       "src/dekko/render/__init__.py": [
-        1786708561126443608,
+        1786711129079273746,
         67
       ],
       "src/dekko/render/export.py": [
-        1786708506352941621,
+        1786711129079543079,
         6851
       ],
       "src/dekko/render/mapfile.py": [
-        1786708592647041853,
-        38053
+        1786713234639333247,
+        38195
       ],
       "src/dekko/render/render_html.py": [
-        1786708506358803844,
+        1786711129079963329,
         12617
       ],
       "src/dekko/render/render_json.py": [
-        1786708506359348383,
+        1786711129080136371,
         1770
       ],
       "src/dekko/render/render_lean.py": [
-        1786708506359697298,
+        1786711129080351871,
         31877
       ],
       "src/dekko/render/render_md.py": [
-        1786708506360162671,
+        1786711129080554538,
         19384
       ],
       "src/dekko/source.py": [
@@ -309,119 +309,119 @@
         774
       ],
       "src/dekko/storage/__init__.py": [
-        1786708561126823815,
+        1786711129080861122,
         63
       ],
       "src/dekko/storage/cache.py": [
-        1786708506348140601,
+        1786713358050429755,
         9716
       ],
       "src/dekko/storage/embedding.py": [
-        1786708506352602497,
+        1786711129081250080,
         13331
       ],
       "src/dekko/storage/filelock.py": [
-        1786705881869973975,
+        1786711129081353664,
         5104
       ],
       "src/dekko/storage/ledger.py": [
-        1786708506355912065,
-        15523
+        1786711129081585247,
+        15534
       ],
       "src/dekko/storage/notes.py": [
-        1786708506356989394,
+        1786711129081910039,
         3417
       ],
       "src/dekko/storage/revcache.py": [
-        1786708506360899459,
+        1786711129082395122,
         5597
       ],
       "src/dekko/textutil.py": [
-        1786708506364582026,
+        1786711129082748289,
         8710
       ],
       "tests/analysis/test_affected.py": [
-        1786708564714636760,
+        1786711129082883456,
         17735
       ],
       "tests/analysis/test_contextpack.py": [
-        1786708564717170248,
+        1786711129083123289,
         11689
       ],
       "tests/analysis/test_contextpack_v2.py": [
-        1786708564717565913,
+        1786711129083280790,
         3990
       ],
       "tests/analysis/test_diff.py": [
-        1786708564719344905,
+        1786711129083479373,
         12580
       ],
       "tests/analysis/test_outline.py": [
-        1786708564725984083,
+        1786713370956012434,
         9044
       ],
       "tests/analysis/test_query.py": [
-        1786708564726775120,
+        1786713370956520932,
         37351
       ],
       "tests/analysis/test_relevance.py": [
-        1786708564727511159,
+        1786711129084038957,
         26805
       ],
       "tests/analysis/test_search.py": [
-        1786708592651065543,
-        56124
+        1786711129084475499,
+        56167
       ],
       "tests/analysis/test_stats.py": [
-        1786708564731798847,
+        1786713370956659182,
         3521
       ],
       "tests/analysis/test_summary.py": [
-        1786708564732734135,
+        1786713370957021139,
         12374
       ],
       "tests/analysis/test_trace.py": [
-        1786708564733032092,
+        1786711129085355749,
         5719
       ],
       "tests/analysis/test_unused.py": [
-        1786708564733267507,
+        1786711129085501791,
         8819
       ],
       "tests/analysis/test_workset.py": [
-        1786708564733854421,
+        1786713370957362805,
         11837
       ],
       "tests/conftest.py": [
-        1786708564714192053,
+        1786711129085822499,
         1112
       ],
       "tests/core/test_extractor.py": [
-        1786708692924757296,
+        1786711129085968458,
         17592
       ],
       "tests/core/test_grammars.py": [
-        1786708564721635311,
+        1786713370957463721,
         3145
       ],
       "tests/core/test_languages.py": [
-        1786708695746802422,
+        1786711129086256874,
         7266
       ],
       "tests/core/test_resolver.py": [
-        1786708697974253862,
+        1786711129086621958,
         70810
       ],
       "tests/core/test_walker.py": [
-        1786708564733657297,
+        1786711129086757791,
         12242
       ],
       "tests/daemon/test_daemon.py": [
-        1786708564718021202,
+        1786711129087015416,
         50633
       ],
       "tests/daemon/test_daemon_transport.py": [
-        1786708564718370242,
+        1786711129087168417,
         26683
       ],
       "tests/fixtures/c/main.c": [
@@ -489,67 +489,67 @@
         477
       ],
       "tests/integrations/test_claude_md.py": [
-        1786708564716009628,
+        1786711129087303167,
         2964
       ],
       "tests/integrations/test_cli.py": [
-        1786708564716335293,
+        1786713370957575971,
         25556
       ],
       "tests/integrations/test_cline.py": [
-        1786708564716790125,
+        1786711129087575875,
         6408
       ],
       "tests/integrations/test_hooks.py": [
-        1786708564721971351,
+        1786711129087700917,
         15790
       ],
       "tests/integrations/test_orient.py": [
-        1786708564725598168,
-        6301
+        1786711129087825917,
+        6310
       ],
       "tests/integrations/test_server.py": [
-        1786708564730967518,
+        1786713370957687387,
         34026
       ],
       "tests/render/test_export.py": [
-        1786708564720474149,
+        1786711129088341251,
         3195
       ],
       "tests/render/test_mapfile.py": [
-        1786708564724675589,
+        1786711129088483001,
         21916
       ],
       "tests/render/test_render_md.py": [
-        1786708564727906407,
+        1786711129088611542,
         3895
       ],
       "tests/storage/test_cache.py": [
-        1786708564715579547,
-        12690
+        1786713370957780720,
+        12695
       ],
       "tests/storage/test_embedding.py": [
-        1786708564719997277,
+        1786711129089126293,
         8298
       ],
       "tests/storage/test_filelock.py": [
-        1786708564720916522,
-        3451
+        1786711129089245876,
+        3459
       ],
       "tests/storage/test_ledger.py": [
-        1786708700924775442,
-        6733
+        1786711129089377543,
+        6746
       ],
       "tests/storage/test_notes.py": [
-        1786708564725352294,
+        1786711129089511168,
         4643
       ],
       "tests/storage/test_revcache.py": [
-        1786708564728970402,
+        1786711129089629459,
         2939
       ],
       "tests/test_benchmark.py": [
-        1786708564715097966,
+        1786711129089821710,
         4410
       ],
       "tests/test_budget.py": [
@@ -561,43 +561,43 @@
         3589
       ],
       "tests/test_density.py": [
-        1786708564718700991,
+        1786711129089982751,
         3930
       ],
       "tests/test_diagram.py": [
-        1786708564719094989,
+        1786711129090142710,
         2846
       ],
       "tests/test_docs.py": [
-        1786708564719671028,
+        1786711129090401168,
         5608
       ],
       "tests/test_freshness_fastpath.py": [
-        1786708564721265646,
+        1786711129090556918,
         2379
       ],
       "tests/test_generic.py": [
-        1786708564721449270,
+        1786711129090703293,
         1410
       ],
       "tests/test_hotspots.py": [
-        1786708564722677389,
+        1786711129090865585,
         5312
       ],
       "tests/test_html.py": [
-        1786708564723283803,
+        1786711129091051085,
         5216
       ],
       "tests/test_lean.py": [
-        1786708564724139966,
+        1786711129091222169,
         26036
       ],
       "tests/test_noise.py": [
-        1786708564725117170,
+        1786711129091406627,
         3940
       ],
       "tests/test_overview.py": [
-        1786708564726279248,
+        1786711129091565502,
         2595
       ],
       "tests/test_python_floor.py": [
@@ -605,19 +605,19 @@
         1730
       ],
       "tests/test_query_surface.py": [
-        1786708564727195452,
+        1786711129091730252,
         7224
       ],
       "tests/test_schema_v3.py": [
-        1786708564729476483,
+        1786711129091874211,
         3784
       ],
       "tests/test_shard.py": [
-        1786708564731573473,
+        1786711129092034044,
         4882
       ],
       "tests/test_status.py": [
-        1786708564732475636,
+        1786711129092202002,
         4152
       ],
       "tests/test_tokenizer.py": [
@@ -727,7 +727,7 @@
         {
           "path": "benchmarks/measure.py",
           "name": "render_lean",
-          "source": "dekko.render_lean"
+          "source": "dekko.render.render_lean"
         }
       ]
     },
@@ -836,7 +836,7 @@
         {
           "path": "src/dekko/analysis/affected.py",
           "name": "cli",
-          "source": ".cli"
+          "source": "dekko.integrations.cli"
         }
       ]
     },
@@ -1057,12 +1057,12 @@
         {
           "path": "src/dekko/analysis/diff.py",
           "name": "cli",
-          "source": ".cli"
+          "source": "dekko.integrations.cli"
         },
         {
           "path": "src/dekko/analysis/diff.py",
           "name": "cli",
-          "source": ".cli"
+          "source": "dekko.integrations.cli"
         }
       ]
     },
@@ -1286,7 +1286,7 @@
         {
           "path": "src/dekko/analysis/relevance.py",
           "name": "summary",
-          "source": ".summary"
+          "source": "dekko.analysis.summary"
         }
       ]
     },
@@ -1694,7 +1694,7 @@
         {
           "path": "src/dekko/analysis/workset.py",
           "name": "cli",
-          "source": ".cli"
+          "source": "dekko.integrations.cli"
         }
       ]
     },
@@ -2210,7 +2210,7 @@
         {
           "path": "src/dekko/daemon/daemon.py",
           "name": "cli",
-          "source": ".cli"
+          "source": "dekko.integrations.cli"
         },
         {
           "path": "src/dekko/daemon/daemon.py",
@@ -2220,7 +2220,7 @@
         {
           "path": "src/dekko/daemon/daemon.py",
           "name": "cli",
-          "source": ".cli"
+          "source": "dekko.integrations.cli"
         }
       ]
     },
@@ -2672,12 +2672,12 @@
         {
           "path": "src/dekko/integrations/hooks.py",
           "name": "cli",
-          "source": ".cli"
+          "source": "dekko.integrations.cli"
         },
         {
           "path": "src/dekko/integrations/hooks.py",
           "name": "mapfile",
-          "source": ".mapfile"
+          "source": "dekko.render.mapfile"
         }
       ]
     },
@@ -2725,12 +2725,12 @@
         {
           "path": "src/dekko/integrations/orient.py",
           "name": "_search",
-          "source": ".search"
+          "source": "dekko.analysis.search"
         },
         {
           "path": "src/dekko/integrations/orient.py",
           "name": "cli",
-          "source": ".cli"
+          "source": "dekko.integrations.cli"
         }
       ]
     },
@@ -2873,12 +2873,12 @@
         {
           "path": "src/dekko/integrations/server.py",
           "name": "cli",
-          "source": ".cli"
+          "source": "dekko.integrations.cli"
         },
         {
           "path": "src/dekko/integrations/server.py",
           "name": "cli",
-          "source": ".cli"
+          "source": "dekko.integrations.cli"
         }
       ]
     },
@@ -3027,6 +3027,11 @@
           "path": "src/dekko/render/mapfile.py",
           "name": "Symbol",
           "source": "dekko.core.model.Symbol"
+        },
+        {
+          "path": "src/dekko/render/mapfile.py",
+          "name": "orjson",
+          "source": "orjson"
         },
         {
           "path": "src/dekko/render/mapfile.py",
@@ -3595,7 +3600,7 @@
         {
           "path": "src/dekko/storage/ledger.py",
           "name": "mapfile",
-          "source": ".mapfile"
+          "source": "dekko.render.mapfile"
         }
       ]
     },
@@ -4163,7 +4168,7 @@
         {
           "path": "tests/analysis/test_search.py",
           "name": "embedding",
-          "source": "dekko.embedding"
+          "source": "dekko.storage.embedding"
         },
         {
           "path": "tests/analysis/test_search.py",
@@ -4188,7 +4193,7 @@
         {
           "path": "tests/analysis/test_search.py",
           "name": "relevance_mod",
-          "source": "dekko.relevance"
+          "source": "dekko.analysis.relevance"
         },
         {
           "path": "tests/analysis/test_search.py",
@@ -4198,7 +4203,7 @@
         {
           "path": "tests/analysis/test_search.py",
           "name": "relevance_mod",
-          "source": "dekko.relevance"
+          "source": "dekko.analysis.relevance"
         },
         {
           "path": "tests/analysis/test_search.py",
@@ -4213,7 +4218,7 @@
         {
           "path": "tests/analysis/test_search.py",
           "name": "relevance_mod",
-          "source": "dekko.relevance"
+          "source": "dekko.analysis.relevance"
         },
         {
           "path": "tests/analysis/test_search.py",
@@ -4248,7 +4253,7 @@
         {
           "path": "tests/analysis/test_search.py",
           "name": "embedding_mod",
-          "source": "dekko.embedding"
+          "source": "dekko.storage.embedding"
         }
       ]
     },
@@ -5271,7 +5276,7 @@
         {
           "path": "tests/integrations/test_orient.py",
           "name": "outline",
-          "source": "dekko.outline"
+          "source": "dekko.analysis.outline"
         }
       ]
     },
@@ -5466,7 +5471,7 @@
         {
           "path": "tests/storage/test_cache.py",
           "name": "resolver_mod",
-          "source": "dekko.resolver"
+          "source": "dekko.core.resolver"
         }
       ]
     },
@@ -5590,7 +5595,7 @@
         {
           "path": "tests/storage/test_ledger.py",
           "name": "server",
-          "source": "dekko.server"
+          "source": "dekko.integrations.server"
         }
       ]
     },
@@ -19913,7 +19918,7 @@
       ],
       "returns": "MapIndex | None",
       "start_line": 85,
-      "end_line": 92,
+      "end_line": 93,
       "decorated": false,
       "exported": false,
       "doc": "Load the map; optionally auto-regenerate a stale one.",
@@ -19937,8 +19942,8 @@
         }
       ],
       "returns": "dict",
-      "start_line": 95,
-      "end_line": 102,
+      "start_line": 96,
+      "end_line": 103,
       "decorated": false,
       "exported": false,
       "doc": "The hookSpecificOutput envelope that injects ``text`` as context.",
@@ -19958,8 +19963,8 @@
         }
       ],
       "returns": "dict | None",
-      "start_line": 108,
-      "end_line": 139,
+      "start_line": 109,
+      "end_line": 140,
       "decorated": false,
       "exported": false,
       "doc": "Inject a steering preamble + budget-capped lean map (FR-A1).",
@@ -19979,8 +19984,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 145,
-      "end_line": 149,
+      "start_line": 146,
+      "end_line": 150,
       "decorated": false,
       "exported": false,
       "doc": "Fewer files as the session's token budget fills (FR-C3).",
@@ -20004,8 +20009,8 @@
         }
       ],
       "returns": "tuple[list[relevance.Candidate], dict[str, float]]",
-      "start_line": 152,
-      "end_line": 170,
+      "start_line": 153,
+      "end_line": 171,
       "decorated": false,
       "exported": false,
       "doc": "Relevance candidates for files not already fully in context.",
@@ -20033,8 +20038,8 @@
         }
       ],
       "returns": "list[str]",
-      "start_line": 173,
-      "end_line": 192,
+      "start_line": 174,
+      "end_line": 193,
       "decorated": false,
       "exported": false,
       "doc": "Top task-relevant, not-yet-read files, budget-scaled and gated.",
@@ -20054,8 +20059,8 @@
         }
       ],
       "returns": "dict | None",
-      "start_line": 195,
-      "end_line": 217,
+      "start_line": 196,
+      "end_line": 218,
       "decorated": false,
       "exported": false,
       "doc": "Point at the files most relevant to the new prompt (FR-A2).",
@@ -20083,8 +20088,8 @@
         }
       ],
       "returns": "ledger.LedgerView",
-      "start_line": 220,
-      "end_line": 225,
+      "start_line": 221,
+      "end_line": 226,
       "decorated": false,
       "exported": false,
       "doc": "Build the session ledger from the payload's transcript, if any.",
@@ -20104,8 +20109,8 @@
         }
       ],
       "returns": "dict | None",
-      "start_line": 231,
-      "end_line": 262,
+      "start_line": 232,
+      "end_line": 263,
       "decorated": false,
       "exported": false,
       "doc": "Advise outlining a large file first \u2014 non-blocking (FR-A3, Q5).",
@@ -20129,8 +20134,8 @@
         }
       ],
       "returns": "str | None",
-      "start_line": 265,
-      "end_line": 273,
+      "start_line": 266,
+      "end_line": 274,
       "decorated": false,
       "exported": false,
       "doc": "Normalize an absolute read path to repo-relative POSIX, or None.",
@@ -20150,8 +20155,8 @@
         }
       ],
       "returns": "list[list[str]]",
-      "start_line": 292,
-      "end_line": 311,
+      "start_line": 293,
+      "end_line": 312,
       "decorated": false,
       "exported": false,
       "doc": "Tokenize a shell command into per-statement argv lists.",
@@ -20171,8 +20176,8 @@
         }
       ],
       "returns": "str | None",
-      "start_line": 314,
-      "end_line": 328,
+      "start_line": 315,
+      "end_line": 329,
       "decorated": false,
       "exported": false,
       "doc": "Nudge for a repo-wide grep/rg/ag search, or None.",
@@ -20192,8 +20197,8 @@
         }
       ],
       "returns": "str | None",
-      "start_line": 331,
-      "end_line": 339,
+      "start_line": 332,
+      "end_line": 340,
       "decorated": false,
       "exported": false,
       "doc": "Nudge for a `find -name` hunt for a file/definition, or None.",
@@ -20221,8 +20226,8 @@
         }
       ],
       "returns": "str | None",
-      "start_line": 342,
-      "end_line": 361,
+      "start_line": 343,
+      "end_line": 362,
       "decorated": false,
       "exported": false,
       "doc": "Nudge for `cat`/`head`/`sed` on a large mapped file, or None.",
@@ -20250,8 +20255,8 @@
         }
       ],
       "returns": "str | None",
-      "start_line": 364,
-      "end_line": 374,
+      "start_line": 365,
+      "end_line": 375,
       "decorated": false,
       "exported": false,
       "doc": "The first dekko-equivalent nudge for a shell command, or None.",
@@ -20279,8 +20284,8 @@
         }
       ],
       "returns": "dict | None",
-      "start_line": 377,
-      "end_line": 414,
+      "start_line": 378,
+      "end_line": 415,
       "decorated": false,
       "exported": false,
       "doc": "Ask (or, under --strict, deny) before a grep/find/cat fallback.",
@@ -20312,8 +20317,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 427,
-      "end_line": 459,
+      "start_line": 428,
+      "end_line": 460,
       "decorated": false,
       "exported": false,
       "doc": "Run a hook handler over stdin JSON and print its output.",
@@ -20333,8 +20338,8 @@
         }
       ],
       "returns": "Path",
-      "start_line": 465,
-      "end_line": 467,
+      "start_line": 466,
+      "end_line": 468,
       "decorated": false,
       "exported": false,
       "doc": "Project-local Claude Code settings file for ``root``.",
@@ -20354,8 +20359,8 @@
         }
       ],
       "returns": "dict",
-      "start_line": 470,
-      "end_line": 476,
+      "start_line": 471,
+      "end_line": 477,
       "decorated": false,
       "exported": false,
       "doc": "Read existing settings, or an empty object (best-effort).",
@@ -20387,8 +20392,8 @@
         }
       ],
       "returns": "dict",
-      "start_line": 479,
-      "end_line": 492,
+      "start_line": 480,
+      "end_line": 493,
       "decorated": false,
       "exported": false,
       "doc": "One settings hooks entry invoking ``dekko hooks run <event>``.",
@@ -20408,8 +20413,8 @@
         }
       ],
       "returns": "bool",
-      "start_line": 495,
-      "end_line": 501,
+      "start_line": 496,
+      "end_line": 502,
       "decorated": false,
       "exported": false,
       "doc": "Whether a settings hooks entry is one of ours.",
@@ -20441,8 +20446,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 504,
-      "end_line": 539,
+      "start_line": 505,
+      "end_line": 540,
       "decorated": false,
       "exported": false,
       "doc": "Merge dekko hook entries into project settings (idempotent).",
@@ -20466,8 +20471,8 @@
         }
       ],
       "returns": "bool",
-      "start_line": 542,
-      "end_line": 559,
+      "start_line": 543,
+      "end_line": 560,
       "decorated": false,
       "exported": false,
       "doc": "Whether ``event`` is already wired in a settings bucket.",
@@ -20487,8 +20492,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 562,
-      "end_line": 597,
+      "start_line": 563,
+      "end_line": 598,
       "decorated": false,
       "exported": false,
       "doc": "Remove all dekko hook entries from project settings.",
@@ -21979,8 +21984,8 @@
         }
       ],
       "returns": "object",
-      "start_line": 46,
-      "end_line": 55,
+      "start_line": 51,
+      "end_line": 60,
       "decorated": false,
       "exported": false,
       "doc": "Parse JSON bytes, preferring ``orjson`` (2-10x faster) when",
@@ -22000,8 +22005,8 @@
         }
       ],
       "returns": "bytes",
-      "start_line": 58,
-      "end_line": 66,
+      "start_line": 63,
+      "end_line": 71,
       "decorated": false,
       "exported": false,
       "doc": "Serialize to compact JSON bytes, preferring ``orjson`` when",
@@ -22025,8 +22030,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 69,
-      "end_line": 107,
+      "start_line": 74,
+      "end_line": 112,
       "decorated": false,
       "exported": false,
       "doc": "Write ``data`` to ``path`` without ever exposing a partial file.",
@@ -22046,8 +22051,8 @@
         }
       ],
       "returns": "dict | None",
-      "start_line": 110,
-      "end_line": 141,
+      "start_line": 115,
+      "end_line": 146,
       "decorated": false,
       "exported": false,
       "doc": "Aggregate ``walker.discover``'s skip reasons into a coverage note.",
@@ -22067,8 +22072,8 @@
         }
       ],
       "returns": "dict | None",
-      "start_line": 144,
-      "end_line": 175,
+      "start_line": 149,
+      "end_line": 180,
       "decorated": false,
       "exported": false,
       "doc": "Aggregate ``walker.discover``'s ``\"vendored (<dir>)\"`` reasons.",
@@ -22088,8 +22093,8 @@
         }
       ],
       "returns": "str | None",
-      "start_line": 178,
-      "end_line": 221,
+      "start_line": 183,
+      "end_line": 226,
       "decorated": false,
       "exported": false,
       "doc": "Coverage note(s) from a provenance dict's skip aggregates.",
@@ -22129,8 +22134,8 @@
         }
       ],
       "returns": "dict",
-      "start_line": 224,
-      "end_line": 260,
+      "start_line": 229,
+      "end_line": 265,
       "decorated": false,
       "exported": false,
       "doc": "Build the provenance stamp for a freshly generated map.",
@@ -22150,8 +22155,8 @@
         }
       ],
       "returns": "str | None",
-      "start_line": 263,
-      "end_line": 276,
+      "start_line": 268,
+      "end_line": 281,
       "decorated": false,
       "exported": false,
       "doc": "Return the HEAD commit of the repo at root, or ``None``.",
@@ -22171,8 +22176,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 279,
-      "end_line": 284,
+      "start_line": 284,
+      "end_line": 289,
       "decorated": false,
       "exported": false,
       "doc": "Short content hash used for staleness comparison.",
@@ -22192,8 +22197,8 @@
         }
       ],
       "returns": "list[int]",
-      "start_line": 287,
-      "end_line": 297,
+      "start_line": 292,
+      "end_line": 302,
       "decorated": false,
       "exported": false,
       "doc": "``[mtime_ns, size]`` signature for the freshness fast path.",
@@ -22208,8 +22213,8 @@
       "language": "python",
       "params": [],
       "returns": null,
-      "start_line": 301,
-      "end_line": 449,
+      "start_line": 306,
+      "end_line": 454,
       "decorated": true,
       "exported": false,
       "doc": "map.json loaded into lookup structures.",
@@ -22233,8 +22238,8 @@
         }
       ],
       "returns": "int",
-      "start_line": 377,
-      "end_line": 381,
+      "start_line": 382,
+      "end_line": 386,
       "decorated": false,
       "exported": false,
       "doc": "Total fan-in + fan-out of a symbol id.",
@@ -22254,8 +22259,8 @@
         }
       ],
       "returns": "\"MapIndex\"",
-      "start_line": 383,
-      "end_line": 449,
+      "start_line": 388,
+      "end_line": 454,
       "decorated": false,
       "exported": false,
       "doc": "A filtered view with all test code removed.",
@@ -22275,8 +22280,8 @@
         }
       ],
       "returns": "bool",
-      "start_line": 452,
-      "end_line": 464,
+      "start_line": 457,
+      "end_line": 469,
       "decorated": false,
       "exported": false,
       "doc": "Whether a symbol is test code, by path or extractor flag.",
@@ -22300,8 +22305,8 @@
         }
       ],
       "returns": "bool",
-      "start_line": 467,
-      "end_line": 479,
+      "start_line": 472,
+      "end_line": 484,
       "decorated": false,
       "exported": false,
       "doc": "Whether a symbol/module id belongs to production (non-test) code.",
@@ -22325,8 +22330,8 @@
         }
       ],
       "returns": "dict[str, list[str]]",
-      "start_line": 482,
-      "end_line": 493,
+      "start_line": 487,
+      "end_line": 498,
       "decorated": false,
       "exported": false,
       "doc": "Drop test-path nodes from an adjacency table, keys and values.",
@@ -22346,8 +22351,8 @@
         }
       ],
       "returns": "dict",
-      "start_line": 496,
-      "end_line": 502,
+      "start_line": 501,
+      "end_line": 507,
       "decorated": false,
       "exported": false,
       "doc": "Drop test-path keys from a path-keyed mapping.",
@@ -22362,8 +22367,8 @@
       "language": "python",
       "params": [],
       "returns": null,
-      "start_line": 506,
-      "end_line": 552,
+      "start_line": 511,
+      "end_line": 557,
       "decorated": true,
       "exported": false,
       "doc": "Result of comparing a map's provenance to the working tree.",
@@ -22383,8 +22388,8 @@
         }
       ],
       "returns": "Symbol",
-      "start_line": 555,
-      "end_line": 573,
+      "start_line": 560,
+      "end_line": 578,
       "decorated": false,
       "exported": false,
       "doc": "Rebuild a ``Symbol`` (with ``Param``s) from its JSON dict.",
@@ -22404,8 +22409,8 @@
         }
       ],
       "returns": "dict[str, list[str]]",
-      "start_line": 576,
-      "end_line": 594,
+      "start_line": 581,
+      "end_line": 599,
       "decorated": false,
       "exported": false,
       "doc": "Read ``.dekko/notes.json`` into symbol id \u2192 note texts.",
@@ -22425,8 +22430,8 @@
         }
       ],
       "returns": "str",
-      "start_line": 597,
-      "end_line": 603,
+      "start_line": 602,
+      "end_line": 608,
       "decorated": false,
       "exported": false,
       "doc": "Base identifier of an external callee text.",
@@ -22446,8 +22451,8 @@
         }
       ],
       "returns": "MapIndex | None",
-      "start_line": 606,
-      "end_line": 664,
+      "start_line": 611,
+      "end_line": 669,
       "decorated": false,
       "exported": false,
       "doc": "Load ``root/.dekko/map.json`` into a ``MapIndex``.",
@@ -22467,8 +22472,8 @@
         }
       ],
       "returns": "tuple[dict[str, list[tuple[str, str]]], dict[str, list[str]]]",
-      "start_line": 667,
-      "end_line": 699,
+      "start_line": 672,
+      "end_line": 704,
       "decorated": false,
       "exported": false,
       "doc": "Index ambiguous-call records by candidate, and by caller.",
@@ -22496,8 +22501,8 @@
         }
       ],
       "returns": "MapIndex",
-      "start_line": 702,
-      "end_line": 748,
+      "start_line": 707,
+      "end_line": 753,
       "decorated": false,
       "exported": false,
       "doc": "Build a ``MapIndex`` from in-memory extraction results.",
@@ -22521,8 +22526,8 @@
         }
       ],
       "returns": "Freshness",
-      "start_line": 751,
-      "end_line": 771,
+      "start_line": 756,
+      "end_line": 776,
       "decorated": false,
       "exported": false,
       "doc": "Compare an index's provenance against the current tree.",
@@ -22546,8 +22551,8 @@
         }
       ],
       "returns": "Freshness",
-      "start_line": 774,
-      "end_line": 800,
+      "start_line": 779,
+      "end_line": 805,
       "decorated": false,
       "exported": false,
       "doc": "Cheap freshness check driven by a provenance dict alone.",
@@ -22571,8 +22576,8 @@
         }
       ],
       "returns": "Freshness",
-      "start_line": 803,
-      "end_line": 869,
+      "start_line": 808,
+      "end_line": 874,
       "decorated": false,
       "exported": false,
       "doc": "Shared comparison body for both freshness-check entry points.",
@@ -22592,8 +22597,8 @@
         }
       ],
       "returns": "dict | None",
-      "start_line": 872,
-      "end_line": 922,
+      "start_line": 877,
+      "end_line": 927,
       "decorated": false,
       "exported": false,
       "doc": "Freshness-only load: read the provenance sidecar, not the map.",
@@ -22617,8 +22622,8 @@
         }
       ],
       "returns": "None",
-      "start_line": 925,
-      "end_line": 946,
+      "start_line": 930,
+      "end_line": 951,
       "decorated": false,
       "exported": false,
       "doc": "Write the small provenance-only sidecar next to ``map.json``.",
@@ -59456,294 +59461,294 @@
       "caller": "src/dekko/integrations/hooks.py::_adaptive_top",
       "callee": "src/dekko/storage/ledger.py::LedgerView.remaining",
       "lines": [
-        147
+        148
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_bash_reason",
       "callee": "src/dekko/integrations/hooks.py::_cat_reason",
       "lines": [
-        370
+        371
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_bash_reason",
       "callee": "src/dekko/integrations/hooks.py::_find_reason",
       "lines": [
-        369
+        370
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_bash_reason",
       "callee": "src/dekko/integrations/hooks.py::_grep_reason",
       "lines": [
-        368
+        369
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_bash_reason",
       "callee": "src/dekko/integrations/hooks.py::_split_statements",
       "lines": [
-        366
+        367
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_cat_reason",
       "callee": "src/dekko/analysis/outline.py::size_estimate",
       "lines": [
-        352
+        353
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_cat_reason",
       "callee": "src/dekko/integrations/hooks.py::_rel_to_root",
       "lines": [
-        349
+        350
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_file_candidates",
       "callee": "src/dekko/analysis/relevance.py::Candidate",
       "lines": [
-        167
+        168
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_file_candidates",
       "callee": "src/dekko/analysis/summary.py::_file_fan_in",
       "lines": [
-        169
+        170
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_load_index",
       "callee": "src/dekko/integrations/cli.py::_load_or_regen",
       "lines": [
-        91
+        92
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_load_index",
       "callee": "src/dekko/render/mapfile.py::load_map",
       "lines": [
-        90
+        91
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_relevant_files",
       "callee": "src/dekko/analysis/relevance.py::LexicalScorer",
       "lines": [
-        184
+        185
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_relevant_files",
       "callee": "src/dekko/analysis/relevance.py::blended_scores",
       "lines": [
-        188
+        189
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_relevant_files",
       "callee": "src/dekko/integrations/hooks.py::_adaptive_top",
       "lines": [
-        192
+        193
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_relevant_files",
       "callee": "src/dekko/integrations/hooks.py::_file_candidates",
       "lines": [
-        181
+        182
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_view",
       "callee": "src/dekko/storage/ledger.py::LedgerView",
       "lines": [
-        225
+        226
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_view",
       "callee": "src/dekko/storage/ledger.py::build_view",
       "lines": [
-        224
+        225
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::install",
       "callee": "src/dekko/integrations/hooks.py::_already_installed",
       "lines": [
-        531
+        532
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::install",
       "callee": "src/dekko/integrations/hooks.py::_entry",
       "lines": [
-        532
+        533
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::install",
       "callee": "src/dekko/integrations/hooks.py::_load_settings",
       "lines": [
-        526
+        527
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::install",
       "callee": "src/dekko/integrations/hooks.py::settings_path",
       "lines": [
-        525
+        526
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_bash",
       "callee": "src/dekko/integrations/hooks.py::_bash_reason",
       "lines": [
-        405
+        406
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_bash",
       "callee": "src/dekko/integrations/hooks.py::_load_index",
       "lines": [
-        402
+        403
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_bash",
       "callee": "src/dekko/integrations/hooks.py::_root_from",
       "lines": [
-        401
+        402
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_read",
       "callee": "src/dekko/analysis/outline.py::size_estimate",
       "lines": [
-        246
+        247
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_read",
       "callee": "src/dekko/integrations/hooks.py::_load_index",
       "lines": [
-        240
+        241
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_read",
       "callee": "src/dekko/integrations/hooks.py::_rel_to_root",
       "lines": [
-        243
+        244
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_read",
       "callee": "src/dekko/integrations/hooks.py::_root_from",
       "lines": [
-        239
+        240
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::prompt_submit",
       "callee": "src/dekko/analysis/relevance.py::task_context",
       "lines": [
-        204
+        205
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::prompt_submit",
       "callee": "src/dekko/integrations/hooks.py::_additional_context",
       "lines": [
-        217
+        218
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::prompt_submit",
       "callee": "src/dekko/integrations/hooks.py::_load_index",
       "lines": [
-        201
+        202
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::prompt_submit",
       "callee": "src/dekko/integrations/hooks.py::_relevant_files",
       "lines": [
-        206
+        207
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::prompt_submit",
       "callee": "src/dekko/integrations/hooks.py::_root_from",
       "lines": [
-        200
+        201
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::prompt_submit",
       "callee": "src/dekko/integrations/hooks.py::_view",
       "lines": [
-        205
+        206
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::session_start",
       "callee": "src/dekko/integrations/hooks.py::_additional_context",
       "lines": [
-        139
+        140
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::session_start",
       "callee": "src/dekko/integrations/hooks.py::_load_index",
       "lines": [
-        111
+        112
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::session_start",
       "callee": "src/dekko/integrations/hooks.py::_root_from",
       "lines": [
-        110
+        111
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::session_start",
       "callee": "src/dekko/render/render_lean.py::CapConfig",
       "lines": [
-        115
+        116
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::session_start",
       "callee": "src/dekko/render/render_lean.py::generate",
       "lines": [
-        114
+        115
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "src/dekko/integrations/hooks.py::_is_dekko_entry",
       "lines": [
-        582
+        583
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "src/dekko/integrations/hooks.py::_load_settings",
       "lines": [
-        572
+        573
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "src/dekko/integrations/hooks.py::settings_path",
       "lines": [
-        571
+        572
       ]
     },
     {
@@ -60866,316 +60871,316 @@
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "src/dekko/render/mapfile.py::MapIndex",
       "lines": [
-        398
+        403
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "src/dekko/render/mapfile.py::_filter_adjacency",
       "lines": [
-        407,
-        408,
-        442,
-        443
+        412,
+        413,
+        447,
+        448
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "src/dekko/render/mapfile.py::_filter_paths",
       "lines": [
-        414,
-        415,
-        416,
-        417
+        419,
+        420,
+        421,
+        422
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "src/dekko/render/mapfile.py::_prod_id",
       "lines": [
-        412,
-        421,
-        424,
-        428,
+        417,
+        426,
+        429,
         433,
-        440,
-        447
+        438,
+        445,
+        452
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "src/dekko/render/mapfile.py::_symbol_is_test",
       "lines": [
-        400
+        405
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_filter_adjacency",
       "callee": "src/dekko/render/mapfile.py::_prod_id",
       "lines": [
-        488,
-        490
+        493,
+        495
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_filter_paths",
       "callee": "src/dekko/classify.py::is_test_path",
       "lines": [
-        501
+        506
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "callee": "src/dekko/core/languages.py::spec_fingerprint",
       "lines": [
-        808
+        813
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "callee": "src/dekko/core/walker.py::discover",
       "lines": [
-        837
+        842
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "callee": "src/dekko/render/mapfile.py::Freshness",
       "lines": [
-        824,
-        863
+        829,
+        868
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "callee": "src/dekko/render/mapfile.py::_file_hash",
       "lines": [
-        853
+        858
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "callee": "src/dekko/render/mapfile.py::_stat_sig",
       "lines": [
-        850
+        855
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_prod_id",
       "callee": "src/dekko/classify.py::is_test_path",
       "lines": [
-        479
+        484
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_prod_id",
       "callee": "src/dekko/render/mapfile.py::_symbol_is_test",
       "lines": [
-        478
+        483
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_symbol_from_dict",
       "callee": "src/dekko/core/model.py::Param",
       "lines": [
-        557
+        562
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_symbol_from_dict",
       "callee": "src/dekko/core/model.py::Symbol",
       "lines": [
-        558
+        563
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_symbol_is_test",
       "callee": "src/dekko/classify.py::is_test_path",
       "lines": [
-        464
+        469
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::check_freshness",
       "callee": "src/dekko/render/mapfile.py::Freshness",
-      "lines": [
-        766
-      ]
-    },
-    {
-      "caller": "src/dekko/render/mapfile.py::check_freshness",
-      "callee": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "lines": [
         771
       ]
     },
     {
+      "caller": "src/dekko/render/mapfile.py::check_freshness",
+      "callee": "src/dekko/render/mapfile.py::_freshness_from_provenance",
+      "lines": [
+        776
+      ]
+    },
+    {
       "caller": "src/dekko/render/mapfile.py::check_freshness_provenance",
       "callee": "src/dekko/render/mapfile.py::Freshness",
       "lines": [
-        799
+        804
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::check_freshness_provenance",
       "callee": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "lines": [
-        800
+        805
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::compute_provenance",
       "callee": "src/dekko/core/languages.py::spec_fingerprint",
       "lines": [
-        251
+        256
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::compute_provenance",
       "callee": "src/dekko/render/mapfile.py::_file_hash",
       "lines": [
-        256
+        261
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::compute_provenance",
       "callee": "src/dekko/render/mapfile.py::_git_commit",
       "lines": [
-        252
+        257
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::compute_provenance",
       "callee": "src/dekko/render/mapfile.py::_stat_sig",
       "lines": [
-        257
+        262
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::compute_provenance",
       "callee": "src/dekko/render/mapfile.py::_unsupported_summary",
       "lines": [
-        258
+        263
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::compute_provenance",
       "callee": "src/dekko/render/mapfile.py::_vendored_summary",
       "lines": [
-        259
+        264
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "src/dekko/render/mapfile.py::MapIndex",
       "lines": [
-        721
+        726
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "src/dekko/render/mapfile.py::_callee_base",
       "lines": [
-        738
+        743
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "src/dekko/render/mapfile.py::_index_ambiguous",
       "lines": [
-        741
+        746
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "src/dekko/core/model.py::ExternalCall",
       "lines": [
-        647
+        652
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "src/dekko/core/model.py::Import",
       "lines": [
-        633
+        638
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "src/dekko/render/mapfile.py::MapIndex",
       "lines": [
-        621
+        626
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "src/dekko/render/mapfile.py::_callee_base",
       "lines": [
-        652
+        657
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "src/dekko/render/mapfile.py::_index_ambiguous",
       "lines": [
-        655
+        660
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "src/dekko/render/mapfile.py::_json_loads",
       "lines": [
-        617
+        622
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "src/dekko/render/mapfile.py::_load_notes",
       "lines": [
-        624
+        629
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "src/dekko/render/mapfile.py::_symbol_from_dict",
       "lines": [
-        636
+        641
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_provenance",
       "callee": "src/dekko/render/mapfile.py::_json_loads",
       "lines": [
-        910,
-        918
+        915,
+        923
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_provenance",
       "callee": "src/dekko/render/mapfile.py::_stat_sig",
       "lines": [
-        905
+        910
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::write_provenance_sidecar",
       "callee": "src/dekko/render/mapfile.py::_json_dumps",
       "lines": [
-        946
+        951
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::write_provenance_sidecar",
       "callee": "src/dekko/render/mapfile.py::_stat_sig",
       "lines": [
-        945
+        950
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::write_provenance_sidecar",
       "callee": "src/dekko/render/mapfile.py::atomic_write_bytes",
       "lines": [
-        946
+        951
       ]
     },
     {
@@ -92811,157 +92816,157 @@
       "caller": "src/dekko/integrations/hooks.py::_adaptive_top",
       "callee": "max",
       "lines": [
-        149
+        150
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_adaptive_top",
       "callee": "min",
       "lines": [
-        149
+        150
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_already_installed",
       "callee": "cmd.startswith",
       "lines": [
-        556
+        557
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_already_installed",
       "callee": "isinstance",
       "lines": [
-        551,
-        554,
-        555
+        552,
+        555,
+        556
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_cat_reason",
       "callee": "candidate.startswith",
       "lines": [
-        347
+        348
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_cat_reason",
       "callee": "len",
       "lines": [
-        344
+        345
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_cat_reason",
       "callee": "round",
       "lines": [
-        356
+        357
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_file_candidates",
       "callee": "\" \".join",
       "lines": [
-        163
+        164
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_file_candidates",
       "callee": "candidates.append",
       "lines": [
-        166
+        167
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_file_candidates",
       "callee": "float",
       "lines": [
-        169
+        170
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_grep_reason",
       "callee": "any",
       "lines": [
-        318
+        319
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_is_dekko_entry",
       "callee": "cmd.startswith",
       "lines": [
-        499
+        500
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_is_dekko_entry",
       "callee": "isinstance",
       "lines": [
-        498,
-        499
+        499,
+        500
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_load_settings",
       "callee": "isinstance",
       "lines": [
-        476
+        477
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_load_settings",
       "callee": "json.loads",
       "lines": [
-        473
+        474
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_load_settings",
       "callee": "path.read_text",
       "lines": [
-        473
+        474
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_rel_to_root",
       "callee": "Path",
       "lines": [
-        267
+        268
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_rel_to_root",
       "callee": "p.as_posix",
       "lines": [
-        269
+        270
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_rel_to_root",
       "callee": "p.is_absolute",
       "lines": [
-        268
+        269
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_rel_to_root",
       "callee": "p.relative_to",
       "lines": [
-        271
+        272
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_rel_to_root",
       "callee": "p.relative_to(root).as_posix",
       "lines": [
-        271
+        272
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_relevant_files",
       "callee": "sorted",
       "lines": [
-        191
+        192
       ]
     },
     {
@@ -92983,83 +92988,126 @@
       "caller": "src/dekko/integrations/hooks.py::_split_statements",
       "callee": "shlex.split",
       "lines": [
-        302
+        303
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_split_statements",
       "callee": "statements.append",
       "lines": [
-        308
+        309
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_split_statements",
       "callee": "statements[-1].append",
       "lines": [
-        310
+        311
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_view",
       "callee": "Path",
       "lines": [
-        224
+        225
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::_view",
       "callee": "isinstance",
       "lines": [
-        223
+        224
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::dispatch",
       "callee": "handler",
       "lines": [
-        452,
-        454
+        453,
+        455
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::dispatch",
       "callee": "isinstance",
       "lines": [
-        449
+        450
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::dispatch",
       "callee": "json.dumps",
       "lines": [
-        458
+        459
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::dispatch",
       "callee": "json.loads",
       "lines": [
-        448
+        449
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::dispatch",
       "callee": "payload_text.strip",
       "lines": [
-        448
+        449
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::dispatch",
       "callee": "print",
       "lines": [
-        458
+        459
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::install",
       "callee": "', '.join",
+      "lines": [
+        522,
+        537
+      ]
+    },
+    {
+      "caller": "src/dekko/integrations/hooks.py::install",
+      "callee": "bucket.append",
+      "lines": [
+        533
+      ]
+    },
+    {
+      "caller": "src/dekko/integrations/hooks.py::install",
+      "callee": "hooks.setdefault",
+      "lines": [
+        531
+      ]
+    },
+    {
+      "caller": "src/dekko/integrations/hooks.py::install",
+      "callee": "json.dumps",
+      "lines": [
+        535
+      ]
+    },
+    {
+      "caller": "src/dekko/integrations/hooks.py::install",
+      "callee": "path.parent.mkdir",
+      "lines": [
+        534
+      ]
+    },
+    {
+      "caller": "src/dekko/integrations/hooks.py::install",
+      "callee": "path.write_text",
+      "lines": [
+        535
+      ]
+    },
+    {
+      "caller": "src/dekko/integrations/hooks.py::install",
+      "callee": "print",
       "lines": [
         521,
         536
@@ -93067,183 +93115,140 @@
     },
     {
       "caller": "src/dekko/integrations/hooks.py::install",
-      "callee": "bucket.append",
-      "lines": [
-        532
-      ]
-    },
-    {
-      "caller": "src/dekko/integrations/hooks.py::install",
-      "callee": "hooks.setdefault",
-      "lines": [
-        530
-      ]
-    },
-    {
-      "caller": "src/dekko/integrations/hooks.py::install",
-      "callee": "json.dumps",
-      "lines": [
-        534
-      ]
-    },
-    {
-      "caller": "src/dekko/integrations/hooks.py::install",
-      "callee": "path.parent.mkdir",
-      "lines": [
-        533
-      ]
-    },
-    {
-      "caller": "src/dekko/integrations/hooks.py::install",
-      "callee": "path.write_text",
-      "lines": [
-        534
-      ]
-    },
-    {
-      "caller": "src/dekko/integrations/hooks.py::install",
-      "callee": "print",
-      "lines": [
-        520,
-        535
-      ]
-    },
-    {
-      "caller": "src/dekko/integrations/hooks.py::install",
       "callee": "settings.setdefault",
       "lines": [
-        527
+        528
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_bash",
       "callee": "command.strip",
       "lines": [
-        399
+        400
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_bash",
       "callee": "isinstance",
       "lines": [
-        396,
-        399
+        397,
+        400
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_read",
       "callee": "isinstance",
       "lines": [
-        234,
-        237
+        235,
+        238
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::pre_read",
       "callee": "round",
       "lines": [
-        250
+        251
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::prompt_submit",
       "callee": "\"\\n\".join",
       "lines": [
-        209
+        210
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::prompt_submit",
       "callee": "isinstance",
       "lines": [
-        198
+        199
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::prompt_submit",
       "callee": "prompt.strip",
       "lines": [
-        198
+        199
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::session_start",
       "callee": "\"\\n\".join",
       "lines": [
-        137
+        138
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::session_start",
       "callee": "\"\\n\\n\".join",
       "lines": [
-        138
+        139
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::session_start",
       "callee": "parts.append",
       "lines": [
-        132,
-        137
+        133,
+        138
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "isinstance",
       "lines": [
-        574,
-        582
+        575,
+        583
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "json.dumps",
       "lines": [
-        592
+        593
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "len",
       "lines": [
-        584
+        585
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "list",
       "lines": [
-        578
+        579
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "path.parent.mkdir",
       "lines": [
-        591
+        592
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "path.write_text",
       "lines": [
-        592
+        593
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "print",
       "lines": [
-        575,
-        593
+        576,
+        594
       ]
     },
     {
       "caller": "src/dekko/integrations/hooks.py::uninstall",
       "callee": "settings.pop",
       "lines": [
-        590
+        591
       ]
     },
     {
@@ -94218,27 +94223,22 @@
       "caller": "src/dekko/render/mapfile.py::<module>",
       "callee": "re.compile",
       "lines": [
-        40
+        45
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::Freshness",
       "callee": "field",
       "lines": [
-        543,
-        544,
-        545
+        548,
+        549,
+        550
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex",
       "callee": "field",
       "lines": [
-        353,
-        354,
-        355,
-        356,
-        357,
         358,
         359,
         360,
@@ -94246,812 +94246,817 @@
         362,
         363,
         364,
+        365,
+        366,
         367,
-        370,
-        371,
+        368,
+        369,
         372,
-        373,
-        374
+        375,
+        376,
+        377,
+        378,
+        379
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.degree",
       "callee": "len",
       "lines": [
-        379
+        384
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "out.symbols_by_name.setdefault",
       "lines": [
-        403
+        408
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "out.symbols_by_name.setdefault(sym.name, []).append",
       "lines": [
-        403
+        408
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "out.symbols_by_path.setdefault",
       "lines": [
-        405
+        410
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "out.symbols_by_path.setdefault(sym.path, []).append",
       "lines": [
-        405
+        410
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "out.symbols_by_qualname.setdefault",
       "lines": [
-        404
+        409
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "out.symbols_by_qualname.setdefault(sym.qualname, []).append",
       "lines": [
-        404
+        409
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "self.ambiguous_in.items",
       "lines": [
-        427
+        432
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "self.ambiguous_out.items",
       "lines": [
-        439
+        444
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "self.edge_lines.items",
       "lines": [
-        411
+        416
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "self.externals_by_name.items",
       "lines": [
-        423
+        428
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "self.notes.items",
       "lines": [
-        420
+        425
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "self.ref_lines.items",
       "lines": [
-        446
+        451
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::MapIndex.without_tests",
       "callee": "self.symbols_by_id.items",
       "lines": [
-        399
+        404
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_callee_base",
       "callee": "_BASE_SPLIT.split",
       "lines": [
-        602
+        607
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_file_hash",
       "callee": "hashlib.sha256",
       "lines": [
-        282
+        287
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_file_hash",
       "callee": "hashlib.sha256(path.read_bytes()).hexdigest",
       "lines": [
-        282
+        287
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_file_hash",
       "callee": "path.read_bytes",
       "lines": [
-        282
+        287
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_filter_adjacency",
       "callee": "table.items",
       "lines": [
-        487
+        492
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_filter_paths",
       "callee": "mapping.items",
       "lines": [
-        500
+        505
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "callee": "_pkg_version",
       "lines": [
-        806
+        811
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "callee": "bool",
       "lines": [
-        862
+        867
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "callee": "set",
       "lines": [
-        855,
-        856,
-        859
+        860,
+        861,
+        864
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "callee": "sorted",
       "lines": [
-        855,
-        856,
-        857
+        860,
+        861,
+        862
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_freshness_from_provenance",
       "callee": "tuple",
       "lines": [
-        840
+        845
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_git_commit",
       "callee": "proc.stdout.strip",
       "lines": [
-        276
+        281
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_git_commit",
       "callee": "str",
       "lines": [
-        267
+        272
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_git_commit",
       "callee": "subprocess.run",
       "lines": [
-        266
+        271
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_index_ambiguous",
       "callee": "ambiguous_in.setdefault",
       "lines": [
-        698
+        703
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_index_ambiguous",
       "callee": "ambiguous_in.setdefault(cand, []).append",
       "lines": [
-        698
+        703
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_index_ambiguous",
       "callee": "ambiguous_out.setdefault",
       "lines": [
-        696
+        701
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_index_ambiguous",
       "callee": "ambiguous_out.setdefault(caller, []).append",
       "lines": [
-        696
+        701
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_json_dumps",
       "callee": "json.dumps",
       "lines": [
-        66
+        71
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_json_dumps",
       "callee": "json.dumps(obj).encode",
       "lines": [
-        66
+        71
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_json_dumps",
       "callee": "orjson.dumps",
       "lines": [
-        65
+        70
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_json_loads",
       "callee": "json.loads",
       "lines": [
-        55
+        60
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_json_loads",
       "callee": "orjson.loads",
       "lines": [
-        54
+        59
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_load_notes",
       "callee": "(root / _MAP_DIR / \"notes.json\").read_text",
       "lines": [
-        584
+        589
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_load_notes",
       "callee": "isinstance",
       "lines": [
-        589
+        594
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_load_notes",
       "callee": "json.loads",
       "lines": [
-        583
+        588
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_load_notes",
       "callee": "raw.items",
       "lines": [
-        593
+        598
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_prod_id",
       "callee": "sym_or_module_id.split",
       "lines": [
-        479
+        484
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_stat_sig",
       "callee": "path.stat",
       "lines": [
-        294
+        299
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_unsupported_summary",
       "callee": "Counter",
       "lines": [
-        132
+        137
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_unsupported_summary",
       "callee": "by_lang.items",
       "lines": [
-        140
+        145
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_unsupported_summary",
       "callee": "by_lang.values",
       "lines": [
-        139
+        144
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_unsupported_summary",
       "callee": "dict",
       "lines": [
-        140
+        145
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_unsupported_summary",
       "callee": "len",
       "lines": [
-        135
+        140
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_unsupported_summary",
       "callee": "reason.endswith",
       "lines": [
-        134
+        139
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_unsupported_summary",
       "callee": "reason.startswith",
       "lines": [
-        134
+        139
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_unsupported_summary",
       "callee": "sorted",
       "lines": [
-        140
+        145
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_unsupported_summary",
       "callee": "sum",
       "lines": [
-        139
+        144
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_vendored_summary",
       "callee": "Counter",
       "lines": [
-        166
+        171
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_vendored_summary",
       "callee": "by_dir.items",
       "lines": [
-        174
+        179
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_vendored_summary",
       "callee": "by_dir.values",
       "lines": [
-        173
+        178
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_vendored_summary",
       "callee": "dict",
       "lines": [
-        174
+        179
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_vendored_summary",
       "callee": "len",
       "lines": [
-        169
+        174
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_vendored_summary",
       "callee": "reason.endswith",
       "lines": [
-        168
+        173
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_vendored_summary",
       "callee": "reason.startswith",
       "lines": [
-        168
+        173
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_vendored_summary",
       "callee": "sorted",
       "lines": [
-        174
+        179
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::_vendored_summary",
       "callee": "sum",
       "lines": [
-        173
+        178
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::atomic_write_bytes",
       "callee": "os.fdopen",
       "lines": [
-        99
+        104
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::atomic_write_bytes",
       "callee": "os.replace",
       "lines": [
-        101
+        106
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::atomic_write_bytes",
       "callee": "os.unlink",
       "lines": [
-        104
+        109
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::atomic_write_bytes",
       "callee": "str",
       "lines": [
-        96
+        101
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::atomic_write_bytes",
       "callee": "tempfile.mkstemp",
       "lines": [
-        95
+        100
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::atomic_write_bytes",
       "callee": "tmp_file.write",
       "lines": [
-        100
+        105
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::check_freshness",
       "callee": "sorted",
       "lines": [
-        768
+        773
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::compute_provenance",
       "callee": "_pkg_version",
       "lines": [
-        250
+        255
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::compute_provenance",
       "callee": "list",
       "lines": [
-        254
+        259
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::format_unsupported",
       "callee": "\", \".join",
       "lines": [
-        205,
-        211
+        210,
+        216
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::format_unsupported",
       "callee": "\"\\n \".join",
       "lines": [
-        221
+        226
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::format_unsupported",
       "callee": "by_dir.items",
       "lines": [
-        211
+        216
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::format_unsupported",
       "callee": "by_lang.items",
       "lines": [
-        205
+        210
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::format_unsupported",
       "callee": "parts.append",
       "lines": [
-        207,
-        213
+        212,
+        218
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.calls_in.setdefault",
       "lines": [
-        735
+        740
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.calls_in.setdefault(edge.callee, []).append",
       "lines": [
-        735
+        740
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.calls_out.setdefault",
       "lines": [
-        734
+        739
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.calls_out.setdefault(edge.caller, []).append",
       "lines": [
-        734
+        739
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.externals_by_name.setdefault",
       "lines": [
-        740
+        745
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.externals_by_name.setdefault(base, []).append",
       "lines": [
-        740
+        745
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.referenced_in.setdefault",
       "lines": [
-        746
+        751
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.referenced_in.setdefault(edge.callee, []).append",
       "lines": [
-        746
+        751
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.referenced_out.setdefault",
       "lines": [
-        745
+        750
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.referenced_out.setdefault(edge.caller, []).append",
       "lines": [
-        745
+        750
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.symbols_by_name.setdefault",
       "lines": [
-        730
+        735
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.symbols_by_name.setdefault(sym.name, []).append",
       "lines": [
-        730
+        735
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.symbols_by_path.setdefault",
       "lines": [
-        732
+        737
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.symbols_by_path.setdefault(sym.path, []).append",
       "lines": [
-        732
+        737
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.symbols_by_qualname.setdefault",
       "lines": [
-        731
+        736
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "index.symbols_by_qualname.setdefault(sym.qualname, []).append",
       "lines": [
-        731
+        736
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "iter",
       "lines": [
-        742
+        747
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::index_from_maps",
       "callee": "list",
       "lines": [
-        727
+        732
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.calls_in.setdefault",
       "lines": [
-        644
+        649
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.calls_in.setdefault(callee, []).append",
       "lines": [
-        644
+        649
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.calls_out.setdefault",
       "lines": [
-        643
+        648
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.calls_out.setdefault(caller, []).append",
       "lines": [
-        643
+        648
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.externals_by_name.setdefault",
       "lines": [
-        654
+        659
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.externals_by_name.setdefault(base, []).append",
       "lines": [
-        654
+        659
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.referenced_in.setdefault",
       "lines": [
-        662
+        667
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.referenced_in.setdefault(callee, []).append",
       "lines": [
-        662
+        667
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.referenced_out.setdefault",
       "lines": [
-        661
+        666
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.referenced_out.setdefault(caller, []).append",
       "lines": [
-        661
+        666
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.symbols_by_name.setdefault",
       "lines": [
-        638
+        643
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.symbols_by_name.setdefault(sym.name, []).append",
       "lines": [
-        638
+        643
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.symbols_by_path.setdefault",
       "lines": [
-        640
+        645
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.symbols_by_path.setdefault(sym.path, []).append",
       "lines": [
-        640
+        645
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.symbols_by_qualname.setdefault",
       "lines": [
-        639
+        644
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "index.symbols_by_qualname.setdefault(sym.qualname, []).append",
       "lines": [
-        639
+        644
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_map",
       "callee": "path.read_bytes",
       "lines": [
-        617
+        622
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_provenance",
       "callee": "isinstance",
       "lines": [
-        913,
-        915,
-        921,
-        922
+        918,
+        920,
+        926,
+        927
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_provenance",
       "callee": "map_path.read_bytes",
       "lines": [
-        918
+        923
       ]
     },
     {
       "caller": "src/dekko/render/mapfile.py::load_provenance",
       "callee": "sidecar.read_bytes",
       "lines": [
-        910
+        915
       ]
     },
     {

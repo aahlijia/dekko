@@ -35,6 +35,11 @@ try:
 except ImportError:  # pragma: no cover - exercised in stdlib-only envs
     orjson = None  # type: ignore[assignment]
 
+try:
+    import orjson
+except ImportError:  # pragma: no cover - exercised in stdlib-only envs
+    orjson = None  # type: ignore[assignment]
+
 MAP_DOC_VERSION = 4
 _MAP_DIR = ".dekko"
 _BASE_SPLIT = re.compile(r"::|\.|->|/")
