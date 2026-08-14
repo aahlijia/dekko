@@ -22,6 +22,7 @@ from pathlib import Path
 from . import affected
 from . import cache as cache_mod
 from . import classify
+from . import claude_md as claude_md_mod
 from . import cline as cline_mod
 from . import contextpack
 from . import daemon as daemon_mod
@@ -121,6 +122,28 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="with --claude-install/--claude-uninstall, print the "
         "command(s) that would run instead of running them",
+    )
+    parser.add_argument(
+        "--claude-md-install",
+        action="store_true",
+        help="write/update an idempotent dekko usage-policy block in "
+        "this repo's CLAUDE.md, so Claude reaches for dekko's tools "
+        "over grep/Read as a standing instruction, not just per-turn "
+        "context (separate opt-in from --claude-install/hooks — edits "
+        "a file you own and read)",
+    )
+    parser.add_argument(
+        "--claude-md-uninstall",
+        action="store_true",
+        help="remove the dekko usage-policy block from CLAUDE.md, "
+        "leaving the rest of the file untouched",
+    )
+    parser.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root whose CLAUDE.md to edit, with "
+        "--claude-md-install/--claude-md-uninstall (default: cwd)",
     )
     parser.add_argument(
         "--mcp-install",
@@ -275,7 +298,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
             "note: 'map' takes DIR positionally; every other command "
             "uses --root DIR\n"
             "legacy aliases: dekko --map [DIR] [SUBPATH], "
-            "dekko --claude-install, dekko --version"
+            "dekko --claude-install, dekko --claude-md-install, "
+            "dekko --version"
         ),
     )
     sub = parser.add_subparsers(
@@ -720,6 +744,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="hook event(s) to enable; repeatable (default: session-start)",
     )
     p_hooks_install.add_argument(
+        "--strict",
+        action="store_true",
+        help="escalate pre-bash's matches from 'ask' to 'deny' "
+        "(opt-in-on-opt-in; only affects pre-bash, requires "
+        "--enable pre-bash)",
+    )
+    p_hooks_install.add_argument(
         "--root",
         default=".",
         metavar="DIR",
@@ -740,6 +771,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "run", help="execute a hook handler (reads event JSON on stdin)"
     )
     p_hooks_run.add_argument("event", choices=list(hooks_mod.EVENTS))
+    p_hooks_run.add_argument(
+        "--strict",
+        action="store_true",
+        help="pre-bash only: escalate a match from 'ask' to 'deny'",
+    )
     p_hooks_run.set_defaults(func=run_hooks_run)
 
     p_daemon = sub.add_parser(
@@ -2271,7 +2307,9 @@ def run_ledger(args: argparse.Namespace) -> int:
 def run_hooks_install(args: argparse.Namespace) -> int:
     """Handle ``dekko hooks install``."""
     events = args.enable or ["session-start"]
-    return hooks_mod.install(Path(args.root).resolve(), events)
+    return hooks_mod.install(
+        Path(args.root).resolve(), events, strict=args.strict
+    )
 
 
 def run_hooks_uninstall(args: argparse.Namespace) -> int:
@@ -2281,7 +2319,7 @@ def run_hooks_uninstall(args: argparse.Namespace) -> int:
 
 def run_hooks_run(args: argparse.Namespace) -> int:
     """Handle ``dekko hooks run <event>`` (reads JSON on stdin)."""
-    return hooks_mod.dispatch(args.event, sys.stdin.read())
+    return hooks_mod.dispatch(args.event, sys.stdin.read(), strict=args.strict)
 
 
 def run_daemon_start(args: argparse.Namespace) -> int:
@@ -2535,6 +2573,12 @@ def _legacy_main(args_list: list[str]) -> int:
 
     if args.claude_uninstall:
         return claude_uninstall(dry_run=args.dry_run)
+
+    if args.claude_md_install:
+        return claude_md_mod.install(Path(args.root).resolve())
+
+    if args.claude_md_uninstall:
+        return claude_md_mod.uninstall(Path(args.root).resolve())
 
     if args.mcp_install:
         return mcp_install()

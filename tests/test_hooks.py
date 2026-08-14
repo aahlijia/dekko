@@ -1,10 +1,12 @@
 """Pillar A: the opt-in Claude Code push hooks.
 
-Covers the three entrypoints (session-start / prompt-submit / pre-read),
-their fail-silent contract, the relevance ⋈ ledger dedup in prompt-submit,
+Covers the four entrypoints (session-start / prompt-submit / pre-read /
+pre-bash), their fail-silent contract, the relevance ⋈ ledger dedup in
+prompt-submit, pre-bash's grep/find/cat matching and --strict escalation,
 and the idempotent settings.json install/uninstall merge.
 """
 
+import io
 import json
 from pathlib import Path
 
@@ -178,6 +180,154 @@ def test_pre_read_silent_without_file_path(
     assert hooks.pre_read({"cwd": str(root), "tool_input": {}}) is None
 
 
+# --- PreToolUse / Bash -------------------------------------------------
+
+
+def test_pre_bash_asks_on_recursive_grep(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_FILES)
+    out = hooks.pre_bash(
+        {
+            "cwd": str(root),
+            "tool_input": {"command": 'grep -rn "login" .'},
+        }
+    )
+    assert out is not None
+    hso = out["hookSpecificOutput"]
+    assert hso["permissionDecision"] == "ask"
+    assert "search_code" in hso["permissionDecisionReason"]
+
+
+def test_pre_bash_rg_always_counts_as_recursive(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_FILES)
+    out = hooks.pre_bash(
+        {"cwd": str(root), "tool_input": {"command": "rg login"}}
+    )
+    assert out is not None
+    assert (
+        "search_code" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    )
+
+
+def test_pre_bash_silent_on_targeted_grep(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A single-file, non-recursive grep is a targeted read, not a blind
+    # search -- deliberately not matched (favor false negatives).
+    root = make_mapped_repo(_FILES)
+    out = hooks.pre_bash(
+        {
+            "cwd": str(root),
+            "tool_input": {"command": "grep login src/auth.py"},
+        }
+    )
+    assert out is None
+
+
+def test_pre_bash_asks_on_find_name(make_mapped_repo: RepoFactory) -> None:
+    root = make_mapped_repo(_FILES)
+    out = hooks.pre_bash(
+        {
+            "cwd": str(root),
+            "tool_input": {"command": 'find . -name "*auth*"'},
+        }
+    )
+    assert out is not None
+    assert "outline" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_pre_bash_asks_on_cat_large_mapped_file(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    big = {"src/big.py": "x = 1\n" * 4000}
+    root = make_mapped_repo(big)
+    out = hooks.pre_bash(
+        {"cwd": str(root), "tool_input": {"command": "cat src/big.py"}}
+    )
+    assert out is not None
+    hso = out["hookSpecificOutput"]
+    assert hso["permissionDecision"] == "ask"
+    assert "dekko outline" in hso["permissionDecisionReason"]
+
+
+def test_pre_bash_silent_on_cat_small_mapped_file(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_FILES)
+    out = hooks.pre_bash(
+        {"cwd": str(root), "tool_input": {"command": "cat src/auth.py"}}
+    )
+    assert out is None
+
+
+def test_pre_bash_silent_on_cat_unmapped_file(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # e.g. `cat package.json` -- not a file dekko's map indexes at all.
+    root = make_mapped_repo(_FILES)
+    out = hooks.pre_bash(
+        {"cwd": str(root), "tool_input": {"command": "cat package.json"}}
+    )
+    assert out is None
+
+
+def test_pre_bash_strict_denies_instead_of_asks(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_FILES)
+    out = hooks.pre_bash(
+        {"cwd": str(root), "tool_input": {"command": "rg login"}},
+        strict=True,
+    )
+    assert out is not None
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_pre_bash_silent_without_command(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_FILES)
+    assert hooks.pre_bash({"cwd": str(root), "tool_input": {}}) is None
+
+
+def test_pre_bash_silent_on_unparseable_command(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_FILES)
+    out = hooks.pre_bash(
+        {"cwd": str(root), "tool_input": {"command": "grep 'unterminated"}}
+    )
+    assert out is None
+
+
+def test_pre_bash_checks_each_piped_statement(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_FILES)
+    out = hooks.pre_bash(
+        {
+            "cwd": str(root),
+            "tool_input": {"command": "echo start && rg login"},
+        }
+    )
+    assert out is not None
+
+
+def test_dispatch_pre_bash_strict_flag(
+    make_mapped_repo: RepoFactory, capsys: object
+) -> None:
+    root = make_mapped_repo(_FILES)
+    payload = json.dumps(
+        {"cwd": str(root), "tool_input": {"command": "rg login"}}
+    )
+    assert hooks.dispatch("pre-bash", payload, strict=True) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 # --- dispatch (fail-silent contract) ---------------------------------
 
 
@@ -253,6 +403,38 @@ def test_install_unknown_event_errors(tmp_path: Path) -> None:
     assert hooks.install(tmp_path, ["bogus"]) == 2
 
 
+def test_install_pre_bash_uses_bash_matcher(tmp_path: Path) -> None:
+    hooks.install(tmp_path, ["pre-bash"])
+    entry = _settings(tmp_path)["hooks"]["PreToolUse"][0]
+    assert entry["matcher"] == "Bash"
+    cmd = entry["hooks"][0]["command"]
+    assert cmd == "dekko hooks run pre-bash"
+
+
+def test_install_pre_bash_strict_appends_flag(tmp_path: Path) -> None:
+    hooks.install(tmp_path, ["pre-bash"], strict=True)
+    entry = _settings(tmp_path)["hooks"]["PreToolUse"][0]
+    cmd = entry["hooks"][0]["command"]
+    assert cmd == "dekko hooks run pre-bash --strict"
+
+
+def test_install_pre_bash_strict_is_idempotent(tmp_path: Path) -> None:
+    hooks.install(tmp_path, ["pre-bash"], strict=True)
+    hooks.install(tmp_path, ["pre-bash"], strict=True)
+    assert len(_settings(tmp_path)["hooks"]["PreToolUse"]) == 1
+
+
+def test_install_pre_bash_plain_then_strict_does_not_duplicate(
+    tmp_path: Path,
+) -> None:
+    # Re-running with a different --strict setting merges (skips), it
+    # doesn't reconfigure -- install() docs this; uninstall+reinstall
+    # is the documented path to change it.
+    hooks.install(tmp_path, ["pre-bash"], strict=False)
+    hooks.install(tmp_path, ["pre-bash"], strict=True)
+    assert len(_settings(tmp_path)["hooks"]["PreToolUse"]) == 1
+
+
 def test_uninstall_removes_only_dekko(tmp_path: Path) -> None:
     settings_file = tmp_path / ".claude" / "settings.json"
     settings_file.parent.mkdir(parents=True)
@@ -277,3 +459,36 @@ def test_uninstall_removes_only_dekko(tmp_path: Path) -> None:
 def test_cli_hooks_install_smoke(tmp_path: Path) -> None:
     assert cli.main(["hooks", "install", "--root", str(tmp_path)]) == 0
     assert (tmp_path / ".claude" / "settings.json").is_file()
+
+
+def test_cli_hooks_install_pre_bash_strict_smoke(tmp_path: Path) -> None:
+    code = cli.main(
+        [
+            "hooks",
+            "install",
+            "--enable",
+            "pre-bash",
+            "--strict",
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    assert code == 0
+    entry = _settings(tmp_path)["hooks"]["PreToolUse"][0]
+    assert entry["hooks"][0]["command"] == "dekko hooks run pre-bash --strict"
+
+
+def test_cli_hooks_run_pre_bash_strict_smoke(
+    make_mapped_repo: RepoFactory,
+    capsys: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_mapped_repo(_FILES)
+    payload = json.dumps(
+        {"cwd": str(root), "tool_input": {"command": "rg login"}}
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO(payload))
+    code = cli.main(["hooks", "run", "pre-bash", "--strict"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["hookSpecificOutput"]["permissionDecision"] == "deny"

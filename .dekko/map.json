@@ -2,11 +2,11 @@
   "generator": "dekko",
   "version": 4,
   "root": "dekko",
-  "generated_at": "2026-08-14T10:57:31+00:00",
+  "generated_at": "2026-08-14T11:12:05+00:00",
   "provenance": {
-    "tool_version": "0.30.13",
+    "tool_version": "0.30.9",
     "spec_hash": "c826ad1278b7aafff9e22f8be8055da05975a6fe911238d34e952b7f939daf21",
-    "git_commit": "aa7b08fd23627c56cfbd532407aa10d29e04b883",
+    "git_commit": "d1b308a703f68c5e008d1695f65c5b51fd4fab19",
     "subpath": null,
     "excludes": [],
     "max_file_size": 1000000,
@@ -141,19 +141,19 @@
         60
       ],
       "src/dekko/affected.py": [
-        1786407402207047541,
+        1786705881865953068,
         19133
       ],
       "src/dekko/cache.py": [
-        1786442104481837580,
+        1786705881866241862,
         9684
       ],
       "src/dekko/classify.py": [
-        1786483916591825678,
+        1786705881866495572,
         3648
       ],
       "src/dekko/cli.py": [
-        1786577827150146105,
+        1786705881867018327,
         85301
       ],
       "src/dekko/cline.py": [
@@ -165,27 +165,27 @@
         21660
       ],
       "src/dekko/daemon.py": [
-        1786701605916318664,
+        1786705881867769999,
         45898
       ],
       "src/dekko/daemon_transport.py": [
-        1786702516109632084,
+        1786705881868191503,
         29417
       ],
       "src/dekko/diff.py": [
-        1786407381555011377,
+        1786705881868581298,
         18798
       ],
       "src/dekko/embedding.py": [
-        1785928746642398593,
+        1786705881868902633,
         13291
       ],
       "src/dekko/export.py": [
-        1786064242191866796,
+        1786705881869249261,
         6829
       ],
       "src/dekko/extractor.py": [
-        1786393169664811500,
+        1786705881869697181,
         38792
       ],
       "src/dekko/extractor_generic.py": [
@@ -193,19 +193,19 @@
         8049
       ],
       "src/dekko/filelock.py": [
-        1786483967078132258,
+        1786705881869973975,
         5104
       ],
       "src/dekko/grammars.py": [
-        1786441400595928568,
+        1786705881870238144,
         4991
       ],
       "src/dekko/hooks.py": [
-        1786529356460913031,
+        1786705881870613314,
         14670
       ],
       "src/dekko/languages.py": [
-        1786486556945525731,
+        1786705881870903025,
         24937
       ],
       "src/dekko/ledger.py": [
@@ -213,11 +213,11 @@
         15506
       ],
       "src/dekko/mapfile.py": [
-        1786442098068151605,
+        1786705881871254986,
         37990
       ],
       "src/dekko/model.py": [
-        1786393179599842195,
+        1786705881871586447,
         8356
       ],
       "src/dekko/notes.py": [
@@ -225,19 +225,19 @@
         3405
       ],
       "src/dekko/orient.py": [
-        1786096964793765311,
+        1786705881871884199,
         6105
       ],
       "src/dekko/outline.py": [
-        1786441450173673741,
+        1786705881872104951,
         13002
       ],
       "src/dekko/query.py": [
-        1786529481442261027,
+        1786705881872381453,
         35641
       ],
       "src/dekko/relevance.py": [
-        1786572705225140454,
+        1786705881872763998,
         29623
       ],
       "src/dekko/render_html.py": [
@@ -249,7 +249,7 @@
         1748
       ],
       "src/dekko/render_lean.py": [
-        1786134169871802521,
+        1786705881873147251,
         31804
       ],
       "src/dekko/render_md.py": [
@@ -257,19 +257,19 @@
         19305
       ],
       "src/dekko/resolver.py": [
-        1786702667781475100,
+        1786705881873614130,
         55969
       ],
       "src/dekko/revcache.py": [
-        1786442138819284165,
+        1786705881873836215,
         5547
       ],
       "src/dekko/search.py": [
-        1786618315662201622,
+        1786705881874196968,
         29299
       ],
       "src/dekko/server.py": [
-        1786442904846758653,
+        1786705881874503262,
         46750
       ],
       "src/dekko/source.py": [
@@ -277,11 +277,11 @@
         774
       ],
       "src/dekko/stats.py": [
-        1786063689636388523,
+        1786705881874785764,
         4772
       ],
       "src/dekko/summary.py": [
-        1786529534246302078,
+        1786705881875053808,
         20736
       ],
       "src/dekko/textutil.py": [
@@ -289,7 +289,7 @@
         8700
       ],
       "src/dekko/trace.py": [
-        1786529725508472187,
+        1786705881875406728,
         8887
       ],
       "src/dekko/unused.py": [
@@ -297,11 +297,11 @@
         5484
       ],
       "src/dekko/walker.py": [
-        1786115170407901311,
+        1786705881875737230,
         14205
       ],
       "src/dekko/workset.py": [
-        1786440837400662438,
+        1786705881876115859,
         16417
       ],
       "tests/conftest.py": [
@@ -373,7 +373,7 @@
         477
       ],
       "tests/test_affected.py": [
-        1786440938329907426,
+        1786705881876382444,
         17654
       ],
       "tests/test_benchmark.py": [
@@ -385,15 +385,15 @@
         2635
       ],
       "tests/test_cache.py": [
-        1786442957269926686,
+        1786705881876625863,
         12669
       ],
       "tests/test_classify.py": [
-        1786483854917228586,
+        1786705881876846406,
         3589
       ],
       "tests/test_cli.py": [
-        1786530009644611399,
+        1786705881877161617,
         25487
       ],
       "tests/test_cline.py": [
@@ -409,11 +409,11 @@
         3964
       ],
       "tests/test_daemon.py": [
-        1786701869222800289,
+        1786705881877601162,
         50586
       ],
       "tests/test_daemon_transport.py": [
-        1786702520941366035,
+        1786705881877943498,
         26676
       ],
       "tests/test_density.py": [
@@ -425,7 +425,7 @@
         2827
       ],
       "tests/test_diff.py": [
-        1786440924123179756,
+        1786705881880919439,
         12517
       ],
       "tests/test_docs.py": [
@@ -433,19 +433,19 @@
         5588
       ],
       "tests/test_embedding.py": [
-        1785929151397987557,
+        1786705881881218483,
         8281
       ],
       "tests/test_export.py": [
-        1786401376271909700,
+        1786705881881459693,
         3182
       ],
       "tests/test_extractor.py": [
-        1786486629132627483,
+        1786705881881730737,
         17570
       ],
       "tests/test_filelock.py": [
-        1786484269035505470,
+        1786705881881909614,
         3443
       ],
       "tests/test_freshness_fastpath.py": [
@@ -457,11 +457,11 @@
         1392
       ],
       "tests/test_grammars.py": [
-        1786441473703236686,
+        1786705881882110074,
         3140
       ],
       "tests/test_hooks.py": [
-        1786529390152078139,
+        1786705881882369451,
         9131
       ],
       "tests/test_hotspots.py": [
@@ -477,7 +477,7 @@
         7231
       ],
       "tests/test_lean.py": [
-        1786134482501208552,
+        1786705881882656411,
         25966
       ],
       "tests/test_ledger.py": [
@@ -485,7 +485,7 @@
         6669
       ],
       "tests/test_mapfile.py": [
-        1786442162797680733,
+        1786705881882983289,
         21904
       ],
       "tests/test_noise.py": [
@@ -493,15 +493,15 @@
         3928
       ],
       "tests/test_notes.py": [
-        1786095151926688452,
+        1786705881883427209,
         4609
       ],
       "tests/test_orient.py": [
-        1786096981335522110,
+        1786705881883693920,
         6264
       ],
       "tests/test_outline.py": [
-        1786441529550546179,
+        1786705881884007297,
         9005
       ],
       "tests/test_overview.py": [
@@ -513,7 +513,7 @@
         1730
       ],
       "tests/test_query.py": [
-        1786529534246499996,
+        1786705881884356759,
         37283
       ],
       "tests/test_query_surface.py": [
@@ -521,7 +521,7 @@
         7198
       ],
       "tests/test_relevance.py": [
-        1786485801923752041,
+        1786705881884766137,
         26726
       ],
       "tests/test_render_md.py": [
@@ -529,11 +529,11 @@
         3883
       ],
       "tests/test_resolver.py": [
-        1786702877980570624,
+        1786705881885335350,
         70775
       ],
       "tests/test_revcache.py": [
-        1786118693038547359,
+        1786705881885947188,
         2917
       ],
       "tests/test_schema_v3.py": [
@@ -541,11 +541,11 @@
         3764
       ],
       "tests/test_search.py": [
-        1786618343811167318,
+        1786705881886267149,
         55964
       ],
       "tests/test_server.py": [
-        1786440561452525628,
+        1786705881886589110,
         33993
       ],
       "tests/test_shard.py": [
@@ -553,7 +553,7 @@
         4840
       ],
       "tests/test_stats.py": [
-        1786063846506994655,
+        1786705881887011072,
         3475
       ],
       "tests/test_status.py": [
@@ -561,7 +561,7 @@
         4139
       ],
       "tests/test_summary.py": [
-        1786529299557707186,
+        1786705881887282824,
         12315
       ],
       "tests/test_tokenizer.py": [
@@ -569,11 +569,11 @@
         3104
       ],
       "tests/test_trace.py": [
-        1786529725508451145,
+        1786705881887514784,
         5706
       ],
       "tests/test_unused.py": [
-        1786096762697319330,
+        1786705881887939412,
         8785
       ],
       "tests/test_version.py": [
@@ -581,11 +581,11 @@
         1734
       ],
       "tests/test_walker.py": [
-        1786115432794819819,
+        1786705881888201956,
         12237
       ],
       "tests/test_workset.py": [
-        1786440953715051085,
+        1786705881888492750,
         11795
       ]
     },
@@ -60936,13 +60936,6 @@
     },
     {
       "caller": "src/dekko/summary.py::compute",
-      "callee": "src/dekko/stats.py::compute",
-      "lines": [
-        130
-      ]
-    },
-    {
-      "caller": "src/dekko/summary.py::compute",
       "callee": "src/dekko/summary.py::_directories",
       "lines": [
         138
@@ -61709,13 +61702,6 @@
       "callee": "src/dekko/contextpack.py::build_pack",
       "lines": [
         214
-      ]
-    },
-    {
-      "caller": "src/dekko/workset.py::build",
-      "callee": "src/dekko/outline.py::build",
-      "lines": [
-        209
       ]
     },
     {
@@ -79726,15 +79712,6 @@
     },
     {
       "caller": "src/dekko/diff.py::run",
-      "name": "get",
-      "candidates": [
-        "src/dekko/daemon.py::_WarmCache.get",
-        "src/dekko/embedding.py::EmbeddingCache.get",
-        "src/dekko/render_md.py::_Anchors.get"
-      ]
-    },
-    {
-      "caller": "src/dekko/embedding.py::EmbeddingCache.get",
       "name": "get",
       "candidates": [
         "src/dekko/daemon.py::_WarmCache.get",

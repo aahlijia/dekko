@@ -9,7 +9,40 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-08-14
+
 ### Added
+- **Stronger dekko-usage enforcement for Claude Code sessions**
+  (`.features/plans/usages/enforce-dekko-usage.md`). Real transcripts
+  showed Claude falling back to `grep`/whole-file `Read` more than
+  reaching for dekko's structural tools even with the existing
+  session-start/prompt-submit/pre-read hooks installed, because every
+  one of those is per-turn `additionalContext` an agent is free to
+  weigh against convenience and ignore. Three additions, in ascending
+  order of enforcement strength:
+  - Sharper copy in the existing soft-push surfaces — `orient.py`'s
+    session preamble, `hooks.py`'s prompt-submit nudge, and the MCP
+    tool descriptions for `get_callees`/`find_usages`/`workset`/
+    `impacted_tests` — now name the grep/Read alternative explicitly
+    instead of only describing what the tool returns.
+  - **`dekko --claude-md-install` / `--claude-md-uninstall`**: an
+    idempotent, marker-bounded (`<!-- dekko:usage-policy:start -->` /
+    `...:end`) usage-policy block written into the project's
+    `CLAUDE.md`. Unlike per-turn injected context, `CLAUDE.md` content
+    is documented as overriding default agent behavior — a materially
+    stronger lever, loaded once per session. Kept as a separate
+    top-level flag (not bundled into `dekko hooks install`) since it
+    edits a file the user directly owns and reads, unlike
+    `.claude/settings.json`.
+  - **New `pre-bash` hook event** (`dekko hooks install --enable
+    pre-bash`, off by default): a `PreToolUse`/`Bash` hook that matches
+    a repo-wide `grep`/`rg`/`ag` search, a `find -name` hunt, or a
+    `cat`/`head`/`sed` on a large mapped file, and surfaces
+    `permissionDecision: "ask"` with the dekko-equivalent command — a
+    real interruption instead of ignorable text. `--strict` escalates
+    matches to `"deny"`. Matching is deliberately conservative (a
+    targeted single-file `grep` or a `cat` on an unmapped file like
+    `package.json` never matches) to keep false positives low.
 - **Daemon-mode CLI** (`dekko daemon start/stop/status`). A per-repo
   background process the bare `dekko` CLI talks to over a socket
   (Unix domain socket on macOS/Linux, token-authenticated TCP

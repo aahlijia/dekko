@@ -44,8 +44,13 @@ _SEARCH_LINE = (
 )
 
 _PREAMBLE = (
-    "dekko orientation — this repo has a .dekko/ map. Prefer dekko's\n"
-    "structural tools over grep/reading whole files:\n"
+    "dekko orientation — this repo has a .dekko/ map. Use dekko's\n"
+    "structural tools instead of grep/reading whole files: they answer\n"
+    "the same question cheaper and exactly, where grep guesses. If this\n"
+    "repo's pre-bash hook is enabled, a broad grep/find/cat on a mapped\n"
+    "file will pause for confirmation before it runs — treat that as a\n"
+    "real constraint on this session, not a suggestion to weigh against\n"
+    "convenience.\n"
     f"{_SEARCH_LINE}"
     "  • outline <file>  — a file's shape (signatures, no bodies), "
     "~1/10 cost\n"

@@ -810,7 +810,9 @@ TOOLS: list[dict[str, Any]] = [
         "name": "get_callees",
         "description": "Every in-repo symbol a symbol calls (set "
         "sites=true for call-site lines) — what this code depends on, "
-        "without reading its body.",
+        "without reading its body. Walks the resolved call graph "
+        "directly instead of grepping the body for names that look "
+        "like calls.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -827,7 +829,10 @@ TOOLS: list[dict[str, Any]] = [
         "name": "find_usages",
         "description": "List the symbols that reference an external "
         "(out-of-repo) name, e.g. a stdlib or third-party function, "
-        "with call sites.",
+        "with call sites — one call gets every real call site across "
+        "the repo, where grepping the bare name also pulls in imports, "
+        "comments, and unrelated same-named locals you'd have to "
+        "hand-filter.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -916,7 +921,9 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Test files a runner should exercise after a "
         "change: reverse call-graph reachability from changed symbols "
         "plus an import-edge fallback (leads, not verdicts — static "
-        "analysis misses fixtures and dynamic dispatch).",
+        "analysis misses fixtures and dynamic dispatch). More reliable "
+        "than grepping test files for the changed symbol's name, which "
+        "misses indirect callers and matches unrelated same-named text.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -941,7 +948,9 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Task work-set: for a change (git rev) or a "
         "symbol, bundle the touched files' outlines plus call-graph "
         "packs for the most central touched symbols under one token "
-        "budget. One call replaces affected + N outlines + N packs.",
+        "budget. One call replaces affected + N outlines + N packs — "
+        "and grepping a diff for touched names then reading each file "
+        "whole to work it.",
         "inputSchema": {
             "type": "object",
             "properties": {

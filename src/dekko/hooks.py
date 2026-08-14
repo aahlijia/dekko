@@ -8,7 +8,7 @@ the documented ``additionalContext`` channel. They are composition over
 the existing tools (``render_lean``, ``relevance``, ``ledger``,
 ``outline``) — no new extraction.
 
-Three events, each individually opt-in (``dekko hooks install``):
+Four events, each individually opt-in (``dekko hooks install``):
 
 * **SessionStart** (``session-start``) — a steering preamble plus a
   budget-capped ``lean`` map, so the first turn already holds a navigation
@@ -20,6 +20,13 @@ Three events, each individually opt-in (``dekko hooks install``):
 * **PreToolUse / Read** (``pre-read``) — a non-blocking advisory to
   outline a large file first (``permissionDecision: "defer"`` — never
   denies the read; Resolved Q5).
+* **PreToolUse / Bash** (``pre-bash``) — the enforcement tier: a
+  ``grep``/``rg``/``ag`` repo-wide search, a ``find -name`` hunt, or a
+  ``cat``/``head``/``sed`` on a large mapped file surfaces
+  ``permissionDecision: "ask"`` (or ``"deny"`` under ``--strict``) with
+  the dekko-equivalent command, instead of the purely advisory text
+  every other hook here emits. Off by default even when other hooks
+  are installed — see :func:`pre_bash`.
 
 Every handler is **fail-silent**: any error, missing map, or empty signal
 yields no output and a clean exit, so a hook can never break or hijack a
@@ -28,6 +35,7 @@ already maintains; dekko persists none of its own.
 """
 
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -45,7 +53,7 @@ SESSION_MAP_BUDGET = 2000
 SESSION_TOKEN_BUDGET = 180_000
 # Most files the prompt-submit pointer lists, before budget scaling.
 PROMPT_TOP_FILES = 5
-# `pre-read` advises only above this whole-file token cost.
+# `pre-read`/`pre-bash` advise only above this whole-file token cost.
 READ_THRESHOLD = 1000
 # Symbol names sampled into a file's relevance text.
 _NAME_SAMPLE = 8
@@ -55,6 +63,7 @@ EVENTS: dict[str, tuple[str, str | None]] = {
     "session-start": ("SessionStart", None),
     "prompt-submit": ("UserPromptSubmit", None),
     "pre-read": ("PreToolUse", "Read"),
+    "pre-bash": ("PreToolUse", "Bash"),
 }
 
 _HOOK_COMMAND_PREFIX = "dekko hooks run "
@@ -197,7 +206,9 @@ def prompt_submit(payload: dict) -> dict | None:
         return None
     body = "\n".join(f"  {p}" for p in files)
     text = (
-        "dekko — files most relevant to this task (not yet fully read):\n"
+        "dekko — files most relevant to this task (not yet fully read).\n"
+        "Outline or query these before Read/grep — do not read one of "
+        "them whole without checking its outline first:\n"
         f"{body}\n"
         "  expand: `dekko outline <file>` · `dekko context <sym>`"
     )
@@ -260,16 +271,158 @@ def _rel_to_root(file_path: str, root: Path) -> str | None:
         return None
 
 
+# --- PreToolUse / Bash -------------------------------------------------
+
+# Statement separators shlex leaves as standalone tokens when they're
+# whitespace-delimited (the common case); anything shlex can't tokenize
+# at all (unbalanced quotes, etc.) is treated as "no match" rather than
+# guessed at.
+_SHELL_SEPARATORS = {";", "&&", "||", "|"}
+_GREP_CMDS = {"grep", "egrep", "fgrep", "rgrep", "rg", "ag"}
+_CAT_CMDS = {"cat", "head", "sed"}
+# Recursive/repo-wide flags for the grep family. `rg`/`ag` are recursive
+# by default, so any invocation of those two counts; the plain `grep`
+# family only counts once one of these explicit flags is present —
+# `grep somepattern one_file.py` is a targeted read, not a blind search.
+_RECURSIVE_FLAGS = {"-r", "-R", "-rn", "-nr", "-Rn", "-nR", "--recursive"}
+
+
+def _split_statements(command: str) -> list[list[str]]:
+    """Tokenize a shell command into per-statement argv lists.
+
+    Splits on ``;``/``&&``/``||``/``|`` tokens (only recognized when
+    whitespace-delimited, matching normal shell formatting) so each
+    piece of a chained/piped command is checked independently. Returns
+    ``[]`` on anything ``shlex`` can't parse (unbalanced quotes, etc.)
+    so the caller fails silent rather than guesses.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return []
+    statements: list[list[str]] = [[]]
+    for tok in tokens:
+        if tok in _SHELL_SEPARATORS:
+            statements.append([])
+        else:
+            statements[-1].append(tok)
+    return [s for s in statements if s]
+
+
+def _grep_reason(stmt: list[str]) -> str | None:
+    """Nudge for a repo-wide grep/rg/ag search, or None."""
+    if stmt[0] not in _GREP_CMDS:
+        return None
+    recursive = stmt[0] in {"rg", "ag"} or any(
+        tok in _RECURSIVE_FLAGS for tok in stmt[1:]
+    )
+    if not recursive:
+        return None
+    return (
+        "dekko: this looks like a repo-wide text search — "
+        "`search_code`/`query_symbol` answer 'where/what is X' from "
+        "the parsed map without scanning every file; grep still wins "
+        "for literal strings, comments, and non-code files."
+    )
+
+
+def _find_reason(stmt: list[str]) -> str | None:
+    """Nudge for a `find -name` hunt for a file/definition, or None."""
+    if stmt[0] != "find" or "-name" not in stmt:
+        return None
+    return (
+        "dekko: hunting for a file/definition by guessed name — "
+        "`search_code`/`outline` locate it from the parsed map instead "
+        "of walking the tree."
+    )
+
+
+def _cat_reason(stmt: list[str], index: MapIndex, root: Path) -> str | None:
+    """Nudge for `cat`/`head`/`sed` on a large mapped file, or None."""
+    if stmt[0] not in _CAT_CMDS or len(stmt) < 2:
+        return None
+    candidate = stmt[-1]
+    if candidate.startswith("-"):
+        return None
+    rel = _rel_to_root(candidate, root)
+    if rel is None:
+        return None
+    est = outline.size_estimate(index, root, rel)
+    if est is None or est[0] < READ_THRESHOLD:
+        return None
+    full, outline_tokens = est
+    pct = round(100 * outline_tokens / full)
+    return (
+        f"dekko: {rel} ≈ {full} tok via {stmt[0]} — `dekko outline "
+        f"{rel}` is ≈ {outline_tokens} tok ({pct}%); outline first if "
+        "you only need its shape."
+    )
+
+
+def _bash_reason(command: str, index: MapIndex, root: Path) -> str | None:
+    """The first dekko-equivalent nudge for a shell command, or None."""
+    for stmt in _split_statements(command):
+        reason = (
+            _grep_reason(stmt)
+            or _find_reason(stmt)
+            or _cat_reason(stmt, index, root)
+        )
+        if reason is not None:
+            return reason
+    return None
+
+
+def pre_bash(payload: dict, *, strict: bool = False) -> dict | None:
+    """Ask (or, under --strict, deny) before a grep/find/cat fallback.
+
+    The enforcement tier (Tier 2): unlike every other hook in this
+    module, a match here interrupts the tool call instead of merely
+    annotating it — ``"ask"`` forces a confirmation, ``"deny"`` (opt-in
+    via ``--strict``) rejects the call outright and hands Claude the
+    dekko-equivalent command to retry with. Matching is deliberately
+    conservative (favor false negatives): a plain ``cat config.json``
+    or a non-recursive, single-file ``grep`` never matches.
+
+    Args:
+        payload: The ``PreToolUse``/``Bash`` hook JSON.
+        strict: Escalate a match from ``"ask"`` to ``"deny"``.
+
+    Returns:
+        A ``hookSpecificOutput`` dict on a match, else ``None``.
+    """
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+    command = tool_input.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    root = _root_from(payload)
+    index = _load_index(root, allow_regen=False)
+    if index is None:
+        return None
+    reason = _bash_reason(command, index, root)
+    if reason is None:
+        return None
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny" if strict else "ask",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
 # --- dispatch (the `dekko hooks run <event>` entrypoint) -------------
 
 _HANDLERS = {
     "session-start": session_start,
     "prompt-submit": prompt_submit,
     "pre-read": pre_read,
+    "pre-bash": pre_bash,
 }
 
 
-def dispatch(event: str, payload_text: str) -> int:
+def dispatch(event: str, payload_text: str, *, strict: bool = False) -> int:
     """Run a hook handler over stdin JSON and print its output.
 
     Fail-silent by contract: a bad event, unparseable payload, or any
@@ -277,8 +430,11 @@ def dispatch(event: str, payload_text: str) -> int:
     never disrupted.
 
     Args:
-        event: One of ``session-start``, ``prompt-submit``, ``pre-read``.
+        event: One of ``session-start``, ``prompt-submit``, ``pre-read``,
+            ``pre-bash``.
         payload_text: The raw hook JSON from stdin.
+        strict: Forwarded to ``pre_bash``; ignored by every other
+            handler.
 
     Returns:
         Always ``0``.
@@ -290,7 +446,10 @@ def dispatch(event: str, payload_text: str) -> int:
         payload = json.loads(payload_text) if payload_text.strip() else {}
         if not isinstance(payload, dict):
             return EXIT_OK
-        output = handler(payload)
+        if event == "pre-bash":
+            output = handler(payload, strict=strict)
+        else:
+            output = handler(payload)
     except Exception:
         return EXIT_OK
     if output is not None:
@@ -315,13 +474,17 @@ def _load_settings(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _entry(event: str, matcher: str | None) -> dict:
-    """One settings hooks entry invoking ``dekko hooks run <event>``."""
-    block = {
-        "hooks": [
-            {"type": "command", "command": f"{_HOOK_COMMAND_PREFIX}{event}"}
-        ]
-    }
+def _entry(event: str, matcher: str | None, *, strict: bool = False) -> dict:
+    """One settings hooks entry invoking ``dekko hooks run <event>``.
+
+    ``strict`` only affects ``pre-bash``: it appends ``--strict`` to the
+    command, which ``run_hooks_run``/``dispatch`` forward so
+    :func:`pre_bash` escalates its matches from ``"ask"`` to ``"deny"``.
+    """
+    command = f"{_HOOK_COMMAND_PREFIX}{event}"
+    if event == "pre-bash" and strict:
+        command += " --strict"
+    block = {"hooks": [{"type": "command", "command": command}]}
     if matcher is not None:
         block = {"matcher": matcher, **block}
     return block
@@ -336,12 +499,16 @@ def _is_dekko_entry(entry: dict) -> bool:
     return False
 
 
-def install(root: Path, events: list[str]) -> int:
+def install(root: Path, events: list[str], *, strict: bool = False) -> int:
     """Merge dekko hook entries into project settings (idempotent).
 
     Args:
         root: Repository root whose ``.claude/settings.json`` to edit.
         events: dekko event names to enable.
+        strict: Escalate ``pre-bash`` matches from ``"ask"`` to
+            ``"deny"``. No effect unless ``"pre-bash"`` is in
+            ``events``; changing it on an already-installed ``pre-bash``
+            requires ``hooks uninstall`` first (install only merges).
 
     Returns:
         Process exit code (``0`` ok, ``2`` on an unknown event).
@@ -360,7 +527,7 @@ def install(root: Path, events: list[str]) -> int:
         claude_event, matcher = EVENTS[event]
         bucket = hooks.setdefault(claude_event, [])
         if not _already_installed(bucket, event):
-            bucket.append(_entry(event, matcher))
+            bucket.append(_entry(event, matcher, strict=strict))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
     print(
@@ -371,13 +538,21 @@ def install(root: Path, events: list[str]) -> int:
 
 
 def _already_installed(bucket: list, event: str) -> bool:
-    """Whether ``event`` is already wired in a settings bucket."""
+    """Whether ``event`` is already wired in a settings bucket.
+
+    Matches either the plain command or its ``--strict``-suffixed
+    variant, so re-running install (with or without ``--strict``)
+    never adds a duplicate entry.
+    """
     command = f"{_HOOK_COMMAND_PREFIX}{event}"
     for entry in bucket:
         if not isinstance(entry, dict):
             continue
         for hook in entry.get("hooks", []):
-            if isinstance(hook, dict) and hook.get("command") == command:
+            cmd = hook.get("command") if isinstance(hook, dict) else None
+            if isinstance(cmd, str) and (
+                cmd == command or cmd.startswith(f"{command} ")
+            ):
                 return True
     return False
 
