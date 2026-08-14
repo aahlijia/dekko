@@ -35,6 +35,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
   MCP-only agent (no Bash) with no way to discover them.
 
 ### Fixed
+- **`dekko daemon status` could report `running: false` for a daemon
+  that was alive but slow to reply, and `stop` could unlink a live
+  daemon's transport artifacts on the same false-negative evidence.**
+  Under sustained CPU contention, a status round-trip that had
+  already connected to a genuine listener could still time out
+  waiting for a reply, previously indistinguishable from a plain
+  connection refusal, so `status()` folded both into the same "not
+  running" report. `stop()`'s forced-fallback path (used when neither
+  a graceful-shutdown ack nor a PID lookup confirmed the daemon was
+  gone) had the mirror problem: it unlinked the transport
+  unconditionally, capable of orphaning a still-listening process.
+  `daemon.py`'s `status()`/`_query_pid()` now distinguish a
+  post-connect timeout from a genuine absence and report
+  `confirmed: false` instead of guessing; `stop()`'s forced-fallback
+  now only cleans up when a final reachability probe itself fails,
+  positive evidence, not silence. See `.features/plans/round14/
+  daemon-lifecycle-fixes-plan.md`.
 - **`dekko daemon stop` reported success up to ~1.1s before the
   daemon process had actually torn down.** From a live eval against
   6 of 7 real repos post-round-13 search fix
