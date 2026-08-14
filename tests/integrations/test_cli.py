@@ -14,6 +14,7 @@ import pytest
 from dekko import repo_ops
 from dekko.analysis import affected
 from dekko.integrations import cli
+from dekko.render import mapfile
 from dekko.storage import filelock
 from dekko.core.model import FileMap
 
@@ -114,6 +115,35 @@ def test_map_full_bypasses_noop_fast_path(
     out = capsys.readouterr().out
     assert "unchanged" not in out
     assert "mapped 1 files" in out
+
+
+def test_map_regens_when_doc_version_stale(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # round-15 plan: MAP_DOC_VERSION (the on-disk map.json *format*,
+    # e.g. the id-interning change) can bump independently of a
+    # package release, so tool_version/spec_hash alone would call an
+    # old-format map.json "fresh" forever on an unchanged source tree
+    # — the no-op fast path must also check doc_version, not just
+    # those two. Reproduced without a real old build: hand-edit the
+    # on-disk doc's "version" down by one after a normal run.
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    assert cli.main(["map", str(tmp_path)]) == 0
+    capsys.readouterr()
+
+    json_path = tmp_path / ".dekko" / "map.json"
+    doc = json.loads(json_path.read_text())
+    doc["version"] = doc["version"] - 1
+    json_path.write_text(json.dumps(doc))
+    stale_mtime = json_path.stat().st_mtime_ns
+
+    assert cli.main(["map", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "unchanged" not in out
+    assert json_path.stat().st_mtime_ns != stale_mtime
+    assert (
+        json.loads(json_path.read_text())["version"] == mapfile.MAP_DOC_VERSION
+    )
 
 
 def test_map_added_file_forces_a_real_rewrite(

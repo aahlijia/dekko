@@ -1,10 +1,9 @@
 """Render the extracted symbol/call graph as map.json."""
 
-import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from dekko.render.mapfile import MAP_DOC_VERSION
+from dekko.render.mapfile import MAP_DOC_VERSION, _json_dumps, build_id_table
 from dekko.core.model import CallGraph, FileMap
 
 
@@ -13,7 +12,7 @@ def render_json(
     graph: CallGraph,
     root_label: str,
     provenance: dict | None = None,
-) -> str:
+) -> bytes:
     """Serialize the full graph (including external calls) to JSON.
 
     Args:
@@ -24,9 +23,19 @@ def render_json(
             discovery options, per-file hashes), or ``None``.
 
     Returns:
-        Pretty-printed JSON text.
+        Compact JSON bytes. ``map.json`` has no human reader — only
+        ``mapfile.load_map()`` parses it, and ``MAP.md``
+        (``render_md.py``) is the actual human-facing artifact — so
+        this is written densely instead of pretty-printed
+        (round-15 plan). Caller/callee/candidate id strings that
+        repeat across ``"edges"``/``"ambiguous"``/``"external"``/
+        ``"referenced"`` are interned once into a top-level ``"ids"``
+        table (``mapfile.build_id_table``) and referenced there by
+        integer index instead of being spelled out at every
+        occurrence.
     """
     when = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    ids, id_index = build_id_table(graph)
     doc = {
         "generator": "dekko",
         "version": MAP_DOC_VERSION,
@@ -44,12 +53,38 @@ def render_json(
             for fm in files
         ],
         "symbols": [asdict(sym) for fm in files for sym in fm.symbols],
-        "edges": [asdict(edge) for edge in graph.edges],
+        "ids": ids,
+        "edges": [
+            {
+                "caller": id_index[edge.caller],
+                "callee": id_index[edge.callee],
+                "lines": edge.lines,
+            }
+            for edge in graph.edges
+        ],
         "ambiguous": [
-            {"caller": caller, "name": name, "candidates": cands}
+            {
+                "caller": id_index[caller],
+                "name": name,
+                "candidates": [id_index[c] for c in cands],
+            }
             for caller, name, cands in graph.ambiguous
         ],
-        "external": [asdict(ext) for ext in graph.external],
-        "referenced": [asdict(edge) for edge in graph.referenced],
+        "external": [
+            {
+                "caller": id_index[ext.caller],
+                "callee": id_index[ext.callee],
+                "lines": ext.lines,
+            }
+            for ext in graph.external
+        ],
+        "referenced": [
+            {
+                "caller": id_index[edge.caller],
+                "callee": id_index[edge.callee],
+                "lines": edge.lines,
+            }
+            for edge in graph.referenced
+        ],
     }
-    return json.dumps(doc, indent=2, sort_keys=False) + "\n"
+    return _json_dumps(doc) + b"\n"

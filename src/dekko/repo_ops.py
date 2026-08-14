@@ -350,7 +350,15 @@ def _map_run_is_noop(
     survives to be reused — see bug #1's fix in ``cache.py``), but
     ``.dekko/cache.json`` and ``.dekko/map.json`` are two independent
     files, and a hand-edited or otherwise desynced map.json could
-    still be stale even when the cache looks fully warm.
+    still be stale even when the cache looks fully warm. The
+    ``doc_version`` check exists for the same reason but a distinct
+    axis: ``MAP_DOC_VERSION`` (the on-disk *format*, e.g. the round-15
+    id-interning change) can bump independently of a package release
+    — ``tool_version``/``spec_hash`` alone would call an old-format
+    map.json "fresh" forever on an unchanged source tree, since
+    neither of them moves just because the serialization shape did.
+
+
 
     Args:
         root: Repository root.
@@ -380,6 +388,7 @@ def _map_run_is_noop(
     version_match = (
         prov.get("tool_version") == _pkg_version("dekko")
         and prov.get("spec_hash") == languages.spec_fingerprint()
+        and index.doc_version == mapfile.MAP_DOC_VERSION
     )
     if not (options_match and version_match):
         return False
@@ -554,7 +563,7 @@ def _write_json_output(
     json_path.parent.mkdir(parents=True, exist_ok=True)
     mapfile.atomic_write_bytes(
         json_path,
-        render_json(files, graph, label, provenance).encode("utf-8"),
+        render_json(files, graph, label, provenance),
     )
     if json_path == root / cache_mod.CACHE_DIR / "map.json":
         mapfile.write_provenance_sidecar(root, provenance)

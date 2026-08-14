@@ -37,7 +37,7 @@ def test_load_round_trip(make_mapped_repo: RepoFactory) -> None:
 def test_provenance_written(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(CHAIN)
     doc = json.loads((root / ".dekko" / "map.json").read_text())
-    assert doc["version"] == 4
+    assert doc["version"] == 5
     prov = doc["provenance"]
     assert prov["tool_version"]
     assert prov["spec_hash"]
@@ -413,6 +413,23 @@ def _sym(path: str, name: str) -> Symbol:
     )
 
 
+def _intern(doc: dict, value: str) -> int:
+    """Test-side mirror of ``mapfile.build_id_table``'s intern step.
+
+    Hand-edited map.json fixtures below inject new caller/callee/
+    candidate entries; since v5+ documents store those as integer
+    indices into the top-level ``"ids"`` table (round-15 plan) rather
+    than raw strings, a fixture that wants to add
+    ``{"caller": "a.py::main", ...}`` must add ``"a.py::main"`` to
+    ``doc["ids"]`` (or reuse its existing index) and reference the
+    index instead.
+    """
+    ids = doc.setdefault("ids", [])
+    if value not in ids:
+        ids.append(value)
+    return ids.index(value)
+
+
 def test_load_map_reads_referenced_edge_lines(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -423,7 +440,11 @@ def test_load_map_reads_referenced_edge_lines(
     map_path = root / ".dekko" / "map.json"
     doc = json.loads(map_path.read_text())
     doc["referenced"] = [
-        {"caller": "a.py::main", "callee": "a.py::helper", "lines": [42]}
+        {
+            "caller": _intern(doc, "a.py::main"),
+            "callee": _intern(doc, "a.py::helper"),
+            "lines": [42],
+        }
     ]
     map_path.write_text(json.dumps(doc))
 
@@ -494,9 +515,12 @@ def test_load_map_reads_ambiguous_out(make_mapped_repo: RepoFactory) -> None:
     doc = json.loads(map_path.read_text())
     doc["ambiguous"] = [
         {
-            "caller": "a.py::main",
+            "caller": _intern(doc, "a.py::main"),
             "name": "g",
-            "candidates": ["b.py::g", "c.py::g"],
+            "candidates": [
+                _intern(doc, "b.py::g"),
+                _intern(doc, "c.py::g"),
+            ],
         }
     ]
     map_path.write_text(json.dumps(doc))

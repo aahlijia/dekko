@@ -40,7 +40,7 @@ try:
 except ImportError:  # pragma: no cover - exercised in stdlib-only envs
     orjson = None  # type: ignore[assignment]
 
-MAP_DOC_VERSION = 4
+MAP_DOC_VERSION = 5
 _MAP_DIR = ".dekko"
 _BASE_SPLIT = re.compile(r"::|\.|->|/")
 _UNSUPPORTED_PREFIX = "no parser ("
@@ -63,12 +63,93 @@ def _json_loads(data: bytes) -> object:
 def _json_dumps(obj: object) -> bytes:
     """Serialize to compact JSON bytes, preferring ``orjson`` when
     installed; falls back to stdlib ``json``. Used for machine-only
-    files (the provenance sidecar) where human-readable indentation
-    doesn't matter.
+    files (the provenance sidecar, ``map.json`` as of round 15) where
+    human-readable indentation doesn't matter. The stdlib fallback
+    passes ``separators=(",", ":")`` — without it, ``json.dumps``
+    still inserts a space after every ``,``/``:`` even with no
+    ``indent``, which is real, avoidable overhead on documents with
+    millions of small array elements (exactly ``map.json``'s shape on
+    a large repo). ``orjson.dumps`` has no such padding by default, so
+    only the stdlib branch needs the explicit argument.
     """
     if orjson is not None:
         return orjson.dumps(obj)
-    return json.dumps(obj).encode("utf-8")
+    return json.dumps(obj, separators=(",", ":")).encode("utf-8")
+
+
+def build_id_table(graph: CallGraph) -> tuple[list[str], dict[str, int]]:
+    """First-appearance-order intern table for id strings the writer
+    repeats across ``"edges"``/``"ambiguous"``/``"external"``/
+    ``"referenced"``.
+
+    ``"ambiguous"`` entries in particular can each name dozens to
+    thousands of candidate ids that also appear, verbatim, in many
+    other entries (round-15 plan: a measured 463.6x duplication factor
+    on zed's ``ambiguous`` section, 89.6% of that map.json's total
+    bytes). Building one shared table and writing every distinct id
+    string once, referenced elsewhere by integer index, is what
+    collapses that duplication. ``"symbols"[].id`` is deliberately not
+    covered here — it's the primary key readers already look records
+    up by as a string, and it is not where the disproportionate size
+    lives (round-15 plan's non-goals).
+
+    Args:
+        graph: Resolved call graph whose edge/ambiguous/external/
+            referenced sections will be written.
+
+    Returns:
+        ``(ids, index)``: ``ids`` is the ordered list to embed as the
+        document's top-level ``"ids"`` key; ``index`` is the
+        ``str -> int`` lookup the writer uses while serializing.
+    """
+    ids: list[str] = []
+    index: dict[str, int] = {}
+
+    def intern(value: str) -> None:
+        if value not in index:
+            index[value] = len(ids)
+            ids.append(value)
+
+    for edge in graph.edges:
+        intern(edge.caller)
+        intern(edge.callee)
+    for caller, _name, candidates in graph.ambiguous:
+        intern(caller)
+        for cand in candidates:
+            intern(cand)
+    for ext in graph.external:
+        intern(ext.caller)
+        intern(ext.callee)
+    for edge in graph.referenced:
+        intern(edge.caller)
+        intern(edge.callee)
+    return ids, index
+
+
+def _resolve_ref(value: object, ids: list[str] | None) -> str:
+    """Resolve one caller/callee/candidate field to its string id.
+
+    Pre-v5 documents store the id directly as a string; v5+ documents
+    store an integer index into the document's top-level ``"ids"``
+    table (``ids`` is non-``None`` only then, see ``load_map``).
+    Centralizing this one branch on ``isinstance`` (not truthiness) is
+    what lets every read loop below stay ignorant of which on-disk
+    shape it's reading, without a falsy-zero bug: index ``0`` is a
+    perfectly valid interned id and must not be treated as "missing"
+    the way ``value or ""`` would.
+
+    Args:
+        value: Raw field value as parsed from JSON — a string
+            (pre-v5) or an integer index (v5+).
+        ids: The document's id table, or ``None`` for pre-v5 reads.
+
+    Returns:
+        The resolved id string, or ``""`` when ``value`` doesn't match
+        the shape ``ids`` implies (missing/malformed field).
+    """
+    if ids is None:
+        return value if isinstance(value, str) else ""
+    return ids[value] if isinstance(value, int) else ""
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -352,6 +433,16 @@ class MapIndex:
             one overwrite the other.
         notes: Symbol id → note texts loaded from ``.dekko/notes.json``.
         provenance: Provenance stamp, or ``None`` for v1 documents.
+        doc_version: The on-disk document's ``"version"`` field (``1``
+            for documents predating the field entirely), or
+            ``MAP_DOC_VERSION`` for an index built in-process by
+            ``index_from_maps`` rather than loaded from disk.
+            ``repo_ops._map_run_is_noop`` reads this to tell "this
+            repo's map.json is already in the current on-disk format"
+            apart from "tool_version/spec_hash match but the format
+            itself changed underneath them" (round-15 plan: a
+            ``MAP_DOC_VERSION`` bump alone, with no package version
+            bump, would otherwise be invisible to that no-op check).
     """
 
     root_label: str
@@ -378,6 +469,7 @@ class MapIndex:
     ref_lines: dict[tuple[str, str], list[int]] = field(default_factory=dict)
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
+    doc_version: int = MAP_DOC_VERSION
 
     def degree(self, sym_id: str) -> int:
         """Total fan-in + fan-out of a symbol id."""
@@ -400,7 +492,11 @@ class MapIndex:
         Returns:
             A new ``MapIndex``; ``self`` is left untouched.
         """
-        out = MapIndex(root_label=self.root_label, provenance=self.provenance)
+        out = MapIndex(
+            root_label=self.root_label,
+            provenance=self.provenance,
+            doc_version=self.doc_version,
+        )
         for sid, sym in self.symbols_by_id.items():
             if _symbol_is_test(sym):
                 continue
@@ -627,6 +723,7 @@ def load_map(root: Path) -> MapIndex | None:
         root_label=doc.get("root", root.name),
         provenance=doc.get("provenance"),
         notes=_load_notes(root),
+        doc_version=doc.get("version", 1),
     )
     for entry in doc.get("files", []):
         fpath = entry["path"]
@@ -643,26 +740,45 @@ def load_map(root: Path) -> MapIndex | None:
         index.symbols_by_name.setdefault(sym.name, []).append(sym)
         index.symbols_by_qualname.setdefault(sym.qualname, []).append(sym)
         index.symbols_by_path.setdefault(sym.path, []).append(sym)
+
+    # v5+ documents intern caller/callee/candidate id strings into a
+    # top-level "ids" table and reference them by integer index below
+    # (round-15 plan); pre-v5 documents wrote those ids as raw strings
+    # directly. `_resolve_ref` is a no-op passthrough for the latter,
+    # so every loop below reads either shape unchanged.
+    doc_ids = doc.get("ids")
+    ids = (
+        doc_ids
+        if index.doc_version >= 5 and isinstance(doc_ids, list)
+        else None
+    )
+
     for edge in doc.get("edges", []):
-        caller, callee = edge["caller"], edge["callee"]
+        caller = _resolve_ref(edge["caller"], ids)
+        callee = _resolve_ref(edge["callee"], ids)
         index.calls_out.setdefault(caller, []).append(callee)
         index.calls_in.setdefault(callee, []).append(caller)
         index.edge_lines[(caller, callee)] = edge.get("lines", [])
     for d in doc.get("external", []):
         ext = ExternalCall(
-            caller=d.get("caller") or "",
-            callee=d.get("callee", ""),
+            caller=_resolve_ref(d.get("caller"), ids),
+            callee=_resolve_ref(d.get("callee", ""), ids),
             lines=d.get("lines", []),
         )
         base = _callee_base(ext.callee)
         if base:
             index.externals_by_name.setdefault(base, []).append(ext)
     index.ambiguous_in, index.ambiguous_out = _index_ambiguous(
-        (d.get("caller", ""), d.get("name", ""), d.get("candidates", []))
+        (
+            _resolve_ref(d.get("caller", ""), ids),
+            d.get("name", ""),
+            [_resolve_ref(c, ids) for c in d.get("candidates", [])],
+        )
         for d in doc.get("ambiguous", [])
     )
     for edge in doc.get("referenced", []):
-        caller, callee = edge["caller"], edge["callee"]
+        caller = _resolve_ref(edge["caller"], ids)
+        callee = _resolve_ref(edge["callee"], ids)
         index.referenced_out.setdefault(caller, []).append(callee)
         index.referenced_in.setdefault(callee, []).append(caller)
         index.ref_lines[(caller, callee)] = edge.get("lines", [])
