@@ -757,12 +757,14 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "scorer": {
                     "type": "string",
-                    "enum": ["lexical", "embedding"],
+                    "enum": list(search.SCORER_CHOICES),
                     "description": "Relevance scorer: 'lexical' "
-                    "(default, BM25, always available) or 'embedding' "
-                    "(hashing-trick embedding; only works if the "
+                    "(default, BM25, always available), 'embedding' "
+                    "(hashing-trick embedding), or 'both' (fuses "
+                    "lexical + embedding rankings via reciprocal rank "
+                    "fusion) — 'embedding' and 'both' only work if the "
                     "server was installed with the dekko[search] "
-                    "extra)",
+                    "extra",
                 },
                 "root": _ROOT_PROP,
             },

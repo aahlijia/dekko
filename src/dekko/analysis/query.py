@@ -371,9 +371,15 @@ def report_unresolved(
     if len(ranked) > _MAX_AMBIGUOUS_CANDIDATES:
         more = len(ranked) - _MAX_AMBIGUOUS_CANDIDATES
         sample = ranked[0]
+        # Build the hint from the sample's own qualname, not the raw
+        # ``target`` string — ``target`` may already be a
+        # ``path:qualname[:LINE]`` form (e.g. when path+qualname alone
+        # still matched an overload set), and prepending ``sample.path``
+        # to an already-qualified target duplicated the path segment
+        # (round-15 finding).
         print(
-            f"  … +{more} more (qualify with `{sample.path}:{target}` "
-            "to narrow)",
+            f"  … +{more} more (qualify with "
+            f"`{sample.path}:{sample.qualname}` to narrow)",
             file=sys.stderr,
         )
     if len({(s.path, s.qualname) for s in candidates}) == 1:
