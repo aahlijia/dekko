@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from dekko import cli
-from dekko import server
+from dekko.integrations import cli
+from dekko.integrations import server
 
 from conftest import RepoFactory
 

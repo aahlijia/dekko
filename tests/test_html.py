@@ -8,8 +8,9 @@ import pytest
 
 from conftest import RepoFactory
 
-from dekko import cli, mapfile, render_html
-from dekko.model import CallGraph, Edge, FileMap, Symbol
+from dekko.integrations import cli
+from dekko.render import mapfile, render_html
+from dekko.core.model import CallGraph, Edge, FileMap, Symbol
 
 _ISLAND = re.compile(
     r'<script type="application/json" id="dekko-map">(.*?)</script>',

@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 
-from .model import TYPE_KINDS, Symbol
+from dekko.core.model import TYPE_KINDS, Symbol
 
 # Token-counting backend (Q2). The accurate path uses ``tiktoken`` when
 # it is installed (``pip install dekko[tokenizer]``); otherwise, and in

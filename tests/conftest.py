@@ -17,7 +17,7 @@ import pytest
 
 os.environ["DEKKO_TOKENIZER"] = "chars4"
 
-from dekko import cli
+from dekko.integrations import cli
 
 RepoFactory = Callable[[dict[str, str]], Path]
 

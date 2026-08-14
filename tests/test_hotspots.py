@@ -5,9 +5,11 @@ import subprocess
 from pathlib import Path
 
 
-from dekko import cli, mapfile, summary
-from dekko.model import CallGraph, Edge, FileMap, Symbol
-from dekko.render_md import render_markdown
+from dekko.integrations import cli
+from dekko.render import mapfile
+from dekko.analysis import summary
+from dekko.core.model import CallGraph, Edge, FileMap, Symbol
+from dekko.render.render_md import render_markdown
 
 
 def _sym(path: str, name: str) -> Symbol:

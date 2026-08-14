@@ -11,8 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from dekko import cli, render_lean, server, summary
-from dekko.mapfile import load_map
+from dekko.integrations import cli, server
+from dekko.render import render_lean
+from dekko.analysis import summary
+from dekko.render.mapfile import load_map
 
 from conftest import RepoFactory
 

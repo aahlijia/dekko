@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from dekko import cli, render_md
-from dekko.model import CallGraph, Edge, FileMap, Symbol
+from dekko.integrations import cli
+from dekko.render import render_md
+from dekko.core.model import CallGraph, Edge, FileMap, Symbol
 
 
 def _sym(path: str, name: str) -> Symbol:

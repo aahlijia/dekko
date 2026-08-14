@@ -13,7 +13,17 @@ questions — "who calls this function," "what does this file contain,"
 files or grepping blind. It ships three ways: a CLI (`dekko`), a Claude
 Code `/map` plugin + MCP server, and Cline MCP support.
 
-Source lives under `src/dekko/`; `dekko outline src/dekko/<file>.py` or
+Source lives under `src/dekko/`, split into subpackages by role:
+`core/` (parsing primitives — model, extractor, grammars, languages,
+walker, resolver), `render/` (MAP.md/JSON/HTML/lean/export
+rendering), `analysis/` (read-side commands — query, outline, search,
+affected, trace, unused, stats, summary, workset, contextpack, diff,
+relevance), `daemon/` (the daemon process and its transport),
+`integrations/` (cli, server, hooks, cline, orient, claude_md),
+`storage/` (on-disk caches/locks/notes/ledger under `.dekko/`), and a
+handful of modules with no subpackage-specific home
+(`classify.py`, `textutil.py`, `source.py`) staying directly under
+`src/dekko/`. `dekko outline src/dekko/<subpackage>/<file>.py` or
 `dekko query symbol <name>` are cheaper ways to get oriented in this
 codebase than reading whole files — dekko is a good tool for exploring
 its own source. See `README.md` and `docs/` (`docs/install.md`,
@@ -26,8 +36,13 @@ its own source. See `README.md` and `docs/` (`docs/install.md`,
   — this is what CI runs; match it locally before considering something
   done. A project `.venv` exists (`.venv/bin/python -m pytest -q` works
   equivalently if `uv run` isn't available).
-- Tests live in `tests/`, mirroring `src/dekko/` module-for-module. Test
-  fixtures (tiny sample-language files) live in `tests/fixtures/`.
+- Tests live in `tests/`, mirroring `src/dekko/`'s subpackages
+  (`tests/core/`, `tests/render/`, `tests/analysis/`, `tests/daemon/`,
+  `tests/integrations/`, `tests/storage/`) for tests that map cleanly
+  to a single moved module; cross-cutting/behavioral tests (exercising
+  several modules or the CLI end-to-end) and tests for the top-level
+  modules stay flat directly under `tests/`. Test fixtures (tiny
+  sample-language files) live in `tests/fixtures/`.
 - `test-repos/` holds real, unmodified open-source repos (awesome-go,
   claude-buddy, claude-code, cline, spring-boot, tensorflow, zed) used as
   realistic targets for manual/agent evaluation of dekko itself — not part

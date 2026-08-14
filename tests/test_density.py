@@ -6,8 +6,10 @@ Covers Meter.signals (tokens-per-signal), the lean map's --dense skin
 
 from pathlib import Path
 
-from dekko import cli, contextpack, query, render_lean
-from dekko.mapfile import MapIndex, load_map
+from dekko.integrations import cli
+from dekko.analysis import contextpack, query
+from dekko.render import render_lean
+from dekko.render.mapfile import MapIndex, load_map
 from dekko.textutil import Meter
 
 from conftest import RepoFactory

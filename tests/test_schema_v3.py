@@ -3,8 +3,8 @@
 import json
 from pathlib import Path
 
-from dekko import cli
-from dekko.mapfile import load_map
+from dekko.integrations import cli
+from dekko.render.mapfile import load_map
 
 from conftest import RepoFactory
 

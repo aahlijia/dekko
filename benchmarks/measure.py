@@ -35,10 +35,12 @@ from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
-from dekko import contextpack, ledger, mapfile, outline as outline_mod, query
-from dekko import workset as workset_mod
-from dekko.mapfile import MapIndex
-from dekko.resolver import MODULE_CALLER_SUFFIX
+from dekko.analysis import contextpack, outline as outline_mod, query
+from dekko.storage import ledger
+from dekko.render import mapfile
+from dekko.analysis import workset as workset_mod
+from dekko.render.mapfile import MapIndex
+from dekko.core.resolver import MODULE_CALLER_SUFFIX
 from dekko.textutil import estimate_tokens
 
 
@@ -201,7 +203,7 @@ def _measure_workset(index: MapIndex, root: Path, task: Task) -> Result:
 
 def _measure_lean(index: MapIndex, root: Path, task: Task) -> Result:
     """Absolute cost of the whole-repo lean map and what it covers."""
-    from dekko import render_lean
+    from dekko.render import render_lean
 
     _lines, report = render_lean.generate(index, root)
     n_files = len(index.languages_by_path)

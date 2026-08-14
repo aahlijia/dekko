@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from dekko import languages
-from dekko.extractor import extract_file
-from dekko.extractor_generic import extract_file_generic
-from dekko.model import FileMap
+from dekko.core import languages
+from dekko.core.extractor import extract_file
+from dekko.core.extractor_generic import extract_file_generic
+from dekko.core.model import FileMap
 
 _HAS_PACK = importlib.util.find_spec("tree_sitter_language_pack") is not None
 

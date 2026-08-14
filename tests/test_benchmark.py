@@ -9,7 +9,7 @@ bridge to the ledger must work.
 import sys
 from pathlib import Path
 
-from dekko.mapfile import load_map
+from dekko.render.mapfile import load_map
 
 from conftest import RepoFactory
 
