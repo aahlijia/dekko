@@ -27,7 +27,18 @@ class Symbol:
     """A function, method, or class definition found in a file.
 
     Attributes:
-        id: Stable identifier, ``relpath::Qualified.name``.
+        id: Stable identifier, ``relpath::Qualified.name``. When a
+            file defines more than one symbol with the same
+            ``(path, qualname)`` — an overload set, e.g. Java/C++
+            method overloading, or a same-name closure-local helper —
+            every id past the first gets a ``#N`` suffix
+            (``#2``, ``#3``, ...) in definition order, keeping every
+            symbol's id unique within the map even though ``path``
+            and ``qualname`` alone can't tell them apart (see
+            ``extractor._make_symbol``'s ``seen`` dict). Notes,
+            call-graph edges, and every other id-keyed structure key
+            off this already-disambiguated id, not off the bare
+            ``path::qualname`` form.
         name: Bare name of the symbol.
         qualname: Name qualified by its container, e.g. ``Config.load``.
         kind: One of ``function``, ``method``, ``variable`` (module-

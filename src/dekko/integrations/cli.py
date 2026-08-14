@@ -38,6 +38,7 @@ from dekko.analysis import search
 from dekko.integrations import server
 from dekko.analysis import stats
 from dekko.analysis import summary
+from dekko.core.model import Symbol
 from dekko.analysis import trace
 from dekko.analysis import unused
 from dekko.core import walker
@@ -1547,8 +1548,18 @@ def run_note(args: argparse.Namespace) -> int:
     return _note_list(args)
 
 
-def _resolve_for_note(root: Path, target: str) -> tuple[str | None, int]:
-    """Resolve a note target to a symbol id (no map regeneration)."""
+def _resolve_for_note(root: Path, target: str) -> tuple[Symbol | None, int]:
+    """Resolve a note target to a symbol (no map regeneration).
+
+    Returns the full ``Symbol``, not just its id — ``note add``/``note
+    rm`` echo the symbol's line alongside its id so that a ``:LINE``-
+    qualified target used to disambiguate an overload set (see
+    ``query``'s module docstring) stays visibly disambiguated in the
+    command's own output, not just in ``Symbol.id``'s ``#N`` suffix
+    (round 15's spring-boot finding: the id-only echo doesn't visibly
+    show *which* overload was picked, even though the id itself
+    already anchors each overload to a distinct notes-file key).
+    """
     index = mapfile.load_map(root)
     if index is None:
         print(f"dekko: no map under {root} (run `dekko map`)", file=sys.stderr)
@@ -1556,34 +1567,55 @@ def _resolve_for_note(root: Path, target: str) -> tuple[str | None, int]:
     sym, candidates = query.resolve_target(index, target)
     if sym is None:
         return None, query.report_unresolved(target, candidates, index)
-    return sym.id, 0
+    return sym, 0
 
 
 def _note_add(args: argparse.Namespace) -> int:
     """Anchor a note to a resolved symbol."""
     root = Path(args.root).resolve()
-    sym_id, code = _resolve_for_note(root, args.target)
-    if sym_id is None:
+    sym, code = _resolve_for_note(root, args.target)
+    if sym is None:
         return code
-    notes_mod.add(root, sym_id, args.text)
+    notes_mod.add(root, sym.id, args.text)
     if args.as_json:
-        print(json.dumps({"symbol": sym_id, "text": args.text}))
+        print(
+            json.dumps(
+                {
+                    "symbol": sym.id,
+                    "path": sym.path,
+                    "line": sym.start_line,
+                    "text": args.text,
+                }
+            )
+        )
     else:
-        print(f"dekko: noted {sym_id}")
+        print(f"dekko: noted {sym.id} ({sym.path}:{sym.start_line})")
     return 0
 
 
 def _note_rm(args: argparse.Namespace) -> int:
     """Remove one note (or all) from a resolved symbol."""
     root = Path(args.root).resolve()
-    sym_id, code = _resolve_for_note(root, args.target)
-    if sym_id is None:
+    sym, code = _resolve_for_note(root, args.target)
+    if sym is None:
         return code
-    removed = notes_mod.remove(root, sym_id, args.index)
+    removed = notes_mod.remove(root, sym.id, args.index)
     if args.as_json:
-        print(json.dumps({"symbol": sym_id, "removed": removed}))
+        print(
+            json.dumps(
+                {
+                    "symbol": sym.id,
+                    "path": sym.path,
+                    "line": sym.start_line,
+                    "removed": removed,
+                }
+            )
+        )
     else:
-        print(f"dekko: removed {removed} note(s) from {sym_id}")
+        print(
+            f"dekko: removed {removed} note(s) from "
+            f"{sym.id} ({sym.path}:{sym.start_line})"
+        )
     return 0
 
 
@@ -1596,11 +1628,11 @@ def _note_list(args: argparse.Namespace) -> int:
             return code
         data = notes_mod.orphaned(root, set(index.symbols_by_id))
     elif args.target is not None:
-        sym_id, code = _resolve_for_note(root, args.target)
-        if sym_id is None:
+        sym, code = _resolve_for_note(root, args.target)
+        if sym is None:
             return code
         all_notes = notes_mod.load(root)
-        data = {sym_id: all_notes.get(sym_id, [])}
+        data = {sym.id: all_notes.get(sym.id, [])}
     else:
         data = notes_mod.load(root)
     if args.as_json:

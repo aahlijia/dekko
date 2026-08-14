@@ -78,6 +78,8 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
 
     defs = _collect_definitions(spec, tree.root_node, rel)
     calls = _collect_calls(spec, tree.root_node, rel, defs)
+    if spec.name == "rust":
+        calls.extend(_collect_rust_macro_calls(tree.root_node, rel, defs))
     refs = _collect_refs(spec, tree.root_node, rel, defs)
     imports = _collect_imports(spec, tree.root_node, rel)
     return FileMap(
@@ -164,6 +166,12 @@ def _collect_definitions(
             continue
 
         params_node = _one(caps, "params")
+
+        if _looks_like_c_macro_invocation(
+            spec.name, _text(name_node), params_node
+        ):
+            continue
+
         ret_node = _one(caps, "ret")
         params = (
             _parse_params(spec.param_style, params_node)
@@ -190,6 +198,64 @@ def _collect_definitions(
         defs.append((def_node, sym))
 
     return defs
+
+
+# ALL-CAPS-with-underscores is the near-universal C/C++ convention for
+# function-like macros (``TF_DEVICELIST_METHOD``, ``EXPECT_DEATH``,
+# ``TF_ASSERT_OK_AND_ASSIGN``, ...). Combined with a malformed
+# parameter list (see ``_looks_like_c_macro_invocation``), this
+# reliably identifies an unexpanded macro invocation misparsed as a
+# function definition without also flagging legitimate ALL-CAPS
+# macro-shaped test helpers like gtest's ``TEST(Suite, Case) { ... }``
+# — those parse with a syntactically clean (if semantically nonsense)
+# parameter list, so requiring an actual parse error keeps this from
+# over-triggering (verified empirically against round 15's
+# tensorflow/zed/spring-boot/cline/awesome-go/claude-code test-repos
+# corpus: 228 flagged out of 137,705 C/C++ definitions, one false
+# negative risk accepted — see the macro-extraction-gaps plan).
+_ALL_CAPS_NAME = re.compile(r"^[A-Z_]*[A-Z][A-Z0-9_]*$")
+
+
+def _looks_like_c_macro_invocation(
+    language: str, name: str, params_node: Node | None
+) -> bool:
+    """Detect a C/C++ macro invocation misparsed as a function def.
+
+    Tree-sitter's C/C++ grammars have no dedicated node type for an
+    unexpanded, function-like macro invocation at file/namespace
+    scope (``FOO(a, b, c);``) — dekko never runs a preprocessor, by
+    design. Best-effort grammar error recovery sometimes lands on a
+    ``function_definition``/``function_declarator`` shape anyway,
+    whose "name" is the macro's own name and whose "parameters" node
+    itself contains a syntax error (round 15's ``TF_DEVICELIST_
+    METHOD`` finding in tensorflow's C API layer — see
+    ``round15-macro-extraction-gaps-plan.md`` Track B). Symbols
+    matching this shape are dropped rather than emitted garbled.
+
+    Note: this only suppresses the one garbled symbol. Definitions
+    that tree-sitter's error recovery swallows entirely into the same
+    malformed subtree (real functions textually following the macro
+    invocation) are not recovered by this check — they were already
+    invisible to ``_collect_definitions`` before this function runs,
+    since no separate query match exists for them. Recovering those
+    would need source-level preprocessing before parsing, out of
+    scope here.
+
+    Args:
+        language: Registry language name (only ``c``/``cpp`` apply).
+        name: The captured definition name.
+        params_node: The captured parameter-list node, or ``None``.
+
+    Returns:
+        Whether this definition should be treated as a probable
+        macro invocation rather than a real function.
+    """
+    if language not in ("c", "cpp"):
+        return False
+    if params_node is None or not params_node.has_error:
+        return False
+
+    return bool(_ALL_CAPS_NAME.match(name))
 
 
 def _receiver_container(recv_node: Node | None) -> str | None:
@@ -817,6 +883,151 @@ def _collect_calls(
             )
         )
     return calls
+
+
+# Rust macros whose arguments are ordinary expressions in practice
+# (even though tree-sitter-rust never parses them as such — see
+# ``_collect_rust_macro_calls``). Deliberately narrow: the highest-
+# value, lowest-risk subset (round 15's assert-family recommendation)
+# rather than an attempt at general macro-argument parsing.
+_RUST_ASSERT_MACROS = frozenset(
+    {
+        "assert",
+        "assert_eq",
+        "assert_ne",
+        "debug_assert",
+        "debug_assert_eq",
+        "debug_assert_ne",
+    }
+)
+
+
+def _collect_rust_macro_calls(
+    root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawCall]:
+    """Recover calls made as arguments to assert-family macros.
+
+    tree-sitter-rust does not parse a macro invocation's arguments as
+    Rust expression syntax — ``assert_eq!(helper(1), 2)``'s argument
+    list is an opaque ``token_tree`` of raw tokens, not a structured
+    ``call_expression``, so ``_collect_calls``'s tree-sitter-query
+    mechanism has nothing to match inside it. This is a real, common
+    coverage gap: ``assert!``/``assert_eq!`` wrapping a direct call is
+    an everyday Rust test idiom, and a call made only this way was
+    previously invisible to the call graph entirely (round 15's zed
+    finding — see ``round15-macro-extraction-gaps-plan.md`` Track A).
+
+    Scans ``_RUST_ASSERT_MACROS`` invocations' token trees for
+    ``identifier(...)``/``identifier.identifier(...)``-shaped
+    subsequences and treats each as a call site. General user-defined
+    macro bodies are out of scope.
+
+    Args:
+        root: Parsed file's root node.
+        rel: Repo-relative POSIX path of the file.
+        defs: Definitions found in this file, used to attribute each
+            recovered call to its enclosing function.
+
+    Returns:
+        Recovered ``RawCall``s, one per call-shaped site found inside
+        a target macro's arguments.
+    """
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    calls: list[RawCall] = []
+    _find_target_macro_invocations(root, rel, spans, calls)
+    return calls
+
+
+def _find_target_macro_invocations(
+    node: Node,
+    rel: str,
+    spans: list[tuple[int, int, Symbol]],
+    calls: list[RawCall],
+) -> None:
+    """Recurse the whole tree for target-macro invocations."""
+    if node.type == "macro_invocation":
+        macro_name = node.child_by_field_name("macro")
+        token_tree = _first_child_of_type(node, "token_tree")
+        if (
+            macro_name is not None
+            and token_tree is not None
+            and _text(macro_name) in _RUST_ASSERT_MACROS
+        ):
+            for site, name, receiver in _rust_macro_call_sites(token_tree):
+                caller = _enclosing(spans, site.start_byte)
+                text = f"{receiver}.{name}" if receiver else name
+                calls.append(
+                    RawCall(
+                        caller_id=caller.id if caller else None,
+                        path=rel,
+                        text=text,
+                        name=name,
+                        receiver=receiver,
+                        line=site.start_point[0] + 1,
+                    )
+                )
+
+    for child in node.children:
+        _find_target_macro_invocations(child, rel, spans, calls)
+
+
+def _first_child_of_type(node: Node, node_type: str) -> Node | None:
+    """First direct child matching a node type, or ``None``."""
+    for child in node.children:
+        if child.type == node_type:
+            return child
+    return None
+
+
+def _rust_macro_call_sites(
+    token_tree: Node,
+) -> list[tuple[Node, str, str | None]]:
+    """Find identifier-shaped call sites inside a macro's token tree.
+
+    Structural, not textual: a call written inside a macro argument
+    still nests correctly as an ``identifier`` node immediately
+    followed by a sibling ``token_tree`` node whose own text starts
+    with ``(`` — tree-sitter still balances the raw token stream's
+    brackets, it just doesn't type them as ``call_expression``/
+    ``arguments``. Recurses into nested token trees, so
+    ``outer(inner())`` finds both calls for free (the nesting is
+    already structural, no extra bracket-matching needed).
+
+    Args:
+        token_tree: A macro invocation's ``token_tree`` argument node.
+
+    Returns:
+        ``(identifier_node, name, receiver)`` for each call-shaped
+        site found, in document order.
+    """
+    found: list[tuple[Node, str, str | None]] = []
+    _scan_rust_token_tree(token_tree, found)
+    return found
+
+
+def _scan_rust_token_tree(
+    node: Node, found: list[tuple[Node, str, str | None]]
+) -> None:
+    """Depth-first scan for ``identifier(...)``-shaped subsequences."""
+    children = node.children
+    for i, child in enumerate(children):
+        if child.type == "identifier":
+            nxt = children[i + 1] if i + 1 < len(children) else None
+            if (
+                nxt is not None
+                and nxt.type == "token_tree"
+                and _text(nxt).startswith("(")
+            ):
+                receiver = None
+                if (
+                    i >= 2
+                    and children[i - 1].type in (".", "::")
+                    and children[i - 2].type == "identifier"
+                ):
+                    receiver = _text(children[i - 2])
+                found.append((child, _text(child), receiver))
+        elif child.type == "token_tree":
+            _scan_rust_token_tree(child, found)
 
 
 def _collect_refs(

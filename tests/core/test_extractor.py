@@ -112,6 +112,51 @@ def test_rust_calls_and_receivers() -> None:
     assert any(name == "dist" for name, _ in calls)
 
 
+def test_rust_assert_macro_calls_are_visible(tmp_path: Path) -> None:
+    # Round 15 (zed): tree-sitter-rust never parses a macro's
+    # arguments as expression syntax, so a call made only as a direct
+    # argument to assert!/assert_eq!/etc — an everyday Rust test
+    # idiom — used to be entirely invisible to the call graph. This
+    # covers the assert-family scan added to recover them: a plain
+    # call, a receiver-qualified call, a nested call, and (as a
+    # negative case) vec!/println! staying untouched since they are
+    # not in the target macro set.
+    spec = languages.spec_for_path("lib.rs")
+    assert spec is not None
+    (tmp_path / "lib.rs").write_text(
+        "struct S;\n"
+        "impl S {\n"
+        "    fn intersects(&self, other: &S) -> bool { true }\n"
+        "}\n"
+        "fn helper(x: i32) -> i32 { x + 1 }\n"
+        "fn outer(x: i32) -> i32 { x }\n"
+        "fn nested_helper() -> i32 { 2 }\n"
+        "fn test_it() {\n"
+        "    let s = S;\n"
+        "    let o = S;\n"
+        "    assert!(s.intersects(&o));\n"
+        "    assert_eq!(helper(1), 2);\n"
+        "    assert_ne!(helper(1), helper(2));\n"
+        "    debug_assert!(helper(1) == 2);\n"
+        "    assert_eq!(outer(nested_helper()), 3);\n"
+        "    let v = vec![helper(1), helper(2)];\n"
+        '    println!("{}", helper(1).to_string());\n'
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "lib.rs", spec)
+    assert fm.error is None
+    calls = {(c.name, c.receiver) for c in fm.calls if c.caller_id}
+    assert ("intersects", "s") in calls
+    assert ("helper", None) in calls
+    assert ("outer", None) in calls
+    assert ("nested_helper", None) in calls
+    # vec!/println! aren't assert-family macros — not scanned at all.
+    call_count_from_vec_and_println = sum(
+        1 for c in fm.calls if c.line in (15, 16) and c.name == "helper"
+    )
+    assert call_count_from_vec_and_println == 0
+
+
 def test_rust_nested_fn_not_a_method(tmp_path: Path) -> None:
     # Bug #2(a): a fn nested inside another fn's body is a closure-
     # local helper, not a member of whatever impl block contains the
@@ -352,6 +397,40 @@ def test_cpp_include_derives_header_stem_as_import_name(
     assert "rewrite_utils" in names
     assert "h" not in names
     assert "tensorflow/core/data/rewrite_utils.h" in sources
+
+
+def test_cpp_macro_invocation_not_emitted_as_garbled_symbol(
+    tmp_path: Path,
+) -> None:
+    """Round 15 (tensorflow): an unexpanded, function-like macro
+    invocation at file scope (dekko never runs a preprocessor) can
+    land tree-sitter's error recovery on a genuine
+    ``function_definition`` node whose "name" is the macro's own name
+    and whose parameter list itself contains a parse error — this
+    used to surface as a garbled synthetic symbol (e.g.
+    ``TF_DEVICELIST_METHOD(_: int64_t, ...)``) polluting ``unused``/
+    ``query symbol``. An ALL-CAPS name plus a malformed parameter
+    list (not just an ALL-CAPS name alone, which also matches
+    legitimate gtest-style ``TEST(Suite, Case) { ... }`` macros —
+    verified empirically not to trip this) suppresses the symbol; an
+    ordinary function elsewhere in the same file is unaffected.
+    """
+    spec = languages.spec_for_path("c_api.cc")
+    assert spec is not None
+    (tmp_path / "c_api.cc").write_text(
+        "MY_MACRO(int a, int b,) {\n"
+        "    return a;\n"
+        "}\n"
+        "\n"
+        "int real_function(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "c_api.cc", spec)
+    assert fm.error is None
+    syms = _by_qualname(fm.symbols)
+    assert "MY_MACRO" not in syms
+    assert syms["real_function"].kind == "function"
 
 
 def test_tsx_jsx_tag_name_captured_as_ref(tmp_path: Path) -> None:

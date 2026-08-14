@@ -117,6 +117,46 @@ def test_unresolved_target_exits_not_found(
     assert "no symbol matches" in capsys.readouterr().err
 
 
+OVERLOADED_METHODS = {
+    "Foo.java": (
+        "class Foo {\n"
+        "    void run(int x) {\n"
+        "    }\n"
+        "\n"
+        "    void run(String x) {\n"
+        "    }\n"
+        "}\n"
+    ),
+}
+
+
+def test_note_add_anchors_distinct_overloads(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """Round 15 (spring-boot): a same-file, same-qualname overload set
+    resolved via a ``:LINE`` qualifier must land each note under its
+    own key, not collide on a shared ``path::qualname`` id — and the
+    printed confirmation must show which overload was picked, not
+    just an opaque ``#N`` suffix (see ``Symbol.id``'s docstring)."""
+    root = make_mapped_repo(OVERLOADED_METHODS)
+    assert _cli(root, "note", "add", "Foo.java:Foo.run:2", "int overload") == 0
+    out = capsys.readouterr().out
+    assert "Foo.java::Foo.run" in out
+    assert "Foo.java:2" in out
+    capsys.readouterr()
+
+    assert (
+        _cli(root, "note", "add", "Foo.java:Foo.run:5", "String overload") == 0
+    )
+    out = capsys.readouterr().out
+    assert "Foo.java::Foo.run#2" in out
+    assert "Foo.java:5" in out
+
+    notes = notes_mod.load(root)
+    assert notes["Foo.java::Foo.run"][0]["text"] == "int overload"
+    assert notes["Foo.java::Foo.run#2"][0]["text"] == "String overload"
+
+
 def _call(root: Path, name: str, arguments: dict) -> dict:
     ctx = server.Context(default_root=root, no_regen=False)
     msg = {

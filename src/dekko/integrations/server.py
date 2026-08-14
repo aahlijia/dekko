@@ -538,7 +538,7 @@ def tool_add_note(ctx: Context, args: dict) -> str:
             raise ToolError(f"'{target}' is ambiguous ({len(candidates)})")
         raise ToolError(f"no symbol matches '{target}'")
     notes_mod.add(_root_of(ctx, args), sym.id, text)
-    return f"noted {sym.id}"
+    return f"noted {sym.id} ({sym.path}:{sym.start_line})"
 
 
 def tool_list_notes(ctx: Context, args: dict) -> str:
