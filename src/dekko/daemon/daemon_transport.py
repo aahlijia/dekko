@@ -583,7 +583,7 @@ class TcpLoopbackTransport(DaemonTransport):
 
         if line is None:
             return False
-        return line.strip() == self._token
+        return secrets.compare_digest(line.strip(), self._token)
 
     def send_auth_preamble(self, sock: socket.socket) -> None:
         if self._token is None:

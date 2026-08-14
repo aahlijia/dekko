@@ -23,6 +23,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dekko import repo_ops
 from dekko.storage import cache as cache_mod
 from dekko.render import mapfile
 from dekko.storage import revcache
@@ -145,7 +146,7 @@ def snapshot(
             pass ``tracked_at_rev(root, rev)`` (queried against the
             *real* repo, which does have ``.git/``) here instead.
         jobs: Resolved worker count (1 = sequential) for both file
-            extraction (``cli.map_repository``) and call-graph
+            extraction (``repo_ops.map_repository``) and call-graph
             resolution (``resolve``). Round-12 master report §3.3:
             this call used to always run both single-threaded
             regardless of ``dekko map --full``'s own ``--jobs``
@@ -153,13 +154,11 @@ def snapshot(
             first-touch/cold-rev-cache ``diff``/``affected``/
             ``workset`` call minutes slower than it needed to be on
             a large repo. Callers pass an already-resolved concrete
-            count (see ``cli._resolve_workers``), not the raw
+            count (see ``repo_ops.resolve_workers``), not the raw
             ``--jobs`` CLI value (which allows ``0`` for "all
             cores").
     """
-    from dekko.integrations import cli
-
-    files, _ = cli.map_repository(
+    files, _ = repo_ops.map_repository(
         root,
         subpath,
         excludes,
@@ -495,9 +494,7 @@ def run(
     Returns:
         Process exit code (0 no changes, 1 changes, 2 error).
     """
-    from dekko.integrations import cli
-
-    index = cli.load_current_index_no_regen(root)
+    index = repo_ops.load_current_index_no_regen(root)
     prov = (index.provenance if index else None) or {}
     subpath = prov.get("subpath")
     excludes = tuple(prov.get("excludes", []))

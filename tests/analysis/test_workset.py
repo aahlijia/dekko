@@ -113,7 +113,7 @@ def test_rev_seed_loads_current_index_once(
     """2.4: a rev-seeded ``workset`` call must load the current-tree
     map once, not twice, when the on-disk map is already fresh (no
     auto-regen in the way). ``workset.run()`` loads a fresh index via
-    ``_load_or_regen`` before calling ``seed_from_rev``; before this
+    ``load_or_regen`` before calling ``seed_from_rev``; before this
     fix, ``affected.changes()`` (called from ``seed_from_rev``)
     redundantly reloaded the same map.json itself instead of reusing
     the index it was already handed. Commits the change and remaps

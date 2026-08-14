@@ -18,6 +18,7 @@ import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from dekko import repo_ops
 from dekko.analysis import affected
 from dekko.analysis import outline
 from dekko.analysis import relevance
@@ -459,9 +460,7 @@ def run(
         ``0`` ok, ``2`` bad rev, ``3`` symbol not found, ``4`` ambiguous,
         ``5`` stale map with ``--no-regen``.
     """
-    from dekko.integrations import cli
-
-    index, code = cli._load_or_regen(root, no_regen)
+    index, code = repo_ops.load_or_regen(root, no_regen)
     if index is None:
         return code
     if symbol is not None:

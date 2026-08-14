@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from dekko import repo_ops
 from dekko.integrations import cli
 from dekko.analysis import search
 from dekko.analysis.relevance import (
@@ -437,7 +438,7 @@ def test_search_unrecognized_scorer_name_is_a_clear_error(
     # closed for any other caller (e.g. a future MCP arg without the
     # same enum guard).
     root = make_mapped_repo(SRC)
-    index, code = cli._load_or_regen(root, no_regen=False)
+    index, code = repo_ops.load_or_regen(root, no_regen=False)
     assert code == 0
     code = search.run(index, "retry", root=root, scorer_name="bogus")
     assert code == search.EXIT_ERROR

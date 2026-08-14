@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from dekko import repo_ops
 from dekko.storage import cache as cache_mod
 from dekko.integrations import cli
 
@@ -18,13 +19,13 @@ SRC = {
 def _count_extractions(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Patch ``extract_one`` to record every file it parses."""
     parsed: list[str] = []
-    real = cli.extract_one
+    real = repo_ops.extract_one
 
     def spy(root: Path, rel: str):  # noqa: ANN202
         parsed.append(rel)
         return real(root, rel)
 
-    monkeypatch.setattr(cli, "extract_one", spy)
+    monkeypatch.setattr(repo_ops, "extract_one", spy)
     return parsed
 
 
@@ -117,7 +118,7 @@ def test_parallel_extraction_matches_sequential(
     # Force the process-pool path on a small repo, then confirm the
     # output is byte-identical to a sequential cold rebuild.
     root = make_mapped_repo(SRC)
-    monkeypatch.setattr(cli, "_PARALLEL_MIN", 1)
+    monkeypatch.setattr(repo_ops, "_PARALLEL_MIN", 1)
 
     assert (
         cli.main(["map", str(root), "--quiet", "--full", "--jobs", "2"]) == 0
@@ -163,7 +164,7 @@ def test_jobs_flag_also_parallelizes_resolution(
     from dekko.core import resolver as resolver_mod
 
     root = make_mapped_repo(SRC)
-    monkeypatch.setattr(cli, "_PARALLEL_MIN", 1)
+    monkeypatch.setattr(repo_ops, "_PARALLEL_MIN", 1)
     monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
 
     assert (
@@ -187,23 +188,23 @@ def test_jobs_flag_also_parallelizes_resolution(
 def test_regen_map_uses_all_cores_for_resolution(
     make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """1.4: the auto-regen path (``cli.regen_map``, used by every read
-    subcommand's ``_load_or_regen`` on a stale map) used to hardcode
-    ``jobs=1`` in its synthetic ``argparse.Namespace`` -- the exact
-    scenario round 11 §1 flagged (a single-file edit's auto-regen
+    """1.4: the auto-regen path (``repo_ops.regen_map``, used by every
+    read subcommand's ``load_or_regen`` on a stale map) used to
+    hardcode ``jobs=1`` in its synthetic ``argparse.Namespace`` -- the
+    exact scenario round 11 §1 flagged (a single-file edit's auto-regen
     paying the full single-threaded resolution cost). It must now
     request all cores (``jobs=0``) so the same fix that speeds up
     ``dekko map --jobs 0`` also reaches auto-regen."""
     root = make_mapped_repo(SRC)
     seen_jobs: list[int] = []
-    real_run_map = cli.run_map
+    real_run_map = repo_ops.run_map
 
     def spy(args, persist_excludes: bool = True):  # noqa: ANN001, ANN202
         seen_jobs.append(args.jobs)
         return real_run_map(args, persist_excludes=persist_excludes)
 
-    monkeypatch.setattr(cli, "run_map", spy)
-    assert cli.regen_map(root) == 0
+    monkeypatch.setattr(repo_ops, "run_map", spy)
+    assert repo_ops.regen_map(root) == 0
     assert seen_jobs == [0]
 
 

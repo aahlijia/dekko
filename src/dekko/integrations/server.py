@@ -21,6 +21,7 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any
 
+from dekko import repo_ops
 from dekko.analysis import affected
 from dekko.analysis import contextpack
 from dekko.storage import ledger as ledger_mod
@@ -208,9 +209,7 @@ def _index_for(
     if cached is not None and mapfile.check_freshness(root, cached).fresh:
         index = cached
     else:
-        from dekko.integrations import cli
-
-        index, code = cli._load_or_regen(root, ctx.no_regen)
+        index, code = repo_ops.load_or_regen(root, ctx.no_regen)
         if index is None:
             raise ToolError(f"no usable map under {root} (exit {code})")
         ctx.index_cache[root] = index
@@ -670,12 +669,10 @@ def tool_map_status(ctx: Context, args: dict) -> str:
 
 def tool_refresh_map(ctx: Context, args: dict) -> str:
     """Regenerate the map (optionally a full, uncached rebuild)."""
-    from dekko.integrations import cli
-
     root = _root_of(ctx, args)
     full = bool(args.get("full", False))
     code, out, err = _capture(
-        lambda: cli.regen_map(root, full=full, quiet=False)
+        lambda: repo_ops.regen_map(root, full=full, quiet=False)
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")

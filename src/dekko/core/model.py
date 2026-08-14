@@ -52,7 +52,8 @@ class Symbol:
             ``None`` when none was found (best-effort, per language).
         test: Whether the symbol is classified as test code — either
             because the defining file is (path-based; see
-            ``classify.is_test_path``, applied in ``cli.map_repository``)
+            ``classify.is_test_path``, applied in
+            ``repo_ops.map_repository``)
             or because the extractor found it nested inside a
             language-specific test-only AST container (currently just
             Rust's inline ``mod tests { ... }``; see

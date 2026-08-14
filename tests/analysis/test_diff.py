@@ -280,7 +280,7 @@ def test_diff_jobs_flag_reaches_old_snapshot(
     ``--jobs`` flag to begin with -- a separate, unparallelized code
     path from ``dekko map --full --jobs``. ``dekko diff --jobs N``
     must now reach ``diff.old_snapshot`` with the resolved worker
-    count (``0`` maps to "all cores" via ``cli._resolve_workers``,
+    count (``0`` maps to "all cores" via ``repo_ops.resolve_workers``,
     same as ``map``)."""
     root = _repo(tmp_path, BASE)
 

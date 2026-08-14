@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from dekko import repo_ops
 from dekko.analysis import affected
 from dekko.integrations import cli
 from dekko.storage import filelock
@@ -64,7 +65,7 @@ def test_write_pages_creates_missing_parent_dir(tmp_path: Path) -> None:
     # race to hit the same code path.
     md_path = tmp_path / ".dekko" / "MAP.md"
     assert not md_path.parent.exists()
-    written = cli._write_pages(md_path, [("MAP.md", "# hello\n")])
+    written = repo_ops._write_pages(md_path, [("MAP.md", "# hello\n")])
     assert written == [md_path]
     assert md_path.read_text(encoding="utf-8") == "# hello\n"
 
@@ -192,7 +193,7 @@ def test_regen_map_does_not_re_persist_dekkoignore(
     before_mtime = ignore_path.stat().st_mtime_ns
 
     (tmp_path / "a.py").write_text("def f():\n    return 2\n")
-    assert cli.regen_map(tmp_path, quiet=True) == 0
+    assert repo_ops.regen_map(tmp_path, quiet=True) == 0
 
     assert ignore_path.read_text() == before
     assert ignore_path.stat().st_mtime_ns == before_mtime
@@ -246,7 +247,7 @@ def test_summary_separates_missing_grammar_from_real_parse_errors() -> None:
         ),
         FileMap(path="src/a.py", language="python"),
     ]
-    out = cli._summary(files, 0, 0, 0, [], [])
+    out = repo_ops._summary(files, 0, 0, 0, [], [])
     assert "no grammar installed 1" in out
     assert "parse error 1" in out
 
@@ -313,13 +314,13 @@ def test_custom_output_does_not_write_canonical_sidecar(
 
 
 def test_resolve_outputs_defaults(tmp_path: Path) -> None:
-    md, js = cli.resolve_outputs(tmp_path, None, None)
+    md, js = repo_ops.resolve_outputs(tmp_path, None, None)
     assert md == tmp_path / ".dekko" / "MAP.md"
     assert js == tmp_path / ".dekko" / "map.json"
 
 
 def test_resolve_outputs_explicit_json(tmp_path: Path) -> None:
-    md, js = cli.resolve_outputs(tmp_path, None, "custom.json")
+    md, js = repo_ops.resolve_outputs(tmp_path, None, "custom.json")
     assert md == tmp_path / ".dekko" / "MAP.md"
     assert js == Path("custom.json")
 
@@ -573,7 +574,7 @@ def test_claude_invoked_by_resolved_path_not_bare_name(
     assert calls and all(cmd[0] == resolved for cmd in calls)
 
 
-# --- _load_or_regen: inter-process regen locking (round-12 §4.1b) ------
+# --- load_or_regen: inter-process regen locking (round-12 §4.1b) ------
 
 
 def test_load_or_regen_waits_for_other_process_regen_instead_of_redoing_it(
@@ -581,18 +582,18 @@ def test_load_or_regen_waits_for_other_process_regen_instead_of_redoing_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When ``filelock.try_regen_lock`` reports another process already
-    holds the lock, ``_load_or_regen`` must wait for that process's
+    holds the lock, ``load_or_regen`` must wait for that process's
     regen to land and reuse it, rather than redundantly regenerating
     itself."""
     (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
     assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
-    # Invalidate the map so _load_or_regen takes the regen branch.
+    # Invalidate the map so load_or_regen takes the regen branch.
     (tmp_path / "b.py").write_text("def g() -> int:\n    return 2\n")
 
-    monkeypatch.setattr(cli, "_REGEN_LOCK_POLL_INTERVAL", 0.02)
-    monkeypatch.setattr(cli, "_REGEN_LOCK_WAIT_CAP", 3.0)
+    monkeypatch.setattr(repo_ops, "_REGEN_LOCK_POLL_INTERVAL", 0.02)
+    monkeypatch.setattr(repo_ops, "_REGEN_LOCK_WAIT_CAP", 3.0)
 
-    real_regen_map = cli.regen_map
+    real_regen_map = repo_ops.regen_map
     regen_calls: list[Path] = []
 
     def counting_regen_map(
@@ -601,7 +602,7 @@ def test_load_or_regen_waits_for_other_process_regen_instead_of_redoing_it(
         regen_calls.append(root)
         return real_regen_map(root, full=full, quiet=quiet)
 
-    monkeypatch.setattr(cli, "regen_map", counting_regen_map)
+    monkeypatch.setattr(repo_ops, "regen_map", counting_regen_map)
 
     @contextlib.contextmanager
     def fake_lock_held_by_other_process(root: Path) -> Iterator[bool]:
@@ -620,7 +621,7 @@ def test_load_or_regen_waits_for_other_process_regen_instead_of_redoing_it(
         filelock, "try_regen_lock", fake_lock_held_by_other_process
     )
 
-    index, code = cli._load_or_regen(tmp_path, no_regen=False)
+    index, code = repo_ops.load_or_regen(tmp_path, no_regen=False)
     assert code == 0
     assert index is not None
     # The caller must never have run its own regen -- the other
@@ -633,14 +634,14 @@ def test_load_or_regen_fails_open_after_lock_wait_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If the lock-wait cap is hit without the other holder's regen
-    ever landing, ``_load_or_regen`` must fail open and regen locally
+    ever landing, ``load_or_regen`` must fail open and regen locally
     rather than blocking indefinitely."""
     (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
     assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
     (tmp_path / "b.py").write_text("def g() -> int:\n    return 2\n")
 
-    monkeypatch.setattr(cli, "_REGEN_LOCK_POLL_INTERVAL", 0.01)
-    monkeypatch.setattr(cli, "_REGEN_LOCK_WAIT_CAP", 0.05)
+    monkeypatch.setattr(repo_ops, "_REGEN_LOCK_POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(repo_ops, "_REGEN_LOCK_WAIT_CAP", 0.05)
 
     @contextlib.contextmanager
     def fake_lock_never_released(root: Path) -> Iterator[bool]:
@@ -649,7 +650,7 @@ def test_load_or_regen_fails_open_after_lock_wait_cap(
 
     monkeypatch.setattr(filelock, "try_regen_lock", fake_lock_never_released)
 
-    index, code = cli._load_or_regen(tmp_path, no_regen=False)
+    index, code = repo_ops.load_or_regen(tmp_path, no_regen=False)
     assert code == 0
     assert index is not None
 
@@ -659,7 +660,7 @@ def test_load_or_regen_concurrent_callers_regen_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end, using the real ``filelock`` (not monkeypatched):
-    several concurrent ``_load_or_regen`` calls against the same stale
+    several concurrent ``load_or_regen`` calls against the same stale
     root must only trigger one actual regen -- the losers wait and
     reuse the winner's fresh map -- while every caller still gets a
     correct, fresh result."""
@@ -667,10 +668,10 @@ def test_load_or_regen_concurrent_callers_regen_exactly_once(
     assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
     (tmp_path / "b.py").write_text("def g() -> int:\n    return 2\n")
 
-    monkeypatch.setattr(cli, "_REGEN_LOCK_POLL_INTERVAL", 0.02)
-    monkeypatch.setattr(cli, "_REGEN_LOCK_WAIT_CAP", 10.0)
+    monkeypatch.setattr(repo_ops, "_REGEN_LOCK_POLL_INTERVAL", 0.02)
+    monkeypatch.setattr(repo_ops, "_REGEN_LOCK_WAIT_CAP", 10.0)
 
-    real_regen_map = cli.regen_map
+    real_regen_map = repo_ops.regen_map
     regen_calls: list[Path] = []
     calls_lock = threading.Lock()
 
@@ -684,13 +685,13 @@ def test_load_or_regen_concurrent_callers_regen_exactly_once(
         time.sleep(0.3)
         return real_regen_map(root, full=full, quiet=quiet)
 
-    monkeypatch.setattr(cli, "regen_map", slow_regen_map)
+    monkeypatch.setattr(repo_ops, "regen_map", slow_regen_map)
 
     results: list[tuple] = []
     results_lock = threading.Lock()
 
     def worker() -> None:
-        result = cli._load_or_regen(tmp_path, no_regen=False)
+        result = repo_ops.load_or_regen(tmp_path, no_regen=False)
         with results_lock:
             results.append(result)
 

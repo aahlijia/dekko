@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from dekko.integrations.cli import map_repository
+from dekko.repo_ops import map_repository
 from dekko.core.languages import is_supported, known_unsupported_language
 from dekko.core.model import FileMap, Symbol
 from dekko.core.resolver import resolve

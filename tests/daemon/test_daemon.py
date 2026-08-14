@@ -1063,11 +1063,11 @@ def test_daemon_status_reports_cache_state_after_a_request(
 # Phase 4: diff/affected's current-tree load shares the warm cache.
 #
 # diff.run/affected.changes used to call mapfile.load_map(root)
-# directly, bypassing _load_or_regen (and therefore the daemon's
+# directly, bypassing load_or_regen (and therefore the daemon's
 # warm-cache hook) entirely -- the "partial exception" the design doc
-# flagged at §2.4's last bullet. cli.load_current_index_no_regen()
+# flagged at §2.4's last bullet. repo_ops.load_current_index_no_regen()
 # closes that gap: it checks the same _daemon_cache_get/_put hooks
-# _load_or_regen uses, without adopting its regen-on-stale side
+# load_or_regen uses, without adopting its regen-on-stale side
 # effect (diff/affected never wrote map.json as a side effect before,
 # and still don't). These tests prove the cache is now genuinely
 # shared -- a query warms it for diff/affected and vice versa -- and

@@ -22,8 +22,8 @@ reload on every invocation. This module owns:
 
 Phase 3 (``.features/daemon-mode/TRACKER.md``) adds a single-slot warm
 ``MapIndex`` cache (``_WarmCache``) that ``serve_daemon`` installs into
-``cli.py``'s ``_load_or_regen`` via ``cli.set_daemon_cache_hook`` at
-startup, re-validated on every access via ``mapfile.check_freshness``
+``repo_ops.py``'s ``load_or_regen`` via ``repo_ops.set_daemon_cache_hook``
+at startup, re-validated on every access via ``mapfile.check_freshness``
 -- the same freshness oracle ``server.py``'s ``Context.index_cache``
 already uses for the MCP server's analogous cache. A daemon serving
 repeated requests against an unchanged map skips the JSON-parse/
@@ -42,6 +42,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from dekko import repo_ops
 from dekko.render import mapfile
 from dekko.daemon.daemon_transport import (
     DaemonTransport,
@@ -215,8 +216,8 @@ class _WarmCache:
     multi-root MCP server session does -- a single slot is enough,
     re-validated via ``mapfile.check_freshness`` on every access
     exactly as that cache is (design doc §2.4). Installed into
-    ``cli._load_or_regen`` via ``cli.set_daemon_cache_hook`` for the
-    lifetime of ``serve_daemon``'s accept loop.
+    ``repo_ops.load_or_regen`` via ``repo_ops.set_daemon_cache_hook``
+    for the lifetime of ``serve_daemon``'s accept loop.
 
     ``get``/``put`` are only ever called from the main accept loop's
     thread (single-threaded by design). ``snapshot()`` is also called
@@ -614,14 +615,9 @@ def serve_daemon(
         transport.cleanup()
         return 1
 
-    # Deferred import: avoids a circular import at module load time
-    # with cli.py, which imports this module (see _dispatch_table's
-    # docstring for the same reasoning).
-    from dekko.integrations import cli
-
     dispatch = _dispatch_table()
     cache = _WarmCache()
-    cli.set_daemon_cache_hook(cache.get, cache.put)
+    repo_ops.set_daemon_cache_hook(cache.get, cache.put)
     start_time = time.monotonic()
     busy_event = threading.Event()
     status_stop = threading.Event()
@@ -658,10 +654,11 @@ def serve_daemon(
         transport.cleanup()
         # Uninstall so this process-global hook never leaks past this
         # daemon's lifetime -- matters for tests running serve_daemon
-        # in-thread (same process, same cli module) across several
+        # in-thread (same process, same repo_ops module) across several
         # daemon instances, and simply keeps a stopped daemon's stale
-        # cache from being reachable through cli.py by anything else.
-        cli.set_daemon_cache_hook(None, None)
+        # cache from being reachable through repo_ops.py by anything
+        # else.
+        repo_ops.set_daemon_cache_hook(None, None)
     return 0
 
 

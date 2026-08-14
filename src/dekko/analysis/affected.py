@@ -22,6 +22,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dekko import repo_ops
 from dekko.storage import cache as cache_mod
 from dekko.analysis import diff
 from dekko.render import mapfile
@@ -463,10 +464,8 @@ def changes(
         qualify a "no impacted tests" result the way ``affected.run``
         does — see ``render``.
     """
-    from dekko.integrations import cli
-
     if index is None:
-        index = cli.load_current_index_no_regen(root)
+        index = repo_ops.load_current_index_no_regen(root)
     prov = (index.provenance if index else None) or {}
     subpath = prov.get("subpath")
     excludes = tuple(prov.get("excludes", []))

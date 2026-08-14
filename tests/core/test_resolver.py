@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from dekko.core import resolver as resolver_mod
-from dekko.integrations.cli import map_repository
+from dekko.repo_ops import map_repository
 from dekko.core.model import FileMap, Import, Param, RawCall, RawRef, Symbol
 from dekko.core.resolver import resolve, resolve_refs
 

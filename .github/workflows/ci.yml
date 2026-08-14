@@ -31,4 +31,27 @@ jobs:
       - name: Format
         run: uv run ruff format --check
       - name: Test
-        run: uv run pytest
+        run: uv run pytest --cov=dekko --cov-report=term-missing
+
+  audit:
+    name: dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    # Non-blocking: surfaces advisories for a human to triage without
+    # gating merges on a signal that hasn't earned trust yet (grammar
+    # packages in particular may carry advisories that don't apply to
+    # how dekko uses them). Revisit once a few weeks of runs show the
+    # noise level is low enough to gate on.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.13'
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Export locked requirements
+        run: >
+          uv export --format requirements-txt --no-hashes
+          -o requirements-audit.txt
+      - name: pip-audit
+        run: uvx pip-audit --strict -r requirements-audit.txt

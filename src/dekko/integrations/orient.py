@@ -22,6 +22,7 @@ Two modes behind one command:
 import json
 from pathlib import Path
 
+from dekko import repo_ops
 from dekko.render import mapfile
 from dekko.analysis import outline, summary
 from dekko.render.mapfile import MapIndex
@@ -170,9 +171,7 @@ def run(
         if index is None:
             return EXIT_OK
         return _advise(index, root, read_path, threshold)
-    from dekko.integrations import cli
-
-    index, code = cli._load_or_regen(root, no_regen)
+    index, code = repo_ops.load_or_regen(root, no_regen)
     if index is None:
         return code
     return _session(index, budget, as_json)

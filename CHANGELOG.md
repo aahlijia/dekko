@@ -9,6 +9,29 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.31.2] — 2026-08-14
+
+### Changed
+- **`cli.py`'s repo-loading/map pipeline extracted into a new
+  `src/dekko/repo_ops.py`** (`cli.py` shrank from 2,679 to 1,855
+  lines). Purely structural: `hooks.py`, `orient.py`, `server.py`,
+  and `daemon.py` now import the pipeline from `repo_ops` directly
+  instead of deferred-importing it from `cli` to dodge a circular
+  import; `_resolve_workers` moved alongside it since `cli.py` still
+  calls it directly. Tests that monkeypatched the moved functions via
+  `cli.<name>` were updated to target `repo_ops.<name>`.
+- Daemon auth token comparison now uses `secrets.compare_digest`
+  instead of `==`, closing a timing side-channel on the local
+  loopback auth handshake.
+- CI now runs `pytest` with `--cov=dekko --cov-report=term-missing`
+  (report-only, no coverage gate yet; baseline is 89%) and a
+  non-blocking `pip-audit` job against the locked dependency set.
+
+### Added
+- Unit tests for `textutil.py` (`signature`, `oneline`, `dir_of`,
+  `estimate_tokens`, `count_lines`, `Meter`, `fit_to_budget`) and
+  `source.py`.
+
 ## [0.31.1] — 2026-08-14
 
 ### Changed

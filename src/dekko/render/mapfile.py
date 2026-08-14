@@ -891,7 +891,7 @@ def load_provenance(root: Path) -> dict | None:
     It is trusted only when that signature still matches — a
     hand-edited, externally regenerated, or otherwise desynced
     ``map.json`` (two independent files, same risk already called out
-    for ``cache.json`` in ``cli._map_run_is_noop``'s docstring) falls
+    for ``cache.json`` in ``repo_ops._map_run_is_noop``'s docstring) falls
     back to a real parse rather than silently trusting stale data.
 
     Args:

@@ -143,7 +143,7 @@ def test_rust_inline_test_module_marks_symbol_test(tmp_path: Path) -> None:
     # Master report #7 (round 11, zed): Rust's idiomatic
     # ``#[cfg(test)] mod tests { ... }`` co-locates unit tests inside
     # the same file as the production code they test, so the
-    # file-level `is_test_path` pass in `cli.map_repository` never
+    # file-level `is_test_path` pass in `repo_ops.map_repository` never
     # sees a test-path file and never sets `Symbol.test`. The
     # extractor's own `_qualify` already climbs through the `mod_item`
     # container and knows the qualname prefix is `tests` — it must now
