@@ -9,6 +9,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.31.3] — 2026-08-14
+
+### Changed
+- **`.dekko/map.json`'s on-disk size cut 5.6-7.9x on large repos**
+  (measured: zed 853.5MB→117.2MB, spring-boot 894.2MB→113.9MB,
+  tensorflow 1212.4MB→217.6MB) via two changes to `render_json.py`/
+  `mapfile.py`: a shared symbol-id interning table
+  (`mapfile.build_id_table`) for the `ambiguous`/`edges`/`referenced`/
+  `external` fields, which previously spelled out full symbol ids at
+  every occurrence instead of referencing them by index; and dropping
+  `indent=2` pretty-printing, since `mapfile.load_map()` is the only
+  consumer of `map.json`, not a human reader. `MAP_DOC_VERSION` bumped
+  4→5, with `load_map()` gaining version-branch handling to keep
+  reading pre-v5 map.json files. `repo_ops._map_run_is_noop` and
+  `MapIndex` gained a `doc_version` check so an already-mapped repo
+  picks up the new format on a plain `dekko map` re-run instead of
+  no-op'ing on a stale pre-v5 file.
+
 ## [0.31.2] — 2026-08-14
 
 ### Changed
