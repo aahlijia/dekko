@@ -1861,3 +1861,219 @@ def test_go_same_package_split_across_files_unaffected_by_stem_fix() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, helper.id) in edges
     assert graph.ambiguous == []
+
+
+def test_go_method_call_to_same_named_imported_function_not_dropped() -> None:
+    """Round-14 report awesome-go.md §1.1: a method whose bare name
+    equals the free function it calls in another package
+    (``IDGenerator.Generate`` calling ``slug.Generate(...)``) used to
+    resolve to itself via the same-file step -- the sole ``Generate``
+    symbol in ``convert.go`` was the caller, so ``len(same_file) == 1``
+    returned the caller's own symbol, and ``_add_edge``'s self-
+    recursion filter silently discarded the "edge." The call must
+    resolve to ``pkg/slug``'s ``Generate``, not to itself, not to
+    ``ambiguous``, and not to ``external``."""
+    slug_generate = Symbol(
+        id="pkg/slug/generator.go::Generate",
+        name="Generate",
+        qualname="Generate",
+        kind="function",
+        path="pkg/slug/generator.go",
+        language="go",
+    )
+    id_generator_type = Symbol(
+        id="pkg/markdown/convert.go::IDGenerator",
+        name="IDGenerator",
+        qualname="IDGenerator",
+        kind="struct",
+        path="pkg/markdown/convert.go",
+        language="go",
+    )
+    caller = Symbol(
+        id="pkg/markdown/convert.go::IDGenerator.Generate",
+        name="Generate",
+        qualname="IDGenerator.Generate",
+        kind="method",
+        path="pkg/markdown/convert.go",
+        language="go",
+    )
+    files = [
+        FileMap("pkg/slug/generator.go", "go", symbols=[slug_generate]),
+        FileMap(
+            "pkg/markdown/convert.go",
+            "go",
+            symbols=[id_generator_type, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="pkg/markdown/convert.go",
+                    text="slug.Generate",
+                    name="Generate",
+                    receiver="slug",
+                    line=46,
+                )
+            ],
+            imports=[
+                Import(
+                    path="pkg/markdown/convert.go",
+                    name="slug",
+                    source="github.com/avelino/awesome-go/pkg/slug",
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, slug_generate.id) in edges
+    assert (caller.id, caller.id) not in edges
+    assert graph.ambiguous == []
+    assert not any(ext.callee.startswith("slug.") for ext in graph.external)
+
+
+def test_python_method_call_to_same_named_imported_function_not_dropped() -> (
+    None
+):
+    """Not Go-specific, per the round-14 design doc's root-cause
+    finding: the identical bare-name collision shape in Python --
+    ``Processor.process`` calling an imported, unrelated module's
+    ``process`` function -- must resolve to the import, not silently
+    vanish via the same-file self-collision the fix above targets."""
+    helper_process = _fn("helper.py", "process")
+    processor_type = _fn("main.py", "Processor", "Processor", line=1)
+    caller = _fn("main.py", "process", "Processor.process", line=2)
+    files = [
+        FileMap("helper.py", "python", symbols=[helper_process]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[processor_type, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="helper.process",
+                    name="process",
+                    receiver="helper",
+                    line=3,
+                )
+            ],
+            imports=[
+                Import(path="main.py", name="helper", source="helper"),
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, helper_process.id) in edges
+    assert (caller.id, caller.id) not in edges
+    assert graph.ambiguous == []
+
+
+def test_bare_and_self_recursive_calls_still_produce_no_edge() -> None:
+    """Regression guard for the same-file self-exclusion fix above:
+    genuine recursion -- a bare call to one's own name, and a
+    self-qualified call to one's own method -- must still resolve to
+    no edge (self-recursion is deliberately never recorded), exactly
+    as before this change. The bare call now falls through the
+    (skipped) same-file step and lands on the later
+    ``len(candidates) == 1`` fast path, which still resolves to the
+    caller itself and is still dropped by ``_add_edge``; the
+    self-qualified call is caught earlier still, by
+    ``_container_match``, which resolves it back to the same method
+    and is dropped the same way."""
+    recurse = Symbol(
+        id="c.py::recurse",
+        name="recurse",
+        qualname="recurse",
+        kind="function",
+        path="c.py",
+        language="python",
+    )
+    cls = Symbol(
+        id="c.py::C",
+        name="C",
+        qualname="C",
+        kind="class",
+        path="c.py",
+        language="python",
+    )
+    method = Symbol(
+        id="c.py::C.walk",
+        name="walk",
+        qualname="C.walk",
+        kind="method",
+        path="c.py",
+        language="python",
+    )
+    fm = FileMap(
+        path="c.py",
+        language="python",
+        symbols=[recurse, cls, method],
+        calls=[
+            RawCall(
+                caller_id=recurse.id,
+                path="c.py",
+                text="recurse",
+                name="recurse",
+                line=2,
+            ),
+            RawCall(
+                caller_id=method.id,
+                path="c.py",
+                text="self.walk",
+                name="walk",
+                receiver="self",
+                line=6,
+            ),
+        ],
+    )
+    graph = resolve([fm])
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert not edges
+    assert graph.ambiguous == []
+
+
+def test_same_file_two_candidates_including_caller_unaffected() -> None:
+    """Regression guard: when ``same_file`` already has 2+ candidates
+    (including the caller), the same-file step already skips its
+    single-candidate fast path today, before this fix's new self-
+    exclusion branch even runs -- the branch is nested inside the
+    existing ``len(same_file) == 1`` check, so it structurally cannot
+    fire here. Pinned explicitly since this is the case most likely to
+    be miscoded if a future edit tries to "simplify" the fix into a
+    list-filter instead of the single-candidate identity check."""
+    caller = Symbol(
+        id="c.py::Widget.build",
+        name="build",
+        qualname="Widget.build",
+        kind="method",
+        path="c.py",
+        language="python",
+    )
+    other = Symbol(
+        id="c.py::build",
+        name="build",
+        qualname="build",
+        kind="function",
+        path="c.py",
+        language="python",
+    )
+    fm = FileMap(
+        path="c.py",
+        language="python",
+        symbols=[caller, other],
+        calls=[
+            RawCall(
+                caller_id=caller.id,
+                path="c.py",
+                text="thing.build",
+                name="build",
+                receiver="thing",
+                line=3,
+            )
+        ],
+    )
+    graph = resolve([fm])
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert not edges
+    assert graph.ambiguous == [(caller.id, "build", [caller.id, other.id])]
