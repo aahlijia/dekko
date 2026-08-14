@@ -9,6 +9,524 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-08-14
+
+### Added
+- **Stronger dekko-usage enforcement for Claude Code sessions**
+  (`.features/plans/usages/enforce-dekko-usage.md`). Real transcripts
+  showed Claude falling back to `grep`/whole-file `Read` more than
+  reaching for dekko's structural tools even with the existing
+  session-start/prompt-submit/pre-read hooks installed, because every
+  one of those is per-turn `additionalContext` an agent is free to
+  weigh against convenience and ignore. Three additions, in ascending
+  order of enforcement strength:
+  - Sharper copy in the existing soft-push surfaces — `orient.py`'s
+    session preamble, `hooks.py`'s prompt-submit nudge, and the MCP
+    tool descriptions for `get_callees`/`find_usages`/`workset`/
+    `impacted_tests` — now name the grep/Read alternative explicitly
+    instead of only describing what the tool returns.
+  - **`dekko --claude-md-install` / `--claude-md-uninstall`**: an
+    idempotent, marker-bounded (`<!-- dekko:usage-policy:start -->` /
+    `...:end`) usage-policy block written into the project's
+    `CLAUDE.md`. Unlike per-turn injected context, `CLAUDE.md` content
+    is documented as overriding default agent behavior — a materially
+    stronger lever, loaded once per session. Kept as a separate
+    top-level flag (not bundled into `dekko hooks install`) since it
+    edits a file the user directly owns and reads, unlike
+    `.claude/settings.json`.
+  - **New `pre-bash` hook event** (`dekko hooks install --enable
+    pre-bash`, off by default): a `PreToolUse`/`Bash` hook that matches
+    a repo-wide `grep`/`rg`/`ag` search, a `find -name` hunt, or a
+    `cat`/`head`/`sed` on a large mapped file, and surfaces
+    `permissionDecision: "ask"` with the dekko-equivalent command — a
+    real interruption instead of ignorable text. `--strict` escalates
+    matches to `"deny"`. Matching is deliberately conservative (a
+    targeted single-file `grep` or a `cat` on an unmapped file like
+    `package.json` never matches) to keep false positives low.
+- **Daemon-mode CLI** (`dekko daemon start/stop/status`). A per-repo
+  background process the bare `dekko` CLI talks to over a socket
+  (Unix domain socket on macOS/Linux, token-authenticated TCP
+  loopback on Windows) so repeated CLI invocations share a warm
+  `MapIndex` instead of each one reloading `map.json` from scratch.
+  `diff`/`affected` share the same warm cache. Explicit start/stop in
+  v1, no auto-spawn; every daemon-routing check fails open to direct-
+  process behavior on any daemon absence/error.
+- **Two new Claude Code skills.** `dekko-verify`: sanity-check a
+  suspiciously low or zero call-graph result (`get_callers`,
+  `get_callees`, `find_usages`, `impacted_tests`, `unused`) with a
+  targeted grep before concluding "no callers"/"dead code" — codifies
+  the known resolver blind spots repeated eval rounds keep finding
+  (cross-package/qualified calls, trait/interface dispatch, unparsed-
+  language files, the `--no-tests` default, high-symbol-density common
+  method names). `dekko-daemon`: when to start the daemon ahead of a
+  Bash-CLI-heavy stretch of work, what its warm cache does and doesn't
+  cover (the `diff`/`affected` old-side reparse is never covered), and
+  how to handle a `--no-daemon`/exit-7 abandoned-request retry.
+  Also closed a documentation gap in the existing `dekko-orient`
+  skill: `find_usages`, `map_status`, and `refresh_map` are three of
+  the MCP server's 14 tools that were never listed there, leaving an
+  MCP-only agent (no Bash) with no way to discover them.
+
+### Fixed
+- **`resolver.py` could self-resolve a bare-name call to its own
+  enclosing symbol instead of the real cross-file target, silently
+  dropping the call.** When two symbols in different files share a
+  bare method name (e.g. Go's `IDGenerator.Generate` and an imported
+  `slug.Generate`), `_pick_candidate`'s same-file candidate step
+  could match the call's *own caller* as the sole same-file hit, not
+  a genuine same-file target, just a coincidental name collision, and
+  return it immediately. `_add_edge`'s self-recursion filter then
+  silently discarded the resulting self-edge, so the real, cross-file
+  call via an import hint was never tried and the call vanished from
+  the graph. `_pick_candidate` now falls through to later ladder
+  steps (import hints, in particular) whenever the same-file
+  candidate is the caller itself, while a genuine self/this-qualified
+  recursive call (already handled earlier via `_container_match`) is
+  unaffected. See `.features/plans/round14/
+  go-resolver-bare-name-collision-plan.md`.
+- **Windows daemon transport (`TcpLoopbackTransport`) could wipe its
+  own shared port file, and with it a still-valid daemon connection,
+  whenever a status listener simply hadn't been bound yet.**
+  `status_client_connect()` treated any `DaemonUnavailableError` from
+  reading the status port as corruption and deleted the whole port
+  file, including the main `port`/`token` entry
+  `is_daemon_reachable()`'s fallback `client_connect()` needs, even
+  for the benign case of a daemon started before
+  `bind_status_listener()` existed, which simply lacks a
+  `status_port` key. `daemon_transport.py` now raises a distinct
+  `_StatusPortNotBoundError` for that case so cleanup only fires on
+  genuine file corruption (unreadable, malformed JSON, or a
+  missing/invalid main entry). Windows-only in origin (macOS/Linux's
+  Unix-socket transport has no equivalent cleanup path), diagnosed
+  from a Windows CI run failure; see `.features/fixes/
+  windows-ci-failure-investigation.md`.
+- **`dekko daemon status` could report `running: false` for a daemon
+  that was alive but slow to reply, and `stop` could unlink a live
+  daemon's transport artifacts on the same false-negative evidence.**
+  Under sustained CPU contention, a status round-trip that had
+  already connected to a genuine listener could still time out
+  waiting for a reply, previously indistinguishable from a plain
+  connection refusal, so `status()` folded both into the same "not
+  running" report. `stop()`'s forced-fallback path (used when neither
+  a graceful-shutdown ack nor a PID lookup confirmed the daemon was
+  gone) had the mirror problem: it unlinked the transport
+  unconditionally, capable of orphaning a still-listening process.
+  `daemon.py`'s `status()`/`_query_pid()` now distinguish a
+  post-connect timeout from a genuine absence and report
+  `confirmed: false` instead of guessing; `stop()`'s forced-fallback
+  now only cleans up when a final reachability probe itself fails,
+  positive evidence, not silence. See `.features/plans/round14/
+  daemon-lifecycle-fixes-plan.md`.
+- **`dekko daemon stop` reported success up to ~1.1s before the
+  daemon process had actually torn down.** From a live eval against
+  6 of 7 real repos post-round-13 search fix
+  (`test-repos/reports/14-tokentest-7repo-postround13searchfix/`,
+  `MASTER_REPORT.md`), triple-independently confirmed (cline,
+  claude-buddy, claude-code): `_handle_connection` acked a `_shutdown`
+  request the instant it arrived, before `serve_daemon()`'s own
+  teardown (joining the status-listener thread — bounded by that
+  thread's own 1.0s `accept()` timeout, the dominant term in the
+  measured lag — closing both sockets, then unlinking their transport
+  artifacts) had actually run. A command issued in that window either
+  hard-failed (exit 7, misclassifying "daemon just torn down" as
+  "daemon still busy," violating the documented fail-open contract) or
+  raced a concurrent `daemon start` into spawning a genuine duplicate
+  live process. `daemon.py::stop()` now blocks (bounded, 5s cap) until
+  the daemon's transport artifacts are confirmed gone — a race-free,
+  filesystem-only check, since unlinking them is the literal last step
+  of the teardown it's waiting on — before reporting success. This
+  also structurally narrows a related daemon `start`→`stop`→`start`
+  orphan race a sibling report (tensorflow) found under heavy machine
+  contention, though that item stays open pending a contended re-test
+  (see `.features/plans/round14/daemon-lifecycle-fixes-plan.md`).
+- **Round-13 7-repo eval fixes.** From a live eval against 7 real
+  repos post-round-12 (`test-repos/reports/13-tokentest-7repo-postround12fixes/`,
+  `MASTER_REPORT.md`):
+  - **Session-start hook silently blowing its token budget ~40x.**
+    On a very large repo (tensorflow), the hook's path-only backbone
+    floor could exceed `SESSION_MAP_BUDGET` with no signal anywhere
+    that it happened, unlike the equivalent `dekko lean` CLI path
+    which already warns. `hooks.py`'s session-start now discloses
+    when this floor is exceeded.
+  - **`dekko trace` false "no call path."** A route that exists only
+    through ambiguously-resolved edges read as an indistinguishable
+    genuine negative (spring-boot), inconsistent with `query callees`'
+    own honest ambiguous-edge disclosure. `trace.py` now
+    distinguishes the two cases.
+  - **`dekko summary`'s "parse errors:" section mislabeling
+    no-grammar skips as real failures.** Round-12 fixed this
+    conflation in `dekko map`'s own summary but missed `dekko
+    summary`'s separate code path (tensorflow, zed);
+    `summary.py` and its `--json` fields now share the same
+    distinction.
+  - **Fuzzy "closest matches" noise.** Single-character symbol names
+    could coincidentally surface as a substring match against an
+    unrelated, long query (claude-buddy); `query.py`'s suggestion
+    ranking now excludes these.
+  - **A `FileNotFoundError` race in `dekko map`'s page writer.**
+    Seen once right after a full `.dekko/` reset (spring-boot,
+    corroborated by a softer non-crashing variant in claude-buddy);
+    `cli.py`'s `_write_pages()` now re-asserts its parent directory
+    exists immediately before its first write.
+  - Documentation clarifications: `diff`/`affected`'s symbol-body-hash
+    comparison granularity, and `dekko unused`'s expected
+    false-positive shape on reflective/dynamic-dispatch-heavy
+    frameworks.
+  - **Go cross-package call-resolution gap**, deferred from the
+    first pass as design work and closed in a follow-up (awesome-go):
+    `resolver.py`'s `_repo_stem()` compared a qualified `pkg.Func()`
+    call's import source against the *calling file's own filename
+    stem* rather than its package directory, silently dropping every
+    cross-package call through an imported first-party subpackage —
+    Go packages are directory-scoped, not file-scoped. `_repo_stem()`
+    now resolves every `.go` file to its parent directory
+    unconditionally.
+  - **Two daemon false-negative findings**, also deferred and then
+    closed (claude-code, tensorflow): `dekko daemon start` could
+    orphan a healthy daemon and spawn a duplicate for the same root,
+    and `dekko daemon status` could report `running: false` for the
+    full duration of a slow request while the daemon was alive and
+    busy — both traced to the same root cause, a deliberately
+    single-threaded accept loop that can't answer any request while
+    busy on another. Fixed with a dedicated status-only listener
+    (separate socket/port, its own background thread) that `daemon
+    status` and `is_daemon_reachable()` now probe instead of the busy
+    main command socket; `client_connect()`'s stale-artifact cleanup
+    was also narrowed so a connect-level timeout (busy daemon) no
+    longer deletes a live daemon's transport artifact — only a
+    genuine "nothing listening" failure does. Fail-open guarantees
+    (silent fallback to direct execution on any pre-request transport
+    error) preserved throughout; both fixes have regression tests.
+- **Round-13 search-relevance follow-up.** From the master report's
+  one remaining open item (`.features/plans/round13/
+  search-relevance-tuning-plan.md`), deferred at first because
+  round-12's own precedent showed a same-session patch reacting to
+  one reported query can regress a different one:
+  - **`dekko search`'s relevance score computed inconsistently
+    across two differently-sized candidate batches.** `search.rank()`
+    filtered to zero-relevance survivors, then re-scored that smaller
+    survivor set from scratch for the final blend — since BM25's
+    IDF/length-normalization are corpus-relative, re-deriving over a
+    different-sized batch produced a genuinely different number,
+    occasionally flipping the rank of the query's own correct answer
+    (cline: `"cancel task execution"` outranked `cancelTask()` with a
+    telemetry method matching only one term). `relevance.
+    blended_scores()` gained an optional `precomputed_relevance` param
+    so `rank()` now reuses its already-computed full-batch relevance
+    instead of re-deriving it; every other caller (workset,
+    contextpack, render_lean, hooks) is untouched.
+  - **New `--scorer both`.** For a separate, unrelated finding
+    (zed: `"save file to disk"` missing `Item.save()`, which
+    genuinely has no lexical overlap with the query at all — no
+    scoring-weight change could safely fix that without overfitting)
+    `dekko search` gained an opt-in third scorer choice that runs the
+    lexical (BM25) and embedding scorers independently and fuses their
+    rankings by rank position via reciprocal rank fusion, not raw
+    score (the two scorers' scores aren't on a comparable scale).
+    Requires the same `dekko[search]` extra as `--scorer embedding`;
+    `lexical`/`embedding` alone are byte-for-byte unaffected.
+  - A 6-fixture golden-query regression corpus was added to
+    `tests/test_search.py` (multi-language, including a direct
+    invariant test pinning the batch-consistency bug class) so future
+    relevance tuning has a fast regression check instead of needing
+    live multi-repo re-testing.
+- **`dekko search --scorer both`'s fused score was unlabeled and easy
+  to misread against `lexical`/`embedding`-only scores.** From the
+  round-14 7-repo eval master report (`test-repos/reports/
+  14-tokentest-7repo-postround13searchfix/MASTER_REPORT.md`,
+  corroborated 2/6 — cline, claude-code): `--scorer both`'s reciprocal
+  rank fusion score lands in a much lower, differently-shaped range
+  (~0.03 typical) than a blended `[0, 1]` lexical/embedding score, with
+  no in-band note explaining the scale changed — expected behavior
+  (RRF fuses by rank position, not score magnitude), but a rough edge
+  for anything comparing confidence *across* scorer modes. `search.py`
+  gained `_scale_note()`, an unconditional `note:`/`"note"` hint on
+  every `--scorer both` call (joined with the existing round-08 §2.2
+  exclusion note when both fire); `lexical`/`embedding` alone are
+  unaffected.
+- Documentation: `docs/cli.md`'s daemon-mode section now notes that
+  the warm cache's win is specifically about skipping map *loading*,
+  not every part of a query's own cost — a query whose per-hit
+  rendering dominates (e.g. `get_callers`/`find_usages` on a very
+  high-fan-in "hub" symbol) can show little or no measurable
+  wall-clock difference between a cold and warm daemon call even
+  though `hits`/`misses` correctly show it was served warm (round-14
+  eval, tensorflow §4.4 — not a bug, just an under-documented nuance).
+- **Windows CI: daemon stale-artifact test hardcoded the Unix-only
+  transport.** `test_stale_socket_falls_open` wrote a bogus file at
+  `.dekko/daemon.sock` and asserted it got cleaned up — correct on
+  macOS/Linux, but Windows selects `TcpLoopbackTransport` (artifact:
+  `daemon.port`), so `client_connect()` never touched the irrelevant
+  `daemon.sock` file the test wrote, and the assertion failed on
+  every windows-latest CI run. Fixed by routing the test through
+  `default_transport_for()`, per `test_daemon.py`'s own stated
+  convention of never needing a `skipif`. Investigating this surfaced
+  a real parity gap alongside it: `TcpLoopbackTransport`'s
+  `client_connect()`/`status_client_connect()` read the port file
+  *before* connecting, and a malformed/corrupt port file raised
+  `DaemonUnavailableError` with no cleanup — unlike
+  `UnixSocketTransport`'s stale-socket case (round-13 §2) or this
+  same transport's own connect-level `OSError` branch, both of which
+  do clean up. A failed port-file read now triggers the same
+  cleanup, with a new regression test
+  (`test_tcp_client_connect_malformed_port_file_cleans_up`).
+- **Round-12 7-repo eval fixes.** From a live eval against 7 real
+  repos post-round-11 (`test-repos/reports/12-tokentest-7repo-postround11fixes/`):
+  - **Resolver: bare receiverless call misresolved against an
+    unrelated same-named method.** A call with no receiver can never
+    target a method, so `resolver.py`'s last-resort ladder now prefers
+    a lone non-method candidate instead of falling through to
+    ambiguous. Live-verified on awesome-go.
+  - **`--jobs` was unwired on `diff`/`affected`/`workset`.** The
+    library-level parallel-extraction plumbing existed but no CLI flag
+    threaded through to it; `--jobs` is now accepted on all three
+    subcommands. Confirmed a real ~25-27% wall-clock win on a
+    repeated-run benchmark against tensorflow.
+  - **`dekko daemon status` false "not running."** `_CLIENT_TIMEOUT`
+    was a separate, shorter constant (2s) than the server's own
+    request timeout, so a daemon still warming its cache could read as
+    down. It now matches `_REQUEST_TIMEOUT` (30s).
+  - **Parse-error vs. missing-grammar conflation.** `dekko map`'s
+    summary and `outline`'s sparse-file heuristic treated a genuine
+    parse error the same as an unsupported/missing grammar. New
+    `grammars.is_grammar_unavailable_message()` splits the two so each
+    is reported and suppressed correctly. Live-verified against
+    spring-boot's Kotlin files and zed's Scheme files.
+  - **Non-atomic `map.json`/`cache.json`/rev-cache writes.** A reader
+    (daemon, concurrent CLI invocation) could observe a truncated or
+    partially-written file mid-save. New
+    `mapfile.atomic_write_bytes()` (temp file + `os.replace`) backs
+    all four write sites. Confirmed via concurrent-read races against
+    a live repo with zero corruption.
+  - Documented (no fix needed): the MCP server's warm cache
+    (`Context.index_cache`) is independent of the daemon's
+    `_WarmCache` by design — noted in `server.py`'s docstring and
+    `docs/cli.md` to head off future confusion between the two.
+- **Round-12 open-items implementation pass.** From
+  `.features/plans/round-12-open-items-implementation-guide.md`,
+  design work following the round-12 eval fixes above:
+  - **`dekko search` 30-40s+ latency on large repos.** The actual
+    bottleneck wasn't BM25/embedding scoring but an uncached
+    `classify.is_test_path()` reached millions of times via
+    `MapIndex.without_tests()`. `lru_cache` on `is_test_path()` cut
+    search on zed from ~30s to single-digit seconds.
+  - **Silent local re-work on an abandoned daemon request.**
+    `daemon.try_daemon()` now raises `DaemonRequestAbandonedError`
+    instead of returning `None` once a request has actually been
+    sent and no response arrives, so `cli.main()` reports a clear
+    message and a distinct exit code (`EXIT_DAEMON_ABANDONED = 7`)
+    instead of silently duplicating the work locally.
+  - **Concurrent CLI invocations racing to regen the same stale
+    `.dekko/` state.** New `filelock.py` (POSIX `fcntl`/Windows
+    `msvcrt`, fail-open) wired into `cli.py`'s stale-map path so a
+    second invocation waits for and reuses an in-flight regen
+    instead of re-parsing the repo a second time.
+  - **`--json` on the ambiguous-symbol error path.** Formalized the
+    existing plain-text-on-stderr behavior as documented, tested
+    contract rather than an inconsistency to fix.
+  - **Search relevance ties favoring a generic term over a more
+    specific one.** New IDF-weighted term coverage in `BM25Scorer`/
+    `search.py`'s `_CoverageAdjustedScorer` breaks coverage-fraction
+    ties toward the rarer, more distinctive term. Live-verified
+    fixed on spring-boot's reported case; claude-buddy's case
+    remains unresolved (corpus-relative IDF cuts the wrong way
+    there) and is documented as still open.
+  - **`referenced-by` noise on generic bare identifiers, phase A.**
+    Scoped `languages.py`'s JS/TS shorthand-property reference query
+    to object shorthand properties specifically. Live-verified as a
+    no-op on the pinned tree-sitter grammar (already splits the
+    conflated node types) — the real noise source is JSX/template-
+    literal reads of shadowed locals, needing lexical scope tracking
+    (phase B, deliberately deferred as a larger design effort).
+  - Independently re-verified: all of the above except phase B hold
+    up against live repro on the relevant `test-repos/` targets; see
+    `.features/plans/round-12-implementation-verification.md`.
+- **`dekko daemon start` false success on an oversized socket path.**
+  When the daemon's Unix socket path exceeded `AF_UNIX`'s `sun_path`
+  length limit, `daemon start` reported success (exit 0) and the
+  failure only surfaced later on a `daemon status` call. New
+  `DaemonTransport.preflight_check()` runs before the daemon process
+  is spawned, so an oversized path now fails `daemon start` itself
+  with exit 1 and a clear message.
+
+## [0.30.1] — 2026-08-07
+
+Fixes the 5 follow-up issues from round 09's re-evaluation, documented
+in `.features/plans/investigation-09-round09-followups.md`.
+
+### Fixed
+- **zed-class call-edge gaps in `resolver.py`.** An explicit
+  `Type::method()`/`Type.staticMethod()` receiver (the type's own bare
+  name, not a variable of that type) is now resolved directly via new
+  `_receiver_type_match`, ahead of the typed-parameter step — closing
+  a gap where such calls fell through to the generic ladder and landed
+  ambiguous whenever the repo defined the method name more than once
+  elsewhere. Live-verified on zed: `BufferDiff.new` went from 0 to
+  12/13 callers. `_pick_candidate`'s self/this step was also split out
+  into `_container_match` to keep the growing ladder readable.
+- **Noise-call guard missing Rust std/prelude methods.** New
+  `_RUST_STD_METHOD_NAMES` (`then`, `iter_mut`, `unwrap`, `clone`,
+  etc.) closes the same false-positive shape `_BUILTIN_METHOD_NAMES`
+  already covers for JS/TS, but for Rust — a receiver-qualified call
+  not provably typed as an in-repo class was being misattributed to
+  an unrelated same-named repo method. Live-verified on zed.
+- **`query callees` didn't disclose dropped ambiguous calls** the way
+  `query callers` already discloses `ambiguous_in`. New
+  `MapIndex.ambiguous_out` (caller → names it called ambiguously) and
+  a matching stderr note / `ambiguous_out` JSON field on the callees
+  side, so a low `calls_out` count can be qualified instead of read as
+  exhaustive.
+- **`dekko lean --budget` silently overriding a too-tight request.**
+  `effective_cap` never lets the cap fall below the repo's path-only
+  floor, but this was invisible to the caller — a `--budget 500` on a
+  large repo could render identically to an unbudgeted run with no
+  indication why. `render_lean.run()` now prints a stderr note when
+  the floor overrides the requested budget.
+- **Hardcoded `file.py` in the ambiguous-candidates hint.** `query.py`'s
+  "qualify with `file.py:name`" hint used a literal placeholder instead
+  of an actual candidate path; now uses the first ranked candidate's
+  real path.
+- **MCP `map_status` stale message didn't distinguish version vs. spec
+  staleness.** A long-lived `dekko serve` process can have an
+  identical `tool_version` string on both sides while still running
+  stale extractor code underneath it (a reinstall doesn't change the
+  version every release), which read as a self-contradictory "built by
+  dekko 0.21.3, running 0.21.3" with no explanation. `Freshness` now
+  carries `version_stale`/`spec_stale` flags and the raw built/running
+  values; `tool_map_status` names the actual differentiator and flags
+  the long-lived-process case explicitly.
+- Confirmed (no code fix needed): the resolved/ambiguous edge-count
+  shift observed on cline between rounds 08 and 09 was traced to round
+  08's already-documented stale-binary baseline issue, not a
+  regression introduced by round 09's fixes — `resolver.py`/
+  `extractor.py` are byte-identical between the compared commits.
+
+## [0.30.0] — 2026-08-07
+
+Two 7-repo evaluation rounds (`test-repos/reports/07-tokentest-7repo-fixcycle/`,
+`08-tokentest-7repo-fable5/`, `09-tokentest-7repo-postfix/`) against
+real-world repos (awesome-go, claude-buddy, claude-code, cline,
+spring-boot, tensorflow, zed) drove a two-cycle fix pass. Round 09
+confirms the O(N^2) `lean` hang and the spring-boot vendored-dir bug
+are fixed, disambiguation is a clean win across all 6 re-tested repos,
+and token savings remain strong (12x-765x vs. Read/grep).
+
+### Added
+- **`dekko search "<query>"` / `search_code` MCP tool (semantic
+  search, Phase 1).** Free-text relevance search that ranks every
+  symbol in the map by BM25-style lexical scoring (name/qualname/
+  signature/doc), for when you know what code should do but not its
+  name — no new dependencies. New `relevance.BM25Scorer` (alongside
+  the existing `LexicalScorer`, which is unchanged) and new
+  `search.py` module. Options: `--limit`, `--budget`, `--kind`,
+  `--include-tests`, `--json`, `--no-regen`. See
+  `.features/plans/SEMANTIC-SEARCH-PLAN.md` for the design and
+  implementation notes.
+- **`--scorer embedding` for `dekko search` / `search_code` (semantic
+  search, Phase 2), opt-in via `pip install dekko[search]`.** A
+  deterministic hashing-trick embedding scorer (character n-gram
+  feature hashing + signed random projection, `numpy`-only — no
+  pretrained model, no download, fully offline), with a new
+  `embedding.py` module: `EmbeddingScorer` (implements the same
+  `relevance.Scorer` protocol as `BM25Scorer`) and `EmbeddingCache`
+  (mirrors `cache.IncrementalCache`'s reuse/invalidate pattern),
+  persisted to `.dekko/embeddings.json`. The default scorer stays
+  `lexical` (BM25, unflagged, always available) — a base install and
+  every existing `dekko search`/`search_code` call are unaffected.
+  Requesting `--scorer embedding` / `scorer: "embedding"` without the
+  extra installed fails with a clear error rather than silently
+  falling back. Deviates from the plan's original `sentence-
+  transformers` sketch — see `.features/plans/SEMANTIC-SEARCH-PLAN.md`
+  §8 and "Implementation status" for why.
+- **`dekko[fastjson]` extra** (`orjson`-backed JSON read/write, falls
+  back to stdlib `json` when not installed) and a validated
+  `.dekko/provenance.json` sidecar so `dekko status` can skip a full
+  `map.json` parse.
+- **`query`'s `:LINE` disambiguation qualifier.** `resolve_target`
+  accepts a trailing `:LINE` (e.g. `path:qualname:line`) to pick
+  between overloaded symbols that collide on `(path, qualname)`;
+  `report_unresolved` now hints at the `:LINE` form when candidates
+  share a name and path.
+- `note remove` alias; `--dry-run` for `--claude-install` /
+  `--claude-uninstall`; `DEFAULT_BUDGET` caps for bare `dekko summary`
+  (5000) and `dekko affected` / `impacted_tests` (6000), so neither
+  can render an unbounded report by default.
+
+### Fixed
+- **O(N^2) hang in `dekko lean`** on large repos — `_shed_symbols`'s
+  linear `fits()` walk replaced with a binary search (`_bisect_shed`).
+- **Vendored-dir false positives.** JVM-style source roots
+  (`src/main|test/<lang>/...`, e.g. Spring Boot's
+  `org.springframework.boot.build`) are exempted from
+  `_VENDORED_DIRS` matching so a package literally named `build`
+  isn't mistaken for build output; the no-`.git/` walker fallback now
+  prunes against the same exclude-dir list as the git-aware path
+  instead of leaving the "vendored (<dir>)" skip reason dead code.
+- **Search relevance.** A shared term-coverage discount in
+  `BM25Scorer`/`LexicalScorer` stops partial matches from rescaling
+  to a false `1.00` score, surfaces an "N test-file symbols excluded"
+  hint when the top score is weak, and (via a scorer-agnostic
+  `_CoverageAdjustedScorer` wrapper in `search.rank()`) stops a common
+  term from crowding out a more distinctive one under BM25 or
+  embedding scoring alike.
+- **Resolver false positives on built-in/global calls.** Calls like
+  `.trim()`, `expect()`, or a global `String` reference were
+  silently attributed to a same-named repo symbol whenever a repo
+  happened to define exactly one, inflating fan-in and polluting
+  hotspot rankings. New `_is_noise_call` rejects calls shadowed by an
+  external import, calls to curated ambient globals, and
+  receiver-qualified calls to curated built-in prototype methods
+  (self/this receivers exempted). Live-verified on cline: `trim`
+  fan-in 1404 -> 2, `expect` 603 -> 5, `String` 548 -> 3.
+- **C++/C `#include`-based call disambiguation** and a fix so a
+  header's own stem (not the generic extension-only fallback) is
+  used as its `Import.name`, which was silently colliding across
+  nearly every include in a file.
+- **Zod `.describe()` fan-in collision** — added to the built-in
+  schema-builder-method denylist alongside C++/Go reference-tracking
+  fixes for dead-code false positives (Go value-typed struct usage,
+  JSX-referenced components).
+- **`query.py` resolution/reporting.** `_resolve_exact` merges
+  qualname/name symbol pools instead of or-short-circuiting (bare-name
+  collisions no longer masked by a qualname hit); unresolved rows show
+  `path:start_line  signature(sym)`; `_close_names`' fuzzy tier
+  requires `len(name) >= 3` and raises its cutoff to 0.72 to suppress
+  single-letter junk suggestions.
+- **Change-analysis correctness.** `diff.snapshot` reuses an
+  already-loaded `MapIndex` (freshness-gated) instead of re-parsing;
+  the old-side file list now comes from `git ls-tree` instead of
+  `walker.discover`'s gitignore-reapplying fallback, which produced
+  phantom "added" symbols for already-tracked files an unanchored
+  `.gitignore` pattern happened to match; `affected._test_hint`
+  replaced the pytest-only hint with per-language grouping
+  (pytest/cargo test/go test/npm-bun-pnpm-yarn/gradlew-mvn);
+  `impacts_from_symbol` gained an import-tier fallback for languages
+  without per-symbol import bindings (e.g. C++).
+- **`affected.render()`** now surfaces the same vendored-exclusion
+  coverage caveat `query` already carries when a diff touches only
+  vendored-excluded files (e.g. tensorflow's `third_party/xla`), so
+  "no impacted tests" no longer reads identically to a genuinely safe
+  change dekko never looked at.
+- **`dekko orient`'s preamble** no longer tells an agent to use
+  `search` when the subcommand isn't actually available in-process.
+- Unbounded `dekko summary` parse-error output capped at 15 with a
+  per-language collapse footer.
+
+### Performance
+- **Server-side `MapIndex` caching.** The MCP server now caches the
+  in-process `MapIndex` per session and reuses it while
+  `mapfile.check_freshness` still reports it fresh, skipping
+  redundant JSON parse/rebuild on repeat calls in the same session.
+- **`revcache.py`**, a disk-backed cache of resolved historical git
+  revisions (mtime-evicted, `MAX_ENTRIES=20`), shared between
+  `diff.run` and `affected.changes` instead of each re-exporting/
+  re-parsing the old revision independently.
+- BM25 term tokenization (`_raw_terms`/`_stemmed_terms`) is now
+  `lru_cache`-wrapped, and `search._build_candidates` caches its
+  built candidate list on the `MapIndex` instance, eliminating
+  redundant re-tokenization on repeat `search` calls against an
+  already-loaded index.
+
 ## [0.21.3] — 2026-08-03
 
 ### Added

@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from dekko import cli
+from dekko import diff
+from dekko import mapfile
 from dekko import server
 
 # core() is changed by _change_core; called directly by test_core,
@@ -103,6 +105,65 @@ def test_rev_seed_bundles_change(
     # The depth tier carries core's pack (its callers).
     assert "packs:" in out
     assert "callers:" in out
+
+
+def test_rev_seed_loads_current_index_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2.4: a rev-seeded ``workset`` call must load the current-tree
+    map once, not twice, when the on-disk map is already fresh (no
+    auto-regen in the way). ``workset.run()`` loads a fresh index via
+    ``_load_or_regen`` before calling ``seed_from_rev``; before this
+    fix, ``affected.changes()`` (called from ``seed_from_rev``)
+    redundantly reloaded the same map.json itself instead of reusing
+    the index it was already handed. Commits the change and remaps
+    first so the working tree matches the on-disk map exactly (a
+    stale map would trigger its own separate auto-regen load, muddying
+    the count this test is checking)."""
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    _commit_all(root, "change core")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+
+    calls: list[Path] = []
+    real_load_map = mapfile.load_map
+
+    def spy(root_arg: Path) -> mapfile.MapIndex | None:
+        calls.append(root_arg)
+        return real_load_map(root_arg)
+
+    monkeypatch.setattr(mapfile, "load_map", spy)
+    assert cli.main(["workset", "HEAD~1", "--root", str(root)]) == 0
+    assert len(calls) == 1
+
+
+def test_rev_seed_jobs_flag_reaches_old_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-12 master report §3.3: a rev-seeded ``dekko workset``
+    shares ``diff``/``affected``'s rev-cache-miss old-side re-parse/
+    resolve path, which used to always run single-threaded regardless
+    of ``--jobs`` because ``dekko workset`` never had that flag.
+    ``dekko workset REV --jobs N`` must now reach
+    ``diff.old_snapshot`` with the resolved worker count."""
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+
+    seen_jobs: list[int] = []
+    real_old_snapshot = diff.old_snapshot
+
+    def spy(*args: object, **kwargs: object) -> diff.Snapshot | None:
+        seen_jobs.append(kwargs["jobs"])
+        return real_old_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(diff, "old_snapshot", spy)
+    assert (
+        cli.main(
+            ["workset", "--root", str(root), "--jobs", "3"],
+        )
+        == 0
+    )
+    assert seen_jobs == [3]
 
 
 def test_symbol_seed_needs_no_git(

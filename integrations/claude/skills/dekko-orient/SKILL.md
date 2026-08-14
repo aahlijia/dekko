@@ -19,11 +19,22 @@ once, then use the tools below.
 
 | Need | Use | Not |
 |---|---|---|
+| You know *what the code does* but not its exact name/spelling | `search_code` | grepping guessed keywords across every file |
 | A symbol's signature, doc, or its callers/callees | `query_symbol`, `get_callers`, `get_callees` | grep for the name |
+| Which in-repo symbols reference an external/third-party name (a library import, not a local symbol) | `find_usages` | grepping the import name across every file |
 | A file or directory's shape | `outline` | reading the whole file |
 | Everything needed to work a diff or symbol | `workset` | assembling outlines + packs by hand |
 | Tests a change impacts | `impacted_tests` | guessing from filenames |
+| Whether the map on disk is stale, and fixing it without shell access | `map_status`, `refresh_map` | assuming the map is current; shelling out to `dekko map` when only MCP tools are available |
 | Text dekko doesn't model — strings, comments, config, prose | grep/Read | — |
+
+`search_code` in particular replaces the "grep for a few plausible
+keywords and hope" impulse: it's BM25-style relevance over symbol
+names, signatures, and doc lines (not substring matching), so it
+finds the right symbol even when your guessed keyword isn't literally
+in the source. Reach for it first whenever the task is phrased as
+behavior ("where do we retry failed requests?") rather than a known
+identifier.
 
 ## Orient first
 
@@ -41,6 +52,18 @@ digest can run ~30k characters. Call the `summary` tool, `dekko
 orient`, or pass `--budget` explicitly instead.
 
 ## Read less of the repo
+
+```
+mcp__dekko__search_code <text>        # or: dekko search "<free-text query>"
+```
+
+Don't know the exact symbol name? Describe what it does instead of
+grepping guessed keywords — `search_code`/`dekko search` ranks
+symbols by relevance to a free-text description (BM25-style over
+names, signatures, and doc lines), not substring matching. Falls back
+to zero hits (not an error) rather than a wrong match; broaden the
+query and retry. Once you have an exact name from a hit, switch to
+`query_symbol`/`get_callers` for the precise picture.
 
 ```
 mcp__dekko__outline <file-or-dir>     # or: dekko outline path/to/file.py
@@ -64,6 +87,7 @@ mcp__dekko__query_symbol <sym>        # or: dekko query symbol <sym>
 mcp__dekko__get_context_pack <sym>    # or: dekko context <sym>
 mcp__dekko__get_callers <sym>         # or: dekko query callers <sym>
 mcp__dekko__get_callees <sym>         # or: dekko query callees <sym>
+mcp__dekko__find_usages <name>        # or: dekko query uses <name>
 mcp__dekko__impacted_tests [REV]      # or: dekko affected [REV]
 ```
 
@@ -71,11 +95,31 @@ mcp__dekko__impacted_tests [REV]      # or: dekko affected [REV]
 `get_callers`/`get_callees` give the actual exact call edges (unlike
 grep, which can't tell a call from a same-named string) — use them
 for impact analysis before a change. `get_context_pack` bundles a
-symbol's neighborhood in one budgeted pack.
+symbol's neighborhood in one budgeted pack. `find_usages` is the
+external-name counterpart to `get_callers`: point it at a third-party
+import (e.g. `requests.get`) to find in-repo call sites, rather than
+grepping the import name across every file.
 
 Targets accept a bare name, `Class.method`, `file.py:name`, or the
 `file.py::name` / `Class::method` form (the C++/Rust habit) — all
 resolve to the same symbol.
+
+## Check and fix staleness without shelling out
+
+```
+mcp__dekko__map_status                # or: dekko status (freshness only, no regen)
+mcp__dekko__refresh_map [full]        # or: dekko map --if-stale .
+```
+
+Every other MCP tool here already auto-regenerates a stale map before
+answering (unless the server was started with `--no-regen`), so this
+is rarely needed for correctness. Reach for it when you want the
+staleness fact itself without paying for a regen (`map_status`: what
+changed, added, removed — or "no map yet"), or want to force a full
+uncached rebuild rather than the default incremental one
+(`refresh_map` with `full: true`) — useful after a bulk rename or
+history rewrite where incremental diffing would do needless
+per-symbol work.
 
 ## Boundaries
 

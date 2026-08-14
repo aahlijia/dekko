@@ -5,7 +5,11 @@ import importlib.util
 import pytest
 from tree_sitter import Language
 
-from dekko.grammars import GrammarUnavailableError, get_grammar
+from dekko.grammars import (
+    GrammarUnavailableError,
+    get_grammar,
+    is_grammar_unavailable_message,
+)
 
 TIER1 = [
     "c",
@@ -61,3 +65,29 @@ def test_tier2_without_pack_raises() -> None:
 def test_tier2_with_pack_resolves() -> None:
     """With the pack, a Tier-2 grammar resolves to a Language."""
     assert isinstance(get_grammar("ruby"), Language)
+
+
+def test_is_grammar_unavailable_message_matches_both_raise_sites() -> None:
+    """Round-12 master report §3.9/§3.10/§3.16: both
+    ``GrammarUnavailableError`` messages ``get_grammar`` can raise
+    (unknown name, and Tier-2-without-``dekko[all]``) must be
+    recognized -- this is the single signal callers use to give
+    "missing grammar" its own summary/heuristic bucket, separate from
+    a genuine parse failure."""
+    assert is_grammar_unavailable_message(
+        "grammar 'kotlin' is not in the offline Tier-1 set; install "
+        "the extras with `pip install dekko[all]`"
+    )
+    assert is_grammar_unavailable_message(
+        "grammar 'not-a-real-grammar-xyz' is not available"
+    )
+
+
+def test_is_grammar_unavailable_message_rejects_unrelated_errors() -> None:
+    """A genuine read/parse failure must not be misclassified as a
+    missing grammar -- e.g. an ``OSError`` or tree-sitter parse
+    exception's message, which never mentions Tier-1/availability."""
+    assert not is_grammar_unavailable_message(
+        "[Errno 13] Permission denied: 'src/locked.py'"
+    )
+    assert not is_grammar_unavailable_message("unexpected token at line 4")

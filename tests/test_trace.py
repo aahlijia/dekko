@@ -39,6 +39,18 @@ TWO_HELPERS = {
     "b.py": "def helper():\n    pass\n",
 }
 
+# A bare call to a same-named free function defined in two other files
+# (neither the caller's own) resolves ambiguously rather than to either
+# candidate — same shape as
+# ``test_resolver.test_bare_call_stays_ambiguous_among_multiple_non_methods``,
+# but built as real source so the CLI-level ``trace`` command can be
+# exercised against it, not just ``resolve()`` directly.
+AMBIGUOUS_HOP = {
+    "a.py": "def helper():\n    pass\n",
+    "b.py": "def helper():\n    pass\n",
+    "caller.py": "def entry():\n    helper()\n",
+}
+
 
 def test_linear_path(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
@@ -80,6 +92,50 @@ def test_no_path_is_clean(
     code = cli.main(["trace", "c", "a", "--root", str(root)])
     assert code == 1
     assert "no call path" in capsys.readouterr().err
+
+
+def test_no_path_through_ambiguous_hop_discloses_it(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-13 spring-boot.md: when the only route to the destination
+    # runs through a call that resolved ambiguously (not absent, just
+    # unresolved), a bare "no call path" reads as a false ground-truth
+    # negative — `query callees` on the same edge honestly discloses
+    # it as ambiguous rather than hiding it, and `trace`'s own message
+    # should say the same thing, not contradict it.
+    root = make_mapped_repo(AMBIGUOUS_HOP)
+    code = cli.main(["trace", "entry", "a.py:helper", "--root", str(root)])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "no *resolved* call path" in err
+    assert "ambiguously-resolved calls" in err
+    assert "query callees" in err
+
+
+def test_no_path_through_ambiguous_hop_json(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_HOP)
+    code = cli.main(
+        ["trace", "entry", "a.py:helper", "--root", str(root), "--json"]
+    )
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["paths"] == []
+    assert doc["ambiguous_path_exists"] is True
+
+
+def test_no_path_is_clean_stays_unaffected_by_ambiguity_check(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression guard: a genuinely unreachable pair with *no*
+    # ambiguous edges anywhere along the way must keep the plain
+    # message, not the new "may exist through ambiguous calls" one.
+    root = make_mapped_repo(CHAIN)
+    code = cli.main(["trace", "c", "a", "--root", str(root), "--json"])
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert "ambiguous_path_exists" not in doc
 
 
 def test_endpoint_not_found(

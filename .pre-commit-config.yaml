@@ -1,0 +1,23 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check .
+        language: system
+        pass_filenames: false
+        types: [python]
+
+      - id: dekko-map
+        name: dekko map (keep .dekko/MAP.md + map.json current)
+        entry: uv run dekko map --if-stale
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: uv-lock
+        name: uv lock (sync uv.lock with pyproject.toml)
+        entry: uv lock
+        language: system
+        pass_filenames: false
+        files: ^pyproject\.toml$

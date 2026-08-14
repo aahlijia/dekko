@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from importlib.metadata import version as _pkg_version
 from importlib.resources import files as _pkg_files
@@ -21,10 +22,14 @@ from pathlib import Path
 from . import affected
 from . import cache as cache_mod
 from . import classify
+from . import claude_md as claude_md_mod
 from . import cline as cline_mod
 from . import contextpack
+from . import daemon as daemon_mod
 from . import diff
 from . import export
+from . import filelock
+from . import grammars
 from . import hooks as hooks_mod
 from . import languages
 from . import ledger as ledger_mod
@@ -37,6 +42,7 @@ from . import relevance
 from . import render_html
 from . import render_lean
 from . import render_md
+from . import search
 from . import server
 from . import stats
 from . import summary
@@ -46,7 +52,7 @@ from . import walker
 from . import workset as workset_mod
 from .extractor import extract_file
 from .extractor_generic import extract_file_generic
-from .model import TYPE_KINDS, FileMap
+from .model import TYPE_KINDS, CallGraph, FileMap
 from .render_json import render_json
 from .resolver import resolve
 
@@ -61,9 +67,11 @@ SUBCOMMANDS = (
     "diff",
     "affected",
     "workset",
+    "search",
     "status",
     "ledger",
     "hooks",
+    "daemon",
     "serve",
     "unused",
     "stats",
@@ -108,6 +116,34 @@ def build_legacy_parser() -> argparse.ArgumentParser:
         "--claude-uninstall",
         action="store_true",
         help="remove the dekko plugin from Claude Code",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --claude-install/--claude-uninstall, print the "
+        "command(s) that would run instead of running them",
+    )
+    parser.add_argument(
+        "--claude-md-install",
+        action="store_true",
+        help="write/update an idempotent dekko usage-policy block in "
+        "this repo's CLAUDE.md, so Claude reaches for dekko's tools "
+        "over grep/Read as a standing instruction, not just per-turn "
+        "context (separate opt-in from --claude-install/hooks — edits "
+        "a file you own and read)",
+    )
+    parser.add_argument(
+        "--claude-md-uninstall",
+        action="store_true",
+        help="remove the dekko usage-policy block from CLAUDE.md, "
+        "leaving the rest of the file untouched",
+    )
+    parser.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root whose CLAUDE.md to edit, with "
+        "--claude-md-install/--claude-md-uninstall (default: cwd)",
     )
     parser.add_argument(
         "--mcp-install",
@@ -262,7 +298,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
             "note: 'map' takes DIR positionally; every other command "
             "uses --root DIR\n"
             "legacy aliases: dekko --map [DIR] [SUBPATH], "
-            "dekko --claude-install, dekko --version"
+            "dekko --claude-install, dekko --claude-md-install, "
+            "dekko --version"
         ),
     )
     sub = parser.add_subparsers(
@@ -308,7 +345,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_query.add_argument(
         "target",
         help="symbol (name, Class.method, file.py:func), file path, or "
-        "(for uses) an external base identifier",
+        "(for uses) an external base identifier; append "
+        "':LINE' (file.py:Class.method:LINE) to pick one candidate out "
+        "of an overload set the ambiguous-candidate error reports",
     )
     p_query.add_argument(
         "--limit",
@@ -446,6 +485,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=8,
         help="max impacted callers shown per symbol (default: 8)",
     )
+    p_diff.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="parallel workers for a rev-cache-miss old-side re-parse/"
+        "resolve (1 = sequential, 0 = all cores)",
+    )
     p_diff.set_defaults(func=run_diff)
 
     p_affected = sub.add_parser(
@@ -479,9 +526,18 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_affected.add_argument(
         "--budget",
         type=int,
-        default=None,
+        default=affected.DEFAULT_BUDGET,
         metavar="TOKENS",
-        help="approximate token budget; drops weakest-tier files first",
+        help="approximate token budget; drops weakest-tier files first "
+        f"(default: {affected.DEFAULT_BUDGET})",
+    )
+    p_affected.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="parallel workers for a rev-cache-miss old-side re-parse/"
+        "resolve (1 = sequential, 0 = all cores)",
     )
     p_affected.set_defaults(func=run_affected)
 
@@ -535,8 +591,82 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail (exit 5) instead of regenerating a stale map",
     )
+    p_workset.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="parallel workers for a rev-cache-miss old-side re-parse/"
+        "resolve on a rev seed (1 = sequential, 0 = all cores); no "
+        "effect on a --symbol seed",
+    )
     _add_task_option(p_workset)
     p_workset.set_defaults(func=run_workset)
+
+    p_search = sub.add_parser(
+        "search",
+        help="free-text relevance search over every symbol in the map",
+    )
+    p_search.add_argument(
+        "query",
+        nargs="+",
+        help="free-text description of the code you're looking for "
+        "(quoting is optional; unquoted words are joined with spaces)",
+    )
+    p_search.add_argument(
+        "--limit",
+        type=int,
+        default=search.DEFAULT_LIMIT,
+        help=f"max hits to return (default: {search.DEFAULT_LIMIT})",
+    )
+    p_search.add_argument(
+        "--budget",
+        type=int,
+        default=search.DEFAULT_BUDGET,
+        metavar="TOKENS",
+        help="approximate token budget for the rendered output "
+        f"(default: {search.DEFAULT_BUDGET})",
+    )
+    p_search.add_argument(
+        "--kind",
+        default=None,
+        metavar="KIND[,KIND...]",
+        help="restrict to these comma-separated symbol kinds "
+        "(function, method, class, ...; default: all kinds)",
+    )
+    p_search.add_argument(
+        "--include-tests",
+        action="store_true",
+        help="include test-path symbols (default: excluded)",
+    )
+    p_search.add_argument(
+        "--scorer",
+        choices=list(search.SCORER_CHOICES),
+        default=search.DEFAULT_SCORER,
+        help="relevance scorer: 'lexical' (default, BM25, always "
+        "available), 'embedding' (Phase 2, hashing-trick embedding, "
+        "requires `pip install dekko[search]`), or 'both' (round-13, "
+        "fuses lexical + embedding rankings via reciprocal rank "
+        "fusion, requires `pip install dekko[search]`)",
+    )
+    p_search.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_search.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_search.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="fail (exit 5) instead of regenerating a stale map",
+    )
+    p_search.set_defaults(func=run_search)
 
     p_status = sub.add_parser(
         "status", help="report whether map.json is fresh"
@@ -614,6 +744,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="hook event(s) to enable; repeatable (default: session-start)",
     )
     p_hooks_install.add_argument(
+        "--strict",
+        action="store_true",
+        help="escalate pre-bash's matches from 'ask' to 'deny' "
+        "(opt-in-on-opt-in; only affects pre-bash, requires "
+        "--enable pre-bash)",
+    )
+    p_hooks_install.add_argument(
         "--root",
         default=".",
         metavar="DIR",
@@ -634,7 +771,77 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "run", help="execute a hook handler (reads event JSON on stdin)"
     )
     p_hooks_run.add_argument("event", choices=list(hooks_mod.EVENTS))
+    p_hooks_run.add_argument(
+        "--strict",
+        action="store_true",
+        help="pre-bash only: escalate a match from 'ask' to 'deny'",
+    )
     p_hooks_run.set_defaults(func=run_hooks_run)
+
+    p_daemon = sub.add_parser(
+        "daemon",
+        help="manage the per-repo warm-cache daemon (start/stop/status)",
+    )
+    daemon_sub = p_daemon.add_subparsers(
+        dest="daemon_action", required=True, metavar="ACTION"
+    )
+    p_daemon_start = daemon_sub.add_parser(
+        "start", help="start the daemon for this repo root"
+    )
+    p_daemon_start.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root to serve (default: cwd)",
+    )
+    p_daemon_start.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=daemon_mod.DEFAULT_IDLE_TIMEOUT,
+        metavar="SECONDS",
+        help="self-shutdown after this many idle seconds "
+        f"(default: {daemon_mod.DEFAULT_IDLE_TIMEOUT:.0f})",
+    )
+    p_daemon_start.set_defaults(func=run_daemon_start)
+
+    p_daemon_stop = daemon_sub.add_parser(
+        "stop", help="stop the daemon for this repo root"
+    )
+    p_daemon_stop.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root whose daemon to stop (default: cwd)",
+    )
+    p_daemon_stop.set_defaults(func=run_daemon_stop)
+
+    p_daemon_status = daemon_sub.add_parser(
+        "status",
+        help="report whether a daemon is running for this repo root",
+    )
+    p_daemon_status.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root to check (default: cwd)",
+    )
+    p_daemon_status.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_daemon_status.set_defaults(func=run_daemon_status)
+
+    p_daemon_serve = daemon_sub.add_parser("_serve", help=argparse.SUPPRESS)
+    p_daemon_serve.add_argument("--root", default=".", metavar="DIR")
+    p_daemon_serve.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=daemon_mod.DEFAULT_IDLE_TIMEOUT,
+        metavar="SECONDS",
+    )
+    p_daemon_serve.set_defaults(func=run_daemon_serve)
 
     p_serve = sub.add_parser("serve", help="run the MCP server over stdio")
     p_serve.add_argument(
@@ -699,9 +906,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_summary.add_argument(
         "--budget",
         type=int,
-        default=None,
+        default=summary.DEFAULT_BUDGET,
         metavar="TOKENS",
-        help="approximate token cap; trailing sections are shed to fit",
+        help="approximate token cap; trailing sections are shed to fit "
+        f"(default: {summary.DEFAULT_BUDGET})",
     )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
@@ -807,7 +1015,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="only notes whose symbol is no longer in the map",
     )
-    p_note_rm = note_sub.add_parser("rm", help="remove a note from a symbol")
+    p_note_rm = note_sub.add_parser(
+        "rm", aliases=["remove"], help="remove a note from a symbol"
+    )
     p_note_rm.add_argument(
         "target", help="symbol (name, Class.method, file.py:func)"
     )
@@ -852,7 +1062,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "--scope",
         choices=export.SCOPES,
         default="symbol",
-        help="node granularity (default: symbol)",
+        help="node granularity for the whole rendered graph -- symbol "
+        "or file (default: symbol); does not scope the graph to a "
+        "single symbol's neighborhood, use 'dekko context' for that",
     )
     p_export.add_argument(
         "--max-nodes",
@@ -937,6 +1149,7 @@ def map_repository(
     max_file_size: int,
     cache: cache_mod.IncrementalCache | None = None,
     jobs: int = 1,
+    candidates: list[str] | None = None,
 ) -> tuple[list[FileMap], list[tuple[str, str]]]:
     """Discover and extract every mappable file under a root.
 
@@ -953,6 +1166,9 @@ def map_repository(
         cache: Incremental cache to reuse unchanged files from and
             record fresh extractions into, or ``None`` for a cold run.
         jobs: Worker count for extraction (1 = sequential, 0 = all cores).
+        candidates: Explicit repo-relative paths to consider, bypassing
+            ``walker.discover``'s own tracked-file discovery — see that
+            function's ``candidates`` parameter.
 
     Returns:
         ``(file_maps, skipped)`` where ``skipped`` pairs paths with
@@ -963,6 +1179,7 @@ def map_repository(
         subpath=subpath,
         excludes=excludes,
         max_file_size=max_file_size,
+        candidates=candidates,
     )
     extracted: dict[str, FileMap] = {}
     misses: list[str] = []
@@ -1064,6 +1281,22 @@ def _write_pages(md_path: Path, pages: list[tuple[str, str]]) -> list[Path]:
             stale.unlink()
 
     written = [md_path]
+    # round-13 spring-boot.md: a `FileNotFoundError` writing MAP.md was
+    # seen once, immediately after `test-repos/reset.sh` (which removes
+    # `.dekko/` entirely), and claude-buddy.md's report independently
+    # saw the softer, non-crashing shape of the same thing (a write
+    # reporting success before `.dekko/` was visible on disk). This
+    # function already re-asserts `page_path.parent.mkdir(...)` for
+    # every *subsequent* page below, guarding against exactly this --
+    # the index page was the one write in this function that instead
+    # relied entirely on `run_map`'s much-earlier `md_path.parent.mkdir`
+    # call (well before the potentially long `resolve()`/`render_map`
+    # call in between) still holding by the time this line runs. This
+    # call is idempotent (`exist_ok=True`) and effectively free, so
+    # there's no reason the index write should be the only one in this
+    # function not self-sufficient against the directory transiently
+    # not existing yet.
+    md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(pages[0][1], encoding="utf-8")
     for name, content in pages[1:]:
         page_path = md_path.parent / name
@@ -1098,7 +1331,17 @@ def _summary(
     variables = sum(
         1 for fm in files for s in fm.symbols if s.kind == "variable"
     )
-    errors = sum(1 for fm in files if fm.error)
+    # round-12 master report §3.10/§3.16: a missing *optional* grammar
+    # (``pip install dekko[all]``) and a genuine parse failure used to
+    # share one alarming "parse error N" bucket, even though the
+    # per-file detail line already named the missing grammar
+    # accurately -- see ``grammars.is_grammar_unavailable_message``.
+    no_grammar = sum(
+        1
+        for fm in files
+        if fm.error and grammars.is_grammar_unavailable_message(fm.error)
+    )
+    errors = sum(1 for fm in files if fm.error) - no_grammar
     lines = [
         f"dekko: mapped {len(files)} files ({langs})",
         f"  symbols: {funcs} functions/methods, {classes} types, "
@@ -1107,10 +1350,12 @@ def _summary(
         f"{external} external",
     ]
 
-    if skipped or errors:
+    if skipped or errors or no_grammar:
         reasons = Counter(reason for _, reason in skipped)
         if errors:
             reasons["parse error"] = errors
+        if no_grammar:
+            reasons["no grammar installed"] = no_grammar
 
         detail = ", ".join(
             f"{reason} {n}" for reason, n in reasons.most_common()
@@ -1154,8 +1399,12 @@ def _claude_exe() -> str | None:
     return exe
 
 
-def claude_install() -> int:
+def claude_install(dry_run: bool = False) -> int:
     """Register the bundled plugin with the Claude Code CLI.
+
+    Args:
+        dry_run: Print the command(s) that would run instead of running
+            them; leaves Claude Code's config untouched.
 
     Returns:
         Process exit code.
@@ -1171,6 +1420,12 @@ def claude_install() -> int:
             file=sys.stderr,
         )
         return 1
+
+    if dry_run:
+        print("dekko: --dry-run, would run:")
+        print(f"  {exe} plugin marketplace add {plugin_dir}")
+        print(f"  {exe} plugin install dekko@dekko")
+        return 0
 
     added = _run_subprocess(
         [exe, "plugin", "marketplace", "add", str(plugin_dir)]
@@ -1195,7 +1450,7 @@ def claude_install() -> int:
     return 0
 
 
-def claude_uninstall() -> int:
+def claude_uninstall(dry_run: bool = False) -> int:
     """Remove the bundled plugin from the Claude Code CLI.
 
     Reverses :func:`claude_install`: uninstalls the ``dekko`` plugin and
@@ -1203,12 +1458,25 @@ def claude_uninstall() -> int:
     marketplace is already absent is surfaced as a warning rather than a
     failure, so the command is safe to run on a partial install.
 
+    Args:
+        dry_run: Print the command(s) that would run instead of running
+            them; leaves Claude Code's config untouched.
+
     Returns:
         Process exit code (``1`` only when the ``claude`` CLI is missing).
     """
     exe = _claude_exe()
     if exe is None:
         return 1
+
+    if dry_run:
+        print("dekko: --dry-run, would run:")
+        for cmd in (
+            [exe, "plugin", "uninstall", "dekko@dekko"],
+            [exe, "plugin", "marketplace", "remove", "dekko"],
+        ):
+            print(f"  {' '.join(cmd)}")
+        return 0
 
     for cmd in (
         [exe, "plugin", "uninstall", "dekko@dekko"],
@@ -1405,7 +1673,7 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
     if _map_run_is_noop(root, args, cache, files):
         return 0
 
-    graph = resolve(files)
+    graph = resolve(files, workers=_resolve_workers(getattr(args, "jobs", 1)))
     label = root.name + (f"/{args.subpath}" if args.subpath else "")
 
     md_path, json_path = resolve_outputs(root, args.output, args.json_output)
@@ -1434,20 +1702,11 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
     )
     outputs += _write_pages(md_path, pages)
     if not args.no_json:
-        provenance = mapfile.compute_provenance(
-            root,
-            [fm.path for fm in files],
-            subpath=args.subpath,
-            excludes=tuple(args.exclude),
-            max_file_size=args.max_file_size,
-            skipped=skipped,
+        outputs.append(
+            _write_json_output(
+                root, args, files, graph, label, json_path, skipped
+            )
         )
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        json_path.write_text(
-            render_json(files, graph, label, provenance),
-            encoding="utf-8",
-        )
-        outputs.append(json_path)
 
     if cache is not None:
         cache_mod.save(root, cache)
@@ -1464,6 +1723,57 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
             )
         )
     return 0
+
+
+def _write_json_output(
+    root: Path,
+    args: argparse.Namespace,
+    files: list[FileMap],
+    graph: CallGraph,
+    label: str,
+    json_path: Path,
+    skipped: list[tuple[str, str]],
+) -> Path:
+    """Write ``map.json`` (and its provenance sidecar) for a map run.
+
+    Split out of ``run_map`` to keep it under the complexity budget.
+
+    The sidecar is written only when this run's ``json_path`` is the
+    canonical ``.dekko/map.json`` location — the fixed path
+    ``load_map``/``check_freshness``/``load_provenance`` always read,
+    regardless of ``--output``. A custom ``--output``/``--json-output``
+    run doesn't touch that canonical file, so writing the sidecar then
+    would desync it from whatever map.json (if any) is still sitting
+    at the canonical path.
+
+    Args:
+        root: Repository root.
+        args: Parsed ``dekko map`` arguments.
+        files: This run's extraction results.
+        graph: Resolved call graph.
+        label: Display label of the mapped root.
+        json_path: Resolved output path for ``map.json``.
+        skipped: ``(path, reason)`` pairs from discovery.
+
+    Returns:
+        ``json_path``, for the caller's ``outputs`` list.
+    """
+    provenance = mapfile.compute_provenance(
+        root,
+        [fm.path for fm in files],
+        subpath=args.subpath,
+        excludes=tuple(args.exclude),
+        max_file_size=args.max_file_size,
+        skipped=skipped,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    mapfile.atomic_write_bytes(
+        json_path,
+        render_json(files, graph, label, provenance).encode("utf-8"),
+    )
+    if json_path == root / cache_mod.CACHE_DIR / "map.json":
+        mapfile.write_provenance_sidecar(root, provenance)
+    return json_path
 
 
 def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
@@ -1495,10 +1805,138 @@ def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
     return True
 
 
+# Optional daemon-installed warm-cache hook (Phase 3 of
+# ``.features/daemon-mode/``). ``_load_or_regen`` is the single
+# chokepoint essentially every read subcommand funnels through
+# directly or via ``_read_index`` (``query``/``outline``/``context``/
+# ``trace``/``unused``/``stats``/``summary``/``lean``), or calls
+# directly (``run_search``, ``run_export``, ``workset.run``) — caching
+# at this one point benefits every daemon-eligible subcommand without
+# each one needing its own cache-awareness, the same "one choke
+# point" property that makes ``server.py``'s ``Context.index_cache``
+# sufficient for the whole MCP tool surface (see ``server.py``'s
+# ``_index_for``).
+#
+# Both hooks are ``None`` for every direct CLI invocation — the
+# overwhelming majority of calls — so ``cli.py``'s own behavior is
+# completely unchanged unless a daemon process has explicitly
+# installed them via ``set_daemon_cache_hook``. Only
+# ``daemon.serve_daemon`` ever calls that, once at startup (and clears
+# it again on shutdown).
+_daemon_cache_get: Callable[[Path], mapfile.MapIndex | None] | None = None
+_daemon_cache_put: Callable[[Path, mapfile.MapIndex], None] | None = None
+
+
+def set_daemon_cache_hook(
+    get: Callable[[Path], mapfile.MapIndex | None] | None,
+    put: Callable[[Path, mapfile.MapIndex], None] | None,
+) -> None:
+    """Install (or clear, passing ``None``/``None``) the daemon's cache.
+
+    ``get(root)`` must return a still-fresh cached index for ``root``
+    (having already re-validated it via ``mapfile.check_freshness``
+    itself — this seam trusts the hook's own answer, it does not
+    re-check), or ``None`` on a miss/stale hit. ``put(root, index)``
+    records a freshly loaded index for later ``get`` calls.
+
+    Args:
+        get: Cache-check callback, or ``None`` to disable cache
+            lookups (the default, direct-CLI behavior).
+        put: Cache-store callback, or ``None`` to disable caching.
+    """
+    global _daemon_cache_get, _daemon_cache_put
+    _daemon_cache_get = get
+    _daemon_cache_put = put
+
+
+# Regen-lock wait: how often to re-check freshness while another
+# process holds the ``.dekko/regen.lock`` (round-12 §4.1b), and how
+# long to wait before giving up and fail-opening into a redundant
+# local regen anyway. The cap matches daemon.py's own "generous but
+# bounded" convention (_CLIENT_TIMEOUT/_REQUEST_TIMEOUT, both 30s) —
+# never block indefinitely on another process.
+_REGEN_LOCK_POLL_INTERVAL = 0.2
+_REGEN_LOCK_WAIT_CAP = 30.0
+
+
+def _wait_for_other_regen(root: Path) -> mapfile.MapIndex | None:
+    """Poll for another process's in-flight regen to land.
+
+    Called after ``filelock.try_regen_lock`` reports that a different
+    process already holds the regen lock for ``root`` — rather than
+    redundantly regenerating in parallel, wait a short bounded
+    interval for that process's regen to finish and re-check
+    freshness.
+
+    Args:
+        root: Repository root another process is regenerating.
+
+    Returns:
+        A freshly loaded, fresh index if the wait succeeded within
+        the cap; ``None`` if the cap was hit first (caller should
+        fail open and regen locally).
+    """
+    deadline = time.monotonic() + _REGEN_LOCK_WAIT_CAP
+    while time.monotonic() < deadline:
+        time.sleep(_REGEN_LOCK_POLL_INTERVAL)
+        index = mapfile.load_map(root)
+        if index is not None and mapfile.check_freshness(root, index).fresh:
+            return index
+    return None
+
+
+def _locked_regen(root: Path) -> tuple[mapfile.MapIndex | None, int]:
+    """Regenerate ``root``'s map, coordinating via the advisory regen
+    lock (round-12 §4.1b).
+
+    A best-effort advisory lock (``filelock.try_regen_lock``)
+    coordinates against other processes (bare CLI, daemon-triggered
+    regen, MCP server) regenerating the same root concurrently: the
+    lock holder regens as before; a non-holder waits briefly for the
+    holder's regen to land rather than redundantly repeating the same
+    work, falling open to its own local regen if the wait cap is hit
+    or locking isn't available at all.
+
+    Args:
+        root: Repo root containing (or about to contain) map.json.
+
+    Returns:
+        ``(index, exit_code)`` — index is ``None`` on failure.
+    """
+    with filelock.try_regen_lock(root) as acquired:
+        if not acquired:
+            fresh = _wait_for_other_regen(root)
+            if fresh is not None:
+                if _daemon_cache_put is not None:
+                    _daemon_cache_put(root, fresh)
+                return fresh, 0
+            # Wait cap hit without the other process's regen landing
+            # -- fail open, fall through to a local regen below.
+
+        code = regen_map(root, quiet=True)
+        if code != 0:
+            return None, code
+        index = mapfile.load_map(root)
+        if index is not None and _daemon_cache_put is not None:
+            _daemon_cache_put(root, index)
+        return index, 0
+
+
 def _load_or_regen(
     root: Path, no_regen: bool
 ) -> tuple[mapfile.MapIndex | None, int]:
     """Load the map at root, regenerating when missing or stale.
+
+    When running inside the daemon process (``set_daemon_cache_hook``
+    has installed a hook), a still-fresh cached index is returned
+    outright, skipping ``map.json``'s JSON parse and the full symbol/
+    call-graph index rebuild entirely — the dominant cost of a reload
+    (Phase 3 of ``.features/daemon-mode/``, mirroring ``server.py``'s
+    ``Context.index_cache``/``_index_for``). A direct CLI invocation
+    never installs this hook, so its behavior here is unchanged.
+
+    On a missing/stale map, the regen itself is coordinated with other
+    concurrent processes via ``_locked_regen`` (round-12 §4.1b).
 
     Args:
         root: Repo root containing map.json.
@@ -1507,8 +1945,15 @@ def _load_or_regen(
     Returns:
         ``(index, exit_code)`` — index is ``None`` on failure.
     """
+    if _daemon_cache_get is not None:
+        cached = _daemon_cache_get(root)
+        if cached is not None:
+            return cached, 0
+
     index = mapfile.load_map(root)
     if index is not None and mapfile.check_freshness(root, index).fresh:
+        if _daemon_cache_put is not None:
+            _daemon_cache_put(root, index)
         return index, 0
     if no_regen:
         print(
@@ -1518,10 +1963,66 @@ def _load_or_regen(
         )
         return None, 5
 
-    code = regen_map(root, quiet=True)
-    if code != 0:
-        return None, code
-    return mapfile.load_map(root), 0
+    return _locked_regen(root)
+
+
+def load_current_index_no_regen(root: Path) -> mapfile.MapIndex | None:
+    """Load the current-tree map, checking the daemon's warm cache first.
+
+    ``diff.run``/``affected.changes`` are the one partial exception to
+    ``_load_or_regen`` being the single daemon-cache chokepoint every
+    other read subcommand funnels through (see
+    ``.features/daemon-mode/daemon-mode-cli-plan.md`` §2.4's last
+    bullet and Phase 4 of ``.features/daemon-mode/TRACKER.md``): their
+    current-tree side calls ``mapfile.load_map`` directly, so a
+    daemon-routed ``diff``/``affected`` request previously always paid
+    a full JSON-parse/index-rebuild, even with a warm cache populated
+    by a prior ``query``/``search``/... request against the same
+    root. This function is the fix — it checks the same
+    ``_daemon_cache_get``/``_daemon_cache_put`` hooks
+    ``_load_or_regen`` uses, so a cache hit here skips the reload the
+    same way it would for any other daemon-eligible command.
+
+    It deliberately does **not** reuse ``_load_or_regen`` itself,
+    because that function's stale/missing-map behavior is to call
+    ``regen_map`` (writing a fresh ``map.json`` to disk) — a side
+    effect ``diff``/``affected`` don't want and have never had: they
+    already tolerate a stale on-disk index by falling back to an
+    in-memory re-parse (``diff.snapshot_new_side`` -> ``diff.
+    snapshot()``) that never touches ``map.json``. Adopting
+    ``_load_or_regen``'s regen-on-stale behavior here would be a
+    real behavior change (an on-disk write a plain ``diff``/
+    ``affected`` call never made before), not just a cache-hit
+    optimization, so this seam only ever *reads* — same contract as
+    the ``mapfile.load_map(root)`` call it replaces.
+
+    Outside the daemon process (``_daemon_cache_get``/``_put`` are
+    both ``None``, true for every direct CLI invocation), this is
+    exactly ``mapfile.load_map(root)`` — same return value, same
+    possibly-``None``/possibly-stale semantics ``diff.run``/
+    ``affected.changes`` already handle via their own freshness checks
+    downstream (``diff.snapshot_new_side``).
+
+    Args:
+        root: Repository root containing map.json.
+
+    Returns:
+        The loaded index (possibly stale, possibly ``None``) — never
+        regenerated as a side effect of this call.
+    """
+    if _daemon_cache_get is not None:
+        cached = _daemon_cache_get(root)
+        if cached is not None:
+            return cached
+
+    index = mapfile.load_map(root)
+    if (
+        index is not None
+        and _daemon_cache_put is not None
+        and mapfile.check_freshness(root, index).fresh
+    ):
+        _daemon_cache_put(root, index)
+    return index
 
 
 def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
@@ -1552,7 +2053,17 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
         quiet=quiet,
         if_stale=False,
         full=full,
-        jobs=1,
+        # 0 = all cores. This is the auto-regen path every other read
+        # subcommand funnels through on a stale map (a single-file
+        # edit included) — its own extraction work is tiny (usually
+        # one changed file, via the incremental cache), but call-graph
+        # resolution (resolve()/resolve_refs(), see resolver.py's
+        # ``_resolve_all``) is O(the whole repo's calls) regardless of
+        # diff size, and was previously left sequential here even on a
+        # many-core machine. See round 11 §1: a one-file edit's
+        # auto-regen on tensorflow (14,285 files) took *longer* than a
+        # from-scratch --full remap because of exactly this.
+        jobs=0,
     )
     return run_map(regen_args, persist_excludes=False)
 
@@ -1658,6 +2169,7 @@ def run_diff(args: argparse.Namespace) -> int:
         args.rev,
         as_json=args.as_json,
         limit=args.limit,
+        jobs=_resolve_workers(getattr(args, "jobs", 1)),
     )
 
 
@@ -1670,6 +2182,7 @@ def run_affected(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         limit=args.limit,
         budget=args.budget,
+        jobs=_resolve_workers(getattr(args, "jobs", 1)),
     )
 
 
@@ -1689,6 +2202,44 @@ def run_workset(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         no_regen=args.no_regen,
         task=task,
+        jobs=_resolve_workers(getattr(args, "jobs", 1)),
+    )
+
+
+def run_search(args: argparse.Namespace) -> int:
+    """Handle ``dekko search "<query>"``.
+
+    Unlike the other read commands, ``search`` defaults to *excluding*
+    test-path symbols (opt in with ``--include-tests``) rather than
+    the ``--no-tests`` opt-out convention every other read command
+    uses — a relevance-ranked result competing for a rank slot
+    shouldn't default to including test noise the way an exhaustive
+    caller list should default to completeness (deliberate deviation,
+    see the search feature plan §9.6).
+    """
+    query_text = " ".join(args.query)
+    root = Path(args.root).resolve()
+    index, code = _load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    excluded_test_count = 0
+    if not args.include_tests:
+        filtered = index.without_tests()
+        excluded_test_count = len(index.symbols_by_id) - len(
+            filtered.symbols_by_id
+        )
+        index = filtered
+    kinds = search.parse_kinds(args.kind)
+    return search.run(
+        index,
+        query_text,
+        kinds=kinds,
+        limit=args.limit,
+        budget=args.budget,
+        as_json=args.as_json,
+        root=root,
+        scorer_name=args.scorer,
+        excluded_test_count=excluded_test_count,
     )
 
 
@@ -1756,7 +2307,9 @@ def run_ledger(args: argparse.Namespace) -> int:
 def run_hooks_install(args: argparse.Namespace) -> int:
     """Handle ``dekko hooks install``."""
     events = args.enable or ["session-start"]
-    return hooks_mod.install(Path(args.root).resolve(), events)
+    return hooks_mod.install(
+        Path(args.root).resolve(), events, strict=args.strict
+    )
 
 
 def run_hooks_uninstall(args: argparse.Namespace) -> int:
@@ -1766,7 +2319,35 @@ def run_hooks_uninstall(args: argparse.Namespace) -> int:
 
 def run_hooks_run(args: argparse.Namespace) -> int:
     """Handle ``dekko hooks run <event>`` (reads JSON on stdin)."""
-    return hooks_mod.dispatch(args.event, sys.stdin.read())
+    return hooks_mod.dispatch(args.event, sys.stdin.read(), strict=args.strict)
+
+
+def run_daemon_start(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon start``."""
+    return daemon_mod.start(Path(args.root).resolve(), args.idle_timeout)
+
+
+def run_daemon_stop(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon stop``."""
+    return daemon_mod.stop(Path(args.root).resolve())
+
+
+def run_daemon_status(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon status``."""
+    return daemon_mod.status(Path(args.root).resolve(), args.as_json)
+
+
+def run_daemon_serve(args: argparse.Namespace) -> int:
+    """Handle ``dekko daemon _serve`` (internal daemon process entry).
+
+    Not meant to be invoked directly by a human -- this is the
+    command ``daemon.start()`` spawns as a detached background
+    process; it blocks in ``serve_daemon``'s accept loop until an
+    explicit ``dekko daemon stop`` or the idle timeout fires.
+    """
+    return daemon_mod.serve_daemon(
+        Path(args.root).resolve(), args.idle_timeout
+    )
 
 
 def run_orient(args: argparse.Namespace) -> int:
@@ -1785,7 +2366,7 @@ def run_note(args: argparse.Namespace) -> int:
     """Handle ``dekko note add|list|rm``."""
     if args.note_action == "add":
         return _note_add(args)
-    if args.note_action == "rm":
+    if args.note_action in ("rm", "remove"):
         return _note_rm(args)
     return _note_list(args)
 
@@ -1887,21 +2468,35 @@ def run_serve(args: argparse.Namespace) -> int:
 
 
 def run_status(args: argparse.Namespace) -> int:
-    """Handle ``dekko status`` (never regenerates)."""
-    root = Path(args.root).resolve()
-    index = mapfile.load_map(root)
-    if index is None:
-        if args.as_json:
-            print(json.dumps({"status": "missing"}))
-        else:
-            print(
-                f"dekko: no map.json under {root} - run `dekko map`",
-                file=sys.stderr,
-            )
-        return 1
+    """Handle ``dekko status`` (never regenerates).
 
-    fresh = mapfile.check_freshness(root, index)
-    unsupported = (index.provenance or {}).get("unsupported")
+    Reads only the small provenance sidecar (``mapfile.
+    load_provenance``) rather than the full ``map.json`` — this
+    command only ever needs the freshness stamp, not the parsed
+    symbol/call graph other read commands pay to build. Falls back to
+    a full ``mapfile.load_map`` for maps written before the sidecar
+    existed (or with a missing/corrupt one), matching its prior
+    behavior exactly.
+    """
+    root = Path(args.root).resolve()
+    prov = mapfile.load_provenance(root)
+    if prov is not None:
+        fresh = mapfile.check_freshness_provenance(root, prov)
+    else:
+        index = mapfile.load_map(root)
+        if index is None:
+            if args.as_json:
+                print(json.dumps({"status": "missing"}))
+            else:
+                print(
+                    f"dekko: no map.json under {root} - run `dekko map`",
+                    file=sys.stderr,
+                )
+            return 1
+        fresh = mapfile.check_freshness(root, index)
+        prov = index.provenance
+
+    unsupported = (prov or {}).get("unsupported")
     if args.as_json:
         doc = {
             "status": "fresh" if fresh.fresh else "stale",
@@ -1915,10 +2510,10 @@ def run_status(args: argparse.Namespace) -> int:
         return 0 if fresh.fresh else 1
 
     if fresh.fresh:
-        _print_fresh_status(index.provenance)
+        _print_fresh_status(prov)
         return 0
 
-    _print_stale_status(fresh, index.provenance)
+    _print_stale_status(fresh, prov)
     return 1
 
 
@@ -1974,10 +2569,16 @@ def _legacy_main(args_list: list[str]) -> int:
     args = parser.parse_args(args_list)
 
     if args.claude_install:
-        return claude_install()
+        return claude_install(dry_run=args.dry_run)
 
     if args.claude_uninstall:
-        return claude_uninstall()
+        return claude_uninstall(dry_run=args.dry_run)
+
+    if args.claude_md_install:
+        return claude_md_mod.install(Path(args.root).resolve())
+
+    if args.claude_md_uninstall:
+        return claude_md_mod.uninstall(Path(args.root).resolve())
 
     if args.mcp_install:
         return mcp_install()
@@ -2005,6 +2606,37 @@ def _legacy_main(args_list: list[str]) -> int:
     return run_map(args)
 
 
+def _report_daemon_request_abandoned(
+    exc: "daemon_mod.DaemonRequestAbandonedError",
+) -> int:
+    """Report a timed-out/dropped daemon-routed request, no fallback.
+
+    Round-12 master report §3.8: a client that silently falls back to
+    a local ``args.func(args)`` re-run after abandoning a daemon
+    request duplicates whatever work the daemon (which has no notion
+    of "the client hung up," see ``daemon.py``'s ``_handle_connection``
+    docstring) may still be doing in the background, contending with
+    it for CPU. ``main()`` calls this instead of falling back whenever
+    ``daemon_mod.try_daemon`` raises ``DaemonRequestAbandonedError``.
+
+    Args:
+        exc: The abandoned-request exception; its message names the
+            underlying cause (timeout, disconnect, malformed reply).
+
+    Returns:
+        ``daemon_mod.EXIT_DAEMON_ABANDONED``.
+    """
+    print(
+        f"dekko: a daemon-routed request did not respond in time ({exc}). "
+        "The daemon may still be processing it in the background -- "
+        "re-running the same command here would duplicate that work "
+        "rather than speed it up. Retry with --no-daemon to force a "
+        "fresh local run, or retry normally once the daemon is done.",
+        file=sys.stderr,
+    )
+    return daemon_mod.EXIT_DAEMON_ABANDONED
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point.
 
@@ -2016,8 +2648,24 @@ def main(argv: list[str] | None = None) -> int:
     """
     args_list = list(sys.argv[1:] if argv is None else argv)
 
+    no_daemon = "--no-daemon" in args_list
+    if no_daemon:
+        args_list = [a for a in args_list if a != "--no-daemon"]
+
     if args_list and args_list[0] in SUBCOMMANDS:
         args = build_subcommand_parser().parse_args(args_list)
+        if not no_daemon:
+            try:
+                routed = daemon_mod.try_daemon(args)
+            except daemon_mod.DaemonRequestAbandonedError as exc:
+                return _report_daemon_request_abandoned(exc)
+            if routed is not None:
+                exit_code, out, err = routed
+                if out:
+                    sys.stdout.write(out)
+                if err:
+                    sys.stderr.write(err)
+                return exit_code
         return args.func(args)
 
     if args_list and args_list[0] in ("-h", "--help"):

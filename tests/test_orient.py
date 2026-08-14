@@ -49,6 +49,39 @@ def test_preamble_names_the_core_verbs(
         assert verb in orient._PREAMBLE
 
 
+def test_preamble_includes_search_when_available() -> None:
+    assert orient._search_available() is True
+    assert "search <text>" in orient._preamble()
+
+
+def test_preamble_drops_search_line_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 3.1's minor code consideration: the steering banner must not
+    # recommend ``search`` when this process's own ``search``
+    # subcommand isn't actually usable — see ``orient._search_available``.
+    monkeypatch.setattr(orient, "_search_available", lambda: False)
+    preamble = orient._preamble()
+    assert "search <text>" not in preamble
+    # Every other verb is unaffected.
+    for verb in ("outline", "workset", "query", "context", "affected"):
+        assert verb in preamble
+
+
+def test_session_omits_search_line_when_unavailable(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(orient, "_search_available", lambda: False)
+    root = make_mapped_repo(PY)
+    code = cli.main(["orient", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "search <text>" not in out
+    assert "dekko orientation" in out
+
+
 def test_session_json_shape(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

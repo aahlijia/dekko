@@ -1,0 +1,720 @@
+"""OS-independent transport abstraction for the dekko daemon.
+
+The bare CLI's daemon mode (see ``.features/daemon-mode/``) needs a
+socket-like channel between a short-lived ``dekko <cmd>`` client
+process and a long-lived per-repo daemon process. Unix domain sockets
+are the natural choice on macOS/Linux but don't exist in a usable,
+battle-tested form on Windows, so every daemon-facing caller
+(a later phase's accept loop, the CLI's daemon-routing check) is
+written against the ``DaemonTransport`` interface here rather than
+against ``socket.AF_UNIX`` directly. ``default_transport_for()`` is
+the *only* place that branches on ``sys.platform`` -- everything above
+it only ever sees a ``socket.socket``, since Python's ``socket``
+module presents ``AF_UNIX`` and ``AF_INET`` through the identical
+``accept()``/``connect()``/``send()``/``recv()`` API.
+
+This module is transport plumbing plus the OS-conditional process
+primitives (detached spawn, forced stop, connect-based liveness) that
+are equally platform-sensitive. It does *not* contain a daemon accept
+loop, request/response JSON framing, or CLI wiring -- those land in a
+later phase (see ``.features/daemon-mode/TRACKER.md``); this module
+only needs to bind, connect, authenticate, and clean up a transport.
+"""
+
+import json
+import os
+import secrets
+import signal
+import socket
+import subprocess
+import sys
+from abc import ABC, abstractmethod
+from pathlib import Path
+
+# Socket file name inside a repo's ``.dekko/`` directory (POSIX).
+_SOCKET_NAME = "daemon.sock"
+# Second, status-only socket file (round-13 master report §2): a
+# dedicated listener the main accept loop never touches, so a
+# liveness/status probe stays fast and honest even while the main
+# socket is busy on a slow routed request. See ``bind_status_listener``/
+# ``status_client_connect``.
+_STATUS_SOCKET_NAME = "daemon.status.sock"
+# Port-file name inside a repo's ``.dekko/`` directory (Windows/TCP).
+_PORT_FILE_NAME = "daemon.port"
+# Token length in hex chars written to the port file (16 bytes -> 32
+# hex chars via secrets.token_hex).
+_TOKEN_BYTES = 16
+# sun_path's length limit is platform-specific (~104 bytes on
+# macOS/BSD including the null terminator, ~108 on Linux) -- both far
+# shorter than typical filesystem path limits. Guard against the
+# stricter of the two (with a little headroom) rather than branching
+# on the exact platform for a few bytes of difference.
+_SUN_PATH_LIMIT = 100
+# Hard cap on a single auth-preamble line read by ``_recv_line`` --
+# a real token line is ~34 bytes (32 hex chars + newline); this is
+# just an upper bound against a misbehaving/malicious client sending
+# an unterminated stream.
+_MAX_PREAMBLE_LINE = 4096
+
+# subprocess.CREATE_NEW_PROCESS_GROUP / DETACHED_PROCESS are Windows-
+# only module attributes -- referencing them by bare attribute access
+# raises AttributeError on a POSIX build of Python, which would break
+# both spawn_detached()'s Windows branch under test (monkeypatching
+# sys.platform to exercise that branch's kwargs on non-Windows CI, per
+# the workflow doc's cross-platform kwarg-construction tests) and any
+# accidental import-time evaluation. Fall back to the documented
+# literal Win32 API flag values so this module imports and the
+# Windows branch's kwargs can be constructed identically on every
+# platform; on real Windows, getattr simply returns the native
+# constants.
+_CREATE_NEW_PROCESS_GROUP = getattr(
+    subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200
+)
+_DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+
+
+def _recv_line(sock: socket.socket) -> str | None:
+    """Read one newline-terminated line from ``sock``, byte at a time.
+
+    Deliberately avoids ``socket.makefile()``: its internal buffering
+    reads ahead past the line boundary, and any bytes it buffers but
+    doesn't return are lost once that file object is garbage
+    collected -- silently swallowing the start of whatever a
+    subsequent ``makefile()`` call on the same socket (the actual
+    request line, read by the daemon's dispatch loop after
+    authentication) would otherwise see. A byte-at-a-time read is
+    slower but consumes exactly the auth line and nothing past it.
+
+    Returns:
+        The line (including trailing newline, if present) decoded as
+        UTF-8, or ``None`` if the connection closed before a newline
+        was seen.
+    """
+    chunks = bytearray()
+    while len(chunks) < _MAX_PREAMBLE_LINE:
+        byte = sock.recv(1)
+        if not byte:
+            return None
+        chunks += byte
+        if byte == b"\n":
+            return chunks.decode("utf-8", errors="replace")
+    return None
+
+
+# Name kept as specified: the workflow doc (§2.1) names this
+# exception "TransportUnavailable" explicitly ("raise a dedicated
+# TransportUnavailable exception rather than letting the underlying
+# OSError ... propagate"), so it isn't renamed to satisfy N818's
+# Error-suffix convention.
+class TransportUnavailable(Exception):  # noqa: N818
+    """This transport cannot be used in the current environment.
+
+    Raised instead of letting an OS-level error (e.g. ``OSError:
+    AF_UNIX path too long``) propagate. Callers treat this identically
+    to "no daemon present" -- never a crash.
+    """
+
+
+class DaemonUnavailableError(Exception):
+    """No live daemon could be reached through this transport.
+
+    Covers every fail-open case: no socket/port-file artifact, a
+    stale one left behind by an ungracefully-killed daemon, connection
+    refused, and connect timeouts. Callers must fall back to direct
+    execution on this exception, never surface it as a CLI error.
+    """
+
+
+class _StatusPortNotBoundError(DaemonUnavailableError):
+    """``TcpLoopbackTransport``-only: the port file is present and
+    parses fine, but simply has no ``status_port`` entry yet.
+
+    A ``DaemonUnavailableError`` subclass so existing broad
+    ``except DaemonUnavailableError`` callers keep working unchanged,
+    but distinguishable from a genuinely corrupt/stale port file so
+    ``status_client_connect()`` knows *not* to delete it -- the main
+    ``port``/``token`` entry in the same file is still valid and
+    ``is_daemon_reachable()``'s fallback to ``client_connect()`` needs
+    it to still be there. Never raised across the public
+    ``DaemonTransport`` interface; caught internally within this
+    module only.
+    """
+
+
+class DaemonTransport(ABC):
+    """OS-specific channel between the CLI client and the daemon.
+
+    Concrete implementations: ``UnixSocketTransport`` (macOS/Linux),
+    ``TcpLoopbackTransport`` (Windows default, also usable on POSIX
+    for testing/parity). Use ``default_transport_for()`` to pick the
+    right one for the current platform.
+    """
+
+    @abstractmethod
+    def exists(self) -> bool:
+        """Cheap presence check, no connection attempt.
+
+        Used by the CLI's fail-open logic before attempting a real
+        connect -- "no transport artifact" is the common case for
+        installs that never ran ``dekko daemon start``.
+        """
+
+    @abstractmethod
+    def bind_and_listen(self) -> socket.socket:
+        """Daemon-side: create and return a listening socket.
+
+        Raises:
+            TransportUnavailable: If this transport cannot be bound
+                in the current environment (e.g. a too-long
+                ``sun_path``).
+        """
+
+    @abstractmethod
+    def bind_status_listener(self) -> socket.socket:
+        """Daemon-side: create and return a status-only listening socket.
+
+        Round-13 master report §2: the main accept loop is
+        deliberately single-threaded (see ``daemon.serve_daemon``'s
+        docstring) and cannot answer *any* connection, including a
+        liveness/status probe, while busy dispatching an earlier slow
+        routed request. This second, independent listener is serviced
+        by its own dedicated thread whose only job is answering
+        ``_status`` requests -- it never dispatches a routed command
+        and never blocks behind one. Uses the same authentication as
+        the main socket (``authenticate``/``send_auth_preamble``).
+
+        Raises:
+            TransportUnavailable: If this listener cannot be bound in
+                the current environment.
+        """
+
+    @abstractmethod
+    def status_client_connect(self, timeout: float) -> socket.socket:
+        """CLI-side: connect to the status-only listener.
+
+        Used by ``is_daemon_reachable()`` and ``daemon.status()``
+        instead of ``client_connect()`` so liveness/status probes
+        never block behind a busy main command socket.
+
+        Args:
+            timeout: Socket connect/operation timeout in seconds.
+
+        Raises:
+            DaemonUnavailableError: On any failure to reach a live
+                status listener (no artifact, stale artifact,
+                connection refused, or timeout). Callers fail open --
+                typically by falling back to ``client_connect()`` for
+                a daemon started before this listener existed.
+        """
+
+    @abstractmethod
+    def preflight_check(self) -> None:
+        """Parent-process-side: cheaply predict a ``bind_and_listen()``
+        failure before spawning the detached daemon.
+
+        Exists so ``daemon.start()`` can fail fast, in the foreground,
+        with a real non-zero exit code -- rather than reporting false
+        success because the actual bind happens in a detached child
+        process whose stdio the parent never reads. Must only check
+        conditions knowable without a real bind attempt (e.g. a path
+        length limit); it is not a substitute for ``bind_and_listen()``
+        itself, and a transport with nothing cheap to pre-check may
+        simply no-op here.
+
+        Raises:
+            TransportUnavailable: If this transport is already known
+                to be unbindable in the current environment.
+        """
+
+    @abstractmethod
+    def client_connect(self, timeout: float) -> socket.socket:
+        """CLI-side: connect to a live daemon.
+
+        Args:
+            timeout: Socket connect/operation timeout in seconds.
+
+        Raises:
+            DaemonUnavailableError: On any failure to reach a live daemon
+                (no transport artifact, stale artifact, connection
+                refused, or timeout). Callers fail open to direct
+                execution on this exception.
+        """
+
+    @abstractmethod
+    def authenticate(self, conn: socket.socket) -> bool:
+        """Daemon-side: validate a freshly accepted connection.
+
+        Reads and checks whatever auth preamble this transport
+        requires. ``UnixSocketTransport`` requires none (filesystem
+        permissions already gate access) and always returns ``True``.
+        ``TcpLoopbackTransport`` reads one line containing the token
+        and compares it against the port file's token, since a
+        loopback TCP socket has no filesystem-permission equivalent.
+
+        Returns:
+            ``True`` if the connection may proceed, ``False`` if the
+            caller should close it without sending a response.
+        """
+
+    @abstractmethod
+    def send_auth_preamble(self, sock: socket.socket) -> None:
+        """CLI-side: write this transport's auth preamble, if any.
+
+        Must be called (and will no-op harmlessly if not needed)
+        immediately after ``client_connect()`` succeeds, before
+        sending the first real request line.
+        """
+
+    @abstractmethod
+    def cleanup(self) -> None:
+        """Remove the on-disk artifact for this transport, best-effort.
+
+        Called on graceful daemon exit and on stale-transport
+        detection. Never raises -- failures are swallowed, since
+        cleanup is advisory (a missing file is not an error).
+        """
+
+    @abstractmethod
+    def describe(self) -> str:
+        """Human-readable summary for ``dekko daemon status``."""
+
+
+class UnixSocketTransport(DaemonTransport):
+    """Unix domain socket at ``<root>/.dekko/daemon.sock`` (POSIX only).
+
+    Selected by ``default_transport_for()`` whenever ``sys.platform
+    != "win32"``. Created with mode ``0600`` -- filesystem permissions
+    are the only access control this transport needs; there is no
+    independent authentication, matching how ``map.json``/
+    ``notes.json`` are already protected the same way.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.socket_path = root / ".dekko" / _SOCKET_NAME
+        self.status_socket_path = root / ".dekko" / _STATUS_SOCKET_NAME
+
+    def exists(self) -> bool:
+        return self.socket_path.exists()
+
+    def preflight_check(self) -> None:
+        for path, label in (
+            (self.socket_path, "socket"),
+            (self.status_socket_path, "status socket"),
+        ):
+            encoded = os.fsencode(str(path))
+            if len(encoded) > _SUN_PATH_LIMIT:
+                raise TransportUnavailable(
+                    f"{label} path too long for AF_UNIX "
+                    f"({len(encoded)} bytes > {_SUN_PATH_LIMIT}): {path}"
+                )
+
+    def _bind(self, path: Path, label: str) -> socket.socket:
+        """Shared bind logic for the main and status-only sockets."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # A stale socket file left behind by an ungracefully-killed
+        # daemon (kill -9, crash, reboot without a cleanup hook)
+        # blocks bind() with "address already in use". Best-effort
+        # remove it first -- whether an existing daemon is actually
+        # still live is the caller's responsibility to check before
+        # calling bind_and_listen()/bind_status_listener() at all.
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.bind(str(path))
+        except OSError as exc:
+            sock.close()
+            raise TransportUnavailable(
+                f"could not bind {label} at {path}: {exc}"
+            ) from exc
+        os.chmod(path, 0o600)
+        sock.listen()
+        return sock
+
+    def bind_and_listen(self) -> socket.socket:
+        self.preflight_check()
+        return self._bind(self.socket_path, "unix socket")
+
+    def bind_status_listener(self) -> socket.socket:
+        return self._bind(self.status_socket_path, "unix status socket")
+
+    def _connect(self, path: Path, timeout: float) -> socket.socket:
+        """Shared connect logic for the main and status-only sockets."""
+        if not path.exists():
+            raise DaemonUnavailableError(f"no socket at {path}")
+
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(str(path))
+        except TimeoutError as exc:
+            # Round-13 master report §2: a connect-level timeout can
+            # mean the daemon is genuinely alive but momentarily
+            # unable to service the accept queue -- not "no listener
+            # here." Unlike every other connect failure below, this
+            # must NOT delete a live daemon's transport artifact.
+            sock.close()
+            raise DaemonUnavailableError(
+                f"timed out connecting to {path}: {exc}"
+            ) from exc
+        except OSError as exc:
+            sock.close()
+            self.cleanup()
+            raise DaemonUnavailableError(
+                f"could not connect to {path}: {exc}"
+            ) from exc
+        return sock
+
+    def client_connect(self, timeout: float) -> socket.socket:
+        return self._connect(self.socket_path, timeout)
+
+    def status_client_connect(self, timeout: float) -> socket.socket:
+        return self._connect(self.status_socket_path, timeout)
+
+    def authenticate(self, conn: socket.socket) -> bool:
+        return True
+
+    def send_auth_preamble(self, sock: socket.socket) -> None:
+        pass
+
+    def cleanup(self) -> None:
+        for path in (self.socket_path, self.status_socket_path):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    def describe(self) -> str:
+        return f"unix socket: {self.socket_path}"
+
+
+class TcpLoopbackTransport(DaemonTransport):
+    """Token-authenticated TCP loopback socket (Windows default).
+
+    Binds an OS-assigned ephemeral port on ``127.0.0.1`` and writes
+    ``<root>/.dekko/daemon.port`` containing ``{"port": N, "token":
+    "<32 hex chars>"}``. A loopback TCP socket has no filesystem-
+    permission equivalent to the Unix socket's ``0600`` mode -- any
+    local process on the machine can connect to ``127.0.0.1:N``
+    regardless of file permissions -- so the token is a hard
+    requirement, not optional: every accepted connection must present
+    it via ``send_auth_preamble``/``authenticate`` before being
+    treated as a real client, or it is closed without a response.
+
+    Also constructible (and fully usable) on POSIX for testing/parity
+    even though ``default_transport_for()`` only selects it by default
+    on Windows.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.port_file = root / ".dekko" / _PORT_FILE_NAME
+        self._token: str | None = None
+        self._port: int | None = None
+        self._status_port: int | None = None
+
+    def exists(self) -> bool:
+        return self.port_file.exists()
+
+    def preflight_check(self) -> None:
+        # Nothing cheaply knowable ahead of a real bind for a TCP
+        # loopback socket -- an OS-assigned ephemeral port has no
+        # length-style limit analogous to AF_UNIX's sun_path, and any
+        # other bind failure (e.g. no loopback interface) is rare
+        # enough that a real bind_and_listen() attempt is the only
+        # meaningful check.
+        pass
+
+    def _read_port_file(self) -> tuple[int, str]:
+        try:
+            data = json.loads(self.port_file.read_text())
+            return int(data["port"]), str(data["token"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise DaemonUnavailableError(
+                f"could not read port file {self.port_file}: {exc}"
+            ) from exc
+
+    def _read_status_port(self) -> tuple[int, str]:
+        try:
+            data = json.loads(self.port_file.read_text())
+        except (OSError, ValueError) as exc:
+            raise DaemonUnavailableError(
+                f"could not read status port from {self.port_file}: {exc}"
+            ) from exc
+        if not isinstance(data, dict):
+            raise DaemonUnavailableError(
+                f"malformed port file {self.port_file}: expected a "
+                f"JSON object, got {type(data).__name__}"
+            )
+        if "status_port" not in data:
+            # Benign, expected case: a daemon started by a
+            # pre-status-listener build never called
+            # bind_status_listener(), so the otherwise-valid,
+            # perfectly parseable port file just doesn't have this
+            # key -- not a corrupt/stale artifact. Distinguish this
+            # from the broad except below so status_client_connect()
+            # doesn't destroy the still-valid main port/token entry.
+            raise _StatusPortNotBoundError(
+                f"no status_port entry in {self.port_file}"
+            )
+        try:
+            return int(data["status_port"]), str(data["token"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DaemonUnavailableError(
+                f"could not read status port from {self.port_file}: {exc}"
+            ) from exc
+
+    def _write_port_file(self) -> None:
+        """Persist whichever of the main/status ports have been bound
+        so far, plus the shared auth token -- called once per bind, so
+        a second ``bind_status_listener()`` call after
+        ``bind_and_listen()`` (or vice versa) merges in rather than
+        clobbering the first port's entry."""
+        payload: dict[str, int | str] = {}
+        if self._port is not None:
+            payload["port"] = self._port
+        if self._status_port is not None:
+            payload["status_port"] = self._status_port
+        if self._token is not None:
+            payload["token"] = self._token
+        self.port_file.write_text(json.dumps(payload))
+
+    def bind_and_listen(self) -> socket.socket:
+        self.port_file.parent.mkdir(parents=True, exist_ok=True)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        self._port = sock.getsockname()[1]
+        if self._token is None:
+            self._token = secrets.token_hex(_TOKEN_BYTES)
+        self._write_port_file()
+        sock.listen()
+        return sock
+
+    def bind_status_listener(self) -> socket.socket:
+        self.port_file.parent.mkdir(parents=True, exist_ok=True)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        self._status_port = sock.getsockname()[1]
+        if self._token is None:
+            self._token = secrets.token_hex(_TOKEN_BYTES)
+        self._write_port_file()
+        sock.listen()
+        return sock
+
+    def _connect(self, port: int, timeout: float, label: str) -> socket.socket:
+        """Shared connect logic for the main and status-only ports."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect(("127.0.0.1", port))
+        except TimeoutError as exc:
+            # See UnixSocketTransport._connect's docstring comment:
+            # a connect-level timeout must not delete a live daemon's
+            # transport artifact.
+            sock.close()
+            raise DaemonUnavailableError(
+                f"timed out connecting to {label} 127.0.0.1:{port}: {exc}"
+            ) from exc
+        except OSError as exc:
+            sock.close()
+            self.cleanup()
+            raise DaemonUnavailableError(
+                f"could not connect to {label} 127.0.0.1:{port}: {exc}"
+            ) from exc
+        return sock
+
+    def client_connect(self, timeout: float) -> socket.socket:
+        if not self.port_file.exists():
+            raise DaemonUnavailableError(f"no port file at {self.port_file}")
+
+        try:
+            port, token = self._read_port_file()
+        except DaemonUnavailableError:
+            # A malformed/corrupt port file is the TCP-loopback
+            # equivalent of UnixSocketTransport's stale-socket case --
+            # genuinely unusable, not "busy," so it's safe (and
+            # necessary) to clean it up the same way _connect()'s own
+            # OSError branch does for a refused/failed connect.
+            self.cleanup()
+            raise
+        self._token = token
+        return self._connect(port, timeout, "main")
+
+    def status_client_connect(self, timeout: float) -> socket.socket:
+        if not self.port_file.exists():
+            raise DaemonUnavailableError(f"no port file at {self.port_file}")
+
+        try:
+            port, token = self._read_status_port()
+        except _StatusPortNotBoundError:
+            # No status listener bound yet -- leave the port file
+            # alone. It still holds a valid main port/token pair that
+            # is_daemon_reachable()'s client_connect() fallback needs.
+            raise
+        except DaemonUnavailableError:
+            # Port file itself is unreadable/corrupt -- same
+            # genuine-staleness case client_connect() treats as
+            # cleanup-worthy, and (unlike the missing-key case above)
+            # the main port/token entry can't be trusted either.
+            self.cleanup()
+            raise
+        self._token = token
+        return self._connect(port, timeout, "status")
+
+    def authenticate(self, conn: socket.socket) -> bool:
+        if self._token is None:
+            try:
+                _, self._token = self._read_port_file()
+            except DaemonUnavailableError:
+                return False
+
+        previous_timeout = conn.gettimeout()
+        conn.settimeout(2.0)
+        try:
+            line = _recv_line(conn)
+        except OSError:
+            return False
+        finally:
+            conn.settimeout(previous_timeout)
+
+        if line is None:
+            return False
+        return line.strip() == self._token
+
+    def send_auth_preamble(self, sock: socket.socket) -> None:
+        if self._token is None:
+            _, self._token = self._read_port_file()
+        sock.sendall(f"{self._token}\n".encode("utf-8"))
+
+    def cleanup(self) -> None:
+        try:
+            self.port_file.unlink()
+        except OSError:
+            pass
+
+    def describe(self) -> str:
+        if self.port_file.exists():
+            try:
+                port, _ = self._read_port_file()
+                return f"tcp loopback: 127.0.0.1:{port}"
+            except DaemonUnavailableError:
+                pass
+        return f"tcp loopback: {self.port_file} (not bound)"
+
+
+def default_transport_for(root: Path) -> DaemonTransport:
+    """Pick the right transport for the current platform.
+
+    The only ``sys.platform`` branch the rest of the daemon subsystem
+    should ever need -- everything built on ``DaemonTransport``
+    operates on the returned ``socket.socket`` the same way regardless
+    of address family.
+
+    Args:
+        root: Resolved repo root the daemon serves.
+
+    Returns:
+        ``TcpLoopbackTransport`` on Windows, ``UnixSocketTransport``
+        everywhere else.
+    """
+    if sys.platform == "win32":
+        return TcpLoopbackTransport(root)
+    return UnixSocketTransport(root)
+
+
+def spawn_detached(cmd: list[str]) -> subprocess.Popen:
+    """Launch ``cmd`` as a detached background process.
+
+    POSIX: ``start_new_session=True`` puts the child in its own
+    session (via ``setsid()``) so it survives the parent shell/process
+    exiting. That kwarg is POSIX-only, so the Windows branch instead
+    passes ``CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`` creation
+    flags, which detach the child from the parent's console and
+    process group the equivalent way on that platform.
+
+    Args:
+        cmd: Full argv for the detached process.
+
+    Returns:
+        The ``subprocess.Popen`` handle for the spawned process.
+    """
+    if sys.platform == "win32":
+        creationflags = _CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS
+        return subprocess.Popen(cmd, creationflags=creationflags)
+    return subprocess.Popen(cmd, start_new_session=True)
+
+
+def force_stop(pid: int) -> None:
+    """Send an unconditional stop signal to the process at ``pid``.
+
+    ``signal.SIGTERM`` is used on both platforms: on POSIX it's a
+    catchable terminate request; Python's ``os.kill()`` maps any
+    signal other than ``CTRL_C_EVENT``/``CTRL_BREAK_EVENT`` to an
+    unconditional ``TerminateProcess`` call on Windows, so it is *not*
+    catchable there -- no last-chance socket cleanup runs on that
+    platform. That asymmetry is acceptable: this module's stale-
+    transport cleanup (``bind_and_listen()`` removing a stale socket
+    file, ``client_connect()`` removing a stale artifact on connection
+    failure) already handles "the daemon died without cleaning up"
+    regardless of which platform killed it, so no second recovery
+    mechanism is needed for Windows specifically.
+
+    Args:
+        pid: Process ID to stop.
+
+    Raises:
+        ProcessLookupError: If no process with this PID exists.
+    """
+    os.kill(pid, signal.SIGTERM)
+
+
+def is_daemon_reachable(
+    transport: DaemonTransport, timeout: float = 2.0
+) -> bool:
+    """Best-effort liveness check: does a connect actually succeed?
+
+    Deliberately *not* PID-based: ``os.kill(pid, 0)`` is a POSIX-only
+    idiom that doesn't probe liveness the same way, or at all, on
+    Windows. A real connect is also a strictly stronger signal than
+    PID liveness anyway -- a PID can be alive while the daemon itself
+    is wedged. ``dekko daemon status`` upgrades this into a full
+    protocol round-trip that asks the daemon to report its own state;
+    this transport-layer version only proves a listener is present and
+    accepting connections.
+
+    Round-13 master report §2: probes the dedicated status-only
+    listener first (see ``DaemonTransport.bind_status_listener``),
+    never the main command socket -- a busy main accept loop can't
+    answer *any* connection, including this one, until it finishes
+    whatever slow routed request it's currently servicing, so probing
+    it here used to make a live, busy daemon look unreachable (the
+    exact false-negative that made ``daemon start`` orphan a healthy
+    daemon and spawn a duplicate). Falls back to the main socket only
+    when the status listener itself is unreachable (e.g. a daemon
+    process started by a pre-status-listener build of dekko, before
+    an in-place upgrade) -- still fail-open to "not reachable" if that
+    also fails.
+
+    Args:
+        transport: The transport to probe.
+        timeout: Connect timeout in seconds.
+
+    Returns:
+        ``True`` if a connection could be established, ``False``
+        otherwise (including "no transport artifact present").
+    """
+    if not transport.exists():
+        return False
+    try:
+        sock = transport.status_client_connect(timeout)
+    except DaemonUnavailableError:
+        try:
+            sock = transport.client_connect(timeout)
+        except DaemonUnavailableError:
+            return False
+    sock.close()
+    return True

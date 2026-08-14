@@ -2,7 +2,12 @@
 
 Targets use the agreed syntax: bare ``name``, ``Class.method``,
 ``file.py:name``, or ``file.py:Class.method``. File qualifiers match
-on the full repo-relative path or any trailing path suffix.
+on the full repo-relative path or any trailing path suffix. When two
+or more candidates share the same ``(path, qualname)`` — Java/C++-style
+overloads — append the candidate's own ``start_line`` as a third,
+colon-separated segment (``file.py:Class.method:LINE``) to pick one;
+``report_unresolved`` prints this form in its ambiguity hint whenever
+plain ``path:qualname`` can't narrow the set.
 """
 
 import difflib
@@ -56,7 +61,10 @@ def resolve_target(
 
     Args:
         index: Loaded map index.
-        target: Bare name, qualname, or ``path:qualname`` form.
+        target: Bare name, qualname, ``path:qualname``, or
+            ``path:qualname:line`` form — the trailing ``:line`` picks
+            one candidate out of an overload set that shares the same
+            ``(path, qualname)`` (see ``_resolve_exact``).
 
     Returns:
         ``(match, candidates)``: a unique match (or ``None``) plus all
@@ -78,21 +86,52 @@ def resolve_target(
 def _resolve_exact(
     index: MapIndex, target: str
 ) -> tuple[Symbol | None, list[Symbol]]:
-    """Resolve one target reading against the documented grammar."""
-    if ":" in target:
-        path_part, _, qual = target.rpartition(":")
-        candidates = [
+    """Resolve one target reading against the documented grammar.
+
+    A target with 2+ ``:`` separators whose final segment is all
+    digits is read as ``path:qualname:line`` — the line qualifier an
+    agent copies verbatim from a candidate row printed by
+    ``report_unresolved`` to disambiguate same-file, same-qualname
+    overloads (Java/C++ overload sets, round-08 §2.5) that plain
+    ``path:qualname`` can never tell apart, since the resolution key
+    is identical across every overload. Matched by exact
+    ``start_line`` only — no fuzzy "nearest line". A stale or
+    hand-typed line number that matches zero or more than one
+    candidate is silently ignored (falls back to the unfiltered
+    ``path:qualname`` candidate pool) rather than raising a distinct
+    error, so ``report_unresolved`` handles it the same way it always
+    has.
+    """
+    line = None
+    body = target
+    if target.count(":") >= 2:
+        head, _, tail = target.rpartition(":")
+        if tail.isdigit():
+            body, line = head, int(tail)
+    if ":" in body:
+        path_part, _, qual = body.rpartition(":")
+        pool = [
             s
             for p in paths_matching(index, path_part)
             for s in index.symbols_by_path[p]
             if s.qualname == qual or s.name == qual
         ]
+        candidates = pool
+        if line is not None:
+            narrowed = [s for s in pool if s.start_line == line]
+            if len(narrowed) == 1:
+                candidates = narrowed
     else:
-        candidates = list(
-            index.symbols_by_qualname.get(target)
-            or index.symbols_by_name.get(target)
-            or []
-        )
+        # Merge both pools (deduped by id) instead of short-circuiting
+        # on whichever is non-empty first: a bare name can be both a
+        # unique top-level symbol's full qualname (no "." in it) *and*
+        # the shared bare name of several unrelated nested methods
+        # (whose qualnames are `Foo.name`/`Bar.name`, never bare
+        # `name`) — picking only the qualname hit silently ignores the
+        # real collision (bug #1.4).
+        qual = index.symbols_by_qualname.get(target) or []
+        name = index.symbols_by_name.get(target) or []
+        candidates = list({s.id: s for s in (*qual, *name)}.values())
     if len(candidates) == 1:
         return candidates[0], candidates
     return None, candidates
@@ -157,6 +196,28 @@ def _fit_entries(
 
 
 _MAX_SUGGESTIONS = 5
+# Edit-distance fuzzy-suggestion tuning (bug #3.4b): a name shorter
+# than this floor is only ever eligible via the exact/prefix/substring
+# tiers, never the fuzzy edit-distance tier, and the cutoff itself is
+# raised from difflib's permissive 0.6 default to trim genuinely
+# unrelated matches while still surfacing real near-typos (tuned
+# against claude-buddy's `buddyStateDr` case).
+_MIN_FUZZY_NAME_LEN = 3
+_FUZZY_CUTOFF = 0.72
+# round-13 claude-buddy.md: a single-character candidate name (a
+# throwaway loop variable like `B`/`D`) is a coincidental substring of
+# almost any sufficiently long, unrelated needle -- `totallyMade
+# UpSymbolXYZ123` contains a "b" (from "symbol") and a "d" (from
+# "made") purely by chance, so the substring tier surfaced both as
+# "closest matches" for a query with no real relationship to either.
+# Distinct from ``_MIN_FUZZY_NAME_LEN`` (which only gates the fuzzy
+# edit-distance tier, and is deliberately looser so short symbol names
+# stay reachable via a genuine prefix/substring match): this floor
+# only gates the "tiny candidate happens to appear inside a much
+# longer needle" direction of the substring tier, not the reverse
+# (a short *query* matching inside a longer real candidate name stays
+# fully eligible, and 2+ character names are unaffected either way).
+_MIN_SUBSTRING_CANDIDATE_LEN = 2
 # Cap on how many ambiguous candidates ``report_unresolved`` prints
 # unconditionally. Without this, a very-high-cardinality bare-name
 # collision (zed's 99 same-named ``fn main`` candidates across a Rust
@@ -181,23 +242,55 @@ def _close_names(needle: str, names: list[str]) -> list[str]:
             scored.append((0, name))
         elif cand.startswith(low) or low.startswith(cand):
             scored.append((1, name))
-        elif low in cand or cand in low:
+        elif low in cand or (
+            cand in low and len(cand) >= _MIN_SUBSTRING_CANDIDATE_LEN
+        ):
             scored.append((2, name))
         else:
             rest.append(name)
     scored.sort()
     out = [name for _, name in scored[:_MAX_SUGGESTIONS]]
     if len(out) < _MAX_SUGGESTIONS and rest:
+        # Edit-distance matching is inherently biased toward short
+        # strings, so a single-letter symbol (`B`, `t`, `A`, `D`) wins
+        # this tier disproportionately even when it isn't a real
+        # match. A length floor keeps such names eligible only via the
+        # stricter exact/prefix/substring tiers above, and a higher
+        # cutoff (0.72 vs difflib's default-ish 0.6) trims genuinely
+        # unrelated names that a permissive cutoff still let through.
         by_low = {}
         for name in sorted(rest):
-            by_low.setdefault(name.lower(), name)
+            if len(name) >= _MIN_FUZZY_NAME_LEN:
+                by_low.setdefault(name.lower(), name)
         out += [
             by_low[m]
             for m in difflib.get_close_matches(
-                low, list(by_low), _MAX_SUGGESTIONS - len(out), 0.6
+                low,
+                list(by_low),
+                _MAX_SUGGESTIONS - len(out),
+                _FUZZY_CUTOFF,
             )
         ]
     return out
+
+
+def _is_qualname_near_miss(qual: str, sym: Symbol) -> bool:
+    """Whether ``sym`` looks like ``qual`` missing a namespace/module.
+
+    True when the symbol's real qualname *is* the requested qualname,
+    or ends with it after a ``.`` segment separator — the exact shape
+    of a C++ "forgot the namespace" or a Rust/Java "forgot the outer
+    module" guess (master report #8, round 11: ``ClientSession.Run``
+    failing to resolve when the real qualname is
+    ``tensorflow.ClientSession.Run``). Requiring a preceding ``.``
+    (not a bare substring) avoids matching an unrelated qualname that
+    merely ends with the same trailing characters. Only meaningful
+    when ``qual`` itself has a container segment (a bare name has
+    nothing to be "missing a prefix" from).
+    """
+    return "." in qual and (
+        sym.qualname == qual or sym.qualname.endswith("." + qual)
+    )
 
 
 def _suggest_symbols(index: MapIndex, target: str) -> list[Symbol]:
@@ -205,7 +298,10 @@ def _suggest_symbols(index: MapIndex, target: str) -> list[Symbol]:
 
     Matches the qualname part of the target (and its last segment)
     against the name index, so a wrong or stale path qualifier still
-    finds the right symbol. Production code ranks before test code.
+    finds the right symbol. Candidates whose real qualname is the
+    requested qualname with a namespace/module prefix missing (see
+    ``_is_qualname_near_miss``) rank first; within each tier,
+    production code ranks before test code.
     """
     qual = target.rpartition(":")[2]
     seen: dict[str, Symbol] = {}
@@ -215,7 +311,12 @@ def _suggest_symbols(index: MapIndex, target: str) -> list[Symbol]:
                 seen.setdefault(sym.id, sym)
     ranked = sorted(
         seen.values(),
-        key=lambda s: (is_test_path(s.path), s.path, s.qualname),
+        key=lambda s: (
+            not _is_qualname_near_miss(qual, s),
+            is_test_path(s.path),
+            s.path,
+            s.qualname,
+        ),
     )
     return ranked[:_MAX_SUGGESTIONS]
 
@@ -233,6 +334,17 @@ def report_unresolved(
     the caller can retry inside the map instead of falling back to
     grep (the 2026-07-10 eval transcripts show a bare not-found ejects
     agents into reading whole files).
+
+    Always prints plain text to stderr, regardless of ``--json`` —
+    this is a deliberate, project-wide contract (round-12 §3.15/§6),
+    not an oversight specific to this function. Every CLI error path
+    behaves the same way (see ``docs/cli.md``'s ``--json`` section):
+    ``--json`` governs the shape of successful (exit 0) output only. A
+    caller should check the exit code first (``EXIT_AMBIGUOUS``/
+    ``EXIT_NOT_FOUND`` here) and only parse stdout as JSON when it is
+    0. This function is shared by ``query``, ``trace``, ``workset``,
+    and ``contextpack`` — do not "fix" it as a one-off without also
+    revisiting the other three call sites and the documented contract.
     """
     if not candidates:
         print(f"dekko: no symbol matches '{target}'", file=sys.stderr)
@@ -240,7 +352,10 @@ def report_unresolved(
         if suggestions:
             print("closest matches:", file=sys.stderr)
             for sym in suggestions:
-                print(f"  {sym.path}:{sym.qualname}", file=sys.stderr)
+                print(
+                    f"  {sym.path}:{sym.start_line}  {signature(sym)}",
+                    file=sys.stderr,
+                )
         coverage = _coverage_note(index) if index else None
         if coverage:
             print(f"  note: {coverage}", file=sys.stderr)
@@ -250,11 +365,28 @@ def report_unresolved(
         candidates, key=lambda s: (is_test_path(s.path), s.path, s.qualname)
     )
     for sym in ranked[:_MAX_AMBIGUOUS_CANDIDATES]:
-        print(f"  {sym.path}:{sym.qualname}", file=sys.stderr)
+        print(
+            f"  {sym.path}:{sym.start_line}  {signature(sym)}", file=sys.stderr
+        )
     if len(ranked) > _MAX_AMBIGUOUS_CANDIDATES:
         more = len(ranked) - _MAX_AMBIGUOUS_CANDIDATES
+        sample = ranked[0]
         print(
-            f"  … +{more} more (qualify with `file.py:{target}` to narrow)",
+            f"  … +{more} more (qualify with `{sample.path}:{target}` "
+            "to narrow)",
+            file=sys.stderr,
+        )
+    if len({(s.path, s.qualname) for s in candidates}) == 1:
+        # Every candidate shares (path, qualname) — an overload set a
+        # plain `file.py:qualname` qualifier can never narrow, since
+        # that's exactly the key they collide on. The line-number
+        # qualifier (round-08 §2.5) is the only escape hatch; point at
+        # it directly with a real candidate's own line as an example.
+        sample = ranked[0]
+        print(
+            "  … path+qualname alone can't disambiguate these (same "
+            "file, same name) — append `:LINE` from a row above, e.g. "
+            f"`{sample.path}:{sample.qualname}:{sample.start_line}`",
             file=sys.stderr,
         )
     return EXIT_AMBIGUOUS
@@ -392,6 +524,7 @@ def _print_relation_json(
     limit: int,
     coverage: str | None,
     ambig_in: int,
+    ambig_out: int,
 ) -> None:
     """JSON rendering for ``_run_relation`` (callers/callees)."""
     entries = []
@@ -414,6 +547,8 @@ def _print_relation_json(
         doc["coverage_warning"] = coverage
     if ambig_in:
         doc["ambiguous_in"] = ambig_in
+    if ambig_out:
+        doc["ambiguous_out"] = ambig_out
     if action == "callers" and not entries and not modules:
         referenced = _referenced_entries(index, sym, sites)
         if referenced:
@@ -435,11 +570,18 @@ def _run_relation(
     symbols.sort(key=lambda s: relevance_key(s, index))
     coverage = _coverage_note(index)
     # Ambiguous calls never become a resolved edge (see resolver.py's
-    # module docstring), so a symbol's calls_in can look exhaustive
-    # when name-collision candidates were actually dropped. Only
-    # meaningful for the "who calls this" direction.
+    # module docstring), so a symbol's calls_in/calls_out can look
+    # exhaustive when name-collision candidates were actually dropped.
+    # ambig_in is meaningful for "who calls this" (candidates this
+    # symbol could have been ambiguously called as); ambig_out is the
+    # outgoing-side counterpart for "what does this call" (names this
+    # symbol itself called ambiguously) — round-09 §2.1 part A flagged
+    # that only the callers direction disclosed this gap.
     ambig_in = (
         len(index.ambiguous_in.get(sym.id, [])) if action == "callers" else 0
+    )
+    ambig_out = (
+        len(index.ambiguous_out.get(sym.id, [])) if action == "callees" else 0
     )
     if as_json:
         _print_relation_json(
@@ -453,6 +595,7 @@ def _run_relation(
             limit,
             coverage,
             ambig_in,
+            ambig_out,
         )
         return EXIT_OK, None
     lines: list[str] = []
@@ -464,6 +607,13 @@ def _run_relation(
         print(
             f"  note: {ambig_in} additional call site(s) named "
             f"'{sym.name}' resolved ambiguously — not counted here",
+            file=sys.stderr,
+        )
+    if ambig_out:
+        print(
+            f"  note: {ambig_out} outgoing call(s) from this symbol "
+            "resolved ambiguously (name matched 2+ candidates) — not "
+            "counted here",
             file=sys.stderr,
         )
     if not lines:

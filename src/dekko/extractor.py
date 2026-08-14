@@ -222,7 +222,7 @@ def _make_symbol(
     receiver: str | None = None,
 ) -> Symbol:
     """Build a ``Symbol`` with container qualification and unique id."""
-    containers, is_method = _qualify(spec, def_node)
+    containers, is_method, in_test_module = _qualify(spec, def_node)
     if receiver is not None:
         containers.append(receiver)
         is_method = True
@@ -258,6 +258,7 @@ def _make_symbol(
         decorated=decorated,
         exported=exported,
         doc=_doc_for_symbol(spec.name, def_node),
+        test=in_test_module,
     )
 
 
@@ -359,7 +360,19 @@ def _modifiers_keyword(def_node: Node, keyword: str) -> bool:
     return any(child.type == keyword for child in modifiers.children)
 
 
-def _qualify(spec: LanguageSpec, def_node: Node) -> tuple[list[str], bool]:
+# Rust ``mod`` names conventionally used for inline ``#[cfg(test)]``
+# unit-test submodules co-located with the production code they test
+# (``mod tests { ... }`` at the bottom of the same file). Shares the
+# same two literal values as ``classify.TEST_DIR_PARTS``' bare-name
+# test-directory check, kept as a separate constant here since this is
+# an AST-context signal, not a path-segment one — see ``_qualify``'s
+# ``in_test_module`` return value and round 11 master report #7.
+_RUST_TEST_MOD_NAMES = frozenset({"tests", "test"})
+
+
+def _qualify(
+    spec: LanguageSpec, def_node: Node
+) -> tuple[list[str], bool, bool]:
     """Collect container names above a definition, outermost first.
 
     The climb stops dead at the first enclosing function/method/
@@ -370,15 +383,22 @@ def _qualify(spec: LanguageSpec, def_node: Node) -> tuple[list[str], bool]:
     attributed to a class several levels further up.
 
     Returns:
-        ``(container_names, is_method)`` where ``is_method`` is true
-        when the immediate class-like container makes this a method.
+        ``(container_names, is_method, in_test_module)`` — ``is_method``
+        is true when the immediate class-like container makes this a
+        method; ``in_test_module`` is true when the climb passed
+        through a Rust ``mod_item`` container conventionally used for
+        inline unit tests (a bare module name of ``tests``/``test``),
+        the dominant Rust pattern for co-locating
+        ``#[cfg(test)]``-gated test code with the production code it
+        tests. Always ``False`` for every other language.
     """
     containers: list[str] = []
     is_method = False
+    in_test_module = False
     node = def_node.parent
     while node is not None:
         if node.type in spec.function_boundary_types:
-            return [], False
+            return [], False, False
 
         name_field = spec.container_types.get(node.type)
 
@@ -386,15 +406,23 @@ def _qualify(spec: LanguageSpec, def_node: Node) -> tuple[list[str], bool]:
             name_node = node.child_by_field_name(name_field)
 
             if name_node is not None:
-                containers.append(_strip_generics(_text(name_node)))
+                name_text = _strip_generics(_text(name_node))
+                containers.append(name_text)
 
                 if node.type in spec.method_containers:
                     is_method = True
 
+                if (
+                    spec.name == "rust"
+                    and node.type == "mod_item"
+                    and name_text in _RUST_TEST_MOD_NAMES
+                ):
+                    in_test_module = True
+
         node = node.parent
 
     containers.reverse()
-    return containers, is_method
+    return containers, is_method, in_test_module
 
 
 def _strip_generics(name: str) -> str:
@@ -922,6 +950,8 @@ def _collect_imports(spec: LanguageSpec, root: Node, rel: str) -> list[Import]:
         return _imports_rust(matches, rel)
     if spec.name in ("javascript", "typescript", "tsx"):
         return _imports_js(matches, rel)
+    if spec.name in ("c", "cpp"):
+        return _imports_cpp(matches, rel)
     return _imports_generic(matches, rel)
 
 
@@ -982,6 +1012,42 @@ def _imports_js(
         out.append(
             Import(path=rel, name=local, source=f"{source}/{_text(name)}")
         )
+    return out
+
+
+def _imports_cpp(
+    matches: list[tuple[int, dict[str, list[Node]]]], rel: str
+) -> list[Import]:
+    """Normalize C/C++ ``#include``s.
+
+    Unlike Python/JS/Rust imports, a ``#include`` binds no single
+    symbol name — it textually includes an entire header, so there is
+    no per-symbol local binding the generic fallback's name-derivation
+    can recover. That fallback (``_imports_generic``) splits the
+    include path on ``[./:]`` and keeps the *last* segment, which for
+    ``#include "tensorflow/core/data/rewrite_utils.h"`` is the literal
+    string ``"h"`` (the extension) — never usable as a lookup key, and
+    colliding across nearly every C/C++ ``#include`` in a file (all
+    typically ending in ``.h``/``.hpp``), which silently dropped all
+    but the first such include from ``resolver.py``'s
+    ``_imports_by_file`` dedupe-by-name dict. This derives the
+    header's own stem instead (``rewrite_utils``) — still not a real
+    per-symbol binding, but a stable, mostly-unique-per-file key, and
+    a far more useful label wherever ``Import.name`` is displayed
+    (``contextpack.py``). ``resolver.py``'s ``_import_match`` actually
+    disambiguates C/C++ calls via each import's full ``source`` path
+    (see its whole-file-include fallback), not this ``name`` — see
+    ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
+    """
+    out: list[Import] = []
+    for _, caps in matches:
+        node = _one(caps, "module")
+        if node is None:
+            continue
+        source = _strip_quotes(_text(node))
+        base = source.rsplit("/", 1)[-1]
+        stem = base.rsplit(".", 1)[0] if "." in base else base
+        out.append(Import(path=rel, name=stem or source, source=source))
     return out
 
 

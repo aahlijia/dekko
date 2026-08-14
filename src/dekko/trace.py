@@ -116,6 +116,63 @@ def _reconstruct(
     return paths
 
 
+def _ambiguous_candidates_by_caller(index: MapIndex) -> dict[str, set[str]]:
+    """Invert ``ambiguous_in`` into caller id -> candidate ids it might
+    reach through an ambiguously-resolved call.
+
+    ``MapIndex.ambiguous_in`` is stored candidate-first (who might call
+    *this* symbol, and under what name) since that's what ``query
+    callers`` needs. Walking a path forward from a caller needs the
+    reverse: what a given node might call, ambiguously, so BFS can
+    treat an ambiguous hop the same way it treats a resolved one for
+    reachability purposes (never for a *definitive* path, see
+    ``_ambiguous_path_exists``).
+    """
+    out: dict[str, set[str]] = {}
+    for candidate_id, pairs in index.ambiguous_in.items():
+        for caller_id, _name in pairs:
+            out.setdefault(caller_id, set()).add(candidate_id)
+    return out
+
+
+def _ambiguous_path_exists(index: MapIndex, start: str, goal: str) -> bool:
+    """Whether ``start`` can reach ``goal`` once ambiguous call edges
+    are allowed alongside resolved ones.
+
+    round-13 spring-boot.md: ``trace`` on two symbols connected only by
+    same-file-overload-ambiguous edges (e.g. every hop between them is
+    ``bind(...)`` calling another same-class ``bind(...)`` overload)
+    reported a flatly false-sounding "no call path," even though
+    ``query callees`` on each hop honestly discloses the ambiguous
+    edge rather than hiding it — an agent reading dekko's own callees
+    output right above ``trace``'s answer can tell a path plausibly
+    exists; ``trace``'s own answer couldn't. This is a *reachability*
+    check only (BFS over resolved + ambiguous edges, no path
+    reconstruction) — it never upgrades ``EXIT_NO_PATH`` to a success,
+    it only changes what the "no call path" message says, so a false
+    "definitely can't get there" doesn't stand next to an honest
+    "actually, maybe" one hop away.
+    """
+    if start == goal:
+        return True
+    ambiguous = _ambiguous_candidates_by_caller(index)
+    seen = {start}
+    frontier = deque([start])
+    while frontier and len(seen) <= _MAX_VISITED:
+        node = frontier.popleft()
+        neighbors = set(index.calls_out.get(node, ())) | ambiguous.get(
+            node, set()
+        )
+        for nid in neighbors:
+            if nid == goal:
+                return True
+            if nid in seen or nid not in index.symbols_by_id:
+                continue
+            seen.add(nid)
+            frontier.append(nid)
+    return False
+
+
 def _resolve_endpoint(
     index: MapIndex, target: str
 ) -> tuple[Symbol | None, int]:
@@ -179,6 +236,9 @@ def run(
         return code
 
     paths = _shortest_paths(index, src.id, dst.id, max_paths)
+    ambiguous_path = not paths and _ambiguous_path_exists(
+        index, src.id, dst.id
+    )
 
     if as_json:
         doc = {
@@ -186,11 +246,22 @@ def run(
             "to": dst.id,
             "paths": [_path_json(index, p) for p in paths],
         }
+        if ambiguous_path:
+            doc["ambiguous_path_exists"] = True
         print(json.dumps(doc, indent=2))
         return EXIT_OK if paths else EXIT_NO_PATH
 
     if not paths:
-        print(f"no call path from {src.id} to {dst.id}", file=sys.stderr)
+        if ambiguous_path:
+            print(
+                f"no *resolved* call path from {src.id} to {dst.id} — "
+                "a path may exist through one or more ambiguously-"
+                "resolved calls; re-run `query callees` on each hop "
+                "to check manually",
+                file=sys.stderr,
+            )
+        else:
+            print(f"no call path from {src.id} to {dst.id}", file=sys.stderr)
         return EXIT_NO_PATH
     for path in paths:
         print(_path_line(index, path))

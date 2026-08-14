@@ -31,9 +31,27 @@ EXIT_OK = 0
 DEFAULT_BUDGET = 1500
 DEFAULT_THRESHOLD = 1000
 
+# Kept as its own line so ``_preamble()`` can drop it when ``search``
+# isn't actually available (see ``_search_available`` below) —
+# steering an agent toward a command that then fails is worse than
+# staying silent about it. See IMPLEMENTATION-PLAN.md's 3.1 note:
+# cline's report caught this banner recommending ``search``
+# unconditionally, even when the invoked ``dekko`` binary predated the
+# subcommand entirely.
+_SEARCH_LINE = (
+    "  • search <text>    — find a symbol by what it does, not its "
+    "name (use before grepping blind)\n"
+)
+
 _PREAMBLE = (
-    "dekko orientation — this repo has a .dekko/ map. Prefer dekko's\n"
-    "structural tools over reading whole files:\n"
+    "dekko orientation — this repo has a .dekko/ map. Use dekko's\n"
+    "structural tools instead of grep/reading whole files: they answer\n"
+    "the same question cheaper and exactly, where grep guesses. If this\n"
+    "repo's pre-bash hook is enabled, a broad grep/find/cat on a mapped\n"
+    "file will pause for confirmation before it runs — treat that as a\n"
+    "real constraint on this session, not a suggestion to weigh against\n"
+    "convenience.\n"
+    f"{_SEARCH_LINE}"
     "  • outline <file>  — a file's shape (signatures, no bodies), "
     "~1/10 cost\n"
     "  • workset [REV]    — all you need to work a change, one budget\n"
@@ -43,19 +61,46 @@ _PREAMBLE = (
 )
 
 
+def _search_available() -> bool:
+    """Whether this process's own ``search`` subcommand is usable.
+
+    Guards ``_preamble()`` against steering an agent toward ``search``
+    when it isn't actually there to use — the real-world case that
+    prompted this (a global ``uv tool install`` binary predating this
+    branch's ``search`` subcommand entirely) can't be detected from
+    inside a *different*, up-to-date process, but a broken/partial
+    install of *this* process's own package is a real failure mode a
+    plain ``import`` guard does catch, so this stays defensive rather
+    than a no-op ``True``.
+    """
+    try:
+        from . import search as _search
+    except ImportError:  # pragma: no cover - defensive, see docstring
+        return False
+    return hasattr(_search, "run")
+
+
+def _preamble() -> str:
+    """The steering preamble, minus the ``search`` line when unusable."""
+    if _search_available():
+        return _PREAMBLE
+    return _PREAMBLE.replace(_SEARCH_LINE, "")
+
+
 def _session(index: MapIndex, budget: int | None, as_json: bool) -> int:
     """Render the orientation digest: preamble + budgeted summary."""
+    preamble = _preamble()
     body = summary.render_text(index).splitlines()
-    kept, meter = fit_to_budget(body, budget, None, prefix=_PREAMBLE)
+    kept, meter = fit_to_budget(body, budget, None, prefix=preamble)
     if as_json:
         doc = {
-            "preamble": _PREAMBLE,
+            "preamble": preamble,
             "summary": "\n".join(kept),
             "meta": meter.as_dict(),
         }
         print(json.dumps(doc, indent=2))
         return EXIT_OK
-    print(_PREAMBLE)
+    print(preamble)
     for line in kept:
         print(line)
     print(meter.footer())

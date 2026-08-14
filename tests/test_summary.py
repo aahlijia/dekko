@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from dekko import cli
+from dekko import cli, summary
 from dekko import server
+from dekko.mapfile import MapIndex
 
 from conftest import RepoFactory
 
@@ -112,6 +113,116 @@ def test_cross_dir_edges_counted(
     assert dirs["b"]["cross_edges"] == 1
 
 
+def test_entrypoints_exclude_test_methods_and_noncallable_exports(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # 3.5: a decorated, uncalled pytest-style fixture under tests/ and
+    # an uncalled exported (non-callable) constant used to both pass
+    # the old, too-permissive entrypoints heuristic.
+    root = make_mapped_repo(
+        dict(
+            SRC,
+            **{
+                "tests/test_app.py": (
+                    "import pytest\n\n\n"
+                    "@pytest.fixture\n"
+                    "def helper_fixture():\n"
+                    "    pass\n"
+                ),
+                "src/consts.ts": "export const CONFIG = 1;\n",
+            },
+        )
+    )
+    assert _summary(root, "--json") == 0
+    doc = json.loads(capsys.readouterr().out)
+    ids = {e["id"] for e in doc["entrypoints"]}
+    assert not any("helper_fixture" in i for i in ids)
+    assert not any("CONFIG" in i for i in ids)
+    # The real entry point is untouched by the tightened filter.
+    assert any(i == "src/app.py::main" for i in ids)
+
+
+def test_parse_errors_capped_with_language_breakdown() -> None:
+    # 2.3: an uncapped grammar gap used to make one repeated message
+    # dominate the whole digest (spring-boot/tensorflow/zed: 97%+ of
+    # `summary`'s output). Built directly against a MapIndex, since
+    # reproducing a real Tier-1-grammar-missing error needs no actual
+    # source files, just the resulting error/language records. This
+    # index has a genuine parse failure, not a missing-grammar skip, so
+    # it belongs in the "parse errors:" section (see the round-13
+    # no-grammar-vs-real-error test below for that distinction).
+    index = MapIndex(root_label="repo")
+    for i in range(20):
+        path = f"gen/file{i}.py"
+        index.errors_by_path[path] = "unexpected indent at line 3"
+        index.languages_by_path[path] = "python"
+
+    doc = summary.compute(index)
+    assert len(doc["parse_errors"]) == summary._MAX_PARSE_ERRORS
+    assert doc["parse_errors_total"] == 20
+
+    text = summary.render_text(index)
+    assert "parse errors:" in text
+    hidden = 20 - summary._MAX_PARSE_ERRORS
+    assert f"... and {hidden} more" in text
+    assert "python (20)" in text
+
+
+def test_no_grammar_skips_are_not_labeled_parse_errors() -> None:
+    # round-13 tensorflow.md/zed.md: `summary`'s "parse errors:" section
+    # (and its `--json` parse_errors*/fields) used to lump genuine parse
+    # failures together with "grammar not in the offline Tier-1 set"
+    # skips under one alarming "parse error" label, even though
+    # `dekko map`'s own top-line summary already told the two apart
+    # (round-12's cli.py fix). A repo whose only `errors_by_path`
+    # entries are missing-grammar skips should report zero parse
+    # errors and a separate "grammars not installed" bucket instead.
+    index = MapIndex(root_label="repo")
+    for i in range(20):
+        path = f"gen/file{i}.kt"
+        index.errors_by_path[path] = (
+            "grammar 'kotlin' is not in the offline Tier-1 set"
+        )
+        index.languages_by_path[path] = "kotlin"
+
+    doc = summary.compute(index)
+    assert doc["parse_errors"] == []
+    assert doc["parse_errors_total"] == 0
+    assert len(doc["no_grammar_installed"]) == summary._MAX_PARSE_ERRORS
+    assert doc["no_grammar_installed_total"] == 20
+
+    text = summary.render_text(index)
+    assert "parse errors:" not in text
+    assert "grammars not installed:" in text
+    hidden = 20 - summary._MAX_PARSE_ERRORS
+    assert f"... and {hidden} more" in text
+    assert "kotlin (20)" in text
+
+
+def test_mixed_real_errors_and_no_grammar_skips_split_correctly() -> None:
+    # A repo with both a genuine parse failure and a missing-grammar
+    # skip should show both sections, each with only its own kind.
+    index = MapIndex(root_label="repo")
+    index.errors_by_path["src/broken.py"] = "unexpected EOF"
+    index.languages_by_path["src/broken.py"] = "python"
+    index.errors_by_path["gen/file.kt"] = (
+        "grammar 'kotlin' is not in the offline Tier-1 set"
+    )
+    index.languages_by_path["gen/file.kt"] = "kotlin"
+
+    doc = summary.compute(index)
+    assert doc["parse_errors_total"] == 1
+    assert doc["parse_errors"][0]["path"] == "src/broken.py"
+    assert doc["no_grammar_installed_total"] == 1
+    assert doc["no_grammar_installed"][0]["path"] == "gen/file.kt"
+
+    text = summary.render_text(index)
+    assert "parse errors:" in text
+    assert "src/broken.py: unexpected EOF" in text
+    assert "grammars not installed:" in text
+    assert "gen/file.kt: grammar 'kotlin'" in text
+
+
 def test_no_tests_filter(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
@@ -179,6 +290,21 @@ def test_cli_budget_caps_text_and_footers(
     out = capsys.readouterr().out
     assert "omitted" in out.splitlines()[-1]
     assert "entrypoints:" not in out  # trailing sections shed first
+
+
+def test_cli_summary_applies_default_budget_without_flag(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # 2.3 item 2: the bare CLI used to default `--budget` to `None`
+    # (unbounded), the one surface `orient`'s own default cap didn't
+    # reach. A live budget (even one generous enough not to truncate
+    # this small fixture) always prints a token-count footer line, so
+    # its presence proves a cap is now applied by default.
+    root = make_mapped_repo(SRC)
+    assert _summary(root) == 0
+    out = capsys.readouterr().out
+    assert "tokens" in out.splitlines()[-1]
+    assert "entrypoints:" in out  # small fixture: nothing actually shed
 
 
 def test_mcp_summary_tool_applies_default_budget(

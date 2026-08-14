@@ -119,12 +119,24 @@ def _make_seed(
     )
 
 
-def seed_from_rev(index: MapIndex, root: Path, rev: str | None) -> Seed | None:
-    """Seed from a worktree-vs-rev diff; ``None`` on an unexportable rev."""
-    outcome = affected.changes(root, rev)
+def seed_from_rev(
+    index: MapIndex, root: Path, rev: str | None, jobs: int = 1
+) -> Seed | None:
+    """Seed from a worktree-vs-rev diff; ``None`` on an unexportable rev.
+
+    Args:
+        index: Already-loaded current-tree index (reused, not
+            reloaded — see ``affected.changes``).
+        root: Repository root.
+        rev: Git rev for the old side, or ``None`` to derive a default.
+        jobs: Resolved worker count for a rev-cache-miss old-side
+            re-parse/resolve — see ``diff.snapshot``. Round-12 master
+            report §3.3.
+    """
+    outcome = affected.changes(root, rev, index=index, jobs=jobs)
     if outcome is None:
         return None
-    impacts, result, _new, target_rev = outcome
+    impacts, result, _new, target_rev, _prov = outcome
     touched = [d.symbol for d in result.added + result.changed]
     label = f"changed vs {target_rev[:12]}"
     return _make_seed("rev", label, target_rev, None, touched, impacts, index)
@@ -203,15 +215,15 @@ def build(index: MapIndex, seed: Seed, packs: int) -> Workset:
     return Workset(seed=seed, outlines=outlines, packs=pack_objs)
 
 
-def _manifest(ws: Workset) -> list[str]:
-    """The non-droppable header: seed, counts, and the pytest hint."""
+def _manifest(ws: Workset, root: Path) -> list[str]:
+    """The non-droppable header: seed, counts, and the test-runner hint."""
     seed = ws.seed
     lines = [
         f"workset: {seed.label} — {len(ws.outlines)} files, "
         f"{len(seed.touched)} symbols, "
         f"{len(seed.impacts)} impacted tests"
     ]
-    hint = affected._pytest_hint(seed.impacts)
+    hint = affected._test_hint(seed.impacts, root)
     if hint:
         lines.append(hint)
     return lines
@@ -297,18 +309,20 @@ def _rows(ws: Workset) -> list[_Row]:
     return rows
 
 
-def _fit(ws: Workset, budget: int | None) -> tuple[list[_Row], object]:
+def _fit(
+    ws: Workset, budget: int | None, root: Path
+) -> tuple[list[_Row], object]:
     """Apply the shared budget over the manifest prefix plus all rows."""
     rows = _rows(ws)
-    prefix = "\n".join(_manifest(ws))
+    prefix = "\n".join(_manifest(ws, root))
     kept, meter = fit_to_budget([r.text for r in rows], budget, None, prefix)
     return rows[: len(kept)], meter
 
 
-def _render_text(ws: Workset, budget: int | None) -> int:
+def _render_text(ws: Workset, budget: int | None, root: Path) -> int:
     """Render the bundle as text: manifest, tiered rows, cost footer."""
-    kept, meter = _fit(ws, budget)
-    for line in _manifest(ws):
+    kept, meter = _fit(ws, budget, root)
+    for line in _manifest(ws, root):
         print(line)
     current: str | None = None
     for row in kept:
@@ -382,9 +396,9 @@ def _outline_json(fo: outline.FileOutline, syms: list[Symbol]) -> dict:
     }
 
 
-def _render_json(ws: Workset, budget: int | None) -> int:
+def _render_json(ws: Workset, budget: int | None, root: Path) -> int:
     """Render the bundle as JSON, reflecting exactly what the budget kept."""
-    kept, meter = _fit(ws, budget)
+    kept, meter = _fit(ws, budget, root)
     files, packs, tests = _kept_view(kept)
     seed = ws.seed
     doc = {
@@ -401,7 +415,7 @@ def _render_json(ws: Workset, budget: int | None) -> int:
         # caller can tell the two apart.
         "impacted_tests": [affected._impact_json(i) for i in tests],
         "impacted_tests_total": len(seed.impacts),
-        "pytest": affected._pytest_hint(seed.impacts),
+        "pytest": affected._test_hint(seed.impacts, root),
         "outlines": [
             _outline_json(fo, files[fo.path])
             for fo in ws.outlines
@@ -423,6 +437,7 @@ def run(
     as_json: bool,
     no_regen: bool,
     task: TaskContext | None = None,
+    jobs: int = 1,
 ) -> int:
     """Build and render a work-set bundle for a change or a symbol.
 
@@ -436,6 +451,9 @@ def run(
         no_regen: Fail instead of regenerating a stale map.
         task: Optional task context; when set, the bundle's packs and
             outlines are ordered most task-relevant first.
+        jobs: Resolved worker count for a rev-cache-miss old-side
+            re-parse/resolve on a rev seed — see ``seed_from_rev``. No
+            effect on a ``symbol`` seed.
 
     Returns:
         ``0`` ok, ``2`` bad rev, ``3`` symbol not found, ``4`` ambiguous,
@@ -451,12 +469,12 @@ def run(
         if seed is None:
             return report_unresolved(symbol, candidates, index)
     else:
-        seed = seed_from_rev(index, root, rev)
+        seed = seed_from_rev(index, root, rev, jobs=jobs)
         if seed is None:
             return EXIT_ERROR
     if task is not None and not task.is_empty:
         seed = _apply_task(seed, index, task)
     ws = build(index, seed, packs)
     if as_json:
-        return _render_json(ws, budget)
-    return _render_text(ws, budget)
+        return _render_json(ws, budget, root)
+    return _render_text(ws, budget, root)

@@ -50,8 +50,15 @@ class Symbol:
             Python dunders) is derived at analysis time, not here.
         doc: First line of the symbol's docstring or doc comment, or
             ``None`` when none was found (best-effort, per language).
-        test: Whether the defining file is classified as test code
-            (path-based; see ``classify.is_test_path``).
+        test: Whether the symbol is classified as test code — either
+            because the defining file is (path-based; see
+            ``classify.is_test_path``, applied in ``cli.map_repository``)
+            or because the extractor found it nested inside a
+            language-specific test-only AST container (currently just
+            Rust's inline ``mod tests { ... }``; see
+            ``extractor._qualify``'s ``in_test_module`` signal). The
+            two signals only ever add ``True``, never reset a
+            ``True`` back to ``False``.
     """
 
     id: str

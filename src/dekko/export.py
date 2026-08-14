@@ -193,9 +193,13 @@ def run(
     """
     labels, edges = build_graph(index, scope)
     if len(labels) > max_nodes:
+        suggestions = []
+        if scope != "file":
+            suggestions.append("--scope file")
+        suggestions += ["a subtree map", "raise --max-nodes"]
         print(
             f"dekko: graph has {len(labels)} nodes (limit {max_nodes}); "
-            "use --scope file, a subtree map, or raise --max-nodes",
+            f"use {', '.join(suggestions)}",
             file=sys.stderr,
         )
         return EXIT_TOO_BIG

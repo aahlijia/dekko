@@ -127,7 +127,12 @@ def _size_line(full: int, outline_tokens: int) -> str | None:
     """The 'full file vs outline' savings line, or ``None``."""
     if full <= 0:
         return None
-    pct = round(100 * outline_tokens / full)
+    raw_pct = 100 * outline_tokens / full
+    # Rounding to the nearest integer reads a true ~0.1% ratio as a
+    # misleading "(0%)" on very-high-savings files. Fall back to one
+    # decimal place only in that band; normal cases (1%, 45%, ...)
+    # render exactly as before, with no ".0" noise.
+    pct = f"{raw_pct:.1f}" if 0 < raw_pct < 1 else f"{round(raw_pct)}"
     return f"full ≈ {full} tok · outline ≈ {outline_tokens} tok ({pct}%)"
 
 
@@ -149,7 +154,10 @@ def _file_outline_tokens(fo: FileOutline) -> int:
 
 
 def _sparse_note(
-    full: int, outline_tokens: int, symbol_count: int
+    full: int,
+    outline_tokens: int,
+    symbol_count: int,
+    error: str | None = None,
 ) -> str | None:
     """Caveat when a file's outline looks suspiciously thin for its size.
 
@@ -173,11 +181,21 @@ def _sparse_note(
         outline_tokens: Estimated tokens of the file's full,
             untrimmed outline (see ``_file_outline_tokens``).
         symbol_count: Number of symbols the outline lists.
+        error: The file's ``FileOutline.error``, if any. A file that
+            failed to parse at all (round-12 master report §3.9: most
+            often an unsupported/uninstalled grammar — Kotlin/Groovy
+            without ``pip install dekko[all]``) always has 0 symbols,
+            which used to trip this heuristic en masse even though
+            the real cause is already shown in the file's own
+            ``(parse error: ...)`` header line, not a callback-heavy
+            file the outline is silently missing content from.
 
     Returns:
         A one-line caveat, or ``None`` when the file doesn't look
         anomalously sparse.
     """
+    if error:
+        return None
     if full < _SPARSE_MIN_FULL_TOKENS or symbol_count > _SPARSE_MAX_SYMBOLS:
         return None
     if full <= 0 or outline_tokens / full > _SPARSE_MAX_RATIO:
@@ -233,7 +251,9 @@ def _render_text_file(
     size = _size_line(full, meter.tokens)
     if size:
         print(size)
-    note = _sparse_note(full, _file_outline_tokens(fo), len(fo.symbols))
+    note = _sparse_note(
+        full, _file_outline_tokens(fo), len(fo.symbols), fo.error
+    )
     if note:
         print(f"  note: {note}", file=sys.stderr)
     print(meter.footer())
@@ -266,6 +286,7 @@ def _render_text_dir(
             _full_tokens(root, fo.path),
             _file_outline_tokens(fo),
             len(fo.symbols),
+            fo.error,
         )
         if note:
             print(f"  note: {fo.path} — {note}", file=sys.stderr)

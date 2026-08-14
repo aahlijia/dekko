@@ -173,6 +173,88 @@ def test_unused_does_not_flag_pass_by_reference_callback(
     assert "no unused symbols" in capsys.readouterr().out
 
 
+GO_TYPE_ONLY = {
+    "types.go": ("package main\n\ntype prEvent struct {\n\tName string\n}\n"),
+    "main.go": (
+        "package main\n\n"
+        "func process(e prEvent) {\n"
+        "\t_ = e.Name\n"
+        "}\n\n"
+        "func main() {\n"
+        '\tprocess(prEvent{Name: "a"})\n'
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_go_struct_used_only_as_param_type(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # End-to-end repro of Track G / bug #1.1a: prEvent is never
+    # *called* (structs aren't invoked), only used as a parameter
+    # type and constructed via a composite literal — before the Go
+    # reference_query, this was indistinguishable from dead code.
+    root = make_mapped_repo(GO_TYPE_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
+GO_FIELD_TYPE_ONLY = {
+    "types.go": ("package main\n\ntype RepoMeta struct {\n\tName string\n}\n"),
+    "main.go": (
+        "package main\n\n"
+        "type Wrapper struct {\n"
+        "\tMeta RepoMeta\n"
+        "}\n\n"
+        "func main() {\n"
+        '\tw := Wrapper{Meta: RepoMeta{Name: "a"}}\n'
+        "\t_ = w\n"
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_go_struct_used_only_as_field_type(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # End-to-end repro of the deliberately-uncovered case documented in
+    # Track G's STATUS block: RepoMeta is used only as another
+    # struct's field type, never as a parameter/return/var type —
+    # before ``field_declaration type:`` was added to
+    # ``_GO_REFERENCE_QUERY``, this was indistinguishable from dead
+    # code.
+    root = make_mapped_repo(GO_FIELD_TYPE_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
+TSX_COMPONENT_ONLY = {
+    "sidebar.tsx": (
+        "export function Sidebar(): JSX.Element {\n"
+        "  return <div>menu</div>;\n"
+        "}\n"
+    ),
+    "app.tsx": (
+        "import { Sidebar } from './sidebar';\n\n"
+        "export function App(): JSX.Element {\n"
+        "  return <div><Sidebar /></div>;\n"
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_tsx_component_used_only_as_jsx_tag(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # End-to-end repro of Track G / bug #1.1b: Sidebar is never called
+    # as a plain function, only rendered as <Sidebar /> — before the
+    # jsx_opening_element/jsx_self_closing_element ref capture, this
+    # read as dead code.
+    root = make_mapped_repo(TSX_COMPONENT_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
 def test_unused_json(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
