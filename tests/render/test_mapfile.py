@@ -106,6 +106,31 @@ def test_missing_map_loads_none(tmp_path: Path) -> None:
     assert mapfile.load_map(tmp_path) is None
 
 
+def test_load_map_raises_on_too_new_doc_version(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A stale in-memory process (long-lived MCP server/daemon) reading
+    # a map.json written by a newer dekko build, whose doc version it
+    # has no parsing logic for, must fail loudly and clearly instead
+    # of returning None (which callers like repo_ops.load_or_regen
+    # would read as "missing" and regenerate over, silently
+    # downgrading a perfectly good, newer-format map.json) or letting
+    # some unrelated downstream TypeError/KeyError surface first.
+    root = make_mapped_repo(CHAIN)
+    doc_path = root / ".dekko" / "map.json"
+    doc = json.loads(doc_path.read_text())
+    doc["version"] = mapfile.MAP_DOC_VERSION + 1
+    doc_path.write_text(json.dumps(doc))
+
+    with pytest.raises(mapfile.MapFormatTooNewError) as exc_info:
+        mapfile.load_map(root)
+
+    message = str(exc_info.value)
+    assert str(mapfile.MAP_DOC_VERSION + 1) in message
+    assert str(mapfile.MAP_DOC_VERSION) in message
+    assert "restart" in message.lower()
+
+
 def test_provenance_records_unsupported_files(
     make_mapped_repo: RepoFactory,
 ) -> None:

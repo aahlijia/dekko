@@ -540,6 +540,32 @@ def test_map_status_reports_spec_hash_stale_distinctly(
     assert "call refresh_map" in text
 
 
+def test_tool_call_reports_too_new_doc_version_clearly(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A long-lived MCP server process (this test's Context stands in
+    # for one) that predates a doc-version bump must not surface the
+    # opaque "internal error: expected string or bytes-like object,
+    # got 'int'" that a downstream shape mismatch would otherwise
+    # raise first (round-16 finding). mapfile.load_map() now raises
+    # MapFormatTooNewError instead, and the MCP tool-call path must
+    # translate it into an actionable "restart the server" message
+    # rather than falling through to the generic internal-error catch.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["version"] = mapfile.MAP_DOC_VERSION + 1
+    map_path.write_text(json.dumps(doc))
+
+    ctx = _ctx(root)
+    result = _call(ctx, "map_status", {})
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "restart" in text.lower()
+    assert "dekko serve --mcp" in text
+    assert "internal error" not in text
+
+
 def test_serve_loop_frames_messages(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:

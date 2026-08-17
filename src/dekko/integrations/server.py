@@ -1170,6 +1170,23 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         is_error = False
     except ToolError as exc:
         text, is_error = _prefixed(str(exc)), True
+    except mapfile.MapFormatTooNewError:
+        # This MCP server process has been running since before the
+        # map.json on disk was regenerated in a newer on-disk format
+        # (e.g. after a `dekko` upgrade) — its in-memory parsing code
+        # predates that format and can't safely read it. Restarting
+        # the process (not the repo) is the fix, so say that plainly
+        # instead of surfacing whatever opaque shape-mismatch error
+        # would otherwise fire first (see
+        # .features/fixes/stale-map-json-mcp-crash.md).
+        text, is_error = (
+            "dekko: this MCP server process was started before "
+            "map.json was last regenerated in a newer format (e.g. "
+            "after a dekko upgrade), so it can no longer read it. "
+            "Restart the MCP server (dekko serve --mcp) to pick up "
+            "the current version.",
+            True,
+        )
     except Exception as exc:  # surface any tool crash as an error result
         text, is_error = f"dekko: internal error: {exc}", True
     return _ok(
