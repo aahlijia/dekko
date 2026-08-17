@@ -761,10 +761,11 @@ def test_lean_registered_and_tool_count() -> None:
     # in context tokens every session (E5 trim, 2026-07-10).
     assert "lean" not in names
     assert "ledger" not in names
-    # Canonical MCP tool-count assertion now lives here. 15, not 14:
-    # find_type_usages (type-usage search over params/returns) joined
-    # the always-loaded read surface after the E5 trim.
-    assert len(server.TOOLS) == 15
+    # Canonical MCP tool-count assertion now lives here. 16, not 15:
+    # check_ambiguous (repo-wide resolver-trust summary) joined the
+    # always-loaded read surface as a deliberately narrow tool (no
+    # --by/--name drill-down — those stay CLI-only).
+    assert len(server.TOOLS) == 16
 
 
 def test_mcp_lean_tool_is_cli_only(make_mapped_repo: RepoFactory) -> None:

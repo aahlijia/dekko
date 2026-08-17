@@ -18,6 +18,7 @@ dekko workset                        # one bundle for your current change
 dekko affected                       # test files impacted by your changes
 dekko diff                           # symbols changed since the map's commit (exit 0/1)
 dekko unused                         # symbols nothing calls (dead-code leads)
+dekko ambiguous                      # resolver-trust report: where resolution was ambiguous
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
 dekko daemon start                   # warm-cache background process (see below)
@@ -110,6 +111,34 @@ This isn't a bug in the detector — it's an inherent limit of static
 call-graph analysis — but treat a raw `unused` count as a set of leads to
 spot-check, not a list to delete from unread, especially on
 framework-heavy or trait-heavy codebases.
+
+## Interpreting `dekko ambiguous`
+
+`ambiguous` aggregates every call site where a bare name matched 2+
+repo-wide candidates and couldn't be resolved — a low ambiguous rate
+means the call graph is trustworthy as-is; a high one concentrated in
+a few files or names means those spots are worth a manual check before
+trusting `query callers`/`callees`/`workset`/`impacted_tests` output
+there for an impact-analysis decision:
+
+```sh
+dekko ambiguous                    # summary: totals + top-N by name + top-N by file
+dekko ambiguous --by name          # every colliding name, ranked by occurrence
+dekko ambiguous --by file          # every caller file, ranked by ambiguous-site count
+dekko ambiguous --name Generate    # drill down: every caller site + full candidate set for one name
+```
+
+Counts here are **distinct `(caller, name)` collisions, not physical
+call-site counts**: the resolver keys its ambiguous-call accumulator on
+`(caller, name)`, not `(caller, name, line)`, so a caller that
+references the same colliding name at 3 different lines counts once in
+this report — the same granularity limit `query symbol`'s
+"N additional call site(s) resolved ambiguously" disclosure already
+has. `--name` reuses `query`'s own ambiguous-candidate rendering, so a
+very-high-cardinality collision (a bare `main`/`New`/`Generate`
+matched against dozens of same-named repo-wide candidates) truncates
+the same way an unresolved-target error does, rather than dumping every
+candidate unconditionally.
 
 ## Daemon mode
 

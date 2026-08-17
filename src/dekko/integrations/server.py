@@ -23,6 +23,7 @@ from typing import Any
 
 from dekko import repo_ops
 from dekko.analysis import affected
+from dekko.analysis import ambiguous
 from dekko.analysis import contextpack
 from dekko.storage import ledger as ledger_mod
 from dekko.render import mapfile
@@ -506,6 +507,37 @@ def tool_stats(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     top = int(args.get("top", 10))
     code, out, err = _capture(lambda: stats.run(index, top, as_json=False))
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return _with_notes(out, err)
+
+
+def tool_check_ambiguous(ctx: Context, args: dict) -> str:
+    """Repo-wide resolver-trust summary: how ambiguous call resolution is.
+
+    Deliberately narrower than the CLI (no ``--by``/``--name``
+    drill-down parameters — those stay CLI-only, reachable via
+    ``dekko ambiguous --by name`` for an agent with shell access) and
+    a tighter default budget (500 vs. ``DEFAULT_RELATION_BUDGET``'s
+    800), since this tool's whole value is being a *cheap* sanity
+    check before trusting ``get_callers``/``get_callees``/``workset``,
+    not a full report.
+    """
+    index = _index_for(ctx, args)
+    top = int(args.get("top", 5))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else 500
+    code, out, err = _capture(
+        lambda: ambiguous.run(
+            index,
+            by=None,
+            name=None,
+            top=top,
+            limit=top * 2,
+            budget=budget,
+            as_json=False,
+        )
+    )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
     return _with_notes(out, err)
@@ -1039,6 +1071,31 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
         "handler": tool_workset,
+    },
+    {
+        "name": "check_ambiguous",
+        "description": "Repo-wide resolver-trust summary: total ambiguous "
+        "call sites, the ambiguous rate, and the top colliding names/files. "
+        "Run this before leaning on get_callers/get_callees/workset for an "
+        "impact-analysis decision on a repo with generic/common method "
+        "names — a low ambiguous rate means the call graph is trustworthy "
+        "as-is; a high one concentrated in a few files means spot-check "
+        "those files' call sites by hand before trusting the graph there.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "top": {
+                    "type": "integer",
+                    "description": "Top-N entries per ranking (default 5)",
+                },
+                "budget": {
+                    "type": "integer",
+                    "description": "Approx token budget (default 500)",
+                },
+                "root": _ROOT_PROP,
+            },
+        },
+        "handler": tool_check_ambiguous,
     },
     {
         "name": "summary",

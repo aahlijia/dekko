@@ -87,6 +87,7 @@ def test_tools_list_exposes_the_read_surface() -> None:
         "outline",
         "impacted_tests",
         "workset",
+        "check_ambiguous",
         "summary",
         "add_note",
         "list_notes",
@@ -1097,3 +1098,72 @@ def test_lean_discloses_budget_floor_note(
     ctx = _ctx(make_mapped_repo(files))
     text = server.tool_lean(ctx, {"budget": 1})
     assert "path-only floor" in text
+
+
+def test_check_ambiguous_tool(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(AMBIGUOUS_CALL))
+    result = _call(ctx, "check_ambiguous", {})
+    assert result["isError"] is False
+    text = result["content"][0]["text"]
+    assert "1 ambiguous call sites" in text
+    assert "target" in text
+
+
+def test_check_ambiguous_tool_no_ambiguity(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {"a.py": "def main() -> int:\n    return 1\n"}
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(ctx, "check_ambiguous", {})
+    assert result["isError"] is False
+    assert "no ambiguous call sites" in result["content"][0]["text"]
+
+
+def test_check_ambiguous_tool_defaults_budget(
+    monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
+) -> None:
+    ctx = _ctx(make_mapped_repo(AMBIGUOUS_CALL))
+    seen: dict = {}
+
+    def fake_run(
+        index,  # noqa: ANN001
+        by,  # noqa: ANN001
+        name,  # noqa: ANN001
+        top,  # noqa: ANN001
+        limit,  # noqa: ANN001
+        budget,  # noqa: ANN001
+        as_json,  # noqa: ANN001
+    ) -> int:
+        seen["by"] = by
+        seen["name"] = name
+        seen["top"] = top
+        seen["limit"] = limit
+        seen["budget"] = budget
+        print("ambiguous")
+        return 0
+
+    monkeypatch.setattr(server.ambiguous, "run", fake_run)
+    basic = _call(ctx, "check_ambiguous", {})
+    assert basic["isError"] is False
+    assert seen["by"] is None
+    assert seen["name"] is None
+    assert seen["top"] == 5
+    assert seen["limit"] == 10
+    assert seen["budget"] == 500
+
+    result = _call(ctx, "check_ambiguous", {"top": 3, "budget": 9000})
+    assert result["isError"] is False
+    assert seen["top"] == 3
+    assert seen["limit"] == 6
+    assert seen["budget"] == 9000
+
+
+def test_check_ambiguous_tool_schema_has_no_drilldown_params() -> None:
+    # The MCP surface is deliberately narrower than the CLI (design
+    # doc: summary-only, no --by/--name drill-down) — a schema-shape
+    # assertion, not just a behavioral one, so a later "helpful"
+    # addition of a 'by'/'name' parameter without revisiting the
+    # token-budget tradeoff regresses loudly here.
+    tool = next(t for t in server.TOOLS if t["name"] == "check_ambiguous")
+    props = set(tool["inputSchema"]["properties"])
+    assert props == {"top", "budget", "root"}

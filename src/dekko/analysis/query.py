@@ -331,6 +331,62 @@ def _suggest_symbols(index: MapIndex, target: str) -> list[Symbol]:
     return ranked[:_MAX_SUGGESTIONS]
 
 
+def render_candidates(candidates: list[Symbol]) -> list[str]:
+    """Render an ambiguous candidate list: rows, cap note, overload hint.
+
+    Factored out of ``report_unresolved`` so the same cap/hint
+    rendering can be reused by ``ambiguous.py``'s ``--name`` drill-down
+    (every caller's own full candidate set for one colliding name)
+    without duplicating the ``_MAX_AMBIGUOUS_CANDIDATES`` cap logic or
+    the same-``(path, qualname)`` overload hint. Candidates are shown
+    production code first, test code last (presentation only —
+    resolution itself is unchanged).
+
+    Args:
+        candidates: The 2+ same-name candidates that could not be
+            disambiguated.
+
+    Returns:
+        Text rows: one per candidate (capped at
+        ``_MAX_AMBIGUOUS_CANDIDATES``), an optional "... +N more" row,
+        and an optional "can't disambiguate" hint row when every
+        candidate shares ``(path, qualname)``.
+    """
+    ranked = sorted(
+        candidates, key=lambda s: (is_test_path(s.path), s.path, s.qualname)
+    )
+    rows = [
+        f"  {sym.path}:{sym.start_line}  {signature(sym)}"
+        for sym in ranked[:_MAX_AMBIGUOUS_CANDIDATES]
+    ]
+    if len(ranked) > _MAX_AMBIGUOUS_CANDIDATES:
+        more = len(ranked) - _MAX_AMBIGUOUS_CANDIDATES
+        sample = ranked[0]
+        # Build the hint from the sample's own qualname, not the raw
+        # ``target`` string — ``target`` may already be a
+        # ``path:qualname[:LINE]`` form (e.g. when path+qualname alone
+        # still matched an overload set), and prepending ``sample.path``
+        # to an already-qualified target duplicated the path segment
+        # (round-15 finding).
+        rows.append(
+            f"  … +{more} more (qualify with "
+            f"`{sample.path}:{sample.qualname}` to narrow)"
+        )
+    if len({(s.path, s.qualname) for s in candidates}) == 1:
+        # Every candidate shares (path, qualname) — an overload set a
+        # plain `file.py:qualname` qualifier can never narrow, since
+        # that's exactly the key they collide on. The line-number
+        # qualifier (round-08 §2.5) is the only escape hatch; point at
+        # it directly with a real candidate's own line as an example.
+        sample = ranked[0]
+        rows.append(
+            "  … path+qualname alone can't disambiguate these (same "
+            "file, same name) — append `:LINE` from a row above, e.g. "
+            f"`{sample.path}:{sample.qualname}:{sample.start_line}`"
+        )
+    return rows
+
+
 def report_unresolved(
     target: str,
     candidates: list[Symbol],
@@ -371,40 +427,8 @@ def report_unresolved(
             print(f"  note: {coverage}", file=sys.stderr)
         return EXIT_NOT_FOUND
     print(f"dekko: '{target}' is ambiguous; candidates:", file=sys.stderr)
-    ranked = sorted(
-        candidates, key=lambda s: (is_test_path(s.path), s.path, s.qualname)
-    )
-    for sym in ranked[:_MAX_AMBIGUOUS_CANDIDATES]:
-        print(
-            f"  {sym.path}:{sym.start_line}  {signature(sym)}", file=sys.stderr
-        )
-    if len(ranked) > _MAX_AMBIGUOUS_CANDIDATES:
-        more = len(ranked) - _MAX_AMBIGUOUS_CANDIDATES
-        sample = ranked[0]
-        # Build the hint from the sample's own qualname, not the raw
-        # ``target`` string — ``target`` may already be a
-        # ``path:qualname[:LINE]`` form (e.g. when path+qualname alone
-        # still matched an overload set), and prepending ``sample.path``
-        # to an already-qualified target duplicated the path segment
-        # (round-15 finding).
-        print(
-            f"  … +{more} more (qualify with "
-            f"`{sample.path}:{sample.qualname}` to narrow)",
-            file=sys.stderr,
-        )
-    if len({(s.path, s.qualname) for s in candidates}) == 1:
-        # Every candidate shares (path, qualname) — an overload set a
-        # plain `file.py:qualname` qualifier can never narrow, since
-        # that's exactly the key they collide on. The line-number
-        # qualifier (round-08 §2.5) is the only escape hatch; point at
-        # it directly with a real candidate's own line as an example.
-        sample = ranked[0]
-        print(
-            "  … path+qualname alone can't disambiguate these (same "
-            "file, same name) — append `:LINE` from a row above, e.g. "
-            f"`{sample.path}:{sample.qualname}:{sample.start_line}`",
-            file=sys.stderr,
-        )
+    for row in render_candidates(candidates):
+        print(row, file=sys.stderr)
     return EXIT_AMBIGUOUS
 
 

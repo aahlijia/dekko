@@ -16,6 +16,7 @@ from pathlib import Path
 
 from dekko import repo_ops
 from dekko.analysis import affected
+from dekko.analysis import ambiguous
 from dekko.storage import cache as cache_mod
 from dekko.integrations import claude_md as claude_md_mod
 from dekko.integrations import cline as cline_mod
@@ -63,6 +64,7 @@ SUBCOMMANDS = (
     "serve",
     "unused",
     "stats",
+    "ambiguous",
     "summary",
     "orient",
     "note",
@@ -893,6 +895,47 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     _add_read_options(p_stats)
     p_stats.set_defaults(func=run_stats)
 
+    p_ambig = sub.add_parser(
+        "ambiguous",
+        help="resolver-trust report: where call resolution was "
+        "ambiguous (name collided with 2+ candidates)",
+    )
+    p_ambig.add_argument(
+        "--by",
+        choices=("name", "file"),
+        default=None,
+        help="group the full list by colliding name or by caller file "
+        "instead of the default top-N summary",
+    )
+    p_ambig.add_argument(
+        "--name",
+        default=None,
+        metavar="NAME",
+        help="drill down: every caller site and full candidate set for "
+        "one ambiguous name",
+    )
+    p_ambig.add_argument(
+        "--top",
+        type=int,
+        default=10,
+        help="entries to keep in each ranked list (default: 10)",
+    )
+    p_ambig.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="max text result rows for --by/--name views (default: 100)",
+    )
+    p_ambig.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="approximate token budget for the result rows",
+    )
+    _add_read_options(p_ambig)
+    p_ambig.set_defaults(func=run_ambiguous)
+
     p_summary = sub.add_parser(
         "summary", help="compact repo digest (dirs, hotspots, entrypoints)"
     )
@@ -1450,6 +1493,25 @@ def run_stats(args: argparse.Namespace) -> int:
     if index is None:
         return code
     return stats.run(index, args.top, as_json=args.as_json)
+
+
+def run_ambiguous(args: argparse.Namespace) -> int:
+    """Handle ``dekko ambiguous``."""
+    if args.name is not None and args.by is not None:
+        print("dekko: give --by or --name, not both", file=sys.stderr)
+        return ambiguous.EXIT_ERROR
+    index, code = _read_index(args)
+    if index is None:
+        return code
+    return ambiguous.run(
+        index,
+        by=args.by,
+        name=args.name,
+        top=args.top,
+        limit=args.limit,
+        budget=args.budget,
+        as_json=args.as_json,
+    )
 
 
 def run_summary(args: argparse.Namespace) -> int:
