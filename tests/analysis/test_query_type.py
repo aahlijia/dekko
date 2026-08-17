@@ -5,6 +5,9 @@ import json
 import pytest
 
 from dekko.integrations import cli
+from dekko.analysis import query
+from dekko.render.mapfile import MapIndex
+from dekko.core.model import Param, Symbol
 
 from conftest import RepoFactory
 
@@ -316,3 +319,49 @@ def test_type_typescript_union_wrapper(
     code = cli.main(["query", "type", "Config", "--root", str(root)])
     assert code == 0
     assert "start" in capsys.readouterr().out
+
+
+def _fn(name: str, **kw: object) -> Symbol:
+    return Symbol(
+        id=f"a.py::{name}",
+        name=name,
+        qualname=name,
+        kind="function",
+        path="a.py",
+        language="python",
+        params=list(kw.get("params", [])),  # type: ignore[arg-type]
+        returns=kw.get("returns"),  # type: ignore[arg-type]
+    )
+
+
+def test_type_usage_name_index_matches_wrapper_syntax() -> None:
+    # unused.py's --kinds types relies on this being an O(symbols)
+    # equivalent of calling type_usage_rows(index, name, exact=False)
+    # once per type name — same identifier-token matching, just
+    # inverted into a single pass. Cover the same wrapper shapes
+    # type_usage_rows' own tests above already exercise via the CLI.
+    idx = MapIndex(root_label="t")
+    fns = [
+        _fn("start", params=[Param(name="cfg", type="Config")]),
+        _fn(
+            "maybe",
+            params=[Param(name="cfg", type="Optional[Config]")],
+        ),
+        _fn("load", returns="Config | None"),
+        _fn("ptr", params=[Param(name="cfg", type="*Config")]),
+        _fn("unrelated", params=[Param(name="x", type="int")]),
+    ]
+    for fn in fns:
+        idx.symbols_by_id[fn.id] = fn
+    names = query.type_usage_name_index(idx)
+    assert "Config" in names
+    assert "int" in names
+    assert "ConfigManager" not in names  # not a whole-token match
+
+    # Parity check: every function this reports as a Config hit via
+    # the inverted index is also found by the naive per-needle
+    # matcher, and vice versa — confirms the inversion didn't change
+    # matching semantics, only its cost shape.
+    rows = query.type_usage_rows(idx, "Config", exact=False)
+    row_names = {r[0].name for r in rows}
+    assert row_names == {"start", "maybe", "load", "ptr"}

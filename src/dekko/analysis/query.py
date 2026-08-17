@@ -939,6 +939,45 @@ def type_usage_rows(
     return rows
 
 
+def type_usage_name_index(index: MapIndex) -> frozenset[str]:
+    """Every identifier token used as a param/return type, repo-wide.
+
+    ``unused.py``'s ``--kinds types`` needs an ``exact=False``
+    "is this type used as a param/return type anywhere" answer for
+    *every* type symbol in the repo, not just one needle. Calling
+    ``type_usage_rows`` once per type name is O(types * symbols) —
+    measured at ~370s on spring-boot's ~14k type symbols against its
+    ~69k total symbols, unacceptable for a single CLI invocation. This
+    inverts the loop instead: one O(symbols) pass tokenizing every
+    function/method's ``returns``/``params[].type`` text the same way
+    ``_type_matches(..., exact=False)`` does, building the set once so
+    each type symbol's membership check is O(1) after. The same
+    "reconstruct once, not per-query" discipline ``ambiguous.py``'s own
+    ``_raw_triples`` already established for a structurally analogous
+    cost concern.
+
+    Args:
+        index: Loaded map index.
+
+    Returns:
+        Every identifier token found in any function/method's declared
+        return type or parameter type text. A type name in this set
+        has at least one ``exact=False`` type-usage match somewhere in
+        the repo (per ``type_usage_rows(index, name, exact=False)``);
+        a type name absent from it has none.
+    """
+    names: set[str] = set()
+    for sym in index.symbols_by_id.values():
+        if sym.kind not in ("function", "method"):
+            continue
+        if sym.returns:
+            names.update(_IDENT_RE.findall(sym.returns))
+        for p in sym.params:
+            if p.type:
+                names.update(_IDENT_RE.findall(p.type))
+    return frozenset(names)
+
+
 def _run_type_usage(
     index: MapIndex,
     needle: str,

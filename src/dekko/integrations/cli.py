@@ -905,6 +905,16 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         metavar="TOKENS",
         help="approximate token budget for the result rows",
     )
+    p_unused.add_argument(
+        "--kinds",
+        choices=unused.KINDS_CHOICES,
+        default="callables",
+        help="which symbol kinds to check for dead code: 'callables' "
+        "(functions/methods, today's default and existing behavior), "
+        "'types' (classes/interfaces/enums/structs/records/traits, "
+        "using heritage + type-usage evidence in addition to call "
+        "evidence), or 'all' (both, unioned)",
+    )
     _add_read_options(p_unused)
     p_unused.set_defaults(func=run_unused)
 
@@ -1519,6 +1529,7 @@ def run_unused(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         limit=args.limit,
         budget=args.budget,
+        kinds=args.kinds,
     )
 
 

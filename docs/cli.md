@@ -24,6 +24,8 @@ dekko workset --symbol Config --type-impact  # + type-usage + heritage impact, u
 dekko affected                       # test files impacted by your changes
 dekko diff                           # symbols changed since the map's commit (exit 0/1)
 dekko unused                         # symbols nothing calls (dead-code leads)
+dekko unused --kinds types           # unused types only (heritage + type-usage aware)
+dekko unused --kinds all             # callables + types, unioned
 dekko ambiguous                      # resolver-trust report: where resolution was ambiguous
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
@@ -168,6 +170,28 @@ This isn't a bug in the detector — it's an inherent limit of static
 call-graph analysis — but treat a raw `unused` count as a set of leads to
 spot-check, not a list to delete from unread, especially on
 framework-heavy or trait-heavy codebases.
+
+`--kinds {callables,types,all}` (default `callables`, matching the above
+unchanged) controls which symbol kinds are scanned. `types` restricts the
+scan to classes/interfaces/enums/structs/records/traits and additionally
+weighs heritage (`heritage_in` — implemented/extended by something else)
+and type-usage (used as a parameter/return type elsewhere, the same
+matching `query type` does) as evidence a type is alive — a called
+function's `calls_in`/`referenced_in` entry, which a type-definition
+rarely accumulates directly, isn't the only signal that matters for a
+type. `all` scans every symbol kind with every evidence source unioned
+in, and shows a per-kind subtotal in its header
+(`dekko: 8 unused symbols (5 callables, 3 types)`); JSON output always
+carries a `"kind_totals"` field alongside `"results"`/`"meta"`. Type-mode
+inherits `unused`'s existing blind spots (dynamic dispatch/reflection,
+now also for types) plus `query type`'s own disclosed gap: a type used
+only as a struct/class **field**'s type — not a function parameter or
+return — is invisible to type-usage matching, since struct/class fields
+aren't extracted as their own symbols with a type. An exported/`pub`
+type with zero in-repo implementors or usages (a plausible public library
+surface) is still excluded via the same root check every other symbol
+kind already gets, not flagged as dead just because `--kinds` widened
+the scan.
 
 ## Interpreting `dekko ambiguous`
 

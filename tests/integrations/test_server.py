@@ -616,6 +616,18 @@ def test_find_unused_handler(make_mapped_repo: RepoFactory) -> None:
     assert "g" in server.tool_find_unused(ctx, {})
 
 
+def test_find_unused_handler_kinds_unexposed(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # unused-types-design.md: no MCP schema/tool change for --kinds —
+    # find_unused stays CLI-only and always runs the unchanged
+    # default ("callables") kind, ignoring any stray "kinds" argument.
+    assert not any(t["name"] == "find_unused" for t in server.TOOLS)
+    ctx = _ctx(make_mapped_repo(SRC))
+    out = server.tool_find_unused(ctx, {"kinds": "types"})
+    assert "g" in out
+
+
 def test_stats_handler(make_mapped_repo: RepoFactory) -> None:
     ctx = _ctx(make_mapped_repo(SRC))
     text = server.tool_stats(ctx, {"top": 3})
