@@ -20,6 +20,7 @@ dekko search "retries failed http requests"  # free-text relevance search
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
 dekko search "..." --scorer both             # fuses lexical+embedding; needs dekko[search]
 dekko workset                        # one bundle for your current change
+dekko workset --symbol Config --type-impact  # + type-usage + heritage impact, unioned
 dekko affected                       # test files impacted by your changes
 dekko diff                           # symbols changed since the map's commit (exit 0/1)
 dekko unused                         # symbols nothing calls (dead-code leads)
@@ -91,6 +92,24 @@ name lookup (an `impl` block's own file, not cross-file) — an `impl`
 block for a type defined in a different file, or a same-named type
 appearing twice in one file (two `mod` blocks), produces no heritage
 edge rather than a guess.
+
+`workset --symbol NAME --type-impact` widens the touched set beyond
+the target symbol's own direct callers: when the target is a
+class/interface/struct/trait, every type-usage site (`query type`) and
+every transitive implementor (`query subtypes --transitive`) is
+unioned in too — the full blast radius of changing a shared type's
+shape, not just its call sites. It's a no-op (not an error) on a
+non-type target — the widened set just equals the base set — and it
+requires `--symbol`: combined with a rev diff (or with no `--symbol`
+at all, which defaults to a rev diff) it's rejected with an error,
+since a changed-files diff has no single target type. Text output gets
+one extra `blast radius: N direct target, M type-usage sites, K
+implementors` line under the manifest; JSON output gets a
+`seed.blast_radius` object (`direct`/`type_usage`/`heritage` counts)
+plus an optional `seed.blast_radius_note` when the target's heritage
+has ambiguous inbound edges dekko couldn't resolve — the disclosed
+counts are then a conservative undercount, never an overcount, since
+ambiguous and external matches are excluded rather than guessed at.
 
 `--json` governs the shape of *successful* (exit 0) output only. Any
 error — an ambiguous match, a not-found symbol, a stale map under

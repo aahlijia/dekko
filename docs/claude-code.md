@@ -103,7 +103,7 @@ full guidance.
 | `get_supertypes` / `get_subtypes` | a type's extends/implements heritage, one hop or transitive |
 | `get_context_pack` | a symbol's neighborhood, budget-capped |
 | `outline` | a file's structure without bodies |
-| `workset` | one bundle for a change (`rev` or `symbol`) |
+| `workset` | one bundle for a change (`rev` or `symbol`; `type_impact` for a type's full blast radius) |
 | `summary` | repo digest |
 | `impacted_tests` | test files impacted by changes |
 | `check_ambiguous` | resolver-trust summary: where call resolution was ambiguous |

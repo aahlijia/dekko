@@ -538,6 +538,12 @@ def tool_workset(ctx: Context, args: dict) -> str:
     symbol = symbol if isinstance(symbol, str) and symbol else None
     if rev is not None and symbol is not None:
         raise ToolError("give 'rev' or 'symbol', not both")
+    type_impact = bool(args.get("type_impact", False))
+    if type_impact and symbol is None:
+        raise ToolError(
+            "'type_impact' requires 'symbol' (a rev diff has no single "
+            "target type)"
+        )
     budget = args.get("budget")
     budget = int(budget) if budget is not None else workset_mod.DEFAULT_BUDGET
     packs = int(args.get("packs", workset_mod.DEFAULT_PACKS))
@@ -552,6 +558,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
             as_json=False,
             no_regen=False,
             task=task,
+            type_impact=type_impact,
         )
     )
     if code != 0:
@@ -1171,7 +1178,11 @@ TOOLS: list[dict[str, Any]] = [
         "packs for the most central touched symbols under one token "
         "budget. One call replaces affected + N outlines + N packs — "
         "and grepping a diff for touched names then reading each file "
-        "whole to work it.",
+        "whole to work it. Set type_impact=true when the target is a "
+        "class/interface/struct/trait to also union in every type-usage "
+        "site and implementor into the touched set — the full blast "
+        "radius of changing a shared type's shape, not just its direct "
+        "callers.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1185,6 +1196,13 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Seed from a symbol instead of a diff "
                     "(name, Class.method, file.py:name); not with 'rev'",
+                },
+                "type_impact": {
+                    "type": "boolean",
+                    "description": "Also include type-usage sites and "
+                    "implementors in the touched set (only meaningful "
+                    "when 'symbol' is a class/interface/struct/trait; "
+                    "no-op otherwise). Requires 'symbol'. default false",
                 },
                 "budget": {
                     "type": "integer",

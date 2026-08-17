@@ -570,6 +570,16 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "file.py:name); mutually exclusive with REV",
     )
     p_workset.add_argument(
+        "--type-impact",
+        action="store_true",
+        help="when the target is a class/interface/struct/trait: also "
+        "union in every type-usage site (query type) and every "
+        "implementor (query subtypes --transitive) into the touched "
+        "set, not just direct callers — the full blast radius of "
+        "changing a shared type's shape; requires --symbol, no-op "
+        "(not an error) on a non-type symbol",
+    )
+    p_workset.add_argument(
         "--budget",
         type=int,
         default=workset_mod.DEFAULT_BUDGET,
@@ -1434,9 +1444,16 @@ def run_affected(args: argparse.Namespace) -> int:
 
 
 def run_workset(args: argparse.Namespace) -> int:
-    """Handle ``dekko workset [REV] | --symbol NAME``."""
+    """Handle ``dekko workset [REV] | --symbol NAME [--type-impact]``."""
     if args.symbol is not None and args.rev is not None:
         print("dekko: give a REV or --symbol, not both", file=sys.stderr)
+        return workset_mod.EXIT_ERROR
+    if args.type_impact and args.symbol is None:
+        print(
+            "dekko: --type-impact requires --symbol (a rev diff has no "
+            "single target type)",
+            file=sys.stderr,
+        )
         return workset_mod.EXIT_ERROR
     root = Path(args.root).resolve()
     task = relevance.task_context(args.task, root) if args.task else None
@@ -1450,6 +1467,7 @@ def run_workset(args: argparse.Namespace) -> int:
         no_regen=args.no_regen,
         task=task,
         jobs=repo_ops.resolve_workers(getattr(args, "jobs", 1)),
+        type_impact=args.type_impact,
     )
 
 

@@ -894,6 +894,51 @@ def _run_type_not_found(index: MapIndex, needle: str) -> int:
     return EXIT_NOT_FOUND
 
 
+def type_usage_rows(
+    index: MapIndex, needle: str, exact: bool = False
+) -> list[tuple[Symbol, str, str | None, str]]:
+    """Every function/method row using ``needle`` as a param/return type.
+
+    The reusable core behind ``_run_type_usage`` (``dekko query type``/
+    ``find_type_usages``) — factored out so a second call site
+    (``workset``'s ``--type-impact``) can reuse the same matching logic
+    without duplicating it. Walks every ``function``/``method``
+    symbol's ``returns`` and ``params[].type`` directly — a pure read
+    over data already on disk in ``map.json``, no resolver involvement.
+    Only ``function``/``method`` symbols ever carry non-empty
+    ``params``/``returns`` (see ``extractor._collect_definitions``), so
+    this cannot answer "what struct fields are typed X" — that's a
+    real extraction-pipeline gap, not a matching-strategy shortcoming.
+
+    Args:
+        index: Loaded map index.
+        needle: Type name to search for.
+        exact: Match the literal stored type text instead of a bare
+            identifier token inside wrapper syntax.
+
+    Returns:
+        ``(symbol, usage, param_name, raw_type)`` rows — ``usage`` is
+        ``"param"`` or ``"return"``, ``param_name`` is ``None`` for a
+        return-type row — sorted by relevance (most central/production
+        code first). A symbol appears once per matching param/return,
+        so it can appear more than once (e.g. a function that both
+        takes and returns the same type).
+    """
+    rows: list[tuple[Symbol, str, str | None, str]] = []
+    for sym in index.symbols_by_id.values():
+        if sym.kind not in ("function", "method"):
+            continue
+        if _type_matches(sym.returns, needle, exact):
+            rows.append((sym, "return", None, sym.returns))
+        rows.extend(
+            (sym, "param", p.name, p.type)
+            for p in sym.params
+            if _type_matches(p.type, needle, exact)
+        )
+    rows.sort(key=lambda r: relevance_key(r[0], index))
+    return rows
+
+
 def _run_type_usage(
     index: MapIndex,
     needle: str,
@@ -903,15 +948,6 @@ def _run_type_usage(
     budget: int | None,
 ) -> tuple[int, Meter | None]:
     """Execute the type action: functions/methods taking/returning needle.
-
-    Walks every ``function``/``method`` symbol's ``returns`` and
-    ``params[].type`` directly — a pure read over data already on disk
-    in ``map.json``, no resolver involvement. Only ``function``/``method``
-    symbols ever carry non-empty ``params``/``returns`` (see
-    ``extractor._collect_definitions``), so this cannot answer "what
-    struct fields are typed X" — that's a real extraction-pipeline gap,
-    not a matching-strategy shortcoming, and is documented rather than
-    silently under-covered.
 
     Args:
         index: Loaded map index.
@@ -926,20 +962,9 @@ def _run_type_usage(
         ``(exit_code, meter)`` — meter is ``None`` for JSON output or a
         not-found result.
     """
-    rows: list[tuple[Symbol, str, str | None, str]] = []
-    for sym in index.symbols_by_id.values():
-        if sym.kind not in ("function", "method"):
-            continue
-        if _type_matches(sym.returns, needle, exact):
-            rows.append((sym, "return", None, sym.returns))
-        rows.extend(
-            (sym, "param", p.name, p.type)
-            for p in sym.params
-            if _type_matches(p.type, needle, exact)
-        )
+    rows = type_usage_rows(index, needle, exact)
     if not rows:
         return _run_type_not_found(index, needle), None
-    rows.sort(key=lambda r: relevance_key(r[0], index))
     if as_json:
         entries = [
             _type_usage_entry(index, sym, usage, pname, raw)
@@ -1013,11 +1038,14 @@ def _one_hop_heritage(
     return out
 
 
-def _walk_heritage(
+def walk_heritage(
     index: MapIndex, start: str, direction: str, relation: str | None
 ) -> list[tuple[Symbol, str, int]]:
     """BFS collect every ancestor/descendant of ``start``, depth-tagged.
 
+    Public (no leading underscore) since ``workset``'s ``--type-impact``
+    reuses this directly as a second call site, not just
+    ``_run_heritage`` (``dekko query supertypes``/``subtypes``).
     Collects every ancestor (``direction="out"``) or descendant
     (``direction="in"``) of ``start``, each tagged with its hop depth
     and the relation of the edge that discovered it. Cycle-safe (a
@@ -1140,7 +1168,7 @@ def _run_heritage(
     heritage toward ``sym``) — the same inbound/outbound split
     ``callers``/``callees`` already use for the call graph.
     ``--transitive``/``relation="..."`` select a full BFS ancestor/
-    descendant walk (``_walk_heritage``) versus one hop
+    descendant walk (``walk_heritage``) versus one hop
     (``_one_hop_heritage``); a relation filter applies at every hop.
 
     External heritage (``heritage_external_out``, ``supertypes`` only —
@@ -1158,7 +1186,7 @@ def _run_heritage(
     """
     direction = _heritage_direction(action)
     hits = (
-        _walk_heritage(index, sym.id, direction, relation)
+        walk_heritage(index, sym.id, direction, relation)
         if transitive
         else _one_hop_heritage(index, sym.id, direction, relation)
     )

@@ -8,8 +8,12 @@ import pytest
 
 from dekko.integrations import cli
 from dekko.analysis import diff
+from dekko.analysis import workset
 from dekko.render import mapfile
 from dekko.integrations import server
+from dekko.core.model import CallGraph, FileMap, Symbol
+
+from conftest import RepoFactory
 
 # core() is changed by _change_core; called directly by test_core,
 # transitively (via wrapper) by test_wrapper, import-only by test_ref.
@@ -375,3 +379,244 @@ def test_workset_registered() -> None:
     assert "workset" in cli.SUBCOMMANDS
     names = {t["name"] for t in server.TOOLS}
     assert "workset" in names
+
+
+def test_workset_schema_has_type_impact_property() -> None:
+    tool = next(t for t in server.TOOLS if t["name"] == "workset")
+    assert "type_impact" in tool["inputSchema"]["properties"]
+
+
+# --type-impact fixture: Config (the target type) has one implementor
+# (ConfigManager, same-file `extends`) and one type-usage site
+# (start(), which both takes and returns Config -- two matching rows
+# for one symbol, the overlap/dedup case). other() uses neither.
+TYPE_IMPACT_BASE = {
+    "config.py": (
+        "class Config:\n    pass\n\n\nclass ConfigManager(Config):\n    pass\n"
+    ),
+    "app.py": (
+        "from config import Config\n"
+        "\n"
+        "\n"
+        "def start(cfg: Config) -> Config:\n"
+        "    return cfg\n"
+        "\n"
+        "\n"
+        "def other() -> int:\n"
+        "    return 1\n"
+    ),
+}
+
+
+def test_type_impact_widens_touched_set(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TYPE_IMPACT_BASE)
+    code = cli.main(
+        [
+            "workset",
+            "--symbol",
+            "Config",
+            "--type-impact",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "symbol config.py:Config (+ type-impact)" in out
+    # Config itself + ConfigManager (heritage) + start (type-usage,
+    # once despite matching both param and return) = 3 symbols.
+    assert "3 symbols" in out
+    assert "blast radius:" in out
+    assert "1 direct target" in out
+    assert "2 type-usage sites" in out
+    assert "1 implementor" in out
+    assert "config.py" in out
+    assert "app.py" in out
+
+
+def test_type_impact_on_non_type_target_is_noop(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TYPE_IMPACT_BASE)
+    code = cli.main(
+        [
+            "workset",
+            "--symbol",
+            "other",
+            "--type-impact",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["seed"]["touched_symbols"] == 1
+    assert doc["seed"]["blast_radius"] == {
+        "direct": 1,
+        "type_usage": 0,
+        "heritage": 0,
+    }
+
+
+def test_type_impact_requires_symbol(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    code = cli.main(["workset", "--type-impact", "--root", str(root)])
+    assert code == 2
+    assert "requires --symbol" in capsys.readouterr().err
+
+
+def test_type_impact_with_explicit_rev_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    code = cli.main(["workset", "HEAD", "--type-impact", "--root", str(root)])
+    assert code == 2
+    assert "requires --symbol" in capsys.readouterr().err
+
+
+def test_type_impact_json_shape(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TYPE_IMPACT_BASE)
+    code = cli.main(
+        [
+            "workset",
+            "--symbol",
+            "Config",
+            "--type-impact",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["seed"]["blast_radius"] == {
+        "direct": 1,
+        "type_usage": 2,
+        "heritage": 1,
+    }
+    assert "blast_radius_note" not in doc["seed"]
+
+
+def test_type_impact_budget_capping_at_scale(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A widely-used shared type -- many functions taking it as a
+    # parameter -- must still fit_to_budget cleanly at the larger scale
+    # --type-impact can produce, not just the pre-existing
+    # single-symbol case (design doc's own edge-case callout).
+    files = {"config.py": "class Config:\n    pass\n"}
+    for i in range(60):
+        files[f"user_{i}.py"] = (
+            "from config import Config\n"
+            "\n"
+            "\n"
+            f"def use_{i}(cfg: Config) -> None:\n"
+            "    pass\n"
+        )
+    root = make_mapped_repo(files)
+    code = cli.main(
+        [
+            "workset",
+            "--symbol",
+            "Config",
+            "--type-impact",
+            "--budget",
+            "150",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["seed"]["blast_radius"]["type_usage"] == 60
+    assert doc["meta"]["truncated_by"] is not None
+
+
+def test_mcp_workset_type_impact(make_mapped_repo: RepoFactory) -> None:
+    root = make_mapped_repo(TYPE_IMPACT_BASE)
+    ctx = server.Context(default_root=root, no_regen=False)
+    msg = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "workset",
+            "arguments": {"symbol": "Config", "type_impact": True},
+        },
+    }
+    result = server.handle(ctx, msg)["result"]
+    assert not result["isError"]
+    text = result["content"][0]["text"]
+    assert "(+ type-impact)" in text
+    assert "blast radius:" in text
+
+
+def test_mcp_workset_type_impact_requires_symbol(tmp_path: Path) -> None:
+    root = _repo(tmp_path, BASE)
+    ctx = server.Context(default_root=root, no_regen=False)
+    msg = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "workset", "arguments": {"type_impact": True}},
+    }
+    result = server.handle(ctx, msg)["result"]
+    assert result["isError"]
+    assert "requires" in result["content"][0]["text"]
+
+
+def _cls(path: str, name: str, line: int = 1) -> Symbol:
+    return Symbol(
+        id=f"{path}::{name}",
+        name=name,
+        qualname=name,
+        kind="class",
+        path=path,
+        language="python",
+        start_line=line,
+        end_line=line + 1,
+    )
+
+
+def test_type_impact_discloses_ambiguous_heritage_undercount() -> None:
+    # Two same-named "Base" candidates across files make any subtype
+    # extending bare "Base" ambiguous -- unresolvable, so it never
+    # reaches heritage_in and would otherwise silently undercount the
+    # blast radius. Built directly (bypassing a real parse), mirroring
+    # test_query_heritage.py's own _ambiguous_external_index fixture,
+    # since there's no source text that reliably reproduces a
+    # resolver-level ambiguity through the real extractor/resolver
+    # pipeline in a unit test.
+    files = [
+        FileMap(
+            path="a.py", language="python", symbols=[_cls("a.py", "Widget")]
+        ),
+        FileMap(
+            path="b.py", language="python", symbols=[_cls("b.py", "Base")]
+        ),
+        FileMap(
+            path="c.py", language="python", symbols=[_cls("c.py", "Base")]
+        ),
+    ]
+    graph = CallGraph(
+        heritage_ambiguous=[
+            ("a.py::Widget", "Base", ["b.py::Base", "c.py::Base"])
+        ]
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    seed, _candidates = workset.seed_from_symbol(
+        index, "b.py:Base", type_impact=True
+    )
+    assert seed is not None
+    assert seed.blast_radius is not None
+    assert seed.blast_radius.note is not None
+    assert "ambiguously" in seed.blast_radius.note
+    assert "undercount" in seed.blast_radius.note
