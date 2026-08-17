@@ -39,12 +39,11 @@ def _resolve(doc: dict, ref: int) -> str:
     return doc["ids"][ref]
 
 
-def test_doc_version_is_5(make_mapped_repo: RepoFactory) -> None:
-    # Bumped 4 -> 5 for the caller/callee/candidate id-interning table
-    # (round-15 plan: ambiguous-edge duplication dominated map.json
-    # size on large, ambiguity-heavy repos).
+def test_doc_version_is_6(make_mapped_repo: RepoFactory) -> None:
+    # Bumped 5 -> 6 for the type/interface heritage graph (extends/
+    # implements edges, plus their ambiguous/external buckets).
     doc = _map_doc(make_mapped_repo(SRC))
-    assert doc["version"] == 5
+    assert doc["version"] == 6
 
 
 def test_edges_carry_call_site_lines(make_mapped_repo: RepoFactory) -> None:

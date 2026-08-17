@@ -15,6 +15,7 @@ import io
 import json
 import re
 import sys
+from collections import deque
 from contextlib import redirect_stdout
 
 from dekko.classify import is_test_path, relevance_key
@@ -27,7 +28,25 @@ EXIT_OK = 0
 EXIT_NOT_FOUND = 3
 EXIT_AMBIGUOUS = 4
 
-ACTIONS = ("callers", "callees", "symbol", "file", "uses", "type")
+ACTIONS = (
+    "callers",
+    "callees",
+    "symbol",
+    "file",
+    "uses",
+    "type",
+    "supertypes",
+    "subtypes",
+)
+
+# Valid ``--relation``/``relation=`` filter values for supertypes/
+# subtypes. ``"impl"`` (Rust) and ``"embeds"`` (Go) are accepted here
+# for forward compatibility with Phase 2 (not yet implemented — no
+# Phase 1 extractor ever produces them), matching the design doc's
+# documented CLI/MCP shape; filtering by either today always yields an
+# empty result set, same as filtering by any other relation a repo's
+# languages simply don't produce.
+HERITAGE_RELATIONS = ("extends", "implements", "impl", "embeds")
 
 # Default token cap for relation-shaped actions (callers/callees/uses)
 # when the caller passes no budget. Without this, a high-fan-in
@@ -38,7 +57,14 @@ ACTIONS = ("callers", "callees", "symbol", "file", "uses", "type")
 # Callers can always pass a larger budget explicitly.
 DEFAULT_RELATION_BUDGET = 800
 
-_BUDGETED_ACTIONS = ("callers", "callees", "uses", "type")
+_BUDGETED_ACTIONS = (
+    "callers",
+    "callees",
+    "uses",
+    "type",
+    "supertypes",
+    "subtypes",
+)
 
 # Identifier-token pattern for the default (non-``--exact``) ``type``
 # match: the queried name must appear as a whole token inside the raw,
@@ -938,6 +964,263 @@ def _run_type_usage(
     return EXIT_OK, _emit_lines(lines, budget, limit)
 
 
+def _heritage_direction(action: str) -> str:
+    """``"out"`` for ``supertypes`` (walk what a type points at),
+    ``"in"`` for ``subtypes`` (walk what points at a type) — mirrors
+    ``calls_out``/``calls_in``'s own directional split for
+    callers/callees."""
+    return "out" if action == "supertypes" else "in"
+
+
+def _heritage_adjacency(
+    index: MapIndex, direction: str
+) -> dict[str, list[str]]:
+    """The right adjacency table for a heritage walk direction."""
+    return index.heritage_out if direction == "out" else index.heritage_in
+
+
+def _heritage_relation_between(
+    index: MapIndex, direction: str, node: str, other: str
+) -> str:
+    """The relation of one heritage edge, defaulting to ``"extends"``.
+
+    ``index.heritage_relation`` is always keyed ``(subtype, supertype)``
+    regardless of which direction a walk is traveling — this flips the
+    lookup key for ``direction == "in"`` so callers never need to know
+    that detail. The default only matters for a map written before
+    doc version 6 (no ``heritage_relation`` entries at all), where
+    ``"extends"`` is the least-surprising fallback (every Phase 1
+    language's plain-class case).
+    """
+    key = (node, other) if direction == "out" else (other, node)
+    return index.heritage_relation.get(key, "extends")
+
+
+def _one_hop_heritage(
+    index: MapIndex, start: str, direction: str, relation: str | None
+) -> list[tuple[Symbol, str, int]]:
+    """Direct heritage neighbors of ``start``, each tagged depth 1."""
+    adjacency = _heritage_adjacency(index, direction)
+    out: list[tuple[Symbol, str, int]] = []
+    for nid in adjacency.get(start, []):
+        rel = _heritage_relation_between(index, direction, start, nid)
+        if relation and rel != relation:
+            continue
+        sym = index.symbols_by_id.get(nid)
+        if sym is not None:
+            out.append((sym, rel, 1))
+    out.sort(key=lambda item: relevance_key(item[0], index))
+    return out
+
+
+def _walk_heritage(
+    index: MapIndex, start: str, direction: str, relation: str | None
+) -> list[tuple[Symbol, str, int]]:
+    """BFS collect every ancestor/descendant of ``start``, depth-tagged.
+
+    Collects every ancestor (``direction="out"``) or descendant
+    (``direction="in"``) of ``start``, each tagged with its hop depth
+    and the relation of the edge that discovered it. Cycle-safe (a
+    ``seen`` set, matching ``trace.py``'s own BFS pattern) even though
+    a real heritage graph should never cycle — a resolver
+    misattribution is the only way one could, and this must not hang
+    if it happens. Diamond inheritance (a symbol reachable through two
+    different paths) is deduplicated by ``seen``: it appears once, at
+    its first-discovered (shallowest) depth, never twice.
+
+    Args:
+        index: Loaded map index.
+        start: Symbol id to walk from.
+        direction: ``"out"`` (supertypes) or ``"in"`` (subtypes).
+        relation: Restrict the walk to edges of this relation only, or
+            ``None`` for every relation.
+
+    Returns:
+        ``(symbol, relation, depth)`` triples in BFS (shallowest-first)
+        order — depth-grouped, the order the text renderer indents by.
+    """
+    adjacency = _heritage_adjacency(index, direction)
+    seen = {start}
+    frontier: deque[tuple[str, int]] = deque([(start, 0)])
+    out: list[tuple[Symbol, str, int]] = []
+    while frontier:
+        node, depth = frontier.popleft()
+        for nid in adjacency.get(node, []):
+            rel = _heritage_relation_between(index, direction, node, nid)
+            if relation and rel != relation:
+                continue
+            if nid in seen or nid not in index.symbols_by_id:
+                continue
+            seen.add(nid)
+            out.append((index.symbols_by_id[nid], rel, depth + 1))
+            frontier.append((nid, depth + 1))
+    return out
+
+
+def _heritage_row(sym: Symbol, relation: str, depth: int) -> str:
+    """One text row for a heritage hit, indented by hop depth."""
+    indent = "  " * (depth - 1)
+    return f"{indent}{_sym_line(sym)}  [{relation}]"
+
+
+def _heritage_entry(
+    index: MapIndex, sym: Symbol, relation: str, depth: int
+) -> dict:
+    """One JSON entry for a heritage hit."""
+    entry = _sym_json(index, sym)
+    entry["relation"] = relation
+    entry["depth"] = depth
+    return entry
+
+
+def _run_heritage_wrong_kind(sym: Symbol) -> int:
+    """Report a resolved target that isn't a type-kind symbol."""
+    print(
+        f"dekko: '{sym.id}' is a {sym.kind}, not a type; "
+        "supertypes/subtypes only apply to class/interface/enum/"
+        "struct/record/trait symbols",
+        file=sys.stderr,
+    )
+    return EXIT_NOT_FOUND
+
+
+def _print_heritage_json(
+    index: MapIndex,
+    action: str,
+    sym: Symbol,
+    hits: list[tuple[Symbol, str, int]],
+    externals: list[ExternalCall],
+    transitive: bool,
+    relation: str | None,
+    budget: int | None,
+    limit: int,
+    coverage: str | None,
+    ambig_in: int,
+    ambig_out: int,
+) -> None:
+    """JSON rendering for ``_run_heritage`` (supertypes/subtypes)."""
+    entries = [_heritage_entry(index, s, rel, depth) for s, rel, depth in hits]
+    entries.extend(
+        {"external": True, "text": ext.callee, "lines": ext.lines}
+        for ext in externals
+    )
+    kept, meter = _fit_entries(entries, budget, limit)
+    doc = {
+        "action": action,
+        "target": sym.id,
+        "transitive": transitive,
+        "results": kept,
+        "meta": meter.as_dict(),
+    }
+    if relation:
+        doc["relation"] = relation
+    if coverage:
+        doc["coverage_warning"] = coverage
+    if ambig_in:
+        doc["ambiguous_in"] = ambig_in
+    if ambig_out:
+        doc["ambiguous_out"] = ambig_out
+    print(json.dumps(doc, indent=2))
+
+
+def _run_heritage(
+    index: MapIndex,
+    action: str,
+    sym: Symbol,
+    transitive: bool,
+    relation: str | None,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute the supertypes/subtypes action for a resolved type symbol.
+
+    ``supertypes`` walks ``heritage_out`` (what ``sym`` itself declares
+    heritage toward); ``subtypes`` walks ``heritage_in`` (what declares
+    heritage toward ``sym``) — the same inbound/outbound split
+    ``callers``/``callees`` already use for the call graph.
+    ``--transitive``/``relation="..."`` select a full BFS ancestor/
+    descendant walk (``_walk_heritage``) versus one hop
+    (``_one_hop_heritage``); a relation filter applies at every hop.
+
+    External heritage (``heritage_external_out``, ``supertypes`` only —
+    a subtype relates outward to real or external supertypes, but
+    nothing ever points *in* from an id-less external symbol) and
+    ambiguous-heritage counts (``heritage_ambiguous_out`` for
+    ``supertypes``, ``heritage_ambiguous_in`` for ``subtypes``) are
+    disclosed for ``sym`` itself only — not recursively for
+    intermediate nodes discovered by a transitive walk, since an
+    external supertype has no symbol id to continue walking from and
+    keeping the disclosure scoped to the query's own target mirrors
+    how ``_run_relation`` already scopes ``ambig_in``/``ambig_out`` to
+    the target alone rather than every hop of a (non-existent, for
+    calls) multi-hop traversal.
+    """
+    direction = _heritage_direction(action)
+    hits = (
+        _walk_heritage(index, sym.id, direction, relation)
+        if transitive
+        else _one_hop_heritage(index, sym.id, direction, relation)
+    )
+    externals = (
+        index.heritage_external_out.get(sym.id, [])
+        if action == "supertypes"
+        else []
+    )
+    ambig_out = (
+        len(index.heritage_ambiguous_out.get(sym.id, []))
+        if action == "supertypes"
+        else 0
+    )
+    ambig_in = (
+        len(index.heritage_ambiguous_in.get(sym.id, []))
+        if action == "subtypes"
+        else 0
+    )
+    coverage = _coverage_note(index)
+    if as_json:
+        _print_heritage_json(
+            index,
+            action,
+            sym,
+            hits,
+            externals,
+            transitive,
+            relation,
+            budget,
+            limit,
+            coverage,
+            ambig_in,
+            ambig_out,
+        )
+        return EXIT_OK, None
+    lines: list[str] = []
+    if transitive and hits:
+        lines.append(f"{_sym_line(sym)}  [target]")
+    lines += [_heritage_row(s, rel, depth) for s, rel, depth in hits]
+    for ext in externals:
+        for line in ext.lines or [sym.start_line]:
+            lines.append(f"  {sym.path}:{line}  (external) {ext.callee}")
+    if ambig_out:
+        print(
+            f"  note: {ambig_out} additional supertype name(s) "
+            "resolved ambiguously — not counted here",
+            file=sys.stderr,
+        )
+    if ambig_in:
+        print(
+            f"  note: {ambig_in} additional subtype(s) named this "
+            "type ambiguously — not counted here",
+            file=sys.stderr,
+        )
+    if not lines:
+        print(f"(no {action} of {sym.id})")
+        if coverage:
+            print(f"  note: {coverage}", file=sys.stderr)
+        return EXIT_OK, None
+    return EXIT_OK, _emit_lines(lines, budget, limit)
+
+
 _TYPE_ZERO_FAN_NOTE = (
     "call/reference edges only — a type used solely as a parameter, "
     "field, or return-type annotation reports 0/0 here even when it's "
@@ -1053,6 +1336,8 @@ def _dispatch(
     sites: bool,
     notes: bool,
     exact: bool,
+    transitive: bool,
+    relation: str | None,
 ) -> tuple[int, Meter | None]:
     """Route one query action to its executor."""
     if action == "file":
@@ -1067,6 +1352,12 @@ def _dispatch(
         return report_unresolved(target, candidates, index), None
     if action == "symbol":
         return _run_symbol(index, sym, as_json, notes)
+    if action in ("supertypes", "subtypes"):
+        if sym.kind not in TYPE_KINDS:
+            return _run_heritage_wrong_kind(sym), None
+        return _run_heritage(
+            index, action, sym, transitive, relation, as_json, limit, budget
+        )
     return _run_relation(index, action, sym, as_json, limit, budget, sites)
 
 
@@ -1080,6 +1371,8 @@ def run(
     notes: bool = True,
     budget: int | None = None,
     exact: bool = False,
+    transitive: bool = False,
+    relation: str | None = None,
 ) -> int:
     """Execute one query action against a loaded index.
 
@@ -1097,16 +1390,21 @@ def run(
         notes: Show a symbol's notes on its card (``symbol`` action).
         budget: Approximate token budget for the result rows, or
             ``None``. Lowest-relevance rows are dropped first. For
-            ``callers``/``callees``/``uses``/``type``, ``None`` falls
-            back to ``DEFAULT_RELATION_BUDGET`` rather than going
-            unbounded — a high-fan-in symbol's full row list is
-            otherwise capped only by ``limit``'s row count, which can
-            still render thousands of tokens (the CLI and MCP paths
-            previously diverged here; both now share this one
-            fallback).
+            ``callers``/``callees``/``uses``/``type``/``supertypes``/
+            ``subtypes``, ``None`` falls back to
+            ``DEFAULT_RELATION_BUDGET`` rather than going unbounded —
+            a high-fan-in symbol's full row list is otherwise capped
+            only by ``limit``'s row count, which can still render
+            thousands of tokens (the CLI and MCP paths previously
+            diverged here; both now share this one fallback).
         exact: For ``type``, match the stored type text exactly instead
             of a bare identifier token inside wrapper syntax (e.g.
             ``Optional[Config]``).
+        transitive: For ``supertypes``/``subtypes``, walk the full
+            ancestor/descendant DAG instead of one hop.
+        relation: For ``supertypes``/``subtypes``, restrict results to
+            one heritage relation (``"extends"``/``"implements"``/
+            ``"impl"``/``"embeds"``) — see ``HERITAGE_RELATIONS``.
 
     Returns:
         Process exit code.
@@ -1126,6 +1424,8 @@ def run(
             sites,
             notes,
             exact,
+            transitive,
+            relation,
         )
     text = buf.getvalue()
     sys.stdout.write(text)

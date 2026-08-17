@@ -10,6 +10,11 @@ dekko query callers resolve --sites  # who calls resolve, with call sites
 dekko query callees main             # what does main call?
 dekko query uses Path                # who references the external name Path?
 dekko query type Config              # what takes/returns Config? (--exact for literal match)
+dekko query supertypes BufferDiff    # what BufferDiff extends/implements (one hop)
+dekko query supertypes BufferDiff --transitive  # full ancestor chain/DAG
+dekko query subtypes Serializable    # what directly extends/implements Serializable
+dekko query subtypes Serializable --transitive  # every direct + indirect implementor
+dekko query subtypes Serializable --relation implements  # filter to one relation kind
 dekko context run_map --budget 1500  # minimal context pack for an edit
 dekko search "retries failed http requests"  # free-text relevance search
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
@@ -53,6 +58,29 @@ Default matching is identifier-token based (`Config` matches
 `Optional[Config]`, `Vec<Config>`, `Config | None`, but not
 `ConfigManager`); pass `--exact` to match the stored type text
 verbatim instead.
+
+`query supertypes`/`subtypes` cover declared `extends`/`implements`
+heritage — Python, JavaScript, TypeScript, and Java as of this
+writing. Rust (`impl Trait for Type`), C++ (`class Foo : public
+Base`), and Go (struct embedding) are not yet extracted (planned
+Phase 2 in the design doc, unimplemented). Go's structural interface
+satisfaction (no `implements` keyword at all — any type whose method
+set matches is a satisfier) has no declaring syntax to extract in the
+first place; answering "what implements this Go interface" for real
+needs a method-signature type-checking pass, a different feature in
+kind, not a language gap in this one. `--transitive` walks the full
+ancestor (`supertypes`) or descendant (`subtypes`) DAG — Python/C++
+multiple inheritance and multi-interface implementation both fan out,
+not a single chain — deduplicating diamond-inheritance repeats to
+each node's shallowest depth. `--relation {extends,implements}` (Java/
+TS distinguish the two; Python has only `extends`) filters to one
+relation kind; `impl`/`embeds` are accepted as valid values for
+forward compatibility with the unimplemented Rust/Go phase but never
+appear in current output. An external base class (`class MyModel
+(BaseModel):` from a third-party package) shows as a labeled
+`(external)` row in `supertypes` output rather than being silently
+dropped — a class extending a framework base is a common, expected
+case, not a corner case worth hiding.
 
 `--json` governs the shape of *successful* (exit 0) output only. Any
 error — an ambiguous match, a not-found symbol, a stale map under

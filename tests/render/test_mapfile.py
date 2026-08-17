@@ -6,7 +6,14 @@ from pathlib import Path
 import pytest
 
 from dekko.render import mapfile
-from dekko.core.model import CallGraph, Edge, FileMap, Symbol
+from dekko.core.model import (
+    CallGraph,
+    Edge,
+    ExternalCall,
+    FileMap,
+    HeritageEdge,
+    Symbol,
+)
 
 from conftest import RepoFactory
 
@@ -37,7 +44,7 @@ def test_load_round_trip(make_mapped_repo: RepoFactory) -> None:
 def test_provenance_written(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(CHAIN)
     doc = json.loads((root / ".dekko" / "map.json").read_text())
-    assert doc["version"] == 5
+    assert doc["version"] == 6
     prov = doc["provenance"]
     assert prov["tool_version"]
     assert prov["spec_hash"]
@@ -455,12 +462,12 @@ def test_load_map_works_without_orjson(
     assert mapfile.load_provenance(root) == index.provenance
 
 
-def _sym(path: str, name: str) -> Symbol:
+def _sym(path: str, name: str, kind: str = "function") -> Symbol:
     return Symbol(
         id=f"{path}::{name}",
         name=name,
         qualname=name,
-        kind="function",
+        kind=kind,
         path=path,
         language="python",
         start_line=1,
@@ -697,3 +704,155 @@ def test_atomic_write_bytes_never_exposes_partial_content(
     mapfile.atomic_write_bytes(target, b"new-complete-content")
     after = target.read_bytes()
     assert after == b"new-complete-content"
+
+
+def test_index_from_maps_builds_heritage_adjacency() -> None:
+    files = [
+        FileMap(
+            path="a.py",
+            language="python",
+            symbols=[_sym("a.py", "Dog", "class")],
+        ),
+        FileMap(
+            path="b.py",
+            language="python",
+            symbols=[_sym("b.py", "Animal", "class")],
+        ),
+    ]
+    graph = CallGraph(
+        heritage=[
+            HeritageEdge(
+                subtype="a.py::Dog",
+                supertype="b.py::Animal",
+                relation="extends",
+                lines=[3],
+            )
+        ]
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    assert index.heritage_out["a.py::Dog"] == ["b.py::Animal"]
+    assert index.heritage_in["b.py::Animal"] == ["a.py::Dog"]
+    assert index.heritage_lines[("a.py::Dog", "b.py::Animal")] == [3]
+    assert index.heritage_relation[("a.py::Dog", "b.py::Animal")] == "extends"
+
+
+def test_index_from_maps_builds_heritage_ambiguous() -> None:
+    files = [
+        FileMap(
+            path="a.py",
+            language="python",
+            symbols=[_sym("a.py", "Dog", "class")],
+        ),
+        FileMap(
+            path="b.py",
+            language="python",
+            symbols=[_sym("b.py", "Base", "class")],
+        ),
+        FileMap(
+            path="c.py",
+            language="python",
+            symbols=[_sym("c.py", "Base", "class")],
+        ),
+    ]
+    graph = CallGraph(
+        heritage_ambiguous=[
+            ("a.py::Dog", "Base", ["b.py::Base", "c.py::Base"])
+        ]
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    assert index.heritage_ambiguous_out["a.py::Dog"] == ["Base"]
+    assert index.heritage_ambiguous_in["b.py::Base"] == [("a.py::Dog", "Base")]
+    assert index.heritage_ambiguous_in["c.py::Base"] == [("a.py::Dog", "Base")]
+
+
+def test_index_from_maps_builds_heritage_external_out() -> None:
+    files = [
+        FileMap(
+            path="a.py",
+            language="python",
+            symbols=[_sym("a.py", "MyModel", "class")],
+        )
+    ]
+    graph = CallGraph(
+        heritage_external=[
+            ExternalCall(
+                caller="a.py::MyModel",
+                callee="pydantic.BaseModel",
+                lines=[1],
+            )
+        ]
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    exts = index.heritage_external_out["a.py::MyModel"]
+    assert len(exts) == 1
+    assert exts[0].callee == "pydantic.BaseModel"
+
+
+def test_load_map_reads_heritage(make_mapped_repo: RepoFactory) -> None:
+    root = make_mapped_repo(
+        {
+            "base.py": "class Animal:\n    pass\n",
+            "dog.py": (
+                "from base import Animal\n\n\nclass Dog(Animal):\n    pass\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.heritage_out["dog.py::Dog"] == ["base.py::Animal"]
+    assert index.heritage_in["base.py::Animal"] == ["dog.py::Dog"]
+    assert index.heritage_relation[("dog.py::Dog", "base.py::Animal")] == (
+        "extends"
+    )
+
+
+def test_without_tests_drops_heritage_touching_test_paths() -> None:
+    files = [
+        FileMap(
+            path="a.py",
+            language="python",
+            symbols=[_sym("a.py", "Dog", "class")],
+        ),
+        FileMap(
+            path="b.py",
+            language="python",
+            symbols=[_sym("b.py", "Animal", "class")],
+        ),
+        FileMap(
+            path="tests/test_a.py",
+            language="python",
+            symbols=[_sym("tests/test_a.py", "TestDog", "class")],
+        ),
+    ]
+    graph = CallGraph(
+        heritage=[
+            HeritageEdge(
+                subtype="a.py::Dog",
+                supertype="b.py::Animal",
+                relation="extends",
+                lines=[1],
+            ),
+            HeritageEdge(
+                subtype="tests/test_a.py::TestDog",
+                supertype="b.py::Animal",
+                relation="extends",
+                lines=[1],
+            ),
+        ],
+        heritage_ambiguous=[
+            ("tests/test_a.py::TestDog", "Animal", ["b.py::Animal"])
+        ],
+        heritage_external=[
+            ExternalCall(
+                caller="tests/test_a.py::TestDog",
+                callee="unittest.TestCase",
+                lines=[1],
+            )
+        ],
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    filtered = index.without_tests()
+    assert filtered.heritage_out == {"a.py::Dog": ["b.py::Animal"]}
+    assert filtered.heritage_in == {"b.py::Animal": ["a.py::Dog"]}
+    assert "tests/test_a.py::TestDog" not in filtered.heritage_ambiguous_out
+    assert filtered.heritage_external_out == {}

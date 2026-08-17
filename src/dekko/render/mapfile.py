@@ -13,7 +13,7 @@ import re
 import subprocess
 import tempfile
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -40,7 +40,7 @@ try:
 except ImportError:  # pragma: no cover - exercised in stdlib-only envs
     orjson = None  # type: ignore[assignment]
 
-MAP_DOC_VERSION = 5
+MAP_DOC_VERSION = 6
 _MAP_DIR = ".dekko"
 
 
@@ -117,7 +117,8 @@ def _json_dumps(obj: object) -> bytes:
 def build_id_table(graph: CallGraph) -> tuple[list[str], dict[str, int]]:
     """First-appearance-order intern table for id strings the writer
     repeats across ``"edges"``/``"ambiguous"``/``"external"``/
-    ``"referenced"``.
+    ``"referenced"``/``"heritage"``/``"heritage_ambiguous"``/
+    ``"heritage_external"``.
 
     ``"ambiguous"`` entries in particular can each name dozens to
     thousands of candidate ids that also appear, verbatim, in many
@@ -160,7 +161,29 @@ def build_id_table(graph: CallGraph) -> tuple[list[str], dict[str, int]]:
     for edge in graph.referenced:
         intern(edge.caller)
         intern(edge.callee)
+    _intern_heritage(graph, intern)
     return ids, index
+
+
+def _intern_heritage(graph: CallGraph, intern: Callable[[str], None]) -> None:
+    """The ``build_id_table`` interning loops for heritage sections.
+
+    Split out from ``build_id_table`` itself purely to keep that
+    function's cyclomatic complexity under the project's Ruff limit —
+    behaviorally this is still the same first-appearance-order
+    interning pass, just for ``"heritage"``/``"heritage_ambiguous"``/
+    ``"heritage_external"`` instead of the call-graph sections.
+    """
+    for edge in graph.heritage:
+        intern(edge.subtype)
+        intern(edge.supertype)
+    for subtype, _name, cands in graph.heritage_ambiguous:
+        intern(subtype)
+        for cand in cands:
+            intern(cand)
+    for ext in graph.heritage_external:
+        intern(ext.caller)
+        intern(ext.callee)
 
 
 def _resolve_ref(value: object, ids: list[str] | None) -> str:
@@ -468,6 +491,37 @@ class MapIndex:
             principle both call and reference the same callee and a
             single dict keyed only on ``(caller, callee)`` would let
             one overwrite the other.
+        heritage_out: Symbol id (subtype) → resolved supertype ids
+            (empty for maps written before doc version 6).
+        heritage_in: Symbol id (supertype) → resolved subtype ids.
+        heritage_lines: ``(subtype id, supertype id)`` → clause-site
+            lines, mirroring ``edge_lines``.
+        heritage_relation: ``(subtype id, supertype id)`` → relation
+            string (``"extends"``/``"implements"``/``"impl"``/
+            ``"embeds"``) — needed since, like ``Edge``, a resolved
+            ``HeritageEdge`` isn't kept as an object in the index,
+            only its adjacency and this side table.
+        heritage_ambiguous_in: Candidate (supertype) symbol id →
+            ``(subtype_id, name)`` pairs that could have resolved to
+            it but didn't — the heritage counterpart to
+            ``ambiguous_in``.
+        heritage_ambiguous_out: Subtype symbol id → supertype names it
+            named ambiguously — the heritage counterpart to
+            ``ambiguous_out``.
+        heritage_external_out: Subtype symbol id → heritage clauses
+            whose supertype is outside the repo. Caller(subtype)-
+            indexed rather than name-indexed (unlike ``externals_by_
+            name``'s "who calls this external name" shape) since
+            ``query supertypes`` needs "what does *this* type's own
+            heritage point at, including external bases" — a
+            per-symbol lookup, not a repo-wide name search. This is a
+            deliberate implementation deviation from the design doc's
+            literal ``heritage_externals_by_name`` (name-indexed, the
+            ``externals_by_name`` shape) — nothing in this design
+            needs a name-indexed heritage-external search yet, and a
+            caller-indexed table is what ``supertypes`` rendering
+            actually requires; see the design doc's "Implementation
+            notes" for the rationale.
         notes: Symbol id → note texts loaded from ``.dekko/notes.json``.
         provenance: Provenance stamp, or ``None`` for v1 documents.
         doc_version: The on-disk document's ``"version"`` field (``1``
@@ -504,6 +558,19 @@ class MapIndex:
     referenced_in: dict[str, list[str]] = field(default_factory=dict)
     referenced_out: dict[str, list[str]] = field(default_factory=dict)
     ref_lines: dict[tuple[str, str], list[int]] = field(default_factory=dict)
+    heritage_out: dict[str, list[str]] = field(default_factory=dict)
+    heritage_in: dict[str, list[str]] = field(default_factory=dict)
+    heritage_lines: dict[tuple[str, str], list[int]] = field(
+        default_factory=dict
+    )
+    heritage_relation: dict[tuple[str, str], str] = field(default_factory=dict)
+    heritage_ambiguous_in: dict[str, list[tuple[str, str]]] = field(
+        default_factory=dict
+    )
+    heritage_ambiguous_out: dict[str, list[str]] = field(default_factory=dict)
+    heritage_external_out: dict[str, list[ExternalCall]] = field(
+        default_factory=dict
+    )
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
     doc_version: int = MAP_DOC_VERSION
@@ -584,6 +651,7 @@ class MapIndex:
             for key, lines in self.ref_lines.items()
             if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
         }
+        _filter_heritage(self, out, by_id)
         return out
 
 
@@ -638,6 +706,50 @@ def _filter_paths(mapping: dict) -> dict:
         for path, value in mapping.items()
         if not is_test_path(path)
     }
+
+
+def _filter_heritage(
+    src: "MapIndex", out: "MapIndex", by_id: dict[str, Symbol]
+) -> None:
+    """Fill ``out``'s heritage fields from ``src``, test code dropped.
+
+    Split out of ``MapIndex.without_tests`` purely to keep that
+    method's cyclomatic complexity under the project's Ruff limit —
+    behaviorally this is still part of the same filtered-view build,
+    mirroring the ``ambiguous_in``/``ambiguous_out`` filter block
+    immediately above it in ``without_tests`` line for line, just for
+    the heritage-graph fields instead of the call-graph ones.
+    """
+    out.heritage_out = _filter_adjacency(src.heritage_out, by_id)
+    out.heritage_in = _filter_adjacency(src.heritage_in, by_id)
+    out.heritage_lines = {
+        key: lines
+        for key, lines in src.heritage_lines.items()
+        if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+    }
+    out.heritage_relation = {
+        key: rel
+        for key, rel in src.heritage_relation.items()
+        if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+    }
+    for cand, pairs in src.heritage_ambiguous_in.items():
+        if not _prod_id(cand, by_id):
+            continue
+        kept_pairs = [
+            (subtype, name)
+            for subtype, name in pairs
+            if _prod_id(subtype, by_id)
+        ]
+        if kept_pairs:
+            out.heritage_ambiguous_in[cand] = kept_pairs
+    out.heritage_ambiguous_out = {
+        subtype: names
+        for subtype, names in src.heritage_ambiguous_out.items()
+        if _prod_id(subtype, by_id)
+    }
+    for subtype, exts in src.heritage_external_out.items():
+        if _prod_id(subtype, by_id):
+            out.heritage_external_out[subtype] = exts
 
 
 @dataclass
@@ -873,7 +985,50 @@ def load_map(root: Path) -> MapIndex | None:
         index.referenced_out.setdefault(caller, []).append(callee)
         index.referenced_in.setdefault(callee, []).append(caller)
         index.ref_lines[(caller, callee)] = edge.get("lines", [])
+    _load_heritage(index, doc, ids)
     return index
+
+
+def _load_heritage(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
+    """Fill ``index``'s heritage fields from a parsed ``map.json`` doc.
+
+    Split out of ``load_map`` purely to keep that function's
+    cyclomatic complexity under the project's Ruff limit — behaviorally
+    this is still part of the same document-load pass, mirroring the
+    ``"referenced"`` loading block immediately above it in ``load_map``
+    line for line, just for the ``"heritage"``/``"heritage_ambiguous"``/
+    ``"heritage_external"`` sections instead. Absent entirely from
+    documents written before doc version 6 — the ``.get(..., [])``
+    defaults make every loop here a no-op for those, the same
+    graceful-degradation contract every other v-gated section in
+    ``load_map`` already has.
+    """
+    for edge in doc.get("heritage", []):
+        subtype = _resolve_ref(edge["subtype"], ids)
+        supertype = _resolve_ref(edge["supertype"], ids)
+        index.heritage_out.setdefault(subtype, []).append(supertype)
+        index.heritage_in.setdefault(supertype, []).append(subtype)
+        index.heritage_lines[(subtype, supertype)] = edge.get("lines", [])
+        index.heritage_relation[(subtype, supertype)] = edge.get(
+            "relation", "extends"
+        )
+    index.heritage_ambiguous_in, index.heritage_ambiguous_out = (
+        _index_ambiguous(
+            (
+                _resolve_ref(d.get("subtype", ""), ids),
+                d.get("name", ""),
+                [_resolve_ref(c, ids) for c in d.get("candidates", [])],
+            )
+            for d in doc.get("heritage_ambiguous", [])
+        )
+    )
+    for d in doc.get("heritage_external", []):
+        ext = ExternalCall(
+            caller=_resolve_ref(d.get("caller"), ids),
+            callee=_resolve_ref(d.get("callee", ""), ids),
+            lines=d.get("lines", []),
+        )
+        index.heritage_external_out.setdefault(ext.caller, []).append(ext)
 
 
 def _index_ambiguous(
@@ -957,6 +1112,16 @@ def index_from_maps(
         index.referenced_out.setdefault(edge.caller, []).append(edge.callee)
         index.referenced_in.setdefault(edge.callee, []).append(edge.caller)
         index.ref_lines[(edge.caller, edge.callee)] = edge.lines
+    for edge in graph.heritage:
+        index.heritage_out.setdefault(edge.subtype, []).append(edge.supertype)
+        index.heritage_in.setdefault(edge.supertype, []).append(edge.subtype)
+        index.heritage_lines[(edge.subtype, edge.supertype)] = edge.lines
+        index.heritage_relation[(edge.subtype, edge.supertype)] = edge.relation
+    index.heritage_ambiguous_in, index.heritage_ambiguous_out = (
+        _index_ambiguous(iter(graph.heritage_ambiguous))
+    )
+    for ext in graph.heritage_external:
+        index.heritage_external_out.setdefault(ext.caller, []).append(ext)
     return index
 
 

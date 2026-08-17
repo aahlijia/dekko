@@ -331,10 +331,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_query.add_argument(
         "target",
         help="symbol (name, Class.method, file.py:func), file path, or "
-        "(for uses) an external base identifier, or (for type) a "
-        "type/class/struct/interface name; append "
-        "':LINE' (file.py:Class.method:LINE) to pick one candidate out "
-        "of an overload set the ambiguous-candidate error reports",
+        "(for uses) an external base identifier, or (for type/"
+        "supertypes/subtypes) a type/class/struct/interface name; "
+        "append ':LINE' (file.py:Class.method:LINE) to pick one "
+        "candidate out of an overload set the ambiguous-candidate "
+        "error reports",
     )
     p_query.add_argument(
         "--limit",
@@ -368,6 +369,20 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "pointer/optional wrapper stripping) — default loosely matches "
         "the type name as a bare identifier inside the raw annotation "
         "text",
+    )
+    p_query.add_argument(
+        "--transitive",
+        action="store_true",
+        help="for 'supertypes'/'subtypes': walk the full ancestor/"
+        "descendant DAG instead of one hop",
+    )
+    p_query.add_argument(
+        "--relation",
+        choices=query.HERITAGE_RELATIONS,
+        default=None,
+        help="for 'supertypes'/'subtypes': restrict to one heritage "
+        "relation kind ('impl'/'embeds' are Phase 2 — Rust/Go — and "
+        "never appear in Phase 1's Python/JS/TS/Java output)",
     )
     _add_read_options(p_query)
     p_query.set_defaults(func=run_query)
@@ -1339,6 +1354,8 @@ def run_query(args: argparse.Namespace) -> int:
         notes=args.notes,
         budget=args.budget,
         exact=args.exact,
+        transitive=args.transitive,
+        relation=args.relation,
     )
 
 

@@ -108,8 +108,10 @@ from dekko.core.model import (
     Edge,
     ExternalCall,
     FileMap,
+    HeritageEdge,
     Import,
     RawCall,
+    RawHeritage,
     RawRef,
     Symbol,
 )
@@ -125,11 +127,16 @@ _INDEX_STEMS = {"__init__", "mod", "lib", "index"}
 # ``_import_match``'s whole-file fallback and
 # ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
 _WHOLE_FILE_IMPORT_LANGUAGES = frozenset({"c", "cpp"})
-# Either raw-usage shape the shared candidate ladder resolves — a
-# call and a bare-value reference expose the same fields
-# (name/receiver/caller_id/path) and only differ in what table the
-# result lands in.
-_Referable = RawCall | RawRef
+# Every raw-usage shape the shared candidate ladder resolves — a call,
+# a bare-value reference, and a heritage clause all expose the same
+# ``name``/``receiver`` fields and only differ in what table the
+# result lands in. ``RawHeritage`` has no ``caller_id`` (it has
+# ``subtype_id`` instead — a heritage clause never has an enclosing
+# function the way a call/ref can), so every ladder step that reads
+# ``caller_id`` is a caller-side concern (``_resolve_call``/
+# ``_resolve_ref``/``_resolve_one_heritage``), never something
+# ``_pick_candidate`` itself touches.
+_Referable = RawCall | RawRef | RawHeritage
 
 MODULE_CALLER_SUFFIX = "::<module>"
 
@@ -193,6 +200,13 @@ def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
     graph.referenced, graph.referenced_in, graph.referenced_out = resolve_refs(
         files, workers
     )
+    (
+        graph.heritage,
+        graph.heritage_out,
+        graph.heritage_in,
+        graph.heritage_ambiguous,
+        graph.heritage_external,
+    ) = resolve_heritage(files)
     return graph
 
 
@@ -462,6 +476,186 @@ def _resolve_ref(
     )
     if target is not None and target.id != caller_id:
         edges.setdefault((caller_id, target.id), set()).add(ref.line)
+
+
+def resolve_heritage(
+    files: list[FileMap],
+) -> tuple[
+    list[HeritageEdge],
+    dict[str, list[str]],
+    dict[str, list[str]],
+    list[tuple[str, str, list[str]]],
+    list[ExternalCall],
+]:
+    """Resolve every heritage clause across the repo into a heritage graph.
+
+    Reuses the exact same candidate ladder ``resolve()`` runs for
+    calls (``_pick_candidate``, via ``_resolve_one_heritage``) after
+    pre-filtering candidates to ``TYPE_KINDS`` — a base-class name
+    resolving to a same-named function would be a bug, not an edge.
+    Lands each clause in one of the same three buckets ``resolve()``
+    uses for calls (resolved/ambiguous/external), the shape
+    ``CallGraph.heritage``/``heritage_ambiguous``/``heritage_external``
+    need — unlike ``resolve_refs()``, which only ever produces resolved
+    edges (a heritage clause naming an out-of-repo framework base class,
+    e.g. Python's ``class MyModel(BaseModel):`` from pydantic, is a
+    common, expected case worth surfacing, not one to silently drop).
+
+    ``caller=None`` is passed to ``_pick_candidate`` throughout: a
+    heritage clause has no enclosing function body the way a call or
+    reference does, so the self/this-container and typed-parameter
+    ladder steps (which both require a non-``None`` caller) are inert
+    here and simply no-op, letting the remaining steps (receiver-type,
+    same-file, import hints, the noise guard, and the fallbacks) run
+    unmodified.
+
+    Args:
+        files: Per-file extraction results.
+
+    Returns:
+        ``(heritage_edges, heritage_out, heritage_in,
+        heritage_ambiguous, heritage_external)`` — the same shapes
+        ``resolve()`` assigns onto ``CallGraph.heritage``/
+        ``heritage_out``/``heritage_in``/``heritage_ambiguous``/
+        ``heritage_external``. Built as a plain tuple return (mirroring
+        ``resolve_refs()``'s own return shape) rather than a
+        ``CallGraph`` method, since ``resolve()`` just assigns the
+        pieces onto the graph it already built, exactly as it already
+        does for ``resolve_refs()``'s result.
+    """
+    index = _build_index(files)
+    by_name_path = _build_name_path_index(files)
+    imports_by_file = _imports_by_file(files)
+    repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+
+    edges: dict[tuple[str, str], set[int]] = {}
+    relations: dict[tuple[str, str], str] = {}
+    ambiguous: dict[tuple[str, str], list[str]] = {}
+    external: dict[tuple[str, str], set[int]] = {}
+    for fm in files:
+        file_imports = imports_by_file.get(fm.path, {})
+        for h in fm.heritage:
+            _resolve_one_heritage(
+                h,
+                index,
+                by_name_path,
+                file_imports,
+                repo_stems,
+                edges,
+                relations,
+                ambiguous,
+                external,
+            )
+
+    heritage_edges = [
+        HeritageEdge(
+            subtype=s,
+            supertype=t,
+            relation=relations[(s, t)],
+            lines=sorted(lns),
+        )
+        for (s, t), lns in sorted(edges.items())
+    ]
+    heritage_out: dict[str, list[str]] = {}
+    heritage_in: dict[str, list[str]] = {}
+    for edge in heritage_edges:
+        heritage_out.setdefault(edge.subtype, []).append(edge.supertype)
+        heritage_in.setdefault(edge.supertype, []).append(edge.subtype)
+    for table in (heritage_out, heritage_in):
+        for key in table:
+            table[key] = sorted(set(table[key]))
+    heritage_ambiguous = [
+        (subtype, name, cands)
+        for (subtype, name), cands in sorted(ambiguous.items())
+    ]
+    heritage_external = [
+        ExternalCall(caller=s, callee=t, lines=sorted(lns))
+        for (s, t), lns in sorted(external.items())
+    ]
+    return (
+        heritage_edges,
+        heritage_out,
+        heritage_in,
+        heritage_ambiguous,
+        heritage_external,
+    )
+
+
+def _resolve_one_heritage(
+    h: RawHeritage,
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+    edges: dict[tuple[str, str], set[int]],
+    relations: dict[tuple[str, str], str],
+    ambiguous: dict[tuple[str, str], list[str]],
+    external: dict[tuple[str, str], set[int]],
+) -> None:
+    """Resolve one heritage clause; mirrors ``_resolve_call``'s shape.
+
+    Candidates are pre-filtered to ``TYPE_KINDS`` at every step (the
+    bare-name index lookup, the same-file lookup, and the alias-import
+    recovery) before ``_pick_candidate``'s ladder runs.
+    """
+    if _receiver_is_external(h, file_imports, repo_stems):
+        external.setdefault((h.subtype_id, h.text), set()).add(h.line)
+        return
+
+    candidates = [c for c in index.get(h.name, []) if c.kind in TYPE_KINDS]
+    if not candidates:
+        alias = [
+            c
+            for c in _alias_candidates(h, file_imports, index)
+            if c.kind in TYPE_KINDS
+        ]
+        if len(alias) == 1:
+            _add_heritage_edge(h, alias[0].id, edges, relations)
+            return
+        if len(alias) > 1:
+            _record_ambiguous(h.subtype_id, h.name, alias, ambiguous)
+            return
+        external.setdefault((h.subtype_id, h.text), set()).add(h.line)
+        return
+
+    same_file = [
+        c
+        for c in by_name_path.get((h.name, h.path), [])
+        if c.kind in TYPE_KINDS
+    ]
+    target = _pick_candidate(
+        h,
+        candidates,
+        same_file,
+        file_imports,
+        None,
+        by_name_path,
+        index,
+        repo_stems,
+    )
+    if target is not None:
+        _add_heritage_edge(h, target.id, edges, relations)
+        return
+    _record_ambiguous(h.subtype_id, h.name, candidates, ambiguous)
+
+
+def _add_heritage_edge(
+    h: RawHeritage,
+    target_id: str,
+    edges: dict[tuple[str, str], set[int]],
+    relations: dict[tuple[str, str], str],
+) -> None:
+    """Record one resolved heritage edge, skipping a self-loop.
+
+    A type can never be its own supertype (the extractor never emits
+    that shape), but this mirrors ``_add_edge``'s self-recursion guard
+    for defense in depth.
+    """
+    if target_id == h.subtype_id:
+        return
+    key = (h.subtype_id, target_id)
+    edges.setdefault(key, set()).add(h.line)
+    relations.setdefault(key, h.relation)
 
 
 def _resolve_call(
@@ -1213,20 +1407,24 @@ def _alias_candidates(
 
 
 def _receiver_is_external(
-    call: RawCall,
+    call: _Referable,
     file_imports: dict[str, Import],
     repo_stems: set[str],
 ) -> bool:
-    """Check whether a call's receiver is bound to a non-repo import.
+    """Check whether a call/heritage clause's receiver is a non-repo import.
 
     Runs before the bare-name index lookup so a call like
-    ``subprocess.run(...)`` is recorded as external even when the
-    repo happens to define its own ``run`` symbols elsewhere — the
-    bare-name ladder never gets a chance to misresolve or strand the
-    call in the ``ambiguous`` bucket.
+    ``subprocess.run(...)`` (or a heritage clause like
+    ``class MyModel(pydantic.BaseModel):``) is recorded as external
+    even when the repo happens to define its own same-named symbol
+    elsewhere — the bare-name ladder never gets a chance to misresolve
+    or strand it in the ``ambiguous`` bucket. Shared by
+    ``_resolve_call`` and ``_resolve_one_heritage`` (not ``_resolve_ref``,
+    which has no ``external`` bucket to feed) — only ``call.receiver``
+    is read, which every ``_Referable`` shape exposes.
 
     Args:
-        call: The raw call being resolved.
+        call: The raw call or heritage clause being resolved.
         file_imports: Local name to import record for the calling
             file.
         repo_stems: Every repo file's matching stem (see

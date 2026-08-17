@@ -147,6 +147,45 @@ class RawRef:
 
 
 @dataclass
+class RawHeritage:
+    """A heritage clause (extends/implements/impl-for/embeds) as
+    written, before resolution.
+
+    Unlike ``RawCall.caller_id``, ``subtype_id`` is never ``None`` — a
+    heritage clause only ever appears attached to a ``TYPE_KINDS``
+    definition already extracted as its own ``Symbol`` by the time
+    heritage extraction runs (there's no "module-level heritage" the
+    way there's a module-level call).
+
+    Attributes:
+        subtype_id: Symbol id of the type declaring this clause.
+        path: File the clause appears in.
+        text: Full supertype text as written (``Base``, ``mod::Trait``,
+            ``pkg.Interface``).
+        name: Base identifier (last path/attribute segment) — mirrors
+            ``RawCall.name`` so the resolver's existing candidate
+            ladder (``_pick_candidate``) works unmodified.
+        receiver: Leading qualifier segment when present, else
+            ``None`` — mirrors ``RawCall.receiver``.
+        relation: How the subtype relates to the supertype:
+            ``"extends"`` (class/interface extends), ``"implements"``
+            (class implements interface), ``"impl"`` (Rust
+            ``impl Trait for Type``, Phase 2 — not produced by any
+            Phase 1 extractor), or ``"embeds"`` (Go anonymous struct
+            field, Phase 2 — not produced by any Phase 1 extractor).
+        line: 1-based line of the clause.
+    """
+
+    subtype_id: str
+    path: str
+    text: str
+    name: str
+    receiver: str | None = None
+    relation: str = "extends"
+    line: int = 0
+
+
+@dataclass
 class Import:
     """A name imported into a file.
 
@@ -178,6 +217,7 @@ class FileMap:
     symbols: list[Symbol] = field(default_factory=list)
     calls: list[RawCall] = field(default_factory=list)
     refs: list[RawRef] = field(default_factory=list)
+    heritage: list[RawHeritage] = field(default_factory=list)
     imports: list[Import] = field(default_factory=list)
     error: str | None = None
     doc: str | None = None
@@ -214,6 +254,31 @@ class ExternalCall:
 
 
 @dataclass
+class HeritageEdge:
+    """A resolved subtype -> supertype relationship.
+
+    Attributes:
+        subtype: Symbol id of the type declaring the heritage clause.
+        supertype: Symbol id of the resolved base type/interface/trait.
+        relation: ``"extends"`` / ``"implements"`` / ``"impl"`` /
+            ``"embeds"`` — kept per-edge rather than collapsed into one
+            undifferentiated kind, since "what does Foo extend" and
+            "what does Foo implement" are different questions for a
+            caller in languages that distinguish them (Java, TS), even
+            though every relation collapses to the same subtype ->
+            supertype graph shape for traversal purposes.
+        lines: Sorted, deduplicated 1-based clause-site lines — almost
+            always a single entry, kept as a list purely for shape
+            parity with ``Edge.lines``.
+    """
+
+    subtype: str
+    supertype: str
+    relation: str
+    lines: list[int] = field(default_factory=list)
+
+
+@dataclass
 class CallGraph:
     """Resolution results across the whole repo.
 
@@ -232,6 +297,23 @@ class CallGraph:
             does not call) as values.
         referenced_in: Symbol id → sorted ids that reference it (but
             do not call it) as a value.
+        heritage: Deduplicated resolved subtype -> supertype edges
+            (see ``RawHeritage``/``HeritageEdge``) — extends/implements/
+            impl-for/embeds clauses, kept structurally separate from
+            ``edges`` the same way ``referenced`` is: a heritage clause
+            is neither a call nor a value reference.
+        heritage_out: Symbol id (subtype) → sorted supertype ids.
+        heritage_in: Symbol id (supertype) → sorted subtype ids.
+        heritage_ambiguous: Per subtype, the unresolved supertype name
+            and its candidate symbol ids — same ``(subtype, name,
+            candidates)`` shape as ``ambiguous``.
+        heritage_external: Heritage clauses whose supertype is outside
+            the repo (``ExternalCall.caller`` = subtype id,
+            ``.callee`` = the raw supertype text) — reused verbatim
+            rather than a new type, since the shape fits exactly and a
+            class extending a framework base class is a common,
+            expected case here (unlike ``external``'s "large but
+            usually uninteresting" role for calls).
     """
 
     edges: list[Edge] = field(default_factory=list)
@@ -242,3 +324,10 @@ class CallGraph:
     referenced: list[Edge] = field(default_factory=list)
     referenced_out: dict[str, list[str]] = field(default_factory=dict)
     referenced_in: dict[str, list[str]] = field(default_factory=dict)
+    heritage: list[HeritageEdge] = field(default_factory=list)
+    heritage_out: dict[str, list[str]] = field(default_factory=dict)
+    heritage_in: dict[str, list[str]] = field(default_factory=dict)
+    heritage_ambiguous: list[tuple[str, str, list[str]]] = field(
+        default_factory=list
+    )
+    heritage_external: list[ExternalCall] = field(default_factory=list)

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from dekko import repo_ops
+from dekko.render import mapfile
 from dekko.storage import cache as cache_mod
 from dekko.integrations import cli
 
@@ -369,3 +370,34 @@ def test_persist_dekkoignore_preserves_comments_and_order(
         "*.log",
         "*.astro",
     ]
+
+
+def test_heritage_survives_a_cache_hit_reparse(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A per-file cache round-trip that drops RawHeritage would make
+    # heritage edges vanish on the second `dekko map` run even though
+    # nothing changed — the cache path (`_filemap_from_dict`) has to
+    # rebuild the same ``heritage`` list ``extract_file`` produced,
+    # not just symbols/calls/refs/imports.
+    root = make_mapped_repo(
+        {
+            "base.py": "class Animal:\n    pass\n",
+            "dog.py": (
+                "from base import Animal\n\n\nclass Dog(Animal):\n    pass\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.heritage_out["dog.py::Dog"] == ["base.py::Animal"]
+
+    # Second run: both files are unchanged, so this exercises
+    # IncrementalCache.reuse()'s cache-hit path exclusively.
+    parsed = _count_extractions(monkeypatch)
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    assert parsed == []
+
+    reloaded = mapfile.load_map(root)
+    assert reloaded is not None
+    assert reloaded.heritage_out["dog.py::Dog"] == ["base.py::Animal"]

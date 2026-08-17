@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from dekko.analysis import query
 from dekko.integrations import cli
 from dekko.render import mapfile
 from dekko.integrations import server
@@ -83,6 +84,8 @@ def test_tools_list_exposes_the_read_surface() -> None:
         "get_callees",
         "find_usages",
         "find_type_usages",
+        "get_supertypes",
+        "get_subtypes",
         "get_context_pack",
         "outline",
         "impacted_tests",
@@ -279,6 +282,132 @@ def test_find_type_usages_tool_exact_passthrough(
 
     exact = _call(ctx, "find_type_usages", {"type": "Config", "exact": True})
     assert exact["isError"] is True
+
+
+PY_HERITAGE = {
+    "base.py": "class Animal:\n    pass\n",
+    "dog.py": ("from base import Animal\n\n\nclass Dog(Animal):\n    pass\n"),
+}
+
+
+def test_get_supertypes_tool(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(PY_HERITAGE))
+    result = _call(ctx, "get_supertypes", {"symbol": "Dog"})
+    assert result["isError"] is False
+    assert "class Animal" in result["content"][0]["text"]
+
+
+def test_get_subtypes_tool(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(PY_HERITAGE))
+    result = _call(ctx, "get_subtypes", {"symbol": "Animal"})
+    assert result["isError"] is False
+    assert "class Dog" in result["content"][0]["text"]
+
+
+def test_get_supertypes_transitive_passthrough(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {
+        "a.py": (
+            "class A:\n    pass\n\n\nclass B(A):\n    pass\n\n\nclass C(B):\n"
+            "    pass\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    one_hop = _call(ctx, "get_supertypes", {"symbol": "C"})
+    assert one_hop["isError"] is False
+    assert "class B" in one_hop["content"][0]["text"]
+    assert "class A" not in one_hop["content"][0]["text"]
+
+    transitive = _call(
+        ctx, "get_supertypes", {"symbol": "C", "transitive": True}
+    )
+    assert transitive["isError"] is False
+    text = transitive["content"][0]["text"]
+    assert "class B" in text
+    assert "class A" in text
+
+
+def test_get_supertypes_relation_passthrough(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {
+        "Shapes.java": (
+            "class Base {}\n"
+            "interface IFoo {}\n"
+            "class Foo extends Base implements IFoo {}\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(
+        ctx, "get_supertypes", {"symbol": "Foo", "relation": "implements"}
+    )
+    assert result["isError"] is False
+    text = result["content"][0]["text"]
+    assert "IFoo" in text
+    assert "Base" not in text
+
+
+def test_get_subtypes_excludes_test_files_by_default(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = dict(
+        PY_HERITAGE,
+        **{
+            "tests/test_dog.py": (
+                "from base import Animal\n"
+                "\n"
+                "\n"
+                "class FakeAnimal(Animal):\n"
+                "    pass\n"
+            )
+        },
+    )
+    ctx = _ctx(make_mapped_repo(files))
+    default_text = _call(ctx, "get_subtypes", {"symbol": "Animal"})["content"][
+        0
+    ]["text"]
+    assert "Dog" in default_text
+    assert "FakeAnimal" not in default_text
+
+    included = _call(
+        ctx, "get_subtypes", {"symbol": "Animal", "include_tests": True}
+    )["content"][0]["text"]
+    assert "FakeAnimal" in included
+
+
+def test_get_supertypes_tool_schema_shape() -> None:
+    tool = next(t for t in server.TOOLS if t["name"] == "get_supertypes")
+    assert set(tool) == {"name", "description", "inputSchema", "handler"}
+    schema = tool["inputSchema"]
+    assert schema["required"] == ["symbol"]
+    props = schema["properties"]
+    assert set(props) == {
+        "symbol",
+        "transitive",
+        "relation",
+        "budget",
+        "include_tests",
+        "root",
+    }
+    assert props["relation"]["enum"] == list(query.HERITAGE_RELATIONS)
+
+
+def test_get_subtypes_tool_schema_shape() -> None:
+    tool = next(t for t in server.TOOLS if t["name"] == "get_subtypes")
+    assert set(tool) == {"name", "description", "inputSchema", "handler"}
+    schema = tool["inputSchema"]
+    assert schema["required"] == ["symbol"]
+    props = schema["properties"]
+    assert set(props) == {
+        "symbol",
+        "transitive",
+        "relation",
+        "budget",
+        "include_tests",
+        "root",
+    }
+    assert props["relation"]["enum"] == list(query.HERITAGE_RELATIONS)
 
 
 def test_get_context_pack_tool(make_mapped_repo: RepoFactory) -> None:

@@ -6,7 +6,16 @@ from pathlib import Path
 from typing import Callable
 
 from dekko.core.languages import LanguageSpec
-from dekko.core.model import FileMap, Import, Param, RawCall, RawRef, Symbol
+from dekko.core.model import (
+    TYPE_KINDS,
+    FileMap,
+    Import,
+    Param,
+    RawCall,
+    RawHeritage,
+    RawRef,
+    Symbol,
+)
 from tree_sitter import Node, Parser, Query, QueryCursor
 from dekko.core.grammars import get_grammar
 
@@ -81,6 +90,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     if spec.name == "rust":
         calls.extend(_collect_rust_macro_calls(tree.root_node, rel, defs))
     refs = _collect_refs(spec, tree.root_node, rel, defs)
+    heritage = _collect_heritage(spec, tree.root_node, rel, defs)
     imports = _collect_imports(spec, tree.root_node, rel)
     return FileMap(
         path=rel,
@@ -88,6 +98,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         symbols=[sym for _, sym in defs],
         calls=calls,
         refs=refs,
+        heritage=heritage,
         imports=imports,
         doc=_module_doc(spec.name, tree.root_node),
     )
@@ -1144,6 +1155,197 @@ def _enclosing(
             if best is None or size < best_size:
                 best, best_size = sym, size
     return best
+
+
+# ---------------------------------------------------------------------
+# Heritage (extends/implements clauses)
+
+# Python ``superclasses`` argument_list entries that are real base
+# names: a bare identifier, an ``attribute`` access (``mod.Base``), or
+# a ``subscript`` (``Generic[T]``/``Protocol[T]``-shaped — the design
+# doc's own documented edge case: no attempt is made to distinguish a
+# structural-typing marker from a real base, both resolve the same
+# way). ``keyword_argument`` (``metaclass=Meta``) is deliberately
+# absent — filtered out by simply never matching one of these types.
+_PY_BASE_TYPES = ("identifier", "attribute")
+
+
+def _heritage_python(bases_node: Node) -> list[tuple[Node, str]]:
+    """Walk a Python ``superclasses`` argument_list into base nodes.
+
+    Every kept entry is an ``extends`` clause — Python has no syntactic
+    distinction between "extends a class" and "implements an
+    interface," everything is ``class X(Y):``.
+    """
+    out: list[tuple[Node, str]] = []
+    for child in bases_node.named_children:
+        if child.type in _PY_BASE_TYPES:
+            out.append((child, "extends"))
+        elif child.type == "subscript":
+            value = child.child_by_field_name("value")
+            if value is not None and value.type in _PY_BASE_TYPES:
+                out.append((value, "extends"))
+        # keyword_argument (metaclass=...) and anything else (a
+        # *args/**kwargs splat) are not base names; skip silently.
+    return out
+
+
+def _heritage_js(heritage_node: Node) -> list[tuple[Node, str]]:
+    """Walk a JS ``class_heritage`` node: always exactly one ``extends``.
+
+    Unlike TypeScript, plain JS's ``class_heritage`` has no
+    ``extends_clause`` wrapper — its sole named child *is* the base
+    type expression directly (verified against the pinned
+    tree-sitter-javascript grammar).
+    """
+    children = heritage_node.named_children
+    return [(children[0], "extends")] if children else []
+
+
+def _heritage_ts(heritage_node: Node) -> list[tuple[Node, str]]:
+    """Walk a TS ``class_heritage``/``extends_type_clause`` container.
+
+    ``class_heritage`` (class/abstract-class declarations) wraps an
+    optional ``extends_clause`` (single ``value`` field) and/or
+    ``implements_clause`` (a flat list of unfielded type children).
+    ``extends_type_clause`` (interface declarations) is itself already
+    the flat list — an interface extending other interfaces.
+    """
+    if heritage_node.type == "extends_type_clause":
+        return [(c, "extends") for c in heritage_node.named_children]
+    out: list[tuple[Node, str]] = []
+    for child in heritage_node.named_children:
+        if child.type == "extends_clause":
+            value = child.child_by_field_name("value")
+            if value is not None:
+                out.append((value, "extends"))
+        elif child.type == "implements_clause":
+            out.extend((c, "implements") for c in child.named_children)
+    return out
+
+
+def _type_list_children(node: Node) -> list[Node]:
+    """A Java heritage container's actual type nodes.
+
+    Java's ``superclass`` field wraps its single base type directly as
+    a named child, but ``super_interfaces``/``extends_interfaces`` wrap
+    a ``type_list`` node one level down instead (verified against the
+    pinned tree-sitter-java grammar) — this drills into that wrapper
+    when present so every Java heritage container can be walked the
+    same way regardless of which of the two shapes it is.
+    """
+    type_list = _first_child_of_type(node, "type_list")
+    return (
+        type_list.named_children
+        if type_list is not None
+        else node.named_children
+    )
+
+
+def _heritage_java(caps: dict[str, list[Node]]) -> list[tuple[Node, str]]:
+    """Combine a Java ``@classdef`` match's heritage captures.
+
+    A single ``class_declaration`` match can carry both ``@superclass``
+    (``extends``, at most one) and ``@interfaces`` (``implements``, a
+    list) at once; an ``interface_declaration`` match instead carries
+    ``@heritage`` (its own ``extends_interfaces``, also a list, still
+    an ``extends`` relation since one interface extending another is
+    not "implementing").
+    """
+    out: list[tuple[Node, str]] = []
+    superclass = _one(caps, "superclass")
+    if superclass is not None:
+        out.extend((c, "extends") for c in _type_list_children(superclass))
+    interfaces = _one(caps, "interfaces")
+    if interfaces is not None:
+        out.extend((c, "implements") for c in _type_list_children(interfaces))
+    heritage = _one(caps, "heritage")
+    if heritage is not None:
+        out.extend((c, "extends") for c in _type_list_children(heritage))
+    return out
+
+
+def _heritage_entries(
+    language: str, caps: dict[str, list[Node]]
+) -> list[tuple[Node, str]]:
+    """Dispatch one ``@classdef`` match's captures to its language parser.
+
+    Returns ``(type_node, relation)`` pairs — mirrors how ``_params_*``
+    returns one entry per parameter, just for heritage clauses instead.
+    """
+    if language == "python":
+        bases = _one(caps, "bases")
+        return _heritage_python(bases) if bases is not None else []
+    if language == "javascript":
+        heritage = _one(caps, "heritage")
+        return _heritage_js(heritage) if heritage is not None else []
+    if language in ("typescript", "tsx"):
+        heritage = _one(caps, "heritage")
+        return _heritage_ts(heritage) if heritage is not None else []
+    if language == "java":
+        return _heritage_java(caps)
+    return []
+
+
+def _heritage_name_parts(node: Node) -> tuple[str, str, str | None]:
+    """Split a heritage clause's type node into (text, name, receiver).
+
+    Reuses ``_split_callee_text`` — the same dotted/scoped-path
+    splitting a callee expression already needs (``mod.Base`` ->
+    name ``Base``, receiver ``mod``; ``Comparable<Foo>`` -> name
+    ``Comparable``, its generic argument stripped the same way a call's
+    argument list already is).
+    """
+    text = _text(node)
+    name, receiver = _split_callee_text(text)
+    return text, name, receiver
+
+
+def _collect_heritage(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawHeritage]:
+    """Find extends/implements clauses attached to type definitions.
+
+    Mirrors ``_collect_refs``'s "return empty for languages without a
+    query yet" shape. Each ``heritage_query`` match's ``@classdef``
+    node is correlated back to the ``Symbol`` ``_collect_definitions``
+    already built for it by exact byte span (the same node, re-matched
+    by a second query pass — see ``_collect_calls``/``_enclosing`` for
+    the analogous span-based correlation used for call attribution),
+    restricted to ``TYPE_KINDS`` symbols so a match can never
+    accidentally attach to something else.
+    """
+    if spec.heritage_query is None:
+        return []
+    by_span = {
+        (node.start_byte, node.end_byte): sym
+        for node, sym in defs
+        if sym.kind in TYPE_KINDS
+    }
+    out: list[RawHeritage] = []
+    for _, caps in _run_query(spec.grammar, spec.heritage_query, root):
+        classdef = _one(caps, "classdef")
+        if classdef is None:
+            continue
+        sym = by_span.get((classdef.start_byte, classdef.end_byte))
+        if sym is None:
+            continue
+        for node, relation in _heritage_entries(spec.name, caps):
+            text, name, receiver = _heritage_name_parts(node)
+            if not name:
+                continue
+            out.append(
+                RawHeritage(
+                    subtype_id=sym.id,
+                    path=rel,
+                    text=text,
+                    name=name,
+                    receiver=receiver,
+                    relation=relation,
+                    line=node.start_point[0] + 1,
+                )
+            )
+    return out
 
 
 # ---------------------------------------------------------------------

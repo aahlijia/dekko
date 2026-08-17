@@ -28,7 +28,7 @@ from dekko.render.mapfile import (
     _symbol_from_dict,
     atomic_write_bytes,
 )
-from dekko.core.model import FileMap, Import, RawCall, RawRef
+from dekko.core.model import FileMap, Import, RawCall, RawHeritage, RawRef
 
 CACHE_VERSION = 1
 CACHE_DIR = ".dekko"
@@ -64,6 +64,7 @@ def _filemap_from_dict(d: dict) -> FileMap:
         symbols=[_symbol_from_dict(s) for s in d.get("symbols", [])],
         calls=[RawCall(**c) for c in d.get("calls", [])],
         refs=[RawRef(**r) for r in d.get("refs", [])],
+        heritage=[RawHeritage(**h) for h in d.get("heritage", [])],
         imports=[Import(**i) for i in d.get("imports", [])],
         error=d.get("error"),
         doc=d.get("doc"),

@@ -331,6 +331,63 @@ def tool_find_type_usages(ctx: Context, args: dict) -> str:
     return _with_notes(out, err)
 
 
+def _heritage_tool(
+    ctx: Context,
+    action: str,
+    args: dict,
+    default_include_tests: bool = True,
+) -> str:
+    """Run the supertypes/subtypes query action and return text.
+
+    Mirrors ``_relation_tool``'s shape (index load, error handling,
+    fallback text), plus the two heritage-specific arguments
+    (``transitive``/``relation``) neither ``callers``/``callees`` nor
+    ``symbol`` need.
+
+    Args:
+        ctx: Server-wide settings.
+        action: ``"supertypes"`` or ``"subtypes"``.
+        args: The tool call's raw arguments.
+        default_include_tests: Value to use for ``include_tests`` when
+            the caller omits it — see ``_relation_tool``.
+
+    Returns:
+        Rendered text result, or a placeholder when there are none.
+    """
+    include_tests = bool(args.get("include_tests", default_include_tests))
+    index = _index_for(ctx, args, include_tests=include_tests)
+    target = _require(args, "symbol")
+    transitive = bool(args.get("transitive", False))
+    relation = args.get("relation")
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
+    code, out, err = _capture(
+        lambda: query.run(
+            index,
+            action,
+            target,
+            as_json=False,
+            limit=int(args.get("limit", 50)),
+            budget=budget,
+            transitive=transitive,
+            relation=relation,
+        )
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return _with_notes(out, err, fallback=f"(no {action} for {target})")
+
+
+def tool_get_supertypes(ctx: Context, args: dict) -> str:
+    """What a type extends/implements/impl-for's — one hop by default."""
+    return _heritage_tool(ctx, "supertypes", args)
+
+
+def tool_get_subtypes(ctx: Context, args: dict) -> str:
+    """What extends/implements/impl-for's a type — one hop by default."""
+    return _heritage_tool(ctx, "subtypes", args, default_include_tests=False)
+
+
 def tool_get_context_pack(ctx: Context, args: dict) -> str:
     """Minimal signature neighborhood for editing a symbol or file."""
     index = _index_for(ctx, args)
@@ -942,6 +999,75 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["type"],
         },
         "handler": tool_find_type_usages,
+    },
+    {
+        "name": "get_supertypes",
+        "description": "What a class/interface/struct/trait extends, "
+        "implements, or is impl'd for — its own declared heritage. Set "
+        "transitive=true for the full ancestor chain/DAG (multiple "
+        "inheritance and multi-interface implementation both fan out, "
+        "not a single line). Covers Python/JavaScript/TypeScript/Java; "
+        "Rust/C++/Go are not yet extracted (Phase 2, unimplemented) and "
+        "Go's structural interface satisfaction has no declaring "
+        "syntax to extract at all.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": _SYMBOL_PROP,
+                "transitive": {
+                    "type": "boolean",
+                    "description": "Full ancestor chain/DAG instead of "
+                    "one hop (default false)",
+                },
+                "relation": {
+                    "type": "string",
+                    "enum": list(query.HERITAGE_RELATIONS),
+                    "description": "Filter to one heritage-relation "
+                    "kind ('impl'/'embeds' are Phase 2 and never "
+                    "appear in current results)",
+                },
+                "budget": _BUDGET_PROP,
+                "include_tests": _INCLUDE_TESTS_PROP,
+                "root": _ROOT_PROP,
+            },
+            "required": ["symbol"],
+        },
+        "handler": tool_get_supertypes,
+    },
+    {
+        "name": "get_subtypes",
+        "description": "What extends, implements, or is impl'd for a "
+        "class/interface/struct/trait — the 'if I change this, who's "
+        "affected' blast-radius question for type declarations. Set "
+        "transitive=true for every direct and indirect implementor, "
+        "not just direct ones. Does not include each implementor's own "
+        "callers — pair with get_callers on individual results for "
+        "that. Test-file subtypes are excluded by default — set "
+        "include_tests=true to see them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": _SYMBOL_PROP,
+                "transitive": {
+                    "type": "boolean",
+                    "description": "Every direct and indirect "
+                    "implementor instead of just direct ones (default "
+                    "false)",
+                },
+                "relation": {
+                    "type": "string",
+                    "enum": list(query.HERITAGE_RELATIONS),
+                    "description": "Filter to one heritage-relation "
+                    "kind ('impl'/'embeds' are Phase 2 and never "
+                    "appear in current results)",
+                },
+                "budget": _BUDGET_PROP,
+                "include_tests": _INCLUDE_TESTS_PROP,
+                "root": _ROOT_PROP,
+            },
+            "required": ["symbol"],
+        },
+        "handler": tool_get_subtypes,
     },
     {
         "name": "get_context_pack",

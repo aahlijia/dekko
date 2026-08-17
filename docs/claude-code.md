@@ -91,7 +91,7 @@ full guidance.
 `dekko serve --mcp` speaks the Model Context Protocol over stdio
 (newline-delimited JSON-RPC, no SDK dependency), so an agent can ask
 "who calls X?" with a tool call instead of reading `MAP.md`. It exposes
-14 tools:
+18 tools:
 
 | Tool | Backs |
 | --- | --- |
@@ -99,11 +99,14 @@ full guidance.
 | `query_symbol` | signature, doc, fan-in/out, notes |
 | `get_callers` / `get_callees` | callers/callees, with call sites |
 | `find_usages` | references to an external name |
+| `find_type_usages` | functions/methods taking or returning a type |
+| `get_supertypes` / `get_subtypes` | a type's extends/implements heritage, one hop or transitive |
 | `get_context_pack` | a symbol's neighborhood, budget-capped |
 | `outline` | a file's structure without bodies |
 | `workset` | one bundle for a change (`rev` or `symbol`) |
 | `summary` | repo digest |
 | `impacted_tests` | test files impacted by changes |
+| `check_ambiguous` | resolver-trust summary: where call resolution was ambiguous |
 | `add_note` / `list_notes` | symbol-anchored notes |
 | `map_status` / `refresh_map` | freshness check / regenerate |
 

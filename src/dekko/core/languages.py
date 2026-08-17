@@ -55,6 +55,20 @@ class LanguageSpec:
             definition/call query never visits at all since they name
             a *type*, not a callable or a value. ``None`` for languages
             without one yet (JS, TS, TSX, Go as of this writing).
+        heritage_query: Query capturing a type definition's own
+            ``extends``/``implements`` clause(s) — one ``@classdef``
+            match per type, with the clause(s) attached as sibling
+            captures on the same match rather than a second query over
+            the same node (the "container node walked like a param
+            list" shape: a whole heritage container — Python's
+            ``argument_list``, TS's ``class_heritage``/
+            ``extends_type_clause``, Java's ``superclass``/
+            ``super_interfaces``/``extends_interfaces`` — is captured
+            whole and walked by a dedicated per-language parser in
+            ``extractor.py``, mirroring ``_params_*``). ``None`` for
+            languages without one yet (Rust/C++/Go — Phase 2, not
+            implemented as of this writing; Phase 1 covers Python/
+            JavaScript/TypeScript/TSX/Java).
     """
 
     name: str
@@ -68,6 +82,7 @@ class LanguageSpec:
     param_style: str = "generic"
     function_boundary_types: tuple[str, ...] = ()
     reference_query: str | None = None
+    heritage_query: str | None = None
 
 
 PYTHON = LanguageSpec(
@@ -108,6 +123,11 @@ PYTHON = LanguageSpec(
     container_types={"class_definition": "name"},
     method_containers=("class_definition",),
     param_style="python",
+    heritage_query="""
+(class_definition
+  name: (identifier) @classname
+  superclasses: (argument_list)? @bases) @classdef
+""",
 )
 
 RUST = LanguageSpec(
@@ -367,6 +387,11 @@ JAVASCRIPT = LanguageSpec(
     param_style="js",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY,
+    heritage_query="""
+(class_declaration
+  name: (identifier) @classname
+  (class_heritage)? @heritage) @classdef
+""",
 )
 
 _TS_DEFINITIONS = """
@@ -432,6 +457,32 @@ _TS_CONTAINERS = {
     "interface_declaration": "name",
 }
 
+# TS/TSX heritage: ``class_declaration``/``abstract_class_declaration``
+# carry an optional ``class_heritage`` node (in turn containing an
+# ``extends_clause`` and/or ``implements_clause``); ``interface_
+# declaration`` carries an optional ``extends_type_clause`` list
+# directly (an interface has no ``implements`` of its own). Both
+# container shapes land in the same ``@heritage`` capture name — the
+# per-language parser in ``extractor.py`` dispatches on the captured
+# node's own ``.type`` to walk each shape correctly. Confirmed against
+# the pinned tree-sitter-typescript grammar at implementation time
+# (``class_heritage``'s ``extends_clause`` has a ``value`` field;
+# ``implements_clause``/``extends_type_clause`` list their types as
+# plain, unfielded named children).
+_TS_HERITAGE = """
+(class_declaration
+  name: (type_identifier) @classname
+  (class_heritage)? @heritage) @classdef
+
+(abstract_class_declaration
+  name: (type_identifier) @classname
+  (class_heritage)? @heritage) @classdef
+
+(interface_declaration
+  name: (type_identifier) @classname
+  (extends_type_clause)? @heritage) @classdef
+"""
+
 TYPESCRIPT = LanguageSpec(
     name="typescript",
     grammar="typescript",
@@ -445,6 +496,7 @@ TYPESCRIPT = LanguageSpec(
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     # Plain (non-JSX) TypeScript has no jsx_expression node type.
     reference_query=_JS_REFERENCE_BASE,
+    heritage_query=_TS_HERITAGE,
 )
 
 TSX = LanguageSpec(
@@ -459,6 +511,7 @@ TSX = LanguageSpec(
     param_style="ts",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY,
+    heritage_query=_TS_HERITAGE,
 )
 
 # Type-reference edges (bug #1.1a): a struct/interface type used only
@@ -583,6 +636,16 @@ JAVA = LanguageSpec(
         "record_declaration",
     ),
     param_style="generic",
+    heritage_query="""
+(class_declaration
+  name: (identifier) @classname
+  superclass: (superclass)? @superclass
+  interfaces: (super_interfaces)? @interfaces) @classdef
+
+(interface_declaration
+  name: (identifier) @classname
+  (extends_interfaces)? @heritage) @classdef
+""",
 )
 
 TIER1_SPECS: tuple[LanguageSpec, ...] = (

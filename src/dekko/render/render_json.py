@@ -29,9 +29,10 @@ def render_json(
         this is written densely instead of pretty-printed
         (round-15 plan). Caller/callee/candidate id strings that
         repeat across ``"edges"``/``"ambiguous"``/``"external"``/
-        ``"referenced"`` are interned once into a top-level ``"ids"``
-        table (``mapfile.build_id_table``) and referenced there by
-        integer index instead of being spelled out at every
+        ``"referenced"``/``"heritage"``/``"heritage_ambiguous"``/
+        ``"heritage_external"`` are interned once into a top-level
+        ``"ids"`` table (``mapfile.build_id_table``) and referenced
+        there by integer index instead of being spelled out at every
         occurrence.
     """
     when = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -85,6 +86,31 @@ def render_json(
                 "lines": edge.lines,
             }
             for edge in graph.referenced
+        ],
+        "heritage": [
+            {
+                "subtype": id_index[edge.subtype],
+                "supertype": id_index[edge.supertype],
+                "relation": edge.relation,
+                "lines": edge.lines,
+            }
+            for edge in graph.heritage
+        ],
+        "heritage_ambiguous": [
+            {
+                "subtype": id_index[subtype],
+                "name": name,
+                "candidates": [id_index[c] for c in cands],
+            }
+            for subtype, name, cands in graph.heritage_ambiguous
+        ],
+        "heritage_external": [
+            {
+                "caller": id_index[ext.caller],
+                "callee": id_index[ext.callee],
+                "lines": ext.lines,
+            }
+            for ext in graph.heritage_external
         ],
     }
     return _json_dumps(doc) + b"\n"

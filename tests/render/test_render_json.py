@@ -6,15 +6,22 @@ from pathlib import Path
 
 from dekko.render import mapfile
 from dekko.render.render_json import render_json
-from dekko.core.model import CallGraph, Edge, ExternalCall, FileMap, Symbol
+from dekko.core.model import (
+    CallGraph,
+    Edge,
+    ExternalCall,
+    FileMap,
+    HeritageEdge,
+    Symbol,
+)
 
 
-def _sym(path: str, name: str) -> Symbol:
+def _sym(path: str, name: str, kind: str = "function") -> Symbol:
     return Symbol(
         id=f"{path}::{name}",
         name=name,
         qualname=name,
-        kind="function",
+        kind=kind,
         path=path,
         language="python",
         start_line=1,
@@ -33,6 +40,22 @@ def _sample_graph() -> tuple[list[FileMap], CallGraph]:
         FileMap(
             path="c.py", language="python", symbols=[_sym("c.py", "helper")]
         ),
+        FileMap(
+            path="d.py",
+            language="python",
+            symbols=[
+                _sym("d.py", "Dog", kind="class"),
+                _sym("d.py", "Animal", kind="class"),
+            ],
+        ),
+        FileMap(
+            path="e.py",
+            language="python",
+            symbols=[
+                _sym("e.py", "Base1", kind="class"),
+                _sym("e.py", "Base2", kind="class"),
+            ],
+        ),
     ]
     graph = CallGraph(
         edges=[Edge(caller="a.py::main", callee="b.py::helper", lines=[3])],
@@ -44,6 +67,26 @@ def _sample_graph() -> tuple[list[FileMap], CallGraph]:
         ],
         referenced=[
             Edge(caller="a.py::main", callee="c.py::helper", lines=[7])
+        ],
+        heritage=[
+            HeritageEdge(
+                subtype="d.py::Dog",
+                supertype="d.py::Animal",
+                relation="extends",
+                lines=[1],
+            )
+        ],
+        heritage_ambiguous=[
+            (
+                "d.py::Dog",
+                "Base",
+                ["e.py::Base1", "e.py::Base2"],
+            )
+        ],
+        heritage_external=[
+            ExternalCall(
+                caller="d.py::Dog", callee="pydantic.BaseModel", lines=[2]
+            )
         ],
     )
     return files, graph
@@ -80,6 +123,24 @@ def test_render_json_interns_repeated_ids() -> None:
     assert ids[ref["caller"]] == "a.py::main"
     assert ids[ref["callee"]] == "c.py::helper"
 
+    heritage = doc["heritage"][0]
+    assert ids[heritage["subtype"]] == "d.py::Dog"
+    assert ids[heritage["supertype"]] == "d.py::Animal"
+    assert heritage["relation"] == "extends"
+    assert heritage["lines"] == [1]
+
+    h_amb = doc["heritage_ambiguous"][0]
+    assert ids[h_amb["subtype"]] == "d.py::Dog"
+    assert h_amb["name"] == "Base"
+    assert [ids[c] for c in h_amb["candidates"]] == [
+        "e.py::Base1",
+        "e.py::Base2",
+    ]
+
+    h_ext = doc["heritage_external"][0]
+    assert ids[h_ext["caller"]] == "d.py::Dog"
+    assert ids[h_ext["callee"]] == "pydantic.BaseModel"
+
 
 def test_render_json_is_compact_not_pretty_printed() -> None:
     files, graph = _sample_graph()
@@ -109,6 +170,51 @@ def test_round_trip_matches_index_from_maps(tmp_path: Path) -> None:
     assert loaded.externals_by_name == expected.externals_by_name
     assert loaded.referenced_in == expected.referenced_in
     assert loaded.referenced_out == expected.referenced_out
+    assert loaded.heritage_out == expected.heritage_out
+    assert loaded.heritage_in == expected.heritage_in
+    assert loaded.heritage_lines == expected.heritage_lines
+    assert loaded.heritage_relation == expected.heritage_relation
+    assert loaded.heritage_ambiguous_in == expected.heritage_ambiguous_in
+    assert loaded.heritage_ambiguous_out == expected.heritage_ambiguous_out
+    assert loaded.heritage_external_out == expected.heritage_external_out
+
+
+def test_map_doc_version_is_6() -> None:
+    # Bumped 5 -> 6 for the type/interface heritage graph.
+    assert mapfile.MAP_DOC_VERSION == 6
+
+
+def test_backward_read_v5_document_without_heritage_sections(
+    tmp_path: Path,
+) -> None:
+    # A v5 document (id-interning present, but written before heritage
+    # existed) has no "heritage"/"heritage_ambiguous"/"heritage_
+    # external" keys at all. load_map() must not crash and must
+    # produce empty heritage tables rather than assuming those keys
+    # are always present.
+    files, graph = _sample_graph()
+    graph.heritage = []
+    graph.heritage_ambiguous = []
+    graph.heritage_external = []
+    doc = json.loads(render_json(files, graph, "demo"))
+    doc["version"] = 5
+    del doc["heritage"]
+    del doc["heritage_ambiguous"]
+    del doc["heritage_external"]
+    map_dir = tmp_path / ".dekko"
+    map_dir.mkdir()
+    (map_dir / "map.json").write_text(json.dumps(doc))
+
+    index = mapfile.load_map(tmp_path)
+    assert index is not None
+    assert index.heritage_out == {}
+    assert index.heritage_in == {}
+    assert index.heritage_ambiguous_in == {}
+    assert index.heritage_ambiguous_out == {}
+    assert index.heritage_external_out == {}
+    # The rest of the document still reads correctly — a heritage-less
+    # v5 document is not otherwise degraded.
+    assert index.calls_out["a.py::main"] == ["b.py::helper"]
 
 
 def test_backward_read_v4_document_without_ids_table(
