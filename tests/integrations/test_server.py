@@ -82,6 +82,7 @@ def test_tools_list_exposes_the_read_surface() -> None:
         "get_callers",
         "get_callees",
         "find_usages",
+        "find_type_usages",
         "get_context_pack",
         "outline",
         "impacted_tests",
@@ -235,6 +236,48 @@ def test_get_callers_tool(make_mapped_repo: RepoFactory) -> None:
     result = _call(ctx, "get_callers", {"symbol": "f"})
     assert result["isError"] is False
     assert "g() -> int" in result["content"][0]["text"]
+
+
+def test_find_type_usages_tool(make_mapped_repo: RepoFactory) -> None:
+    files = {
+        "app.py": (
+            "class Config:\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            "def start(cfg: Config) -> None:\n"
+            "    pass\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(ctx, "find_type_usages", {"type": "Config"})
+    assert result["isError"] is False
+    assert "start(cfg: Config) -> None" in result["content"][0]["text"]
+
+
+def test_find_type_usages_tool_exact_passthrough(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {
+        "app.py": (
+            "from typing import Optional\n"
+            "\n"
+            "\n"
+            "class Config:\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            "def start(cfg: Optional[Config] = None) -> None:\n"
+            "    pass\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    loose = _call(ctx, "find_type_usages", {"type": "Config"})
+    assert loose["isError"] is False
+    assert "start" in loose["content"][0]["text"]
+
+    exact = _call(ctx, "find_type_usages", {"type": "Config", "exact": True})
+    assert exact["isError"] is True
 
 
 def test_get_context_pack_tool(make_mapped_repo: RepoFactory) -> None:
@@ -742,6 +785,42 @@ def test_find_usages_tool_defaults_budget(
         is False
     )
     assert seen["budget"] == 9000
+
+
+def test_find_type_usages_tool_defaults_budget(
+    monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    seen: dict = {}
+
+    def fake_run(
+        index,  # noqa: ANN001
+        action,  # noqa: ANN001
+        target,  # noqa: ANN001
+        as_json,  # noqa: ANN001
+        limit,  # noqa: ANN001
+        budget=None,  # noqa: ANN001
+        exact=False,  # noqa: ANN001
+    ) -> int:
+        seen["budget"] = budget
+        seen["exact"] = exact
+        print("type")
+        return 0
+
+    monkeypatch.setattr(server.query, "run", fake_run)
+    basic = _call(ctx, "find_type_usages", {"type": "Config"})
+    assert basic["isError"] is False
+    assert seen["budget"] == server.DEFAULT_RELATION_BUDGET
+    assert seen["exact"] is False
+
+    result = _call(
+        ctx,
+        "find_type_usages",
+        {"type": "Config", "budget": 9000, "exact": True},
+    )
+    assert result["isError"] is False
+    assert seen["budget"] == 9000
+    assert seen["exact"] is True
 
 
 def test_get_context_pack_tool_defaults_budget(

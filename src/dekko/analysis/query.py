@@ -13,6 +13,7 @@ plain ``path:qualname`` can't narrow the set.
 import difflib
 import io
 import json
+import re
 import sys
 from contextlib import redirect_stdout
 
@@ -26,7 +27,7 @@ EXIT_OK = 0
 EXIT_NOT_FOUND = 3
 EXIT_AMBIGUOUS = 4
 
-ACTIONS = ("callers", "callees", "symbol", "file", "uses")
+ACTIONS = ("callers", "callees", "symbol", "file", "uses", "type")
 
 # Default token cap for relation-shaped actions (callers/callees/uses)
 # when the caller passes no budget. Without this, a high-fan-in
@@ -37,7 +38,16 @@ ACTIONS = ("callers", "callees", "symbol", "file", "uses")
 # Callers can always pass a larger budget explicitly.
 DEFAULT_RELATION_BUDGET = 800
 
-_BUDGETED_ACTIONS = ("callers", "callees", "uses")
+_BUDGETED_ACTIONS = ("callers", "callees", "uses", "type")
+
+# Identifier-token pattern for the default (non-``--exact``) ``type``
+# match: the queried name must appear as a whole token inside the raw,
+# unparsed type text (``Optional[Config]``, ``Vec<Config>``, ``*Config``,
+# ``Config | None``), not merely as a substring — this is what keeps
+# ``Config`` from matching ``ConfigManager``/``AppConfig``. Same
+# word-boundary discipline as ``_is_qualname_near_miss``, applied to
+# type text instead of qualnames.
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def paths_matching(index: MapIndex, path: str) -> list[str]:
@@ -769,6 +779,141 @@ def _run_uses(
     return EXIT_OK, _emit_lines(_uses_rows(index, exts), budget, limit)
 
 
+def _type_matches(type_text: str | None, needle: str, exact: bool) -> bool:
+    """Whether a stored ``params[].type``/``returns`` string names ``needle``.
+
+    Types are raw, unparsed text straight from the tree-sitter type
+    annotation node (``Optional[Config]``, ``Config | None``,
+    ``*Config``, ``&mut Config``, ``Vec<Config>``) — there's no type AST
+    to walk here, only string matching. ``exact=False`` (the default)
+    tokenizes on non-identifier characters and requires ``needle`` to
+    appear as a whole token, which matches every wrapper form above
+    while still rejecting ``ConfigManager``/``AppConfig``. ``exact=True``
+    requires the stripped type text to equal ``needle`` verbatim.
+
+    Args:
+        type_text: The stored type string, or ``None`` when the
+            parameter/return has no declared type.
+        needle: Type name being searched for.
+        exact: Match the literal string instead of a bare token.
+
+    Returns:
+        True when ``type_text`` names ``needle`` under the chosen mode.
+    """
+    if not type_text:
+        return False
+    if exact:
+        return type_text.strip() == needle
+    return needle in _IDENT_RE.findall(type_text)
+
+
+def _type_usage_row(sym: Symbol, usage: str, param_name: str | None) -> str:
+    """One text row for a type-usage hit."""
+    tag = f"[param: {param_name}]" if usage == "param" else "[return]"
+    return f"{_sym_line(sym)}  {tag}"
+
+
+def _type_usage_entry(
+    index: MapIndex,
+    sym: Symbol,
+    usage: str,
+    param_name: str | None,
+    raw_type: str,
+) -> dict:
+    """One JSON entry for a type-usage hit."""
+    entry = _sym_json(index, sym)
+    entry["usage"] = usage
+    if param_name is not None:
+        entry["param_name"] = param_name
+    entry["raw_type"] = raw_type
+    return entry
+
+
+def _run_type_not_found(index: MapIndex, needle: str) -> int:
+    """Report a ``type`` target with zero matching functions/methods."""
+    print(f"dekko: no results for type '{needle}'", file=sys.stderr)
+    type_names = [
+        s.name for s in index.symbols_by_id.values() if s.kind in TYPE_KINDS
+    ]
+    close = _close_names(needle, type_names)
+    if close:
+        print("closest type names: " + ", ".join(close), file=sys.stderr)
+    coverage = _coverage_note(index)
+    if coverage:
+        print(f"  note: {coverage}", file=sys.stderr)
+    return EXIT_NOT_FOUND
+
+
+def _run_type_usage(
+    index: MapIndex,
+    needle: str,
+    exact: bool,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute the type action: functions/methods taking/returning needle.
+
+    Walks every ``function``/``method`` symbol's ``returns`` and
+    ``params[].type`` directly — a pure read over data already on disk
+    in ``map.json``, no resolver involvement. Only ``function``/``method``
+    symbols ever carry non-empty ``params``/``returns`` (see
+    ``extractor._collect_definitions``), so this cannot answer "what
+    struct fields are typed X" — that's a real extraction-pipeline gap,
+    not a matching-strategy shortcoming, and is documented rather than
+    silently under-covered.
+
+    Args:
+        index: Loaded map index.
+        needle: Type name to search for.
+        exact: Match the literal stored type text instead of a bare
+            identifier token inside wrapper syntax.
+        as_json: Emit structured JSON instead of text.
+        limit: Cap on text result rows.
+        budget: Approximate token budget for the result rows.
+
+    Returns:
+        ``(exit_code, meter)`` — meter is ``None`` for JSON output or a
+        not-found result.
+    """
+    rows: list[tuple[Symbol, str, str | None, str]] = []
+    for sym in index.symbols_by_id.values():
+        if sym.kind not in ("function", "method"):
+            continue
+        if _type_matches(sym.returns, needle, exact):
+            rows.append((sym, "return", None, sym.returns))
+        rows.extend(
+            (sym, "param", p.name, p.type)
+            for p in sym.params
+            if _type_matches(p.type, needle, exact)
+        )
+    if not rows:
+        return _run_type_not_found(index, needle), None
+    rows.sort(key=lambda r: relevance_key(r[0], index))
+    if as_json:
+        entries = [
+            _type_usage_entry(index, sym, usage, pname, raw)
+            for sym, usage, pname, raw in rows
+        ]
+        kept, meter = _fit_entries(entries, budget, limit)
+        doc = {
+            "action": "type",
+            "name": needle,
+            "exact": exact,
+            "results": kept,
+            "meta": meter.as_dict(),
+        }
+        coverage = _coverage_note(index)
+        if coverage:
+            doc["coverage_warning"] = coverage
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK, None
+    lines = [
+        _type_usage_row(sym, usage, pname) for sym, usage, pname, _ in rows
+    ]
+    return EXIT_OK, _emit_lines(lines, budget, limit)
+
+
 _TYPE_ZERO_FAN_NOTE = (
     "call/reference edges only — a type used solely as a parameter, "
     "field, or return-type annotation reports 0/0 here even when it's "
@@ -883,12 +1028,15 @@ def _dispatch(
     budget: int | None,
     sites: bool,
     notes: bool,
+    exact: bool,
 ) -> tuple[int, Meter | None]:
     """Route one query action to its executor."""
     if action == "file":
         return _run_file(index, target, as_json, limit, budget)
     if action == "uses":
         return _run_uses(index, target, as_json, limit, budget)
+    if action == "type":
+        return _run_type_usage(index, target, exact, as_json, limit, budget)
 
     sym, candidates = resolve_target(index, target)
     if sym is None:
@@ -907,6 +1055,7 @@ def run(
     sites: bool = False,
     notes: bool = True,
     budget: int | None = None,
+    exact: bool = False,
 ) -> int:
     """Execute one query action against a loaded index.
 
@@ -914,7 +1063,8 @@ def run(
         index: Loaded map index.
         action: One of ``ACTIONS``.
         target: Symbol or file target string; for ``uses``, the base
-            identifier of an external reference (``run``, ``Path``).
+            identifier of an external reference (``run``, ``Path``);
+            for ``type``, a type/class/struct/interface name.
         as_json: Emit structured JSON instead of text.
         limit: Cap on text result rows.
         sites: For callers/callees, print one row per call site
@@ -923,12 +1073,16 @@ def run(
         notes: Show a symbol's notes on its card (``symbol`` action).
         budget: Approximate token budget for the result rows, or
             ``None``. Lowest-relevance rows are dropped first. For
-            ``callers``/``callees``/``uses``, ``None`` falls back to
-            ``DEFAULT_RELATION_BUDGET`` rather than going unbounded —
-            a high-fan-in symbol's full row list is otherwise capped
-            only by ``limit``'s row count, which can still render
-            thousands of tokens (the CLI and MCP paths previously
-            diverged here; both now share this one fallback).
+            ``callers``/``callees``/``uses``/``type``, ``None`` falls
+            back to ``DEFAULT_RELATION_BUDGET`` rather than going
+            unbounded — a high-fan-in symbol's full row list is
+            otherwise capped only by ``limit``'s row count, which can
+            still render thousands of tokens (the CLI and MCP paths
+            previously diverged here; both now share this one
+            fallback).
+        exact: For ``type``, match the stored type text exactly instead
+            of a bare identifier token inside wrapper syntax (e.g.
+            ``Optional[Config]``).
 
     Returns:
         Process exit code.
@@ -947,6 +1101,7 @@ def run(
             effective_budget,
             sites,
             notes,
+            exact,
         )
     text = buf.getvalue()
     sys.stdout.write(text)

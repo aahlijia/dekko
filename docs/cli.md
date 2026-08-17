@@ -9,6 +9,7 @@ dekko query symbol run_map           # signature card: doc, location, fan-in/out
 dekko query callers resolve --sites  # who calls resolve, with call sites
 dekko query callees main             # what does main call?
 dekko query uses Path                # who references the external name Path?
+dekko query type Config              # what takes/returns Config? (--exact for literal match)
 dekko context run_map --budget 1500  # minimal context pack for an edit
 dekko search "retries failed http requests"  # free-text relevance search
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
@@ -41,6 +42,16 @@ an impacted-test report. This is deliberate — comment/whitespace noise
 shouldn't spuriously flag every test in a file as impacted — but it's worth
 knowing before assuming a "no changes detected" result means the file itself
 is byte-identical to the compared rev.
+
+`query type` only covers what tree-sitter extracts a type from:
+function/method parameter and return-type annotations. It does not see
+struct/class **fields** typed with the target type — those aren't
+extracted as their own symbols with a type at all, so a clean result
+set from `query type` doesn't mean the type is otherwise unused.
+Default matching is identifier-token based (`Config` matches
+`Optional[Config]`, `Vec<Config>`, `Config | None`, but not
+`ConfigManager`); pass `--exact` to match the stored type text
+verbatim instead.
 
 `--json` governs the shape of *successful* (exit 0) output only. Any
 error — an ambiguous match, a not-found symbol, a stale map under

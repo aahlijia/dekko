@@ -329,7 +329,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_query.add_argument(
         "target",
         help="symbol (name, Class.method, file.py:func), file path, or "
-        "(for uses) an external base identifier; append "
+        "(for uses) an external base identifier, or (for type) a "
+        "type/class/struct/interface name; append "
         "':LINE' (file.py:Class.method:LINE) to pick one candidate out "
         "of an overload set the ambiguous-candidate error reports",
     )
@@ -357,6 +358,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="show notes anchored to the symbol (default: on)",
+    )
+    p_query.add_argument(
+        "--exact",
+        action="store_true",
+        help="for 'type': match the type text exactly (no generic/"
+        "pointer/optional wrapper stripping) — default loosely matches "
+        "the type name as a bare identifier inside the raw annotation "
+        "text",
     )
     _add_read_options(p_query)
     p_query.set_defaults(func=run_query)
@@ -1286,6 +1295,7 @@ def run_query(args: argparse.Namespace) -> int:
         sites=args.sites,
         notes=args.notes,
         budget=args.budget,
+        exact=args.exact,
     )
 
 

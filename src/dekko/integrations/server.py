@@ -306,6 +306,30 @@ def tool_find_usages(ctx: Context, args: dict) -> str:
     return _with_notes(out, err)
 
 
+def tool_find_type_usages(ctx: Context, args: dict) -> str:
+    """Symbols that use a type as a parameter or return type."""
+    index = _index_for(ctx, args)
+    name = _require(args, "type")
+    exact = bool(args.get("exact", False))
+    limit = int(args.get("limit", 50))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
+    code, out, err = _capture(
+        lambda: query.run(
+            index,
+            "type",
+            name,
+            as_json=False,
+            limit=limit,
+            budget=budget,
+            exact=exact,
+        )
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return _with_notes(out, err)
+
+
 def tool_get_context_pack(ctx: Context, args: dict) -> str:
     """Minimal signature neighborhood for editing a symbol or file."""
     index = _index_for(ctx, args)
@@ -850,6 +874,42 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["name"],
         },
         "handler": tool_find_usages,
+    },
+    {
+        "name": "find_type_usages",
+        "description": "Every function/method that uses a type as a "
+        "parameter or return type — for 'what breaks if I change this "
+        "struct/class's shape' questions the call graph alone can't "
+        "answer, since a function can use a type without calling "
+        "anything on it. Matches the bare type name inside wrapper "
+        "syntax (Optional[Config], Vec<Config>, Config | None all match "
+        "'Config') unless exact=true. Only functions/methods carry "
+        "typed params/returns — struct/class fields typed with the "
+        "target type are not covered.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "description": "Type/class/struct/interface name "
+                    "to search for, e.g. 'Config'",
+                },
+                "exact": {
+                    "type": "boolean",
+                    "description": "Match the declared type text "
+                    "exactly instead of the bare identifier inside "
+                    "wrapper syntax (default false)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max result lines (default 50)",
+                },
+                "budget": _BUDGET_PROP,
+                "root": _ROOT_PROP,
+            },
+            "required": ["type"],
+        },
+        "handler": tool_find_type_usages,
     },
     {
         "name": "get_context_pack",
