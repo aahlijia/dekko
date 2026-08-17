@@ -27,6 +27,9 @@ dekko unused                         # symbols nothing calls (dead-code leads)
 dekko unused --kinds types           # unused types only (heritage + type-usage aware)
 dekko unused --kinds all             # callables + types, unioned
 dekko ambiguous                      # resolver-trust report: where resolution was ambiguous
+dekko deps                           # module-level dependency graph: edge/file counts, cycle count
+dekko deps --file src/app.py         # one file's resolved imports/importers/external sources
+dekko deps --cycles                  # every detected circular-import cluster
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
 dekko daemon start                   # warm-cache background process (see below)
@@ -123,7 +126,7 @@ JSON when it is 0.
 
 Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
-`ledger`, `orient` cover more specialized workflows; hooks are
+`ledger`, `orient`, `deps` cover more specialized workflows; hooks are
 documented in [claude-code.md](claude-code.md#push-hooks-opt-in)).
 
 ## Excluding files
@@ -220,6 +223,89 @@ very-high-cardinality collision (a bare `main`/`New`/`Generate`
 matched against dozens of same-named repo-wide candidates) truncates
 the same way an unresolved-target error does, rather than dumping every
 candidate unconditionally.
+
+## Interpreting `dekko deps`
+
+`deps` reports the **module-level dependency graph**: which files
+import which files, resolved from every extracted `import`/`use`/
+`#include` statement's raw source string to the in-repo file it
+actually names (or left external when it names a stdlib/third-party
+source, or dekko can't confidently place it). This is a distinct
+question from the call-graph views `export --scope file`/`--scope
+dir` already answer ("which files call into which files" — a runtime
+question) — the two usually roughly agree but can diverge: a file
+can import a module purely for a type annotation or a side effect
+(`import "./polyfill"`) with zero calls ever crossing that edge:
+
+```sh
+dekko deps                           # summary: file/edge counts, cycle count, top-N most-depended-on
+dekko deps --file src/app.py         # this file's resolved imports/importers + external sources
+dekko deps --cycles                  # every detected circular-import cluster, one block per cycle
+dekko deps --top 20                  # widen the most-depended-on ranking in the default summary
+dekko deps --export mermaid          # emit the module graph via `export`'s existing renderers
+dekko deps --export dot --output deps.dot
+```
+
+`--file`, `--cycles`, and `--export` are mutually exclusive — give at
+most one, the same "one, not several" rule `ambiguous`'s `--by`/
+`--name` already follows.
+
+Cycle detection groups files into strongly-connected components
+(Tarjan's SCC): a reported cycle is every file mutually reachable from
+every other file in that group via resolved imports, not necessarily
+a single walked chain — a group of 2+ files means those files can't be
+split apart without addressing the cycle first. A file that imports
+itself (a re-export pattern gone wrong, or simply unusual code) is
+reported as its own distinct 1-file cycle, labeled `(self-import)`,
+never merged into a real multi-file group's count.
+
+**Per-language resolution coverage** — a source string is matched
+against the repo's real file layout, not guessed when more than one
+file could plausibly be meant:
+
+- **Python**: relative imports (leading dots) resolve against the
+  importing file's own directory; absolute imports resolve against the
+  repo's real package layout (a directory with its own `__init__.py`),
+  found by package name regardless of whether it sits at the repo root
+  or nested under `src/`. A dotted import's last segment is tried both
+  as a submodule file and, when no such file exists, as a symbol
+  defined in the parent module — real Python import semantics have no
+  actual ambiguity here once the submodule file is checked for.
+- **JavaScript/TypeScript/TSX**: `./`/`../`-prefixed sources resolve
+  relative to the importing file, trying `.ts`/`.tsx`/`.js`/`.jsx` and
+  `index.*` in turn. Bare specifiers (`"react"`, `"lodash"`) are
+  external by construction; a `tsconfig.json` path-alias/`baseUrl`
+  absolute import is not resolved (out of scope — would need
+  `tsconfig.json` parsing).
+- **Rust**: `crate::`/`self::`/`super::` paths resolve against a
+  best-effort crate-root/module-tree walk (the nearest ancestor
+  directory with `lib.rs`/`main.rs`, absent any `Cargo.toml` parsing).
+  A bare crate name (`use serde::Deserialize`) is external.
+- **Java**: `import com.foo.Bar;` maps mechanically to `.../com/foo/
+  Bar.java`, searched against the repo regardless of whether sources
+  sit at the repo root or nested under a Maven/Gradle `src/main/java`
+  (or `src/test/java`) module directory — confirmed against
+  `spring-boot`'s real multi-module layout.
+- **C/C++**: `#include` resolves by filename search (no
+  package-qualified path the way Java's `import` has); two headers
+  sharing a basename in different directories are left external rather
+  than guessed. Quoted (`"local.h"`) and angle-bracket (`<system.h>`)
+  forms are **not** distinguished — that information doesn't survive
+  extraction — so this is a filename search for both forms alike, not
+  the "angle brackets are always external" shortcut a compiler gets;
+  in practice a system header only resolves in error if the repo
+  happens to have its own same-named file, which the basename-
+  uniqueness check above already guards against for the common case.
+- **Go**: not resolved. Go's import paths need the module's own
+  declared prefix (`go.mod`), which dekko does not parse — every Go
+  import is reported external rather than guessed from a bare
+  directory-name match. A documented limitation, not a silent gap:
+  `dekko deps` on a Go-heavy repo will show every Go file as
+  external-only rather than a misleadingly sparse (but wrong) graph.
+
+`dekko deps` is **CLI-only** (no MCP tool) — a repo-architecture report
+for refactor/circular-import planning, not a per-turn lookup an agent
+reaches for mid-edit, the same call `stats`/`unused` already make.
 
 ## Daemon mode
 

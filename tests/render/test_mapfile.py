@@ -12,6 +12,8 @@ from dekko.core.model import (
     ExternalCall,
     FileMap,
     HeritageEdge,
+    ModuleEdge,
+    ModuleGraph,
     Symbol,
 )
 
@@ -44,7 +46,7 @@ def test_load_round_trip(make_mapped_repo: RepoFactory) -> None:
 def test_provenance_written(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(CHAIN)
     doc = json.loads((root / ".dekko" / "map.json").read_text())
-    assert doc["version"] == 6
+    assert doc["version"] == mapfile.MAP_DOC_VERSION
     prov = doc["provenance"]
     assert prov["tool_version"]
     assert prov["spec_hash"]
@@ -850,7 +852,7 @@ def test_load_map_reads_heritage_rust_and_cpp(
     )
 
     doc = json.loads((root / ".dekko" / "map.json").read_text())
-    assert doc["version"] == mapfile.MAP_DOC_VERSION == 6
+    assert doc["version"] == mapfile.MAP_DOC_VERSION
 
 
 def test_without_tests_drops_heritage_touching_test_paths() -> None:
@@ -903,3 +905,61 @@ def test_without_tests_drops_heritage_touching_test_paths() -> None:
     assert filtered.heritage_in == {"b.py::Animal": ["a.py::Dog"]}
     assert "tests/test_a.py::TestDog" not in filtered.heritage_ambiguous_out
     assert filtered.heritage_external_out == {}
+
+
+def test_index_from_maps_builds_module_graph_adjacency() -> None:
+    files = [
+        FileMap(path="a.py", language="python"),
+        FileMap(path="b.py", language="python"),
+    ]
+    graph = CallGraph(
+        modules=ModuleGraph(
+            edges=[ModuleEdge(importer="a.py", imported="b.py", names=["x"])],
+            deps_out={"a.py": ["b.py"]},
+            deps_in={"b.py": ["a.py"]},
+            external={"a.py": ["os"]},
+        )
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    assert index.module_deps_out["a.py"] == ["b.py"]
+    assert index.module_deps_in["b.py"] == ["a.py"]
+    assert index.module_edge_names[("a.py", "b.py")] == ["x"]
+    assert index.module_external["a.py"] == ["os"]
+
+
+def test_load_map_reads_module_graph(make_mapped_repo: RepoFactory) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "from .b import helper\ndef main():\n    return helper()\n"
+            ),
+            "b.py": "def helper():\n    return 1\n",
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.module_deps_out["a.py"] == ["b.py"]
+    assert index.module_deps_in["b.py"] == ["a.py"]
+    assert index.module_edge_names[("a.py", "b.py")] == ["helper"]
+
+
+def test_without_tests_drops_module_edges_touching_test_paths() -> None:
+    files = [
+        FileMap(path="a.py", language="python"),
+        FileMap(path="tests/test_a.py", language="python"),
+    ]
+    graph = CallGraph(
+        modules=ModuleGraph(
+            edges=[
+                ModuleEdge(importer="tests/test_a.py", imported="a.py"),
+            ],
+            deps_out={"tests/test_a.py": ["a.py"]},
+            deps_in={"a.py": ["tests/test_a.py"]},
+            external={"tests/test_a.py": ["pytest"]},
+        )
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    filtered = index.without_tests()
+    assert filtered.module_deps_out == {}
+    assert filtered.module_deps_in == {}
+    assert filtered.module_external == {}

@@ -40,7 +40,7 @@ try:
 except ImportError:  # pragma: no cover - exercised in stdlib-only envs
     orjson = None  # type: ignore[assignment]
 
-MAP_DOC_VERSION = 6
+MAP_DOC_VERSION = 7
 _MAP_DIR = ".dekko"
 
 
@@ -162,6 +162,7 @@ def build_id_table(graph: CallGraph) -> tuple[list[str], dict[str, int]]:
         intern(edge.caller)
         intern(edge.callee)
     _intern_heritage(graph, intern)
+    _intern_modules(graph, intern)
     return ids, index
 
 
@@ -184,6 +185,25 @@ def _intern_heritage(graph: CallGraph, intern: Callable[[str], None]) -> None:
     for ext in graph.heritage_external:
         intern(ext.caller)
         intern(ext.callee)
+
+
+def _intern_modules(graph: CallGraph, intern: Callable[[str], None]) -> None:
+    """The ``build_id_table`` interning loop for the module graph.
+
+    Interns file *paths* (not symbol ids) from ``graph.modules`` —
+    safe to share the same intern table as every symbol-id section
+    above, since a path string never collides with a symbol id string
+    (every symbol id contains ``"::"``; no repo-relative path does).
+    Only the edges' ``importer``/``imported`` paths are interned, per
+    the design's own scoping — ``ModuleGraph.external``'s *values*
+    (raw unresolved import-source text, e.g. ``"os"``) are not paths
+    and are written as plain strings.
+    """
+    for edge in graph.modules.edges:
+        intern(edge.importer)
+        intern(edge.imported)
+    for path in graph.modules.external:
+        intern(path)
 
 
 def _resolve_ref(value: object, ids: list[str] | None) -> str:
@@ -522,6 +542,24 @@ class MapIndex:
             caller-indexed table is what ``supertypes`` rendering
             actually requires; see the design doc's "Implementation
             notes" for the rationale.
+        module_deps_out: File path → sorted paths it imports (empty
+            for maps written before doc version 7) — see
+            ``resolver.resolve_imports``/``model.ModuleGraph``. Keyed
+            and valued by file path, not symbol id, unlike every other
+            adjacency table above.
+        module_deps_in: File path → sorted paths that import it.
+        module_edge_names: ``(importer path, imported path)`` → the
+            local names imported across that edge, mirroring
+            ``heritage_lines``'s side-table shape (an edge's own
+            per-pair data not carried by the adjacency tables alone).
+        module_external: File path → raw import-source strings that
+            did not resolve to an in-repo file (stdlib/third-party/
+            framework imports, or a source this pass couldn't
+            confidently place) — the module-graph counterpart to
+            ``externals_by_name``, but path-indexed rather than
+            name-indexed, since ``deps --file`` needs "what did *this*
+            file import that we couldn't resolve," not a repo-wide
+            name search.
         notes: Symbol id → note texts loaded from ``.dekko/notes.json``.
         provenance: Provenance stamp, or ``None`` for v1 documents.
         doc_version: The on-disk document's ``"version"`` field (``1``
@@ -571,6 +609,12 @@ class MapIndex:
     heritage_external_out: dict[str, list[ExternalCall]] = field(
         default_factory=dict
     )
+    module_deps_out: dict[str, list[str]] = field(default_factory=dict)
+    module_deps_in: dict[str, list[str]] = field(default_factory=dict)
+    module_edge_names: dict[tuple[str, str], list[str]] = field(
+        default_factory=dict
+    )
+    module_external: dict[str, list[str]] = field(default_factory=dict)
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
     doc_version: int = MAP_DOC_VERSION
@@ -652,6 +696,7 @@ class MapIndex:
             if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
         }
         _filter_heritage(self, out, by_id)
+        _filter_module_graph(self, out)
         return out
 
 
@@ -750,6 +795,39 @@ def _filter_heritage(
     for subtype, exts in src.heritage_external_out.items():
         if _prod_id(subtype, by_id):
             out.heritage_external_out[subtype] = exts
+
+
+def _filter_module_graph(src: "MapIndex", out: "MapIndex") -> None:
+    """Fill ``out``'s module-graph fields from ``src``, test paths
+    dropped.
+
+    Unlike ``_filter_heritage``/``_filter_adjacency``, the module
+    graph is keyed and valued by file *path* directly (not a symbol
+    id needing a ``symbols_by_id`` lookup to classify), so this
+    filters on ``is_test_path`` alone rather than via ``_prod_id``.
+    """
+    for path, others in src.module_deps_out.items():
+        if is_test_path(path):
+            continue
+        kept = [o for o in others if not is_test_path(o)]
+        if kept:
+            out.module_deps_out[path] = kept
+    for path, others in src.module_deps_in.items():
+        if is_test_path(path):
+            continue
+        kept = [o for o in others if not is_test_path(o)]
+        if kept:
+            out.module_deps_in[path] = kept
+    out.module_edge_names = {
+        key: names
+        for key, names in src.module_edge_names.items()
+        if not is_test_path(key[0]) and not is_test_path(key[1])
+    }
+    out.module_external = {
+        path: sources
+        for path, sources in src.module_external.items()
+        if not is_test_path(path)
+    }
 
 
 @dataclass
@@ -986,6 +1064,7 @@ def load_map(root: Path) -> MapIndex | None:
         index.referenced_in.setdefault(callee, []).append(caller)
         index.ref_lines[(caller, callee)] = edge.get("lines", [])
     _load_heritage(index, doc, ids)
+    _load_module_graph(index, doc, ids)
     return index
 
 
@@ -1029,6 +1108,36 @@ def _load_heritage(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
             lines=d.get("lines", []),
         )
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
+
+
+def _load_module_graph(
+    index: MapIndex, doc: dict, ids: list[str] | None
+) -> None:
+    """Fill ``index``'s module-graph fields from a parsed ``map.json``
+    document.
+
+    ``deps_out``/``deps_in`` are derived here from the ``"module_
+    graph"."edges"`` list, mirroring how ``_load_heritage`` derives
+    ``heritage_out``/``heritage_in`` from ``"heritage"`` rather than
+    storing the adjacency redundantly on disk. Absent entirely from
+    documents written before doc version 7 — ``.get(...)`` defaults
+    make every loop here a no-op for those.
+    """
+    mg = doc.get("module_graph") or {}
+    for edge in mg.get("edges", []):
+        importer = _resolve_ref(edge["importer"], ids)
+        imported = _resolve_ref(edge["imported"], ids)
+        index.module_deps_out.setdefault(importer, []).append(imported)
+        index.module_deps_in.setdefault(imported, []).append(importer)
+        index.module_edge_names[(importer, imported)] = edge.get("names", [])
+    for table in (index.module_deps_out, index.module_deps_in):
+        for key in table:
+            table[key] = sorted(set(table[key]))
+    for entry in mg.get("external", []):
+        path = _resolve_ref(entry["path"], ids)
+        index.module_external.setdefault(path, []).extend(
+            entry.get("sources", [])
+        )
 
 
 def _index_ambiguous(
@@ -1122,7 +1231,31 @@ def index_from_maps(
     )
     for ext in graph.heritage_external:
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
+    _index_module_graph(index, graph)
     return index
+
+
+def _index_module_graph(index: MapIndex, graph: CallGraph) -> None:
+    """The ``index_from_maps`` fill-in loop for the module graph.
+
+    Split out of ``index_from_maps`` purely to keep that function's
+    cyclomatic complexity under the project's Ruff limit — behaviorally
+    this is still part of the same in-process index build, mirroring
+    ``_load_module_graph``'s on-disk-read counterpart.
+    """
+    for edge in graph.modules.edges:
+        index.module_deps_out.setdefault(edge.importer, []).append(
+            edge.imported
+        )
+        index.module_deps_in.setdefault(edge.imported, []).append(
+            edge.importer
+        )
+        index.module_edge_names[(edge.importer, edge.imported)] = edge.names
+    for table in (index.module_deps_out, index.module_deps_in):
+        for key in table:
+            table[key] = sorted(set(table[key]))
+    for path, sources in graph.modules.external.items():
+        index.module_external[path] = sources
 
 
 def check_freshness(root: Path, index: MapIndex) -> Freshness:

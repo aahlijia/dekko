@@ -12,6 +12,8 @@ from dekko.core.model import (
     ExternalCall,
     FileMap,
     HeritageEdge,
+    ModuleEdge,
+    ModuleGraph,
     Symbol,
 )
 
@@ -88,6 +90,14 @@ def _sample_graph() -> tuple[list[FileMap], CallGraph]:
                 caller="d.py::Dog", callee="pydantic.BaseModel", lines=[2]
             )
         ],
+        modules=ModuleGraph(
+            edges=[
+                ModuleEdge(importer="a.py", imported="b.py", names=["helper"])
+            ],
+            deps_out={"a.py": ["b.py"]},
+            deps_in={"b.py": ["a.py"]},
+            external={"a.py": ["os"]},
+        ),
     )
     return files, graph
 
@@ -141,6 +151,15 @@ def test_render_json_interns_repeated_ids() -> None:
     assert ids[h_ext["caller"]] == "d.py::Dog"
     assert ids[h_ext["callee"]] == "pydantic.BaseModel"
 
+    mg_edge = doc["module_graph"]["edges"][0]
+    assert ids[mg_edge["importer"]] == "a.py"
+    assert ids[mg_edge["imported"]] == "b.py"
+    assert mg_edge["names"] == ["helper"]
+
+    mg_ext = doc["module_graph"]["external"][0]
+    assert ids[mg_ext["path"]] == "a.py"
+    assert mg_ext["sources"] == ["os"]
+
 
 def test_render_json_is_compact_not_pretty_printed() -> None:
     files, graph = _sample_graph()
@@ -177,11 +196,15 @@ def test_round_trip_matches_index_from_maps(tmp_path: Path) -> None:
     assert loaded.heritage_ambiguous_in == expected.heritage_ambiguous_in
     assert loaded.heritage_ambiguous_out == expected.heritage_ambiguous_out
     assert loaded.heritage_external_out == expected.heritage_external_out
+    assert loaded.module_deps_out == expected.module_deps_out
+    assert loaded.module_deps_in == expected.module_deps_in
+    assert loaded.module_edge_names == expected.module_edge_names
+    assert loaded.module_external == expected.module_external
 
 
-def test_map_doc_version_is_6() -> None:
-    # Bumped 5 -> 6 for the type/interface heritage graph.
-    assert mapfile.MAP_DOC_VERSION == 6
+def test_map_doc_version_is_7() -> None:
+    # Bumped 6 -> 7 for the module-level dependency graph.
+    assert mapfile.MAP_DOC_VERSION == 7
 
 
 def test_backward_read_v5_document_without_heritage_sections(
@@ -214,6 +237,33 @@ def test_backward_read_v5_document_without_heritage_sections(
     assert index.heritage_external_out == {}
     # The rest of the document still reads correctly — a heritage-less
     # v5 document is not otherwise degraded.
+    assert index.calls_out["a.py::main"] == ["b.py::helper"]
+
+
+def test_backward_read_v6_document_without_module_graph_section(
+    tmp_path: Path,
+) -> None:
+    # A v6 document (heritage present, but written before the module
+    # dependency graph existed) has no "module_graph" key at all.
+    # load_map() must not crash and must produce empty module-graph
+    # tables rather than assuming the key is always present.
+    files, graph = _sample_graph()
+    doc = json.loads(render_json(files, graph, "demo"))
+    doc["version"] = 6
+    del doc["module_graph"]
+    map_dir = tmp_path / ".dekko"
+    map_dir.mkdir()
+    (map_dir / "map.json").write_text(json.dumps(doc))
+
+    index = mapfile.load_map(tmp_path)
+    assert index is not None
+    assert index.module_deps_out == {}
+    assert index.module_deps_in == {}
+    assert index.module_edge_names == {}
+    assert index.module_external == {}
+    # The rest of the document still reads correctly — a module-
+    # graph-less v6 document is not otherwise degraded.
+    assert index.heritage_out["d.py::Dog"] == ["d.py::Animal"]
     assert index.calls_out["a.py::main"] == ["b.py::helper"]
 
 

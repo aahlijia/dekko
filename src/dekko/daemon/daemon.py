@@ -79,6 +79,7 @@ _DAEMON_ELIGIBLE = frozenset(
         "ledger",
         "note",
         "export",
+        "deps",
     }
 )
 
@@ -276,6 +277,7 @@ def _dispatch_table() -> dict[str, Callable[[argparse.Namespace], int]]:
         "ledger": cli.run_ledger,
         "note": cli.run_note,
         "export": cli.run_export,
+        "deps": cli.run_deps,
     }
 
 

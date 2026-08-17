@@ -279,6 +279,48 @@ class HeritageEdge:
 
 
 @dataclass
+class ModuleEdge:
+    """A resolved file -> file import dependency.
+
+    Attributes:
+        importer: Repo-relative path of the importing file.
+        imported: Repo-relative path of the imported file.
+        names: Local names imported across this edge (deduplicated,
+            sorted) — kept for disclosure ("imports X, Y from this
+            file"), not used for graph traversal itself.
+    """
+
+    importer: str
+    imported: str
+    names: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ModuleGraph:
+    """Resolved file-to-file dependency graph.
+
+    Built by ``resolver.resolve_imports()`` from every ``FileMap``'s
+    ``imports`` — a separate resolution pass from the symbol-level
+    call/reference/heritage graph, keyed on file paths rather than
+    symbol ids (an import statement names a module/file, not a
+    callable or type).
+
+    Attributes:
+        edges: Deduplicated resolved import edges.
+        deps_out: File path -> sorted paths it imports.
+        deps_in: File path -> sorted paths that import it.
+        external: Per-file, the raw source strings that did not
+            resolve to an in-repo file (stdlib/third-party/framework
+            imports) — kept for disclosure, not traversal.
+    """
+
+    edges: list[ModuleEdge] = field(default_factory=list)
+    deps_out: dict[str, list[str]] = field(default_factory=dict)
+    deps_in: dict[str, list[str]] = field(default_factory=dict)
+    external: dict[str, list[str]] = field(default_factory=dict)
+
+
+@dataclass
 class CallGraph:
     """Resolution results across the whole repo.
 
@@ -314,6 +356,15 @@ class CallGraph:
             class extending a framework base class is a common,
             expected case here (unlike ``external``'s "large but
             usually uninteresting" role for calls).
+        modules: Resolved file-to-file import dependency graph (see
+            ``ModuleGraph``) — a distinct resolution domain from
+            everything else on this dataclass (file paths, not symbol
+            ids), attached here purely so every resolved-graph
+            structure lives on the one object ``resolve()`` already
+            returns, mirroring how ``resolve_refs()``/
+            ``resolve_heritage()``'s results land on this same object
+            rather than being threaded through every caller
+            separately.
     """
 
     edges: list[Edge] = field(default_factory=list)
@@ -331,3 +382,4 @@ class CallGraph:
         default_factory=list
     )
     heritage_external: list[ExternalCall] = field(default_factory=list)
+    modules: ModuleGraph = field(default_factory=ModuleGraph)

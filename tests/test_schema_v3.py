@@ -39,11 +39,11 @@ def _resolve(doc: dict, ref: int) -> str:
     return doc["ids"][ref]
 
 
-def test_doc_version_is_6(make_mapped_repo: RepoFactory) -> None:
-    # Bumped 5 -> 6 for the type/interface heritage graph (extends/
-    # implements edges, plus their ambiguous/external buckets).
+def test_doc_version_is_7(make_mapped_repo: RepoFactory) -> None:
+    # Bumped 6 -> 7 for the module-level dependency graph
+    # (resolved file-to-file import edges, plus their external bucket).
     doc = _map_doc(make_mapped_repo(SRC))
-    assert doc["version"] == 6
+    assert doc["version"] == 7
 
 
 def test_edges_carry_call_site_lines(make_mapped_repo: RepoFactory) -> None:

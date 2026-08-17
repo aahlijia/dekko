@@ -33,7 +33,9 @@ def render_json(
         ``"heritage_external"`` are interned once into a top-level
         ``"ids"`` table (``mapfile.build_id_table``) and referenced
         there by integer index instead of being spelled out at every
-        occurrence.
+        occurrence. ``"module_graph"``'s file paths share that same
+        table (a path string never collides with a symbol id, which
+        always contains ``"::"``).
     """
     when = datetime.now(timezone.utc).isoformat(timespec="seconds")
     ids, id_index = build_id_table(graph)
@@ -112,5 +114,19 @@ def render_json(
             }
             for ext in graph.heritage_external
         ],
+        "module_graph": {
+            "edges": [
+                {
+                    "importer": id_index[edge.importer],
+                    "imported": id_index[edge.imported],
+                    "names": edge.names,
+                }
+                for edge in graph.modules.edges
+            ],
+            "external": [
+                {"path": id_index[path], "sources": sources}
+                for path, sources in sorted(graph.modules.external.items())
+            ],
+        },
     }
     return _json_dumps(doc) + b"\n"

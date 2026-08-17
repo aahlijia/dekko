@@ -97,8 +97,11 @@ receiver/arity, ``(g *IDGenerator) Generate(...)`` in ``pkg/markdown``
 tests for a change a same-package unit test directly covered.
 """
 
+import posixpath
 import re
+from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 from dekko.classify import is_test_path
@@ -110,6 +113,8 @@ from dekko.core.model import (
     FileMap,
     HeritageEdge,
     Import,
+    ModuleEdge,
+    ModuleGraph,
     RawCall,
     RawHeritage,
     RawRef,
@@ -207,6 +212,7 @@ def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
         graph.heritage_ambiguous,
         graph.heritage_external,
     ) = resolve_heritage(files)
+    graph.modules = resolve_imports(files)
     return graph
 
 
@@ -1554,3 +1560,775 @@ def _build_adjacency(graph: CallGraph) -> None:
     for table in (graph.calls_out, graph.calls_in):
         for key in table:
             table[key] = sorted(set(table[key]))
+
+
+# ---------------------------------------------------------------------
+# Module-level dependency graph (``dekko deps``)
+#
+# A structurally different resolution problem from everything above:
+# every ladder step in this file resolves a bare *name* (a call,
+# reference, or heritage clause) against repo-wide symbol candidates.
+# An import source string names a *module/file*, not a symbol — there
+# is no "same-file"/"typed-parameter"/"receiver-type" candidate ladder
+# to run, since a source string built from dots/slashes either maps to
+# exactly one real file once resolved, or it doesn't (see each
+# per-language resolver's own docstring for its construction rule).
+# ``resolve_imports`` is therefore its own self-contained pass, not a
+# thin wrapper around ``_pick_candidate``.
+
+
+@dataclass(frozen=True)
+class _ImportResolveContext:
+    """Precomputed, read-only lookup structures for import resolution.
+
+    Built once per ``resolve_imports`` call (O(files)) and shared
+    read-only across every import in the repo, so no per-language
+    resolver ever re-scans the full file list — every lookup below is
+    O(1) or bounded by a file's own path depth, never O(files) per
+    import (see ``resolve_imports``'s own docstring for why this
+    matters at scale).
+
+    Attributes:
+        paths: Every file path known to the map, for direct membership
+            checks.
+        py_package_roots: Top-level Python package name (the basename
+            of a directory containing ``__init__.py`` whose own parent
+            does not) → the directory path(s) with that basename. Used
+            to resolve absolute (non-relative) Python imports against
+            the repo's real package layout, wherever that layout lives
+            (``src/pkg/...``, ``pkg/...``, ...) rather than assuming
+            packages sit directly at the repo root.
+        java_suffix_index: Path suffix (with any of the well-known
+            Maven/Gradle source-root prefixes stripped, plus the raw
+            path itself) → matching real ``.java`` file path(s). Lets
+            ``import com.foo.Bar;`` resolve against ``src/main/java/
+            com/foo/Bar.java``-style layouts without hardcoding one
+            specific root.
+        cpp_basename_index: C/C++ header/source basename → matching
+            real path(s), scoped to C/C++-shaped extensions only (a
+            same-named Python/JS file must never satisfy a ``#include``
+            filename search).
+    """
+
+    paths: frozenset[str]
+    py_package_roots: dict[str, list[str]] = field(default_factory=dict)
+    java_suffix_index: dict[str, list[str]] = field(default_factory=dict)
+    cpp_basename_index: dict[str, list[str]] = field(default_factory=dict)
+
+
+def _dirname(path: str) -> str:
+    """Repo-relative parent directory of ``path`` (``""`` at the root)."""
+    head, _, _ = path.rpartition("/")
+    return head
+
+
+def _ancestor_dir(path: str, levels: int) -> str:
+    """Walk ``levels`` directories up from ``path`` (clamped at root)."""
+    if levels <= 0 or not path:
+        return path
+    parts = path.split("/")
+    if levels >= len(parts):
+        return ""
+    return "/".join(parts[:-levels])
+
+
+def _first_match(paths: frozenset[str], candidates: list[str]) -> str | None:
+    """First of ``candidates`` that names a real file, else ``None``."""
+    for c in candidates:
+        if c in paths:
+            return c
+    return None
+
+
+def _dir_module_candidates(
+    base_dir: str,
+    parts: list[str],
+    file_ext: str,
+    index_names: tuple[str, ...],
+) -> list[str]:
+    """File-path candidates for ``parts`` as a module path under
+    ``base_dir``, in a directory-per-package language (Python/Rust).
+
+    ``parts`` is treated as fully naming a module: either a leaf file
+    (``base_dir/parts/joined.ext``) or a package/sub-module directory
+    (``base_dir/parts/joined/<one of index_names>``). With ``parts``
+    empty, only the package-index form is meaningful (there is no
+    bare-file candidate for "the current directory itself").
+    ``index_names`` takes more than one entry only for Rust's crate
+    root, whose own index file is ``lib.rs``/``main.rs`` rather than
+    the ordinary ``mod.rs`` every other package directory uses.
+
+    Args:
+        base_dir: Directory the module path is rooted at (``""`` for
+            the repo root).
+        parts: Dotted/``::``-separated path segments, already split.
+        file_ext: Leaf-module file extension (``.py``, ``.rs``).
+        index_names: Package-index filename(s) to try, in order
+            (``("__init__.py",)``, ``("mod.rs",)``, or
+            ``("lib.rs", "main.rs")`` for a Rust crate root).
+
+    Returns:
+        Candidate repo-relative paths, most-specific first.
+    """
+    if not parts:
+        return [
+            f"{base_dir}/{name}" if base_dir else name for name in index_names
+        ]
+    joined = "/".join(parts)
+    base = f"{base_dir}/{joined}" if base_dir else joined
+    return [f"{base}{file_ext}"] + [f"{base}/{name}" for name in index_names]
+
+
+def _resolve_two_candidate_lists(
+    paths: frozenset[str], full: list[str], dropped_last: list[str] | None
+) -> str | None:
+    """Pick between "last segment is a submodule" vs. "last segment is
+    a symbol inside the parent module" — the ambiguity every dotted/
+    ``::``-path import source shares (see ``_resolve_import_python``'s
+    docstring for why this ambiguity exists at all).
+
+    ``full`` (the submodule reading) always wins when it matches a
+    real file: if ``pkg/sub/mod.py`` genuinely exists, ``from pkg.sub
+    import mod`` names that real submodule, full stop — real Python
+    import semantics have no actual ambiguity here, regardless of
+    whether ``pkg/sub/__init__.py`` also happens to exist (it almost
+    always does, for any properly laid-out package, which would make
+    "both readings match a real file" fire on virtually every import
+    if treated as a coin-flip ambiguity instead of a strict fallback).
+    ``dropped_last`` is only consulted when ``full`` matches nothing.
+
+    Args:
+        paths: Every known file path.
+        full: Candidates treating every segment as part of the module
+            path (the "last segment is itself a submodule" reading),
+            tried first.
+        dropped_last: Candidates with the last segment dropped (the
+            "last segment is a symbol imported from the parent module"
+            reading), tried only when ``full`` finds nothing; ``None``
+            when that reading doesn't apply.
+
+    Returns:
+        The resolved path, or ``None`` when neither reading matches a
+        real file.
+    """
+    match = _first_match(paths, full)
+    if match is not None:
+        return match
+    if dropped_last is not None:
+        return _first_match(paths, dropped_last)
+    return None
+
+
+def _resolve_import_python(
+    imp: Import, importer_path: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a Python import source to a repo file.
+
+    ``Import.source`` for a Python ``from`` import is ``"{base}{sep}
+    {imported_name}"`` (see ``extractor._imports_python``) — the
+    *imported name* is always appended to the module path, whether
+    that name is itself a submodule (``from . import sibling``) or a
+    plain symbol defined inside the named module (``from .mod import
+    Foo``). Static text alone can't tell those two shapes apart (this
+    is the real gap in the ideation doc's "source is already the
+    resolved module path" assumption — even the corrected design
+    doc's own worked example undercounts it), so every segment split
+    is tried both ways via ``_resolve_two_candidate_lists``: the full
+    dotted path as a submodule, and the path with its last segment
+    dropped (the parent module) plus that segment treated as a symbol
+    living inside it. A plain ``import a.b.c`` has no such ambiguity
+    (every segment is definitely a module-path segment), but since
+    ``Import`` doesn't record which of the two statement shapes
+    produced a given record, the same two-reading check is applied
+    uniformly — the "submodule" reading is tried first and is the one
+    that matches for ``import`` statements in practice.
+
+    Relative imports (leading dots) resolve against the importer's own
+    directory, walking up one level per dot beyond the first. Absolute
+    imports are only attempted when the first dotted segment names a
+    real top-level package in this repo (a directory with its own
+    ``__init__.py`` whose parent isn't itself a package) — found via
+    ``ctx.py_package_roots``, which is layout-agnostic (works for a
+    package sitting at the repo root or nested under ``src/``), unlike
+    a literal repo-root-only check.
+    """
+    source = imp.source
+    ndots = len(source) - len(source.lstrip("."))
+    rest = source[ndots:]
+    parts = rest.split(".") if rest else []
+
+    if ndots:
+        base_dir = _ancestor_dir(_dirname(importer_path), ndots - 1)
+    else:
+        if not parts:
+            return None
+        roots = ctx.py_package_roots.get(parts[0], [])
+        if len(roots) != 1:
+            return None
+        base_dir = roots[0]
+        parts = parts[1:]
+        if not parts:
+            return None
+
+    full = _dir_module_candidates(base_dir, parts, ".py", ("__init__.py",))
+    dropped = (
+        _dir_module_candidates(base_dir, parts[:-1], ".py", ("__init__.py",))
+        if parts
+        else None
+    )
+    return _resolve_two_candidate_lists(ctx.paths, full, dropped)
+
+
+_JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
+
+
+def _resolve_import_js(
+    imp: Import, importer_path: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a JS/TS/TSX import source to a repo file.
+
+    ``Import.source`` is ``"{module_source}/{imported_name}"`` (see
+    ``extractor._imports_js``) — the module path is recovered by
+    dropping the last ``/``-segment, safe regardless of how many
+    slashes the real module path itself contains (the appended name is
+    always exactly the last segment). Bare specifiers (no leading
+    ``.``/``..``) are external by construction — an npm package name
+    never collides with a relative path, so no repo-root search is
+    needed the way Python's absolute imports require one.
+    """
+    module_source = imp.source.rsplit("/", 1)[0]
+    if not (module_source.startswith("./") or module_source.startswith("../")):
+        return None
+    base_dir = _dirname(importer_path)
+    joined = posixpath.normpath(
+        f"{base_dir}/{module_source}" if base_dir else module_source
+    )
+    candidates = [joined]
+    candidates += [f"{joined}{ext}" for ext in _JS_EXTENSIONS]
+    candidates += [f"{joined}/index{ext}" for ext in _JS_EXTENSIONS]
+    return _first_match(ctx.paths, candidates)
+
+
+_RUST_INDEX_STEMS = ("mod", "lib", "main")
+# Every directory's own index-file name is "mod.rs" except the crate
+# root, which uses "lib.rs" (library crates) or "main.rs" (binary
+# crates) instead — tried in this order for every directory reached
+# during resolution, since only the crate-root case ever matches
+# lib.rs/main.rs and it's cheaper to try all three unconditionally
+# than to track "is this directory the crate root" separately.
+_RUST_INDEX_NAMES = ("mod.rs", "lib.rs", "main.rs")
+
+
+def _rust_self_base(importer_path: str) -> str:
+    """The directory ``self::``-relative Rust paths resolve against.
+
+    An index-style file (``mod.rs``/``lib.rs``/``main.rs``) *is* its
+    directory's own module, so ``self::`` there means "this directory".
+    A leaf file (``foo.rs``) is a module named ``foo`` whose own
+    submodules (Rust 2018+ per-file modules) live in a sibling ``foo/``
+    directory, so ``self::`` there means that virtual ``foo/`` path,
+    not ``foo.rs``'s own containing directory.
+    """
+    d = _dirname(importer_path)
+    stem = importer_path.rsplit("/", 1)[-1].removesuffix(".rs")
+    if stem in _RUST_INDEX_STEMS:
+        return d
+    return f"{d}/{stem}" if d else stem
+
+
+def _rust_crate_root(importer_path: str, paths: frozenset[str]) -> str | None:
+    """Nearest ancestor directory of ``importer_path`` containing
+    ``lib.rs``/``main.rs`` — this repo's best-effort stand-in for the
+    crate root ``crate::`` paths resolve against, absent any ``Cargo.
+    toml``/workspace parsing (out of scope; dekko does not parse
+    build manifests). Returns ``None`` when no such ancestor exists
+    (e.g. a fixture with no crate-root file, or a Rust ``tests/``
+    integration-test file, each compiled as its own separate crate).
+    """
+    d = _dirname(importer_path)
+    while True:
+        if f"{d}/lib.rs" in paths or f"{d}/main.rs" in paths:
+            return d
+        if not d:
+            return None
+        d = _dirname(d)
+
+
+def _resolve_import_rust(
+    imp: Import, importer_path: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a Rust ``use`` path to a repo file.
+
+    Dispatches on the leading path segment: ``crate::`` resolves
+    against the crate root (``_rust_crate_root``), ``self::``/
+    ``super::`` (one or more, e.g. ``super::super::foo``) against the
+    importer's own module position (``_rust_self_base``, walked up
+    once per ``super``). A bare crate name (``serde::Deserialize``,
+    no recognized prefix) is external by construction — real
+    third-party crates never start with ``crate``/``self``/``super``.
+
+    Like Python, the trailing segment is ambiguous between "a
+    submodule" and "an item defined in the parent module" — resolved
+    the same way, via ``_resolve_two_candidate_lists``.
+    """
+    segs = imp.source.split("::")
+    if not segs:
+        return None
+
+    if segs[0] == "crate":
+        base = _rust_crate_root(importer_path, ctx.paths)
+        rest = segs[1:]
+    elif segs[0] in ("self", "super"):
+        base = _rust_self_base(importer_path)
+        i = 0
+        while i < len(segs) and segs[i] == "super":
+            base = _dirname(base)
+            i += 1
+        if i < len(segs) and segs[i] == "self":
+            i += 1
+        rest = segs[i:]
+    else:
+        return None
+
+    if base is None or not rest:
+        return None
+    # A nested package directory's own index file is always mod.rs —
+    # lib.rs/main.rs only ever names the crate root itself, which is
+    # only reachable here when ``rest``/``rest[:-1]`` is empty (base
+    # itself is the target). Trying all three index names whenever
+    # the remaining segment list is empty covers both shapes without
+    # needing to track "is base the crate root" separately.
+    full = _dir_module_candidates(base, rest, ".rs", _RUST_INDEX_NAMES)
+    dropped = _dir_module_candidates(base, rest[:-1], ".rs", _RUST_INDEX_NAMES)
+    return _resolve_two_candidate_lists(ctx.paths, full, dropped)
+
+
+def _resolve_import_java(
+    imp: Import, importer_path: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a Java ``import`` to a repo file.
+
+    Java's package-equals-directory convention is fully mechanical
+    (``com.foo.Bar`` → ``.../com/foo/Bar.java``) — the only real work
+    is finding *which* source root the path is relative to, since
+    Maven/Gradle nest Java sources under ``src/main/java``/``src/test/
+    java`` rather than the repo root. ``ctx.java_suffix_index`` (built
+    once, see ``_java_suffix_index``) already indexes every file under
+    both its raw path and its root-stripped suffix, so this is a
+    single dict lookup, not a per-import scan.
+    """
+    del importer_path
+    target = imp.source.replace(".", "/") + ".java"
+    matches = sorted(set(ctx.java_suffix_index.get(target, [])))
+    return matches[0] if len(matches) == 1 else None
+
+
+_CPP_EXTENSIONS = (
+    ".h", ".hpp", ".hh", ".hxx", ".c", ".cpp", ".cc", ".cxx",
+)  # fmt: skip
+
+
+def _resolve_import_cpp(
+    imp: Import, importer_path: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a C/C++ ``#include`` to a repo file by filename search.
+
+    A ``#include`` binds no package-qualified path the way Java's
+    ``import`` does (per ``extractor._imports_cpp``'s own docstring),
+    so this is a basename search over every C/C++-shaped file in the
+    repo (``ctx.cpp_basename_index``), not a direct path check.
+    Resolves only when the basename is unique — two headers with the
+    same name in different directories are conservatively left
+    external rather than guessed (this design's "skip rather than
+    guess" rule).
+
+    Deliberately does not distinguish ``#include "local.h"`` (quoted)
+    from ``#include <system.h>`` (angle-bracket) — ``Import.source``
+    has already had both delimiter forms stripped by extraction time
+    (see ``extractor._strip_quotes``) with no record of which one was
+    used, and adding that distinction would mean touching
+    ``extractor.py``/``languages.py``, out of this design's stated
+    scope (no new tree-sitter work). In practice this only matters if
+    a repo happens to have its own file literally named the same as a
+    system header, which the basename-uniqueness check above already
+    guards against for the common case.
+    """
+    del importer_path
+    basename = imp.source.rsplit("/", 1)[-1]
+    matches = ctx.cpp_basename_index.get(basename, [])
+    return matches[0] if len(matches) == 1 else None
+
+
+_IMPORT_RESOLVERS: dict[
+    str, Callable[[Import, str, _ImportResolveContext], str | None]
+] = {
+    "python": _resolve_import_python,
+    "javascript": _resolve_import_js,
+    "typescript": _resolve_import_js,
+    "tsx": _resolve_import_js,
+    "rust": _resolve_import_rust,
+    "java": _resolve_import_java,
+    "c": _resolve_import_cpp,
+    "cpp": _resolve_import_cpp,
+}
+
+
+def _external_label_js(imp: Import) -> str:
+    """External-disclosure label for a JS/TS/TSX import.
+
+    ``Import.source`` has the imported name appended (see
+    ``_resolve_import_js``'s docstring), so two named imports from the
+    same external package (``import {useState, useEffect} from
+    "react"``) would otherwise show up as two differently-suffixed
+    "external sources" (``react/useState``, ``react/useEffect``)
+    instead of the one external dependency they actually are. Strips
+    the appended name back off for display, the same recovery
+    ``_resolve_import_js`` already does before attempting resolution.
+    """
+    return imp.source.rsplit("/", 1)[0]
+
+
+_EXTERNAL_LABELS: dict[str, Callable[[Import], str]] = {
+    "javascript": _external_label_js,
+    "typescript": _external_label_js,
+    "tsx": _external_label_js,
+}
+
+
+def _external_label(imp: Import, language: str) -> str:
+    """The string recorded in ``ModuleGraph.external`` for an
+    unresolved import — ``imp.source`` verbatim for every language
+    except JS/TS/TSX (see ``_external_label_js``).
+    """
+    labeler = _EXTERNAL_LABELS.get(language)
+    return labeler(imp) if labeler is not None else imp.source
+
+
+# Go is deliberately absent: real Go import-path resolution needs
+# ``go.mod``'s module-prefix declaration, which dekko does not parse
+# (out of scope for this design — see the design doc's Feasibility
+# section). Every Go import is reported external rather than guessed
+# from a bare directory-name match, which would silently misresolve
+# as often as it helped. Any other/generic language falls through the
+# same way.
+
+
+def _py_package_roots(paths: frozenset[str]) -> dict[str, list[str]]:
+    """Top-level Python package name → directory path(s).
+
+    A directory counts as a top-level package root when it has its own
+    ``__init__.py`` and its parent directory does not (so a nested
+    subpackage like ``pkg/sub`` is reached by walking from ``pkg``,
+    never listed as its own independent root named ``sub``).
+
+    Args:
+        paths: Every file path known to the map.
+
+    Returns:
+        Basename → matching root directory path(s) (almost always
+        zero or one; more than one means two same-named top-level
+        packages exist, left for the caller's own ambiguity handling).
+    """
+    init_dirs = {
+        p[: -len("/__init__.py")] if "/" in p else ""
+        for p in paths
+        if p.endswith("__init__.py")
+    }
+    roots: dict[str, list[str]] = {}
+    for d in init_dirs:
+        if not d:
+            continue
+        parent = _dirname(d)
+        parent_init = f"{parent}/__init__.py" if parent else "__init__.py"
+        if parent in init_dirs and parent_init in paths:
+            continue
+        basename = d.rsplit("/", 1)[-1]
+        roots.setdefault(basename, []).append(d)
+    return roots
+
+
+# Segment sequences tried in order — a directory-boundary subsequence
+# match anywhere in the path, not just a literal prefix at position 0,
+# since a real multi-module Maven/Gradle repo nests each module's own
+# "src/main/java" under a module directory (``spring-core/src/main/
+# java/...``, confirmed live against ``test-repos/spring-boot``), not
+# at the repo root.
+_JAVA_ROOT_SEGMENTS = (
+    ("src", "main", "java"),
+    ("src", "test", "java"),
+    ("src",),
+)
+
+
+def _java_suffix_index(paths: frozenset[str]) -> dict[str, list[str]]:
+    """Java file path/root-stripped-suffix → matching real path(s).
+
+    Every ``.java`` file is indexed under its own full path *and*
+    (when one of the well-known Maven/Gradle source-root segment
+    sequences appears anywhere in its path, at a directory boundary)
+    the path with everything up to and including that root stripped —
+    so ``_resolve_import_java``'s single dict lookup works whether the
+    repo nests sources directly under ``src/main/java`` or under
+    ``<module>/src/main/java``, without hardcoding one specific
+    layout or module-directory depth as "the" root.
+
+    Args:
+        paths: Every file path known to the map.
+
+    Returns:
+        Lookup key → matching path(s) (almost always zero or one).
+    """
+    index: dict[str, list[str]] = {}
+    for p in paths:
+        if not p.endswith(".java"):
+            continue
+        index.setdefault(p, []).append(p)
+        segs = p.split("/")
+        suffix = _strip_java_root(segs)
+        if suffix is not None:
+            index.setdefault(suffix, []).append(p)
+    return index
+
+
+def _strip_java_root(segs: list[str]) -> str | None:
+    """First matching source-root segment sequence stripped from
+    ``segs``, or ``None`` when none of ``_JAVA_ROOT_SEGMENTS`` appears.
+    """
+    for root_segs in _JAVA_ROOT_SEGMENTS:
+        n = len(root_segs)
+        for i in range(len(segs) - n):
+            if tuple(segs[i : i + n]) == root_segs:
+                return "/".join(segs[i + n :])
+    return None
+
+
+def _cpp_basename_index(paths: frozenset[str]) -> dict[str, list[str]]:
+    """C/C++ file basename → matching real path(s), scoped to
+    C/C++-shaped extensions only (a same-named file in another
+    language must never satisfy a ``#include`` filename search).
+    """
+    index: dict[str, list[str]] = {}
+    for p in paths:
+        if not p.endswith(_CPP_EXTENSIONS):
+            continue
+        index.setdefault(p.rsplit("/", 1)[-1], []).append(p)
+    return index
+
+
+def resolve_imports(files: list[FileMap]) -> ModuleGraph:
+    """Resolve every file's raw imports into a file-to-file dependency
+    graph.
+
+    Per-language resolution (see each ``_resolve_import_*`` function)
+    turns ``Import.source`` — raw, unresolved text at extraction time
+    (a dotted Python path, a JS/TS relative specifier, a Rust ``use``
+    path, a Java package path, or a C/C++ include path) — into an
+    in-repo file path, or leaves it unresolved (external: stdlib,
+    third-party, or a source string this pass can't confidently place).
+    A self-import (a file importing itself) is recorded as a genuine
+    edge, not filtered out — ``find_cycles`` reports it as a distinct
+    1-node self-cycle. An import matching more than one plausible
+    in-repo file is left unresolved rather than guessed, the same
+    "skip rather than guess" discipline the call/heritage resolvers
+    already apply everywhere.
+
+    Every per-language resolver is O(1) (a handful of dict lookups and
+    bounded ancestor-directory walks) once ``_ImportResolveContext``'s
+    indices are built, so the whole pass is O(total imports) after one
+    O(files) index-build pass — no O(imports x files) scan anywhere,
+    the shape that would make this pathologically slow on a large
+    repo (verified live against ``test-repos/spring-boot``'s Java-heavy
+    corpus; see the implementation report).
+
+    Args:
+        files: Per-file extraction results.
+
+    Returns:
+        The resolved ``ModuleGraph``.
+    """
+    paths = frozenset(fm.path for fm in files)
+    ctx = _ImportResolveContext(
+        paths=paths,
+        py_package_roots=_py_package_roots(paths),
+        java_suffix_index=_java_suffix_index(paths),
+        cpp_basename_index=_cpp_basename_index(paths),
+    )
+
+    edge_names: dict[tuple[str, str], set[str]] = {}
+    external: dict[str, set[str]] = {}
+    for fm in files:
+        resolver = _IMPORT_RESOLVERS.get(fm.language)
+        for imp in fm.imports:
+            target = resolver(imp, fm.path, ctx) if resolver else None
+            if target is None:
+                external.setdefault(fm.path, set()).add(
+                    _external_label(imp, fm.language)
+                )
+                continue
+            edge_names.setdefault((fm.path, target), set()).add(imp.name)
+
+    edges = [
+        ModuleEdge(importer=i, imported=j, names=sorted(names))
+        for (i, j), names in sorted(edge_names.items())
+    ]
+    deps_out: dict[str, list[str]] = {}
+    deps_in: dict[str, list[str]] = {}
+    for edge in edges:
+        deps_out.setdefault(edge.importer, []).append(edge.imported)
+        deps_in.setdefault(edge.imported, []).append(edge.importer)
+    for table in (deps_out, deps_in):
+        for key in table:
+            table[key] = sorted(set(table[key]))
+
+    return ModuleGraph(
+        edges=edges,
+        deps_out=deps_out,
+        deps_in=deps_in,
+        external={path: sorted(names) for path, names in external.items()},
+    )
+
+
+def find_cycles(deps_out: dict[str, list[str]]) -> list[list[str]]:
+    """Find every circular-dependency cluster in a module graph.
+
+    Tarjan's strongly-connected-components algorithm over ``deps_out``
+    — chosen over a simpler "does any cycle exist" DFS because the
+    useful answer for a refactor question ("can I safely split this
+    file without breaking a cycle") is *which* files are mutually
+    entangled, not just yes/no: an SCC of size 2+ *is* the answer to
+    "these files can't be split apart without addressing the cycle
+    first". A size-1 SCC is only interesting when its sole member
+    imports itself (a genuine, if rare, self-import — e.g. a re-export
+    gone wrong); reported as a distinct 1-file cycle, not conflated
+    with a real multi-file SCC.
+
+    Implemented iteratively (an explicit work stack, not recursive
+    call frames) — a straightforward recursive Tarjan would blow
+    Python's default recursion limit on a large repo's genuinely deep
+    import chain (confirmed a real risk, not a theoretical one, when
+    verifying against ``test-repos``' larger corpora; see the
+    implementation report). O(V + E), the same complexity class as
+    ``trace.py``'s own BFS.
+
+    Args:
+        deps_out: File path → sorted paths it imports (``ModuleGraph.
+            deps_out``, or the same-shaped field loaded onto
+            ``MapIndex.module_deps_out`` — this takes the plain dict
+            rather than a ``ModuleGraph``/``MapIndex`` object so both
+            the resolver-time and query-time callers can share it).
+
+    Returns:
+        Every cycle (an SCC with 2+ members, or a 1-member SCC with a
+        self-loop), each as its member paths sorted ascending. Sorted
+        by descending size then ascending members for deterministic
+        output.
+    """
+    nodes = sorted(
+        set(deps_out) | {n for targets in deps_out.values() for n in targets}
+    )
+    indices: dict[str, int] = {}
+    low_link: dict[str, int] = {}
+    on_stack: set[str] = set()
+    tarjan_stack: list[str] = []
+    sccs: list[list[str]] = []
+    counter = 0
+
+    for root in nodes:
+        if root in indices:
+            continue
+        counter = _strongconnect(
+            root,
+            deps_out,
+            indices,
+            low_link,
+            on_stack,
+            tarjan_stack,
+            sccs,
+            counter,
+        )
+
+    cycles = [
+        sorted(comp)
+        for comp in sccs
+        if len(comp) >= 2
+        or (len(comp) == 1 and comp[0] in deps_out.get(comp[0], []))
+    ]
+    cycles.sort(key=lambda c: (-len(c), c))
+    return cycles
+
+
+def _strongconnect(
+    root: str,
+    deps_out: dict[str, list[str]],
+    indices: dict[str, int],
+    low_link: dict[str, int],
+    on_stack: set[str],
+    tarjan_stack: list[str],
+    sccs: list[list[str]],
+    counter: int,
+) -> int:
+    """One iterative Tarjan traversal rooted at ``root``.
+
+    Split out of ``find_cycles`` purely to keep that function's
+    cyclomatic complexity under the project's Ruff limit — behaviorally
+    this is the classic iterative-Tarjan work-stack loop: each frame is
+    ``(node, iterator-over-node's-successors)``, resumed in place
+    (the same ``Iterator`` object) rather than recursing, so a single
+    frame per call depth level never accumulates on Python's own call
+    stack regardless of how deep the import graph's DFS tree goes.
+
+    Args:
+        root: Unvisited node to start this traversal from.
+        deps_out: File path → paths it imports.
+        indices: Discovery-order index per visited node (mutated).
+        low_link: Low-link value per visited node (mutated).
+        on_stack: Nodes currently on ``tarjan_stack`` (mutated).
+        tarjan_stack: The algorithm's own node stack (mutated).
+        sccs: Completed strongly-connected components (mutated).
+        counter: Next discovery-order index to assign.
+
+    Returns:
+        The updated discovery-order counter.
+    """
+    call_stack: list[tuple[str, Iterator[str]]] = [
+        (root, iter(deps_out.get(root, [])))
+    ]
+    indices[root] = counter
+    low_link[root] = counter
+    counter += 1
+    tarjan_stack.append(root)
+    on_stack.add(root)
+
+    while call_stack:
+        node, it = call_stack[-1]
+        descended = False
+        for succ in it:
+            if succ not in indices:
+                indices[succ] = counter
+                low_link[succ] = counter
+                counter += 1
+                tarjan_stack.append(succ)
+                on_stack.add(succ)
+                call_stack.append((succ, iter(deps_out.get(succ, []))))
+                descended = True
+                break
+            if succ in on_stack:
+                low_link[node] = min(low_link[node], indices[succ])
+        if descended:
+            continue
+
+        call_stack.pop()
+        if low_link[node] == indices[node]:
+            component: list[str] = []
+            while True:
+                w = tarjan_stack.pop()
+                on_stack.discard(w)
+                component.append(w)
+                if w == node:
+                    break
+            sccs.append(component)
+        if call_stack:
+            parent = call_stack[-1][0]
+            low_link[parent] = min(low_link[parent], low_link[node])
+
+    return counter

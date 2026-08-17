@@ -22,6 +22,7 @@ from dekko.integrations import claude_md as claude_md_mod
 from dekko.integrations import cline as cline_mod
 from dekko.analysis import contextpack
 from dekko.daemon import daemon as daemon_mod
+from dekko.analysis import deps
 from dekko.analysis import diff
 from dekko.render import export
 from dekko.integrations import hooks as hooks_mod
@@ -69,6 +70,7 @@ SUBCOMMANDS = (
     "orient",
     "note",
     "export",
+    "deps",
 )
 
 
@@ -971,6 +973,67 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     _add_read_options(p_ambig)
     p_ambig.set_defaults(func=run_ambiguous)
 
+    p_deps = sub.add_parser(
+        "deps",
+        help="module-level dependency graph: file-to-file resolved "
+        "imports, plus circular-import detection",
+    )
+    p_deps.add_argument(
+        "--file",
+        default=None,
+        metavar="PATH",
+        help="one file's resolved imports/importers/external sources "
+        "instead of the default repo-wide summary",
+    )
+    p_deps.add_argument(
+        "--cycles",
+        action="store_true",
+        help="every detected circular-import cluster instead of the "
+        "default summary",
+    )
+    p_deps.add_argument(
+        "--top",
+        type=int,
+        default=10,
+        help="entries in the most-depended-on ranking (default: 10)",
+    )
+    p_deps.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="max text result rows for --file/--cycles (default: 100)",
+    )
+    p_deps.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="approximate token budget for the result rows",
+    )
+    p_deps.add_argument(
+        "--export",
+        dest="export_fmt",
+        choices=export.FORMATS[:2],
+        default=None,
+        help="emit the module graph as mermaid or dot instead of a "
+        "report view (reuses `dekko export`'s renderers)",
+    )
+    p_deps.add_argument(
+        "--max-nodes",
+        type=int,
+        default=export.DEFAULT_MAX_NODES,
+        help="refuse to render more --export nodes than this "
+        f"(default: {export.DEFAULT_MAX_NODES})",
+    )
+    p_deps.add_argument(
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="write --export output to this file (default: stdout)",
+    )
+    _add_read_options(p_deps)
+    p_deps.set_defaults(func=run_deps)
+
     p_summary = sub.add_parser(
         "summary", help="compact repo digest (dirs, hotspots, entrypoints)"
     )
@@ -1557,6 +1620,39 @@ def run_ambiguous(args: argparse.Namespace) -> int:
         limit=args.limit,
         budget=args.budget,
         as_json=args.as_json,
+    )
+
+
+def run_deps(args: argparse.Namespace) -> int:
+    """Handle ``dekko deps``."""
+    given = sum(
+        (
+            args.file is not None,
+            bool(args.cycles),
+            args.export_fmt is not None,
+        )
+    )
+    if given > 1:
+        print(
+            "dekko: give one of --file, --cycles, --export, not several",
+            file=sys.stderr,
+        )
+        return deps.EXIT_ERROR
+    index, code = _read_index(args)
+    if index is None:
+        return code
+    out = Path(args.output) if args.output else None
+    return deps.run(
+        index,
+        file=args.file,
+        cycles=args.cycles,
+        top=args.top,
+        limit=args.limit,
+        budget=args.budget,
+        as_json=args.as_json,
+        export_fmt=args.export_fmt,
+        max_nodes=args.max_nodes,
+        out_path=out,
     )
 
 
