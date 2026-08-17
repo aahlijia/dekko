@@ -9,6 +9,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.31.4] — 2026-08-17
+
+### Fixed
+- **MCP server crash on newer `map.json` format made opaque instead
+  of clear.** A long-lived `dekko serve --mcp` process running
+  pre-id-interning code would raise a bare `TypeError` when it read a
+  v5 `map.json` whose `caller`/`callee` fields are now interned ints
+  instead of strings, surfaced to callers as an unhelpful "internal
+  error". `mapfile.load_map()` now raises `MapFormatTooNewError` when
+  the doc's `version` exceeds `MAP_DOC_VERSION`, and
+  `server.py`'s `_handle_tools_call()` catches it with a message
+  telling the caller to restart the MCP server.
+- **Malformed `map.json` `version` field (`null`, string, float,
+  bool) fell through the above guard** and still hit the old opaque
+  `TypeError`. Added a distinct `MapFormatInvalidError` — "restart
+  the server" is the wrong advice for a corrupted doc — pointing the
+  caller at `dekko map` instead.
+
 ## [0.31.3] — 2026-08-14
 
 ### Changed
