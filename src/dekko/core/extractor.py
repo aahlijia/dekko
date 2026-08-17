@@ -1265,6 +1265,107 @@ def _heritage_java(caps: dict[str, list[Node]]) -> list[tuple[Node, str]]:
     return out
 
 
+def _heritage_cpp(clause_node: Node) -> list[tuple[Node, str]]:
+    """Walk a C++ ``base_class_clause`` into ``(type_node, "extends")``.
+
+    Each base is either a bare type node (``struct S : Base1 {}`` —
+    no explicit access specifier; a struct base defaults to public and
+    carries no ``access_specifier`` sibling at all) or preceded by its
+    own ``access_specifier`` wrapper node (``public``/``private``/
+    ``protected``) that must be stripped, not treated as part of the
+    type name — the design doc's own documented pitfall
+    (``"public Base"`` would never equal any real symbol name).
+    Verified against the pinned tree-sitter-cpp grammar:
+    ``base_class_clause``'s named children are a flat sequence, each
+    base's own ``access_specifier`` (when present) a preceding
+    sibling, not nested inside the type node. C++ has no syntactic
+    extends/implements distinction — every base, public or private, is
+    an ``extends`` relation.
+    """
+    return [
+        (child, "extends")
+        for child in clause_node.named_children
+        if child.type != "access_specifier"
+    ]
+
+
+def _heritage_rust_bounds(bounds_node: Node) -> list[tuple[Node, str]]:
+    """Walk a Rust ``trait_bounds`` node into supertrait entries.
+
+    ``trait Sub: Super + Clone`` bounds every named supertrait the
+    same way — Rust has no syntactic distinction for a supertrait
+    bound, it's always ``extends`` (mirrors how Python's
+    ``class X(Y):`` collapses everything to ``extends`` too). A
+    lifetime bound (``trait Sub<'a>: 'a + Super``) surfaces as its own
+    ``lifetime`` named child here, not a type — filtered out, since a
+    lifetime is not a supertrait and has no symbol to resolve against
+    (verified against the pinned tree-sitter-rust grammar).
+    """
+    return [
+        (child, "extends")
+        for child in bounds_node.named_children
+        if child.type != "lifetime"
+    ]
+
+
+def _heritage_rust_impl(
+    caps: dict[str, list[Node]],
+    rel: str,
+    defs: list[tuple[Node, Symbol]],
+) -> list[RawHeritage]:
+    """Resolve one ``impl Trait for Type`` block into a ``RawHeritage``.
+
+    Structurally different from every other language's heritage shape
+    (see ``LanguageSpec.heritage_query``'s docstring): the clause
+    isn't attached to the type's own definition node, so there's no
+    ``@classdef`` span to correlate against the way ``_collect_
+    heritage``'s main loop does for every other language. Instead,
+    ``@impl_type``'s name is looked up against this file's own
+    already-extracted ``TYPE_KINDS`` symbols by exact name match —
+    Rust ``impl`` blocks are almost always in the same file as the
+    type they're for, though not required by the language. When the
+    type isn't defined in this file, or its name is ambiguous within
+    it (same-named types in two different ``mod`` blocks — legal but
+    rare), no symbol id exists to attach a ``RawHeritage`` to
+    (``subtype_id`` is never ``None``), so the impl block is silently
+    skipped rather than guessed at.
+
+    An inherent ``impl Type { ... }`` block (no ``trait:`` field)
+    never reaches this function — ``heritage_query``'s ``trait: (_)``
+    field requirement means the query itself never matches one (the
+    design's own flagged false-signal risk: inherent impls vastly
+    outnumber trait impls in typical Rust code).
+    """
+    impl_trait = _one(caps, "impl_trait")
+    impl_type = _one(caps, "impl_type")
+    if impl_trait is None or impl_type is None:
+        return []
+    _, type_name, _ = _heritage_name_parts(impl_type)
+    if not type_name:
+        return []
+    candidates = [
+        sym
+        for _, sym in defs
+        if sym.kind in TYPE_KINDS and sym.name == type_name
+    ]
+    if len(candidates) != 1:
+        return []
+    text, name, receiver = _heritage_name_parts(impl_trait)
+    if not name:
+        return []
+    return [
+        RawHeritage(
+            subtype_id=candidates[0].id,
+            path=rel,
+            text=text,
+            name=name,
+            receiver=receiver,
+            relation="impl",
+            line=impl_trait.start_point[0] + 1,
+        )
+    ]
+
+
 def _heritage_entries(
     language: str, caps: dict[str, list[Node]]
 ) -> list[tuple[Node, str]]:
@@ -1272,6 +1373,12 @@ def _heritage_entries(
 
     Returns ``(type_node, relation)`` pairs — mirrors how ``_params_*``
     returns one entry per parameter, just for heritage clauses instead.
+    Rust's ``impl Trait for Type`` heritage (``@implblock`` matches,
+    which carry no ``@classdef``) is handled separately by
+    ``_heritage_rust_impl``, called directly from ``_collect_heritage``
+    before this dispatch ever runs — only Rust's supertrait-bound
+    shape (``@classdef``-attached, like every other language here)
+    reaches this function for Rust.
     """
     if language == "python":
         bases = _one(caps, "bases")
@@ -1284,6 +1391,12 @@ def _heritage_entries(
         return _heritage_ts(heritage) if heritage is not None else []
     if language == "java":
         return _heritage_java(caps)
+    if language == "cpp":
+        heritage = _one(caps, "heritage")
+        return _heritage_cpp(heritage) if heritage is not None else []
+    if language == "rust":
+        bounds = _one(caps, "bounds")
+        return _heritage_rust_bounds(bounds) if bounds is not None else []
     return []
 
 
@@ -1304,7 +1417,7 @@ def _heritage_name_parts(node: Node) -> tuple[str, str, str | None]:
 def _collect_heritage(
     spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
 ) -> list[RawHeritage]:
-    """Find extends/implements clauses attached to type definitions.
+    """Find extends/implements/impl-for clauses on type definitions.
 
     Mirrors ``_collect_refs``'s "return empty for languages without a
     query yet" shape. Each ``heritage_query`` match's ``@classdef``
@@ -1314,6 +1427,11 @@ def _collect_heritage(
     the analogous span-based correlation used for call attribution),
     restricted to ``TYPE_KINDS`` symbols so a match can never
     accidentally attach to something else.
+
+    Rust's ``impl Trait for Type`` matches (``@implblock``) carry no
+    ``@classdef`` at all — a structurally different shape handled
+    before span correlation ever runs, via same-file name lookup in
+    ``_heritage_rust_impl`` instead.
     """
     if spec.heritage_query is None:
         return []
@@ -1324,6 +1442,9 @@ def _collect_heritage(
     }
     out: list[RawHeritage] = []
     for _, caps in _run_query(spec.grammar, spec.heritage_query, root):
+        if "implblock" in caps:
+            out.extend(_heritage_rust_impl(caps, rel, defs))
+            continue
         classdef = _one(caps, "classdef")
         if classdef is None:
             continue

@@ -5,7 +5,15 @@ applied to ``RawHeritage`` — same-file resolution, cross-file
 resolution via import hints, the unique-repo-wide-name fallback,
 honest ambiguous/external buckets, and the ``TYPE_KINDS`` candidate
 pre-filter that keeps a base-class name from ever resolving to a
-same-named function.
+same-named function. Most of this file (synthetic ``FileMap``/
+``Symbol`` fixtures tagged ``language="python"``) is language-agnostic
+by design — the ladder itself never branches on language. The Phase 2
+section near the end instead runs real Rust/C++ source through
+``extract_file`` + ``resolve()`` end to end, confirming the ``impl``
+relation and C++'s access-specifier-stripped names resolve correctly
+through the unmodified ladder, plus one test proving Rust's ``impl``
+"subtype resolved at extraction time" behavior propagates through
+resolution unchanged.
 """
 
 from pathlib import Path
@@ -269,3 +277,81 @@ def test_type_fixture_repo_resolves(tmp_path: Path) -> None:
     ]
     graph = resolve(files)
     assert graph.heritage_out["dog.py::Dog"] == ["base.py::Animal"]
+
+
+# ---------------------------------------------------------------------
+# Phase 2: Rust / C++ (real extraction, end to end through resolve())
+
+
+def test_rust_impl_trait_resolves_same_file(tmp_path: Path) -> None:
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "a.rs").write_text(
+        "trait Super {}\nstruct Foo;\n\nimpl Super for Foo {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    graph = resolve([extract_file(tmp_path, "a.rs", spec)])
+    assert graph.heritage_out["a.rs::Foo"] == ["a.rs::Super"]
+    assert graph.heritage[0].relation == "impl"
+
+
+def test_rust_impl_trait_resolves_cross_file_via_import(
+    tmp_path: Path,
+) -> None:
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "shapes.rs").write_text("pub trait Shape {}\n")
+    (tmp_path / "circle.rs").write_text(
+        "use crate::shapes::Shape;\n"
+        "\n"
+        "struct Circle;\n"
+        "\n"
+        "impl Shape for Circle {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    files = [
+        extract_file(tmp_path, "shapes.rs", spec),
+        extract_file(tmp_path, "circle.rs", spec),
+    ]
+    graph = resolve(files)
+    assert graph.heritage_out["circle.rs::Circle"] == ["shapes.rs::Shape"]
+
+
+def test_rust_impl_unknown_trait_is_external(tmp_path: Path) -> None:
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "a.rs").write_text(
+        "struct Foo;\n\nimpl std::fmt::Debug for Foo {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    graph = resolve([extract_file(tmp_path, "a.rs", spec)])
+    assert graph.heritage_out == {}
+    assert len(graph.heritage_external) == 1
+    assert graph.heritage_external[0].callee == "std::fmt::Debug"
+
+
+def test_cpp_multiple_inheritance_resolves(tmp_path: Path) -> None:
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "shapes.cpp").write_text(
+        "class Base1 {};\n"
+        "class Base2 {};\n"
+        "class Derived : public Base1, private Base2 {\n"
+        "public:\n"
+        "};\n"
+    )
+    spec = languages.spec_for_path("a.cpp")
+    assert spec is not None
+    graph = resolve([extract_file(tmp_path, "shapes.cpp", spec)])
+    assert graph.heritage_out["shapes.cpp::Derived"] == [
+        "shapes.cpp::Base1",
+        "shapes.cpp::Base2",
+    ]
+    assert all(e.relation == "extends" for e in graph.heritage)

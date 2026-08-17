@@ -806,6 +806,53 @@ def test_load_map_reads_heritage(make_mapped_repo: RepoFactory) -> None:
     )
 
 
+def test_load_map_reads_heritage_rust_and_cpp(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Phase 2 round-trip: write via render_json, read back via
+    # load_map, on a repo mixing Rust's `impl` relation and C++'s
+    # multi-base `extends` relation in the same map.json — confirms
+    # MAP_DOC_VERSION 6 and id-interning (round 15's own concern)
+    # extend to the new languages without any render_json.py/
+    # mapfile.py changes, exactly as the design predicted.
+    root = make_mapped_repo(
+        {
+            "shapes.rs": (
+                "pub trait Shape {}\n"
+                "\n"
+                "pub struct Circle;\n"
+                "\n"
+                "impl Shape for Circle {}\n"
+            ),
+            "shapes.cpp": (
+                "class Base1 {};\n"
+                "class Base2 {};\n"
+                "class Derived : public Base1, private Base2 {\n"
+                "public:\n"
+                "};\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.heritage_out["shapes.rs::Circle"] == ["shapes.rs::Shape"]
+    assert (
+        index.heritage_relation[("shapes.rs::Circle", "shapes.rs::Shape")]
+        == "impl"
+    )
+    assert index.heritage_out["shapes.cpp::Derived"] == [
+        "shapes.cpp::Base1",
+        "shapes.cpp::Base2",
+    ]
+    assert (
+        index.heritage_relation[("shapes.cpp::Derived", "shapes.cpp::Base1")]
+        == "extends"
+    )
+
+    doc = json.loads((root / ".dekko" / "map.json").read_text())
+    assert doc["version"] == mapfile.MAP_DOC_VERSION == 6
+
+
 def test_without_tests_drops_heritage_touching_test_paths() -> None:
     files = [
         FileMap(

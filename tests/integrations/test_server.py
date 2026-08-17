@@ -376,6 +376,42 @@ def test_get_subtypes_excludes_test_files_by_default(
     assert "FakeAnimal" in included
 
 
+def test_get_supertypes_tool_rust_impl(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {
+        "shapes.rs": (
+            "pub trait Shape {}\n"
+            "\n"
+            "pub struct Circle;\n"
+            "\n"
+            "impl Shape for Circle {}\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(ctx, "get_supertypes", {"symbol": "Circle"})
+    assert result["isError"] is False
+    assert "trait Shape" in result["content"][0]["text"]
+
+
+def test_get_subtypes_tool_cpp_multiple_inheritance(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {
+        "shapes.cpp": (
+            "class Base1 {};\n"
+            "class Base2 {};\n"
+            "class Derived : public Base1, private Base2 {\n"
+            "public:\n"
+            "};\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(ctx, "get_subtypes", {"symbol": "Base1"})
+    assert result["isError"] is False
+    assert "class Derived" in result["content"][0]["text"]
+
+
 def test_get_supertypes_tool_schema_shape() -> None:
     tool = next(t for t in server.TOOLS if t["name"] == "get_supertypes")
     assert set(tool) == {"name", "description", "inputSchema", "handler"}

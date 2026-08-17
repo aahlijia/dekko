@@ -1,4 +1,13 @@
-"""``dekko query supertypes``/``subtypes``: heritage graph queries."""
+"""``dekko query supertypes``/``subtypes``: heritage graph queries.
+
+``RUST_HERITAGE``/``CPP_HERITAGE`` and their CLI tests near the end of
+this file cover Phase 2 (Rust ``impl Trait for Type``, C++
+``base_class_clause``) end to end through the same ``query
+supertypes``/``subtypes`` surface Phase 1's Python/Java fixtures
+already exercise — no query.py/CLI code changed for Phase 2, so these
+confirm the read surface really is language-agnostic as designed, not
+just assumed.
+"""
 
 import json
 
@@ -29,6 +38,26 @@ JAVA_HERITAGE = {
         "interface IFoo {}\n"
         "interface IBar {}\n"
         "class Foo extends Base implements IFoo, IBar {}\n"
+    ),
+}
+
+RUST_HERITAGE = {
+    "shapes.rs": (
+        "pub trait Shape {}\n"
+        "\n"
+        "pub struct Circle;\n"
+        "\n"
+        "impl Shape for Circle {}\n"
+    ),
+}
+
+CPP_HERITAGE = {
+    "shapes.cpp": (
+        "class Base1 {};\n"
+        "class Base2 {};\n"
+        "class Derived : public Base1, private Base2 {\n"
+        "public:\n"
+        "};\n"
     ),
 }
 
@@ -276,3 +305,71 @@ def test_json_result_shape_has_relation_and_depth(
     result = doc["results"][0]
     assert result["relation"] == "extends"
     assert result["depth"] == 1
+
+
+# ---------------------------------------------------------------------
+# Phase 2: Rust / C++
+
+
+def test_rust_supertypes_shows_impl_relation(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(RUST_HERITAGE)
+    code = cli.main(["query", "supertypes", "Circle", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "trait Shape" in out
+    assert "[impl]" in out
+
+
+def test_rust_subtypes_finds_implementor(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(RUST_HERITAGE)
+    code = cli.main(["query", "subtypes", "Shape", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "struct Circle" in out
+    assert "[impl]" in out
+
+
+def test_rust_relation_filter_impl(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(RUST_HERITAGE)
+    code = cli.main(
+        [
+            "query",
+            "supertypes",
+            "Circle",
+            "--relation",
+            "impl",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Shape" in out
+
+
+def test_cpp_supertypes_multiple_inheritance(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CPP_HERITAGE)
+    code = cli.main(["query", "supertypes", "Derived", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Base1" in out
+    assert "Base2" in out
+    assert "[extends]" in out
+
+
+def test_cpp_subtypes_finds_derived(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CPP_HERITAGE)
+    code = cli.main(["query", "subtypes", "Base1", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Derived" in out

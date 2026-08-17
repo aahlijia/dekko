@@ -10,9 +10,9 @@ dekko query callers resolve --sites  # who calls resolve, with call sites
 dekko query callees main             # what does main call?
 dekko query uses Path                # who references the external name Path?
 dekko query type Config              # what takes/returns Config? (--exact for literal match)
-dekko query supertypes BufferDiff    # what BufferDiff extends/implements (one hop)
+dekko query supertypes BufferDiff    # what BufferDiff extends/implements/impl's-for (one hop)
 dekko query supertypes BufferDiff --transitive  # full ancestor chain/DAG
-dekko query subtypes Serializable    # what directly extends/implements Serializable
+dekko query subtypes Serializable    # what directly extends/implements/impl's-for Serializable
 dekko query subtypes Serializable --transitive  # every direct + indirect implementor
 dekko query subtypes Serializable --relation implements  # filter to one relation kind
 dekko context run_map --budget 1500  # minimal context pack for an edit
@@ -59,28 +59,38 @@ Default matching is identifier-token based (`Config` matches
 `ConfigManager`); pass `--exact` to match the stored type text
 verbatim instead.
 
-`query supertypes`/`subtypes` cover declared `extends`/`implements`
-heritage — Python, JavaScript, TypeScript, and Java as of this
-writing. Rust (`impl Trait for Type`), C++ (`class Foo : public
-Base`), and Go (struct embedding) are not yet extracted (planned
-Phase 2 in the design doc, unimplemented). Go's structural interface
-satisfaction (no `implements` keyword at all — any type whose method
-set matches is a satisfier) has no declaring syntax to extract in the
-first place; answering "what implements this Go interface" for real
-needs a method-signature type-checking pass, a different feature in
-kind, not a language gap in this one. `--transitive` walks the full
-ancestor (`supertypes`) or descendant (`subtypes`) DAG — Python/C++
-multiple inheritance and multi-interface implementation both fan out,
-not a single chain — deduplicating diamond-inheritance repeats to
-each node's shallowest depth. `--relation {extends,implements}` (Java/
-TS distinguish the two; Python has only `extends`) filters to one
-relation kind; `impl`/`embeds` are accepted as valid values for
-forward compatibility with the unimplemented Rust/Go phase but never
-appear in current output. An external base class (`class MyModel
-(BaseModel):` from a third-party package) shows as a labeled
-`(external)` row in `supertypes` output rather than being silently
-dropped — a class extending a framework base is a common, expected
-case, not a corner case worth hiding.
+`query supertypes`/`subtypes` cover declared heritage — `extends`/
+`implements` for Python, JavaScript, TypeScript, and Java; `impl`
+(Rust's `impl Trait for Type`, plus `trait Sub: Super` supertrait
+bounds as `extends`) and `extends` (C++'s `class Foo : public Base`,
+access specifiers stripped from the base name) for Rust and C++. Go
+struct embedding (`embeds`) is not extracted — deliberately deferred,
+not just unimplemented: it only answers struct *composition*, not
+"what implements this Go interface" (the actual common Go heritage
+question), and Go's structural interface satisfaction has no
+declaring syntax to extract in the first place — any type whose
+method set matches an interface satisfies it, with no `implements`
+keyword anywhere. Answering that for real needs a method-signature
+type-checking pass, a different feature in kind, not a language gap
+in this one. `--transitive` walks the full ancestor (`supertypes`) or
+descendant (`subtypes`) DAG — Python/C++ multiple inheritance and
+multi-interface implementation both fan out, not a single chain —
+deduplicating diamond-inheritance repeats to each node's shallowest
+depth. `--relation {extends,implements,impl}` filters to one relation
+kind (Java/TS distinguish extends/implements; Python and C++ have only
+`extends`; Rust's `impl Trait for Type` is `impl`, its supertrait
+bounds are `extends`); `embeds` is accepted as a valid value for
+forward compatibility with a possible future Go pass but never appears
+in current output. An external base class or trait (`class MyModel
+(BaseModel):` from a third-party package, `impl std::fmt::Debug for
+Foo`) shows as a labeled `(external)` row in `supertypes` output
+rather than being silently dropped — a type extending/impl'ing a
+framework base is a common, expected case, not a corner case worth
+hiding. Rust's `impl` heritage resolves the `Type` side by same-file
+name lookup (an `impl` block's own file, not cross-file) — an `impl`
+block for a type defined in a different file, or a same-named type
+appearing twice in one file (two `mod` blocks), produces no heritage
+edge rather than a guess.
 
 `--json` governs the shape of *successful* (exit 0) output only. Any
 error — an ambiguous match, a not-found symbol, a stale map under

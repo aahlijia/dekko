@@ -1006,10 +1006,12 @@ TOOLS: list[dict[str, Any]] = [
         "implements, or is impl'd for — its own declared heritage. Set "
         "transitive=true for the full ancestor chain/DAG (multiple "
         "inheritance and multi-interface implementation both fan out, "
-        "not a single line). Covers Python/JavaScript/TypeScript/Java; "
-        "Rust/C++/Go are not yet extracted (Phase 2, unimplemented) and "
-        "Go's structural interface satisfaction has no declaring "
-        "syntax to extract at all.",
+        "not a single line). Covers Python/JavaScript/TypeScript/Java/"
+        "Rust/C++. Go struct embedding is not extracted (only answers "
+        "composition, not interface satisfaction, so not worth the "
+        "confusion) and Go's structural interface satisfaction has no "
+        "declaring syntax to extract at all — no tree-sitter query can "
+        "see it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1023,8 +1025,9 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": list(query.HERITAGE_RELATIONS),
                     "description": "Filter to one heritage-relation "
-                    "kind ('impl'/'embeds' are Phase 2 and never "
-                    "appear in current results)",
+                    "kind ('embeds' is Go struct embedding, not "
+                    "extracted, and never appears in current "
+                    "results)",
                 },
                 "budget": _BUDGET_PROP,
                 "include_tests": _INCLUDE_TESTS_PROP,
@@ -1058,8 +1061,9 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": list(query.HERITAGE_RELATIONS),
                     "description": "Filter to one heritage-relation "
-                    "kind ('impl'/'embeds' are Phase 2 and never "
-                    "appear in current results)",
+                    "kind ('embeds' is Go struct embedding, not "
+                    "extracted, and never appears in current "
+                    "results)",
                 },
                 "budget": _BUDGET_PROP,
                 "include_tests": _INCLUDE_TESTS_PROP,

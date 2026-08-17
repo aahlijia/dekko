@@ -65,10 +65,17 @@ class LanguageSpec:
             ``extends_type_clause``, Java's ``superclass``/
             ``super_interfaces``/``extends_interfaces`` — is captured
             whole and walked by a dedicated per-language parser in
-            ``extractor.py``, mirroring ``_params_*``). ``None`` for
-            languages without one yet (Rust/C++/Go — Phase 2, not
-            implemented as of this writing; Phase 1 covers Python/
-            JavaScript/TypeScript/TSX/Java).
+            ``extractor.py``, mirroring ``_params_*``). Rust is the
+            one exception to the "container attached to ``@classdef``"
+            shape: ``impl Trait for Type`` is its own top-level
+            construct (``@implblock``, no ``@classdef`` at all), so
+            ``extractor._collect_heritage`` special-cases it, resolving
+            the type side by same-file name lookup instead of span
+            correlation (see ``extractor._heritage_rust_impl``). ``None``
+            for languages without one yet (Go — optional bonus item,
+            deferred; see the design doc's Phase 2 section for why).
+            Covers Python/JavaScript/TypeScript/TSX/Java (Phase 1) and
+            Rust/C++ (Phase 2).
     """
 
     name: str
@@ -163,6 +170,22 @@ RUST = LanguageSpec(
     method_containers=("impl_item", "trait_item"),
     param_style="rust",
     function_boundary_types=("function_item", "closure_expression"),
+    # ``impl_item`` with a ``trait:`` field is heritage (``impl Trait
+    # for Type``); an inherent ``impl Type { ... }`` (no ``trait:``
+    # field) never matches this pattern at all, so no query-time
+    # filtering is needed to exclude it. ``trait_item``'s optional
+    # ``bounds: (trait_bounds)`` field covers supertrait bounds
+    # (``trait Sub: Super``), attached to ``@classdef`` the same way
+    # Phase 1's languages attach their heritage container.
+    heritage_query="""
+(impl_item
+  trait: (_) @impl_trait
+  type: (_) @impl_type) @implblock
+
+(trait_item
+  name: (type_identifier) @classname
+  bounds: (trait_bounds)? @bounds) @classdef
+""",
 )
 
 _C_DEFINITIONS = """
@@ -257,6 +280,28 @@ CPP = LanguageSpec(
     },
     method_containers=("class_specifier", "struct_specifier"),
     param_style="c",
+    # ``base_class_clause``'s named children alternate between an
+    # ``access_specifier`` wrapper (``public``/``private``/
+    # ``protected`` — absent on a struct base with no explicit
+    # specifier) and the actual base type node; the specifier must be
+    # stripped before the type name is usable (see
+    # ``extractor._heritage_cpp``). The pattern mirrors ``definition_
+    # query``'s own ``@classdef`` shape exactly (``body: (field_
+    # declaration_list)`` required) so the two queries' ``@classdef``
+    # spans line up byte-for-byte for correlation — a forward
+    # declaration (``class Foo;``, no body) is excluded from heritage
+    # extraction the same way it's already excluded from definitions.
+    heritage_query="""
+(struct_specifier
+  name: (type_identifier) @classname
+  (base_class_clause)? @heritage
+  body: (field_declaration_list)) @classdef
+
+(class_specifier
+  name: (type_identifier) @classname
+  (base_class_clause)? @heritage
+  body: (field_declaration_list)) @classdef
+""",
 )
 
 # Function/method/closure node types shared by JS/TS/TSX's
