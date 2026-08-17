@@ -131,6 +131,36 @@ def test_load_map_raises_on_too_new_doc_version(
     assert "restart" in message.lower()
 
 
+@pytest.mark.parametrize(
+    "bad_version",
+    [None, "not-a-number", 5.7, True],
+    ids=["null", "string", "float", "bool"],
+)
+def test_load_map_raises_on_malformed_doc_version(
+    make_mapped_repo: RepoFactory,
+    bad_version: object,
+) -> None:
+    # A malformed/corrupted "version" field (null, non-numeric, or a
+    # float rather than an int) must not fall through the
+    # MapFormatTooNewError guard's `isinstance(doc_version, int)`
+    # check and hit the old opaque TypeError from
+    # `doc_version > MAP_DOC_VERSION` comparing incompatible types —
+    # it needs its own clear, distinct error instead (the document is
+    # broken, not merely "too new").
+    root = make_mapped_repo(CHAIN)
+    doc_path = root / ".dekko" / "map.json"
+    doc = json.loads(doc_path.read_text())
+    doc["version"] = bad_version
+    doc_path.write_text(json.dumps(doc))
+
+    with pytest.raises(mapfile.MapFormatInvalidError) as exc_info:
+        mapfile.load_map(root)
+
+    message = str(exc_info.value)
+    assert "version" in message.lower()
+    assert "dekko map" in message
+
+
 def test_provenance_records_unsupported_files(
     make_mapped_repo: RepoFactory,
 ) -> None:

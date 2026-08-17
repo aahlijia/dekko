@@ -59,6 +59,26 @@ class MapFormatTooNewError(Exception):
     """
 
 
+class MapFormatInvalidError(Exception):
+    """``map.json``'s ``"version"`` field is missing a valid integer.
+
+    Raised by ``load_map`` when the top-level ``"version"`` value is
+    present but not an ``int`` (``null``, a string, a float, ...) —
+    a malformed or corrupted document, not merely a newer one. This
+    is deliberately a distinct exception from
+    ``MapFormatTooNewError``: "too new" implies a valid, well-formed
+    document this build doesn't yet understand (fix: upgrade dekko
+    or restart the long-lived process reading it), whereas a
+    non-numeric ``"version"`` means the document itself is broken
+    (fix: regenerate it with ``dekko map``). Without this guard, the
+    bad value flows into ``doc_version > MAP_DOC_VERSION`` and raises
+    an opaque ``TypeError`` instead — the same failure mode
+    ``MapFormatTooNewError`` exists to prevent, just for a different
+    kind of bad input. See
+    ``.features/fixes/stale-map-json-mcp-crash.md``.
+    """
+
+
 _BASE_SPLIT = re.compile(r"::|\.|->|/")
 _UNSUPPORTED_PREFIX = "no parser ("
 _VENDORED_PREFIX = "vendored ("
@@ -721,6 +741,40 @@ def _callee_base(text: str) -> str:
     return parts[-1] if parts else ""
 
 
+def _check_doc_version(doc_version: object) -> int:
+    """Validate a ``map.json`` document's ``"version"`` field.
+
+    Args:
+        doc_version: The raw ``doc.get("version", 1)`` value.
+
+    Returns:
+        ``doc_version``, narrowed to ``int``, when it's valid and not
+        newer than ``MAP_DOC_VERSION``.
+
+    Raises:
+        MapFormatInvalidError: ``doc_version`` isn't an ``int``
+            (``null``, a string, a float, a ``bool``, ...).
+        MapFormatTooNewError: ``doc_version`` is a valid integer but
+            greater than ``MAP_DOC_VERSION``.
+    """
+    if not isinstance(doc_version, int) or isinstance(doc_version, bool):
+        raise MapFormatInvalidError(
+            f'map.json has a malformed "version" field '
+            f"({doc_version!r}); expected an integer. The file may "
+            "be corrupted or truncated. Regenerate it with "
+            "`dekko map`."
+        )
+    if doc_version > MAP_DOC_VERSION:
+        raise MapFormatTooNewError(
+            f"map.json is doc-version {doc_version}, newer than this "
+            f"dekko build understands (max {MAP_DOC_VERSION}). "
+            "Upgrade dekko, or if this is a long-lived process "
+            "(dekko serve --mcp, or the dekko daemon), restart it to "
+            "pick up the current version."
+        )
+    return doc_version
+
+
 def load_map(root: Path) -> MapIndex | None:
     """Load ``root/.dekko/map.json`` into a ``MapIndex``.
 
@@ -741,6 +795,12 @@ def load_map(root: Path) -> MapIndex | None:
             then regenerate and silently overwrite a perfectly good,
             newer-format ``map.json`` with this stale process's
             older-format output.
+        MapFormatInvalidError: The document's ``"version"`` field is
+            present but not an integer (``null``, a string, a float,
+            ...) — the document is malformed or corrupted rather than
+            merely newer (see the exception's docstring). Also
+            deliberately not folded into the ``None`` contract, for
+            the same reason as ``MapFormatTooNewError`` above.
     """
     path = root / _MAP_DIR / "map.json"
     try:
@@ -748,15 +808,7 @@ def load_map(root: Path) -> MapIndex | None:
     except (OSError, ValueError):
         return None
 
-    doc_version = doc.get("version", 1)
-    if isinstance(doc_version, int) and doc_version > MAP_DOC_VERSION:
-        raise MapFormatTooNewError(
-            f"map.json is doc-version {doc_version}, newer than this "
-            f"dekko build understands (max {MAP_DOC_VERSION}). "
-            "Upgrade dekko, or if this is a long-lived process "
-            "(dekko serve --mcp, or the dekko daemon), restart it to "
-            "pick up the current version."
-        )
+    doc_version = _check_doc_version(doc.get("version", 1))
 
     index = MapIndex(
         root_label=doc.get("root", root.name),

@@ -566,6 +566,29 @@ def test_tool_call_reports_too_new_doc_version_clearly(
     assert "internal error" not in text
 
 
+def test_tool_call_reports_malformed_doc_version_clearly(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A corrupted/mid-write map.json with a non-numeric "version"
+    # (null here) must not fall through to the generic "internal
+    # error" catch-all with an opaque TypeError message — it needs
+    # its own actionable text distinct from the "too new" case, since
+    # restarting the server won't fix a broken file.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["version"] = None
+    map_path.write_text(json.dumps(doc))
+
+    ctx = _ctx(root)
+    result = _call(ctx, "map_status", {})
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "version" in text.lower()
+    assert "dekko map" in text
+    assert "internal error" not in text
+
+
 def test_serve_loop_frames_messages(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:

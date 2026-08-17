@@ -1187,6 +1187,20 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
             "the current version.",
             True,
         )
+    except mapfile.MapFormatInvalidError:
+        # map.json's "version" field itself is malformed (null,
+        # non-numeric, ...) — the document is corrupted or was read
+        # mid-write, not merely newer than this process understands.
+        # Restarting the server won't fix a broken file, so point at
+        # regenerating the map instead (see
+        # .features/fixes/stale-map-json-mcp-crash.md).
+        text, is_error = (
+            'dekko: map.json\'s "version" field is missing or '
+            "invalid, so it can't be read. The file may be "
+            "corrupted or truncated. Regenerate it with `dekko map` "
+            "(or call refresh_map).",
+            True,
+        )
     except Exception as exc:  # surface any tool crash as an error result
         text, is_error = f"dekko: internal error: {exc}", True
     return _ok(
