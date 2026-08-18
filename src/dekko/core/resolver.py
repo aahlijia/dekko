@@ -1985,12 +1985,17 @@ def _resolve_import_js(
     ``extractor._imports_js``) — the module path is recovered by
     dropping the last ``/``-segment, safe regardless of how many
     slashes the real module path itself contains (the appended name is
-    always exactly the last segment). Bare specifiers (no leading
-    ``.``/``..``) are external by construction — an npm package name
-    never collides with a relative path, so no repo-root search is
-    needed the way Python's absolute imports require one.
+    always exactly the last segment). A side-effect import
+    (``imp.name == ""``, no local binding) stores ``source`` bare with
+    no appended name to strip, so the drop is skipped for that shape —
+    stripping unconditionally would truncate a real path segment (e.g.
+    ``"opentui-spinner/react"`` down to ``"opentui-spinner"``). Bare
+    specifiers (no leading ``.``/``..``) are external by construction —
+    an npm package name never collides with a relative path, so no
+    repo-root search is needed the way Python's absolute imports
+    require one.
     """
-    module_source = imp.source.rsplit("/", 1)[0]
+    module_source = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
     if not (module_source.startswith("./") or module_source.startswith("../")):
         return None
     base_dir = _dirname(importer_path)
@@ -2178,8 +2183,11 @@ def _external_label_js(imp: Import) -> str:
     instead of the one external dependency they actually are. Strips
     the appended name back off for display, the same recovery
     ``_resolve_import_js`` already does before attempting resolution.
+    A side-effect import (``imp.name == ""``) has no appended name to
+    strip — the source is already bare, so stripping is skipped for
+    that shape (same guard as ``_resolve_import_js``).
     """
-    return imp.source.rsplit("/", 1)[0]
+    return imp.source.rsplit("/", 1)[0] if imp.name else imp.source
 
 
 _EXTERNAL_LABELS: dict[str, Callable[[Import], str]] = {
@@ -2189,10 +2197,17 @@ _EXTERNAL_LABELS: dict[str, Callable[[Import], str]] = {
 }
 
 
-def _external_label(imp: Import, language: str) -> str:
-    """The string recorded in ``ModuleGraph.external`` for an
-    unresolved import — ``imp.source`` verbatim for every language
-    except JS/TS/TSX (see ``_external_label_js``).
+def bare_import_source(imp: Import, language: str) -> str:
+    """The bare, name-suffix-stripped module source for an import —
+    ``imp.source`` verbatim for every language except JS/TS/TSX (see
+    ``_external_label_js``).
+
+    Used both for ``ModuleGraph.external``'s disclosure label and for
+    ``query.py``'s ``--exact`` import matching (see
+    ``query._source_matches``) — both want "the string a developer
+    would write to mean this module", not the raw stored
+    ``Import.source``, which for JS/TS has an arbitrary local binding
+    name appended (see ``extractor._imports_js``).
     """
     labeler = _EXTERNAL_LABELS.get(language)
     return labeler(imp) if labeler is not None else imp.source
@@ -2356,7 +2371,7 @@ def resolve_imports(files: list[FileMap]) -> ModuleGraph:
             target = resolver(imp, fm.path, ctx) if resolver else None
             if target is None:
                 external.setdefault(fm.path, set()).add(
-                    _external_label(imp, fm.language)
+                    bare_import_source(imp, fm.language)
                 )
                 continue
             edge_names.setdefault((fm.path, target), set()).add(imp.name)

@@ -622,6 +622,15 @@ JAVASCRIPT = LanguageSpec(
 (import_statement
   (import_clause (identifier) @name)
   source: (string) @from_module)
+
+(import_statement
+  (import_clause
+    (namespace_import
+      (identifier) @name))
+  source: (string) @from_module)
+
+(import_statement
+  . (string) @from_module) @stmt
 """,
     container_types={"class_declaration": "name"},
     method_containers=("class_declaration",),

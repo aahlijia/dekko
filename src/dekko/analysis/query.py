@@ -29,7 +29,7 @@ from dekko.core.model import (
     Symbol,
 )
 from dekko.textutil import Meter, fit_to_budget, signature, token_footer
-from dekko.core.resolver import MODULE_CALLER_SUFFIX
+from dekko.core.resolver import MODULE_CALLER_SUFFIX, bare_import_source
 
 EXIT_OK = 0
 EXIT_NOT_FOUND = 3
@@ -1627,40 +1627,62 @@ def _run_uses(
     return EXIT_OK, _emit_lines(_uses_rows(index, exts), budget, limit)
 
 
-def _source_matches(source: str, needle: str, exact: bool) -> bool:
-    """Whether an import's raw ``source`` text names ``needle``.
+def _source_matches(
+    imp: Import, language: str, needle: str, exact: bool
+) -> bool:
+    """Whether an import's source text names ``needle``.
 
-    Default (``exact=False``): a plain substring check. Import source
-    strings are already bare module/path text (``os.path``,
-    ``../utils``, ``std::collections::HashMap``) with no generic/
-    pointer wrapper syntax to see through, unlike ``type``'s
-    identifier-token matching — a substring check alone correctly
-    matches ``os.path`` against both ``import os.path`` and ``from
-    os.path import join``. ``exact=True`` requires the source to equal
-    ``needle`` verbatim, trailing-slash-normalized so a relative
-    source (``./utils`` vs. ``./utils/``) isn't a false negative.
+    Default (``exact=False``): a plain substring check against the raw
+    stored ``Import.source``. Import source strings are already bare
+    module/path text (``os.path``, ``../utils``,
+    ``std::collections::HashMap``) with no generic/pointer wrapper
+    syntax to see through, unlike ``type``'s identifier-token matching
+    — a substring check alone correctly matches ``os.path`` against
+    both ``import os.path`` and ``from os.path import join``.
+
+    ``exact=True`` compares against ``bare_import_source(imp,
+    language)`` instead of the raw ``imp.source`` — for JS/TS, the
+    stored source has an arbitrary local binding name appended
+    (``"react/useState"``, see ``extractor._imports_js``), which no
+    developer would think to type; ``bare_import_source`` strips that
+    back off so ``--exact "react"`` matches. Every other language's
+    ``bare_import_source`` is a no-op (returns ``imp.source``
+    unchanged), so this is a JS/TS-only behavior change. Trailing-
+    slash-normalized either way so a relative source (``./utils`` vs.
+    ``./utils/``) isn't a false negative.
 
     Args:
-        source: The stored ``Import.source`` text.
+        imp: The matched ``Import`` entry.
+        language: The importing file's language (``index.
+            languages_by_path[path]``), used to pick the right
+            bare-source stripping rule.
         needle: Text being searched for.
-        exact: Match the literal source string instead of a substring.
+        exact: Match the literal bare source string instead of a
+            substring.
 
     Returns:
-        True when ``source`` matches ``needle`` under the chosen mode.
+        True when the import matches ``needle`` under the chosen mode.
     """
     if exact:
-        return source.rstrip("/") == needle.rstrip("/")
-    return needle in source
+        bare = bare_import_source(imp, language)
+        return bare.rstrip("/") == needle.rstrip("/")
+    return needle in imp.source
 
 
 def _importers_row(path: str, imp: Import) -> str:
     """One text row for an ``importers`` hit."""
+    if not imp.name:
+        return f"{path}  {imp.source}  (side-effect import)"
     return f"{path}  {imp.source}  (as {imp.name})"
 
 
 def _importers_entry(path: str, imp: Import) -> dict:
     """One JSON entry for an ``importers`` hit."""
-    return {"path": path, "local_name": imp.name, "source": imp.source}
+    return {
+        "path": path,
+        "local_name": imp.name or None,
+        "source": imp.source,
+    }
 
 
 def _run_importers_not_found(index: MapIndex, needle: str) -> int:
@@ -1715,7 +1737,9 @@ def _run_importers(
         (path, imp)
         for path, imports in index.imports_by_path.items()
         for imp in imports
-        if _source_matches(imp.source, needle, exact)
+        if _source_matches(
+            imp, index.languages_by_path.get(path, ""), needle, exact
+        )
     ]
     if not rows:
         return _run_importers_not_found(index, needle), None

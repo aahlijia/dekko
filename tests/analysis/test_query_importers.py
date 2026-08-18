@@ -6,8 +6,14 @@ import pytest
 
 from dekko.integrations import cli
 from dekko.analysis.query import _source_matches
+from dekko.core.model import Import
 
 from conftest import RepoFactory
+
+
+def _imp(name: str, source: str) -> Import:
+    return Import(path="app.py", name=name, source=source)
+
 
 PY_IMPORTERS = {
     "app.py": ("import os.path\nfrom os.path import join\n"),
@@ -167,18 +173,86 @@ def test_importers_no_tests_excludes_test_files(
     assert "tests/test_app.py" not in out
 
 
+def test_importers_side_effect_import_displays_without_as_clause(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.js": 'import "./polyfill";\n'})
+    code = cli.main(["query", "importers", "polyfill", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "(side-effect import)" in out
+    assert "(as )" not in out
+
+
+def test_importers_exact_js_matches_bare_module_specifier(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # I2 fix: --exact for JS/TS compares against the bare module
+    # specifier, not the raw "module/localName" stored source.
+    root = make_mapped_repo(
+        {
+            "a.tsx": 'import React from "react";\n',
+            "b.ts": 'import { useState } from "react";\n',
+        }
+    )
+    code = cli.main(
+        ["query", "importers", "react", "--exact", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "a.tsx" in out
+    assert "b.ts" in out
+
+
+def test_importers_exact_js_does_not_substring_match_similar_package(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.ts": 'import x from "react-dom";\n'})
+    code = cli.main(
+        ["query", "importers", "react", "--exact", "--root", str(root)]
+    )
+    assert code == 3
+
+
 def test_source_matches_substring_default() -> None:
-    assert _source_matches("os.path.join", "os.path", exact=False)
-    assert not _source_matches("sys", "os.path", exact=False)
+    imp = _imp("join", "os.path.join")
+    assert _source_matches(imp, "python", "os.path", exact=False)
+    assert not _source_matches(
+        _imp("sys", "sys"), "python", "os.path", exact=False
+    )
 
 
 def test_source_matches_exact_requires_literal_equality() -> None:
-    assert _source_matches("os.path", "os.path", exact=True)
-    assert not _source_matches("os.path.join", "os.path", exact=True)
+    imp = _imp("os", "os.path")
+    assert _source_matches(imp, "python", "os.path", exact=True)
+    join_imp = _imp("join", "os.path.join")
+    assert not _source_matches(join_imp, "python", "os.path", exact=True)
 
 
 def test_source_matches_exact_trailing_slash_normalized() -> None:
     # A relative source ("./utils" vs "./utils/") shouldn't false-
     # negative under --exact purely over a trailing slash.
-    assert _source_matches("./utils/", "./utils", exact=True)
-    assert _source_matches("./utils", "./utils/", exact=True)
+    assert _source_matches(
+        _imp("utils", "./utils/"), "python", "./utils", exact=True
+    )
+    assert _source_matches(
+        _imp("utils", "./utils"), "python", "./utils/", exact=True
+    )
+
+
+def test_source_matches_exact_js_strips_appended_name() -> None:
+    # JS/TS named/default imports store "module/localName" — --exact
+    # must compare against the bare module specifier, not the raw
+    # compound string (I2 fix).
+    imp = _imp("React", "react/React")
+    assert _source_matches(imp, "javascript", "react", exact=True)
+    assert not _source_matches(imp, "javascript", "react/React", exact=True)
+
+
+def test_source_matches_exact_js_side_effect_import_already_bare() -> None:
+    # A side-effect import's source is already bare (I1 fix) —
+    # bare_import_source must not try to strip a nonexistent suffix.
+    imp = _imp("", "opentui-spinner/react")
+    assert _source_matches(
+        imp, "javascript", "opentui-spinner/react", exact=True
+    )

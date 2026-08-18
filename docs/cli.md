@@ -82,7 +82,14 @@ resolution is attempted, so it's a text match, not a "does this
 resolve to a real file" answer; default matching is substring
 (`os.path` matches both `import os.path` and `from os.path import
 join`), `--exact` requires the literal source string (trailing slash
-normalized for relative sources). `peers <symbol>` finds other symbols
+normalized for relative sources). For JS/TS, `--exact` matches the
+bare module specifier, not a particular named/default import binding
+(`--exact react` matches `import React from "react"` and `import
+{ useState } from "react"` alike) — Import.source stores JS/TS names
+with an arbitrary local binding name appended internally, which
+`--exact` strips back off before comparing, so two different named
+imports from the same package both satisfy the same `--exact` match.
+`peers <symbol>` finds other symbols
 whose outgoing calls overlap the target's by at least `--min-shared`
 callees (default 2 — a single shared callee, like both calling
 `print`/`log`, is usually noise); results are ranked by shared-callee

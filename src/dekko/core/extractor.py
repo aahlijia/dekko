@@ -2146,14 +2146,23 @@ def _imports_rust(
 def _imports_js(
     matches: list[tuple[int, dict[str, list[Node]]]], rel: str
 ) -> list[Import]:
-    """Normalize JS/TS import statements (named and default)."""
+    """Normalize JS/TS import statements (named, default, namespace,
+    and side-effect/bare)."""
     out: list[Import] = []
     for _, caps in matches:
         module = _one(caps, "from_module")
-        name = _one(caps, "name")
-        if module is None or name is None:
+        if module is None:
             continue
         source = _strip_quotes(_text(module))
+        name = _one(caps, "name")
+        if name is None:
+            # Side-effect import (`import "./foo.css";`) — no local
+            # binding. ``name=""`` is the signal downstream JS-specific
+            # resolver code (``resolver._resolve_import_js``,
+            # ``bare_import_source``) uses to know this source has no
+            # appended "/name" suffix to strip.
+            out.append(Import(path=rel, name="", source=source))
+            continue
         alias = _one(caps, "alias")
         local = _text(alias) if alias else _text(name)
         out.append(

@@ -184,6 +184,36 @@ def test_js_bare_specifier_is_external_without_repo_root_search() -> None:
     assert graph.external["src/app.js"] == ["utils"]
 
 
+def test_js_side_effect_import_relative_path_not_truncated() -> None:
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [_imp("src/index.ts", "", "./widgets/widget")],
+        ),
+        _fm("src/widgets/widget.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["src/index.ts"] == ["src/widgets/widget.ts"]
+
+
+def test_js_side_effect_bare_specifier_stays_external_untruncated() -> None:
+    # Critical regression guard for the resolver-fallout fix (I1 part
+    # 3): without the imp.name-conditional strip, this would
+    # incorrectly compute module_source="opentui-spinner" (truncated,
+    # wrong) instead of treating the full bare specifier as external.
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [_imp("src/index.ts", "", "opentui-spinner/react")],
+        )
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
+    assert graph.external["src/index.ts"] == ["opentui-spinner/react"]
+
+
 def test_js_multiple_named_imports_collapse_to_one_external_label() -> None:
     files = [
         _fm(
