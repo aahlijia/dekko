@@ -340,7 +340,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "(for catches) a raised type name (e.g. ConfigError, "
         "ValueError), or (for env) a literal env-var name (e.g. "
         "DATABASE_URL); 'throws' takes a function/method symbol like "
-        "callers/callees. Append ':LINE' (file.py:Class.method:LINE) "
+        "callers/callees; 'cohesion' takes a file path like 'file'. "
+        "Append ':LINE' (file.py:Class.method:LINE) "
         "to pick one candidate out of an overload set the "
         "ambiguous-candidate error reports. Required for every action "
         "except 'env --list'",

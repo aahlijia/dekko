@@ -54,6 +54,7 @@ ACTIONS = (
     "throws",
     "catches",
     "env",
+    "cohesion",
 )
 
 # Valid ``--relation``/``relation=`` filter values for supertypes/
@@ -100,6 +101,7 @@ _BUDGETED_ACTIONS = (
     "throws",
     "catches",
     "env",
+    "cohesion",
 )
 
 # Identifier-token pattern for the default (non-``--exact``) ``type``
@@ -2301,6 +2303,236 @@ def _run_file(
     return EXIT_OK, _emit_lines([_sym_line(s) for s in symbols], budget, limit)
 
 
+# ``cohesion``'s weak-signal disclosure (design doc: "the note: line is
+# load-bearing, not decorative"). Always printed, in both text and
+# JSON output, never dropped by budget/limit capping — this is what
+# keeps a connectivity view from being misread as real "which
+# functions belong together" clustering, which this action does not
+# implement (see ``symbol-cohesion-clustering-design.md``).
+_COHESION_NOTE = (
+    "note: this groups symbols that are mutually reachable, not "
+    "symbols that are tightly coupled vs. loosely coupled — a file "
+    "that's one connected component (the common case) gets no useful "
+    'split suggestion from this view. Real "which functions belong '
+    'together" clustering is not implemented.'
+)
+
+
+def _intra_file_edges(index: MapIndex, path: str) -> list[tuple[str, str]]:
+    """Resolved call/reference edges where both endpoints are defined
+    in ``path``.
+
+    Restricts ``calls_out``/``referenced_out`` (already resolved,
+    already fully loaded — the entire data cost of this feature) to
+    edges wholly inside one file. Module-level pseudo-caller ids (see
+    ``MODULE_CALLER_SUFFIX``) appear as keys in ``calls_out`` too, but
+    are never real ``Symbol`` ids, so they're never in ``in_file`` and
+    drop out of the ``src not in in_file`` check automatically — no
+    special-casing needed here, unlike ``peers``'s handling of the
+    same id shape.
+
+    Args:
+        index: Loaded map index.
+        path: Repo-relative path of the file being analyzed.
+
+    Returns:
+        ``(src, dst)`` id pairs, one per resolved intra-file edge,
+        self-references excluded. A pair appearing in both
+        ``calls_out`` and ``referenced_out`` is kept twice — these are
+        two distinct edge types (a call vs. a by-value reference), not
+        one edge double-counted.
+    """
+    in_file = {s.id for s in index.symbols_by_path.get(path, [])}
+    edges: list[tuple[str, str]] = []
+    for table in (index.calls_out, index.referenced_out):
+        for src, dsts in table.items():
+            if src not in in_file:
+                continue
+            edges.extend(
+                (src, dst) for dst in dsts if dst in in_file and dst != src
+            )
+    return edges
+
+
+def connected_components(
+    ids: list[str], edges: list[tuple[str, str]]
+) -> list[set[str]]:
+    """Union-Find over an intra-file edge list. O(E * alpha(V)).
+
+    Every id in ``ids`` gets its own component even with zero edges —
+    the result always partitions the full id set, not just the ids
+    that happen to appear in ``edges``, so a symbol with no intra-file
+    edges still shows up as its own size-1 component rather than being
+    silently dropped.
+
+    Args:
+        ids: Every symbol id to partition (typically a file's full
+            symbol set, in definition order).
+        edges: ``(src, dst)`` pairs to union together.
+
+    Returns:
+        Every connected component as a set of member ids.
+    """
+    parent = {i: i for i in ids}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in edges:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    groups: dict[str, set[str]] = {}
+    for i in ids:
+        groups.setdefault(find(i), set()).add(i)
+    return list(groups.values())
+
+
+def _cohesion_groups(
+    ids: list[str], edges: list[tuple[str, str]]
+) -> tuple[list[list[str]], list[str]]:
+    """Split a file's connected components into clusters and isolates.
+
+    A component of size 1 is, by construction, a symbol with zero
+    intra-file edges (any edge would have unioned it with another
+    symbol) — so no separate "has no edges" check is needed to
+    classify it as isolated.
+
+    Args:
+        ids: Every symbol id in the file, in definition order.
+        edges: Intra-file ``(src, dst)`` edges, from
+            ``_intra_file_edges``.
+
+    Returns:
+        ``(clusters, isolated)``. ``clusters`` is every component with
+        2+ members (each a list of member ids in definition order),
+        sorted largest-first, ties broken by the first member's
+        definition order. ``isolated`` is every 1-member component's
+        id, in definition order.
+    """
+    order = {sid: i for i, sid in enumerate(ids)}
+    components = connected_components(ids, edges)
+    clusters = sorted(
+        (sorted(c, key=order.__getitem__) for c in components if len(c) > 1),
+        key=lambda c: (-len(c), order[c[0]]),
+    )
+    isolated = sorted(
+        (next(iter(c)) for c in components if len(c) == 1),
+        key=order.__getitem__,
+    )
+    return clusters, isolated
+
+
+def _cohesion_json(
+    path: str,
+    symbol_count: int,
+    edge_count: int,
+    clusters: list[list[str]],
+    isolated: list[str],
+    names_by_id: dict[str, str],
+) -> dict:
+    """Build the ``cohesion`` JSON document."""
+    return {
+        "action": "cohesion",
+        "path": path,
+        "symbol_count": symbol_count,
+        "edge_count": edge_count,
+        "weak_signal": True,
+        "components": [
+            {"size": len(c), "symbols": [names_by_id[i] for i in c]}
+            for c in clusters
+        ],
+        "isolated": [names_by_id[i] for i in isolated],
+        "note": _COHESION_NOTE,
+    }
+
+
+def _run_cohesion(
+    index: MapIndex,
+    target: str,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute the cohesion action: intra-file connected-components.
+
+    A deliberately weak signal, not real clustering — see
+    ``_COHESION_NOTE`` and the design doc. Groups a file's symbols by
+    mutual reachability over intra-file calls/references only; a file
+    that's fully connected (the common case) yields one big cluster
+    and no useful split suggestion.
+
+    Args:
+        index: Loaded map index.
+        target: File path (matched like the ``file`` action — exact
+            repo-relative path, or any trailing path suffix).
+        as_json: Emit structured JSON instead of text.
+        limit: Cap on text result rows (one row per cluster, plus one
+            for the isolated group).
+        budget: Approximate token budget for the result rows; the
+            header and the weak-signal note are never dropped.
+
+    Returns:
+        ``(exit_code, meter)`` — meter is ``None`` for JSON output or
+        a not-found/ambiguous result.
+    """
+    matches = paths_matching(index, target)
+    if not matches:
+        print(f"dekko: no mapped file matches '{target}'", file=sys.stderr)
+        coverage = _coverage_note(index)
+        if coverage:
+            print(f"  note: {coverage}", file=sys.stderr)
+        return EXIT_NOT_FOUND, None
+    if len(matches) > 1:
+        print(
+            f"dekko: '{target}' is ambiguous; candidates:",
+            file=sys.stderr,
+        )
+        for p in matches:
+            print(f"  {p}", file=sys.stderr)
+        return EXIT_AMBIGUOUS, None
+
+    path = matches[0]
+    symbols = index.symbols_by_path[path]
+    ids = [s.id for s in symbols]
+    edges = _intra_file_edges(index, path)
+    clusters, isolated = _cohesion_groups(ids, edges)
+    names_by_id = {s.id: s.qualname for s in symbols}
+
+    if as_json:
+        doc = _cohesion_json(
+            path, len(ids), len(edges), clusters, isolated, names_by_id
+        )
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK, None
+
+    header = (
+        f"dekko: {len(ids)} symbols, {len(edges)} intra-file edges "
+        "(weak signal — connectivity only, not clustering)"
+    )
+    rows = [
+        f"  connected component {n} ({len(c)} symbols): "
+        + ", ".join(names_by_id[i] for i in c)
+        for n, c in enumerate(clusters, start=1)
+    ]
+    if isolated:
+        rows.append(
+            f"  isolated ({len(isolated)} symbols, no intra-file "
+            "edges): " + ", ".join(names_by_id[i] for i in isolated)
+        )
+    prefix = header + "\n" + _COHESION_NOTE
+    kept, meter = fit_to_budget(rows, budget, limit, prefix=prefix)
+    print(header)
+    for row in kept:
+        print(row)
+    print(_COHESION_NOTE)
+    return EXIT_OK, meter
+
+
 def _dispatch_scan(
     index: MapIndex,
     action: str,
@@ -2313,7 +2545,7 @@ def _dispatch_scan(
 ) -> tuple[int, Meter | None] | None:
     """Route the whole-repo-scan actions that never resolve a symbol
     target (``file``/``uses``/``type``/``importers``/``catches``/
-    ``env``).
+    ``env``/``cohesion``).
 
     Split out of ``_dispatch`` purely to keep that function's
     cyclomatic complexity under the project's Ruff limit. Returns
@@ -2330,6 +2562,8 @@ def _dispatch_scan(
         return _run_importers(index, target, exact, as_json, limit, budget)
     if action == "catches":
         return _run_catches(index, target, as_json, limit, budget)
+    if action == "cohesion":
+        return _run_cohesion(index, target, as_json, limit, budget)
     if action == "env":
         if env_list:
             return _run_env_list(index, as_json, limit, budget)
@@ -2408,7 +2642,8 @@ def run(
             ``ValueError``); for ``env``, a literal env-var name
             (``DATABASE_URL``) — ignored (may be an empty string) when
             ``env_list`` is set, since ``env --list`` scans the whole
-            repo rather than looking up one key.
+            repo rather than looking up one key; for ``cohesion``, a
+            file path, matched the same way as the ``file`` action.
         as_json: Emit structured JSON instead of text.
         limit: Cap on text result rows.
         sites: For callers/callees, print one row per call site
@@ -2418,9 +2653,10 @@ def run(
         budget: Approximate token budget for the result rows, or
             ``None``. Lowest-relevance rows are dropped first. For
             ``callers``/``callees``/``uses``/``type``/``supertypes``/
-            ``subtypes``/``throws``/``catches``, ``None`` falls back to
-            ``DEFAULT_RELATION_BUDGET`` rather than going unbounded —
-            a high-fan-in symbol's full row list is otherwise capped
+            ``subtypes``/``throws``/``catches``/``cohesion``, ``None``
+            falls back to ``DEFAULT_RELATION_BUDGET`` rather than
+            going unbounded — a high-fan-in symbol's full row list is
+            otherwise capped
             only by ``limit``'s row count, which can still render
             thousands of tokens (the CLI and MCP paths previously
             diverged here; both now share this one fallback).

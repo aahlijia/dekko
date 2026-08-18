@@ -22,6 +22,7 @@ dekko query throws load_config --transitive --depth 3  # + everything its callee
 dekko query catches ConfigError      # every catch clause that would handle ConfigError
 dekko query env DATABASE_URL         # every statically-known read site for this env var
 dekko query env --list               # every distinct env var read anywhere, ranked by read-site count
+dekko query cohesion src/app.py      # intra-file connected-components (weak signal, not clustering)
 dekko context run_map --budget 1500  # minimal context pack for an edit
 dekko search "retries failed http requests"  # free-text relevance search
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
@@ -458,6 +459,50 @@ see the idiom difference without a second lookup.
 scope than `throws`/`catches`'s own CLI-only pilot; revisit if a
 recurring "which env vars does this service read" need surfaces for
 an MCP-only agent session.
+
+## Interpreting `dekko query cohesion`
+
+`cohesion` answers "if I'm splitting this file in two, which symbols
+naturally group together" — but only partially, and it says so in its
+own output. It groups a file's symbols into **connected components**
+over intra-file calls/references only (edges where both the caller/
+referrer and the callee/referenced symbol are defined in the same
+file); this is **connectivity, not clustering** — a deliberately weak
+signal, not a "which functions belong together" recommendation.
+
+```sh
+dekko query cohesion src/app/big_module.py         # intra-file coupling summary
+dekko query cohesion src/app/big_module.py --json
+```
+
+`FILE` is matched the same way as `query file` — exact repo-relative
+path, or any unambiguous trailing path suffix. Symbols with **no**
+intra-file call/reference edge to any other symbol in the file are
+reported separately as `isolated`, not as their own one-member
+"component". Every run always prints this disclosure, in both text
+and JSON output, never dropped by `--budget`/`--limit` capping:
+
+> note: this groups symbols that are mutually reachable, not symbols
+> that are tightly coupled vs. loosely coupled — a file that's one
+> connected component (the common case) gets no useful split
+> suggestion from this view. Real "which functions belong together"
+> clustering is not implemented.
+
+That note is load-bearing, not decorative: **most non-trivial files
+are a single connected component**, and for those, `cohesion` gives
+**zero** useful split signal — this is the expected, common case, not
+a bug. Real community-detection/modularity-style clustering (which
+would give a genuinely useful answer even for a fully-connected file)
+is a materially harder algorithm dekko has no other precedent for and
+does not implement; see
+`.features/plans/post-indexing-tooling/symbol-cohesion-clustering-design.md`
+for the full reasoning and what a future "real clustering" version
+would require.
+
+`cohesion` is **CLI-only** (no MCP tool) — this is a human refactor-
+planning aid, not something an agent typically needs mid-task, and the
+weak-signal caveat above makes it a poor fit for always-loaded MCP
+schema rent regardless.
 
 ## Daemon mode
 
