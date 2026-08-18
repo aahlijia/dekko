@@ -23,6 +23,7 @@ from dekko.classify import is_test_path
 from dekko.core.languages import spec_fingerprint
 from dekko.core.model import (
     CallGraph,
+    CatchSite,
     ExternalCall,
     FileMap,
     Import,
@@ -40,7 +41,7 @@ try:
 except ImportError:  # pragma: no cover - exercised in stdlib-only envs
     orjson = None  # type: ignore[assignment]
 
-MAP_DOC_VERSION = 7
+MAP_DOC_VERSION = 8
 _MAP_DIR = ".dekko"
 
 
@@ -118,7 +119,8 @@ def build_id_table(graph: CallGraph) -> tuple[list[str], dict[str, int]]:
     """First-appearance-order intern table for id strings the writer
     repeats across ``"edges"``/``"ambiguous"``/``"external"``/
     ``"referenced"``/``"heritage"``/``"heritage_ambiguous"``/
-    ``"heritage_external"``.
+    ``"heritage_external"``/``"throws"``/``"throws_ambiguous"``/
+    ``"throws_external"``/``"throws_bare"``/``"catches"``.
 
     ``"ambiguous"`` entries in particular can each name dozens to
     thousands of candidate ids that also appear, verbatim, in many
@@ -163,6 +165,7 @@ def build_id_table(graph: CallGraph) -> tuple[list[str], dict[str, int]]:
         intern(edge.callee)
     _intern_heritage(graph, intern)
     _intern_modules(graph, intern)
+    _intern_throws_catches(graph, intern)
     return ids, index
 
 
@@ -204,6 +207,38 @@ def _intern_modules(graph: CallGraph, intern: Callable[[str], None]) -> None:
         intern(edge.imported)
     for path in graph.modules.external:
         intern(path)
+
+
+def _intern_throws_catches(
+    graph: CallGraph, intern: Callable[[str], None]
+) -> None:
+    """The ``build_id_table`` interning loops for throws/catches.
+
+    Split out of ``build_id_table`` for the same reason
+    ``_intern_heritage``/``_intern_modules`` are — keeps that
+    function's cyclomatic complexity under the project's Ruff limit.
+    Interns caller/type ids from ``"throws"``/``"throws_ambiguous"``/
+    ``"throws_external"``/``"throws_bare"``/``"catches"`` — a caller id
+    here is a symbol id or a module pseudo-id
+    (``resolver.MODULE_CALLER_SUFFIX``), safe to share the same table
+    every other section already interns caller ids into.
+    """
+    for edge in graph.throws:
+        intern(edge.caller)
+        intern(edge.type)
+    for caller, _name, cands in graph.throws_ambiguous:
+        intern(caller)
+        for cand in cands:
+            intern(cand)
+    for ext in graph.throws_external:
+        intern(ext.caller)
+        intern(ext.callee)
+    for caller, _path, _line in graph.throws_bare:
+        intern(caller)
+    for site in graph.catches:
+        intern(site.caller)
+        for type_id in site.repo_types.values():
+            intern(type_id)
 
 
 def _resolve_ref(value: object, ids: list[str] | None) -> str:
@@ -560,6 +595,28 @@ class MapIndex:
             name-indexed, since ``deps --file`` needs "what did *this*
             file import that we couldn't resolve," not a repo-wide
             name search.
+        throws_out: Symbol id (or module pseudo-id) → resolved
+            raised-repo-type ids (empty for maps written before doc
+            version 8) — Python/Java/C++/JS/TS only, see
+            ``resolver.resolve_throws``/``model.ThrowEdge``.
+        throws_lines: ``(caller, raised-type id)`` → throw-site lines,
+            mirroring ``edge_lines``.
+        throws_ambiguous_out: Caller id → raised-type names it named
+            ambiguously — the throws counterpart to ``ambiguous_out``.
+        throws_external_out: Caller id → throw sites whose raised type
+            is outside the repo — the common case (most raised types
+            are stdlib/third-party); caller-indexed, mirroring
+            ``heritage_external_out``.
+        throws_bare_out: Caller id → ``(path, line)`` pairs of bare
+            re-raise sites (Python bare ``raise``, C++ bare ``throw;``)
+            — kept separate since a re-raise's actual type isn't
+            tracked (see ``model.CallGraph.throws_bare``).
+        catches: Every except/catch clause across the repo, resolved
+            (empty for maps written before doc version 8) — same
+            Python/Java/C++/JS/TS scope as ``throws_out``. A
+            ``dekko query catches Y`` request scans this list by name
+            rather than through a resolved-id index (see
+            ``model.CatchSite``'s docstring for why).
         notes: Symbol id → note texts loaded from ``.dekko/notes.json``.
         provenance: Provenance stamp, or ``None`` for v1 documents.
         doc_version: The on-disk document's ``"version"`` field (``1``
@@ -615,6 +672,18 @@ class MapIndex:
         default_factory=dict
     )
     module_external: dict[str, list[str]] = field(default_factory=dict)
+    throws_out: dict[str, list[str]] = field(default_factory=dict)
+    throws_lines: dict[tuple[str, str], list[int]] = field(
+        default_factory=dict
+    )
+    throws_ambiguous_out: dict[str, list[str]] = field(default_factory=dict)
+    throws_external_out: dict[str, list[ExternalCall]] = field(
+        default_factory=dict
+    )
+    throws_bare_out: dict[str, list[tuple[str, int]]] = field(
+        default_factory=dict
+    )
+    catches: list[CatchSite] = field(default_factory=list)
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
     doc_version: int = MAP_DOC_VERSION
@@ -697,6 +766,7 @@ class MapIndex:
         }
         _filter_heritage(self, out, by_id)
         _filter_module_graph(self, out)
+        _filter_throws_catches(self, out, by_id)
         return out
 
 
@@ -828,6 +898,38 @@ def _filter_module_graph(src: "MapIndex", out: "MapIndex") -> None:
         for path, sources in src.module_external.items()
         if not is_test_path(path)
     }
+
+
+def _filter_throws_catches(
+    src: "MapIndex", out: "MapIndex", by_id: dict[str, Symbol]
+) -> None:
+    """Fill ``out``'s throws/catches fields from ``src``, test code
+    dropped.
+
+    Split out of ``MapIndex.without_tests`` for the same reason
+    ``_filter_heritage``/``_filter_module_graph`` are. ``catches`` is a
+    flat per-clause list (not an adjacency table), so it's filtered by
+    a direct ``_prod_id`` check on each site's ``caller`` rather than
+    via ``_filter_adjacency``.
+    """
+    out.throws_out = _filter_adjacency(src.throws_out, by_id)
+    out.throws_lines = {
+        key: lines
+        for key, lines in src.throws_lines.items()
+        if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
+    }
+    out.throws_ambiguous_out = {
+        caller: names
+        for caller, names in src.throws_ambiguous_out.items()
+        if _prod_id(caller, by_id)
+    }
+    for caller, exts in src.throws_external_out.items():
+        if _prod_id(caller, by_id):
+            out.throws_external_out[caller] = exts
+    for caller, sites in src.throws_bare_out.items():
+        if _prod_id(caller, by_id):
+            out.throws_bare_out[caller] = sites
+    out.catches = [c for c in src.catches if _prod_id(c.caller, by_id)]
 
 
 @dataclass
@@ -1065,6 +1167,7 @@ def load_map(root: Path) -> MapIndex | None:
         index.ref_lines[(caller, callee)] = edge.get("lines", [])
     _load_heritage(index, doc, ids)
     _load_module_graph(index, doc, ids)
+    _load_throws_catches(index, doc, ids)
     return index
 
 
@@ -1137,6 +1240,57 @@ def _load_module_graph(
         path = _resolve_ref(entry["path"], ids)
         index.module_external.setdefault(path, []).extend(
             entry.get("sources", [])
+        )
+
+
+def _load_throws_catches(
+    index: MapIndex, doc: dict, ids: list[str] | None
+) -> None:
+    """Fill ``index``'s throws/catches fields from a parsed ``map.json``
+    document.
+
+    Split out of ``load_map`` for the same reason ``_load_heritage``/
+    ``_load_module_graph`` are. Absent entirely from documents written
+    before doc version 8 — ``.get(..., [])`` defaults make every loop
+    here a no-op for those.
+    """
+    for edge in doc.get("throws", []):
+        caller = _resolve_ref(edge["caller"], ids)
+        type_id = _resolve_ref(edge["type"], ids)
+        index.throws_out.setdefault(caller, []).append(type_id)
+        index.throws_lines[(caller, type_id)] = edge.get("lines", [])
+    for key in index.throws_out:
+        index.throws_out[key] = sorted(set(index.throws_out[key]))
+    for d in doc.get("throws_ambiguous", []):
+        caller = _resolve_ref(d.get("caller", ""), ids)
+        name = d.get("name", "")
+        if caller and name:
+            index.throws_ambiguous_out.setdefault(caller, []).append(name)
+    for d in doc.get("throws_external", []):
+        ext = ExternalCall(
+            caller=_resolve_ref(d.get("caller"), ids),
+            callee=_resolve_ref(d.get("callee", ""), ids),
+            lines=d.get("lines", []),
+        )
+        index.throws_external_out.setdefault(ext.caller, []).append(ext)
+    for d in doc.get("throws_bare", []):
+        caller = _resolve_ref(d.get("caller", ""), ids)
+        index.throws_bare_out.setdefault(caller, []).append(
+            (d.get("path", ""), d.get("line", 0))
+        )
+    for d in doc.get("catches", []):
+        index.catches.append(
+            CatchSite(
+                caller=_resolve_ref(d.get("caller", ""), ids),
+                path=d.get("path", ""),
+                type_names=d.get("type_names", []),
+                repo_types={
+                    name: _resolve_ref(type_id, ids)
+                    for name, type_id in d.get("repo_types", {}).items()
+                },
+                bare=d.get("bare", False),
+                line=d.get("line", 0),
+            )
         )
 
 
@@ -1232,6 +1386,7 @@ def index_from_maps(
     for ext in graph.heritage_external:
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
     _index_module_graph(index, graph)
+    _index_throws_catches(index, graph)
     return index
 
 
@@ -1256,6 +1411,27 @@ def _index_module_graph(index: MapIndex, graph: CallGraph) -> None:
             table[key] = sorted(set(table[key]))
     for path, sources in graph.modules.external.items():
         index.module_external[path] = sources
+
+
+def _index_throws_catches(index: MapIndex, graph: CallGraph) -> None:
+    """The ``index_from_maps`` fill-in loop for throws/catches.
+
+    Split out of ``index_from_maps`` for the same reason
+    ``_index_module_graph`` is, mirroring ``_load_throws_catches``'s
+    on-disk-read counterpart.
+    """
+    for edge in graph.throws:
+        index.throws_out.setdefault(edge.caller, []).append(edge.type)
+        index.throws_lines[(edge.caller, edge.type)] = edge.lines
+    for key in index.throws_out:
+        index.throws_out[key] = sorted(set(index.throws_out[key]))
+    for caller, name, _cands in graph.throws_ambiguous:
+        index.throws_ambiguous_out.setdefault(caller, []).append(name)
+    for ext in graph.throws_external:
+        index.throws_external_out.setdefault(ext.caller, []).append(ext)
+    for caller, path, line in graph.throws_bare:
+        index.throws_bare_out.setdefault(caller, []).append((path, line))
+    index.catches = list(graph.catches)
 
 
 def check_freshness(root: Path, index: MapIndex) -> Freshness:

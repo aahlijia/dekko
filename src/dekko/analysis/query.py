@@ -20,7 +20,13 @@ from contextlib import redirect_stdout
 
 from dekko.classify import is_test_path, relevance_key
 from dekko.render.mapfile import MapIndex, format_unsupported
-from dekko.core.model import TYPE_KINDS, ExternalCall, Import, Symbol
+from dekko.core.model import (
+    TYPE_KINDS,
+    CatchSite,
+    ExternalCall,
+    Import,
+    Symbol,
+)
 from dekko.textutil import Meter, fit_to_budget, signature, token_footer
 from dekko.core.resolver import MODULE_CALLER_SUFFIX
 
@@ -39,6 +45,8 @@ ACTIONS = (
     "subtypes",
     "importers",
     "peers",
+    "throws",
+    "catches",
 )
 
 # Valid ``--relation``/``relation=`` filter values for supertypes/
@@ -64,6 +72,15 @@ DEFAULT_RELATION_BUDGET = 800
 # peer signal. Callers can raise this via ``--min-shared``.
 DEFAULT_MIN_SHARED = 2
 
+# Default ``throws --transitive`` walk depth: call-graph reachability
+# can be very deep, and "everything this function's entire call tree
+# might raise" degrades toward "every exception type in the repo" on a
+# sufficiently connected codebase — see the design doc's own "hard
+# depth cap" requirement. Callers can raise this via ``--depth``; a
+# capped walk always discloses truncation rather than silently
+# stopping (mirrors ``_MAX_AMBIGUOUS_CANDIDATES``'s discipline).
+DEFAULT_THROWS_DEPTH = 2
+
 _BUDGETED_ACTIONS = (
     "callers",
     "callees",
@@ -73,6 +90,8 @@ _BUDGETED_ACTIONS = (
     "subtypes",
     "importers",
     "peers",
+    "throws",
+    "catches",
 )
 
 # Identifier-token pattern for the default (non-``--exact``) ``type``
@@ -838,6 +857,422 @@ def _run_peers(
         return EXIT_OK, None
     lines = [_peer_row(index, oid, names) for oid, names in rows]
     return EXIT_OK, _emit_lines(lines, budget, limit)
+
+
+# ---------------------------------------------------------------------
+# Throws/catches (exception/error-flow tracing — a scoped pilot per
+# the design doc: Python/Java/C++/JS/TS only, Rust/Go/C permanently
+# out of scope; see ``languages.LanguageSpec.throw_query``'s
+# docstring).
+
+
+def _caller_label(index: MapIndex, caller_id: str) -> str:
+    """Human-readable label for a throws/catches ``caller`` id.
+
+    ``caller_id`` is either a real symbol id or a module pseudo-id
+    (``path::<module>``, for a top-level throw/catch) — mirrors how
+    ``_related`` already splits the two shapes for callers/callees.
+    """
+    if caller_id.endswith(MODULE_CALLER_SUFFIX):
+        path = caller_id[: -len(MODULE_CALLER_SUFFIX)]
+        return f"{path} <module level>"
+    sym = index.symbols_by_id.get(caller_id)
+    return sym.qualname if sym is not None else caller_id
+
+
+def _throws_direct(
+    index: MapIndex, caller_id: str
+) -> tuple[list[tuple[Symbol, list[int]]], list[ExternalCall], int, int]:
+    """One caller's own resolved/external/bare/ambiguous throw data.
+
+    Returns ``(resolved, external, bare_count, ambiguous_count)`` —
+    ``resolved`` pairs a repo-defined raised-type symbol with its
+    throw-site lines; a resolved type id absent from ``symbols_by_id``
+    (a stale map referencing a since-deleted type) is skipped
+    defensively rather than raising.
+    """
+    resolved: list[tuple[Symbol, list[int]]] = []
+    for type_id in index.throws_out.get(caller_id, []):
+        sym = index.symbols_by_id.get(type_id)
+        if sym is not None:
+            lines = index.throws_lines.get((caller_id, type_id), [])
+            resolved.append((sym, lines))
+    external = index.throws_external_out.get(caller_id, [])
+    bare_count = len(index.throws_bare_out.get(caller_id, []))
+    ambiguous_count = len(index.throws_ambiguous_out.get(caller_id, []))
+    return resolved, external, bare_count, ambiguous_count
+
+
+def _walk_throws_transitive(
+    index: MapIndex, start: str, depth_cap: int
+) -> tuple[
+    dict[str, tuple[int, list[int]]],
+    list[tuple[int, ExternalCall]],
+    int,
+    bool,
+]:
+    """BFS ``calls_out`` from ``start`` up to ``depth_cap`` hops,
+    collecting every resolved/external throw reachable.
+
+    Depth 0 is ``start`` itself. Cycle-safe (a ``seen`` set, matching
+    ``walk_heritage``'s own BFS pattern).
+
+    Returns:
+        ``(resolved, external, bare_count, truncated)`` — ``resolved``
+        maps a raised-type symbol id to its shallowest discovery depth
+        and that depth's throw-site lines; ``truncated`` is ``True``
+        when the walk hit ``depth_cap`` with unvisited callees still
+        remaining (disclosed, never silently dropped).
+    """
+    seen = {start}
+    frontier: deque[tuple[str, int]] = deque([(start, 0)])
+    resolved: dict[str, tuple[int, list[int]]] = {}
+    external: list[tuple[int, ExternalCall]] = []
+    bare_count = 0
+    truncated = False
+    while frontier:
+        node, depth = frontier.popleft()
+        for type_id in index.throws_out.get(node, []):
+            lines = index.throws_lines.get((node, type_id), [])
+            if type_id not in resolved or depth < resolved[type_id][0]:
+                resolved[type_id] = (depth, lines)
+        external.extend(
+            (depth, ext) for ext in index.throws_external_out.get(node, [])
+        )
+        bare_count += len(index.throws_bare_out.get(node, []))
+        callees = index.calls_out.get(node, [])
+        if depth >= depth_cap:
+            if any(c not in seen for c in callees):
+                truncated = True
+            continue
+        for callee in callees:
+            if callee in seen:
+                continue
+            seen.add(callee)
+            frontier.append((callee, depth + 1))
+    return resolved, external, bare_count, truncated
+
+
+def _throws_row(sym: Symbol, lines: list[int]) -> str:
+    """One text row for a resolved throw hit."""
+    site = ",".join(str(n) for n in lines) if lines else "?"
+    return f"{_sym_line(sym)}  (L{site})"
+
+
+def _throws_external_row(ext: ExternalCall) -> str:
+    """One text row for an external (stdlib/third-party) throw hit."""
+    site = ",".join(str(n) for n in ext.lines) if ext.lines else "?"
+    return f"  L{site}  (external) {ext.callee}"
+
+
+def _throws_gather(
+    index: MapIndex, sym: Symbol, transitive: bool, depth: int
+) -> tuple[
+    list[tuple[Symbol, int, list[int]]],
+    list[ExternalCall],
+    int,
+    int,
+    bool,
+]:
+    """Compute one throws query's result set, one level or transitive.
+
+    Split out of ``_run_throws`` purely to keep that function's
+    cyclomatic complexity under the project's Ruff limit — behaviorally
+    this is still the same "gather, then render" split every other
+    ``_run_*`` action already uses.
+
+    Returns:
+        ``(resolved, external, bare_count, ambiguous_count,
+        truncated)`` — ``resolved`` is ``(symbol, depth, lines)``
+        triples (``depth`` always ``0`` for a one-level query);
+        ``truncated``/non-zero ``ambiguous_count`` only ever apply to
+        a transitive walk / a one-level query respectively (the design
+        doc scopes ambiguous-name disclosure to the target itself, the
+        same way ``_run_heritage`` already does for supertypes).
+    """
+    if not transitive:
+        direct, external, bare_count, ambiguous_count = _throws_direct(
+            index, sym.id
+        )
+        resolved = [(s, 0, lines) for s, lines in direct]
+        return resolved, external, bare_count, ambiguous_count, False
+
+    resolved_map, external_hits, bare_count, truncated = (
+        _walk_throws_transitive(index, sym.id, depth)
+    )
+    resolved = [
+        (index.symbols_by_id[tid], d, lines)
+        for tid, (d, lines) in resolved_map.items()
+        if tid in index.symbols_by_id
+    ]
+    resolved.sort(key=lambda r: (r[1], relevance_key(r[0], index)))
+    external = [ext for _depth, ext in external_hits]
+    return resolved, external, bare_count, 0, truncated
+
+
+def _print_throws_json(
+    index: MapIndex,
+    sym: Symbol,
+    resolved: list[tuple[Symbol, int, list[int]]],
+    external: list[ExternalCall],
+    bare_count: int,
+    ambiguous_count: int,
+    transitive: bool,
+    depth: int,
+    truncated: bool,
+    budget: int | None,
+    limit: int,
+    coverage: str | None,
+) -> None:
+    """JSON rendering for ``_run_throws``."""
+    entries = [
+        {**_sym_json(index, s), "depth": d, "lines": lines}
+        for s, d, lines in resolved
+    ]
+    entries.extend(
+        {"external": True, "text": ext.callee, "lines": ext.lines}
+        for ext in external
+    )
+    kept, meter = _fit_entries(entries, budget, limit)
+    doc = {
+        "action": "throws",
+        "target": sym.id,
+        "transitive": transitive,
+        "results": kept,
+        "repo_defined": len(resolved),
+        "external": len(external),
+        "bare_reraise": bare_count,
+        "meta": meter.as_dict(),
+    }
+    if transitive:
+        doc["depth"] = depth
+        doc["truncated"] = truncated
+    if ambiguous_count:
+        doc["ambiguous"] = ambiguous_count
+    if coverage:
+        doc["coverage_warning"] = coverage
+    print(json.dumps(doc, indent=2))
+
+
+def _throws_text_lines(
+    sym: Symbol,
+    resolved: list[tuple[Symbol, int, list[int]]],
+    external: list[ExternalCall],
+    transitive: bool,
+) -> list[str]:
+    """Build ``_run_throws``' text result rows (summary + hits)."""
+    lines_out: list[str] = []
+    if resolved or external:
+        total = len(resolved) + len(external)
+        lines_out.append(
+            f"{total} throw site(s): {len(resolved)} repo-defined, "
+            f"{len(external)} external"
+        )
+    if transitive and resolved:
+        lines_out.append(f"{_sym_line(sym)}  [target]")
+    for s, d, throw_lines in resolved:
+        prefix = "  " * d if transitive else ""
+        lines_out.append(f"{prefix}{_throws_row(s, throw_lines)}")
+    lines_out.extend(_throws_external_row(ext) for ext in external)
+    return lines_out
+
+
+def _throws_text_notes(
+    bare_count: int, ambiguous_count: int, truncated: bool, depth: int
+) -> None:
+    """Print ``_run_throws``' disclosure notes (stderr, unconditional)."""
+    if bare_count:
+        print(
+            f"  note: {bare_count} re-raise site(s) omitted — type "
+            "depends on the enclosing handler, not tracked",
+            file=sys.stderr,
+        )
+    if ambiguous_count:
+        print(
+            f"  note: {ambiguous_count} additional raised-type name(s) "
+            "resolved ambiguously — not counted here",
+            file=sys.stderr,
+        )
+    if truncated:
+        print(
+            f"  note: reached the transitive depth cap ({depth}) with "
+            "callees still unwalked — results may be incomplete; "
+            "raise --depth to widen",
+            file=sys.stderr,
+        )
+
+
+def _run_throws(
+    index: MapIndex,
+    sym: Symbol,
+    transitive: bool,
+    depth: int,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute the throws action: what calling ``sym`` can raise.
+
+    One level (default) reads ``sym``'s own throw/raise sites (plus,
+    Java only, its declared ``throws`` clause — indistinguishable in
+    the data, both describe the same "error surface" question, see
+    ``model.RawThrow``'s docstring). ``--transitive`` additionally
+    walks ``sym``'s own call graph up to ``--depth`` hops (default
+    ``DEFAULT_THROWS_DEPTH``), unioning every throw found along the
+    way and disclosing when the depth cap truncated the walk.
+
+    Args:
+        index: Loaded map index.
+        sym: Resolved target symbol.
+        transitive: Walk the call graph instead of one level.
+        depth: Hop cap for a transitive walk (ignored otherwise).
+        as_json: Emit structured JSON instead of text.
+        limit: Cap on text result rows.
+        budget: Approximate token budget for the result rows.
+
+    Returns:
+        ``(exit_code, meter)`` — meter is ``None`` for JSON output or
+        an empty result.
+    """
+    resolved, external, bare_count, ambiguous_count, truncated = (
+        _throws_gather(index, sym, transitive, depth)
+    )
+    coverage = _coverage_note(index)
+    if as_json:
+        _print_throws_json(
+            index,
+            sym,
+            resolved,
+            external,
+            bare_count,
+            ambiguous_count,
+            transitive,
+            depth,
+            truncated,
+            budget,
+            limit,
+            coverage,
+        )
+        return EXIT_OK, None
+
+    lines_out = _throws_text_lines(sym, resolved, external, transitive)
+    _throws_text_notes(bare_count, ambiguous_count, truncated, depth)
+    if not lines_out:
+        print(f"(no throws found for {sym.id})")
+        if coverage:
+            print(f"  note: {coverage}", file=sys.stderr)
+        return EXIT_OK, None
+    return EXIT_OK, _emit_lines(lines_out, budget, limit)
+
+
+# JS/TS catch clauses are never type-discriminated at the syntax level
+# (see ``languages.LanguageSpec.catch_query``'s docstring) — a real,
+# disclosed precision gap the design doc requires stating in the
+# command's own output, not just ``--help`` text, so an agent running
+# this against a JS/TS-heavy repo doesn't over-trust a near-empty
+# result.
+_CATCHES_CAVEAT = (
+    "JS/TS catch clauses are almost never type-annotated at the "
+    "syntax level — a match here is either a rare typed `catch (e: "
+    "Type)` (TS only) or a catch-all (which always matches regardless "
+    "of type); a near-empty result on a JS/TS-heavy repo is a weak "
+    "signal, not proof nothing catches this type. Also: matching is "
+    "exact-name-only (v1) — a catch of a supertype of the queried "
+    "type is not detected as a match."
+)
+
+
+def _catch_site_matches(site: CatchSite, target: str) -> bool:
+    """Whether one catch clause would handle a raised type named
+    ``target`` — exact-name-or-catch-all only (the documented v1
+    scope; no supertype-aware matching)."""
+    return site.bare or target in site.type_names
+
+
+def _catch_row(index: MapIndex, site: CatchSite) -> str:
+    """One text row for a matching catch clause."""
+    label = "catch-all" if site.bare else ", ".join(site.type_names)
+    return (
+        f"{site.path}:{site.line}  [{label}]  "
+        f"{_caller_label(index, site.caller)}"
+    )
+
+
+def _catch_entry(site: CatchSite) -> dict:
+    """One JSON entry for a matching catch clause."""
+    return {
+        "path": site.path,
+        "line": site.line,
+        "caller": site.caller,
+        "type_names": site.type_names,
+        "bare": site.bare,
+    }
+
+
+def _run_catches(
+    index: MapIndex,
+    target: str,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute the catches action: who catches an exception of type
+    ``target``.
+
+    Matches every clause across the repo by name against
+    ``CatchSite.type_names`` (or a catch-all clause, which always
+    matches) — a repo-wide scan, like ``uses``/``type``/``importers``,
+    not a ``resolve_target`` lookup, since the common case is ``target``
+    naming a stdlib/third-party type that was never extracted as a
+    repo ``Symbol`` at all (see ``model.CatchSite``'s docstring).
+
+    Args:
+        index: Loaded map index.
+        target: Raised type name to search for (e.g. ``ConfigError``,
+            ``ValueError``).
+        as_json: Emit structured JSON instead of text.
+        limit: Cap on text result rows.
+        budget: Approximate token budget for the result rows.
+
+    Returns:
+        ``(exit_code, meter)`` — meter is ``None`` for JSON output or
+        an empty result.
+    """
+    hits = [s for s in index.catches if _catch_site_matches(s, target)]
+    hits.sort(key=lambda s: (s.path, s.line, s.caller))
+    exact_count = sum(1 for s in hits if not s.bare)
+    catch_all_count = sum(1 for s in hits if s.bare)
+    coverage = _coverage_note(index)
+    if as_json:
+        entries = [_catch_entry(s) for s in hits]
+        kept, meter = _fit_entries(entries, budget, limit)
+        doc = {
+            "action": "catches",
+            "target": target,
+            "results": kept,
+            "exact_matches": exact_count,
+            "catch_all_matches": catch_all_count,
+            "note": _CATCHES_CAVEAT,
+            "meta": meter.as_dict(),
+        }
+        if coverage:
+            doc["coverage_warning"] = coverage
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK, None
+    lines_out: list[str] = []
+    if hits:
+        lines_out.append(
+            f"{len(hits)} catch clause(s) match '{target}': "
+            f"{exact_count} exact, {catch_all_count} catch-all"
+        )
+    lines_out.extend(_catch_row(index, s) for s in hits)
+    print(f"  note: {_CATCHES_CAVEAT}", file=sys.stderr)
+    if not lines_out:
+        print(f"(no catch clauses would handle '{target}')")
+        if coverage:
+            print(f"  note: {coverage}", file=sys.stderr)
+        return EXIT_OK, None
+    return EXIT_OK, _emit_lines(lines_out, budget, limit)
 
 
 def _shadow_note(index: MapIndex, target: str) -> str | None:
@@ -1644,6 +2079,36 @@ def _run_file(
     return EXIT_OK, _emit_lines([_sym_line(s) for s in symbols], budget, limit)
 
 
+def _dispatch_scan(
+    index: MapIndex,
+    action: str,
+    target: str,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+    exact: bool,
+) -> tuple[int, Meter | None] | None:
+    """Route the whole-repo-scan actions that never resolve a symbol
+    target (``file``/``uses``/``type``/``importers``/``catches``).
+
+    Split out of ``_dispatch`` purely to keep that function's
+    cyclomatic complexity under the project's Ruff limit. Returns
+    ``None`` when ``action`` is none of these, telling ``_dispatch``
+    to fall through to ``resolve_target``-based routing instead.
+    """
+    if action == "file":
+        return _run_file(index, target, as_json, limit, budget)
+    if action == "uses":
+        return _run_uses(index, target, as_json, limit, budget)
+    if action == "type":
+        return _run_type_usage(index, target, exact, as_json, limit, budget)
+    if action == "importers":
+        return _run_importers(index, target, exact, as_json, limit, budget)
+    if action == "catches":
+        return _run_catches(index, target, as_json, limit, budget)
+    return None
+
+
 def _dispatch(
     index: MapIndex,
     action: str,
@@ -1657,16 +2122,14 @@ def _dispatch(
     transitive: bool,
     relation: str | None,
     min_shared: int,
+    depth: int,
 ) -> tuple[int, Meter | None]:
     """Route one query action to its executor."""
-    if action == "file":
-        return _run_file(index, target, as_json, limit, budget)
-    if action == "uses":
-        return _run_uses(index, target, as_json, limit, budget)
-    if action == "type":
-        return _run_type_usage(index, target, exact, as_json, limit, budget)
-    if action == "importers":
-        return _run_importers(index, target, exact, as_json, limit, budget)
+    scanned = _dispatch_scan(
+        index, action, target, as_json, limit, budget, exact
+    )
+    if scanned is not None:
+        return scanned
 
     sym, candidates = resolve_target(index, target)
     if sym is None:
@@ -1681,6 +2144,10 @@ def _dispatch(
         )
     if action == "peers":
         return _run_peers(index, sym, min_shared, as_json, limit, budget)
+    if action == "throws":
+        return _run_throws(
+            index, sym, transitive, depth, as_json, limit, budget
+        )
     return _run_relation(index, action, sym, as_json, limit, budget, sites)
 
 
@@ -1697,6 +2164,7 @@ def run(
     transitive: bool = False,
     relation: str | None = None,
     min_shared: int = DEFAULT_MIN_SHARED,
+    depth: int = DEFAULT_THROWS_DEPTH,
 ) -> int:
     """Execute one query action against a loaded index.
 
@@ -1705,7 +2173,9 @@ def run(
         action: One of ``ACTIONS``.
         target: Symbol or file target string; for ``uses``, the base
             identifier of an external reference (``run``, ``Path``);
-            for ``type``, a type/class/struct/interface name.
+            for ``type``, a type/class/struct/interface name; for
+            ``catches``, a raised type name (``ConfigError``,
+            ``ValueError``).
         as_json: Emit structured JSON instead of text.
         limit: Cap on text result rows.
         sites: For callers/callees, print one row per call site
@@ -1715,7 +2185,7 @@ def run(
         budget: Approximate token budget for the result rows, or
             ``None``. Lowest-relevance rows are dropped first. For
             ``callers``/``callees``/``uses``/``type``/``supertypes``/
-            ``subtypes``, ``None`` falls back to
+            ``subtypes``/``throws``/``catches``, ``None`` falls back to
             ``DEFAULT_RELATION_BUDGET`` rather than going unbounded —
             a high-fan-in symbol's full row list is otherwise capped
             only by ``limit``'s row count, which can still render
@@ -1725,12 +2195,16 @@ def run(
             of a bare identifier token inside wrapper syntax (e.g.
             ``Optional[Config]``).
         transitive: For ``supertypes``/``subtypes``, walk the full
-            ancestor/descendant DAG instead of one hop.
+            ancestor/descendant DAG instead of one hop; for ``throws``,
+            walk the call graph up to ``depth`` hops instead of just
+            ``target``'s own body.
         relation: For ``supertypes``/``subtypes``, restrict results to
             one heritage relation (``"extends"``/``"implements"``/
             ``"impl"``/``"embeds"``) — see ``HERITAGE_RELATIONS``.
         min_shared: For ``peers``, minimum shared-callee count to
             count as a peer (default: ``DEFAULT_MIN_SHARED``).
+        depth: For ``throws --transitive``, the call-graph walk's hop
+            cap (default: ``DEFAULT_THROWS_DEPTH``); ignored otherwise.
 
     Returns:
         Process exit code.
@@ -1753,6 +2227,7 @@ def run(
             transitive,
             relation,
             min_shared,
+            depth,
         )
     text = buf.getvalue()
     sys.stdout.write(text)

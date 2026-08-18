@@ -30,7 +30,9 @@ def render_json(
         (round-15 plan). Caller/callee/candidate id strings that
         repeat across ``"edges"``/``"ambiguous"``/``"external"``/
         ``"referenced"``/``"heritage"``/``"heritage_ambiguous"``/
-        ``"heritage_external"`` are interned once into a top-level
+        ``"heritage_external"``/``"throws"``/``"throws_ambiguous"``/
+        ``"throws_external"``/``"throws_bare"``/``"catches"`` are
+        interned once into a top-level
         ``"ids"`` table (``mapfile.build_id_table``) and referenced
         there by integer index instead of being spelled out at every
         occurrence. ``"module_graph"``'s file paths share that same
@@ -128,5 +130,47 @@ def render_json(
                 for path, sources in sorted(graph.modules.external.items())
             ],
         },
+        "throws": [
+            {
+                "caller": id_index[edge.caller],
+                "type": id_index[edge.type],
+                "lines": edge.lines,
+            }
+            for edge in graph.throws
+        ],
+        "throws_ambiguous": [
+            {
+                "caller": id_index[caller],
+                "name": name,
+                "candidates": [id_index[c] for c in cands],
+            }
+            for caller, name, cands in graph.throws_ambiguous
+        ],
+        "throws_external": [
+            {
+                "caller": id_index[ext.caller],
+                "callee": id_index[ext.callee],
+                "lines": ext.lines,
+            }
+            for ext in graph.throws_external
+        ],
+        "throws_bare": [
+            {"caller": id_index[caller], "path": path, "line": line}
+            for caller, path, line in graph.throws_bare
+        ],
+        "catches": [
+            {
+                "caller": id_index[site.caller],
+                "path": site.path,
+                "type_names": site.type_names,
+                "repo_types": {
+                    name: id_index[type_id]
+                    for name, type_id in site.repo_types.items()
+                },
+                "bare": site.bare,
+                "line": site.line,
+            }
+            for site in graph.catches
+        ],
     }
     return _json_dumps(doc) + b"\n"

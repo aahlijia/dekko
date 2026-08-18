@@ -108,6 +108,7 @@ from dekko.classify import is_test_path
 from dekko.core.model import (
     TYPE_KINDS,
     CallGraph,
+    CatchSite,
     Edge,
     ExternalCall,
     FileMap,
@@ -119,6 +120,7 @@ from dekko.core.model import (
     RawHeritage,
     RawRef,
     Symbol,
+    ThrowEdge,
 )
 
 _SELF_RECEIVERS = {"self", "this", "Self", "cls"}
@@ -213,6 +215,14 @@ def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
         graph.heritage_external,
     ) = resolve_heritage(files)
     graph.modules = resolve_imports(files)
+    (
+        graph.throws,
+        graph.throws_out,
+        graph.throws_ambiguous,
+        graph.throws_external,
+        graph.throws_bare,
+    ) = resolve_throws(files)
+    graph.catches = resolve_catches(files)
     return graph
 
 
@@ -662,6 +672,185 @@ def _add_heritage_edge(
     key = (h.subtype_id, target_id)
     edges.setdefault(key, set()).add(h.line)
     relations.setdefault(key, h.relation)
+
+
+# ---------------------------------------------------------------------
+# Throws/catches (exception/error-flow tracing)
+#
+# A deliberately lighter-weight resolution than ``resolve_heritage()``'s
+# full ``_pick_candidate`` ladder: the overwhelmingly common case is a
+# raised/caught type that was never extracted as a repo ``Symbol`` at
+# all (``ValueError``, ``IOException``, ``std::runtime_error``), so
+# ``_resolve_type_name`` only tries the cheap, high-confidence steps
+# (unique repo-wide name, same-file, import hint) before giving up as
+# "external" — a design choice, not a shortcut (see the design doc's
+# "Resolution" section).
+
+
+def _resolve_type_name(
+    name: str,
+    path: str,
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    file_imports: dict[str, Import],
+) -> tuple[Symbol | None, list[Symbol]]:
+    """Resolve a raised/caught type name to a repo ``TYPE_KINDS`` symbol.
+
+    Args:
+        name: Bare raised/caught type name, as written.
+        path: File the raise/throw or catch clause appears in.
+        index: Bare name → symbols (see ``_build_index``).
+        by_name_path: ``(name, path)`` → same-file symbols (see
+            ``_build_name_path_index``).
+        file_imports: This file's local name → import record.
+
+    Returns:
+        ``(resolved, candidates)`` — ``resolved`` is the unique
+        ``TYPE_KINDS``-filtered match, or ``None`` when the name is
+        external (``candidates`` empty — the common case) or
+        genuinely ambiguous (``candidates`` has 2+ entries, a real
+        same-name-in-two-files collision).
+    """
+    candidates = [c for c in index.get(name, []) if c.kind in TYPE_KINDS]
+    if not candidates:
+        return None, []
+    if len(candidates) == 1:
+        return candidates[0], candidates
+    same_file = [
+        c for c in by_name_path.get((name, path), []) if c.kind in TYPE_KINDS
+    ]
+    if len(same_file) == 1:
+        return same_file[0], candidates
+    imp = file_imports.get(name)
+    if imp is not None:
+        hinted = [c for c in candidates if _module_matches(imp.source, c.path)]
+        if len(hinted) == 1:
+            return hinted[0], candidates
+    return None, candidates
+
+
+def resolve_throws(
+    files: list[FileMap],
+) -> tuple[
+    list[ThrowEdge],
+    dict[str, list[str]],
+    list[tuple[str, str, list[str]]],
+    list[ExternalCall],
+    list[tuple[str, str, int]],
+]:
+    """Resolve every raise/throw site across the repo.
+
+    Args:
+        files: Per-file extraction results.
+
+    Returns:
+        ``(throws, throws_out, throws_ambiguous, throws_external,
+        throws_bare)`` — the shapes ``resolve()`` assigns onto
+        ``CallGraph.throws``/``throws_out``/``throws_ambiguous``/
+        ``throws_external``/``throws_bare``.
+    """
+    index = _build_index(files)
+    by_name_path = _build_name_path_index(files)
+    imports_by_file = _imports_by_file(files)
+
+    edges: dict[tuple[str, str], set[int]] = {}
+    ambiguous: dict[tuple[str, str], list[str]] = {}
+    external: dict[tuple[str, str], set[int]] = {}
+    bare: list[tuple[str, str, int]] = []
+
+    for fm in files:
+        file_imports = imports_by_file.get(fm.path, {})
+        for t in fm.throws:
+            caller_id = t.caller_id or f"{t.path}{MODULE_CALLER_SUFFIX}"
+            if t.name is None:
+                bare.append((caller_id, t.path, t.line))
+                continue
+            target, candidates = _resolve_type_name(
+                t.name, t.path, index, by_name_path, file_imports
+            )
+            if target is not None:
+                if target.id != caller_id:
+                    edges.setdefault((caller_id, target.id), set()).add(t.line)
+                continue
+            if len(candidates) >= 2:
+                _record_ambiguous(caller_id, t.name, candidates, ambiguous)
+                continue
+            external.setdefault((caller_id, t.text or t.name), set()).add(
+                t.line
+            )
+
+    throw_edges = [
+        ThrowEdge(caller=c, type=ty, lines=sorted(lns))
+        for (c, ty), lns in sorted(edges.items())
+    ]
+    throws_out: dict[str, list[str]] = {}
+    for edge in throw_edges:
+        throws_out.setdefault(edge.caller, []).append(edge.type)
+    for key in throws_out:
+        throws_out[key] = sorted(set(throws_out[key]))
+    throws_ambiguous = [
+        (caller, name, cands)
+        for (caller, name), cands in sorted(ambiguous.items())
+    ]
+    throws_external = [
+        ExternalCall(caller=c, callee=t, lines=sorted(lns))
+        for (c, t), lns in sorted(external.items())
+    ]
+    return (
+        throw_edges,
+        throws_out,
+        throws_ambiguous,
+        throws_external,
+        sorted(bare),
+    )
+
+
+def resolve_catches(files: list[FileMap]) -> list[CatchSite]:
+    """Resolve every except/catch clause across the repo.
+
+    Unlike ``resolve_throws()``, this produces no separate ambiguous/
+    external bucket — a ``dekko query catches Y`` request matches by
+    name against ``CatchSite.type_names`` directly (see the design
+    doc's "mostly a name-index lookup" note and ``CatchSite``'s own
+    docstring), so per-clause resolution only matters for
+    ``repo_types``' summary-disclosure role, not for query
+    correctness.
+
+    Args:
+        files: Per-file extraction results.
+
+    Returns:
+        Every clause across the repo as a ``CatchSite``, sorted by
+        ``(path, line, caller)``.
+    """
+    index = _build_index(files)
+    by_name_path = _build_name_path_index(files)
+    imports_by_file = _imports_by_file(files)
+
+    sites: list[CatchSite] = []
+    for fm in files:
+        file_imports = imports_by_file.get(fm.path, {})
+        for c in fm.catches:
+            caller_id = c.caller_id or f"{c.path}{MODULE_CALLER_SUFFIX}"
+            repo_types: dict[str, str] = {}
+            for name in c.types:
+                target, _candidates = _resolve_type_name(
+                    name, c.path, index, by_name_path, file_imports
+                )
+                if target is not None:
+                    repo_types[name] = target.id
+            sites.append(
+                CatchSite(
+                    caller=caller_id,
+                    path=c.path,
+                    type_names=list(c.types),
+                    repo_types=repo_types,
+                    bare=c.bare,
+                    line=c.line,
+                )
+            )
+    sites.sort(key=lambda s: (s.path, s.line, s.caller))
+    return sites
 
 
 def _resolve_call(

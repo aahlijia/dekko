@@ -76,6 +76,32 @@ class LanguageSpec:
             deferred; see the design doc's Phase 2 section for why).
             Covers Python/JavaScript/TypeScript/TSX/Java (Phase 1) and
             Rust/C++ (Phase 2).
+        throw_query: Query capturing raise/throw sites (``@throw``) and,
+            Java only, a method's declared checked-exception clause
+            (``@throws_clause``) — a second, independent signal for
+            "what can calling this raise" beyond throw-site scanning
+            (see ``extractor._collect_throws``). Exception/error
+            handling is not a uniform language feature (see the design
+            doc's own per-language analysis): this is a deliberately
+            scoped pilot covering Python/Java/C++/JS/TS only.
+            ``None`` for Rust/Go/C — a **permanent** exclusion, not a
+            placeholder awaiting a future pass the way an unset
+            ``heritage_query`` slot can be: Rust's ``Result``/``?``
+            propagation and Go's returned-``error``-value convention
+            are type-inference problems, not tree-sitter-query-able
+            syntax, and C has no exception concept at all.
+        catch_query: Query capturing except/catch clauses (``@catch``,
+            plus Java's ``@catch_type``/C++'s ``@catch_params`` helper
+            captures for their container-node shapes — see
+            ``extractor._collect_catches``). Same Python/Java/C++/JS/TS
+            scope and same permanent Rust/Go/C exclusion as
+            ``throw_query``. JS/TS catch clauses are never
+            type-discriminated at the syntax level (no runtime type
+            check on the caught value), so every JS catch and every
+            untyped TS catch extracts as a catch-all (``bare=True``) —
+            only a TS ``catch (e: SomeType)`` annotation (rare) yields
+            a real type name; a "weak signal" caveat, not a bug,
+            disclosed in ``dekko query catches``' own output.
     """
 
     name: str
@@ -90,6 +116,8 @@ class LanguageSpec:
     function_boundary_types: tuple[str, ...] = ()
     reference_query: str | None = None
     heritage_query: str | None = None
+    throw_query: str | None = None
+    catch_query: str | None = None
 
 
 PYTHON = LanguageSpec(
@@ -134,6 +162,20 @@ PYTHON = LanguageSpec(
 (class_definition
   name: (identifier) @classname
   superclasses: (argument_list)? @bases) @classdef
+""",
+    # ``raise_statement``'s raised expression is an unfielded first
+    # named child (absent for a bare re-raise) — the same shape as
+    # C++'s ``throw_statement``, walked by the shared
+    # ``extractor._raise_expr`` helper. ``except_clause``'s optional
+    # ``value`` field is an identifier/attribute (single type), a
+    # ``tuple`` (multi-catch), or an ``as_pattern`` wrapping either
+    # (``except X as e:``) — absent entirely for a bare ``except:``.
+    # Verified against the pinned tree-sitter-python grammar.
+    throw_query="""
+(raise_statement) @throw
+""",
+    catch_query="""
+(except_clause) @catch
 """,
 )
 
@@ -302,6 +344,23 @@ CPP = LanguageSpec(
   (base_class_clause)? @heritage
   body: (field_declaration_list)) @classdef
 """,
+    # ``throw_statement``'s raised expression is an unfielded first
+    # named child, same shape as Python's ``raise_statement`` (see
+    # ``extractor._raise_expr``) — absent for a bare ``throw;``
+    # re-raise. ``catch_clause``'s ``parameters`` field is a
+    # ``parameter_list`` with either a single ``parameter_declaration``
+    # (a typed catch, its own ``type``/``declarator`` fields) or zero
+    # named children for a catch-all ``catch (...)`` (``...`` parses as
+    # an anonymous token, not a named node — confirmed live against the
+    # pinned tree-sitter-cpp grammar, so ``named_child_count == 0``
+    # reliably means catch-all; C++ has no true empty ``catch ()``).
+    throw_query="""
+(throw_statement) @throw
+""",
+    catch_query="""
+(catch_clause
+  parameters: (parameter_list) @catch_params) @catch
+""",
 )
 
 # Function/method/closure node types shared by JS/TS/TSX's
@@ -367,6 +426,25 @@ _JSX_REFERENCE_EXTRA = """
 """
 
 _JS_REFERENCE_QUERY = _JS_REFERENCE_BASE + _JSX_REFERENCE_EXTRA
+
+# JS/TS/TSX throw/catch: ``throw_statement``'s expression is an
+# unfielded first named child (see ``extractor._raise_expr``, shared
+# with Python/C++'s identically-shaped ``raise_statement``/
+# ``throw_statement``). ``catch_clause`` is captured whole for every
+# JS/TS/TSX file, but the *walk* differs by language: plain JS never
+# type-discriminates a caught value (no ``type`` field exists on JS's
+# grammar node at all), so a JS catch always extracts as a catch-all
+# regardless of whether it binds a name; TS/TSX additionally carry an
+# optional ``type`` field (a ``type_annotation`` wrapping the actual
+# type node) for a real, if rare, typed catch — see
+# ``extractor._catches_js``/``_catches_ts``. Confirmed against the
+# pinned tree-sitter-javascript/typescript grammars.
+_JS_THROW_QUERY = """
+(throw_statement) @throw
+"""
+_JS_CATCH_QUERY = """
+(catch_clause) @catch
+"""
 
 JAVASCRIPT = LanguageSpec(
     name="javascript",
@@ -437,6 +515,8 @@ JAVASCRIPT = LanguageSpec(
   name: (identifier) @classname
   (class_heritage)? @heritage) @classdef
 """,
+    throw_query=_JS_THROW_QUERY,
+    catch_query=_JS_CATCH_QUERY,
 )
 
 _TS_DEFINITIONS = """
@@ -542,6 +622,8 @@ TYPESCRIPT = LanguageSpec(
     # Plain (non-JSX) TypeScript has no jsx_expression node type.
     reference_query=_JS_REFERENCE_BASE,
     heritage_query=_TS_HERITAGE,
+    throw_query=_JS_THROW_QUERY,
+    catch_query=_JS_CATCH_QUERY,
 )
 
 TSX = LanguageSpec(
@@ -557,6 +639,8 @@ TSX = LanguageSpec(
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY,
     heritage_query=_TS_HERITAGE,
+    throw_query=_JS_THROW_QUERY,
+    catch_query=_JS_CATCH_QUERY,
 )
 
 # Type-reference edges (bug #1.1a): a struct/interface type used only
@@ -691,7 +775,46 @@ JAVA = LanguageSpec(
   name: (identifier) @classname
   (extends_interfaces)? @heritage) @classdef
 """,
+    # ``throw_statement``'s raised expression is always an
+    # ``object_creation_expression`` in practice (walked via
+    # ``extractor._callee_java``, reused from call resolution). The
+    # second pattern, a bare ``(throws)`` node, is Java's declared
+    # checked-exception clause on a method — a distinct, independent
+    # signal beyond throw-site scanning (see ``LanguageSpec.
+    # throw_query``'s docstring); unfielded on ``method_declaration``,
+    # so it's captured standalone rather than nested in the first
+    # pattern, and ``extractor._enclosing`` still attributes it to the
+    # right method by byte-range containment.
+    throw_query="""
+(throw_statement) @throw
+(throws) @throws_clause
+""",
+    # ``catch_clause``'s ``catch_formal_parameter`` child is an
+    # unfielded positional child (not a named field), itself wrapping
+    # an unfielded ``catch_type`` child that lists one or more
+    # ``type_identifier`` types directly as named children — a single
+    # type for an ordinary catch, 2+ separated by unnamed ``|`` tokens
+    # for Java's multi-catch (``catch (A | B e)``). Java requires a
+    # typed parameter on every catch clause — there is no catch-all
+    # syntax the way C++/Python have one, so ``bare`` is always
+    # ``False`` here. Confirmed against the pinned tree-sitter-java
+    # grammar.
+    catch_query="""
+(catch_clause
+  (catch_formal_parameter
+    (catch_type) @catch_type)) @catch
+""",
 )
+
+# ``RUST``, ``GO``, and ``C`` above deliberately leave ``throw_query``/
+# ``catch_query`` at their default ``None`` — a **permanent** exclusion,
+# not a placeholder awaiting a future pass (contrast with
+# ``heritage_query``'s Go slot, left ``None`` only because that
+# extraction hasn't been written yet). Rust's ``Result<T, E>``/``?``
+# propagation and Go's returned-``error``-value convention are
+# type-inference problems, not syntax a tree-sitter query can point at;
+# C has no exception concept to extract at all. See the design doc's
+# per-language analysis for the full reasoning.
 
 TIER1_SPECS: tuple[LanguageSpec, ...] = (
     PYTHON,

@@ -17,6 +17,9 @@ dekko query supertypes BufferDiff --transitive  # full ancestor chain/DAG
 dekko query subtypes Serializable    # what directly extends/implements/impl's-for Serializable
 dekko query subtypes Serializable --transitive  # every direct + indirect implementor
 dekko query subtypes Serializable --relation implements  # filter to one relation kind
+dekko query throws load_config       # what load_config's own body raises (one level, not transitive)
+dekko query throws load_config --transitive --depth 3  # + everything its callees raise, depth-capped
+dekko query catches ConfigError      # every catch clause that would handle ConfigError
 dekko context run_map --budget 1500  # minimal context pack for an edit
 dekko search "retries failed http requests"  # free-text relevance search
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
@@ -327,6 +330,80 @@ file could plausibly be meant:
 `dekko deps` is **CLI-only** (no MCP tool) — a repo-architecture report
 for refactor/circular-import planning, not a per-turn lookup an agent
 reaches for mid-edit, the same call `stats`/`unused` already make.
+
+## Interpreting `dekko query throws`/`catches`
+
+`throws`/`catches` trace exception/error flow: what can calling a
+function raise, and who catches a given exception type. This is a
+**scoped pilot, not a general feature** — exception handling isn't a
+uniform language feature, so coverage is deliberately narrower than
+every other `query` action:
+
+- **Python, Java, C++**: full support. `throws` reads `raise`/`throw`
+  sites; Java additionally reads a method's own declared `throws
+  IOException` checked-exception clause as an independent signal (a
+  method that only propagates a caught exception, with no `throw`
+  statement of its own, still shows up). `catches` reads `except`/
+  `catch` clauses, typed or catch-all.
+- **JS/TS**: `throws` works fully (`throw` sites are ordinary syntax).
+  `catches` is a **weak signal** — JS/TS never type-discriminate a
+  caught value at the syntax level, so every plain JS `catch` and
+  every untyped TS `catch (e)` extracts as a catch-all that matches
+  any query; only a rare `catch (e: SomeType)` TS annotation is a real
+  typed match. `dekko query catches` always prints this caveat in its
+  own output (not just here), so a near-empty result on a JS/TS-heavy
+  repo isn't mistaken for "nothing catches this."
+- **Rust, Go, C: not supported, permanently** — not a coverage gap
+  waiting on a future pass. Rust's `Result<T, E>`/`?` propagation and
+  Go's returned-`error`-value convention are type-inference questions,
+  not syntax a tree-sitter query can point at; C has no exception
+  concept to extract at all. `throws`/`catches` against a Rust/Go/C
+  file report nothing, the same as if the file weren't parsed for this
+  feature at all — no misleadingly partial answer.
+
+```sh
+dekko query throws load_config              # what load_config's own body raises (one level)
+dekko query throws load_config --transitive # + everything its callees raise, up to --depth hops
+dekko query throws load_config --transitive --depth 4  # widen the walk (default depth: 2)
+dekko query catches ConfigError             # every catch clause that would handle ConfigError
+```
+
+`throws <symbol>` (a function/method target, resolved the same way
+`callers`/`callees` resolve one) defaults to one level — only the
+target's own raise/throw sites (plus, for Java, its own declared
+`throws` clause). `--transitive` walks the call graph outward instead,
+unioning every throw found along the way, up to `--depth` hops
+(default 2) — call-graph reachability can be very deep, and "everything
+this function's entire call tree might raise" degrades toward "every
+exception type in the repo" on a well-connected codebase, so the walk
+is hard-capped rather than unbounded. Hitting the cap with callees
+still unwalked prints a `note:` disclosing the truncation rather than
+silently under-reporting — raise `--depth` to widen. Output always
+states how many throw sites are repo-defined vs. external (`N throw
+site(s): M repo-defined, K external`) since the overwhelming majority
+of real raised types are stdlib/third-party (`ValueError`,
+`IOException`, `std::runtime_error`) — this is expected, not a sign
+the feature isn't working. A bare re-raise (Python bare `raise`, C++
+bare `throw;`) can't be resolved to a specific type — its actual type
+depends on the enclosing handler, a data-flow fact this pass doesn't
+track — so it's counted separately and disclosed (`note: N re-raise
+site(s) omitted`), never silently dropped or miscounted as "no throw."
+
+`catches <type-name>` (a bare raised-type name, like `ConfigError` or
+`ValueError` — not a resolved symbol lookup, since the common case is
+a stdlib/third-party type never extracted as a repo symbol at all)
+scans every catch clause repo-wide and reports every one that would
+handle that type: an exact name match, or a catch-all (which always
+matches, regardless of type). **This is exact-name matching only** —
+catching a *superclass* of the queried type (`except Exception:`
+catching a raised `ConfigError` that extends `Exception`) is **not**
+detected as a match in this version; a real, disclosed precision gap,
+not an assumed-away one.
+
+`throws`/`catches` are **CLI-only** (no MCP tool) — given the scoped-
+pilot framing and the JS/TS caveat above, this doesn't yet clear the
+bar `get_callers`/`find_type_usages` cleared for always-loaded MCP
+schema rent; revisit once real usage confirms the signal is worth it.
 
 ## Daemon mode
 

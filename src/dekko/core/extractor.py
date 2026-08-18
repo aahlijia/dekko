@@ -12,8 +12,10 @@ from dekko.core.model import (
     Import,
     Param,
     RawCall,
+    RawCatch,
     RawHeritage,
     RawRef,
+    RawThrow,
     Symbol,
 )
 from tree_sitter import Node, Parser, Query, QueryCursor
@@ -91,6 +93,8 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         calls.extend(_collect_rust_macro_calls(tree.root_node, rel, defs))
     refs = _collect_refs(spec, tree.root_node, rel, defs)
     heritage = _collect_heritage(spec, tree.root_node, rel, defs)
+    throws = _collect_throws(spec, tree.root_node, rel, defs)
+    catches = _collect_catches(spec, tree.root_node, rel, defs)
     imports = _collect_imports(spec, tree.root_node, rel)
     return FileMap(
         path=rel,
@@ -99,6 +103,8 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         calls=calls,
         refs=refs,
         heritage=heritage,
+        throws=throws,
+        catches=catches,
         imports=imports,
         doc=_module_doc(spec.name, tree.root_node),
     )
@@ -1466,6 +1472,310 @@ def _collect_heritage(
                     line=node.start_point[0] + 1,
                 )
             )
+    return out
+
+
+# ---------------------------------------------------------------------
+# Throws/catches (raise/throw sites, except/catch clauses)
+
+# Node types a raised/caught type node might reasonably be — anything
+# outside this set (a string/object/array literal, e.g. JS ``throw "a
+# string"``) yields ``name=None`` deliberately rather than a garbage
+# name pulled from an unrelated node's text (see ``_throw_type_parts``,
+# ``_catch_type_name``). Reused across Python/C++'s bare-identifier and
+# attribute/member-access re-raise shapes and Java/C++'s (possibly
+# scoped/qualified) type names.
+_NAMEABLE_TYPE_NODES = (
+    "identifier",
+    "attribute",
+    "field_expression",
+    "qualified_identifier",
+    "scoped_identifier",
+    "member_expression",
+    "type_identifier",
+)
+
+
+def _raise_expr(stmt_node: Node) -> Node | None:
+    """First unfielded named child of a raise/throw statement.
+
+    Shared by Python's ``raise_statement`` and C++/JS/TS's
+    ``throw_statement`` — all three park the raised expression as a
+    bare (unfielded) first named child, absent entirely for a bare
+    re-raise (Python bare ``raise``, C++ bare ``throw;``). Python's
+    optional ``raise X from Y`` re-raise-cause uses its own fielded
+    ``cause:`` child, which must be skipped rather than mistaken for
+    the raised expression itself — confirmed against the pinned
+    tree-sitter-python grammar (``cause`` is the only fielded child a
+    raise/throw statement in any of these languages ever carries).
+    """
+    for i, child in enumerate(stmt_node.children):
+        if not child.is_named:
+            continue
+        if stmt_node.field_name_for_child(i) is not None:
+            continue
+        return child
+    return None
+
+
+def _throw_type_parts(expr: Node) -> tuple[str, str | None]:
+    """Best-effort ``(text, name)`` for a raised/thrown expression.
+
+    ``name`` is the raised type's base identifier for a type
+    construction (``SomeError(...)``, ``new SomeError(...)``, Java's
+    ``new SomeError(...)``) or a bare type/identifier reference
+    (``raise SomeError`` / ``raise err`` re-raising a caught
+    variable) — ``None`` for anything else (a string/object-literal
+    throw, valid in JS/TS but not a name-able type; the design doc's
+    own documented JS/TS caveat).
+    """
+    text = _text(expr)
+    if expr.type in ("call", "call_expression"):
+        func = expr.child_by_field_name("function")
+        if func is None:
+            return text, None
+        _, name, _ = _heritage_name_parts(func)
+        return text, name or None
+    if expr.type == "object_creation_expression":
+        special = _callee_java(expr)
+        return text, (special[1] or None) if special else None
+    if expr.type == "new_expression":
+        ctor = expr.child_by_field_name("constructor")
+        if ctor is None:
+            return text, None
+        _, name, _ = _heritage_name_parts(ctor)
+        return text, name or None
+    if expr.type in _NAMEABLE_TYPE_NODES:
+        _, name, _ = _heritage_name_parts(expr)
+        return text, name or None
+    return text, None
+
+
+def _catch_type_name(node: Node) -> str | None:
+    """Base identifier of one caught-type node, or ``None``.
+
+    Mirrors ``_heritage_name_parts``'s text-splitting — a caught type
+    is written the same shapes a heritage clause's base type is
+    (bare identifier, dotted/scoped path).
+    """
+    _, name, _ = _heritage_name_parts(node)
+    return name or None
+
+
+def _catches_python(except_node: Node) -> tuple[list[str], bool]:
+    """Walk a Python ``except_clause``'s optional ``value`` field.
+
+    ``value`` is absent for a bare ``except:`` (catch-all). When
+    present it is an identifier/attribute (single type), a ``tuple``
+    (multi-catch, ``except (A, B):``), or an ``as_pattern`` wrapping
+    either (``except X as e:`` / ``except (A, B) as e:``) — the
+    ``as_pattern``'s own first named child (not its fielded ``alias``)
+    is the actual caught-type value, unwrapped here before the
+    tuple-vs-single check runs.
+    """
+    value = except_node.child_by_field_name("value")
+    if value is None:
+        return [], True
+    if value.type == "as_pattern":
+        children = value.named_children
+        value = children[0] if children else None
+        if value is None:
+            return [], True
+    if value.type == "tuple":
+        names = []
+        for child in value.named_children:
+            name = _catch_type_name(child)
+            if name:
+                names.append(name)
+        return names, False
+    name = _catch_type_name(value)
+    return ([name] if name else []), False
+
+
+def _catches_java(catch_type_node: Node) -> tuple[list[str], bool]:
+    """Walk a Java ``catch_type``'s named children into type names.
+
+    A single type for an ordinary catch, 2+ (``catch_type``'s named
+    children, separated by unnamed ``|`` tokens the query never
+    captures) for Java's multi-catch. Java requires a typed parameter
+    on every catch clause — no catch-all syntax exists — so ``bare``
+    is always ``False``.
+    """
+    names = []
+    for child in catch_type_node.named_children:
+        name = _catch_type_name(child)
+        if name:
+            names.append(name)
+    return names, False
+
+
+def _catches_cpp(params_node: Node) -> tuple[list[str], bool]:
+    """Walk a C++ ``catch_clause``'s ``parameters`` (a ``parameter_list``).
+
+    Zero named children means a catch-all ``catch (...)`` (the ``...``
+    token parses as anonymous, not a named node — see
+    ``LanguageSpec.catch_query``'s docstring); otherwise the sole
+    ``parameter_declaration``'s ``type`` field is the caught type. C++
+    catch clauses never carry more than one type.
+    """
+    if params_node.named_child_count == 0:
+        return [], True
+    decl = params_node.named_children[0]
+    type_node = decl.child_by_field_name("type")
+    if type_node is None:
+        return [], False
+    name = _catch_type_name(type_node)
+    return ([name] if name else []), False
+
+
+def _catches_js(_catch_node: Node) -> tuple[list[str], bool]:
+    """Plain JS never type-discriminates a caught value.
+
+    Whether or not the clause binds a name (``catch (e) {}`` vs. bare
+    ``catch {}``), there is no syntactic type to extract — always a
+    catch-all. See ``LanguageSpec.catch_query``'s docstring.
+    """
+    return [], True
+
+
+def _catches_ts(catch_node: Node) -> tuple[list[str], bool]:
+    """TS/TSX's optional ``type`` field on a ``catch_clause``.
+
+    Absent (the common case, matching plain JS) means catch-all;
+    present (rare — a ``catch (e: SomeType)`` annotation) wraps a
+    ``type_annotation`` whose own sole named child is the actual type
+    node.
+    """
+    type_node = catch_node.child_by_field_name("type")
+    if type_node is None:
+        return [], True
+    inner = type_node.named_children
+    if not inner:
+        return [], True
+    name = _catch_type_name(inner[0])
+    return ([name] if name else []), False
+
+
+def _catch_entries(
+    language: str, caps: dict[str, list[Node]], catch_node: Node
+) -> tuple[list[str], bool]:
+    """Dispatch one ``@catch`` match to its language-specific walker."""
+    if language == "python":
+        return _catches_python(catch_node)
+    if language == "java":
+        catch_type = _one(caps, "catch_type")
+        if catch_type is None:
+            return [], False
+        return _catches_java(catch_type)
+    if language == "cpp":
+        params = _one(caps, "catch_params")
+        if params is None:
+            return [], True
+        return _catches_cpp(params)
+    if language == "javascript":
+        return _catches_js(catch_node)
+    if language in ("typescript", "tsx"):
+        return _catches_ts(catch_node)
+    return [], False
+
+
+def _collect_throws(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawThrow]:
+    """Find raise/throw sites and (Java) declared ``throws``-clause
+    entries, attributed to their enclosing definition.
+
+    Mirrors ``_collect_refs``'s "return empty for languages without a
+    query yet" shape (Rust/Go/C — see ``LanguageSpec.throw_query``'s
+    docstring for why this is permanent, not "not yet implemented").
+    Java's query produces two independently-matched shapes in one
+    pass — an actual ``@throw`` site and a method's own ``@throws_
+    clause`` — each attributed via ``_enclosing`` the same way, since
+    a declared checked exception is just as much part of "what this
+    method's error surface includes" as an explicit throw statement.
+    """
+    if spec.throw_query is None:
+        return []
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    out: list[RawThrow] = []
+    for _, caps in _run_query(spec.grammar, spec.throw_query, root):
+        throw_node = _one(caps, "throw")
+        if throw_node is not None:
+            caller = _enclosing(spans, throw_node.start_byte)
+            caller_id = caller.id if caller else None
+            expr = _raise_expr(throw_node)
+            line = throw_node.start_point[0] + 1
+            if expr is None:
+                out.append(
+                    RawThrow(
+                        caller_id=caller_id,
+                        path=rel,
+                        text=None,
+                        name=None,
+                        line=line,
+                    )
+                )
+                continue
+            text, name = _throw_type_parts(expr)
+            out.append(
+                RawThrow(
+                    caller_id=caller_id,
+                    path=rel,
+                    text=text,
+                    name=name,
+                    line=line,
+                )
+            )
+            continue
+        throws_clause = _one(caps, "throws_clause")
+        if throws_clause is None:
+            continue
+        caller = _enclosing(spans, throws_clause.start_byte)
+        caller_id = caller.id if caller else None
+        line = throws_clause.start_point[0] + 1
+        for child in throws_clause.named_children:
+            name = _catch_type_name(child)
+            if not name:
+                continue
+            out.append(
+                RawThrow(
+                    caller_id=caller_id,
+                    path=rel,
+                    text=_text(child),
+                    name=name,
+                    line=line,
+                )
+            )
+    return out
+
+
+def _collect_catches(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawCatch]:
+    """Find except/catch clauses, attributed to their enclosing definition.
+
+    Mirrors ``_collect_throws``'s "return empty for languages without
+    a query yet" shape.
+    """
+    if spec.catch_query is None:
+        return []
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    out: list[RawCatch] = []
+    for _, caps in _run_query(spec.grammar, spec.catch_query, root):
+        catch_node = _one(caps, "catch")
+        if catch_node is None:
+            continue
+        caller = _enclosing(spans, catch_node.start_byte)
+        types, bare = _catch_entries(spec.name, caps, catch_node)
+        out.append(
+            RawCatch(
+                caller_id=caller.id if caller else None,
+                path=rel,
+                types=types,
+                bare=bare,
+                line=catch_node.start_point[0] + 1,
+            )
+        )
     return out
 
 

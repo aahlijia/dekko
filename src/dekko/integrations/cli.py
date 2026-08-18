@@ -334,10 +334,12 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "target",
         help="symbol (name, Class.method, file.py:func), file path, or "
         "(for uses) an external base identifier, or (for type/"
-        "supertypes/subtypes) a type/class/struct/interface name; "
-        "append ':LINE' (file.py:Class.method:LINE) to pick one "
-        "candidate out of an overload set the ambiguous-candidate "
-        "error reports",
+        "supertypes/subtypes) a type/class/struct/interface name, or "
+        "(for catches) a raised type name (e.g. ConfigError, "
+        "ValueError); 'throws' takes a function/method symbol like "
+        "callers/callees. Append ':LINE' (file.py:Class.method:LINE) "
+        "to pick one candidate out of an overload set the "
+        "ambiguous-candidate error reports",
     )
     p_query.add_argument(
         "--limit",
@@ -377,7 +379,16 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "--transitive",
         action="store_true",
         help="for 'supertypes'/'subtypes': walk the full ancestor/"
-        "descendant DAG instead of one hop",
+        "descendant DAG instead of one hop; for 'throws': walk the call "
+        "graph up to --depth hops instead of just the target's own body",
+    )
+    p_query.add_argument(
+        "--depth",
+        type=int,
+        default=query.DEFAULT_THROWS_DEPTH,
+        metavar="N",
+        help="for 'throws --transitive': call-graph walk depth cap "
+        f"(default: {query.DEFAULT_THROWS_DEPTH})",
     )
     p_query.add_argument(
         "--relation",
@@ -1449,6 +1460,7 @@ def run_query(args: argparse.Namespace) -> int:
         transitive=args.transitive,
         relation=args.relation,
         min_shared=args.min_shared,
+        depth=args.depth,
     )
 
 
