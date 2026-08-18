@@ -9,6 +9,64 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Added
+- **`dekko deps` — module-level dependency graph.** File-to-file
+  import graph resolved from raw `import`/`use`/`#include` source
+  text (full resolution for Python, JS/TS/TSX, Rust, Java, C/C++; Go
+  imports always external, undocumented `go.mod` prefix). `--file`
+  shows one file's resolved imports/importers/external sources,
+  `--cycles` reports circular-import clusters via Tarjan's SCC,
+  `--top` widens the most-depended-on ranking, `--export
+  {mermaid,dot}` reuses `export.py`'s existing renderers. CLI-only, no
+  MCP tool.
+- **`dekko query importers`/`dekko query peers` — shared-dependency
+  and co-usage lookups.** `importers SOURCE` is a reverse, raw-import-
+  text match (substring by default, `--exact` for the literal
+  string) — "what else imports the same thing as X," distinct from
+  `deps --file`'s cross-language-resolved answer. `peers SYMBOL` finds
+  other symbols sharing at least `--min-shared` (default 2) callees
+  with the target, ranked by shared-callee count, each row naming the
+  shared callees. CLI-only, no MCP tool.
+- **`dekko query throws`/`dekko query catches` — exception/error-flow
+  tracing.** `throws SYMBOL` traces raise/throw sites one level deep
+  by default, `--transitive --depth N` walks the call graph outward;
+  `catches TYPE` scans every catch clause repo-wide for an exact-name
+  or catch-all match. A scoped pilot: full support for Python/Java/
+  C++, `throws`-only for JS/TS (`catches` is a disclosed weak signal
+  there), Rust/Go/C permanently excluded (no syntax-level exception
+  concept to extract, not a future gap). CLI-only, no MCP tool.
+- **`dekko query env` — static env-var read tracing.** Detects
+  `getenv`-shaped call sites (`os.getenv`, `process.env.X`,
+  `System.getenv`, `std::env::var`, `os.Getenv`, bare `getenv`) across
+  all 9 Tier-1 languages. Exact-match only, no data-flow or config-file
+  (YAML/JSON/TOML/`.env`) tracing — explicitly out of scope.
+  `--list` ranks every distinct env-var name read anywhere by
+  read-site count. CLI-only, no MCP tool.
+- **`dekko query cohesion FILE` — intra-file symbol-cohesion
+  clustering.** Groups a file's symbols into connected components
+  over same-file call/reference edges (Union-Find); isolated symbols
+  reported separately. A deliberately weak "mutually reachable"
+  signal, not real modularity-style clustering — every run prints a
+  non-droppable disclosure note to that effect, since most non-trivial
+  files come back as one single connected component with zero useful
+  split signal. CLI-only, no MCP tool.
+- **`dekko unused --kinds {callables,types,all}` — dead-type
+  detection.** Extends `unused` to classes/interfaces/enums/structs/
+  records/traits, counting heritage (`extends`/`implements`) and
+  type-usage (parameter/return-type) evidence alongside existing
+  call/reference evidence, so a class only ever constructed or
+  extended isn't misflagged as dead. Default (`callables`) behavior is
+  unchanged; `all` unions both kinds with a per-kind subtotal. No MCP
+  change (`find_unused` was already CLI-only).
+- **`dekko workset --symbol NAME --type-impact` — combined
+  blast-radius report.** Widens `workset`'s touched set beyond a
+  type target's direct callers to include every type-usage site
+  (parameter/return type) and every transitive implementor — the
+  union of call-graph, type-usage, and heritage impact in one call.
+  No-op on a non-type target; requires `--symbol` (rejected with a
+  rev diff). The only feature in this batch exposed via MCP (the
+  `workset` tool's `type_impact` boolean).
+
 ## [0.31.4] — 2026-08-17
 
 ### Fixed

@@ -121,6 +121,28 @@ uncached rebuild rather than the default incremental one
 history rewrite where incremental diffing would do needless
 per-symbol work.
 
+## CLI-only structural queries (no MCP tool — use Bash)
+
+These answer narrower relational questions than the MCP tools above,
+and have no MCP equivalent — reach for them with Bash instead of
+grepping by hand:
+
+| Need | Use | Not |
+|---|---|---|
+| What else imports/depends on this module before I change or remove it | `dekko query importers <source>` | grepping the import string across every file |
+| What other symbols probably belong in the same module (share callees with a target) | `dekko query peers <symbol>` | eyeballing and diffing call lists by hand |
+| What can calling this function raise, before I change it | `dekko query throws <symbol>` (`--transitive` for the callee-tree version) | reading every function on the call path hunting for `raise`/`throw` |
+| Whether a given exception type is actually handled anywhere | `dekko query catches <type>` | grepping `except`/`catch` blocks across the repo |
+| Where a specific env var is read | `dekko query env <NAME>` (`--list` for every var read anywhere) | grepping `getenv`/`process.env`/`os.environ` across the repo |
+| A cheap first gut-check before splitting a file (which symbols are mutually reachable) | `dekko query cohesion <file>` | reading the whole file to guess groupings — and note this is a weak, disclosed-as-such signal, not real clustering |
+| File-to-file import structure / circular-import hunting | `dekko deps` (`--file`, `--cycles`) | tracing `import`/`use`/`#include` statements by hand |
+| Shortest call path between two symbols, dead-code leads, hotspot stats, terse map | `dekko trace \| unused \| stats \| lean ...` | — |
+
+All of these are CLI-only by design (schema-token cost vs. actual
+per-turn need) — see `docs/cli.md` for full flag reference and
+per-command caveats (language coverage, exact-match rules, weak-signal
+disclosures) before relying on one heavily.
+
 ## Boundaries
 
 - Structural aids, not a substitute for reading the exact lines you
@@ -131,6 +153,3 @@ per-symbol work.
   and what was dropped to fit.
 - `get_callers` hides test-file callers by default (`include_tests`
   to include them) — an empty result doesn't mean dead code.
-- Shortest call path between symbols, dead-code leads, hotspot
-  stats, and the terse "lean" map are **CLI-only** — no MCP tool
-  exists for them; use Bash: `dekko trace|unused|stats|lean ...`.
