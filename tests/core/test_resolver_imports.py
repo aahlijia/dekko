@@ -385,6 +385,46 @@ def test_cpp_ambiguous_same_basename_stays_external() -> None:
     assert graph.external["src/main.cpp"] == ["local.h"]
 
 
+def test_cpp_self_basename_collision_with_excluded_vendor_stays_external() -> (
+    None
+):
+    # The importer's own basename coincidentally matches its own
+    # #include, and no other file in the map shares that basename --
+    # simulating the real match living in a vendored/excluded
+    # directory that never entered the map. Must stay external, not
+    # resolve to itself (D1).
+    files = [
+        _fm(
+            "core/common_runtime/bfc_allocator.h",
+            "cpp",
+            [
+                _imp(
+                    "core/common_runtime/bfc_allocator.h",
+                    "bfc_allocator",
+                    "xla/tsl/framework/bfc_allocator.h",
+                )
+            ],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
+    assert graph.external["core/common_runtime/bfc_allocator.h"] == [
+        "xla/tsl/framework/bfc_allocator.h"
+    ]
+
+
+def test_cpp_self_exclusion_resolves_real_other_file() -> None:
+    # Excluding self from the candidate pool must still let a
+    # genuinely different same-basename file resolve normally (D1's
+    # "strictly non-regressive" claim).
+    files = [
+        _fm("src/foo.h", "cpp", [_imp("src/foo.h", "foo", "foo.h")]),
+        _fm("other/foo.h", "cpp", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["src/foo.h"] == ["other/foo.h"]
+
+
 # ---------------------------------------------------------------------
 # Go (deliberately unsupported)
 

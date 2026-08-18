@@ -138,6 +138,61 @@ def test_deps_file_not_found(
     assert "no mapped file 'nope.py'" in capsys.readouterr().err
 
 
+def test_deps_file_ambiguous_suffix(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "pkg_a/index.ts": "export function a() { return 1; }\n",
+            "pkg_b/index.ts": "export function b() { return 2; }\n",
+        }
+    )
+    code = cli.main(["deps", "--root", str(root), "--file", "index.ts"])
+    assert code == deps.EXIT_AMBIGUOUS
+    err = capsys.readouterr().err
+    assert "'index.ts' is ambiguous; candidates:" in err
+    assert "pkg_a/index.ts" in err
+    assert "pkg_b/index.ts" in err
+    assert capsys.readouterr().out == ""
+
+
+def test_deps_file_bare_suffix_resolves_unambiguous_match(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CYCLE_REPO)
+    code = cli.main(["deps", "--root", str(root), "--file", "a.py"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "imports (1):" in out
+    assert "b.py" in out
+
+
+def test_deps_file_zero_symbol_barrel_file_still_resolves(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A pure re-export file extracts zero symbols, so it never gets a
+    # key in index.symbols_by_path -- deps --file must still resolve
+    # it by exact full path via the wider languages_by_path pool (D2's
+    # "why not just reuse paths_matching as-is" regression guard).
+    root = make_mapped_repo(
+        {
+            "sdk/SdkController.js": (
+                "export function Controller() { return 1; }\n"
+            ),
+            "index.js": 'export { Controller } from "./sdk/SdkController";\n',
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert "index.js" not in index.symbols_by_path
+    assert "index.js" in index.languages_by_path
+    code = cli.main(["deps", "--root", str(root), "--file", "index.js"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "imports (0):" in out
+    assert "imported by (0):" in out
+
+
 def test_deps_cycles_text(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

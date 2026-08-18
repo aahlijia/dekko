@@ -25,6 +25,7 @@ import json
 import sys
 from pathlib import Path
 
+from dekko.analysis.query import paths_matching
 from dekko.core.resolver import find_cycles
 from dekko.render import export
 from dekko.render.mapfile import MapIndex
@@ -34,6 +35,7 @@ EXIT_OK = 0
 EXIT_ERROR = 2
 EXIT_NOT_FOUND = 3
 EXIT_TOO_BIG = 2
+EXIT_AMBIGUOUS = 4
 
 
 def compute(index: MapIndex, top: int) -> dict:
@@ -121,9 +123,16 @@ def _run_file(
     index: MapIndex, path: str, limit: int, budget: int | None, as_json: bool
 ) -> int:
     """Handle ``--file PATH``: one file's imports/importers/external."""
-    if path not in index.languages_by_path:
+    matches = paths_matching(index, path, pool=index.languages_by_path)
+    if not matches:
         print(f"dekko: no mapped file '{path}'", file=sys.stderr)
         return EXIT_NOT_FOUND
+    if len(matches) > 1:
+        print(f"dekko: '{path}' is ambiguous; candidates:", file=sys.stderr)
+        for p in matches:
+            print(f"  {p}", file=sys.stderr)
+        return EXIT_AMBIGUOUS
+    path = matches[0]
 
     imports = index.module_deps_out.get(path, [])
     imported_by = index.module_deps_in.get(path, [])
@@ -273,7 +282,8 @@ def run(
 
     Returns:
         ``0`` on success, ``2`` on a too-big export graph, ``3`` when
-        ``--file`` names an unmapped path.
+        ``--file`` names an unmapped path, ``4`` when ``--file`` names
+        an ambiguous path suffix matching 2+ mapped files.
     """
     if export_fmt is not None:
         return _run_export(index, export_fmt, max_nodes, out_path)

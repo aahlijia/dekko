@@ -16,6 +16,7 @@ import json
 import re
 import sys
 from collections import deque
+from collections.abc import Iterable
 from contextlib import redirect_stdout
 
 from dekko.classify import is_test_path, relevance_key
@@ -114,12 +115,26 @@ _BUDGETED_ACTIONS = (
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-def paths_matching(index: MapIndex, path: str) -> list[str]:
-    """File paths equal to ``path`` or ending in ``/path``."""
-    if path in index.symbols_by_path:
+def paths_matching(
+    index: MapIndex, path: str, pool: Iterable[str] | None = None
+) -> list[str]:
+    """File paths equal to ``path`` or ending in ``/path``.
+
+    Args:
+        index: Loaded map index.
+        path: Bare filename or path suffix to match.
+        pool: Path universe to search — defaults to
+            ``index.symbols_by_path`` (symbol-bearing files only, the
+            behavior every existing caller relies on). Pass
+            ``index.languages_by_path`` for a wider universe that
+            includes zero-symbol files (barrel/re-export files) — see
+            ``deps.py``'s ``_run_file``.
+    """
+    universe = index.symbols_by_path if pool is None else pool
+    if path in universe:
         return [path]
     suffix = "/" + path
-    return sorted(p for p in index.symbols_by_path if p.endswith(suffix))
+    return sorted(p for p in universe if p.endswith(suffix))
 
 
 def resolve_target(

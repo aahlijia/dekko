@@ -2041,6 +2041,49 @@ _ENV_READ_DISPATCH: dict[
 }
 
 
+def _is_env_write_or_delete_target(language: str, call_node: Node) -> bool:
+    """Whether ``call_node`` (the matched env-read subscript/member
+    node) sits in a write or delete position rather than a read
+    position.
+
+    A write is an assignment's ``left`` field (Python ``assignment``,
+    JS/TS ``assignment_expression`` — **not** Python's
+    ``augmented_assignment``, since ``x += v`` genuinely reads ``x``
+    before writing it). A delete is Python's ``delete_statement`` (an
+    unfielded child) or JS/TS's ``unary_expression`` with a ``delete``
+    operator (the ``argument`` field). Every other Tier-1 language's
+    env-read idiom is a call expression, which can never be an
+    assignment target or delete operand — this check is a no-op for
+    them by construction (see ``LanguageSpec.env_read_query``'s
+    docstring).
+    """
+    # Tree-sitter ``Node`` objects are re-wrapped on each access (e.g.
+    # each call to ``child_by_field_name``), so identity comparison
+    # with ``is`` unreliably returns ``False`` even for the same
+    # underlying node -- confirmed live against the pinned grammar
+    # (two separately-fetched handles to the identical node compare
+    # ``==`` True but ``is`` False). Compare by ``==`` instead, as
+    # tree-sitter's own ``Node.__eq__`` is defined for exactly this.
+    parent = call_node.parent
+    if parent is None:
+        return False
+    if language == "python":
+        if parent.type == "assignment":
+            return parent.child_by_field_name("left") == call_node
+        return parent.type == "delete_statement"
+    if language in ("javascript", "typescript", "tsx"):
+        if parent.type == "assignment_expression":
+            return parent.child_by_field_name("left") == call_node
+        if parent.type == "unary_expression":
+            operator = parent.child_by_field_name("operator")
+            return (
+                operator is not None
+                and _text(operator) == "delete"
+                and parent.child_by_field_name("argument") == call_node
+            )
+    return False
+
+
 def _collect_env_reads(
     spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
 ) -> list[EnvRead]:
@@ -2064,6 +2107,8 @@ def _collect_env_reads(
     for _, caps in _run_query(spec.grammar, spec.env_read_query, root):
         call_node = _one(caps, "call")
         if call_node is None:
+            continue
+        if _is_env_write_or_delete_target(spec.name, call_node):
             continue
         hit = dispatch(caps)
         if hit is None:

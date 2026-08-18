@@ -321,3 +321,111 @@ def test_cpp_getenv(tmp_path: Path) -> None:
     assert len(fm.env_reads) == 1
     assert fm.env_reads[0].key == "DATABASE_URL"
     assert fm.env_reads[0].call == "getenv"
+
+
+# ---------------------------------------------------------------------
+# Write/delete exclusion (E1) -- os.environ[]/process.env write and
+# delete sites must not be reported as reads.
+
+
+def test_python_environ_subscript_assignment_not_captured(
+    tmp_path: Path,
+) -> None:
+    spec = languages.spec_for_path("a.py")
+    assert spec is not None
+    (tmp_path / "a.py").write_text("import os\n\nos.environ['X'] = '1'\n")
+    fm = extract_file(tmp_path, "a.py", spec)
+    assert fm.env_reads == []
+
+
+def test_python_environ_subscript_delete_not_captured(
+    tmp_path: Path,
+) -> None:
+    spec = languages.spec_for_path("a.py")
+    assert spec is not None
+    (tmp_path / "a.py").write_text("import os\n\ndel os.environ['X']\n")
+    fm = extract_file(tmp_path, "a.py", spec)
+    assert fm.env_reads == []
+
+
+def test_python_environ_subscript_augmented_assignment_still_read(
+    tmp_path: Path,
+) -> None:
+    # x += v genuinely reads x before writing it -- must stay a read
+    # (deliberate scope decision, not an oversight; see E1 design).
+    spec = languages.spec_for_path("a.py")
+    assert spec is not None
+    (tmp_path / "a.py").write_text("import os\n\nos.environ['X'] += '1'\n")
+    fm = extract_file(tmp_path, "a.py", spec)
+    assert len(fm.env_reads) == 1
+    assert fm.env_reads[0].key == "X"
+    assert fm.env_reads[0].call == "os.environ[]"
+
+
+def test_python_environ_subscript_plain_read_still_captured(
+    tmp_path: Path,
+) -> None:
+    spec = languages.spec_for_path("a.py")
+    assert spec is not None
+    (tmp_path / "a.py").write_text("import os\n\nx = os.environ['X']\n")
+    fm = extract_file(tmp_path, "a.py", spec)
+    assert len(fm.env_reads) == 1
+    assert fm.env_reads[0].key == "X"
+
+
+def test_python_environ_get_and_getenv_unaffected_by_write_check(
+    tmp_path: Path,
+) -> None:
+    # Call-shaped idioms can never be assignment targets or delete
+    # operands -- confirm the write/delete check is a no-op for them.
+    spec = languages.spec_for_path("a.py")
+    assert spec is not None
+    (tmp_path / "a.py").write_text(
+        "import os\n\na = os.environ.get('X')\nb = os.getenv('Y')\n"
+    )
+    fm = extract_file(tmp_path, "a.py", spec)
+    by_key = _by_key(fm.env_reads)
+    assert set(by_key) == {"X", "Y"}
+
+
+def test_js_process_env_dot_assignment_not_captured(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("a.js")
+    assert spec is not None
+    (tmp_path / "a.js").write_text("process.env.X = '1';\n")
+    fm = extract_file(tmp_path, "a.js", spec)
+    assert fm.env_reads == []
+
+
+def test_js_process_env_bracket_assignment_not_captured(
+    tmp_path: Path,
+) -> None:
+    spec = languages.spec_for_path("a.js")
+    assert spec is not None
+    (tmp_path / "a.js").write_text("process.env['X'] = '1';\n")
+    fm = extract_file(tmp_path, "a.js", spec)
+    assert fm.env_reads == []
+
+
+def test_js_process_env_dot_delete_not_captured(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("a.js")
+    assert spec is not None
+    (tmp_path / "a.js").write_text("delete process.env.X;\n")
+    fm = extract_file(tmp_path, "a.js", spec)
+    assert fm.env_reads == []
+
+
+def test_js_process_env_bracket_delete_not_captured(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("a.js")
+    assert spec is not None
+    (tmp_path / "a.js").write_text("delete process.env['X'];\n")
+    fm = extract_file(tmp_path, "a.js", spec)
+    assert fm.env_reads == []
+
+
+def test_js_process_env_plain_read_still_captured(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("a.js")
+    assert spec is not None
+    (tmp_path / "a.js").write_text("const y = process.env.X;\n")
+    fm = extract_file(tmp_path, "a.js", spec)
+    assert len(fm.env_reads) == 1
+    assert fm.env_reads[0].key == "X"

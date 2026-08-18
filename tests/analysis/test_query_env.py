@@ -150,3 +150,35 @@ def test_env_list_needs_no_target(
     root = make_mapped_repo(ENV_SRC)
     code = cli.main(["query", "env", "--list", "--root", str(root)])
     assert code == 0
+
+
+# ---------------------------------------------------------------------
+# Write/delete exclusion (E1)
+
+WRITE_DELETE_REPO = {
+    # Mirrors the report's real-world repro shape (a read, then a
+    # write, then a delete, then another write of the same key) --
+    # only the genuine read should surface.
+    "src/env.js": (
+        "function setup() {\n"
+        "  const dir = process.env.CLINE_DIR;\n"
+        "  process.env.CLINE_DIR = '/tmp/a';\n"
+        "  delete process.env.CLINE_DIR;\n"
+        "  process.env.CLINE_DIR = '/tmp/b';\n"
+        "  return dir;\n"
+        "}\n"
+    ),
+}
+
+
+def test_env_write_delete_sites_not_reported_as_reads(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(WRITE_DELETE_REPO)
+    code = cli.main(
+        ["query", "env", "CLINE_DIR", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert len(doc["results"]) == 1
+    assert doc["results"][0]["path"] == "src/env.js"

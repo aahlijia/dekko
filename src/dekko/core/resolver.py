@@ -2151,10 +2151,22 @@ def _resolve_import_cpp(
     a repo happens to have its own file literally named the same as a
     system header, which the basename-uniqueness check above already
     guards against for the common case.
+
+    The importing file itself is excluded from its own basename
+    candidate pool — a header including its own basename is not a
+    meaningful construct in valid C/C++ (it would either be an
+    include-guard bug or, more commonly under this design, an
+    artifact of the *real* same-basename file being vendored/excluded
+    from the map, which must not silently resolve to "self" instead
+    of correctly falling through to external; see the design doc's D1
+    fix for the concrete repro this guards against).
     """
-    del importer_path
     basename = imp.source.rsplit("/", 1)[-1]
-    matches = ctx.cpp_basename_index.get(basename, [])
+    matches = [
+        m
+        for m in ctx.cpp_basename_index.get(basename, [])
+        if m != importer_path
+    ]
     return matches[0] if len(matches) == 1 else None
 
 
