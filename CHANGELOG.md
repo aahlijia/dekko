@@ -9,6 +9,8 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.40.0] — 2026-08-18
+
 ### Added
 - **`dekko deps` — module-level dependency graph.** File-to-file
   import graph resolved from raw `import`/`use`/`#include` source
