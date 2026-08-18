@@ -110,6 +110,117 @@ def test_python_catch_all_and_multi_catch(tmp_path: Path) -> None:
     assert bare.bare is True
 
 
+def test_python_bound_reraise_folds_into_bare(tmp_path: Path) -> None:
+    # `raise e` re-raising the `except ... as e:` bound variable is the
+    # same "re-raise this exact error" idiom as a bare `raise` — it
+    # must fold into the same bucket, not be extracted as a fake
+    # external type named "e" (T1 fix).
+    spec = languages.spec_for_path("a.py")
+    assert spec is not None
+    (tmp_path / "a.py").write_text(
+        "def f():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except OSError as e:\n"
+        "        raise e\n"
+    )
+    fm = extract_file(tmp_path, "a.py", spec)
+    reraise = _throws_by_caller(fm.throws)["a.py::f"]
+    assert len(reraise) == 1
+    assert reraise[0].text is None
+    assert reraise[0].name is None
+
+
+def test_python_raise_different_type_in_except_block_unaffected(
+    tmp_path: Path,
+) -> None:
+    # Raising a *different*, real, constructed type inside a handler
+    # that also binds `e` must not be mistaken for a re-raise of `e`.
+    spec = languages.spec_for_path("a.py")
+    assert spec is not None
+    (tmp_path / "a.py").write_text(
+        "def f():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except OSError as e:\n"
+        "        raise ValueError('x')\n"
+    )
+    fm = extract_file(tmp_path, "a.py", spec)
+    thrown = _throws_by_caller(fm.throws)["a.py::f"]
+    assert len(thrown) == 1
+    assert thrown[0].name == "ValueError"
+
+
+def test_python_raise_other_bare_name_in_except_block_unaffected(
+    tmp_path: Path,
+) -> None:
+    # A bare reference to a *different* name than the bound variable
+    # is still a real (external) type name, not folded into bare
+    # re-raise — confirms name equality is checked, not just "any bare
+    # identifier inside an except block".
+    spec = languages.spec_for_path("a.py")
+    assert spec is not None
+    (tmp_path / "a.py").write_text(
+        "def f():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except OSError as e:\n"
+        "        raise SomeOtherError\n"
+    )
+    fm = extract_file(tmp_path, "a.py", spec)
+    thrown = _throws_by_caller(fm.throws)["a.py::f"]
+    assert len(thrown) == 1
+    assert thrown[0].name == "SomeOtherError"
+
+
+def test_python_bare_class_reference_raise_with_no_except_unaffected(
+    tmp_path: Path,
+) -> None:
+    # A bare class-reference raise at module/function scope with no
+    # enclosing except clause at all — the upward walk must return
+    # None cleanly rather than crash or mis-tag.
+    spec = languages.spec_for_path("a.py")
+    assert spec is not None
+    (tmp_path / "a.py").write_text("def f():\n    raise SomeError\n")
+    fm = extract_file(tmp_path, "a.py", spec)
+    thrown = _throws_by_caller(fm.throws)["a.py::f"]
+    assert len(thrown) == 1
+    assert thrown[0].name == "SomeError"
+
+
+def test_python_nested_closure_reraise_folds_into_bare(
+    tmp_path: Path,
+) -> None:
+    # `raise e` inside a nested `def` defined inside an except block,
+    # referencing the outer `e` via closure. Python's `LanguageSpec`
+    # sets no `function_boundary_types` (matching Python's existing
+    # lack of that concept elsewhere in the codebase), so the upward
+    # walk does not stop at the nested `def` and still finds the
+    # outer `except ... as e:` binding — the closure genuinely
+    # re-raises the same bound exception object, so folding this into
+    # bare re-raise is correct, not a mis-tag. Documented explicitly
+    # (deviation from the original design doc, which expected this
+    # case to fall through to an "external type named e" — see the
+    # design doc's T1 section for the reconciliation note) so a future
+    # change doesn't silently alter this behavior.
+    spec = languages.spec_for_path("a.py")
+    assert spec is not None
+    (tmp_path / "a.py").write_text(
+        "def f():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except OSError as e:\n"
+        "        def inner():\n"
+        "            raise e\n"
+        "        inner()\n"
+    )
+    fm = extract_file(tmp_path, "a.py", spec)
+    thrown = _throws_by_caller(fm.throws)["a.py::inner"]
+    assert len(thrown) == 1
+    assert thrown[0].text is None
+    assert thrown[0].name is None
+
+
 def test_python_raise_from_ignores_cause(tmp_path: Path) -> None:
     # `raise X from Y` — the `from` clause's cause must never be
     # mistaken for the raised expression itself (RawThrow.name should
@@ -205,6 +316,51 @@ def test_cpp_throw_repo_and_bare_rethrow(tmp_path: Path) -> None:
     assert bare.name is None
 
 
+def test_cpp_reference_bound_catch_reraise_folds_into_bare(
+    tmp_path: Path,
+) -> None:
+    # `catch (std::exception& e) { throw e; }` — the common C++
+    # reference-bound catch-param shape. Exercises
+    # `_innermost_identifier`'s `reference_declarator` unwrap (T1 fix).
+    spec = languages.spec_for_path("a.cpp")
+    assert spec is not None
+    (tmp_path / "a.cpp").write_text(
+        "void handle() {\n"
+        "    try {\n"
+        "    } catch (std::exception& e) {\n"
+        "        throw e;\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "a.cpp", spec)
+    reraise = _throws_by_caller(fm.throws)["a.cpp::handle"]
+    assert len(reraise) == 1
+    assert reraise[0].text is None
+    assert reraise[0].name is None
+
+
+def test_cpp_by_value_catch_reraise_folds_into_bare(
+    tmp_path: Path,
+) -> None:
+    # `catch (std::exception e) { throw e; }` — by-value, no `&`, so
+    # the declarator is a plain `identifier` with no unwrap needed.
+    spec = languages.spec_for_path("a.cpp")
+    assert spec is not None
+    (tmp_path / "a.cpp").write_text(
+        "void handle() {\n"
+        "    try {\n"
+        "    } catch (std::exception e) {\n"
+        "        throw e;\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "a.cpp", spec)
+    reraise = _throws_by_caller(fm.throws)["a.cpp::handle"]
+    assert len(reraise) == 1
+    assert reraise[0].text is None
+    assert reraise[0].name is None
+
+
 def test_cpp_catch_typed_and_catch_all(tmp_path: Path) -> None:
     spec = languages.spec_for_path("a.cpp")
     assert spec is not None
@@ -289,6 +445,76 @@ def test_ts_typed_catch_is_rare_exception(tmp_path: Path) -> None:
     assert typed.bare is False
     assert untyped.bare is True
     assert untyped.types == []
+
+
+def test_js_bound_catch_reraise_folds_into_bare(tmp_path: Path) -> None:
+    # `catch (e) { throw e; }` — the JS/TS re-throw idiom (T1 fix).
+    spec = languages.spec_for_path("a.js")
+    assert spec is not None
+    (tmp_path / "a.js").write_text(
+        "function handle() {\n"
+        "    try {\n"
+        "    } catch (e) {\n"
+        "        throw e;\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "a.js", spec)
+    reraise = _throws_by_caller(fm.throws)["a.js::handle"]
+    assert len(reraise) == 1
+    assert reraise[0].text is None
+    assert reraise[0].name is None
+
+
+def test_js_bound_catch_new_error_throw_unaffected(tmp_path: Path) -> None:
+    # `catch (e) { throw new Error("x"); }` — a real, constructed
+    # error inside a handler that also binds `e` must not be folded
+    # into bare re-raise.
+    spec = languages.spec_for_path("a.js")
+    assert spec is not None
+    (tmp_path / "a.js").write_text(
+        "function handle() {\n"
+        "    try {\n"
+        "    } catch (e) {\n"
+        "        throw new Error('x');\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "a.js", spec)
+    thrown = _throws_by_caller(fm.throws)["a.js::handle"]
+    assert len(thrown) == 1
+    assert thrown[0].name == "Error"
+
+
+def test_ts_catch_any_and_unknown_are_catch_all(tmp_path: Path) -> None:
+    # TS's compiler permits only `any`/`unknown` on a catch variable's
+    # type annotation — both are semantically catch-all, not genuine
+    # typed matches (T2 fix).
+    spec = languages.spec_for_path("a.ts")
+    assert spec is not None
+    (tmp_path / "a.ts").write_text(
+        "function handle(): void {\n"
+        "    try {\n"
+        "    } catch (e: any) {\n"
+        "    }\n"
+        "    try {\n"
+        "    } catch (e: unknown) {\n"
+        "    }\n"
+        "    try {\n"
+        "    } catch (e) {\n"
+        "    }\n"
+        "    try {\n"
+        "    } catch {\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "a.ts", spec)
+    assert fm.error is None
+    clauses = _catches_by_caller(fm.catches)["a.ts::handle"]
+    assert len(clauses) == 4
+    for clause in clauses:
+        assert clause.types == []
+        assert clause.bare is True
 
 
 def test_js_throw_string_literal_has_no_name(tmp_path: Path) -> None:

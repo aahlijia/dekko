@@ -1554,6 +1554,68 @@ def _throw_type_parts(expr: Node) -> tuple[str, str | None]:
     return text, None
 
 
+def _innermost_identifier(node: Node) -> str | None:
+    """Unwrap a declarator (C++ ``reference_declarator``/
+    ``pointer_declarator``) down to its base ``identifier``'s text.
+    """
+    while node is not None and node.type != "identifier":
+        named = [c for c in node.children if c.is_named]
+        node = named[0] if named else None
+    return _text(node) if node is not None else None
+
+
+def _nearest_catch_binding(
+    language: str, stmt: Node, boundary_types: tuple[str, ...]
+) -> str | None:
+    """Bound exception-variable name of the nearest enclosing
+    except/catch clause containing ``stmt`` (a raise/throw statement),
+    or ``None`` if it isn't confidently inside one before crossing a
+    function boundary.
+
+    Verified against the pinned grammars:
+    - Python: ``except_clause``'s ``value`` field is an ``as_pattern``
+      whose ``alias`` field is the bound name (``except X as e:``).
+    - JS/TS: ``catch_clause``'s ``parameter`` field is the bound name
+      directly (``catch (e)``), when it's a plain identifier (not a
+      destructuring pattern, which this deliberately doesn't try to
+      match — a destructured catch can't plausibly rethrow "the whole
+      exception" by any single name).
+    - C++: ``catch_clause``'s ``parameters`` field is a
+      ``parameter_list``; its sole ``parameter_declaration``'s
+      ``declarator`` field wraps the bound name (possibly through a
+      ``reference_declarator``, e.g. ``catch (std::exception& e)``),
+      unwrapped via ``_innermost_identifier``.
+    """
+    node = stmt.parent
+    while node is not None:
+        if node.type in boundary_types:
+            return None
+        if language == "python" and node.type == "except_clause":
+            value = node.child_by_field_name("value")
+            if value is not None and value.type == "as_pattern":
+                alias = value.child_by_field_name("alias")
+                return _text(alias) if alias is not None else None
+            return None
+        if (
+            language in ("javascript", "typescript", "tsx")
+            and node.type == "catch_clause"
+        ):
+            param = node.child_by_field_name("parameter")
+            if param is not None and param.type == "identifier":
+                return _text(param)
+            return None
+        if language == "cpp" and node.type == "catch_clause":
+            params = node.child_by_field_name("parameters")
+            if params is not None and params.named_child_count == 1:
+                decl = params.named_children[0]
+                declarator = decl.child_by_field_name("declarator")
+                if declarator is not None:
+                    return _innermost_identifier(declarator)
+            return None
+        node = node.parent
+    return None
+
+
 def _catch_type_name(node: Node) -> str | None:
     """Base identifier of one caught-type node, or ``None``.
 
@@ -1641,13 +1703,18 @@ def _catches_js(_catch_node: Node) -> tuple[list[str], bool]:
     return [], True
 
 
+_TS_CATCH_ALL_TYPES = frozenset({"any", "unknown"})
+
+
 def _catches_ts(catch_node: Node) -> tuple[list[str], bool]:
     """TS/TSX's optional ``type`` field on a ``catch_clause``.
 
-    Absent (the common case, matching plain JS) means catch-all;
-    present (rare — a ``catch (e: SomeType)`` annotation) wraps a
-    ``type_annotation`` whose own sole named child is the actual type
-    node.
+    Absent, or annotated with the only two types TS's compiler permits
+    on a catch variable (``any``/``unknown``, semantically a
+    catch-all — see ``useUnknownInCatchVariables``), means catch-all;
+    any other annotation is not valid TypeScript and can't occur in
+    real code, but is still walked defensively rather than assumed
+    unreachable.
     """
     type_node = catch_node.child_by_field_name("type")
     if type_node is None:
@@ -1656,7 +1723,9 @@ def _catches_ts(catch_node: Node) -> tuple[list[str], bool]:
     if not inner:
         return [], True
     name = _catch_type_name(inner[0])
-    return ([name] if name else []), False
+    if name is None or name in _TS_CATCH_ALL_TYPES:
+        return [], True
+    return [name], False
 
 
 def _catch_entries(
@@ -1708,7 +1777,15 @@ def _collect_throws(
             caller_id = caller.id if caller else None
             expr = _raise_expr(throw_node)
             line = throw_node.start_point[0] + 1
-            if expr is None:
+            is_bound_reraise = (
+                expr is not None
+                and expr.type == "identifier"
+                and _nearest_catch_binding(
+                    spec.name, throw_node, spec.function_boundary_types
+                )
+                == _text(expr)
+            )
+            if expr is None or is_bound_reraise:
                 out.append(
                     RawThrow(
                         caller_id=caller_id,
