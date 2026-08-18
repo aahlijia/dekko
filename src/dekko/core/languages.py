@@ -102,6 +102,30 @@ class LanguageSpec:
             only a TS ``catch (e: SomeType)`` annotation (rare) yields
             a real type name; a "weak signal" caveat, not a bug,
             disclosed in ``dekko query catches``' own output.
+        env_read_query: Query capturing statically-known
+            environment-variable read call sites (``@call``, plus
+            per-shape helper captures — ``@mod``/``@fn``/``@sub`` for
+            Python/Java/Go's attribute-chain calls, ``@proc``/``@env``
+            for JS/TS's ``process.env`` member access — see
+            ``extractor._collect_env_reads``). Unlike every other
+            query field, this targets a small, hand-curated allowlist
+            of known "config/env read" call shapes, not a general
+            syntactic category — closer in spirit to ``stats.py``'s
+            ``_NOISE_NAMES`` than to a broad grammar-driven capture
+            (see the design doc's own framing). The key argument must
+            be a literal string node for a match to occur at all — a
+            dynamic key (``os.getenv(some_var)``) or an f-string/
+            template-literal key structurally does not match, so no
+            filtering-out step is needed for those; identifier-text
+            filtering (``@mod`` must actually read ``"os"``, etc.) is
+            done in ``extractor.py`` Python code rather than the query
+            itself, matching the codebase's established
+            capture-broadly-then-filter convention (see
+            ``extractor._CLASSDEF_KIND``). Set for every Tier-1
+            language (no permanent exclusion the way ``throw_query``/
+            ``catch_query`` exclude Rust/Go/C — an env-var read is
+            just a call/member-access expression, not a language
+            feature some languages structurally lack).
     """
 
     name: str
@@ -118,6 +142,7 @@ class LanguageSpec:
     heritage_query: str | None = None
     throw_query: str | None = None
     catch_query: str | None = None
+    env_read_query: str | None = None
 
 
 PYTHON = LanguageSpec(
@@ -177,6 +202,40 @@ PYTHON = LanguageSpec(
     catch_query="""
 (except_clause) @catch
 """,
+    # Three independent shapes, each a separate top-level pattern (one
+    # match per shape, disambiguated in ``extractor._env_read_python``
+    # by which captures are present — mirrors ``throw_query``'s
+    # ``@throw``/``@throws_clause`` dispatch). Every pattern requires
+    # the key argument/subscript to be a literal ``(string)`` node —
+    # a dynamic key (a bare variable) or an f-string key structurally
+    # fails to match the first two shapes at all; an f-string *does*
+    # still match (an f-string is also node type ``string``), so
+    # ``extractor._string_literal_value`` rejects it by its ``f``/``F``
+    # prefix. ``.`` anchors the key to the argument list's first
+    # child, so a default-value second argument
+    # (``os.getenv("PORT", "8080")``) is never captured. Verified live
+    # against the pinned tree-sitter-python grammar.
+    env_read_query="""
+(call
+  function: (attribute
+    object: (identifier) @mod
+    attribute: (identifier) @fn)
+  arguments: (argument_list . (string) @key)) @call
+
+(call
+  function: (attribute
+    object: (attribute
+      object: (identifier) @mod
+      attribute: (identifier) @sub)
+    attribute: (identifier) @fn)
+  arguments: (argument_list . (string) @key)) @call
+
+(subscript
+  value: (attribute
+    object: (identifier) @mod
+    attribute: (identifier) @sub)
+  subscript: (string) @key) @call
+""",
 )
 
 RUST = LanguageSpec(
@@ -228,6 +287,21 @@ RUST = LanguageSpec(
   name: (type_identifier) @classname
   bounds: (trait_bounds)? @bounds) @classdef
 """,
+    # ``std::env::var("X")``/``env::var("X")``/``*_os`` variants all
+    # parse as ``call_expression`` whose ``function`` is a (possibly
+    # nested) ``scoped_identifier`` — captured whole as ``@fn`` rather
+    # than matched shape-by-shape, since ``std::env::var`` and bare
+    # ``env::var`` differ in nesting depth but both render to plain
+    # ``::``-joined text; ``extractor._env_read_rust`` checks that
+    # text ends with ``env::var``/``env::var_os`` rather than the
+    # query itself branching on depth. ``.`` anchors the key to the
+    # first argument. Verified live against the pinned
+    # tree-sitter-rust grammar.
+    env_read_query="""
+(call_expression
+  function: (scoped_identifier) @fn
+  arguments: (arguments . (string_literal) @key)) @call
+""",
 )
 
 _C_DEFINITIONS = """
@@ -249,6 +323,21 @@ _C_DEFINITIONS = """
   body: (field_declaration_list)) @classdef
 """
 
+# C/C++'s bare ``getenv("X")`` is a plain ``call_expression`` whose
+# function is a bare ``identifier`` — no ``std``/``os``-style
+# namespace/attribute chain to walk, unlike every other language's
+# shape. ``.`` anchors the key to the first argument; ``extractor.
+# _env_read_c_cpp`` still requires ``@fn`` to read exactly
+# ``"getenv"`` (not merely contain it — see the design doc's
+# ``my_getenv_wrapper`` false-positive test). Verified live against
+# the pinned tree-sitter-c/tree-sitter-cpp grammars (both accept this
+# identical query).
+_C_ENV_READ_QUERY = """
+(call_expression
+  function: (identifier) @fn
+  arguments: (argument_list . (string_literal) @key)) @call
+"""
+
 C = LanguageSpec(
     name="c",
     grammar="c",
@@ -261,6 +350,7 @@ C = LanguageSpec(
 (preproc_include path: (_) @module)
 """,
     param_style="c",
+    env_read_query=_C_ENV_READ_QUERY,
 )
 
 CPP = LanguageSpec(
@@ -361,6 +451,7 @@ CPP = LanguageSpec(
 (catch_clause
   parameters: (parameter_list) @catch_params) @catch
 """,
+    env_read_query=_C_ENV_READ_QUERY,
 )
 
 # Function/method/closure node types shared by JS/TS/TSX's
@@ -446,6 +537,33 @@ _JS_CATCH_QUERY = """
 (catch_clause) @catch
 """
 
+# JS/TS/TSX ``process.env.X``/``process.env["X"]``: dot access reads
+# the key as a plain ``property_identifier`` (never dynamic — there is
+# no dot-access syntax for a computed name), so
+# ``extractor._env_read_js`` reads its text directly, no quote
+# stripping needed. Bracket access requires a literal ``(string)``
+# index — ``process.env[SOME_VAR]`` structurally fails to match (the
+# index node type is ``identifier``, not ``string``) and a template
+# literal (`` `APP_${x}` ``) parses as ``template_string``, a distinct
+# node type this pattern never captures either — both dynamic-key
+# forms are excluded by the query shape itself, no extra filtering
+# needed (unlike Python's f-string, which shares node type ``string``
+# with a plain literal). Confirmed live against the pinned
+# tree-sitter-javascript/typescript grammars.
+_JS_ENV_READ_QUERY = """
+(member_expression
+  object: (member_expression
+    object: (identifier) @proc
+    property: (property_identifier) @env)
+  property: (property_identifier) @key) @call
+
+(subscript_expression
+  object: (member_expression
+    object: (identifier) @proc
+    property: (property_identifier) @env)
+  index: (string) @key) @call
+"""
+
 JAVASCRIPT = LanguageSpec(
     name="javascript",
     grammar="javascript",
@@ -517,6 +635,7 @@ JAVASCRIPT = LanguageSpec(
 """,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
+    env_read_query=_JS_ENV_READ_QUERY,
 )
 
 _TS_DEFINITIONS = """
@@ -624,6 +743,7 @@ TYPESCRIPT = LanguageSpec(
     heritage_query=_TS_HERITAGE,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
+    env_read_query=_JS_ENV_READ_QUERY,
 )
 
 TSX = LanguageSpec(
@@ -641,6 +761,7 @@ TSX = LanguageSpec(
     heritage_query=_TS_HERITAGE,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
+    env_read_query=_JS_ENV_READ_QUERY,
 )
 
 # Type-reference edges (bug #1.1a): a struct/interface type used only
@@ -724,6 +845,21 @@ GO = LanguageSpec(
 """,
     param_style="go",
     reference_query=_GO_REFERENCE_QUERY,
+    # ``os.Getenv("X")``/``os.LookupEnv("X")`` are ``call_expression``
+    # whose function is a ``selector_expression`` with ``operand:``/
+    # ``field:`` fields; the key is an ``interpreted_string_literal``
+    # (Go also has ``raw_string_literal`` — backtick-quoted — not
+    # matched here, since a raw-string env-var key is vanishingly rare
+    # and the design table only specifies the interpreted form). ``.``
+    # anchors the key to the first argument. Verified live against the
+    # pinned tree-sitter-go grammar.
+    env_read_query="""
+(call_expression
+  function: (selector_expression
+    operand: (identifier) @mod
+    field: (field_identifier) @fn)
+  arguments: (argument_list . (interpreted_string_literal) @key)) @call
+""",
 )
 
 JAVA = LanguageSpec(
@@ -803,6 +939,17 @@ JAVA = LanguageSpec(
 (catch_clause
   (catch_formal_parameter
     (catch_type) @catch_type)) @catch
+""",
+    # ``System.getenv("X")`` is a ``method_invocation`` with an
+    # ``object:``/``name:`` field pair (unlike JS/Python's attribute-
+    # chain shape, Java fields these directly). ``.`` anchors the key
+    # to the first argument. Verified live against the pinned
+    # tree-sitter-java grammar.
+    env_read_query="""
+(method_invocation
+  object: (identifier) @sys
+  name: (identifier) @fn
+  arguments: (argument_list . (string_literal) @key)) @call
 """,
 )
 

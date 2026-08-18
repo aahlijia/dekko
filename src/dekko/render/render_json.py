@@ -172,5 +172,19 @@ def render_json(
             }
             for site in graph.catches
         ],
+        # Not routed through ``id_index`` like every section above —
+        # ``EnvRead`` needs no resolution pass, so ``caller_id`` is
+        # written as a plain string or ``null`` directly (see
+        # ``model.EnvRead``'s docstring).
+        "env_reads": [
+            {
+                "caller_id": r.caller_id,
+                "path": r.path,
+                "key": r.key,
+                "call": r.call,
+                "line": r.line,
+            }
+            for r in graph.env_reads
+        ],
     }
     return _json_dumps(doc) + b"\n"

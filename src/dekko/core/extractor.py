@@ -8,6 +8,7 @@ from typing import Callable
 from dekko.core.languages import LanguageSpec
 from dekko.core.model import (
     TYPE_KINDS,
+    EnvRead,
     FileMap,
     Import,
     Param,
@@ -95,6 +96,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     heritage = _collect_heritage(spec, tree.root_node, rel, defs)
     throws = _collect_throws(spec, tree.root_node, rel, defs)
     catches = _collect_catches(spec, tree.root_node, rel, defs)
+    env_reads = _collect_env_reads(spec, tree.root_node, rel, defs)
     imports = _collect_imports(spec, tree.root_node, rel)
     return FileMap(
         path=rel,
@@ -105,6 +107,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         heritage=heritage,
         throws=throws,
         catches=catches,
+        env_reads=env_reads,
         imports=imports,
         doc=_module_doc(spec.name, tree.root_node),
     )
@@ -1774,6 +1777,229 @@ def _collect_catches(
                 types=types,
                 bare=bare,
                 line=catch_node.start_point[0] + 1,
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------
+# Env-var reads (config/env value tracing — scoped pilot)
+
+
+def _string_literal_value(node: Node) -> str | None:
+    """Interior text of a plain string-literal node, or ``None`` when
+    the literal is an f-string — a dynamic-key form dekko can't
+    statically resolve, even one with no ``{...}`` interpolation at
+    all (e.g. ``f"PORT"``), rejected purely by its ``f``/``F`` prefix
+    rather than by inspecting for an ``interpolation`` child.
+
+    Handles every language's key-literal node shape captured by
+    ``LanguageSpec.env_read_query`` (Python's ``string``, Java/Rust/
+    Go/C/C++'s ``string_literal``/``interpreted_string_literal``) —
+    all quote a plain string body the same way once any prefix
+    (``r``/``b``/``u``/``f``, Python's only) is stripped. Every
+    non-Python language's env-read query captures only a node type
+    that a computed/formatted key structurally cannot produce (a JS
+    template literal is node type ``template_string``, not
+    ``string``; Rust's ``format!`` is a macro call, not a
+    ``string_literal`` argument) — so this f-prefix check is a
+    Python-only concern in practice, harmless as a no-op elsewhere.
+    """
+    raw = _raw(node)
+    prefix_match = _STR_PREFIX.match(raw)
+    prefix = prefix_match.group(0) if prefix_match else ""
+    if "f" in prefix.lower():
+        return None
+    text = raw[len(prefix) :]
+    for quote in ('"""', "'''", '"', "'"):
+        if (
+            text.startswith(quote)
+            and text.endswith(quote)
+            and len(text) >= 2 * len(quote)
+        ):
+            return text[len(quote) : -len(quote)]
+    return None
+
+
+def _env_read_python(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one Python env-read match, or
+    ``None`` when the identifier names don't match a known shape or
+    the key literal is an f-string.
+
+    Dispatches on which captures are present (mirrors ``_catch_
+    entries``' presence-based dispatch): ``sub`` absent means the
+    two-level ``os.getenv(...)`` shape; ``sub`` + ``fn`` present means
+    the three-level ``os.environ.get(...)`` shape; ``sub`` present
+    without ``fn`` means the ``os.environ[...]`` subscript form.
+    """
+    mod = _one(caps, "mod")
+    key_node = _one(caps, "key")
+    if mod is None or key_node is None or _text(mod) != "os":
+        return None
+    sub = _one(caps, "sub")
+    fn = _one(caps, "fn")
+    if sub is not None:
+        if _text(sub) != "environ":
+            return None
+        call = "os.environ[]"
+        if fn is not None:
+            if _text(fn) != "get":
+                return None
+            call = "os.environ.get"
+    elif fn is not None and _text(fn) == "getenv":
+        call = "os.getenv"
+    else:
+        return None
+    value = _string_literal_value(key_node)
+    return (call, value) if value is not None else None
+
+
+def _env_read_js(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one JS/TS/TSX env-read match.
+
+    The dot-access shape's ``@key`` is a plain ``property_identifier``
+    — its text *is* the env-var name already, never dynamic (dot
+    syntax has no computed-name form). The bracket-access shape's
+    ``@key`` is a ``(string)`` node, unwrapped by
+    ``_string_literal_value``; a computed bracket key
+    (``process.env[SOME_VAR]``) or template literal
+    (`` `APP_${x}` ``) never matches the query's ``(string)``/
+    ``property_identifier`` node types at all (see
+    ``languages._JS_ENV_READ_QUERY``'s docstring), so no extra
+    dynamic-key filtering is needed here.
+    """
+    proc = _one(caps, "proc")
+    env = _one(caps, "env")
+    key_node = _one(caps, "key")
+    if proc is None or env is None or key_node is None:
+        return None
+    if _text(proc) != "process" or _text(env) != "env":
+        return None
+    if key_node.type == "property_identifier":
+        return "process.env", _text(key_node)
+    value = _string_literal_value(key_node)
+    return ("process.env[]", value) if value is not None else None
+
+
+def _env_read_java(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one Java ``System.getenv(...)`` match."""
+    sys_node = _one(caps, "sys")
+    fn = _one(caps, "fn")
+    key_node = _one(caps, "key")
+    if sys_node is None or fn is None or key_node is None:
+        return None
+    if _text(sys_node) != "System" or _text(fn) != "getenv":
+        return None
+    value = _string_literal_value(key_node)
+    return ("System.getenv", value) if value is not None else None
+
+
+def _env_read_rust(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one Rust ``env::var``-family match.
+
+    ``call`` is the captured scoped-identifier text exactly as
+    written (``std::env::var``, bare ``env::var``, either's ``_os``
+    variant) rather than a canonicalized label — so the same key read
+    via ``std::env::var`` in one function and bare ``env::var`` (after
+    a local ``use std::env;``) in another still surfaces as two
+    distinct ``call`` values, same as every other language's
+    shape-disclosure intent.
+    """
+    fn = _one(caps, "fn")
+    key_node = _one(caps, "key")
+    if fn is None or key_node is None:
+        return None
+    fn_text = _text(fn)
+    if not (fn_text.endswith("::var") or fn_text.endswith("::var_os")):
+        return None
+    value = _string_literal_value(key_node)
+    return (fn_text, value) if value is not None else None
+
+
+def _env_read_go(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one Go ``os.Getenv``/``os.LookupEnv``
+    match."""
+    mod = _one(caps, "mod")
+    fn = _one(caps, "fn")
+    key_node = _one(caps, "key")
+    if mod is None or fn is None or key_node is None:
+        return None
+    if _text(mod) != "os":
+        return None
+    fn_name = _text(fn)
+    if fn_name not in ("Getenv", "LookupEnv"):
+        return None
+    value = _string_literal_value(key_node)
+    return (f"os.{fn_name}", value) if value is not None else None
+
+
+def _env_read_c_cpp(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one C/C++ bare ``getenv(...)`` match."""
+    fn = _one(caps, "fn")
+    key_node = _one(caps, "key")
+    if fn is None or key_node is None or _text(fn) != "getenv":
+        return None
+    value = _string_literal_value(key_node)
+    return ("getenv", value) if value is not None else None
+
+
+# Per-language env-read match walker, keyed by ``LanguageSpec.name`` —
+# every walker returns ``(call_shape, key)`` for a name-matched hit or
+# ``None`` for a structurally-matched but name-mismatched call (e.g.
+# Python's ``json.dumps("x")``, which shares ``os.getenv``'s two-level
+# attribute-call shape; see the design doc's own "curated, not general
+# string-matching" precision requirement).
+_ENV_READ_DISPATCH: dict[
+    str, Callable[[dict[str, list[Node]]], tuple[str, str] | None]
+] = {
+    "python": _env_read_python,
+    "javascript": _env_read_js,
+    "typescript": _env_read_js,
+    "tsx": _env_read_js,
+    "java": _env_read_java,
+    "rust": _env_read_rust,
+    "go": _env_read_go,
+    "c": _env_read_c_cpp,
+    "cpp": _env_read_c_cpp,
+}
+
+
+def _collect_env_reads(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[EnvRead]:
+    """Find statically-known environment-variable read call sites,
+    attributed to their enclosing definition.
+
+    A detector, not a resolver — the literal key text extracted here
+    *is* the fully-resolved fact (see ``model.EnvRead``'s docstring).
+    Mirrors ``_collect_throws``/``_collect_catches``'s "no query for
+    this language" empty-list shape, though every Tier-1 language sets
+    ``env_read_query`` (no permanent per-language exclusion here, per
+    ``LanguageSpec.env_read_query``'s docstring).
+    """
+    if spec.env_read_query is None:
+        return []
+    dispatch = _ENV_READ_DISPATCH.get(spec.name)
+    if dispatch is None:
+        return []
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    out: list[EnvRead] = []
+    for _, caps in _run_query(spec.grammar, spec.env_read_query, root):
+        call_node = _one(caps, "call")
+        if call_node is None:
+            continue
+        hit = dispatch(caps)
+        if hit is None:
+            continue
+        call, key = hit
+        caller = _enclosing(spans, call_node.start_byte)
+        out.append(
+            EnvRead(
+                caller_id=caller.id if caller else None,
+                path=rel,
+                key=key,
+                call=call,
+                line=call_node.start_point[0] + 1,
             )
         )
     return out

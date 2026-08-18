@@ -20,6 +20,8 @@ dekko query subtypes Serializable --relation implements  # filter to one relatio
 dekko query throws load_config       # what load_config's own body raises (one level, not transitive)
 dekko query throws load_config --transitive --depth 3  # + everything its callees raise, depth-capped
 dekko query catches ConfigError      # every catch clause that would handle ConfigError
+dekko query env DATABASE_URL         # every statically-known read site for this env var
+dekko query env --list               # every distinct env var read anywhere, ranked by read-site count
 dekko context run_map --budget 1500  # minimal context pack for an edit
 dekko search "retries failed http requests"  # free-text relevance search
 dekko search "..." --scorer embedding        # optional; needs dekko[search]
@@ -404,6 +406,58 @@ not an assumed-away one.
 pilot framing and the JS/TS caveat above, this doesn't yet clear the
 bar `get_callers`/`find_type_usages` cleared for always-loaded MCP
 schema rent; revisit once real usage confirms the signal is worth it.
+
+## Interpreting `dekko query env`
+
+`env` finds statically-known environment-variable **read** call sites
+— "where is `DATABASE_URL` read" — across a small, hand-curated
+allowlist of known `getenv`-shaped call idioms per language: Python's
+`os.getenv(...)`/`os.environ.get(...)`/`os.environ[...]`, JS/TS's
+`process.env.X`/`process.env["X"]`, Java's `System.getenv(...)`,
+Rust's `std::env::var(...)`/`env::var(...)`/their `_os` variants, Go's
+`os.Getenv(...)`/`os.LookupEnv(...)`, and C/C++'s bare `getenv(...)`.
+All Tier-1 languages are covered (unlike `throws`/`catches`, there's
+no Rust/Go/C exclusion here — an env-var read is just a call/member
+expression, not a language feature some languages structurally lack).
+
+This is a **detector, not a resolver** — it is explicitly **not**:
+
+- A general string-literal search (`search` already covers free-text
+  lookups, imperfectly; this doesn't replace or extend that).
+- Assignment/data-flow tracking. "Where does the value read from
+  `DATABASE_URL` end up, and does anything override it" is out of
+  scope — only the read call site itself is indexed.
+- Config-*file* tracing (YAML/JSON/TOML/`.env` key lookups) — scoped
+  to in-source `getenv`-shaped call expressions only.
+
+```sh
+dekko query env DATABASE_URL   # every read site for this exact env-var name
+dekko query env --list         # every distinct env-var name read anywhere, with read-site counts
+```
+
+`env <NAME>` is an **exact-match** lookup (no loose/token matching,
+and no case-folding — `PORT` and `port` are genuinely different keys,
+matching how environment variables actually behave on POSIX systems).
+`--list` is the aggregate view: every distinct key read anywhere,
+ranked by read-site count descending. `TARGET` may be omitted only
+with `--list`; every other action still requires it.
+
+Only a **literal string** key argument produces a match —
+`os.getenv(some_var)` (a variable) and `os.getenv(f"APP_{suffix}")`
+(an f-string/template-literal key) are correctly invisible here, not
+a bug: a dynamically-constructed key name is genuinely unknowable
+without running the code, so no attempt is made to guess it. A
+default-value second argument, when present (`os.getenv("PORT",
+"8080")`), is never captured or shown — only the key matters for this
+command's question. The same key read via two different call idioms
+in one file (`os.getenv("PORT")` in one function, `os.environ["PORT"]`
+in another) correctly surfaces as two distinct rows, so an agent can
+see the idiom difference without a second lookup.
+
+`env` is **CLI-only** (no MCP tool) — an even narrower, single-purpose
+scope than `throws`/`catches`'s own CLI-only pilot; revisit if a
+recurring "which env vars does this service read" need surfaces for
+an MCP-only agent session.
 
 ## Daemon mode
 

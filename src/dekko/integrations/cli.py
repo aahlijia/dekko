@@ -332,14 +332,18 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_query.add_argument("action", choices=query.ACTIONS)
     p_query.add_argument(
         "target",
+        nargs="?",
+        default=None,
         help="symbol (name, Class.method, file.py:func), file path, or "
         "(for uses) an external base identifier, or (for type/"
         "supertypes/subtypes) a type/class/struct/interface name, or "
         "(for catches) a raised type name (e.g. ConfigError, "
-        "ValueError); 'throws' takes a function/method symbol like "
+        "ValueError), or (for env) a literal env-var name (e.g. "
+        "DATABASE_URL); 'throws' takes a function/method symbol like "
         "callers/callees. Append ':LINE' (file.py:Class.method:LINE) "
         "to pick one candidate out of an overload set the "
-        "ambiguous-candidate error reports",
+        "ambiguous-candidate error reports. Required for every action "
+        "except 'env --list'",
     )
     p_query.add_argument(
         "--limit",
@@ -405,6 +409,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="for 'peers': minimum shared callees to count as a peer "
         f"(default: {query.DEFAULT_MIN_SHARED})",
+    )
+    p_query.add_argument(
+        "--list",
+        dest="env_list",
+        action="store_true",
+        help="for 'env': every distinct env-var key read anywhere in "
+        "the repo, ranked by read-site count, instead of looking up "
+        "one TARGET key — TARGET may be omitted with this flag",
     )
     _add_read_options(p_query)
     p_query.set_defaults(func=run_query)
@@ -1443,14 +1455,29 @@ def _read_index(
 
 
 def run_query(args: argparse.Namespace) -> int:
-    """Handle ``dekko query``."""
+    """Handle ``dekko query``.
+
+    ``target`` is an optional positional at the argparse level (see
+    ``build_subcommand_parser``) purely so ``env --list`` can omit it
+    — every other action still requires it, enforced here rather than
+    by argparse, since argparse's own "required" plumbing can't
+    express "required unless this other flag is set" (mirrors
+    ``run_workset``'s ``--symbol``/``REV`` mutual-exclusion check).
+    """
+    if args.target is None and not (args.action == "env" and args.env_list):
+        print(
+            f"dekko: '{args.action}' requires TARGET "
+            "(only 'env --list' can omit it)",
+            file=sys.stderr,
+        )
+        return query.EXIT_USAGE_ERROR
     index, code = _read_index(args)
     if index is None:
         return code
     return query.run(
         index,
         args.action,
-        args.target,
+        args.target or "",
         as_json=args.as_json,
         limit=args.limit,
         sites=args.sites,
@@ -1461,6 +1488,7 @@ def run_query(args: argparse.Namespace) -> int:
         relation=args.relation,
         min_shared=args.min_shared,
         depth=args.depth,
+        env_list=args.env_list,
     )
 
 

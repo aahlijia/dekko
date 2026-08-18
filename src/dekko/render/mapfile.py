@@ -24,6 +24,7 @@ from dekko.core.languages import spec_fingerprint
 from dekko.core.model import (
     CallGraph,
     CatchSite,
+    EnvRead,
     ExternalCall,
     FileMap,
     Import,
@@ -41,7 +42,7 @@ try:
 except ImportError:  # pragma: no cover - exercised in stdlib-only envs
     orjson = None  # type: ignore[assignment]
 
-MAP_DOC_VERSION = 8
+MAP_DOC_VERSION = 9
 _MAP_DIR = ".dekko"
 
 
@@ -617,6 +618,18 @@ class MapIndex:
             ``dekko query catches Y`` request scans this list by name
             rather than through a resolved-id index (see
             ``model.CatchSite``'s docstring for why).
+        env_reads_by_key: Literal env-var name → every read site
+            naming it, repo-wide (empty for maps written before doc
+            version 9) — see ``model.EnvRead``. Grouped by ``key``
+            rather than caller-indexed like ``throws_out``/``catches``,
+            since ``dekko query env NAME`` is a name lookup, not a
+            per-symbol walk; ``--list`` iterates this dict directly for
+            its "distinct keys by read-site count" ranking. No
+            resolved/candidate-ladder shape needed — the literal key
+            text is already the fully-resolved fact, so unlike every
+            other new field this doc set's designs added, there is no
+            corresponding `env_reads_ambiguous`/`env_reads_external`
+            side table.
         notes: Symbol id → note texts loaded from ``.dekko/notes.json``.
         provenance: Provenance stamp, or ``None`` for v1 documents.
         doc_version: The on-disk document's ``"version"`` field (``1``
@@ -684,6 +697,7 @@ class MapIndex:
         default_factory=dict
     )
     catches: list[CatchSite] = field(default_factory=list)
+    env_reads_by_key: dict[str, list[EnvRead]] = field(default_factory=dict)
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
     doc_version: int = MAP_DOC_VERSION
@@ -767,6 +781,7 @@ class MapIndex:
         _filter_heritage(self, out, by_id)
         _filter_module_graph(self, out)
         _filter_throws_catches(self, out, by_id)
+        _filter_env_reads(self, out)
         return out
 
 
@@ -930,6 +945,24 @@ def _filter_throws_catches(
         if _prod_id(caller, by_id):
             out.throws_bare_out[caller] = sites
     out.catches = [c for c in src.catches if _prod_id(c.caller, by_id)]
+
+
+def _filter_env_reads(src: "MapIndex", out: "MapIndex") -> None:
+    """Fill ``out.env_reads_by_key`` from ``src``, test-path reads
+    dropped.
+
+    Filtered on ``EnvRead.path`` directly (mirrors
+    ``_filter_module_graph``'s path-keyed filtering), not via
+    ``_prod_id`` — an ``EnvRead``'s ``caller_id`` is disclosure-only
+    (see ``model.EnvRead``'s docstring), not something ``dekko query
+    env`` looks up by id, so there's no adjacency table here requiring
+    symbol-level classification the way ``_filter_throws_catches``
+    needs.
+    """
+    for key, reads in src.env_reads_by_key.items():
+        kept = [r for r in reads if not is_test_path(r.path)]
+        if kept:
+            out.env_reads_by_key[key] = kept
 
 
 @dataclass
@@ -1168,6 +1201,7 @@ def load_map(root: Path) -> MapIndex | None:
     _load_heritage(index, doc, ids)
     _load_module_graph(index, doc, ids)
     _load_throws_catches(index, doc, ids)
+    _load_env_reads(index, doc)
     return index
 
 
@@ -1294,6 +1328,30 @@ def _load_throws_catches(
         )
 
 
+def _load_env_reads(index: MapIndex, doc: dict) -> None:
+    """Fill ``index.env_reads_by_key`` from a parsed ``map.json`` doc.
+
+    Split out of ``load_map`` for the same reason ``_load_heritage``/
+    ``_load_module_graph``/``_load_throws_catches`` are. Absent
+    entirely from documents written before doc version 9 —
+    ``.get("env_reads", [])`` defaults make this a no-op for those.
+    No id table involved here (unlike every ``_load_*`` sibling above)
+    — ``caller_id`` is written and read as a plain string or ``null``,
+    not routed through the shared ``ids`` intern table (see
+    ``model.EnvRead``'s docstring: no resolution pass populates this
+    field, so there's nothing to resolve on read either).
+    """
+    for d in doc.get("env_reads", []):
+        read = EnvRead(
+            caller_id=d.get("caller_id"),
+            path=d.get("path", ""),
+            key=d.get("key", ""),
+            call=d.get("call", ""),
+            line=d.get("line", 0),
+        )
+        index.env_reads_by_key.setdefault(read.key, []).append(read)
+
+
 def _index_ambiguous(
     entries: Iterator[tuple[str, str, list[str]]],
 ) -> tuple[dict[str, list[tuple[str, str]]], dict[str, list[str]]]:
@@ -1387,6 +1445,7 @@ def index_from_maps(
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
     _index_module_graph(index, graph)
     _index_throws_catches(index, graph)
+    _index_env_reads(index, graph)
     return index
 
 
@@ -1432,6 +1491,18 @@ def _index_throws_catches(index: MapIndex, graph: CallGraph) -> None:
     for caller, path, line in graph.throws_bare:
         index.throws_bare_out.setdefault(caller, []).append((path, line))
     index.catches = list(graph.catches)
+
+
+def _index_env_reads(index: MapIndex, graph: CallGraph) -> None:
+    """The ``index_from_maps`` fill-in loop for env-var reads.
+
+    Split out for the same reason ``_index_module_graph``/``_index_
+    throws_catches`` are. A plain grouping pass, not a mirror of
+    ``_load_env_reads``'s id-resolution shape — no resolution or
+    symbol-id lookup is needed (see ``model.EnvRead``'s docstring).
+    """
+    for read in graph.env_reads:
+        index.env_reads_by_key.setdefault(read.key, []).append(read)
 
 
 def check_freshness(root: Path, index: MapIndex) -> Freshness:

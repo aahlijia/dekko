@@ -223,6 +223,11 @@ def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
         graph.throws_bare,
     ) = resolve_throws(files)
     graph.catches = resolve_catches(files)
+    # No resolution pass needed — a literal env-var key is already the
+    # fully-resolved fact (see model.EnvRead's docstring), so this is
+    # a plain flatten across files, not a call into a dedicated
+    # resolve_env_reads() the way every other section above is.
+    graph.env_reads = [r for fm in files for r in fm.env_reads]
     return graph
 
 

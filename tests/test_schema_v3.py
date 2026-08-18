@@ -39,10 +39,10 @@ def _resolve(doc: dict, ref: int) -> str:
     return doc["ids"][ref]
 
 
-def test_doc_version_is_8(make_mapped_repo: RepoFactory) -> None:
-    # Bumped 7 -> 8 for throws/catches (exception/error-flow tracing).
+def test_doc_version_is_9(make_mapped_repo: RepoFactory) -> None:
+    # Bumped 8 -> 9 for env_reads (config/env value read tracing).
     doc = _map_doc(make_mapped_repo(SRC))
-    assert doc["version"] == 8
+    assert doc["version"] == 9
 
 
 def test_edges_carry_call_site_lines(make_mapped_repo: RepoFactory) -> None:

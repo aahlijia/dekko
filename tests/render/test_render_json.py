@@ -202,9 +202,9 @@ def test_round_trip_matches_index_from_maps(tmp_path: Path) -> None:
     assert loaded.module_external == expected.module_external
 
 
-def test_map_doc_version_is_8() -> None:
-    # Bumped 7 -> 8 for throws/catches (exception/error-flow tracing).
-    assert mapfile.MAP_DOC_VERSION == 8
+def test_map_doc_version_is_9() -> None:
+    # Bumped 8 -> 9 for env_reads (config/env value read tracing).
+    assert mapfile.MAP_DOC_VERSION == 9
 
 
 def test_backward_read_v5_document_without_heritage_sections(

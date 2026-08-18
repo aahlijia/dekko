@@ -308,6 +308,46 @@ class CatchSite:
 
 
 @dataclass
+class EnvRead:
+    """A statically-known environment-variable read call site.
+
+    A deliberately scoped detector, not a resolver: the literal key
+    text *is* the fully-resolved fact, so unlike every other fact this
+    module models, there is no separate raw/resolved pair and no
+    resolution pass at all (see ``languages.LanguageSpec.
+    env_read_query``'s docstring and the design doc's own framing).
+    Config-value *flow* (assignment tracking, override detection,
+    config-file parsing) is explicitly out of scope — this only
+    records where a known ``getenv``-shaped call reads a literal key.
+
+    Attributes:
+        caller_id: Symbol id of the enclosing definition, or ``None``
+            for a module-level read.
+        path: File the read appears in.
+        key: The literal env-var name read, exactly as written (no
+            normalization — ``"PORT"`` and ``"port"`` are kept
+            distinct, since environment variable names are commonly
+            case-sensitive by OS convention and this design does not
+            guess at case-insensitivity).
+        call: The matched call shape as written (``os.getenv``,
+            ``os.environ.get``, ``os.environ[]``, ``process.env``,
+            ``process.env[]``, ``System.getenv``, ``std::env::var``/
+            ``env::var``/``env::var_os``, ``os.Getenv``/
+            ``os.LookupEnv``, ``getenv``) — kept for disclosure, so an
+            agent can see which idiom was used without a second
+            lookup, and so the same key read via two different idioms
+            in one file surfaces as two distinct entries.
+        line: 1-based line of the read.
+    """
+
+    caller_id: str | None
+    path: str
+    key: str
+    call: str
+    line: int = 0
+
+
+@dataclass
 class Import:
     """A name imported into a file.
 
@@ -335,6 +375,12 @@ class FileMap:
             ``languages.LanguageSpec.throw_query``).
         catches: Except/catch clauses (Python/Java/C++/JS/TS only —
             see ``languages.LanguageSpec.catch_query``).
+        env_reads: Statically-known environment-variable read call
+            sites (Python/JS/TS/Java/Rust/Go/C/C++ — see
+            ``languages.LanguageSpec.env_read_query``). Already fully
+            resolved at extraction time — no separate resolver pass
+            populates this the way ``calls``/``heritage``/``throws``
+            are turned into edges (see ``model.EnvRead``'s docstring).
         doc: First line of the file's module docstring or leading
             comment, or ``None`` (best-effort, per language).
     """
@@ -347,6 +393,7 @@ class FileMap:
     heritage: list[RawHeritage] = field(default_factory=list)
     throws: list[RawThrow] = field(default_factory=list)
     catches: list[RawCatch] = field(default_factory=list)
+    env_reads: list[EnvRead] = field(default_factory=list)
     imports: list[Import] = field(default_factory=list)
     error: str | None = None
     doc: str | None = None
@@ -517,6 +564,11 @@ class CallGraph:
         catches: Every except/catch clause across the repo, resolved
             (see ``RawCatch``/``CatchSite``) — Python/Java/C++/JS/TS
             only, same scope as ``throws``.
+        env_reads: Every statically-known environment-variable read
+            call site across the repo (see ``EnvRead``) — populated
+            straight from each file's ``FileMap.env_reads``, no
+            resolver pass involved (the literal key text is already
+            the fully-resolved fact).
     """
 
     edges: list[Edge] = field(default_factory=list)
@@ -543,3 +595,4 @@ class CallGraph:
     throws_external: list[ExternalCall] = field(default_factory=list)
     throws_bare: list[tuple[str, str, int]] = field(default_factory=list)
     catches: list[CatchSite] = field(default_factory=list)
+    env_reads: list[EnvRead] = field(default_factory=list)

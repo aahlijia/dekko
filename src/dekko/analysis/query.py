@@ -23,6 +23,7 @@ from dekko.render.mapfile import MapIndex, format_unsupported
 from dekko.core.model import (
     TYPE_KINDS,
     CatchSite,
+    EnvRead,
     ExternalCall,
     Import,
     Symbol,
@@ -33,6 +34,11 @@ from dekko.core.resolver import MODULE_CALLER_SUFFIX
 EXIT_OK = 0
 EXIT_NOT_FOUND = 3
 EXIT_AMBIGUOUS = 4
+# CLI-level usage error (a required TARGET missing for an action other
+# than 'env --list') — mirrors ``workset.EXIT_ERROR``'s value; used by
+# ``cli.run_query`` before ``run()`` is even called, not by anything
+# in this module itself.
+EXIT_USAGE_ERROR = 2
 
 ACTIONS = (
     "callers",
@@ -47,6 +53,7 @@ ACTIONS = (
     "peers",
     "throws",
     "catches",
+    "env",
 )
 
 # Valid ``--relation``/``relation=`` filter values for supertypes/
@@ -92,6 +99,7 @@ _BUDGETED_ACTIONS = (
     "peers",
     "throws",
     "catches",
+    "env",
 )
 
 # Identifier-token pattern for the default (non-``--exact``) ``type``
@@ -1275,6 +1283,220 @@ def _run_catches(
     return EXIT_OK, _emit_lines(lines_out, budget, limit)
 
 
+# Caveat surfaced in ``env``'s own output (not just ``--help``),
+# matching ``catches``'/``throws``' precedent of disclosing scope
+# limits in the command's own result, not only reference docs — see
+# the design doc's own "disclose the scope boundary in the same
+# document a user would read to learn the command exists" discipline.
+_ENV_CAVEAT = (
+    "detects statically-known getenv-shaped read call sites only — "
+    "not a general string-literal search, not assignment/data-flow "
+    'tracking ("where does the value end up" is out of scope), and '
+    "not config-file (YAML/JSON/TOML/.env) key tracing. A dynamic key "
+    "(os.getenv(some_var), an f-string/template-literal key) is "
+    "correctly invisible here — no attempt is made to guess it."
+)
+
+
+def _env_call_display(call: str, key: str) -> str:
+    """Reconstruct a readable call-expression string for one env-read
+    row (``os.getenv("KEY")``, ``os.environ["KEY"]``,
+    ``process.env.KEY``) from its stored ``call`` shape label and
+    literal ``key``.
+
+    A second, default-value argument the original call may have had
+    (``os.getenv("PORT", "8080")``) is never reconstructed here — the
+    extractor only captures the key argument (see ``model.EnvRead``'s
+    docstring), so there is nothing to show for it.
+    """
+    if call == "process.env":
+        return f"process.env.{key}"
+    if call.endswith("[]"):
+        return f'{call[:-2]}["{key}"]'
+    return f'{call}("{key}")'
+
+
+def _env_caller_label(index: MapIndex, read: EnvRead) -> str:
+    """Human-readable label for an env-read's enclosing definition.
+
+    ``caller_id`` is ``None`` for a module-level read (see
+    ``model.EnvRead``'s docstring) — rendered the same "<module
+    level>" way every other module-level-origin fact already is
+    (``_caller_label``'s throws/catches counterpart), just without a
+    ``MODULE_CALLER_SUFFIX`` pseudo-id round trip: ``EnvRead`` stores
+    ``None`` directly since nothing else needs to look this fact up
+    by id.
+    """
+    if read.caller_id is None:
+        return f"{read.path} <module level>"
+    sym = index.symbols_by_id.get(read.caller_id)
+    return sym.qualname if sym is not None else read.caller_id
+
+
+def _env_row(read: EnvRead) -> str:
+    """One text row for an ``env`` hit."""
+    call = _env_call_display(read.call, read.key)
+    return f"{read.path}:{read.line}   {call}"
+
+
+def _env_entry(index: MapIndex, read: EnvRead) -> dict:
+    """One JSON entry for an ``env`` hit."""
+    return {
+        "path": read.path,
+        "line": read.line,
+        "key": read.key,
+        "call": read.call,
+        "caller": _env_caller_label(index, read),
+    }
+
+
+def _run_env_not_found(index: MapIndex, needle: str) -> int:
+    """Report an ``env`` target with zero matching read sites."""
+    print(f"dekko: no env-var reads found for '{needle}'", file=sys.stderr)
+    close = _close_names(needle, sorted(index.env_reads_by_key))
+    if close:
+        print("closest env vars: " + ", ".join(close), file=sys.stderr)
+    coverage = _coverage_note(index)
+    if coverage:
+        print(f"  note: {coverage}", file=sys.stderr)
+    return EXIT_NOT_FOUND
+
+
+def _run_env(
+    index: MapIndex,
+    needle: str,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute the env action: every read site for one literal env-var
+    name.
+
+    Exact match only against ``index.env_reads_by_key`` — no loose/
+    token matching needed, since env-var names are conventionally
+    atomic ``SCREAMING_SNAKE_CASE`` tokens, not composite type-
+    annotation text the way ``type``'s matching needs (see the design
+    doc). Case-sensitive: ``DATABASE_URL`` and ``database_url`` are
+    genuinely different keys (see ``model.EnvRead``'s docstring).
+
+    Args:
+        index: Loaded map index.
+        needle: Literal env-var name to search for.
+        as_json: Emit structured JSON instead of text.
+        limit: Cap on text result rows.
+        budget: Approximate token budget for the result rows.
+
+    Returns:
+        ``(exit_code, meter)`` — meter is ``None`` for JSON output or
+        a not-found result.
+    """
+    reads = index.env_reads_by_key.get(needle, [])
+    if not reads:
+        return _run_env_not_found(index, needle), None
+    reads = sorted(reads, key=lambda r: (is_test_path(r.path), r.path, r.line))
+    if as_json:
+        entries = [_env_entry(index, r) for r in reads]
+        kept, meter = _fit_entries(entries, budget, limit)
+        doc = {
+            "action": "env",
+            "key": needle,
+            "results": kept,
+            "note": _ENV_CAVEAT,
+            "meta": meter.as_dict(),
+        }
+        coverage = _coverage_note(index)
+        if coverage:
+            doc["coverage_warning"] = coverage
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK, None
+    print(f"  note: {_ENV_CAVEAT}", file=sys.stderr)
+    lines = [_env_row(r) for r in reads]
+    return EXIT_OK, _emit_lines(lines, budget, limit)
+
+
+def _env_list_row(key: str, count: int) -> str:
+    """One text row for the ``env --list`` aggregate view."""
+    return f"{count:>6}  {key}"
+
+
+def _env_list_entry(key: str, count: int) -> dict:
+    """One JSON entry for the ``env --list`` aggregate view."""
+    return {"key": key, "read_sites": count}
+
+
+def _run_env_list(
+    index: MapIndex,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute ``env --list``: every distinct env-var key read
+    anywhere in the repo, ranked by read-site count descending — the
+    aggregate view, closer in shape to ``unused``'s flat listing than
+    to a ``--by``-grouped report (no natural sub-grouping beyond
+    "distinct key, sorted by count").
+
+    Args:
+        index: Loaded map index.
+        as_json: Emit structured JSON instead of text.
+        limit: Cap on text result rows.
+        budget: Approximate token budget for the result rows.
+
+    Returns:
+        ``(exit_code, meter)`` — meter is ``None`` for JSON output or
+        an empty result.
+    """
+    counts = sorted(
+        ((key, len(reads)) for key, reads in index.env_reads_by_key.items()),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    coverage = _coverage_note(index)
+    if not counts:
+        if as_json:
+            doc = {
+                "action": "env",
+                "list": True,
+                "distinct_keys": 0,
+                "results": [],
+                "note": _ENV_CAVEAT,
+                "meta": {},
+            }
+            if coverage:
+                doc["coverage_warning"] = coverage
+            print(json.dumps(doc, indent=2))
+            return EXIT_OK, None
+        print("dekko: no statically-known env-var reads found")
+        if coverage:
+            print(f"  note: {coverage}", file=sys.stderr)
+        return EXIT_OK, None
+    files = {
+        r.path for reads in index.env_reads_by_key.values() for r in reads
+    }
+    if as_json:
+        entries = [_env_list_entry(k, c) for k, c in counts]
+        kept, meter = _fit_entries(entries, budget, limit)
+        doc = {
+            "action": "env",
+            "list": True,
+            "distinct_keys": len(counts),
+            "files": len(files),
+            "results": kept,
+            "note": _ENV_CAVEAT,
+            "meta": meter.as_dict(),
+        }
+        if coverage:
+            doc["coverage_warning"] = coverage
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK, None
+    header = (
+        f"dekko: {len(counts)} distinct env vars read across "
+        f"{len(files)} files"
+    )
+    print(f"  note: {_ENV_CAVEAT}", file=sys.stderr)
+    lines_out = [header] + [_env_list_row(k, c) for k, c in counts]
+    return EXIT_OK, _emit_lines(lines_out, budget, limit)
+
+
 def _shadow_note(index: MapIndex, target: str) -> str | None:
     """Caveat when an in-repo symbol shares the queried external name.
 
@@ -2087,9 +2309,11 @@ def _dispatch_scan(
     limit: int,
     budget: int | None,
     exact: bool,
+    env_list: bool,
 ) -> tuple[int, Meter | None] | None:
     """Route the whole-repo-scan actions that never resolve a symbol
-    target (``file``/``uses``/``type``/``importers``/``catches``).
+    target (``file``/``uses``/``type``/``importers``/``catches``/
+    ``env``).
 
     Split out of ``_dispatch`` purely to keep that function's
     cyclomatic complexity under the project's Ruff limit. Returns
@@ -2106,6 +2330,10 @@ def _dispatch_scan(
         return _run_importers(index, target, exact, as_json, limit, budget)
     if action == "catches":
         return _run_catches(index, target, as_json, limit, budget)
+    if action == "env":
+        if env_list:
+            return _run_env_list(index, as_json, limit, budget)
+        return _run_env(index, target, as_json, limit, budget)
     return None
 
 
@@ -2123,10 +2351,11 @@ def _dispatch(
     relation: str | None,
     min_shared: int,
     depth: int,
+    env_list: bool,
 ) -> tuple[int, Meter | None]:
     """Route one query action to its executor."""
     scanned = _dispatch_scan(
-        index, action, target, as_json, limit, budget, exact
+        index, action, target, as_json, limit, budget, exact, env_list
     )
     if scanned is not None:
         return scanned
@@ -2165,6 +2394,7 @@ def run(
     relation: str | None = None,
     min_shared: int = DEFAULT_MIN_SHARED,
     depth: int = DEFAULT_THROWS_DEPTH,
+    env_list: bool = False,
 ) -> int:
     """Execute one query action against a loaded index.
 
@@ -2175,7 +2405,10 @@ def run(
             identifier of an external reference (``run``, ``Path``);
             for ``type``, a type/class/struct/interface name; for
             ``catches``, a raised type name (``ConfigError``,
-            ``ValueError``).
+            ``ValueError``); for ``env``, a literal env-var name
+            (``DATABASE_URL``) — ignored (may be an empty string) when
+            ``env_list`` is set, since ``env --list`` scans the whole
+            repo rather than looking up one key.
         as_json: Emit structured JSON instead of text.
         limit: Cap on text result rows.
         sites: For callers/callees, print one row per call site
@@ -2205,6 +2438,10 @@ def run(
             count as a peer (default: ``DEFAULT_MIN_SHARED``).
         depth: For ``throws --transitive``, the call-graph walk's hop
             cap (default: ``DEFAULT_THROWS_DEPTH``); ignored otherwise.
+        env_list: For ``env``, scan the whole repo for every distinct
+            env-var key read anywhere (``env --list``) instead of
+            looking up one ``target`` key. Ignored for every other
+            action.
 
     Returns:
         Process exit code.
@@ -2228,6 +2465,7 @@ def run(
             relation,
             min_shared,
             depth,
+            env_list,
         )
     text = buf.getvalue()
     sys.stdout.write(text)
