@@ -20,7 +20,7 @@ from contextlib import redirect_stdout
 
 from dekko.classify import is_test_path, relevance_key
 from dekko.render.mapfile import MapIndex, format_unsupported
-from dekko.core.model import TYPE_KINDS, ExternalCall, Symbol
+from dekko.core.model import TYPE_KINDS, ExternalCall, Import, Symbol
 from dekko.textutil import Meter, fit_to_budget, signature, token_footer
 from dekko.core.resolver import MODULE_CALLER_SUFFIX
 
@@ -37,6 +37,8 @@ ACTIONS = (
     "type",
     "supertypes",
     "subtypes",
+    "importers",
+    "peers",
 )
 
 # Valid ``--relation``/``relation=`` filter values for supertypes/
@@ -57,6 +59,11 @@ HERITAGE_RELATIONS = ("extends", "implements", "impl", "embeds")
 # Callers can always pass a larger budget explicitly.
 DEFAULT_RELATION_BUDGET = 800
 
+# Default ``peers`` threshold: a single shared callee is common noise
+# (both calling ``print``/``log``); two or more is a much stronger
+# peer signal. Callers can raise this via ``--min-shared``.
+DEFAULT_MIN_SHARED = 2
+
 _BUDGETED_ACTIONS = (
     "callers",
     "callees",
@@ -64,6 +71,8 @@ _BUDGETED_ACTIONS = (
     "type",
     "supertypes",
     "subtypes",
+    "importers",
+    "peers",
 )
 
 # Identifier-token pattern for the default (non-``--exact``) ``type``
@@ -701,6 +710,136 @@ def _run_relation(
     return EXIT_OK, _emit_lines(lines, budget, limit)
 
 
+def _peer_relevance_key(
+    index: MapIndex, sym_id: str
+) -> tuple[bool, int, str, int]:
+    """Sort key for a peer id, module-level-pseudo-caller aware.
+
+    ``calls_out``'s keys (the side ``peers`` iterates) can be a
+    module-level pseudo-caller id (``path::<module>``) alongside real
+    symbol ids — ``relevance_key`` only accepts a ``Symbol``, so this
+    builds the same ``(is_test, -degree, path, line)`` tuple shape by
+    hand for the module-level case rather than looking it up in
+    ``symbols_by_id`` and KeyError-ing, mirroring ``ambiguous.py``'s
+    own ``_caller_path`` suffix-stripping for the identical id shape.
+    """
+    if sym_id.endswith(MODULE_CALLER_SUFFIX):
+        path = sym_id[: -len(MODULE_CALLER_SUFFIX)]
+        return (is_test_path(path), 0, path, 0)
+    return relevance_key(index.symbols_by_id[sym_id], index)
+
+
+def _shared_callee_names(index: MapIndex, shared: set[str]) -> list[str]:
+    """Bare qualnames for a shared-callee id set, sorted.
+
+    ``calls_out``'s callee side is always a resolved symbol id, never
+    a module-level pseudo-caller (only the caller/key side of an edge
+    can be module-level — a call can't target a module), so every id
+    here is safe to look up directly.
+    """
+    return sorted(
+        index.symbols_by_id[cid].qualname
+        for cid in shared
+        if cid in index.symbols_by_id
+    )
+
+
+def _peer_row(index: MapIndex, sym_id: str, shared: list[str]) -> str:
+    """One text row for a ``peers`` hit."""
+    if sym_id.endswith(MODULE_CALLER_SUFFIX):
+        path = sym_id[: -len(MODULE_CALLER_SUFFIX)]
+        head = f"{path}  (module level)"
+    else:
+        head = _sym_line(index.symbols_by_id[sym_id])
+    return f"{head}  shares: {', '.join(shared)} ({len(shared)})"
+
+
+def _peer_entry(index: MapIndex, sym_id: str, shared: list[str]) -> dict:
+    """One JSON entry for a ``peers`` hit."""
+    if sym_id.endswith(MODULE_CALLER_SUFFIX):
+        path = sym_id[: -len(MODULE_CALLER_SUFFIX)]
+        entry = {"id": sym_id, "path": path, "module_level": True}
+    else:
+        entry = _sym_json(index, index.symbols_by_id[sym_id])
+    entry["shared_callees"] = shared
+    entry["shared_count"] = len(shared)
+    return entry
+
+
+def _run_peers_empty(sym: Symbol, min_shared: int, base_size: int) -> None:
+    """Print the empty-result note for ``peers`` (text mode only)."""
+    print(f"(no peers of {sym.id} sharing >= {min_shared} callee(s))")
+    if base_size == 0:
+        print(
+            "  note: this symbol has no outgoing calls (a leaf "
+            "function) — it can't share callees with anything"
+        )
+    elif min_shared > 1:
+        print(
+            f"  note: try --min-shared {min_shared - 1} to loosen the "
+            "threshold"
+        )
+
+
+def _run_peers(
+    index: MapIndex,
+    sym: Symbol,
+    min_shared: int,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute the peers action: symbols sharing >= min_shared callees.
+
+    A symbol with zero callees (a pure leaf function) has no peers by
+    construction — a clean, expected empty result, not an error.
+
+    Args:
+        index: Loaded map index.
+        sym: Resolved target symbol.
+        min_shared: Minimum shared-callee count to count as a peer.
+        as_json: Emit structured JSON instead of text.
+        limit: Cap on text result rows.
+        budget: Approximate token budget for the result rows.
+
+    Returns:
+        ``(exit_code, meter)`` — meter is ``None`` for JSON output or
+        an empty result.
+    """
+    base = set(index.calls_out.get(sym.id, []))
+    rows: list[tuple[str, list[str]]] = []
+    if base:
+        for other_id, callees in index.calls_out.items():
+            if other_id == sym.id:
+                continue
+            shared = base & set(callees)
+            if len(shared) >= min_shared:
+                rows.append((other_id, _shared_callee_names(index, shared)))
+    rows.sort(key=lambda r: (-len(r[1]), _peer_relevance_key(index, r[0])))
+    coverage = _coverage_note(index)
+    if as_json:
+        entries = [_peer_entry(index, oid, names) for oid, names in rows]
+        kept, meter = _fit_entries(entries, budget, limit)
+        doc = {
+            "action": "peers",
+            "target": sym.id,
+            "min_shared": min_shared,
+            "results": kept,
+            "meta": meter.as_dict(),
+        }
+        if coverage:
+            doc["coverage_warning"] = coverage
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK, None
+    if not rows:
+        _run_peers_empty(sym, min_shared, len(base))
+        if coverage:
+            print(f"  note: {coverage}", file=sys.stderr)
+        return EXIT_OK, None
+    lines = [_peer_row(index, oid, names) for oid, names in rows]
+    return EXIT_OK, _emit_lines(lines, budget, limit)
+
+
 def _shadow_note(index: MapIndex, target: str) -> str | None:
     """Caveat when an in-repo symbol shares the queried external name.
 
@@ -827,6 +966,118 @@ def _run_uses(
     if shadow:
         print(f"  note: {shadow}", file=sys.stderr)
     return EXIT_OK, _emit_lines(_uses_rows(index, exts), budget, limit)
+
+
+def _source_matches(source: str, needle: str, exact: bool) -> bool:
+    """Whether an import's raw ``source`` text names ``needle``.
+
+    Default (``exact=False``): a plain substring check. Import source
+    strings are already bare module/path text (``os.path``,
+    ``../utils``, ``std::collections::HashMap``) with no generic/
+    pointer wrapper syntax to see through, unlike ``type``'s
+    identifier-token matching — a substring check alone correctly
+    matches ``os.path`` against both ``import os.path`` and ``from
+    os.path import join``. ``exact=True`` requires the source to equal
+    ``needle`` verbatim, trailing-slash-normalized so a relative
+    source (``./utils`` vs. ``./utils/``) isn't a false negative.
+
+    Args:
+        source: The stored ``Import.source`` text.
+        needle: Text being searched for.
+        exact: Match the literal source string instead of a substring.
+
+    Returns:
+        True when ``source`` matches ``needle`` under the chosen mode.
+    """
+    if exact:
+        return source.rstrip("/") == needle.rstrip("/")
+    return needle in source
+
+
+def _importers_row(path: str, imp: Import) -> str:
+    """One text row for an ``importers`` hit."""
+    return f"{path}  {imp.source}  (as {imp.name})"
+
+
+def _importers_entry(path: str, imp: Import) -> dict:
+    """One JSON entry for an ``importers`` hit."""
+    return {"path": path, "local_name": imp.name, "source": imp.source}
+
+
+def _run_importers_not_found(index: MapIndex, needle: str) -> int:
+    """Report an ``importers`` target with zero matching imports."""
+    print(f"dekko: no imports match '{needle}'", file=sys.stderr)
+    sources = sorted(
+        {
+            imp.source
+            for imports in index.imports_by_path.values()
+            for imp in imports
+        }
+    )
+    close = _close_names(needle, sources)
+    if close:
+        print("closest import sources: " + ", ".join(close), file=sys.stderr)
+    coverage = _coverage_note(index)
+    if coverage:
+        print(f"  note: {coverage}", file=sys.stderr)
+    return EXIT_NOT_FOUND
+
+
+def _run_importers(
+    index: MapIndex,
+    needle: str,
+    exact: bool,
+    as_json: bool,
+    limit: int,
+    budget: int | None,
+) -> tuple[int, Meter | None]:
+    """Execute the importers action: files importing a matching source.
+
+    Reconstructed at query time from ``index.imports_by_path`` rather
+    than a pre-built reverse index — that dict is small (one entry per
+    file, not per symbol), already fully loaded, and a full scan is
+    O(files), the same "reconstruct vs. add an index field" call
+    ``ambiguous.py``'s ``_raw_triples`` already made for a structurally
+    identical tradeoff.
+
+    Args:
+        index: Loaded map index.
+        needle: Raw import-source text (or substring) to search for.
+        exact: Match the literal source string instead of a substring.
+        as_json: Emit structured JSON instead of text.
+        limit: Cap on text result rows.
+        budget: Approximate token budget for the result rows.
+
+    Returns:
+        ``(exit_code, meter)`` — meter is ``None`` for JSON output or a
+        not-found result.
+    """
+    rows = [
+        (path, imp)
+        for path, imports in index.imports_by_path.items()
+        for imp in imports
+        if _source_matches(imp.source, needle, exact)
+    ]
+    if not rows:
+        return _run_importers_not_found(index, needle), None
+    rows.sort(key=lambda r: (is_test_path(r[0]), r[0], r[1].name))
+    if as_json:
+        entries = [_importers_entry(p, imp) for p, imp in rows]
+        kept, meter = _fit_entries(entries, budget, limit)
+        doc = {
+            "action": "importers",
+            "source": needle,
+            "exact": exact,
+            "results": kept,
+            "meta": meter.as_dict(),
+        }
+        coverage = _coverage_note(index)
+        if coverage:
+            doc["coverage_warning"] = coverage
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK, None
+    lines = [_importers_row(p, imp) for p, imp in rows]
+    return EXIT_OK, _emit_lines(lines, budget, limit)
 
 
 def _type_matches(type_text: str | None, needle: str, exact: bool) -> bool:
@@ -1405,6 +1656,7 @@ def _dispatch(
     exact: bool,
     transitive: bool,
     relation: str | None,
+    min_shared: int,
 ) -> tuple[int, Meter | None]:
     """Route one query action to its executor."""
     if action == "file":
@@ -1413,6 +1665,8 @@ def _dispatch(
         return _run_uses(index, target, as_json, limit, budget)
     if action == "type":
         return _run_type_usage(index, target, exact, as_json, limit, budget)
+    if action == "importers":
+        return _run_importers(index, target, exact, as_json, limit, budget)
 
     sym, candidates = resolve_target(index, target)
     if sym is None:
@@ -1425,6 +1679,8 @@ def _dispatch(
         return _run_heritage(
             index, action, sym, transitive, relation, as_json, limit, budget
         )
+    if action == "peers":
+        return _run_peers(index, sym, min_shared, as_json, limit, budget)
     return _run_relation(index, action, sym, as_json, limit, budget, sites)
 
 
@@ -1440,6 +1696,7 @@ def run(
     exact: bool = False,
     transitive: bool = False,
     relation: str | None = None,
+    min_shared: int = DEFAULT_MIN_SHARED,
 ) -> int:
     """Execute one query action against a loaded index.
 
@@ -1472,6 +1729,8 @@ def run(
         relation: For ``supertypes``/``subtypes``, restrict results to
             one heritage relation (``"extends"``/``"implements"``/
             ``"impl"``/``"embeds"``) — see ``HERITAGE_RELATIONS``.
+        min_shared: For ``peers``, minimum shared-callee count to
+            count as a peer (default: ``DEFAULT_MIN_SHARED``).
 
     Returns:
         Process exit code.
@@ -1493,6 +1752,7 @@ def run(
             exact,
             transitive,
             relation,
+            min_shared,
         )
     text = buf.getvalue()
     sys.stdout.write(text)

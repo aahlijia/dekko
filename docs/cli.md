@@ -10,6 +10,8 @@ dekko query callers resolve --sites  # who calls resolve, with call sites
 dekko query callees main             # what does main call?
 dekko query uses Path                # who references the external name Path?
 dekko query type Config              # what takes/returns Config? (--exact for literal match)
+dekko query importers os.path        # what files import a source matching os.path?
+dekko query peers load_config        # symbols sharing 2+ callees with load_config
 dekko query supertypes BufferDiff    # what BufferDiff extends/implements/impl's-for (one hop)
 dekko query supertypes BufferDiff --transitive  # full ancestor chain/DAG
 dekko query subtypes Serializable    # what directly extends/implements/impl's-for Serializable
@@ -64,6 +66,25 @@ Default matching is identifier-token based (`Config` matches
 `Optional[Config]`, `Vec<Config>`, `Config | None`, but not
 `ConfigManager`); pass `--exact` to match the stored type text
 verbatim instead.
+
+`query importers` and `query peers` answer "what else imports/uses the
+same thing as X" — a reverse-import lookup and a shared-callee peer
+lookup, respectively. `importers <source>` matches against each
+file's raw, unresolved import-source text (`os.path`, `../utils`,
+`std::collections::HashMap`) — no cross-language module-path
+resolution is attempted, so it's a text match, not a "does this
+resolve to a real file" answer; default matching is substring
+(`os.path` matches both `import os.path` and `from os.path import
+join`), `--exact` requires the literal source string (trailing slash
+normalized for relative sources). `peers <symbol>` finds other symbols
+whose outgoing calls overlap the target's by at least `--min-shared`
+callees (default 2 — a single shared callee, like both calling
+`print`/`log`, is usually noise); results are ranked by shared-callee
+count, and each row lists the shared callee names so it's clear *why*
+two symbols are peers without a second lookup. A symbol with zero
+callees has no peers by construction (a clean empty result, not an
+error); a symbol with fewer callees than `--min-shared` gets a hint to
+lower the threshold.
 
 `query supertypes`/`subtypes` cover declared heritage — `extends`/
 `implements` for Python, JavaScript, TypeScript, and Java; `impl`

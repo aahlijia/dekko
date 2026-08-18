@@ -370,7 +370,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="for 'type': match the type text exactly (no generic/"
         "pointer/optional wrapper stripping) — default loosely matches "
         "the type name as a bare identifier inside the raw annotation "
-        "text",
+        "text; for 'importers': match the import source string exactly "
+        "instead of a substring",
     )
     p_query.add_argument(
         "--transitive",
@@ -385,6 +386,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="for 'supertypes'/'subtypes': restrict to one heritage "
         "relation kind ('impl'/'embeds' are Phase 2 — Rust/Go — and "
         "never appear in Phase 1's Python/JS/TS/Java output)",
+    )
+    p_query.add_argument(
+        "--min-shared",
+        type=int,
+        default=query.DEFAULT_MIN_SHARED,
+        metavar="N",
+        help="for 'peers': minimum shared callees to count as a peer "
+        f"(default: {query.DEFAULT_MIN_SHARED})",
     )
     _add_read_options(p_query)
     p_query.set_defaults(func=run_query)
@@ -1439,6 +1448,7 @@ def run_query(args: argparse.Namespace) -> int:
         exact=args.exact,
         transitive=args.transitive,
         relation=args.relation,
+        min_shared=args.min_shared,
     )
 
 
