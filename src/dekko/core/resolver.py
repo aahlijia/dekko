@@ -221,8 +221,8 @@ def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
         graph.throws_ambiguous,
         graph.throws_external,
         graph.throws_bare,
-    ) = resolve_throws(files)
-    graph.catches = resolve_catches(files)
+    ) = resolve_throws(files, workers)
+    graph.catches = resolve_catches(files, workers)
     # No resolution pass needed — a literal env-var key is already the
     # fully-resolved fact (see model.EnvRead's docstring), so this is
     # a plain flatten across files, not a call into a dedicated
@@ -734,30 +734,21 @@ def _resolve_type_name(
     return None, candidates
 
 
-def resolve_throws(
+def _resolve_throws_chunk(
     files: list[FileMap],
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    imports_by_file: dict[str, dict[str, Import]],
 ) -> tuple[
-    list[ThrowEdge],
-    dict[str, list[str]],
-    list[tuple[str, str, list[str]]],
-    list[ExternalCall],
+    dict[tuple[str, str], set[int]],
+    dict[tuple[str, str], list[str]],
+    dict[tuple[str, str], set[int]],
     list[tuple[str, str, int]],
 ]:
-    """Resolve every raise/throw site across the repo.
-
-    Args:
-        files: Per-file extraction results.
-
-    Returns:
-        ``(throws, throws_out, throws_ambiguous, throws_external,
-        throws_bare)`` — the shapes ``resolve()`` assigns onto
-        ``CallGraph.throws``/``throws_out``/``throws_ambiguous``/
-        ``throws_external``/``throws_bare``.
+    """Resolve every raise/throw site in ``files`` into fresh, local
+    accumulators — the throw-resolution analog of
+    ``_resolve_files_chunk``, same pure-function/worker-safety shape.
     """
-    index = _build_index(files)
-    by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files)
-
     edges: dict[tuple[str, str], set[int]] = {}
     ambiguous: dict[tuple[str, str], list[str]] = {}
     external: dict[tuple[str, str], set[int]] = {}
@@ -783,6 +774,73 @@ def resolve_throws(
             external.setdefault((caller_id, t.text or t.name), set()).add(
                 t.line
             )
+
+    return edges, ambiguous, external, bare
+
+
+def resolve_throws(
+    files: list[FileMap], workers: int = 1
+) -> tuple[
+    list[ThrowEdge],
+    dict[str, list[str]],
+    list[tuple[str, str, list[str]]],
+    list[ExternalCall],
+    list[tuple[str, str, int]],
+]:
+    """Resolve every raise/throw site across the repo.
+
+    Args:
+        files: Per-file extraction results.
+        workers: Worker count for parallel resolution (1 = sequential,
+            the default). Mirrors ``resolve_refs``'s own ``workers``
+            parameter and ``_resolve_all``'s chunking/threshold shape.
+
+    Returns:
+        ``(throws, throws_out, throws_ambiguous, throws_external,
+        throws_bare)`` — the shapes ``resolve()`` assigns onto
+        ``CallGraph.throws``/``throws_out``/``throws_ambiguous``/
+        ``throws_external``/``throws_bare``.
+    """
+    index = _build_index(files)
+    by_name_path = _build_name_path_index(files)
+    imports_by_file = _imports_by_file(files)
+
+    total_throws = sum(len(fm.throws) for fm in files)
+    chunks = (
+        _chunk_files(files, workers)
+        if workers > 1 and total_throws >= _RESOLVE_PARALLEL_MIN_ITEMS
+        else [files]
+    )
+
+    if len(chunks) < 2:
+        edges, ambiguous, external, bare = _resolve_throws_chunk(
+            files, index, by_name_path, imports_by_file
+        )
+    else:
+        edges = {}
+        ambiguous = {}
+        external = {}
+        bare = []
+        with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
+            futures = [
+                pool.submit(
+                    _resolve_throws_chunk,
+                    chunk,
+                    index,
+                    by_name_path,
+                    imports_by_file,
+                )
+                for chunk in chunks
+            ]
+            for future in futures:
+                c_edges, c_ambiguous, c_external, c_bare = future.result()
+                for key, lines in c_edges.items():
+                    edges.setdefault(key, set()).update(lines)
+                for key, cands in c_ambiguous.items():
+                    ambiguous.setdefault(key, cands)
+                for key, lines in c_external.items():
+                    external.setdefault(key, set()).update(lines)
+                bare.extend(c_bare)
 
     throw_edges = [
         ThrowEdge(caller=c, type=ty, lines=sorted(lns))
@@ -810,28 +868,15 @@ def resolve_throws(
     )
 
 
-def resolve_catches(files: list[FileMap]) -> list[CatchSite]:
-    """Resolve every except/catch clause across the repo.
-
-    Unlike ``resolve_throws()``, this produces no separate ambiguous/
-    external bucket — a ``dekko query catches Y`` request matches by
-    name against ``CatchSite.type_names`` directly (see the design
-    doc's "mostly a name-index lookup" note and ``CatchSite``'s own
-    docstring), so per-clause resolution only matters for
-    ``repo_types``' summary-disclosure role, not for query
-    correctness.
-
-    Args:
-        files: Per-file extraction results.
-
-    Returns:
-        Every clause across the repo as a ``CatchSite``, sorted by
-        ``(path, line, caller)``.
-    """
-    index = _build_index(files)
-    by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files)
-
+def _resolve_catches_chunk(
+    files: list[FileMap],
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    imports_by_file: dict[str, dict[str, Import]],
+) -> list[CatchSite]:
+    """Resolve every except/catch clause in ``files`` into a fresh,
+    local list — the catch-resolution analog of ``_resolve_refs_chunk``,
+    same pure-function/worker-safety shape."""
     sites: list[CatchSite] = []
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
@@ -854,6 +899,61 @@ def resolve_catches(files: list[FileMap]) -> list[CatchSite]:
                     line=c.line,
                 )
             )
+    return sites
+
+
+def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
+    """Resolve every except/catch clause across the repo.
+
+    Unlike ``resolve_throws()``, this produces no separate ambiguous/
+    external bucket — a ``dekko query catches Y`` request matches by
+    name against ``CatchSite.type_names`` directly (see the design
+    doc's "mostly a name-index lookup" note and ``CatchSite``'s own
+    docstring), so per-clause resolution only matters for
+    ``repo_types``' summary-disclosure role, not for query
+    correctness.
+
+    Args:
+        files: Per-file extraction results.
+        workers: Worker count for parallel resolution (1 = sequential,
+            the default). Mirrors ``resolve_throws``'s own ``workers``
+            parameter and ``_resolve_all``'s chunking/threshold shape.
+
+    Returns:
+        Every clause across the repo as a ``CatchSite``, sorted by
+        ``(path, line, caller)``.
+    """
+    index = _build_index(files)
+    by_name_path = _build_name_path_index(files)
+    imports_by_file = _imports_by_file(files)
+
+    total_catches = sum(len(fm.catches) for fm in files)
+    chunks = (
+        _chunk_files(files, workers)
+        if workers > 1 and total_catches >= _RESOLVE_PARALLEL_MIN_ITEMS
+        else [files]
+    )
+
+    if len(chunks) < 2:
+        sites = _resolve_catches_chunk(
+            files, index, by_name_path, imports_by_file
+        )
+    else:
+        sites = []
+        with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
+            futures = [
+                pool.submit(
+                    _resolve_catches_chunk,
+                    chunk,
+                    index,
+                    by_name_path,
+                    imports_by_file,
+                )
+                for chunk in chunks
+            ]
+            for future in futures:
+                sites.extend(future.result())
+
     sites.sort(key=lambda s: (s.path, s.line, s.caller))
     return sites
 

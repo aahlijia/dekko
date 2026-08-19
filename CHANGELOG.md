@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.40.1] — 2026-08-19
+
+### Fixed
+- **`dekko deps`** — self-import false positives, ambiguous `--file`
+  matches, and env-write detection (D1, D2, E1); NodeNext/ESM-style
+  relative TS imports (specifier carries a compiled `.js` extension,
+  source is `.ts`) now resolve correctly.
+- **`dekko query importers`** — `--exact` matching fixed; JS/TS
+  side-effect and namespace imports now resolved (I1, I2).
+- **`dekko query catches`/`throws`** — false positives fixed (T1, T2);
+  `--transitive`'s "N of TOTAL omitted" truncation footer no longer
+  miscounts header lines as data rows; both passes now resolve in
+  parallel across workers like the existing calls/refs passes.
+- **`dekko query peers`** — no longer mislabels a symbol as a leaf
+  function when its only outgoing call resolved ambiguously rather
+  than being genuinely absent.
+
 ## [0.40.0] — 2026-08-18
 
 ### Added

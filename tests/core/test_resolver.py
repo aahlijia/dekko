@@ -6,8 +6,22 @@ import pytest
 
 from dekko.core import resolver as resolver_mod
 from dekko.repo_ops import map_repository
-from dekko.core.model import FileMap, Import, Param, RawCall, RawRef, Symbol
-from dekko.core.resolver import resolve, resolve_refs
+from dekko.core.model import (
+    FileMap,
+    Import,
+    Param,
+    RawCall,
+    RawCatch,
+    RawRef,
+    RawThrow,
+    Symbol,
+)
+from dekko.core.resolver import (
+    resolve,
+    resolve_catches,
+    resolve_refs,
+    resolve_throws,
+)
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -1613,6 +1627,138 @@ def test_resolve_refs_parallel_matches_sequential(
         par_edges, par_in, par_out
     )
     assert seq_edges  # sanity: real work happened
+
+
+def _multi_file_throws_fixture() -> list[FileMap]:
+    """20 files, each defining a same-named ``Err`` class plus a
+    ``load`` function that raises it (same-file resolution) — the
+    throw-resolution analog of ``_multi_file_call_fixture``, enough
+    shape to actually exercise chunk boundaries."""
+    files = []
+    for i in range(20):
+        err = Symbol(
+            id=f"mod{i}.py::Err",
+            name="Err",
+            qualname="Err",
+            kind="class",
+            path=f"mod{i}.py",
+            language="python",
+        )
+        fn = Symbol(
+            id=f"mod{i}.py::load",
+            name="load",
+            qualname="load",
+            kind="function",
+            path=f"mod{i}.py",
+            language="python",
+        )
+        files.append(
+            FileMap(
+                path=f"mod{i}.py",
+                language="python",
+                symbols=[err, fn],
+                throws=[
+                    RawThrow(
+                        caller_id=f"mod{i}.py::load",
+                        path=f"mod{i}.py",
+                        text="Err",
+                        name="Err",
+                        line=2,
+                    )
+                ],
+            )
+        )
+    return files
+
+
+def _multi_file_catches_fixture() -> list[FileMap]:
+    """20 files, each with an except clause naming a same-file ``Err``
+    class — the catch-resolution analog of ``_multi_file_throws_fixture``.
+    """
+    files = []
+    for i in range(20):
+        err = Symbol(
+            id=f"mod{i}.py::Err",
+            name="Err",
+            qualname="Err",
+            kind="class",
+            path=f"mod{i}.py",
+            language="python",
+        )
+        fn = Symbol(
+            id=f"mod{i}.py::run",
+            name="run",
+            qualname="run",
+            kind="function",
+            path=f"mod{i}.py",
+            language="python",
+        )
+        files.append(
+            FileMap(
+                path=f"mod{i}.py",
+                language="python",
+                symbols=[err, fn],
+                catches=[
+                    RawCatch(
+                        caller_id=f"mod{i}.py::run",
+                        path=f"mod{i}.py",
+                        types=["Err"],
+                        bare=False,
+                        line=2,
+                    )
+                ],
+            )
+        )
+    return files
+
+
+def test_resolve_throws_parallel_matches_sequential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    files = _multi_file_throws_fixture()
+
+    seq = resolve_throws(files, workers=1)
+    par = resolve_throws(files, workers=4)
+
+    def shape(result: tuple) -> tuple:
+        edges, out, ambiguous, external, bare = result
+        return (
+            sorted((e.caller, e.type, tuple(e.lines)) for e in edges),
+            sorted(out.items()),
+            sorted(ambiguous),
+            sorted((e.caller, e.callee, tuple(e.lines)) for e in external),
+            sorted(bare),
+        )
+
+    assert shape(seq) == shape(par)
+    assert seq[0]  # sanity: real work happened
+
+
+def test_resolve_catches_parallel_matches_sequential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    files = _multi_file_catches_fixture()
+
+    seq = resolve_catches(files, workers=1)
+    par = resolve_catches(files, workers=4)
+
+    def shape(sites: list) -> list:
+        return [
+            (
+                s.caller,
+                s.path,
+                tuple(s.type_names),
+                tuple(sorted(s.repo_types.items())),
+                s.bare,
+                s.line,
+            )
+            for s in sites
+        ]
+
+    assert shape(seq) == shape(par)
+    assert seq  # sanity: real work happened
 
 
 def test_resolve_below_threshold_stays_sequential_by_default() -> None:
