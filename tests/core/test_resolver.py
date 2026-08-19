@@ -1609,6 +1609,38 @@ def test_resolve_parallel_matches_sequential(
     assert sequential.edges
 
 
+def test_resolve_all_oversubscribes_chunk_count_beyond_worker_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 17: ``_resolve_all``'s ``_run(w)`` closure must build
+    ``w * _RESOLVE_CHUNK_OVERSUBSCRIPTION`` chunks, not just ``w`` --
+    more chunks than workers is the whole point of the fix (an idle
+    worker can pick up the next queued chunk instead of sitting idle
+    once its one assigned chunk finishes). Byte-identical-output tests
+    alone wouldn't catch a silent revert to one-chunk-per-worker, since
+    output is correct either way -- this asserts the chunk *count*
+    the pool actually sees, by spying on ``_chunk_files``."""
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    files = _multi_file_call_fixture()  # 20 files, plenty to chunk finely
+
+    real_chunk_files = resolver_mod._chunk_files
+    seen_n: list[int] = []
+
+    def spy_chunk_files(files: list, n: int) -> list:
+        seen_n.append(n)
+        return real_chunk_files(files, n)
+
+    monkeypatch.setattr(resolver_mod, "_chunk_files", spy_chunk_files)
+
+    workers = 3
+    resolve(files, workers=workers)
+
+    assert seen_n  # _chunk_files was actually invoked
+    expected = workers * resolver_mod._RESOLVE_CHUNK_OVERSUBSCRIPTION
+    assert all(n == expected for n in seen_n)
+    assert expected > workers  # the actual oversubscription property
+
+
 def test_resolve_refs_parallel_matches_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1789,19 +1821,40 @@ def _flaky_pool_factory(fail_times: int) -> type:
     """Build a ``ProcessPoolExecutor``-shaped fake that raises
     ``BrokenProcessPool`` on ``__enter__`` for its first ``fail_times``
     constructions (counted across every instance built from this one
-    factory call), then delegates to ``ThreadPoolExecutor``."""
+    factory call), then delegates to ``ThreadPoolExecutor``.
+
+    Accepts (and forwards) ``initializer``/``initargs`` the same way
+    ``ProcessPoolExecutor`` does (round 17: ``_resolve_all`` and its
+    siblings now construct their real pool with these) --
+    ``ThreadPoolExecutor`` supports both natively, and since threads
+    share process memory, running the initializer per-thread still
+    populates the same module-level ``_worker_*`` globals the real
+    worker wrapper functions read from, just redundantly rather than
+    once-per-process -- harmless for a same-value re-assignment in a
+    test fake."""
     state = {"calls": 0}
 
     class _FlakyPool:
-        def __init__(self, max_workers: int | None = None) -> None:
+        def __init__(
+            self,
+            max_workers: int | None = None,
+            initializer: object = None,
+            initargs: tuple = (),
+        ) -> None:
             self._max_workers = max_workers
+            self._initializer = initializer
+            self._initargs = initargs
             self._real: ThreadPoolExecutor | None = None
 
         def __enter__(self) -> "_FlakyPool | ThreadPoolExecutor":
             state["calls"] += 1
             if state["calls"] <= fail_times:
                 raise BrokenProcessPool("simulated: process pool broken")
-            self._real = ThreadPoolExecutor(max_workers=self._max_workers)
+            self._real = ThreadPoolExecutor(
+                max_workers=self._max_workers,
+                initializer=self._initializer,
+                initargs=self._initargs,
+            )
             return self._real.__enter__()
 
         def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:

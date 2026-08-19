@@ -161,6 +161,25 @@ MODULE_CALLER_SUFFIX = "::<module>"
 # stay sequential.
 _RESOLVE_PARALLEL_MIN_ITEMS = 5_000
 
+# How many chunks to build per worker when parallelizing a resolution
+# pass (round 17 scaling investigation:
+# .features/plans/round17/round17-resolve-all-scaling-plan.md). Static
+# one-chunk-per-worker partitioning left workers that finished early
+# with nothing else to pick up -- measured at 2.2x-3.9x speedup on 8
+# workers instead of the ~8-10x a compute-bound, evenly-splittable
+# workload should get close to. Building ``workers *
+# _RESOLVE_CHUNK_OVERSUBSCRIPTION`` chunks and submitting them all to
+# the pool's own task queue (instead of exactly ``workers`` chunks,
+# one per worker) lets an idle worker pull the next chunk as soon as
+# it finishes, the same dynamic-rebalancing pattern
+# ``repo_ops._extract_misses``'s ``pool.map(..., chunksize=1)`` already
+# gets ~10x from. 4 was chosen as a middle point between finer-grained
+# balancing (higher multiplier) and per-task dispatch overhead (lower
+# multiplier) without a full empirical sweep on this repo's own CI
+# hardware -- see the design doc's "Tune the oversubscription
+# multiplier empirically" step for the sweep that would refine this.
+_RESOLVE_CHUNK_OVERSUBSCRIPTION = 4
+
 # Worker count for the one bounded retry a broken process pool gets
 # (round 17: an MCP server's auto-regen requesting os.cpu_count()
 # workers while a sibling `dekko map --jobs 0` does the same on the
@@ -236,6 +255,64 @@ def run_pooled_with_retry(
         retry_workers = min(workers, _POOL_RETRY_WORKERS)
         _pool_retry_note(what, retry_workers)
         return run(retry_workers)
+
+
+# Worker-process-local copies of the shared, read-only indices every
+# resolution pass needs. Populated once per worker process (not once
+# per submitted chunk) by ``_init_resolve_worker``, so that
+# oversubscribing a pool to many more chunks than workers (round 17,
+# see ``_RESOLVE_CHUNK_OVERSUBSCRIPTION``) doesn't also multiply how
+# many times these (potentially large -- tens of MB on a big repo)
+# structures get pickled across process boundaries. ``None`` outside a
+# pool worker process; every pass that reads these asserts non-``None``
+# first as a guard against a worker function accidentally being called
+# without the initializer having run.
+_worker_index: dict[str, list[Symbol]] | None = None
+_worker_by_name_path: dict[tuple[str, str], list[Symbol]] | None = None
+_worker_imports_by_file: dict[str, dict[str, Import]] | None = None
+_worker_repo_stems: set[str] | None = None
+_worker_symbols_by_id: dict[str, Symbol] | None = None
+
+
+def _init_resolve_worker(
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    imports_by_file: dict[str, dict[str, Import]],
+    repo_stems: set[str] | None,
+    symbols_by_id: dict[str, Symbol] | None,
+) -> None:
+    """Stash the shared read-only indices in this worker process once.
+
+    Passed as ``ProcessPoolExecutor(initializer=...)``: runs exactly
+    once per worker process, before that worker picks up its first
+    submitted chunk -- not once per chunk, the way passing these same
+    arguments through every ``submit()`` call (today's one-chunk-per-
+    worker shape) does. A plain module-level function (not a closure)
+    so it stays picklable as an ``initializer=`` target under
+    ``spawn``.
+
+    ``repo_stems``/``symbols_by_id`` are ``None`` for pools that don't
+    need them (``resolve_refs``/``resolve_throws``/``resolve_catches``
+    all resolve against a subset of the five indices ``_resolve_all``
+    needs) -- each pass's own worker wrapper only reads the globals it
+    actually uses.
+
+    Args:
+        index: Name -> candidate symbols, repo-wide.
+        by_name_path: ``(name, path)`` -> candidate symbols.
+        imports_by_file: Per-file import bindings.
+        repo_stems: Every file's repo-relative stem, or ``None`` if
+            this pool's task doesn't need it.
+        symbols_by_id: Symbol id -> ``Symbol``, or ``None`` if this
+            pool's task doesn't need it.
+    """
+    global _worker_index, _worker_by_name_path, _worker_imports_by_file
+    global _worker_repo_stems, _worker_symbols_by_id
+    _worker_index = index
+    _worker_by_name_path = by_name_path
+    _worker_imports_by_file = imports_by_file
+    _worker_repo_stems = repo_stems
+    _worker_symbols_by_id = symbols_by_id
 
 
 def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
@@ -356,6 +433,35 @@ def _resolve_files_chunk(
     return edges, ambiguous, external
 
 
+def _resolve_files_chunk_worker(
+    files: list[FileMap],
+) -> tuple[
+    dict[tuple[str, str], set[int]],
+    dict[tuple[str, str], list[str]],
+    dict[tuple[str, str], set[int]],
+]:
+    """Per-task pool entry point for oversubscribed call resolution.
+
+    Thin wrapper around ``_resolve_files_chunk``: reads the shared
+    indices ``_init_resolve_worker`` already stashed in this worker
+    process's globals instead of receiving them as arguments, so each
+    ``submit()``'s pickled payload is just this chunk's own ``files``
+    slice -- keeping per-task dispatch cost small even with many more
+    chunks than workers (``_RESOLVE_CHUNK_OVERSUBSCRIPTION``).
+    """
+    assert _worker_index is not None  # initializer always runs first
+    assert _worker_repo_stems is not None
+    assert _worker_symbols_by_id is not None
+    return _resolve_files_chunk(
+        files,
+        _worker_index,
+        _worker_by_name_path,
+        _worker_imports_by_file,
+        _worker_repo_stems,
+        _worker_symbols_by_id,
+    )
+
+
 def _chunk_files(files: list[FileMap], n: int) -> list[list[FileMap]]:
     """Split ``files`` into up to ``n`` contiguous, roughly-even chunks."""
     if n <= 1 or len(files) < 2:
@@ -420,7 +526,7 @@ def _resolve_all(
         dict[tuple[str, str], list[str]],
         dict[tuple[str, str], set[int]],
     ]:
-        chunks = _chunk_files(files, w)
+        chunks = _chunk_files(files, w * _RESOLVE_CHUNK_OVERSUBSCRIPTION)
         if len(chunks) < 2:
             return _resolve_files_chunk(
                 files,
@@ -434,17 +540,19 @@ def _resolve_all(
         edges: dict[tuple[str, str], set[int]] = {}
         ambiguous: dict[tuple[str, str], list[str]] = {}
         external: dict[tuple[str, str], set[int]] = {}
-        with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
+        with ProcessPoolExecutor(
+            max_workers=w,
+            initializer=_init_resolve_worker,
+            initargs=(
+                index,
+                by_name_path,
+                imports_by_file,
+                repo_stems,
+                symbols_by_id,
+            ),
+        ) as pool:
             futures = [
-                pool.submit(
-                    _resolve_files_chunk,
-                    chunk,
-                    index,
-                    by_name_path,
-                    imports_by_file,
-                    repo_stems,
-                    symbols_by_id,
-                )
+                pool.submit(_resolve_files_chunk_worker, chunk)
                 for chunk in chunks
             ]
             for future in futures:
@@ -485,6 +593,24 @@ def _resolve_refs_chunk(
     return edges
 
 
+def _resolve_refs_chunk_worker(
+    files: list[FileMap],
+) -> dict[tuple[str, str], set[int]]:
+    """Per-task pool entry point for oversubscribed reference
+    resolution -- reads the shared indices ``_init_resolve_worker``
+    stashed in this worker process's globals, the reference-resolution
+    analog of ``_resolve_files_chunk_worker``."""
+    assert _worker_index is not None  # initializer always runs first
+    assert _worker_symbols_by_id is not None
+    return _resolve_refs_chunk(
+        files,
+        _worker_index,
+        _worker_by_name_path,
+        _worker_imports_by_file,
+        _worker_symbols_by_id,
+    )
+
+
 def resolve_refs(
     files: list[FileMap], workers: int = 1
 ) -> tuple[list[Edge], dict[str, list[str]], dict[str, list[str]]]:
@@ -519,23 +645,30 @@ def resolve_refs(
     use_pool = workers > 1 and total_refs >= _RESOLVE_PARALLEL_MIN_ITEMS
 
     def _run(w: int) -> dict[tuple[str, str], set[int]]:
-        chunks = _chunk_files(files, w) if use_pool else [files]
+        chunks = (
+            _chunk_files(files, w * _RESOLVE_CHUNK_OVERSUBSCRIPTION)
+            if use_pool
+            else [files]
+        )
         if len(chunks) < 2:
             return _resolve_refs_chunk(
                 files, index, by_name_path, imports_by_file, symbols_by_id
             )
 
         edges: dict[tuple[str, str], set[int]] = {}
-        with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
+        with ProcessPoolExecutor(
+            max_workers=w,
+            initializer=_init_resolve_worker,
+            initargs=(
+                index,
+                by_name_path,
+                imports_by_file,
+                None,
+                symbols_by_id,
+            ),
+        ) as pool:
             futures = [
-                pool.submit(
-                    _resolve_refs_chunk,
-                    chunk,
-                    index,
-                    by_name_path,
-                    imports_by_file,
-                    symbols_by_id,
-                )
+                pool.submit(_resolve_refs_chunk_worker, chunk)
                 for chunk in chunks
             ]
             for future in futures:
@@ -876,6 +1009,24 @@ def _resolve_throws_chunk(
     return edges, ambiguous, external, bare
 
 
+def _resolve_throws_chunk_worker(
+    files: list[FileMap],
+) -> tuple[
+    dict[tuple[str, str], set[int]],
+    dict[tuple[str, str], list[str]],
+    dict[tuple[str, str], set[int]],
+    list[tuple[str, str, int]],
+]:
+    """Per-task pool entry point for oversubscribed throw resolution --
+    reads the shared indices ``_init_resolve_worker`` stashed in this
+    worker process's globals, the throw-resolution analog of
+    ``_resolve_files_chunk_worker``."""
+    assert _worker_index is not None  # initializer always runs first
+    return _resolve_throws_chunk(
+        files, _worker_index, _worker_by_name_path, _worker_imports_by_file
+    )
+
+
 def resolve_throws(
     files: list[FileMap], workers: int = 1
 ) -> tuple[
@@ -917,7 +1068,11 @@ def resolve_throws(
         dict[tuple[str, str], set[int]],
         list[tuple[str, str, int]],
     ]:
-        chunks = _chunk_files(files, w) if use_pool else [files]
+        chunks = (
+            _chunk_files(files, w * _RESOLVE_CHUNK_OVERSUBSCRIPTION)
+            if use_pool
+            else [files]
+        )
         if len(chunks) < 2:
             return _resolve_throws_chunk(
                 files, index, by_name_path, imports_by_file
@@ -927,15 +1082,13 @@ def resolve_throws(
         ambiguous: dict[tuple[str, str], list[str]] = {}
         external: dict[tuple[str, str], set[int]] = {}
         bare: list[tuple[str, str, int]] = []
-        with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
+        with ProcessPoolExecutor(
+            max_workers=w,
+            initializer=_init_resolve_worker,
+            initargs=(index, by_name_path, imports_by_file, None, None),
+        ) as pool:
             futures = [
-                pool.submit(
-                    _resolve_throws_chunk,
-                    chunk,
-                    index,
-                    by_name_path,
-                    imports_by_file,
-                )
+                pool.submit(_resolve_throws_chunk_worker, chunk)
                 for chunk in chunks
             ]
             for future in futures:
@@ -1013,6 +1166,17 @@ def _resolve_catches_chunk(
     return sites
 
 
+def _resolve_catches_chunk_worker(files: list[FileMap]) -> list[CatchSite]:
+    """Per-task pool entry point for oversubscribed catch resolution --
+    reads the shared indices ``_init_resolve_worker`` stashed in this
+    worker process's globals, the catch-resolution analog of
+    ``_resolve_files_chunk_worker``."""
+    assert _worker_index is not None  # initializer always runs first
+    return _resolve_catches_chunk(
+        files, _worker_index, _worker_by_name_path, _worker_imports_by_file
+    )
+
+
 def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
     """Resolve every except/catch clause across the repo.
 
@@ -1045,22 +1209,24 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
     use_pool = workers > 1 and total_catches >= _RESOLVE_PARALLEL_MIN_ITEMS
 
     def _run(w: int) -> list[CatchSite]:
-        chunks = _chunk_files(files, w) if use_pool else [files]
+        chunks = (
+            _chunk_files(files, w * _RESOLVE_CHUNK_OVERSUBSCRIPTION)
+            if use_pool
+            else [files]
+        )
         if len(chunks) < 2:
             return _resolve_catches_chunk(
                 files, index, by_name_path, imports_by_file
             )
 
         sites: list[CatchSite] = []
-        with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
+        with ProcessPoolExecutor(
+            max_workers=w,
+            initializer=_init_resolve_worker,
+            initargs=(index, by_name_path, imports_by_file, None, None),
+        ) as pool:
             futures = [
-                pool.submit(
-                    _resolve_catches_chunk,
-                    chunk,
-                    index,
-                    by_name_path,
-                    imports_by_file,
-                )
+                pool.submit(_resolve_catches_chunk_worker, chunk)
                 for chunk in chunks
             ]
             for future in futures:

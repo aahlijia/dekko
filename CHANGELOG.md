@@ -9,6 +9,17 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.40.4] — 2026-08-19
+
+### Changed
+- **Call/ref/throws/catches resolution parallelism** — `resolver.py`'s
+  `ProcessPoolExecutor` passes now use oversubscribed chunking
+  (submitted to the pool's task queue for dynamic rebalancing instead
+  of exactly one static chunk per worker) plus a shared-index pool
+  initializer, cutting run-to-run variance on heterogeneous-core
+  machines from ~2.2x-3.9x swings to a tight ~3% spread at a
+  consistent ~3.3x-3.5x parallel speedup.
+
 ## [0.40.3] — 2026-08-19
 
 ### Added
