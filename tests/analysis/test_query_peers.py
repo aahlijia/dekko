@@ -132,6 +132,33 @@ def test_peers_leaf_symbol_reports_clean_empty_result(
     assert "--min-shared" not in out
 
 
+AMBIGUOUS_OUT = {
+    "a.py": "def target() -> int:\n    return 1\n",
+    "b.py": "def target() -> int:\n    return 2\n",
+    "c.py": ("def caller() -> int:\n    return target()\n"),
+}
+
+
+def test_peers_ambiguous_only_outgoing_call_is_not_a_leaf_function(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression test (round-17 spring-boot finding): `caller`'s only
+    # outgoing call resolves ambiguously (two same-named `target`
+    # candidates repo-wide), so `calls_out` is empty for it -- same
+    # observable shape as a genuine leaf function, but the "no
+    # outgoing calls (a leaf function)" wording is false here: the
+    # symbol's own body plainly calls something. `query symbol`/
+    # `query callees` already disclose this case via ambiguous_out;
+    # `peers` must give the equivalent disclosure, not the leaf note.
+    root = make_mapped_repo(AMBIGUOUS_OUT)
+    code = cli.main(["query", "peers", "c.py:caller", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "no peers of" in out
+    assert "leaf function" not in out
+    assert "resolved ambiguously" in out
+
+
 def test_peers_fan_out_one_suggests_lower_threshold(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

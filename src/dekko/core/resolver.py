@@ -2005,6 +2005,17 @@ def _resolve_import_js(
     candidates = [joined]
     candidates += [f"{joined}{ext}" for ext in _JS_EXTENSIONS]
     candidates += [f"{joined}/index{ext}" for ext in _JS_EXTENSIONS]
+    # NodeNext/ESM-style TypeScript requires relative specifiers to
+    # carry the *compiled* extension ("./foo.js") even when the real
+    # source is foo.ts -- the specifier and the source file's actual
+    # extension deliberately disagree. Appending an extension onto
+    # `joined` as-is never reaches foo.ts in that case (it would only
+    # try foo.js.ts, foo.js.tsx, ...), so a second candidate stem with
+    # the specifier's own JS/TS extension stripped is tried too,
+    # re-running the same extension ladder against it.
+    stem, specifier_ext = posixpath.splitext(joined)
+    if specifier_ext in _JS_EXTENSIONS:
+        candidates += [f"{stem}{ext}" for ext in _JS_EXTENSIONS]
     return _first_match(ctx.paths, candidates)
 
 

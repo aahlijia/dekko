@@ -296,3 +296,69 @@ def test_catches_json_includes_note(
     doc = json.loads(capsys.readouterr().out)
     assert doc["action"] == "catches"
     assert "note" in doc
+
+
+def _catch_all_repo(n: int) -> dict[str, str]:
+    return {
+        f"mod{i}.py": (
+            "def f():\n    try:\n        pass\n    except:\n        pass\n"
+        )
+        for i in range(n)
+    }
+
+
+def test_catches_truncation_footer_omitted_count_matches_hits(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression test: the truncation footer's "N of TOTAL omitted"
+    # denominator must equal the real hit count, not hit count + 1 --
+    # the summary/header line printed above the rows must not itself
+    # be counted as a row by the truncation meter.
+    root = make_mapped_repo(_catch_all_repo(5))
+    code = cli.main(
+        [
+            "query",
+            "catches",
+            "AnythingAtAll",
+            "--limit",
+            "2",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "5 catch clause(s) match" in out
+    assert "3 of 5 omitted" in out
+
+
+MANY_THROWS = {
+    "app.py": (
+        "def f():\n"
+        "    if a:\n"
+        "        raise ValueError('a')\n"
+        "    if b:\n"
+        "        raise TypeError('b')\n"
+        "    if c:\n"
+        "        raise KeyError('c')\n"
+        "    if d:\n"
+        "        raise IndexError('d')\n"
+        "    if e:\n"
+        "        raise AttributeError('e')\n"
+    ),
+}
+
+
+def test_throws_truncation_footer_omitted_count_matches_hits(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Same regression as the catches case above, for `query throws`'
+    # own summary-line-in-lines_out truncation-meter bug.
+    root = make_mapped_repo(MANY_THROWS)
+    code = cli.main(
+        ["query", "throws", "f", "--limit", "2", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "5 throw site(s): 0 repo-defined, 5 external" in out
+    assert "3 of 5 omitted" in out

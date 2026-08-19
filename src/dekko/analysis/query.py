@@ -267,9 +267,21 @@ def _sym_json(index: MapIndex, sym: Symbol) -> dict:
     }
 
 
-def _emit_lines(lines: list[str], budget: int | None, limit: int) -> Meter:
-    """Print rows trimmed to the caps and return the cost meter."""
-    kept, meter = fit_to_budget(lines, budget, limit)
+def _emit_lines(
+    lines: list[str], budget: int | None, limit: int, prefix: str = ""
+) -> Meter:
+    """Print rows trimmed to the caps and return the cost meter.
+
+    ``prefix`` holds non-droppable leading text (a summary/header line,
+    printed once up front) — it counts toward the reported token cost
+    but, critically, *not* toward ``Meter.total``/the "N of TOTAL
+    omitted" row count, which must reflect data rows only. Passing a
+    header inside ``lines`` instead would inflate that count by one
+    (or more, for multi-line headers) whenever truncation kicks in.
+    """
+    kept, meter = fit_to_budget(lines, budget, limit, prefix=prefix)
+    if prefix:
+        print(prefix)
     for line in kept:
         print(line)
     return meter
@@ -810,10 +822,28 @@ def _peer_entry(index: MapIndex, sym_id: str, shared: list[str]) -> dict:
     return entry
 
 
-def _run_peers_empty(sym: Symbol, min_shared: int, base_size: int) -> None:
-    """Print the empty-result note for ``peers`` (text mode only)."""
+def _run_peers_empty(
+    sym: Symbol, min_shared: int, base_size: int, ambig_out: int
+) -> None:
+    """Print the empty-result note for ``peers`` (text mode only).
+
+    ``base_size == 0`` covers two different situations that must not
+    share the same "leaf function" wording: a symbol with genuinely no
+    outgoing calls, and one whose only outgoing call(s) resolved
+    ambiguously (name matched 2+ candidates) and so aren't counted in
+    ``calls_out`` at all — the same ambiguous-call case ``query
+    symbol``/``query callees`` already disclose via ``ambig_out``.
+    Calling the latter a "leaf function" asserts something the
+    symbol's own body contradicts.
+    """
     print(f"(no peers of {sym.id} sharing >= {min_shared} callee(s))")
-    if base_size == 0:
+    if base_size == 0 and ambig_out:
+        print(
+            f"  note: this symbol's only outgoing call(s) resolved "
+            f"ambiguously ({ambig_out} name(s) matched 2+ candidates) "
+            "— not counted, so no peers could be computed"
+        )
+    elif base_size == 0:
         print(
             "  note: this symbol has no outgoing calls (a leaf "
             "function) — it can't share callees with anything"
@@ -876,7 +906,8 @@ def _run_peers(
         print(json.dumps(doc, indent=2))
         return EXIT_OK, None
     if not rows:
-        _run_peers_empty(sym, min_shared, len(base))
+        ambig_out = len(index.ambiguous_out.get(sym.id, []))
+        _run_peers_empty(sym, min_shared, len(base), ambig_out)
         if coverage:
             print(f"  note: {coverage}", file=sys.stderr)
         return EXIT_OK, None
@@ -1084,22 +1115,31 @@ def _throws_text_lines(
     resolved: list[tuple[Symbol, int, list[int]]],
     external: list[ExternalCall],
     transitive: bool,
-) -> list[str]:
-    """Build ``_run_throws``' text result rows (summary + hits)."""
-    lines_out: list[str] = []
+) -> tuple[str, list[str]]:
+    """Build ``_run_throws``' text result prefix + data rows.
+
+    Returns:
+        ``(prefix, rows)`` — ``prefix`` holds the non-droppable summary
+        line (and, under ``--transitive``, the ``[target]`` label
+        line), kept separate from ``rows`` (one throw site each) so
+        truncation's "N of TOTAL omitted" count reflects data rows
+        only, not these header lines.
+    """
+    prefix_lines: list[str] = []
     if resolved or external:
         total = len(resolved) + len(external)
-        lines_out.append(
+        prefix_lines.append(
             f"{total} throw site(s): {len(resolved)} repo-defined, "
             f"{len(external)} external"
         )
     if transitive and resolved:
-        lines_out.append(f"{_sym_line(sym)}  [target]")
+        prefix_lines.append(f"{_sym_line(sym)}  [target]")
+    rows: list[str] = []
     for s, d, throw_lines in resolved:
-        prefix = "  " * d if transitive else ""
-        lines_out.append(f"{prefix}{_throws_row(s, throw_lines)}")
-    lines_out.extend(_throws_external_row(ext) for ext in external)
-    return lines_out
+        row_prefix = "  " * d if transitive else ""
+        rows.append(f"{row_prefix}{_throws_row(s, throw_lines)}")
+    rows.extend(_throws_external_row(ext) for ext in external)
+    return "\n".join(prefix_lines), rows
 
 
 def _throws_text_notes(
@@ -1180,14 +1220,14 @@ def _run_throws(
         )
         return EXIT_OK, None
 
-    lines_out = _throws_text_lines(sym, resolved, external, transitive)
+    prefix, rows = _throws_text_lines(sym, resolved, external, transitive)
     _throws_text_notes(bare_count, ambiguous_count, truncated, depth)
-    if not lines_out:
+    if not rows:
         print(f"(no throws found for {sym.id})")
         if coverage:
             print(f"  note: {coverage}", file=sys.stderr)
         return EXIT_OK, None
-    return EXIT_OK, _emit_lines(lines_out, budget, limit)
+    return EXIT_OK, _emit_lines(rows, budget, limit, prefix=prefix)
 
 
 # JS/TS catch clauses are never type-discriminated at the syntax level
@@ -1284,20 +1324,20 @@ def _run_catches(
             doc["coverage_warning"] = coverage
         print(json.dumps(doc, indent=2))
         return EXIT_OK, None
-    lines_out: list[str] = []
-    if hits:
-        lines_out.append(
-            f"{len(hits)} catch clause(s) match '{target}': "
-            f"{exact_count} exact, {catch_all_count} catch-all"
-        )
-    lines_out.extend(_catch_row(index, s) for s in hits)
+    header = (
+        f"{len(hits)} catch clause(s) match '{target}': "
+        f"{exact_count} exact, {catch_all_count} catch-all"
+        if hits
+        else ""
+    )
+    rows = [_catch_row(index, s) for s in hits]
     print(f"  note: {_CATCHES_CAVEAT}", file=sys.stderr)
-    if not lines_out:
+    if not rows:
         print(f"(no catch clauses would handle '{target}')")
         if coverage:
             print(f"  note: {coverage}", file=sys.stderr)
         return EXIT_OK, None
-    return EXIT_OK, _emit_lines(lines_out, budget, limit)
+    return EXIT_OK, _emit_lines(rows, budget, limit, prefix=header)
 
 
 # Caveat surfaced in ``env``'s own output (not just ``--help``),

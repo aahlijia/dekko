@@ -172,6 +172,42 @@ def test_js_relative_import_resolves_index_file() -> None:
     assert graph.deps_out["src/app.js"] == ["src/widgets/index.js"]
 
 
+def test_js_relative_import_with_js_extension_resolves_to_ts_source() -> None:
+    # NodeNext/ESM-style TypeScript requires relative specifiers to
+    # carry the *compiled* ".js" extension even though the real source
+    # is ".ts" -- "./foo.js" must still resolve to "foo.ts" when no
+    # literal "foo.js" exists in the repo.
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [_imp("src/index.ts", "Button", "./components/Button.js/Button")],
+        ),
+        _fm("src/components/Button.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["src/index.ts"] == ["src/components/Button.ts"]
+
+
+def test_js_relative_import_with_js_extension_prefers_literal_js_file() -> (
+    None
+):
+    # When a real ".js" file exists at the literal specifier path, it
+    # must still win over the ".ts"-guessing fallback above -- the
+    # fallback only kicks in when nothing matches the specifier as-is.
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [_imp("src/index.ts", "Button", "./components/Button.js/Button")],
+        ),
+        _fm("src/components/Button.js", "javascript", []),
+        _fm("src/components/Button.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["src/index.ts"] == ["src/components/Button.js"]
+
+
 def test_js_bare_specifier_is_external_without_repo_root_search() -> None:
     # Bare specifiers are external by construction, even if a
     # same-named directory happens to exist in the repo.

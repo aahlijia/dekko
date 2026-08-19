@@ -73,9 +73,10 @@ Default matching is identifier-token based (`Config` matches
 `ConfigManager`); pass `--exact` to match the stored type text
 verbatim instead.
 
-`query importers` and `query peers` answer "what else imports/uses the
-same thing as X" — a reverse-import lookup and a shared-callee peer
-lookup, respectively. `importers <source>` matches against each
+`query importers` and `query peers` are **CLI-only** (no MCP tool),
+like `deps`/`throws`/`catches`/`env`/`cohesion` — they answer "what
+else imports/uses the same thing as X", a reverse-import lookup and a
+shared-callee peer lookup, respectively. `importers <source>` matches against each
 file's raw, unresolved import-source text (`os.path`, `../utils`,
 `std::collections::HashMap`) — no cross-language module-path
 resolution is attempted, so it's a text match, not a "does this
@@ -291,7 +292,14 @@ a single walked chain — a group of 2+ files means those files can't be
 split apart without addressing the cycle first. A file that imports
 itself (a re-export pattern gone wrong, or simply unusual code) is
 reported as its own distinct 1-file cycle, labeled `(self-import)`,
-never merged into a real multi-file group's count.
+never merged into a real multi-file group's count. On Rust repos
+specifically, an inline submodule referencing an earlier item in the
+same file (`mod tests { use crate::Foo; }`, or any non-test inline
+`mod` doing the same) also shows up as `(self-import)` — this is
+ordinary, extremely common Rust, not a re-export smell; the label
+means "this file's own `use` graph has a cycle," which for Rust's
+per-file-module convention is frequently harmless rather than a sign
+of anything to fix.
 
 **Per-language resolution coverage** — a source string is matched
 against the repo's real file layout, not guessed when more than one
@@ -524,7 +532,7 @@ dekko daemon status --json           # structured form of the above
 dekko daemon stop                    # graceful shutdown
 ```
 
-Once running, every read-only subcommand (`query`, `search`,
+Once running, every read-only subcommand (`query`, `deps`, `search`,
 `workset`, `diff`, `affected`, `outline`, `context`, `trace`, `stats`,
 `summary`, `lean`, `unused`, `status`, `note list`, `export`)
 transparently routes through the daemon: identical output and exit
