@@ -77,6 +77,15 @@ JS_CATCHES = {
     ),
 }
 
+RUST_FN = {
+    "lib.rs": "fn foo() {}\n",
+}
+
+PY_AND_RUST = {
+    "app.py": "def f():\n    pass\n",
+    "lib.rs": "fn foo() {}\n",
+}
+
 
 def test_throws_one_level_repo_defined(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
@@ -362,3 +371,97 @@ def test_throws_truncation_footer_omitted_count_matches_hits(
     out = capsys.readouterr().out
     assert "5 throw site(s): 0 repo-defined, 5 external" in out
     assert "3 of 5 omitted" in out
+
+
+def test_throws_unsupported_language_target_is_disclosed_not_generic_empty(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Rust is a permanent throws/catches exclusion (see
+    # `languages.exception_handling_supported`) -- the empty-result
+    # message must say so, not fall into the generic "(no throws
+    # found ...)" text that a genuinely-empty *supported*-language
+    # query also produces.
+    root = make_mapped_repo(RUST_FN)
+    code = cli.main(["query", "throws", "foo", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "not tracked for" in out
+    assert "rust" in out
+    assert "no throws found" not in out
+
+
+def test_throws_json_language_supported_false_for_rust_target(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(RUST_FN)
+    code = cli.main(["query", "throws", "foo", "--json", "--root", str(root)])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["language_supported"] is False
+    assert doc["results"] == []
+
+
+def test_throws_json_omits_language_supported_when_true(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A genuinely-empty result on a *supported* language must not
+    # carry `language_supported` at all -- locks in the conditional
+    # field decision, not just the positive (Rust) case.
+    root = make_mapped_repo(PY_THROWS)
+    code = cli.main(
+        ["query", "throws", "caller", "--json", "--root", str(root)]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "language_supported" not in doc
+
+
+def test_catches_excluded_file_count_disclosed_when_repo_has_rust_files(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(PY_AND_RUST)
+    code = cli.main(
+        [
+            "query",
+            "catches",
+            "SomeCompletelyUnrelatedType",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 0
+    result = capsys.readouterr()
+    assert "1 of 2 mapped files" in result.err
+    assert "Rust/Go/C" in result.err
+
+
+def test_catches_no_language_coverage_note_for_single_supported_language(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Pure-Python repo: excluded count is 0, so the note must be
+    # silent -- regression guard against noise on the common case.
+    root = make_mapped_repo(PY_THROWS)
+    code = cli.main(["query", "catches", "ValueError", "--root", str(root)])
+    assert code == 0
+    result = capsys.readouterr()
+    assert "mapped files" not in result.err
+
+
+def test_catches_json_language_coverage_field_present_when_nonzero(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(PY_AND_RUST)
+    code = cli.main(
+        [
+            "query",
+            "catches",
+            "SomeCompletelyUnrelatedType",
+            "--json",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["language_coverage"]["excluded_files"] == 1
+    assert doc["language_coverage"]["total_files"] == 2

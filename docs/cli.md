@@ -377,7 +377,15 @@ every other `query` action:
   not syntax a tree-sitter query can point at; C has no exception
   concept to extract at all. `throws`/`catches` against a Rust/Go/C
   file report nothing, the same as if the file weren't parsed for this
-  feature at all — no misleadingly partial answer.
+  feature at all — and unlike a silent gap, both commands now disclose
+  this directly in their own output rather than only here: `throws`
+  against a Rust/Go/C target prints a distinct "not tracked for
+  `<language>`" message (and `--json` sets `"language_supported":
+  false`) instead of the generic empty-result text; `catches` prints a
+  `note:` line (and `--json` adds a `language_coverage` object) whenever
+  the repo has any Rust/Go/C files, giving the excluded/total file
+  count so a partial-coverage repo doesn't read as "nothing catches
+  this."
 
 ```sh
 dekko query throws load_config              # what load_config's own body raises (one level)

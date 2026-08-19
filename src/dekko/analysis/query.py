@@ -21,6 +21,7 @@ from contextlib import redirect_stdout
 
 from dekko.classify import is_test_path, relevance_key
 from dekko.render.mapfile import MapIndex, format_unsupported
+from dekko.core import languages
 from dekko.core.model import (
     TYPE_KINDS,
     CatchSite,
@@ -1079,6 +1080,7 @@ def _print_throws_json(
     budget: int | None,
     limit: int,
     coverage: str | None,
+    language_supported: bool,
 ) -> None:
     """JSON rendering for ``_run_throws``."""
     entries = [
@@ -1107,6 +1109,8 @@ def _print_throws_json(
         doc["ambiguous"] = ambiguous_count
     if coverage:
         doc["coverage_warning"] = coverage
+    if not language_supported:
+        doc["language_supported"] = False
     print(json.dumps(doc, indent=2))
 
 
@@ -1199,9 +1203,19 @@ def _run_throws(
         ``(exit_code, meter)`` — meter is ``None`` for JSON output or
         an empty result.
     """
-    resolved, external, bare_count, ambiguous_count, truncated = (
-        _throws_gather(index, sym, transitive, depth)
-    )
+    language_supported = languages.exception_handling_supported(sym.language)
+    if language_supported:
+        resolved, external, bare_count, ambiguous_count, truncated = (
+            _throws_gather(index, sym, transitive, depth)
+        )
+    else:
+        resolved, external, bare_count, ambiguous_count, truncated = (
+            [],
+            [],
+            0,
+            0,
+            False,
+        )
     coverage = _coverage_note(index)
     if as_json:
         _print_throws_json(
@@ -1217,13 +1231,21 @@ def _run_throws(
             budget,
             limit,
             coverage,
+            language_supported,
         )
         return EXIT_OK, None
 
     prefix, rows = _throws_text_lines(sym, resolved, external, transitive)
     _throws_text_notes(bare_count, ambiguous_count, truncated, depth)
     if not rows:
-        print(f"(no throws found for {sym.id})")
+        if not language_supported:
+            print(
+                f"(throws not tracked for {sym.id} — {sym.language} is "
+                "permanently excluded from this query; see `dekko "
+                "query throws --help`)"
+            )
+        else:
+            print(f"(no throws found for {sym.id})")
         if coverage:
             print(f"  note: {coverage}", file=sys.stderr)
         return EXIT_OK, None
@@ -1245,6 +1267,24 @@ _CATCHES_CAVEAT = (
     "exact-name-only (v1) — a catch of a supertype of the queried "
     "type is not detected as a match."
 )
+
+
+def _catches_excluded_file_count(index: MapIndex) -> tuple[int, int]:
+    """``(excluded, total)`` mapped files not covered by throws/catches.
+
+    ``excluded`` counts files whose recorded language (Rust/Go/C, or
+    any Tier-2 generic-grammar language) never extracts throw/catch
+    sites at all — see ``languages.exception_handling_supported``.
+    ``total`` is every mapped file, so the caller can render a "N of
+    TOTAL" disclosure.
+    """
+    total = len(index.languages_by_path)
+    excluded = sum(
+        1
+        for lang in index.languages_by_path.values()
+        if not languages.exception_handling_supported(lang)
+    )
+    return excluded, total
 
 
 def _catch_site_matches(site: CatchSite, target: str) -> bool:
@@ -1308,6 +1348,7 @@ def _run_catches(
     exact_count = sum(1 for s in hits if not s.bare)
     catch_all_count = sum(1 for s in hits if s.bare)
     coverage = _coverage_note(index)
+    excluded, total = _catches_excluded_file_count(index)
     if as_json:
         entries = [_catch_entry(s) for s in hits]
         kept, meter = _fit_entries(entries, budget, limit)
@@ -1322,6 +1363,12 @@ def _run_catches(
         }
         if coverage:
             doc["coverage_warning"] = coverage
+        if excluded:
+            doc["language_coverage"] = {
+                "excluded_files": excluded,
+                "total_files": total,
+                "reason": ("Rust/Go/C are not covered by throws/catches"),
+            }
         print(json.dumps(doc, indent=2))
         return EXIT_OK, None
     header = (
@@ -1332,6 +1379,14 @@ def _run_catches(
     )
     rows = [_catch_row(index, s) for s in hits]
     print(f"  note: {_CATCHES_CAVEAT}", file=sys.stderr)
+    if excluded:
+        print(
+            f"  note: {excluded:,} of {total:,} mapped files are in a "
+            "language (Rust/Go/C) this query doesn't cover; results "
+            "only reflect the other "
+            f"{total - excluded:,} files",
+            file=sys.stderr,
+        )
     if not rows:
         print(f"(no catch clauses would handle '{target}')")
         if coverage:

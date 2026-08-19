@@ -988,6 +988,31 @@ EXTENSION_MAP: dict[str, LanguageSpec] = {
     ext: spec for spec in TIER1_SPECS for ext in spec.extensions
 }
 
+SPEC_BY_NAME: dict[str, LanguageSpec] = {
+    spec.name: spec for spec in TIER1_SPECS
+}
+
+
+def exception_handling_supported(language: str) -> bool:
+    """Whether ``throws``/``catches`` extract anything for ``language``.
+
+    False for Rust/Go/C (permanent exclusion — see the comment above
+    ``TIER1_SPECS``) and for any language not in ``TIER1_SPECS`` at
+    all (Tier-2 generic-grammar languages, which never extract
+    throw/catch sites in the first place — same practical answer, a
+    different reason).
+
+    Args:
+        language: A language name as recorded on ``Symbol.language``
+            or in ``MapIndex.languages_by_path``.
+
+    Returns:
+        ``True`` if the language's ``LanguageSpec`` defines a
+        ``throw_query``, ``False`` otherwise.
+    """
+    spec = SPEC_BY_NAME.get(language)
+    return spec is not None and spec.throw_query is not None
+
 
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.

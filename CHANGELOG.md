@@ -9,6 +9,16 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.40.3] — 2026-08-19
+
+### Added
+- **`dekko query throws`/`dekko query catches`** — Rust/Go/C exclusion
+  is now disclosed in-CLI rather than only in docs: `throws` prints a
+  distinct message (and `language_supported: false` in `--json`) when
+  the target symbol's language has no syntax-level exception concept;
+  `catches` notes how many repo files were excluded from its scan for
+  the same reason (`language_coverage` in `--json`).
+
 ## [0.40.2] — 2026-08-19
 
 ### Fixed
