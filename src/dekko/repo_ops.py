@@ -38,7 +38,7 @@ from dekko.core.extractor_generic import extract_file_generic
 from dekko.core import languages
 from dekko.core.model import TYPE_KINDS, CallGraph, FileMap
 from dekko.render.render_json import render_json
-from dekko.core.resolver import resolve
+from dekko.core.resolver import resolve, run_pooled_with_retry
 
 
 # Below this many cache-miss files, a process pool costs more in startup
@@ -85,12 +85,22 @@ def _extract_misses(
 
     Returns:
         ``rel -> FileMap`` (or ``None`` for unsupported files).
+
+    A ``BrokenProcessPool`` on the parallel path (e.g. sibling
+    multiprocessing contention from another concurrent ``dekko``
+    process on this machine — round 17) gets one bounded retry at
+    reduced parallelism via ``run_pooled_with_retry`` before
+    propagating.
     """
     if workers <= 1 or len(misses) < _PARALLEL_MIN:
         return {rel: extract_one(root, rel) for rel in misses}
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        results = pool.map(extract_one, [root] * len(misses), misses)
-        return dict(zip(misses, results))
+
+    def _run(w: int) -> dict[str, FileMap | None]:
+        with ProcessPoolExecutor(max_workers=w) as pool:
+            results = pool.map(extract_one, [root] * len(misses), misses)
+            return dict(zip(misses, results))
+
+    return run_pooled_with_retry(_run, workers, "file extraction")
 
 
 def map_repository(

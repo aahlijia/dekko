@@ -99,10 +99,13 @@ tests for a change a same-package unit test directly covered.
 
 import posixpath
 import re
+import sys
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
+from typing import TypeVar
 
 from dekko.classify import is_test_path
 from dekko.core.model import (
@@ -157,6 +160,82 @@ MODULE_CALLER_SUFFIX = "::<module>"
 # medium repos see a win too, while trivial ones (most test fixtures)
 # stay sequential.
 _RESOLVE_PARALLEL_MIN_ITEMS = 5_000
+
+# Worker count for the one bounded retry a broken process pool gets
+# (round 17: an MCP server's auto-regen requesting os.cpu_count()
+# workers while a sibling `dekko map --jobs 0` does the same on the
+# same machine can starve worker-process startup enough to raise
+# BrokenProcessPool). Reduced-but-nonzero, not straight to sequential
+# -- see ``run_pooled_with_retry``'s docstring for why.
+_POOL_RETRY_WORKERS = 2
+
+_PoolResultT = TypeVar("_PoolResultT")
+
+
+def _pool_retry_note(what: str, retry_workers: int) -> None:
+    """Print the process-pool-retry disclosure note to stderr.
+
+    Mirrors round 15's ``_maybe_warn_sequential`` pattern (a one-line
+    ``note:`` on stderr before a slower fallback path runs) so a
+    caller that ends up waiting longer for a reduced-parallelism retry
+    isn't left in the dark about why.
+    """
+    plural = "" if retry_workers == 1 else "s"
+    print(
+        f"note: process pool failed during {what} (likely CPU "
+        "contention from another concurrent dekko process on this "
+        f"machine) -- retrying with reduced parallelism "
+        f"({retry_workers} worker{plural})",
+        file=sys.stderr,
+    )
+
+
+def run_pooled_with_retry(
+    run: Callable[[int], _PoolResultT], workers: int, what: str
+) -> _PoolResultT:
+    """Run a process-pool step, retrying once at reduced parallelism if
+    the pool itself breaks.
+
+    ``BrokenProcessPool`` most often means sibling multiprocessing
+    contention on the host machine starved worker-process startup
+    (round 17), not that process pools are fundamentally broken here
+    -- a bounded retry at a small but nonzero worker count is far more
+    likely to survive the same transient contention than either
+    repeating at full parallelism (same risk) or falling straight to
+    fully-sequential (round 15 measured 5+ minutes cold on a
+    tensorflow-scale repo; silently downgrading an in-flight MCP call
+    to that is its own trap).
+
+    Not a retry loop: exactly one bounded second attempt at
+    ``_POOL_RETRY_WORKERS`` (or fewer, if ``workers`` was already
+    smaller). If that attempt also raises ``BrokenProcessPool``, it
+    propagates unchanged -- a genuinely wedged or resource-exhausted
+    machine should surface a clear error, not hang retrying
+    indefinitely.
+
+    Args:
+        run: Builds a fresh pool at the given worker count and
+            returns the merged result. Called once, or twice on a
+            first-attempt ``BrokenProcessPool``; must be safe to call
+            again with no partial state left visible to the caller
+            (every call site in this module is a closure over locals
+            only, so this holds here).
+        workers: The worker count to attempt first.
+        what: Short label for the disclosure note (e.g. ``"call
+            resolution"``).
+
+    Returns:
+        Whatever ``run`` returns.
+
+    Raises:
+        BrokenProcessPool: If the retry attempt also fails.
+    """
+    try:
+        return run(workers)
+    except BrokenProcessPool:
+        retry_workers = min(workers, _POOL_RETRY_WORKERS)
+        _pool_retry_note(what, retry_workers)
+        return run(retry_workers)
 
 
 def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
@@ -317,6 +396,11 @@ def _resolve_all(
     (and therefore ``map.json``) is independent of how many workers
     ran or which one finished first — a parallel run must be
     byte-identical to a sequential one.
+
+    A ``BrokenProcessPool`` on the parallel path (round 17: sibling
+    multiprocessing contention on the host machine) gets one bounded
+    retry at reduced parallelism via ``run_pooled_with_retry`` before
+    propagating — see that function's docstring.
     """
     total_calls = sum(len(fm.calls) for fm in files)
     if workers <= 1 or total_calls < _RESOLVE_PARALLEL_MIN_ITEMS:
@@ -329,42 +413,51 @@ def _resolve_all(
             symbols_by_id,
         )
 
-    chunks = _chunk_files(files, workers)
-    if len(chunks) < 2:
-        return _resolve_files_chunk(
-            files,
-            index,
-            by_name_path,
-            imports_by_file,
-            repo_stems,
-            symbols_by_id,
-        )
-
-    edges: dict[tuple[str, str], set[int]] = {}
-    ambiguous: dict[tuple[str, str], list[str]] = {}
-    external: dict[tuple[str, str], set[int]] = {}
-    with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
-        futures = [
-            pool.submit(
-                _resolve_files_chunk,
-                chunk,
+    def _run(
+        w: int,
+    ) -> tuple[
+        dict[tuple[str, str], set[int]],
+        dict[tuple[str, str], list[str]],
+        dict[tuple[str, str], set[int]],
+    ]:
+        chunks = _chunk_files(files, w)
+        if len(chunks) < 2:
+            return _resolve_files_chunk(
+                files,
                 index,
                 by_name_path,
                 imports_by_file,
                 repo_stems,
                 symbols_by_id,
             )
-            for chunk in chunks
-        ]
-        for future in futures:
-            chunk_edges, chunk_ambiguous, chunk_external = future.result()
-            for key, lines in chunk_edges.items():
-                edges.setdefault(key, set()).update(lines)
-            for key, cands in chunk_ambiguous.items():
-                ambiguous.setdefault(key, cands)
-            for key, lines in chunk_external.items():
-                external.setdefault(key, set()).update(lines)
-    return edges, ambiguous, external
+
+        edges: dict[tuple[str, str], set[int]] = {}
+        ambiguous: dict[tuple[str, str], list[str]] = {}
+        external: dict[tuple[str, str], set[int]] = {}
+        with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
+            futures = [
+                pool.submit(
+                    _resolve_files_chunk,
+                    chunk,
+                    index,
+                    by_name_path,
+                    imports_by_file,
+                    repo_stems,
+                    symbols_by_id,
+                )
+                for chunk in chunks
+            ]
+            for future in futures:
+                chunk_edges, chunk_ambiguous, chunk_external = future.result()
+                for key, lines in chunk_edges.items():
+                    edges.setdefault(key, set()).update(lines)
+                for key, cands in chunk_ambiguous.items():
+                    ambiguous.setdefault(key, cands)
+                for key, lines in chunk_external.items():
+                    external.setdefault(key, set()).update(lines)
+        return edges, ambiguous, external
+
+    return run_pooled_with_retry(_run, workers, "call resolution")
 
 
 def _resolve_refs_chunk(
@@ -401,7 +494,10 @@ def resolve_refs(
     (bare identifiers used as values — see ``model.RawRef``) instead
     of ``RawCall``s. Kept as a distinct pass with its own return
     shape/tables rather than folding into ``edges``/``calls_in``/
-    ``calls_out`` — see the module docstring for why.
+    ``calls_out`` — see the module docstring for why. A
+    ``BrokenProcessPool`` on the parallel path gets one bounded retry
+    at reduced parallelism via ``run_pooled_with_retry`` before
+    propagating.
 
     Args:
         files: Per-file extraction results.
@@ -420,17 +516,16 @@ def resolve_refs(
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
 
     total_refs = sum(len(fm.refs) for fm in files)
-    chunks = (
-        _chunk_files(files, workers)
-        if workers > 1 and total_refs >= _RESOLVE_PARALLEL_MIN_ITEMS
-        else [files]
-    )
-    edges: dict[tuple[str, str], set[int]] = {}
-    if len(chunks) < 2:
-        edges = _resolve_refs_chunk(
-            files, index, by_name_path, imports_by_file, symbols_by_id
-        )
-    else:
+    use_pool = workers > 1 and total_refs >= _RESOLVE_PARALLEL_MIN_ITEMS
+
+    def _run(w: int) -> dict[tuple[str, str], set[int]]:
+        chunks = _chunk_files(files, w) if use_pool else [files]
+        if len(chunks) < 2:
+            return _resolve_refs_chunk(
+                files, index, by_name_path, imports_by_file, symbols_by_id
+            )
+
+        edges: dict[tuple[str, str], set[int]] = {}
         with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
             futures = [
                 pool.submit(
@@ -446,6 +541,9 @@ def resolve_refs(
             for future in futures:
                 for key, lines in future.result().items():
                     edges.setdefault(key, set()).update(lines)
+        return edges
+
+    edges = run_pooled_with_retry(_run, workers, "reference resolution")
 
     edge_list = [
         Edge(caller=c, callee=e, lines=sorted(lines))
@@ -794,6 +892,9 @@ def resolve_throws(
         workers: Worker count for parallel resolution (1 = sequential,
             the default). Mirrors ``resolve_refs``'s own ``workers``
             parameter and ``_resolve_all``'s chunking/threshold shape.
+            A ``BrokenProcessPool`` on the parallel path gets one
+            bounded retry at reduced parallelism via
+            ``run_pooled_with_retry`` before propagating.
 
     Returns:
         ``(throws, throws_out, throws_ambiguous, throws_external,
@@ -806,21 +907,26 @@ def resolve_throws(
     imports_by_file = _imports_by_file(files)
 
     total_throws = sum(len(fm.throws) for fm in files)
-    chunks = (
-        _chunk_files(files, workers)
-        if workers > 1 and total_throws >= _RESOLVE_PARALLEL_MIN_ITEMS
-        else [files]
-    )
+    use_pool = workers > 1 and total_throws >= _RESOLVE_PARALLEL_MIN_ITEMS
 
-    if len(chunks) < 2:
-        edges, ambiguous, external, bare = _resolve_throws_chunk(
-            files, index, by_name_path, imports_by_file
-        )
-    else:
-        edges = {}
-        ambiguous = {}
-        external = {}
-        bare = []
+    def _run(
+        w: int,
+    ) -> tuple[
+        dict[tuple[str, str], set[int]],
+        dict[tuple[str, str], list[str]],
+        dict[tuple[str, str], set[int]],
+        list[tuple[str, str, int]],
+    ]:
+        chunks = _chunk_files(files, w) if use_pool else [files]
+        if len(chunks) < 2:
+            return _resolve_throws_chunk(
+                files, index, by_name_path, imports_by_file
+            )
+
+        edges: dict[tuple[str, str], set[int]] = {}
+        ambiguous: dict[tuple[str, str], list[str]] = {}
+        external: dict[tuple[str, str], set[int]] = {}
+        bare: list[tuple[str, str, int]] = []
         with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
             futures = [
                 pool.submit(
@@ -841,6 +947,11 @@ def resolve_throws(
                 for key, lines in c_external.items():
                     external.setdefault(key, set()).update(lines)
                 bare.extend(c_bare)
+        return edges, ambiguous, external, bare
+
+    edges, ambiguous, external, bare = run_pooled_with_retry(
+        _run, workers, "throw resolution"
+    )
 
     throw_edges = [
         ThrowEdge(caller=c, type=ty, lines=sorted(lns))
@@ -918,6 +1029,9 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
         workers: Worker count for parallel resolution (1 = sequential,
             the default). Mirrors ``resolve_throws``'s own ``workers``
             parameter and ``_resolve_all``'s chunking/threshold shape.
+            A ``BrokenProcessPool`` on the parallel path gets one
+            bounded retry at reduced parallelism via
+            ``run_pooled_with_retry`` before propagating.
 
     Returns:
         Every clause across the repo as a ``CatchSite``, sorted by
@@ -928,18 +1042,16 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
     imports_by_file = _imports_by_file(files)
 
     total_catches = sum(len(fm.catches) for fm in files)
-    chunks = (
-        _chunk_files(files, workers)
-        if workers > 1 and total_catches >= _RESOLVE_PARALLEL_MIN_ITEMS
-        else [files]
-    )
+    use_pool = workers > 1 and total_catches >= _RESOLVE_PARALLEL_MIN_ITEMS
 
-    if len(chunks) < 2:
-        sites = _resolve_catches_chunk(
-            files, index, by_name_path, imports_by_file
-        )
-    else:
-        sites = []
+    def _run(w: int) -> list[CatchSite]:
+        chunks = _chunk_files(files, w) if use_pool else [files]
+        if len(chunks) < 2:
+            return _resolve_catches_chunk(
+                files, index, by_name_path, imports_by_file
+            )
+
+        sites: list[CatchSite] = []
         with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
             futures = [
                 pool.submit(
@@ -953,7 +1065,9 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
             ]
             for future in futures:
                 sites.extend(future.result())
+        return sites
 
+    sites = run_pooled_with_retry(_run, workers, "catch resolution")
     sites.sort(key=lambda s: (s.path, s.line, s.caller))
     return sites
 

@@ -2,10 +2,12 @@
 
 import io
 import json
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import pytest
 
+from dekko import repo_ops
 from dekko.analysis import query
 from dekko.integrations import cli
 from dekko.render import mapfile
@@ -807,6 +809,36 @@ def test_tool_call_reports_malformed_doc_version_clearly(
     text = result["content"][0]["text"]
     assert "version" in text.lower()
     assert "dekko map" in text
+    assert "internal error" not in text
+
+
+def test_tool_call_reports_persistent_broken_pool_clearly(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round 17: a BrokenProcessPool that survives resolver.py's own
+    # reduced-parallelism retry (persistent, not transient, sibling
+    # multiprocessing contention on the host machine) must not fall
+    # through to the generic "internal error: {exc}" catch-all -- it
+    # gets its own actionable message pointing at the likely cause and
+    # a workaround (`dekko map --jobs 1`), mirroring how
+    # MapFormatTooNewError/MapFormatInvalidError are already handled
+    # just above this in server.py.
+    root = make_mapped_repo(SRC)
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise BrokenProcessPool(
+            "A process in the process pool was terminated abruptly"
+        )
+
+    monkeypatch.setattr(repo_ops, "load_or_regen", _raise)
+
+    ctx = _ctx(root)  # fresh Context -> empty index_cache -> forces load
+    result = _call(ctx, "query_symbol", {"symbol": "f"})
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "process-pool" in text or "process pool" in text
+    assert "dekko map --jobs 1" in text
     assert "internal error" not in text
 
 

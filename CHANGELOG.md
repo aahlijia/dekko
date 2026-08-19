@@ -9,6 +9,16 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.40.2] — 2026-08-19
+
+### Fixed
+- **MCP server / process pools** — every `ProcessPoolExecutor` call
+  site (`repo_ops` extraction; `resolver`'s calls, refs, throws, and
+  catches resolution) now retries once at a reduced worker count on
+  `BrokenProcessPool` instead of surfacing an opaque crash under
+  contended-core load, with a disclosure note on retry and an
+  actionable MCP-level error message if the retry also fails.
+
 ## [0.40.1] — 2026-08-19
 
 ### Fixed

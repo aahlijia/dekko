@@ -15,6 +15,7 @@ import io
 import json
 import sys
 from collections.abc import Callable
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from importlib.metadata import version as _pkg_version
@@ -1464,6 +1465,24 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
             "invalid, so it can't be read. The file may be "
             "corrupted or truncated. Regenerate it with `dekko map` "
             "(or call refresh_map).",
+            True,
+        )
+    except BrokenProcessPool:
+        # A process pool broke twice in a row (once on the first
+        # attempt, once on round 17's reduced-parallelism retry —
+        # see resolver.py's run_pooled_with_retry) -- persistent, not
+        # transient, contention. Most often another concurrent
+        # ``dekko`` process on this machine (e.g. a heavy `dekko map
+        # --jobs 0`) is oversubscribing the CPU badly enough that
+        # even a small worker pool can't start up. Point at the fix
+        # instead of surfacing the raw "A process in the process pool
+        # was terminated abruptly..." text.
+        text, is_error = (
+            "dekko: map regeneration failed twice due to a process-pool "
+            "failure (often caused by heavy CPU/multiprocessing load from "
+            "another concurrent dekko process on this machine). Try again "
+            "once system load drops, or run `dekko map --jobs 1` manually "
+            "against this repo to avoid the parallel pool entirely.",
             True,
         )
     except Exception as exc:  # surface any tool crash as an error result
