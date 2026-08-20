@@ -2212,14 +2212,24 @@ def _heritage_external_label(index: MapIndex, sym: Symbol, name: str) -> str:
     first-party code one ``query symbol`` lookup away.
 
     This is a presentation-only distinction — no new resolution is
-    attempted, and the edge is still not walkable either way. The
-    signal used is narrow and JS/TS-specific by construction (the only
-    language family where this extraction gap is currently known to
-    apply): if the clause's target name matches a same-named import in
-    the subtype's own file, and that import's source looks like a
-    relative path into the repo (starts with ``.`` or ``/``, as
-    opposed to a bare package specifier like ``"react"``), the name is
-    at least *known* to be local.
+    attempted, and the edge is still not walkable either way. Two
+    narrow, JS/TS-specific signals are checked (the only language
+    family where this extraction gap is currently known to apply):
+
+    1. A same-file type-alias declaration with this bare name exists
+       (``index.type_aliases_by_path`` — round-19 claude-code finding:
+       ``ShellCommandImpl implements ShellCommand`` where
+       ``ShellCommand`` is a same-file ``type X = {...}``. The
+       original round-18 fix only covered the cross-file case below,
+       since a same-file alias needs no import statement and so never
+       had a candidate for that loop to check).
+    2. The clause's target name matches a same-named import in the
+       subtype's own file, and that import's source looks like a
+       relative path into the repo (starts with ``.`` or ``/``, as
+       opposed to a bare package specifier like ``"react"``) — the
+       original round-18 signal, for the cross-file case.
+
+    Either signal is enough to know the name is at least local.
 
     Args:
         index: Loaded map index.
@@ -2227,10 +2237,13 @@ def _heritage_external_label(index: MapIndex, sym: Symbol, name: str) -> str:
         name: The heritage clause's raw target text (``ext.callee``).
 
     Returns:
-        ``"unresolved"`` when a same-named relative import exists in
-        the subtype's own file, ``"external"`` otherwise.
+        ``"unresolved"`` when a same-file type alias or a same-named
+        relative import exists for this name, ``"external"``
+        otherwise.
     """
     bare = name.split("<", 1)[0].strip().rsplit(".", 1)[-1]
+    if bare in index.type_aliases_by_path.get(sym.path, frozenset()):
+        return "unresolved"
     for imp in index.imports_by_path.get(sym.path, []):
         if imp.name == bare and imp.source.startswith((".", "/")):
             return "unresolved"

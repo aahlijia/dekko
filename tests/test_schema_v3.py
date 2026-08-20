@@ -39,10 +39,11 @@ def _resolve(doc: dict, ref: int) -> str:
     return doc["ids"][ref]
 
 
-def test_doc_version_is_9(make_mapped_repo: RepoFactory) -> None:
-    # Bumped 8 -> 9 for env_reads (config/env value read tracing).
+def test_doc_version_is_10(make_mapped_repo: RepoFactory) -> None:
+    # Bumped 9 -> 10 for type_aliases_by_path (round-19 claude-code
+    # same-file TS type-alias heritage-mislabeling fix).
     doc = _map_doc(make_mapped_repo(SRC))
-    assert doc["version"] == 9
+    assert doc["version"] == 10
 
 
 def test_edges_carry_call_site_lines(make_mapped_repo: RepoFactory) -> None:

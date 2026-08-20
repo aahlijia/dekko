@@ -42,7 +42,7 @@ try:
 except ImportError:  # pragma: no cover - exercised in stdlib-only envs
     orjson = None  # type: ignore[assignment]
 
-MAP_DOC_VERSION = 9
+MAP_DOC_VERSION = 10
 _MAP_DIR = ".dekko"
 
 
@@ -573,6 +573,17 @@ class MapIndex:
         edge_lines: ``(caller id, callee id)`` → call-site lines
             (empty for maps written before doc version 3).
         imports_by_path: File path → imports declared in it.
+        type_aliases_by_path: File path → bare names of type-alias
+            declarations in it (TS/TSX only, empty for maps written
+            before doc version 10 — see ``model.FileMap.
+            type_aliases``). Consulted by ``query.
+            _heritage_external_label`` as a same-file counterpart to
+            ``imports_by_path``'s cross-file relative-import check
+            (round-19 claude-code finding: a same-file ``type X =
+            {...}`` used in an ``implements``/``extends`` clause had
+            no structural signal to distinguish it from a genuinely
+            external base, since it's never extracted as a ``Symbol``
+            at all).
         languages_by_path: File path → language name.
         docs_by_path: File path → module doc first line, or ``None``.
         errors_by_path: File path → parse error message (only files
@@ -712,6 +723,9 @@ class MapIndex:
     calls_out: dict[str, list[str]] = field(default_factory=dict)
     edge_lines: dict[tuple[str, str], list[int]] = field(default_factory=dict)
     imports_by_path: dict[str, list[Import]] = field(default_factory=dict)
+    type_aliases_by_path: dict[str, frozenset[str]] = field(
+        default_factory=dict
+    )
     languages_by_path: dict[str, str] = field(default_factory=dict)
     docs_by_path: dict[str, str | None] = field(default_factory=dict)
     errors_by_path: dict[str, str] = field(default_factory=dict)
@@ -803,6 +817,7 @@ class MapIndex:
             if _prod_id(key[0], by_id) and _prod_id(key[1], by_id)
         }
         out.imports_by_path = _filter_paths(self.imports_by_path)
+        out.type_aliases_by_path = _filter_paths(self.type_aliases_by_path)
         out.languages_by_path = _filter_paths(self.languages_by_path)
         out.docs_by_path = _filter_paths(self.docs_by_path)
         out.errors_by_path = _filter_paths(self.errors_by_path)
@@ -1209,6 +1224,9 @@ def load_map(root: Path) -> MapIndex | None:
         index.imports_by_path[fpath] = [
             Import(**imp) for imp in entry.get("imports", [])
         ]
+        index.type_aliases_by_path[fpath] = frozenset(
+            entry.get("type_aliases", [])
+        )
     for d in doc.get("symbols", []):
         sym = _symbol_from_dict(d)
         index.symbols_by_id[sym.id] = sym
@@ -1472,6 +1490,7 @@ def index_from_maps(
         if fm.error:
             index.errors_by_path[fm.path] = fm.error
         index.imports_by_path[fm.path] = list(fm.imports)
+        index.type_aliases_by_path[fm.path] = frozenset(fm.type_aliases)
         for sym in fm.symbols:
             index.symbols_by_id[sym.id] = sym
             index.symbols_by_name.setdefault(sym.name, []).append(sym)

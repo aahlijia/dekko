@@ -98,6 +98,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     catches = _collect_catches(spec, tree.root_node, rel, defs)
     env_reads = _collect_env_reads(spec, tree.root_node, rel, defs)
     imports = _collect_imports(spec, tree.root_node, rel)
+    type_aliases = _collect_type_aliases(spec, tree.root_node)
     return FileMap(
         path=rel,
         language=spec.name,
@@ -109,6 +110,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         catches=catches,
         env_reads=env_reads,
         imports=imports,
+        type_aliases=type_aliases,
         doc=_module_doc(spec.name, tree.root_node),
     )
 
@@ -2268,6 +2270,30 @@ def _collect_env_reads(
             )
         )
     return out
+
+
+# ---------------------------------------------------------------------
+# Type aliases
+
+
+def _collect_type_aliases(spec: LanguageSpec, root: Node) -> list[str]:
+    """Bare names of type-alias declarations in this file.
+
+    TS/TSX only (see ``LanguageSpec.type_alias_query``'s docstring) --
+    a lightweight file-scoped name registry, not full symbols, feeding
+    ``query._heritage_external_label``'s same-file lookup (round-19
+    claude-code finding: ``ShellCommandImpl implements ShellCommand``
+    where ``ShellCommand`` is a same-file ``type X = {...}`` alias was
+    mislabeled ``(external)`` for lack of this signal).
+    """
+    if spec.type_alias_query is None:
+        return []
+    names: list[str] = []
+    for _, caps in _run_query(spec.grammar, spec.type_alias_query, root):
+        name_node = _one(caps, "name")
+        if name_node is not None:
+            names.append(_text(name_node))
+    return names
 
 
 # ---------------------------------------------------------------------

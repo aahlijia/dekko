@@ -54,6 +54,7 @@ def render_json(
                 "error": fm.error,
                 "doc": fm.doc,
                 "imports": [asdict(i) for i in fm.imports],
+                "type_aliases": fm.type_aliases,
             }
             for fm in files
         ],

@@ -202,9 +202,10 @@ def test_round_trip_matches_index_from_maps(tmp_path: Path) -> None:
     assert loaded.module_external == expected.module_external
 
 
-def test_map_doc_version_is_9() -> None:
-    # Bumped 8 -> 9 for env_reads (config/env value read tracing).
-    assert mapfile.MAP_DOC_VERSION == 9
+def test_map_doc_version_is_10() -> None:
+    # Bumped 9 -> 10 for type_aliases_by_path (round-19 claude-code
+    # same-file TS type-alias heritage-mislabeling fix).
+    assert mapfile.MAP_DOC_VERSION == 10
 
 
 def test_backward_read_v5_document_without_heritage_sections(

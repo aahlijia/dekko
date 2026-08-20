@@ -344,6 +344,60 @@ def test_type_alias_implements_target_json_flags_unresolved_local(
     assert ext["unresolved_local"] is True
 
 
+# round-19 claude-code finding: the round-18 fix above only catches
+# the cross-file case (a same-named relative import exists to check
+# against) -- a *same-file* type alias needs no import statement at
+# all, so that loop never even had a candidate for ``ShellCommand``
+# and the resolver's terminal fallback still mislabeled it
+# ``(external)``. Same repro shape as claude-code's own
+# ``src/utils/ShellCommand.ts``, just collapsed into one file.
+TS_SAME_FILE_TYPE_ALIAS_HERITAGE = {
+    "shell_command.ts": (
+        "export type ShellCommand = {\n"
+        "  run(): void;\n"
+        "};\n"
+        "\n"
+        "export class ShellCommandImpl implements ShellCommand {\n"
+        "  run(): void {}\n"
+        "}\n"
+    ),
+}
+
+
+def test_same_file_type_alias_implements_target_labeled_unresolved(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_SAME_FILE_TYPE_ALIAS_HERITAGE)
+    code = cli.main(
+        ["query", "supertypes", "ShellCommandImpl", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "(unresolved) ShellCommand" in out
+    assert "(external)" not in out
+
+
+def test_same_file_type_alias_implements_target_json_flags_unresolved(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_SAME_FILE_TYPE_ALIAS_HERITAGE)
+    code = cli.main(
+        [
+            "query",
+            "supertypes",
+            "ShellCommandImpl",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    ext = next(r for r in doc["results"] if r.get("external"))
+    assert ext["text"] == "ShellCommand"
+    assert ext["unresolved_local"] is True
+
+
 def test_genuine_external_base_still_labeled_external(
     capsys: pytest.CaptureFixture,
 ) -> None:

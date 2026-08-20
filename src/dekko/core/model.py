@@ -383,6 +383,13 @@ class FileMap:
             are turned into edges (see ``model.EnvRead``'s docstring).
         doc: First line of the file's module docstring or leading
             comment, or ``None`` (best-effort, per language).
+        type_aliases: Bare names of type-alias declarations in this
+            file (TS/TSX only — see ``languages.LanguageSpec.
+            type_alias_query``). Not full symbols, just names: a
+            same-file lookup registry so ``query._heritage_external_
+            label`` can tell a same-file ``type X = {...}`` apart from
+            a genuinely external heritage base (round-19 claude-code
+            finding).
     """
 
     path: str
@@ -395,6 +402,7 @@ class FileMap:
     catches: list[RawCatch] = field(default_factory=list)
     env_reads: list[EnvRead] = field(default_factory=list)
     imports: list[Import] = field(default_factory=list)
+    type_aliases: list[str] = field(default_factory=list)
     error: str | None = None
     doc: str | None = None
 

@@ -130,6 +130,16 @@ class LanguageSpec:
             ``catch_query`` exclude Rust/Go/C — an env-var read is
             just a call/member-access expression, not a language
             feature some languages structurally lack).
+        type_alias_query: Query capturing a type-alias declaration's
+            bare name (``@name``) — e.g. TS's ``type X = {...}``,
+            which is never extracted as a ``Symbol`` (see
+            ``query._heritage_external_label``'s docstring for why
+            this matters: an ``implements``/``extends`` clause naming
+            a same-file type alias has no other structural signal to
+            distinguish it from a genuinely external base type,
+            round-19 claude-code finding). ``None`` for languages
+            without one (only TS/TSX have this construct as of this
+            writing — plain JS has no ``type`` keyword at all).
     """
 
     name: str
@@ -147,6 +157,7 @@ class LanguageSpec:
     throw_query: str | None = None
     catch_query: str | None = None
     env_read_query: str | None = None
+    type_alias_query: str | None = None
 
 
 PYTHON = LanguageSpec(
@@ -751,6 +762,26 @@ _TS_HERITAGE = """
   (extends_type_clause)? @heritage) @classdef
 """
 
+# Same-file type-alias registry (round-19 claude-code finding, bug #3):
+# TS's ``type X = {...}``/``type X = A | B``/etc. is never extracted as
+# a ``Symbol`` at all (no ``definition_query`` pattern covers it), so an
+# ``implements``/``extends`` clause naming a same-file alias had no
+# structural signal to tell it apart from a genuinely external base
+# type -- ``_heritage_external_label`` in ``query.py`` consults this
+# field's output (``FileMap.type_aliases`` -> ``MapIndex.
+# type_aliases_by_path``) as a same-file counterpart to its existing
+# same-named-relative-import check. Only the bare name is needed (not a
+# full symbol), so this is a lightweight per-file name registry, not a
+# new definition_query pattern. Confirmed against the pinned
+# tree-sitter-typescript grammar: ``type_alias_declaration``'s ``name``
+# field is a ``type_identifier``, fielded as ``name:`` -- no anchor
+# tricks needed. Not wired onto ``JAVASCRIPT``: the ``javascript``
+# tree-sitter grammar has no ``type_alias_declaration`` node type at
+# all (no ``type`` keyword in the language).
+_TS_TYPE_ALIAS_QUERY = """
+(type_alias_declaration name: (type_identifier) @name)
+"""
+
 TYPESCRIPT = LanguageSpec(
     name="typescript",
     grammar="typescript",
@@ -768,6 +799,7 @@ TYPESCRIPT = LanguageSpec(
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
     env_read_query=_JS_ENV_READ_QUERY,
+    type_alias_query=_TS_TYPE_ALIAS_QUERY,
 )
 
 TSX = LanguageSpec(
@@ -786,6 +818,7 @@ TSX = LanguageSpec(
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
     env_read_query=_JS_ENV_READ_QUERY,
+    type_alias_query=_TS_TYPE_ALIAS_QUERY,
 )
 
 # Type-reference edges (bug #1.1a): a struct/interface type used only
