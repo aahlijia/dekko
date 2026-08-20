@@ -265,6 +265,33 @@ def test_unused_does_not_flag_go_struct_used_only_as_field_type(
     assert "no unused symbols" in capsys.readouterr().out
 
 
+JAVA_METHOD_REFERENCE_ONLY = {
+    "Foo.java": (
+        "public class Foo {\n"
+        "    void configureBuildInfoTask(BuildInfo info) {}\n"
+        "    public void wire() {\n"
+        "        java.util.function.Consumer<BuildInfo> c = "
+        "this::configureBuildInfoTask;\n"
+        "        c.accept(new BuildInfo());\n"
+        "    }\n"
+        "}\n\n"
+        "class BuildInfo {}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_java_method_only_used_via_method_reference(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-19 spring-boot finding: this::configureBuildInfoTask (a
+    # Java 8 method reference passed as a callback) was invisible to
+    # both call_query (no argument list) and Java's reference_query
+    # (didn't exist) -- ~15% of the repo's .java files use `::`.
+    root = make_mapped_repo(JAVA_METHOD_REFERENCE_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
 TSX_COMPONENT_ONLY = {
     "sidebar.tsx": (
         "export function Sidebar(): JSX.Element {\n"

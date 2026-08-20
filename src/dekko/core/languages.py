@@ -41,7 +41,7 @@ class LanguageSpec:
         reference_query: Query capturing non-call usage edges — a
             single ``@ref`` capture per match, fed into the same
             ``referenced_in``/``referenced_out`` pipeline
-            ``call_query`` feeds. Two distinct shapes so far: bare
+            ``call_query`` feeds. Three distinct shapes so far: bare
             identifiers used as *values* rather than invoked —
             object-literal property values, array elements, call
             arguments, assignment/declarator right-hand sides, and (for
@@ -53,8 +53,12 @@ class LanguageSpec:
             const declaration types and composite-literal types (Go's
             struct/interface usage, bug #1.1a) — which a
             definition/call query never visits at all since they name
-            a *type*, not a callable or a value. ``None`` for languages
-            without one yet (JS, TS, TSX, Go as of this writing).
+            a *type*, not a callable or a value; and (Java) method
+            references (``this::method``/``Class::method``, bug
+            #2/round-19), which are call-shaped nowhere in the syntax
+            tree (no argument list) and so are invisible to
+            ``call_query`` too. ``None`` for languages without one yet
+            (JS, TS, TSX, Go, Java as of this writing).
         heritage_query: Query capturing a type definition's own
             ``extends``/``implements`` clause(s) — one ``@classdef``
             match per type, with the clause(s) attached as sibling
@@ -882,6 +886,25 @@ GO = LanguageSpec(
 """,
 )
 
+# Round-19 (spring-boot) finding: a Java 8 method reference
+# (``this::configureBuildInfoTask``, ``Foo::staticMethod``,
+# ``java.util.Objects::requireNonNull`` -- tree-sitter node type
+# ``method_reference``) is neither a call (no argument list, no
+# invocation) nor covered by any reference query, since JAVA previously
+# set none at all -- a method used only as a callback reference (e.g.
+# passed to a functional-interface parameter) was indistinguishable
+# from dead code to ``dekko unused``. The ``"::"`` anchor requires the
+# captured ``@ref`` node to immediately follow the literal ``::``
+# token; Java's ``Class::new`` constructor-reference form has ``new``
+# as an anonymous keyword token in that position, not an
+# ``identifier`` node, so it never matches this pattern -- no separate
+# exclusion predicate needed. Verified live against the pinned
+# tree-sitter-java grammar for ``this::baz``/``Foo::staticMethod``/
+# ``java.util.Objects::requireNonNull``/``Class::new``.
+_JAVA_REFERENCE_QUERY = """
+(method_reference "::" (identifier) @ref)
+"""
+
 JAVA = LanguageSpec(
     name="java",
     grammar="java",
@@ -921,6 +944,7 @@ JAVA = LanguageSpec(
         "record_declaration",
     ),
     param_style="generic",
+    reference_query=_JAVA_REFERENCE_QUERY,
     heritage_query="""
 (class_declaration
   name: (identifier) @classname

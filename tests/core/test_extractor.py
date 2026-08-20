@@ -505,6 +505,67 @@ def test_tsx_jsx_tag_name_captured_as_ref(tmp_path: Path) -> None:
     assert "Sidebar" in ref_names
 
 
+def test_java_method_reference_captured_as_ref(tmp_path: Path) -> None:
+    """Round-19 (spring-boot) finding: Java 8 method references.
+
+    ``this::configureBuildInfoTask``/``Foo::staticMethod``/
+    ``java.util.Objects::requireNonNull`` are never call-shaped (no
+    argument list) and, before ``_JAVA_REFERENCE_QUERY``, Java had no
+    ``reference_query`` at all -- a method passed only as a callback
+    reference was indistinguishable from dead code to ``dekko unused``.
+    """
+    spec = languages.spec_for_path("Data.java")
+    assert spec is not None
+    (tmp_path / "Data.java").write_text(
+        "class Data {\n"
+        "    void configureBuildInfoTask(BuildInfo info) {}\n"
+        "    static void staticMethod() {}\n"
+        "    void wire() {\n"
+        "        java.util.function.Consumer<BuildInfo> c ="
+        " this::configureBuildInfoTask;\n"
+        "        Runnable r = Data::staticMethod;\n"
+        "        java.util.function.Function<String, Long> p ="
+        " java.util.Objects::requireNonNull;\n"
+        "    }\n"
+        "}\n\n"
+        "class BuildInfo {}\n"
+    )
+    fm = extract_file(tmp_path, "Data.java", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "configureBuildInfoTask" in ref_names
+    assert "staticMethod" in ref_names
+    assert "requireNonNull" in ref_names
+
+
+def test_java_constructor_reference_not_captured_as_ref_to_new(
+    tmp_path: Path,
+) -> None:
+    """Negative case for the fix above: ``Class::new``.
+
+    ``new`` is an anonymous keyword token in tree-sitter-java, not an
+    ``identifier`` node, so it must never satisfy
+    ``_JAVA_REFERENCE_QUERY``'s ``"::" (identifier) @ref`` anchor --
+    locks in that a constructor reference doesn't spuriously surface a
+    reference to a symbol literally named ``new`` (and doesn't
+    misattribute the reference to the object identifier, ``Data``,
+    either).
+    """
+    spec = languages.spec_for_path("Data.java")
+    assert spec is not None
+    (tmp_path / "Data.java").write_text(
+        "import java.util.function.Supplier;\n\n"
+        "class Data {\n"
+        "    void wire() {\n"
+        "        Supplier<Data> s = Data::new;\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "Data.java", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "new" not in ref_names
+    assert "Data" not in ref_names
+
+
 def test_ts_object_literal_shorthand_captured_as_ref(
     tmp_path: Path,
 ) -> None:
