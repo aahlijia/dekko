@@ -2428,17 +2428,44 @@ def _rust_self_base(importer_path: str) -> str:
 
 def _rust_crate_root(importer_path: str, paths: frozenset[str]) -> str | None:
     """Nearest ancestor directory of ``importer_path`` containing
-    ``lib.rs``/``main.rs`` — this repo's best-effort stand-in for the
-    crate root ``crate::`` paths resolve against, absent any ``Cargo.
-    toml``/workspace parsing (out of scope; dekko does not parse
-    build manifests). Returns ``None`` when no such ancestor exists
-    (e.g. a fixture with no crate-root file, or a Rust ``tests/``
-    integration-test file, each compiled as its own separate crate).
+    ``lib.rs``/``main.rs`` — or, failing that, a ``src/`` directory
+    whose immediate parent directory name matches a ``.rs`` file
+    directly inside it (``crates/editor/src/editor.rs`` for a
+    ``crates/editor/`` crate) — this repo's best-effort stand-in for
+    the crate root ``crate::`` paths resolve against, absent any
+    ``Cargo.toml``/workspace parsing (out of scope; dekko does not
+    parse build manifests).
+
+    The second heuristic exists because Cargo.toml's ``[lib] path =
+    "src/<name>.rs"`` (or ``[[bin]] path = ...``) override is common in
+    real-world workspaces (confirmed against zed: 216/222 of its
+    crates using a ``[lib] path`` override follow exactly this
+    crate-dir-name-matches-filename-stem shape) — without it, a
+    literal-``lib.rs``-only check silently misresolves the vast
+    majority of ``crate::``-prefixed imports as external on any repo
+    using this convention. It's also exactly what ``cargo`` itself
+    infers by default when no ``[lib]`` override exists, and matches
+    the filename zed's own override *chooses* — not an arbitrary
+    guess.
+
+    Returns ``None`` when neither shape is found in any ancestor (e.g.
+    a fixture with no crate-root file, a Rust ``tests/`` integration-
+    test file compiled as its own crate, or a crate whose Cargo.toml
+    points somewhere this heuristic doesn't cover, such as zed's
+    ``language_onboarding`` crate mapping ``[lib] path =
+    "src/python.rs"`` — still an honest "can't tell", not a wrong
+    answer).
     """
     d = _dirname(importer_path)
     while True:
         if f"{d}/lib.rs" in paths or f"{d}/main.rs" in paths:
             return d
+        base = d.rsplit("/", 1)[-1] if d else ""
+        parent = _dirname(d)
+        if base == "src" and parent:
+            crate_name = parent.rsplit("/", 1)[-1]
+            if f"{d}/{crate_name}.rs" in paths:
+                return d
         if not d:
             return None
         d = _dirname(d)

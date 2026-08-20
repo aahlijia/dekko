@@ -353,6 +353,40 @@ def test_deps_budget_caps_file_view_rows(
     assert code == 0
 
 
+def test_deps_rust_crate_import_resolves_against_named_lib_root(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-19 zed finding: a crate whose Cargo.toml overrides
+    # `[lib] path = "src/<name>.rs"` (216/222 of zed's own crates with
+    # a [lib] path override use this shape) has no literal lib.rs/
+    # main.rs anywhere -- before the _rust_crate_root fallback, every
+    # crate::-prefixed import in such a crate resolved as external
+    # rather than to the real in-repo file.
+    root = make_mapped_repo(
+        {
+            "crates/editor/src/editor.rs": "pub struct Editor;\n",
+            "crates/editor/src/code_context_menus.rs": (
+                "use crate::editor::Editor;\n"
+                "pub fn make() -> Editor { Editor }\n"
+            ),
+        }
+    )
+    code = cli.main(
+        [
+            "deps",
+            "--root",
+            str(root),
+            "--file",
+            "crates/editor/src/code_context_menus.rs",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "imports (1):" in out
+    assert "crates/editor/src/editor.rs" in out
+    assert "external (0):" in out
+
+
 def test_deps_compute_top_by_deps_in_ranking(
     make_mapped_repo: RepoFactory,
 ) -> None:

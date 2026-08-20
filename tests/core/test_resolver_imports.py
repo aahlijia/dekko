@@ -324,6 +324,59 @@ def test_rust_bare_crate_name_is_external() -> None:
     assert graph.external["src/lib.rs"] == ["serde::Deserialize"]
 
 
+def test_rust_crate_path_resolves_against_named_lib_root() -> None:
+    # round-19 zed finding: Cargo.toml `[lib] path = "src/editor.rs"`
+    # overrides the default lib.rs filename -- 216/222 of zed's own
+    # crates with a [lib] path override use this pattern. No Cargo.toml
+    # parsing; matched instead by the "single .rs file under src/
+    # matching its parent dir name" convention (see _rust_crate_root's
+    # docstring).
+    files = [
+        _fm("crates/editor/src/editor.rs", "rust", []),
+        _fm(
+            "crates/editor/src/code_context_menus.rs",
+            "rust",
+            [
+                _imp(
+                    "crates/editor/src/code_context_menus.rs",
+                    "Editor",
+                    "crate::editor::Editor",
+                )
+            ],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["crates/editor/src/code_context_menus.rs"] == [
+        "crates/editor/src/editor.rs"
+    ]
+
+
+def test_rust_crate_path_still_external_when_no_named_root_matches() -> None:
+    # Negative case: a src/ dir whose parent name doesn't match any
+    # .rs file inside it (custom Cargo.toml path unrelated to the
+    # crate dir name, e.g. zed's language_onboarding -> src/python.rs)
+    # stays an honest "can't tell" -> external, not a regression from
+    # pre-fix behavior for this shape.
+    files = [
+        _fm("crates/weird/src/entry_point.rs", "rust", []),
+        _fm(
+            "crates/weird/src/other.rs",
+            "rust",
+            [
+                _imp(
+                    "crates/weird/src/other.rs",
+                    "Thing",
+                    "crate::entry_point::Thing",
+                )
+            ],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
+    external = graph.external["crates/weird/src/other.rs"]
+    assert "crate::entry_point::Thing" in external
+
+
 # ---------------------------------------------------------------------
 # Java
 
