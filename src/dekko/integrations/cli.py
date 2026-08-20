@@ -1970,6 +1970,7 @@ def run_status(args: argparse.Namespace) -> int:
         prov = index.provenance
 
     unsupported = (prov or {}).get("unsupported")
+    too_large = (prov or {}).get("too_large")
     if args.as_json:
         doc = {
             "status": "fresh" if fresh.fresh else "stale",
@@ -1978,6 +1979,7 @@ def run_status(args: argparse.Namespace) -> int:
             "removed": fresh.removed,
             "changed": fresh.changed,
             "unsupported": unsupported,
+            "too_large": too_large,
         }
         print(json.dumps(doc, indent=2))
         return 0 if fresh.fresh else 1

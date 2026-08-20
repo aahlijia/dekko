@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from dekko.render import mapfile
+from dekko.integrations import cli
 from dekko.core.model import (
     CallGraph,
     Edge,
@@ -267,6 +268,51 @@ def test_vendored_excluded_none_when_no_vendored_dirs_present(
     index = mapfile.load_map(root)
     assert index is not None
     assert index.provenance["vendored_excluded"] is None
+
+
+def test_provenance_records_too_large_files_with_paths(
+    tmp_path: Path,
+) -> None:
+    # round-18 zed finding: a real, first-party file skipped only for
+    # exceeding --max-file-size vanished with zero disclosure ("no
+    # mapped file or directory", no hint a size cap was the reason).
+    # The path itself (not just a count) must survive into provenance
+    # so `status`/`summary`/`map_status` can name it.
+    big_file = tmp_path / "big_module.py"
+    big_file.write_text("def f() -> None:\n    pass\n" + "# pad\n" * 100)
+    small_file = tmp_path / "small_module.py"
+    small_file.write_text("def g() -> None:\n    pass\n")
+    assert (
+        cli.main(
+            [
+                "map",
+                str(tmp_path),
+                "--quiet",
+                "--max-file-size",
+                "50",
+            ]
+        )
+        == 0
+    )
+    index = mapfile.load_map(tmp_path)
+    assert index is not None
+    assert index.provenance is not None
+    too_large = index.provenance["too_large"]
+    assert too_large == {"count": 1, "paths": ["big_module.py"]}
+    note = mapfile.format_unsupported(index.provenance)
+    assert note is not None
+    assert "1 file(s) exceeded the size cap" in note
+    assert "big_module.py" in note
+    assert "--max-file-size" in note
+
+
+def test_too_large_none_when_no_files_exceed_cap(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.provenance["too_large"] is None
 
 
 def test_version_stamp_stale_even_with_unchanged_source(

@@ -86,6 +86,29 @@ PY_AND_RUST = {
     "lib.rs": "fn foo() {}\n",
 }
 
+# round-18 spring-boot finding, reproduced from the real
+# `Binder.handleBindError` shape: rethrowing a caught exception
+# through a Java 16+ `instanceof` pattern-match binding used to be
+# mislabeled `(external) bindException` -- the raw variable name
+# standing in for a fabricated external type.
+JAVA_INSTANCEOF_RERAISE = {
+    "BindException.java": "class BindException extends Exception {\n}\n",
+    "Binder.java": (
+        "class Binder {\n"
+        "    Object handleBindError(Exception error) {\n"
+        "        try {\n"
+        "            return null;\n"
+        "        } catch (Exception ex) {\n"
+        "            if (ex instanceof BindException bindException) {\n"
+        "                throw bindException;\n"
+        "            }\n"
+        "            throw new BindException(ex);\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    ),
+}
+
 
 def test_throws_one_level_repo_defined(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
@@ -432,7 +455,11 @@ def test_catches_excluded_file_count_disclosed_when_repo_has_rust_files(
     assert code == 0
     result = capsys.readouterr()
     assert "1 of 2 mapped files" in result.err
-    assert "Rust/Go/C" in result.err
+    # Names the actual excluded language present in this repo (rust),
+    # not a static "Rust/Go/C" list that could name languages the
+    # repo doesn't even contain -- see round-18 claude-buddy finding.
+    assert "(rust)" in result.err
+    assert "Rust/Go/C" not in result.err
 
 
 def test_catches_no_language_coverage_note_for_single_supported_language(
@@ -465,3 +492,24 @@ def test_catches_json_language_coverage_field_present_when_nonzero(
     doc = json.loads(capsys.readouterr().out)
     assert doc["language_coverage"]["excluded_files"] == 1
     assert doc["language_coverage"]["total_files"] == 2
+
+
+def test_throws_java_instanceof_pattern_reraise_not_labeled_external(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(JAVA_INSTANCEOF_RERAISE)
+    code = cli.main(
+        [
+            "query",
+            "throws",
+            "handleBindError",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 0
+    result = capsys.readouterr()
+    assert "bindException" not in result.out
+    assert "(external)" not in result.out
+    assert "1 throw site(s): 1 repo-defined, 0 external" in result.out
+    assert "1 re-raise site(s) omitted" in result.err

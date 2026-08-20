@@ -342,10 +342,18 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
         return
     if len(candidates) < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
         return
+    # round-18 tensorflow finding: `candidates` is `git ls-tree`'s full
+    # tracked-file count at the target rev -- before `walker.discover`
+    # excludes vendored/no-parser/too-large files -- so it can read
+    # much larger than the repo's actual mapped file count (36,518
+    # tracked vs. 14,285 mapped on tensorflow) and mislead a reader
+    # into thinking the wait scales with the mapped set. Naming it
+    # "git-tracked" makes that distinction explicit instead of
+    # implying it's the same count `dekko map`'s own summary reports.
     print(
         f"note: no rev-cache for this commit; single-threaded resolve "
-        f"on {len(candidates)} files may take a while -- pass --jobs 0 "
-        f"to use all cores",
+        f"on {len(candidates)} git-tracked files may take a while -- "
+        f"pass --jobs 0 to use all cores",
         file=sys.stderr,
     )
 

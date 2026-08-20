@@ -292,6 +292,100 @@ def test_java_multi_catch(tmp_path: Path) -> None:
     assert multi.bare is False
 
 
+def test_java_catch_param_reraise_folds_into_bare(tmp_path: Path) -> None:
+    # `catch (Exception ex) { throw ex; }` — the direct Java analog of
+    # C++/JS's bound-catch-param reraise. Before this fix, Java had no
+    # branch in `_nearest_catch_binding` at all, so this was mislabeled
+    # as an "external" throw of a fake type literally named `ex`.
+    spec = languages.spec_for_path("Sample.java")
+    assert spec is not None
+    (tmp_path / "Sample.java").write_text(
+        "class Sample {\n"
+        "    void handle() {\n"
+        "        try {\n"
+        "        } catch (Exception ex) {\n"
+        "            throw ex;\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "Sample.java", spec)
+    assert fm.error is None
+    reraise = _throws_by_caller(fm.throws)["Sample.java::Sample.handle"]
+    assert len(reraise) == 1
+    assert reraise[0].text is None
+    assert reraise[0].name is None
+
+
+def test_java_instanceof_pattern_bound_reraise_folds_into_bare(
+    tmp_path: Path,
+) -> None:
+    # round-18 spring-boot finding, reproduced from
+    # `Binder.handleBindError`: rethrowing a caught exception through a
+    # Java 16+ `instanceof` pattern-match binding (`if (ex instanceof
+    # BindException bindException) { throw bindException; }`) was
+    # mislabeled `(external) bindException` — the raw variable
+    # identifier standing in for a fabricated external type name, even
+    # though it's neither external nor truly unresolvable: the bound
+    # type is sitting right there in the pattern match one line up.
+    spec = languages.spec_for_path("Sample.java")
+    assert spec is not None
+    (tmp_path / "Sample.java").write_text(
+        "class Sample {\n"
+        "    void handle() {\n"
+        "        try {\n"
+        "        } catch (Exception ex) {\n"
+        "            if (ex instanceof BindException bindException) {\n"
+        "                throw bindException;\n"
+        "            }\n"
+        "            throw new BindException(ex);\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "Sample.java", spec)
+    assert fm.error is None
+    sites = _throws_by_caller(fm.throws)["Sample.java::Sample.handle"]
+    assert len(sites) == 2
+    bare = [t for t in sites if t.text is None]
+    named = [t for t in sites if t.text is not None]
+    assert len(bare) == 1
+    assert len(named) == 1
+    assert named[0].name == "BindException"
+
+
+def test_java_instanceof_pattern_in_else_branch_not_mistaken_for_reraise(
+    tmp_path: Path,
+) -> None:
+    # The pattern-bound variable's scope is the `if`'s own consequence
+    # block only -- a bare-identifier throw of the same name from the
+    # `else` branch (real Java would reject this at compile time as
+    # out of scope, but dekko doesn't type-check) must not be folded
+    # into bare re-raise on the strength of a name match alone; it
+    # should still resolve as a named (if unresolvable) throw target.
+    spec = languages.spec_for_path("Sample.java")
+    assert spec is not None
+    (tmp_path / "Sample.java").write_text(
+        "class Sample {\n"
+        "    void handle() {\n"
+        "        try {\n"
+        "        } catch (Exception ex) {\n"
+        "            if (ex instanceof BindException bindException) {\n"
+        "            } else {\n"
+        "                throw bindException;\n"
+        "            }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "Sample.java", spec)
+    assert fm.error is None
+    sites = _throws_by_caller(fm.throws)["Sample.java::Sample.handle"]
+    assert len(sites) == 1
+    assert sites[0].text is not None
+    assert sites[0].name == "bindException"
+
+
 # ---------------------------------------------------------------------
 # C++
 

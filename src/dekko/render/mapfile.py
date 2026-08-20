@@ -84,6 +84,14 @@ class MapFormatInvalidError(Exception):
 _BASE_SPLIT = re.compile(r"::|\.|->|/")
 _UNSUPPORTED_PREFIX = "no parser ("
 _VENDORED_PREFIX = "vendored ("
+_TOO_LARGE_REASON = "too large"
+# Cap on how many "too large" paths a coverage note names outright —
+# unlike no-grammar/vendored skips (which can number in the hundreds
+# and are only ever shown as aggregate counts), an oversized file is
+# rare enough that naming it is exactly the useful signal (round-18
+# zed finding: an agent hit "no mapped file" on a real, first-party
+# 1.3 MB test file with zero indication a size cap was the reason).
+_MAX_TOO_LARGE_PATHS = 10
 _PROVENANCE_FILE = "provenance.json"
 
 
@@ -377,16 +385,52 @@ def _vendored_summary(
     }
 
 
+def _too_large_summary(
+    skipped: list[tuple[str, str]] | None,
+) -> dict | None:
+    """Aggregate ``walker.discover``'s ``"too large"`` reasons.
+
+    Unlike ``_unsupported_summary``/``_vendored_summary`` (which only
+    ever report aggregate counts, since a no-grammar or vendored-dir
+    skip can span hundreds of files), this names the actual paths —
+    an oversized-file skip is rare enough that the path itself is the
+    useful signal, and round-18's zed report found an agent had no way
+    to learn *which* first-party file a plain "no mapped file or
+    directory" error was actually hiding.
+
+    Args:
+        skipped: ``(path, reason)`` pairs from ``walker.discover``.
+
+    Returns:
+        ``{"count": N, "paths": [...]}`` (paths capped at
+        ``_MAX_TOO_LARGE_PATHS``, sorted), or ``None`` when there is
+        nothing to report.
+    """
+    if not skipped:
+        return None
+    paths = sorted(
+        path for path, reason in skipped if reason == _TOO_LARGE_REASON
+    )
+    if not paths:
+        return None
+    return {
+        "count": len(paths),
+        "paths": paths[:_MAX_TOO_LARGE_PATHS],
+    }
+
+
 def format_unsupported(provenance: dict | None) -> str | None:
     """Coverage note(s) from a provenance dict's skip aggregates.
 
-    Combines two independent coverage gaps into one caller-facing
+    Combines three independent coverage gaps into one caller-facing
     note, each included only when present: confirmed-unsupported
-    languages (``provenance["unsupported"]``) and files skipped only
+    languages (``provenance["unsupported"]``), files skipped only
     because they live under a default-excluded directory that
     sometimes holds first-party code
     (``provenance["vendored_excluded"]`` — e.g. tensorflow's
-    ``third_party/xla``). Shared by ``dekko status``, ``map_status``,
+    ``third_party/xla``), and files that exceeded the size cap
+    (``provenance["too_large"]`` — e.g. a large first-party test file,
+    round-18's zed finding). Shared by ``dekko status``, ``map_status``,
     ``dekko summary``, and ``query``'s not-found/ambiguous replies so
     the wording is identical everywhere a caller might see it.
 
@@ -395,8 +439,8 @@ def format_unsupported(provenance: dict | None) -> str | None:
 
     Returns:
         E.g. ``"12 files unparsed — no parser for: astro (12)"``,
-        both notes joined by a newline when both apply, or ``None``
-        when there is nothing to report.
+        every applicable note joined by a newline, or ``None`` when
+        there is nothing to report.
     """
     if not provenance:
         return None
@@ -417,6 +461,19 @@ def format_unsupported(provenance: dict | None) -> str | None:
             f"({detail}) were not mapped — pass --exclude '' or a "
             "narrower default-dir allowlist to include them if they "
             "hold first-party code"
+        )
+    too_large = provenance.get("too_large")
+    if too_large:
+        paths = too_large.get("paths", [])
+        count = too_large.get("count", 0)
+        detail = ", ".join(paths)
+        hidden = count - len(paths)
+        if hidden > 0:
+            detail += f", +{hidden} more"
+        parts.append(
+            f"{count} file(s) exceeded the size cap and were not "
+            f"mapped: {detail} — pass --max-file-size N to include "
+            "them if they hold first-party code"
         )
     if not parts:
         return None
@@ -441,9 +498,10 @@ def compute_provenance(
         max_file_size: Size cap used for discovery.
         skipped: ``(path, reason)`` pairs from the same ``walker.
             discover`` call that produced ``paths``, used to record
-            coverage notes for confirmed-unsupported languages and
-            for files skipped only because they live under a
-            default-excluded (vendored/build-output) directory.
+            coverage notes for confirmed-unsupported languages, for
+            files skipped only because they live under a
+            default-excluded (vendored/build-output) directory, and
+            for files that exceeded ``max_file_size``.
 
     Returns:
         JSON-serializable provenance dict.
@@ -459,6 +517,7 @@ def compute_provenance(
         "stat": {rel: _stat_sig(root / rel) for rel in paths},
         "unsupported": _unsupported_summary(skipped),
         "vendored_excluded": _vendored_summary(skipped),
+        "too_large": _too_large_summary(skipped),
     }
 
 

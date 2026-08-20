@@ -471,11 +471,17 @@ _JS_FUNCTION_BOUNDARIES = (
 # callback wired up by name rather than invoked at that site — an
 # object-literal property value, a shorthand property, an array
 # element, a bare call argument, an assignment/declarator
-# right-hand side, or a ``${...}`` template-literal substitution.
-# Only ``identifier`` nodes are captured, so a string/number literal
-# can never be mistaken for one; a same-named local variable
-# shadowing a repo-wide function is a real ambiguity, resolved by
-# reusing ``resolver.py``'s existing candidate ladder.
+# right-hand side, a ``${...}`` template-literal substitution, or
+# (round-18 claude-buddy finding) an operand of a binary expression
+# (``x >= 0``, ``a + clearLine``) or a branch/condition of a ternary
+# (``cond ? a : b``) — plain reads that ``dekko unused`` was silently
+# missing for module-level ``const``-bound variables read (not
+# called) elsewhere in the same file, e.g. a guard condition or a
+# string-concatenation operand. Only ``identifier`` nodes are
+# captured, so a string/number literal can never be mistaken for one;
+# a same-named local variable shadowing a repo-wide function is a
+# real ambiguity, resolved by reusing ``resolver.py``'s existing
+# candidate ladder.
 #
 # The shorthand-property capture is scoped to an ``object`` (value)
 # parent, not a bare ``(shorthand_property_identifier) @ref`` — this
@@ -500,6 +506,11 @@ _JS_REFERENCE_BASE = """
 (variable_declarator value: (identifier) @ref)
 (assignment_expression right: (identifier) @ref)
 (template_substitution (identifier) @ref)
+(binary_expression left: (identifier) @ref)
+(binary_expression right: (identifier) @ref)
+(ternary_expression condition: (identifier) @ref)
+(ternary_expression consequence: (identifier) @ref)
+(ternary_expression alternative: (identifier) @ref)
 """
 
 # JSX attribute/expression values (``<Button onClick={handleClick}

@@ -1564,13 +1564,66 @@ def _innermost_identifier(node: Node) -> str | None:
     return _text(node) if node is not None else None
 
 
-def _nearest_catch_binding(
-    language: str, stmt: Node, boundary_types: tuple[str, ...]
-) -> str | None:
-    """Bound exception-variable name of the nearest enclosing
-    except/catch clause containing ``stmt`` (a raise/throw statement),
-    or ``None`` if it isn't confidently inside one before crossing a
-    function boundary.
+def _java_instanceof_pattern_name(if_node: Node) -> str | None:
+    """Bound pattern variable of a Java ``if (x instanceof T t)`` guard.
+
+    ``None`` if the ``if``'s condition isn't (only) a pattern-matching
+    ``instanceof`` test. Handles the direct case only — the condition's
+    ``parenthesized_expression`` wraps exactly one
+    ``instanceof_expression`` carrying a ``name`` field (Java 16+
+    pattern matching for ``instanceof``) — not compound/negated
+    conditions (``!(x instanceof T t)`` guards paired with an early
+    return, De Morgan-style reordering, etc.), which would need real
+    flow analysis to scope correctly and are out of scope for this
+    fix. Verified against the pinned tree-sitter-java grammar.
+    """
+    cond = if_node.child_by_field_name("condition")
+    if cond is not None and cond.type == "parenthesized_expression":
+        inner = cond.named_children
+        cond = inner[0] if inner else None
+    if cond is None or cond.type != "instanceof_expression":
+        return None
+    name = cond.child_by_field_name("name")
+    return _text(name) if name is not None else None
+
+
+def _java_if_pattern_binding(node: Node, prev: Node) -> str | None:
+    """``_java_instanceof_pattern_name(node)`` if ``prev`` (the child
+    ``_nearest_catch_binding`` arrived from) is inside ``node``'s own
+    ``consequence`` block, ``None`` otherwise (including when ``node``
+    isn't a pattern-matching ``instanceof`` guard at all) — split out
+    of ``_nearest_catch_binding`` purely to keep that function's
+    branch count under the project's complexity cap.
+    """
+    consequence = node.child_by_field_name("consequence")
+    if (
+        consequence is None
+        or consequence.start_byte > prev.start_byte
+        or prev.end_byte > consequence.end_byte
+    ):
+        return None
+    return _java_instanceof_pattern_name(node)
+
+
+# Node type that terminates ``_nearest_catch_binding``'s upward walk
+# for each language — reaching it (whether or not a bound name can be
+# extracted from it) always stops the search, since it's the nearest
+# enclosing except/catch construct.
+_CATCH_TERMINAL_TYPE = {
+    "python": "except_clause",
+    "javascript": "catch_clause",
+    "typescript": "catch_clause",
+    "tsx": "catch_clause",
+    "cpp": "catch_clause",
+    "java": "catch_clause",
+}
+
+
+def _catch_binding_name(language: str, node: Node) -> str | None:
+    """Bound exception-variable name from one matched terminal
+    except/catch node (see ``_CATCH_TERMINAL_TYPE``), dispatched by
+    language. Split out of ``_nearest_catch_binding`` purely to keep
+    that function's branch count under the project's complexity cap.
 
     Verified against the pinned grammars:
     - Python: ``except_clause``'s ``value`` field is an ``as_pattern``
@@ -1585,33 +1638,83 @@ def _nearest_catch_binding(
       ``declarator`` field wraps the bound name (possibly through a
       ``reference_declarator``, e.g. ``catch (std::exception& e)``),
       unwrapped via ``_innermost_identifier``.
+    - Java: ``catch_clause``'s unfielded ``catch_formal_parameter``
+      child has a ``name`` field directly (``catch (Exception ex)``)
+      — see ``_java_catch_param_binding``.
     """
+    if language == "python":
+        value = node.child_by_field_name("value")
+        if value is not None and value.type == "as_pattern":
+            alias = value.child_by_field_name("alias")
+            return _text(alias) if alias is not None else None
+        return None
+    if language in ("javascript", "typescript", "tsx"):
+        param = node.child_by_field_name("parameter")
+        if param is not None and param.type == "identifier":
+            return _text(param)
+        return None
+    if language == "cpp":
+        params = node.child_by_field_name("parameters")
+        if params is not None and params.named_child_count == 1:
+            decl = params.named_children[0]
+            declarator = decl.child_by_field_name("declarator")
+            if declarator is not None:
+                return _innermost_identifier(declarator)
+        return None
+    if language == "java":
+        return _java_catch_param_binding(node)
+    return None
+
+
+def _java_catch_param_binding(node: Node) -> str | None:
+    """Bound exception-variable name of a Java ``catch_clause``.
+
+    Split out of ``_catch_binding_name`` purely to keep that
+    function's branch count under the project's complexity cap.
+    """
+    param = next(
+        (c for c in node.named_children if c.type == "catch_formal_parameter"),
+        None,
+    )
+    if param is None:
+        return None
+    name = param.child_by_field_name("name")
+    return _text(name) if name is not None else None
+
+
+def _nearest_catch_binding(
+    language: str, stmt: Node, boundary_types: tuple[str, ...]
+) -> str | None:
+    """Bound exception-variable name of the nearest enclosing
+    except/catch clause containing ``stmt`` (a raise/throw statement),
+    or ``None`` if it isn't confidently inside one before crossing a
+    function boundary.
+
+    Java additionally recognizes one narrower binding *nested inside*
+    a catch clause, checked before the terminal ``catch_clause`` node
+    is reached: a pattern-matching ``instanceof`` guard's bound
+    variable (``if (ex instanceof BindException bindException) {
+    throw bindException; }``, Java 16+), scoped to that ``if``'s own
+    consequence block only — see ``_java_if_pattern_binding``. Round-18
+    spring-boot finding: without this, a rethrown pattern-bound
+    variable was labeled ``(external)`` with the raw variable
+    identifier standing in for a fabricated type name. See
+    ``_catch_binding_name`` for the per-language terminal-node
+    extraction this defers to once a match is found.
+    """
+    terminal_type = _CATCH_TERMINAL_TYPE.get(language)
+    prev = stmt
     node = stmt.parent
     while node is not None:
         if node.type in boundary_types:
             return None
-        if language == "python" and node.type == "except_clause":
-            value = node.child_by_field_name("value")
-            if value is not None and value.type == "as_pattern":
-                alias = value.child_by_field_name("alias")
-                return _text(alias) if alias is not None else None
-            return None
-        if (
-            language in ("javascript", "typescript", "tsx")
-            and node.type == "catch_clause"
-        ):
-            param = node.child_by_field_name("parameter")
-            if param is not None and param.type == "identifier":
-                return _text(param)
-            return None
-        if language == "cpp" and node.type == "catch_clause":
-            params = node.child_by_field_name("parameters")
-            if params is not None and params.named_child_count == 1:
-                decl = params.named_children[0]
-                declarator = decl.child_by_field_name("declarator")
-                if declarator is not None:
-                    return _innermost_identifier(declarator)
-            return None
+        if language == "java" and node.type == "if_statement":
+            name = _java_if_pattern_binding(node, prev)
+            if name is not None:
+                return name
+        if node.type == terminal_type:
+            return _catch_binding_name(language, node)
+        prev = node
         node = node.parent
     return None
 

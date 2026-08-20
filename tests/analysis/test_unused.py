@@ -179,6 +179,37 @@ def test_unused_does_not_flag_pass_by_reference_callback(
     assert "no unused symbols" in capsys.readouterr().out
 
 
+TS_GUARD_AND_CONCAT_ONLY = {
+    "consts.ts": (
+        "export const biomeArgIdx = 3;\n"
+        "export const clearLine = 'clear';\n"
+        "export const CYAN = '\\x1b[36m';\n"
+    ),
+    "use.ts": (
+        "import { biomeArgIdx, clearLine, CYAN } from './consts';\n"
+        "\n"
+        "export function run(panelFocus: boolean): string {\n"
+        "  const override = biomeArgIdx >= 0 ? '1' : '0';\n"
+        "  const line = 'x' + clearLine;\n"
+        "  const color = panelFocus ? '' : CYAN;\n"
+        "  return override + line + color;\n"
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_const_read_as_binary_or_ternary_operand(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-18 claude-buddy finding: module-level `const`s read only
+    # as a guard-condition/ternary operand or a string-concatenation
+    # operand (never called, never a value in one of the previously
+    # covered reference shapes) were false-flagged as unused.
+    root = make_mapped_repo(TS_GUARD_AND_CONCAT_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
 GO_TYPE_ONLY = {
     "types.go": ("package main\n\ntype prEvent struct {\n\tName string\n}\n"),
     "main.go": (

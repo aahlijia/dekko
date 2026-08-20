@@ -311,6 +311,58 @@ def test_javascript_template_substitution_captured_as_ref(
     assert "RED" in ref_names
 
 
+def test_ts_binary_expression_operand_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """A module-level ``const`` read as a binary-expression operand
+    (a guard condition, a string-concatenation operand) is a bare
+    reference.
+
+    Round-18 claude-buddy finding: ``dekko unused`` false-flagged live
+    module-level ``const`` variables read this way (``biomeArgIdx >= 0
+    ? ... : undefined``, ``moveTo() + clearLine``) as dead code,
+    because ``_JS_REFERENCE_BASE`` had no pattern for
+    ``binary_expression`` operands.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const biomeArgIdx = 3;\n"
+        "const clearLine = 'clear';\n"
+        "export const run = () => {\n"
+        "  const override = biomeArgIdx >= 0 ? 1 : 0;\n"
+        "  return 'x' + clearLine;\n"
+        "};\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "biomeArgIdx" in ref_names
+    assert "clearLine" in ref_names
+
+
+def test_ts_ternary_branch_and_condition_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """A module-level ``const`` read as a ternary's condition or
+    either branch is a bare reference.
+
+    Round-18 claude-buddy finding: ``panelFocus ? ... : CYAN`` false-
+    flagged both ``panelFocus`` (the condition) and ``CYAN`` (the
+    alternative branch) as unused.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const panelFocus = true;\n"
+        "const CYAN = '\\x1b[36m';\n"
+        "export const color = panelFocus ? '' : CYAN;\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "panelFocus" in ref_names
+    assert "CYAN" in ref_names
+
+
 def test_go_struct_type_positions_captured_as_refs(tmp_path: Path) -> None:
     """Track G / bug #1.1a: Go struct types used only as *types*.
 

@@ -307,7 +307,10 @@ def test_maybe_warn_sequential_fires_above_threshold(
     monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 3)
     diff._maybe_warn_sequential(1, ["a.py", "b.py", "c.py"])
     err = capsys.readouterr().err
-    assert "single-threaded resolve on 3 files" in err
+    # round-18 tensorflow finding: the count is git-tracked files at
+    # the target rev, not dekko's (usually smaller) mapped file count
+    # -- the note must say so explicitly rather than implying parity.
+    assert "single-threaded resolve on 3 git-tracked files" in err
     assert "--jobs 0" in err
 
 

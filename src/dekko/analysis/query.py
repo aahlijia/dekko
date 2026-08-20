@@ -1269,22 +1269,31 @@ _CATCHES_CAVEAT = (
 )
 
 
-def _catches_excluded_file_count(index: MapIndex) -> tuple[int, int]:
-    """``(excluded, total)`` mapped files not covered by throws/catches.
+def _catches_excluded_file_count(
+    index: MapIndex,
+) -> tuple[int, int, tuple[str, ...]]:
+    """``(excluded, total, languages)`` mapped files not covered by
+    throws/catches.
 
     ``excluded`` counts files whose recorded language (Rust/Go/C, or
     any Tier-2 generic-grammar language) never extracts throw/catch
     sites at all — see ``languages.exception_handling_supported``.
     ``total`` is every mapped file, so the caller can render a "N of
-    TOTAL" disclosure.
+    TOTAL" disclosure. ``languages`` lists the distinct excluded
+    languages actually present in this repo, sorted — the caller uses
+    this instead of a static "Rust/Go/C" string so the disclosure
+    names what's really excluded here (e.g. a JS/TS repo whose only
+    excluded files are bash scripts should say "bash", not
+    "Rust/Go/C", which would be actively misleading).
     """
     total = len(index.languages_by_path)
-    excluded = sum(
-        1
-        for lang in index.languages_by_path.values()
-        if not languages.exception_handling_supported(lang)
-    )
-    return excluded, total
+    excluded = 0
+    excluded_langs: set[str] = set()
+    for lang in index.languages_by_path.values():
+        if not languages.exception_handling_supported(lang):
+            excluded += 1
+            excluded_langs.add(lang)
+    return excluded, total, tuple(sorted(excluded_langs))
 
 
 def _catch_site_matches(site: CatchSite, target: str) -> bool:
@@ -1348,7 +1357,8 @@ def _run_catches(
     exact_count = sum(1 for s in hits if not s.bare)
     catch_all_count = sum(1 for s in hits if s.bare)
     coverage = _coverage_note(index)
-    excluded, total = _catches_excluded_file_count(index)
+    excluded, total, excluded_langs = _catches_excluded_file_count(index)
+    lang_list = "/".join(excluded_langs) if excluded_langs else "Rust/Go/C"
     if as_json:
         entries = [_catch_entry(s) for s in hits]
         kept, meter = _fit_entries(entries, budget, limit)
@@ -1367,7 +1377,7 @@ def _run_catches(
             doc["language_coverage"] = {
                 "excluded_files": excluded,
                 "total_files": total,
-                "reason": ("Rust/Go/C are not covered by throws/catches"),
+                "reason": (f"{lang_list} are not covered by throws/catches"),
             }
         print(json.dumps(doc, indent=2))
         return EXIT_OK, None
@@ -1382,7 +1392,7 @@ def _run_catches(
     if excluded:
         print(
             f"  note: {excluded:,} of {total:,} mapped files are in a "
-            "language (Rust/Go/C) this query doesn't cover; results "
+            f"language ({lang_list}) this query doesn't cover; results "
             "only reflect the other "
             f"{total - excluded:,} files",
             file=sys.stderr,
@@ -2184,6 +2194,49 @@ def _heritage_entry(
     return entry
 
 
+def _heritage_external_label(index: MapIndex, sym: Symbol, name: str) -> str:
+    """``"external"`` or ``"unresolved"`` for a heritage clause dekko
+    couldn't resolve to a repo symbol.
+
+    Distinguishes two very different situations the resolver's
+    ``heritage_external_out`` bucket otherwise conflates under one
+    ``(external)`` label (round-18 claude-code finding): a genuinely
+    out-of-repo base type (an npm/stdlib/framework class) versus an
+    in-repo name the extractor simply never captured as a
+    heritage-eligible symbol — the concrete case being a TS
+    ``type X = { ... }`` object-type alias used with ``implements``,
+    which parses fine but isn't extracted as any kind of ``Symbol`` at
+    all (``query symbol`` on it returns "no symbol matches"). Labeling
+    that ``(external)`` actively misleads: an agent reading it would
+    reasonably conclude the base is a framework/stdlib type, when it's
+    first-party code one ``query symbol`` lookup away.
+
+    This is a presentation-only distinction — no new resolution is
+    attempted, and the edge is still not walkable either way. The
+    signal used is narrow and JS/TS-specific by construction (the only
+    language family where this extraction gap is currently known to
+    apply): if the clause's target name matches a same-named import in
+    the subtype's own file, and that import's source looks like a
+    relative path into the repo (starts with ``.`` or ``/``, as
+    opposed to a bare package specifier like ``"react"``), the name is
+    at least *known* to be local.
+
+    Args:
+        index: Loaded map index.
+        sym: The subtype symbol whose heritage clause is unresolved.
+        name: The heritage clause's raw target text (``ext.callee``).
+
+    Returns:
+        ``"unresolved"`` when a same-named relative import exists in
+        the subtype's own file, ``"external"`` otherwise.
+    """
+    bare = name.split("<", 1)[0].strip().rsplit(".", 1)[-1]
+    for imp in index.imports_by_path.get(sym.path, []):
+        if imp.name == bare and imp.source.startswith((".", "/")):
+            return "unresolved"
+    return "external"
+
+
 def _run_heritage_wrong_kind(sym: Symbol) -> int:
     """Report a resolved target that isn't a type-kind symbol."""
     print(
@@ -2212,7 +2265,15 @@ def _print_heritage_json(
     """JSON rendering for ``_run_heritage`` (supertypes/subtypes)."""
     entries = [_heritage_entry(index, s, rel, depth) for s, rel, depth in hits]
     entries.extend(
-        {"external": True, "text": ext.callee, "lines": ext.lines}
+        {
+            "external": True,
+            "text": ext.callee,
+            "lines": ext.lines,
+            "unresolved_local": (
+                _heritage_external_label(index, sym, ext.callee)
+                == "unresolved"
+            ),
+        }
         for ext in externals
     )
     kept, meter = _fit_entries(entries, budget, limit)
@@ -2310,8 +2371,9 @@ def _run_heritage(
         lines.append(f"{_sym_line(sym)}  [target]")
     lines += [_heritage_row(s, rel, depth) for s, rel, depth in hits]
     for ext in externals:
+        label = _heritage_external_label(index, sym, ext.callee)
         for line in ext.lines or [sym.start_line]:
-            lines.append(f"  {sym.path}:{line}  (external) {ext.callee}")
+            lines.append(f"  {sym.path}:{line}  ({label}) {ext.callee}")
     if ambig_out:
         print(
             f"  note: {ambig_out} additional supertype name(s) "

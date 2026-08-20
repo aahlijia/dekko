@@ -291,6 +291,72 @@ def test_external_supertype_shown_as_labeled_row(
     assert "(external) pydantic.BaseModel" in out
 
 
+# round-18 claude-code finding: a TS object-type alias (``type X =
+# {...}``) used with ``implements`` isn't extracted as a heritage-
+# eligible symbol, so the resolver's terminal fallback previously
+# labeled it ``(external)`` -- identical to a genuine out-of-repo
+# framework base -- even though it's first-party code sitting one
+# `query symbol` lookup away, imported from a relative path in the
+# same repo.
+TS_TYPE_ALIAS_HERITAGE = {
+    "types.ts": "export type ShellCommand = {\n  run(): void;\n};\n",
+    "impl.ts": (
+        "import { ShellCommand } from './types';\n"
+        "\n"
+        "export class ShellCommandImpl implements ShellCommand {\n"
+        "  run(): void {}\n"
+        "}\n"
+    ),
+}
+
+
+def test_type_alias_implements_target_labeled_unresolved_not_external(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_TYPE_ALIAS_HERITAGE)
+    code = cli.main(
+        ["query", "supertypes", "ShellCommandImpl", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "(unresolved) ShellCommand" in out
+    assert "(external)" not in out
+
+
+def test_type_alias_implements_target_json_flags_unresolved_local(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_TYPE_ALIAS_HERITAGE)
+    code = cli.main(
+        [
+            "query",
+            "supertypes",
+            "ShellCommandImpl",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    ext = next(r for r in doc["results"] if r.get("external"))
+    assert ext["text"] == "ShellCommand"
+    assert ext["unresolved_local"] is True
+
+
+def test_genuine_external_base_still_labeled_external(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Regression guard: a real out-of-repo base (no matching relative
+    # import anywhere) must keep the plain "external" label.
+    index = _ambiguous_external_index()
+    code = query.run(index, "supertypes", "Foo", as_json=True, limit=50)
+    assert code == query.EXIT_OK
+    doc = json.loads(capsys.readouterr().out)
+    ext = next(r for r in doc["results"] if r.get("external"))
+    assert ext["unresolved_local"] is False
+
+
 def test_json_result_shape_has_relation_and_depth(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
