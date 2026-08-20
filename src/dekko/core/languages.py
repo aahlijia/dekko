@@ -1025,6 +1025,25 @@ def exception_handling_supported(language: str) -> bool:
     return spec is not None and spec.throw_query is not None
 
 
+# Bumped whenever ``repo_ops._resolve_header_spec``'s C/C++ ``.h``
+# dispatch heuristic (``extractor.looks_like_cpp_header``) changes in
+# a way that could reclassify a file differently than before. That
+# heuristic lives outside any ``LanguageSpec``, so ``spec_fingerprint``
+# would otherwise be blind to it entirely -- a ``.dekko/`` cache built
+# before the heuristic shipped (or before a later change to it) would
+# keep silently reusing a stale, possibly-wrong-grammar ``FileMap`` for
+# every ``.h`` file after an upgrade, exactly the silent-wrong-answer
+# failure mode the heuristic itself was added to close, just relocated
+# to the upgrade boundary (round 18 tensorflow finding; see the
+# h-header-cpp-c-grammar implementation plan/report under
+# ``test-repos/reports/18-tokentest-7repo-post0404/``). Folding this
+# into the fingerprint below means a cache built under old dispatch
+# logic is discarded automatically -- every file re-parses once on the
+# next non-``--full`` ``dekko map`` run -- rather than requiring users
+# to know to pass ``--full`` themselves.
+_HEADER_DISPATCH_HEURISTIC_VERSION = 1
+
+
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.
 
@@ -1032,16 +1051,22 @@ def spec_fingerprint() -> str:
     of a file — queries, container/method-container types, parameter
     style, and any field added to ``LanguageSpec`` later (the loop is
     driven by ``dataclasses.fields``, not a hand-kept list, so a new
-    field is covered automatically). Used to invalidate a stale
-    ``.dekko`` cache entry or flag a stale ``map.json`` even when the
-    released package version string hasn't changed — a dev iteration
-    or hotfix that reuses the same version, or an unreleased checkout.
+    field is covered automatically) — plus
+    ``_HEADER_DISPATCH_HEURISTIC_VERSION``, which covers the one piece
+    of dispatch logic that lives outside any ``LanguageSpec`` (the
+    C/C++ ``.h`` content-sniffing heuristic — see that constant's
+    comment). Used to invalidate a stale ``.dekko`` cache entry or flag
+    a stale ``map.json`` even when the released package version string
+    hasn't changed — a dev iteration or hotfix that reuses the same
+    version, or an unreleased checkout.
 
     Returns:
         A stable hex digest, unchanged as long as extraction behavior
         is unchanged.
     """
-    parts: list[str] = []
+    parts: list[str] = [
+        f"header_dispatch_heuristic={_HEADER_DISPATCH_HEURISTIC_VERSION}",
+    ]
     for spec in TIER1_SPECS:
         for f in fields(spec):
             value = getattr(spec, f.name)

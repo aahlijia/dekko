@@ -113,6 +113,46 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     )
 
 
+# Node types produced only by a genuine C++ construct -- the C grammar
+# has no ``class``/``namespace``/``template`` productions at all, so
+# these never appear in a parse tree built with that grammar. Used to
+# disambiguate a ``.h`` file's actual language from its own content
+# (both C and C++ claim the extension; see
+# ``repo_ops._resolve_header_spec``).
+_CPP_HEADER_MARKER_QUERY = """
+(class_specifier) @marker
+(namespace_definition) @marker
+(template_declaration) @marker
+"""
+
+
+def looks_like_cpp_header(source: bytes) -> bool:
+    """Whether ``source`` contains a genuine C++-only construct.
+
+    Parses ``source`` with the C++ tree-sitter grammar (a Tier-1,
+    offline dependency -- no optional-grammar gap) and checks whether
+    the resulting parse tree contains a ``class_specifier``,
+    ``namespace_definition``, or ``template_declaration`` node
+    anywhere. Tree-sitter's error recovery means this still classifies
+    correctly around unrelated parse trouble elsewhere in the file
+    (unknown macros, etc.) -- verified live against a plain C header,
+    an ``extern "C"``-wrapped C header, and a C file using ``class``/
+    ``template`` as ordinary identifiers (legal in C, not in C++):
+    none of these three marker node types appear for any of them.
+
+    Args:
+        source: Raw file bytes.
+
+    Returns:
+        True if a C++-only construct was found anywhere in the parse
+        tree.
+    """
+    parser = Parser(get_grammar("cpp"))
+    tree = parser.parse(source)
+    matches = _run_query("cpp", _CPP_HEADER_MARKER_QUERY, tree.root_node)
+    return bool(matches)
+
+
 # ---------------------------------------------------------------------
 # Definitions
 

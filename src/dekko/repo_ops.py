@@ -33,7 +33,7 @@ from dekko.render import mapfile
 from dekko.render import render_md
 from dekko.storage import filelock
 from dekko.core import walker
-from dekko.core.extractor import extract_file
+from dekko.core.extractor import extract_file, looks_like_cpp_header
 from dekko.core.extractor_generic import extract_file_generic
 from dekko.core import languages
 from dekko.core.model import TYPE_KINDS, CallGraph, FileMap
@@ -59,11 +59,52 @@ def extract_one(root: Path, rel: str) -> FileMap | None:
     """
     spec = languages.spec_for_path(rel)
     if spec is not None:
+        spec = _resolve_header_spec(root, rel, spec)
         return extract_file(root, rel, spec)
     grammar = languages.tier2_grammar_for_path(rel)
     if grammar is not None:
         return extract_file_generic(root, rel, grammar)
     return None
+
+
+def _resolve_header_spec(
+    root: Path, rel: str, spec: languages.LanguageSpec
+) -> languages.LanguageSpec:
+    """Disambiguate a ``.h`` file between the C and C++ grammars.
+
+    ``.h`` is claimed unconditionally by the C ``LanguageSpec``
+    (``languages.EXTENSION_MAP`` has no separate C++-header
+    extension), but ``.h`` is also the dominant convention for C++
+    headers in large codebases (LLVM, gRPC, Abseil, tensorflow, ...).
+    Parsing a genuine C++ header with the C grammar silently drops
+    every ``class``/``namespace``/``template`` construct instead of
+    erroring, producing confidently wrong call/heritage resolution
+    downstream instead of just a coverage gap (round 18's tensorflow
+    finding -- see ``test-repos/reports/18-tokentest-7repo-post0404/
+    IMPLEMENTATION-PLAN-h-header-cpp-c-grammar.md``). Sniff the file's
+    own content, not the extension, by parsing it with the C++ grammar
+    and checking for a real C++ construct.
+
+    Args:
+        root: Repository root.
+        rel: Repo-relative path of the file.
+        spec: The extension-resolved spec (both ``.c`` and ``.h``
+            resolve to ``languages.C`` before this check runs).
+
+    Returns:
+        ``languages.CPP`` when ``rel`` is a ``.h`` file whose content
+        contains a genuine C++ construct; ``spec`` unchanged otherwise
+        -- including for ``.c`` files, which are never content-sniffed,
+        and for a ``.h`` file that fails to read here (the extraction
+        call right after this one will surface that same failure).
+    """
+    if spec is not languages.C or not rel.lower().endswith(".h"):
+        return spec
+    try:
+        source = (root / rel).read_bytes()
+    except OSError:
+        return spec
+    return languages.CPP if looks_like_cpp_header(source) else spec
 
 
 def resolve_workers(jobs: int) -> int:

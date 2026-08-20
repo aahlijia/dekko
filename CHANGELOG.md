@@ -9,6 +9,33 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.40.5] — 2026-08-20
+
+### Fixed
+- **`.h` header files** — now content-sniffed to disambiguate C vs.
+  C++ (checking for `class_specifier`/`namespace_definition`/
+  `template_declaration` nodes) instead of always parsing as C, which
+  silently mis-resolved heritage/call edges on large C++ codebases
+  using the `.h` convention (LLVM, gRPC, Chromium-style, TensorFlow).
+  Existing `.dekko/` caches self-heal on the next `dekko map` via a
+  fingerprint bump, no `--full` required.
+- **`dekko unused`** — no longer false-flags module-level `const`
+  variables that are read as binary/ternary operands rather than
+  called.
+- **`query supertypes`/`subtypes`** — in-repo type aliases used with
+  `implements` that can't be resolved are now labeled `(unresolved)`
+  instead of the misleading `(external)`.
+- **`query throws`** — recognizes Java `instanceof`-pattern-bound
+  rethrow variables instead of mislabeling them as a fake external
+  type.
+- **`dekko query catches`** — dropped its hardcoded Rust/Go/C
+  exclusion note in favor of reflecting the languages actually present
+  in the scanned repo.
+- **`mapfile`** — files dropped by the 1MB size cap are now disclosed
+  instead of silently omitted from the map.
+- **`affected`/`workset`** — fixed a cold-resolve note overstating the
+  file count via a git-tracked-vs-mapped count mismatch.
+
 ## [0.40.4] — 2026-08-19
 
 ### Changed

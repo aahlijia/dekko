@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
+import pytest
+
 from dekko.repo_ops import map_repository
+from dekko.core import languages
 from dekko.core.languages import is_supported, known_unsupported_language
 from dekko.core.model import FileMap, Symbol
 from dekko.core.resolver import resolve
@@ -65,6 +68,56 @@ def test_cpp() -> None:
     ctor = syms["shapes.cpp::geo.Circle.Circle"]
     assert [(p.name, p.type) for p in ctor.params] == [("r", "double")]
     assert ("shapes.cpp::geo.Circle.area", "shapes.cpp::geo.pi") in edges
+
+
+def test_cpp_header_dispatch_by_content_not_extension() -> None:
+    # Round 18 tensorflow finding: `.h` used to be parsed
+    # unconditionally with the C grammar, silently dropping every
+    # `class`/`namespace`/`template` construct in a genuine C++ header
+    # instead of erroring -- see the h-header-cpp-c-grammar
+    # implementation plan/report under
+    # test-repos/reports/18-tokentest-7repo-post0404/. widget.h and
+    # plain.h sit in the same fixture directory on purpose: a
+    # directory/sibling-count heuristic would get one of them wrong
+    # depending on which extension is more common there, but this
+    # exercises the real `map_repository` pipeline end to end and
+    # confirms both are classified correctly from their own content.
+    files, _ = _map("cpp_header")
+    by_path = {fm.path: fm for fm in files}
+
+    widget = by_path["widget.h"]
+    assert widget.language == "cpp"
+    syms = _symbols(files)
+    assert syms["widget.h::demo.Widget"].kind == "class"
+    ctor = syms["widget.h::demo.Widget.Widget"]
+    assert ctor.kind == "method"
+    assert [(p.name, p.type) for p in ctor.params] == [("spin_count", "int")]
+    assert syms["widget.h::demo.Widget.Spin"].kind == "method"
+
+    # plain.h is genuine C and must not be reclassified just because
+    # it shares a directory with a C++ header.
+    plain = by_path["plain.h"]
+    assert plain.language == "c"
+    point_sum = syms["plain.h::point_sum"]
+    assert point_sum.kind == "function"
+
+
+def test_spec_fingerprint_changes_with_header_dispatch_heuristic_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The C/C++ `.h` content-sniffing heuristic
+    # (extractor.looks_like_cpp_header, dispatched from
+    # repo_ops._resolve_header_spec) lives outside any LanguageSpec, so
+    # spec_fingerprint would otherwise never change when that
+    # heuristic's own logic does -- a .dekko/ cache built before a
+    # heuristic change would then keep silently reusing stale
+    # FileMaps. Confirms the version marker is actually wired into the
+    # hash, not just declared and forgotten.
+    baseline = languages.spec_fingerprint()
+    monkeypatch.setattr(
+        languages, "_HEADER_DISPATCH_HEURISTIC_VERSION", 999999
+    )
+    assert languages.spec_fingerprint() != baseline
 
 
 def test_javascript() -> None:

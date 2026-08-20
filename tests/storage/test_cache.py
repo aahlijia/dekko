@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from dekko import repo_ops
+from dekko.core.model import FileMap
 from dekko.render import mapfile
+from dekko.render.mapfile import _file_hash
 from dekko.storage import cache as cache_mod
 from dekko.integrations import cli
 
@@ -111,6 +113,68 @@ def test_spec_change_invalidates_cache(
     parsed = _count_extractions(monkeypatch)
     assert cli.main(["map", str(root), "--quiet"]) == 0
     assert sorted(parsed) == ["a.py", "b.py"]
+
+
+def test_header_dispatch_heuristic_change_invalidates_cache(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 18's tensorflow finding: ``.h`` was always parsed with the
+    C grammar, even for a genuine C++ header, silently dropping every
+    ``class``/``namespace``/``template`` construct and producing wrong
+    call/heritage resolution downstream. The fix
+    (``repo_ops._resolve_header_spec``) content-sniffs a ``.h`` file
+    and swaps to the C++ grammar when warranted -- but that dispatch
+    logic lives outside any ``LanguageSpec``, so it had to be folded
+    into ``spec_fingerprint`` by hand
+    (``languages._HEADER_DISPATCH_HEURISTIC_VERSION``), or a
+    ``.dekko/`` cache built under the *old* (always-C) dispatch logic
+    would keep silently reusing a stale, wrongly-C-parsed ``FileMap``
+    for every ``.h`` file forever after an upgrade -- the exact
+    silent-wrong-answer failure mode the fix was meant to close, just
+    relocated to the upgrade boundary. This simulates exactly that
+    boundary: a hand-built cache entry standing in for what a pre-fix
+    ``dekko map`` run would have produced.
+    """
+    src = {
+        "widget.h": (
+            "namespace demo {\n"
+            "class Widget {\n"
+            " public:\n"
+            "  void Spin();\n"
+            "};\n"
+            "}  // namespace demo\n"
+        ),
+    }
+    root = make_mapped_repo(src)
+
+    # Hand-write a cache entry mimicking a pre-fix build: `widget.h`
+    # parsed with the C grammar (no `class`/`namespace` visible to it
+    # at all, hence no symbols extracted), tagged with a spec_hash
+    # standing in for what a build predating this fix would have
+    # computed (the fingerprint without the heuristic version marker
+    # folded in).
+    stale_filemap = FileMap(path="widget.h", language="c", symbols=[])
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cache_mod, "spec_fingerprint", lambda: "pre-fix-hash")
+        cache = cache_mod.IncrementalCache({})
+        cache.entries["widget.h"] = {
+            "hash": _file_hash(root / "widget.h"),
+            "file": cache_mod._filemap_to_dict(stale_filemap),
+        }
+        cache_mod.save(root, cache)
+
+    # Sanity check: the hand-built entry really is stale under the
+    # *current* fingerprint (not a no-op fixture) -- ``load`` discards
+    # the whole cache on a spec_hash mismatch.
+    assert cache_mod.load(root) == {}
+
+    parsed = _count_extractions(monkeypatch)
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    assert parsed == ["widget.h"]  # re-extracted, not served from cache
+
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.languages_by_path["widget.h"] == "cpp"
 
 
 def test_parallel_extraction_matches_sequential(

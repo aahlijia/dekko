@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from dekko import repo_ops
+from dekko.core import languages
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -96,6 +97,71 @@ def test_extract_misses_propagates_when_retry_also_broken(
 
     with pytest.raises(BrokenProcessPool):
         repo_ops._extract_misses(root, misses, workers=4)
+
+
+# ``_resolve_header_spec``: the C/C++ ``.h`` dispatch decision itself,
+# in isolation from a full ``extract_one``/``map_repository`` run --
+# see ``tests/core/test_languages.py::
+# test_cpp_header_dispatch_by_content_not_extension`` for the
+# end-to-end pipeline coverage of the same fix, and
+# ``tests/core/test_extractor_cpp_header_dispatch.py`` for the
+# underlying ``looks_like_cpp_header`` heuristic's own unit tests.
+
+
+def test_resolve_header_spec_cpp_content_swaps_to_cpp_spec(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "widget.h").write_text(
+        "namespace demo {\nclass Widget {};\n}\n"
+    )
+    resolved = repo_ops._resolve_header_spec(tmp_path, "widget.h", languages.C)
+    assert resolved is languages.CPP
+
+
+def test_resolve_header_spec_plain_c_content_keeps_c_spec(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "plain.h").write_text(
+        "struct Point {\n  int x;\n  int y;\n};\n"
+    )
+    resolved = repo_ops._resolve_header_spec(tmp_path, "plain.h", languages.C)
+    assert resolved is languages.C
+
+
+def test_resolve_header_spec_dot_c_files_never_content_sniffed(
+    tmp_path: Path,
+) -> None:
+    # `.c` also resolves to the C spec (languages.EXTENSION_MAP), but
+    # is never ambiguous the way `.h` is -- a `.c` file must not be
+    # reclassified even if its content happens to contain what would
+    # otherwise read as a C++ construct.
+    (tmp_path / "odd.c").write_text("namespace demo {\nclass Widget {};\n}\n")
+    resolved = repo_ops._resolve_header_spec(tmp_path, "odd.c", languages.C)
+    assert resolved is languages.C
+
+
+def test_resolve_header_spec_non_c_spec_passes_through_unchanged(
+    tmp_path: Path,
+) -> None:
+    # Only a `.h` file resolved to the C spec is ever a candidate for
+    # this dispatch -- any other spec (e.g. a `.py` file's resolved
+    # Python spec) must be returned untouched.
+    py_spec = languages.SPEC_BY_NAME["python"]
+    resolved = repo_ops._resolve_header_spec(tmp_path, "mod.py", py_spec)
+    assert resolved is py_spec
+
+
+def test_resolve_header_spec_unreadable_header_keeps_original_spec(
+    tmp_path: Path,
+) -> None:
+    # No such file: the read raises OSError, which this function must
+    # swallow and return the original spec unchanged -- extract_file's
+    # own read right after this call will surface the same failure
+    # through the normal FileMap.error path.
+    resolved = repo_ops._resolve_header_spec(
+        tmp_path, "missing.h", languages.C
+    )
+    assert resolved is languages.C
 
 
 def test_extract_misses_below_parallel_min_never_touches_pool(
