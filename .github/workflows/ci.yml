@@ -48,10 +48,9 @@ jobs:
         with:
           python-version: '3.13'
           enable-cache: true
-      - run: uv sync --locked
       - name: Export locked requirements
         run: >
-          uv export --format requirements-txt --no-hashes
-          -o requirements-audit.txt
+          uv export --locked --format requirements-txt --no-hashes
+          --no-emit-project -o requirements-audit.txt
       - name: pip-audit
         run: uvx pip-audit --strict -r requirements-audit.txt
