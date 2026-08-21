@@ -106,7 +106,7 @@ never blocks a session or a tool call, it just produces no output (for
 
 ## Skills
 
-`dekko --claude-install` also ships four Claude Code skills alongside
+`dekko --claude-install` also ships five Claude Code skills alongside
 the `/map` command and MCP server — Claude discovers and invokes them
 automatically when their trigger conditions match, no separate install
 step:
@@ -117,6 +117,7 @@ step:
 | `dekko-verify` | a targeted grep sanity-check before trusting a suspiciously low or zero call-graph result (`get_callers`, `find_usages`, `unused`, ...) — dekko's known resolver blind spots (cross-package/qualified calls, trait/interface dispatch, unparsed-language files) |
 | `dekko-daemon` | starting `dekko daemon start` ahead of a Bash-CLI-heavy stretch of work, and how to handle a `--no-daemon`/exit-7 abandoned-request retry |
 | `dekko-notes` | reading a symbol's notes before editing it and writing one after a non-obvious change, via `dekko note add`/`add_note` |
+| `dekko-review-context` | composing `workset` + `impacted_tests` + `check_ambiguous` into structural context for a PR description or code-review flow, before reading the diff line by line |
 
 See each skill's `SKILL.md` under `integrations/claude/skills/` for the
 full guidance.

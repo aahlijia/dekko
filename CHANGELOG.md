@@ -9,6 +9,15 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.42.0] — 2026-08-21
+
+### Added
+- **`dekko-review-context` skill** — orchestrates `workset` +
+  `impacted_tests` + `check_ambiguous` to give PR-description and
+  code-review flows a structural head start on a diff (what changed,
+  what calls it, what tests should run, where the resolver itself is
+  unsure) ahead of the not-yet-built `dekko review` command (#14).
+
 ## [0.41.0] — 2026-08-21
 
 ### Added
