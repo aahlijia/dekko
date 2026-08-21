@@ -9,6 +9,16 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.1] — 2026-08-21
+
+### Changed
+- **`dekko-verify` skill** — broadened scope from the two specific
+  bugs it originally called out (heritage/throws mislabeling, since
+  fixed) to the general failure-shape category they belonged to, so
+  the skill still applies when a *different* mislabeling bug surfaces
+  in the future. Notes that `dekko sanity` now automates the
+  call-graph half of this check, but not the heritage/throws half.
+
 ## [0.43.0] — 2026-08-21
 
 ### Added
