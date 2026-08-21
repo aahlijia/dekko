@@ -9,6 +9,16 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.3] — 2026-08-21
+
+### Fixed
+- **README logo** — the `<picture>`/`<img>` logo at the top of
+  `README.md` used relative asset paths (`assets/logo-full-*.svg`),
+  which resolve on GitHub but 404 on PyPI's standalone README render
+  (no repo context to resolve against). Switched to absolute
+  `raw.githubusercontent.com` URLs pinned to `main` so the logo
+  renders correctly on both.
+
 ## [0.43.2] — 2026-08-21
 
 ### Changed

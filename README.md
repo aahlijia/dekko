@@ -1,8 +1,8 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-full-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/logo-full-light.svg">
-    <img src="assets/logo-full-light.svg" alt="dekko" width="460">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/aahlijia/dekko/main/assets/logo-full-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/aahlijia/dekko/main/assets/logo-full-light.svg">
+    <img src="https://raw.githubusercontent.com/aahlijia/dekko/main/assets/logo-full-light.svg" alt="dekko" width="460">
   </picture>
 </p>
 
