@@ -34,6 +34,17 @@ def test_bare_invocation_prints_help(capsys: pytest.CaptureFixture) -> None:
     assert "--claude-install" in out
 
 
+def test_sanity_smoke(tmp_path: Path) -> None:
+    """``dekko sanity`` is wired into the subcommand dispatch (not left
+    routing into the legacy flag parser — see ``SUBCOMMANDS``) and
+    doesn't crash on a small real repo."""
+    (tmp_path / "a.py").write_text(
+        "def somefn():\n    return 1\n\n\ndef caller():\n    return somefn()\n"
+    )
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+    assert cli.main(["sanity", "somefn", "--root", str(tmp_path)]) == 0
+
+
 def test_affected_budget_defaults_to_affected_default_budget() -> None:
     # Round-08 eval: `dekko affected` had no default --budget at all
     # (confirmed via --help) and returned ~124K uncapped tokens for one

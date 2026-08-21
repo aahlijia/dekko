@@ -34,6 +34,7 @@ from dekko.integrations import orient as orient_mod
 from dekko.analysis import outline as outline_mod
 from dekko.analysis import query
 from dekko.analysis import relevance
+from dekko.analysis import sanity as sanity_mod
 from dekko.render import render_html
 from dekko.render import render_lean
 from dekko.render import render_md
@@ -61,6 +62,7 @@ SUBCOMMANDS = (
     "search",
     "status",
     "doctor",
+    "sanity",
     "ledger",
     "hooks",
     "daemon",
@@ -760,6 +762,60 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="emit structured JSON",
     )
     p_doctor.set_defaults(func=run_doctor)
+
+    p_sanity = sub.add_parser(
+        "sanity",
+        help="cross-check a callers/uses result against a targeted "
+        "grep sweep before trusting a low/zero count",
+    )
+    p_sanity.add_argument("target")
+    p_sanity.add_argument(
+        "--usages",
+        action="store_true",
+        help="check 'uses <target>' instead of 'callers <target>' — "
+        "target is the bare external base identifier (e.g. 'get' for "
+        "requests.get)",
+    )
+    p_sanity.add_argument(
+        "--include-tests",
+        action="store_true",
+        help="include test files in the dekko-side query (default: "
+        "excluded, matching the get_callers/find_usages MCP tools' "
+        "own default)",
+    )
+    p_sanity.add_argument(
+        "--limit",
+        type=int,
+        default=sanity_mod.DEFAULT_REPORT_LIMIT,
+        help="max rendered rows per bucket (matches/dekko-only/"
+        f"grep-only) (default: {sanity_mod.DEFAULT_REPORT_LIMIT})",
+    )
+    p_sanity.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="approximate token budget, applied independently to each "
+        "report bucket",
+    )
+    p_sanity.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root containing map.json (default: cwd)",
+    )
+    p_sanity.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_sanity.add_argument(
+        "--no-regen",
+        action="store_true",
+        help="fail (exit 5) instead of regenerating a stale map",
+    )
+    p_sanity.set_defaults(func=run_sanity)
 
     p_ledger = sub.add_parser(
         "ledger",
@@ -2077,6 +2133,30 @@ def run_doctor(args: argparse.Namespace) -> int:
         print(f"dekko: not a directory: {root}", file=sys.stderr)
         return 2
     return doctor_mod.run(root, args.as_json)
+
+
+def run_sanity(args: argparse.Namespace) -> int:
+    """Handle ``dekko sanity`` — automates the ``dekko-verify`` skill.
+
+    Loads the map unfiltered (``sanity.run`` applies its own test-
+    inclusion default rather than the generic ``--no-tests`` every
+    other read command uses — see ``sanity``'s module docstring for
+    why the default needed to differ here).
+    """
+    root = Path(args.root).resolve()
+    index, code = repo_ops.load_or_regen(root, args.no_regen)
+    if index is None:
+        return code
+    return sanity_mod.run(
+        index,
+        args.target,
+        root,
+        usages=args.usages,
+        include_tests=args.include_tests,
+        limit=args.limit,
+        budget=args.budget,
+        as_json=args.as_json,
+    )
 
 
 def _legacy_main(args_list: list[str]) -> int:

@@ -41,6 +41,8 @@ dekko deps --cycles                  # every detected circular-import cluster
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
 dekko doctor                         # diagnose install/environment issues (PATH shadowing, hooks, MCP, ...)
+dekko sanity resolve                 # cross-check `callers resolve` against a targeted grep sweep
+dekko sanity Path --usages           # cross-check `uses Path` instead of `callers`
 dekko daemon start                   # warm-cache background process (see below)
 ```
 
@@ -178,6 +180,38 @@ anything not `ok`; `--json` for scripting. It never regenerates the map
 and never auto-fixes anything — reporting only. Full check list and the
 Claude Code `/doctor` slash command:
 [claude-code.md](claude-code.md#the-doctor-command).
+
+## Sanity-checking a low/zero call-graph result
+
+`dekko sanity <target>` automates the `dekko-verify` skill's "reach
+for one targeted grep" check: it runs the same `query callers <target>`
+dekko would answer with (or `query uses <target>` under `--usages`),
+runs one scoped `grep -rn <bare-name>` across the repo (excluding the
+same directories `dekko map` already excludes), and diffs the two hit
+sets by `(file, line)` into three buckets:
+
+- **matches** — both found it.
+- **dekko-only** — dekko resolved a call grep's literal pattern
+  didn't match (an alias, a multi-line call) — informational.
+- **grep-only** — grep found a line dekko's answer missed. Each entry
+  is labeled with a likely cause: a cross-package/qualified call
+  (`pkg.Func(`, `Type::method(`, `Type.method(`), a file in a language
+  dekko can't parse, a test-only call site (tests are excluded from
+  the dekko-side query by default here, unlike the plain
+  `query callers` default — see `--include-tests`), a short/generic
+  target name (resolver precision degrades in a dense repo), or
+  "unexplained" when none of those fit.
+
+```sh
+dekko sanity resolve                 # cross-check `callers resolve`
+dekko sanity Path --usages           # cross-check `uses Path` instead
+dekko sanity resolve --include-tests # include test files in the dekko-side query
+```
+
+Always exits `0` on a completed comparison — a nonempty `grep-only`
+bucket is a finding to relay, not itself an error; this is a spot
+check, not a re-verification. See the Claude Code `/sanity` slash
+command: [claude-code.md](claude-code.md#the-sanity-command).
 
 ## Excluding files
 

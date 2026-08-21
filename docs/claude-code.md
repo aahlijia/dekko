@@ -46,6 +46,28 @@ always exits `0` — the findings are advisory, not errors; each
 `missing`/`stale` row names the exact command to fix it. `--json` emits
 the same findings as structured data for scripting.
 
+## The `/sanity` command
+
+```sh
+/sanity resolve
+/sanity Path --usages
+```
+
+Automates the `dekko-verify` skill (below): rather than relying on an
+agent to notice a call-graph result looks "suspiciously low" and
+remember to run a manual grep sanity check, `dekko sanity <target>`
+(also runnable standalone) does it every time, deterministically. It
+runs the same `query callers <target>` dekko would answer with (or
+`query uses <target>` under `--usages`), runs one scoped grep sweep
+across the repo, and diffs the two hit sets into matches/dekko-only/
+grep-only buckets — every grep-only hit is labeled with a likely
+cause drawn from `dekko-verify`'s own blind-spot list (a cross-package/
+qualified call, an unparsed-language file, a test-only call site, or a
+short/generic target name), never a guess presented as certain. Always
+exits `0`; a nonempty grep-only bucket is a finding to relay, not an
+error — see [cli.md](cli.md#sanity-checking-a-lowzero-call-graph-result)
+for the full bucket/cause breakdown and every flag.
+
 ## A persistent usage policy in CLAUDE.md (opt-in)
 
 `dekko hooks` (below) injects per-turn context an agent can weigh
@@ -114,7 +136,7 @@ step:
 | Skill | Nudges toward |
 | --- | --- |
 | `dekko-orient` | reaching for dekko's tools instead of grep/`Read` whenever a repo has a `.dekko/` directory |
-| `dekko-verify` | a targeted grep sanity-check before trusting a suspiciously low or zero call-graph result (`get_callers`, `find_usages`, `unused`, ...) — dekko's known resolver blind spots (cross-package/qualified calls, trait/interface dispatch, unparsed-language files) |
+| `dekko-verify` | a targeted grep sanity-check before trusting a suspiciously low or zero call-graph result (`get_callers`, `find_usages`, `unused`, ...) — dekko's known resolver blind spots (cross-package/qualified calls, trait/interface dispatch, unparsed-language files); the `/sanity` command (above) automates the check itself rather than only nudging toward running it |
 | `dekko-daemon` | starting `dekko daemon start` ahead of a Bash-CLI-heavy stretch of work, and how to handle a `--no-daemon`/exit-7 abandoned-request retry |
 | `dekko-notes` | reading a symbol's notes before editing it and writing one after a non-obvious change, via `dekko note add`/`add_note` |
 | `dekko-review-context` | composing `workset` + `impacted_tests` + `check_ambiguous` into structural context for a PR description or code-review flow, before reading the diff line by line |

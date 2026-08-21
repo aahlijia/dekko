@@ -9,6 +9,18 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.0] — 2026-08-21
+
+### Added
+- **`dekko sanity <target>`** / **`/sanity`** — cross-checks a
+  `callers`/`uses` result against a scoped, word-bounded `grep`
+  sweep, diffing hits into matches/dekko-only/grep-only and naming
+  the likely cause of any grep-only miss (qualified call, unsupported
+  language, test-filter exclusion, generic name). Automates the
+  manual spot check `dekko-verify` already documented, so it's cheap
+  enough to run habitually instead of only when a result looks
+  suspicious.
+
 ## [0.42.0] — 2026-08-21
 
 ### Added
