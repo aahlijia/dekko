@@ -158,6 +158,7 @@ def compute(index: MapIndex) -> dict:
             index, no_grammar_errors
         ),
         "unsupported": (index.provenance or {}).get("unsupported"),
+        "too_large": (index.provenance or {}).get("too_large"),
     }
 
 

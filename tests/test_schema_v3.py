@@ -34,16 +34,25 @@ def _map_doc(root: Path) -> dict:
     return json.loads((root / ".dekko" / "map.json").read_text())
 
 
-def test_doc_version_is_4(make_mapped_repo: RepoFactory) -> None:
-    # Bumped 3 -> 4 for the "referenced" edge table (bug #2b).
+def _resolve(doc: dict, ref: int) -> str:
+    """Resolve a v5+ interned caller/callee/candidate index to its id."""
+    return doc["ids"][ref]
+
+
+def test_doc_version_is_10(make_mapped_repo: RepoFactory) -> None:
+    # Bumped 9 -> 10 for type_aliases_by_path (round-19 claude-code
+    # same-file TS type-alias heritage-mislabeling fix).
     doc = _map_doc(make_mapped_repo(SRC))
-    assert doc["version"] == 4
+    assert doc["version"] == 10
 
 
 def test_edges_carry_call_site_lines(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(SRC)
     doc = _map_doc(root)
-    edges = {(e["caller"], e["callee"]): e["lines"] for e in doc["edges"]}
+    edges = {
+        (_resolve(doc, e["caller"]), _resolve(doc, e["callee"])): e["lines"]
+        for e in doc["edges"]
+    }
     key = ("src/app.py::main", "src/app.py::helper")
     assert edges[key] == [10, 11]
 
@@ -57,11 +66,13 @@ def test_externals_normalized_with_lines(
 ) -> None:
     root = make_mapped_repo(SRC)
     doc = _map_doc(root)
-    by_callee = {e["callee"]: e for e in doc["external"]}
+    by_callee = {_resolve(doc, e["callee"]): e for e in doc["external"]}
     ext = by_callee["external_thing"]
-    assert ext["caller"] == "src/app.py::main"
+    assert _resolve(doc, ext["caller"]) == "src/app.py::main"
     assert ext["lines"] == [12]
-    assert by_callee["print"]["caller"] == "src/app.py::<module>"
+    assert (
+        _resolve(doc, by_callee["print"]["caller"]) == "src/app.py::<module>"
+    )
 
     index = load_map(root)
     assert index is not None
@@ -88,7 +99,7 @@ def test_warm_run_output_matches_cold(make_mapped_repo: RepoFactory) -> None:
     cold = _map_doc(root)
     assert cli.main(["map", str(root), "--quiet"]) == 0
     warm = _map_doc(root)
-    for key in ("files", "symbols", "edges", "ambiguous", "external"):
+    for key in ("files", "symbols", "ids", "edges", "ambiguous", "external"):
         assert warm[key] == cold[key]
 
 
@@ -105,11 +116,35 @@ def test_v2_document_loads_with_defaults(
     for sym in doc["symbols"]:
         sym.pop("doc", None)
         sym.pop("test", None)
+    # Pre-v5 documents wrote caller/callee/candidate ids as raw
+    # strings directly, not indices into an "ids" intern table
+    # (round-15 plan) — the fixture's real map.json is already v5+,
+    # so de-intern every id-bearing field to simulate the true v2
+    # shape rather than just lowering the version number.
+    ids = doc.pop("ids")
     for edge in doc["edges"]:
+        edge["caller"] = ids[edge["caller"]]
+        edge["callee"] = ids[edge["callee"]]
         edge.pop("lines", None)
     doc["external"] = [
-        {"caller": e["caller"] or None, "callee": e["callee"]}
+        {"caller": ids[e["caller"]] or None, "callee": ids[e["callee"]]}
         for e in doc["external"]
+    ]
+    doc["ambiguous"] = [
+        {
+            "caller": ids[a["caller"]],
+            "name": a["name"],
+            "candidates": [ids[c] for c in a["candidates"]],
+        }
+        for a in doc["ambiguous"]
+    ]
+    doc["referenced"] = [
+        {
+            "caller": ids[e["caller"]],
+            "callee": ids[e["callee"]],
+            "lines": e["lines"],
+        }
+        for e in doc["referenced"]
     ]
     path.write_text(json.dumps(doc))
 

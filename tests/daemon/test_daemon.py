@@ -16,6 +16,7 @@ test that didn't clean up (workflow doc §3, point 3).
 
 import json as _json
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -704,6 +705,99 @@ def test_client_timeout_matches_request_timeout() -> None:
     assert daemon._CLIENT_TIMEOUT == daemon._REQUEST_TIMEOUT
 
 
+def test_scaled_client_timeout_floors_at_client_timeout_when_no_map(
+    short_root: Path,
+) -> None:
+    """No ``map.json`` at all (or an unreadable one) -- the floor."""
+    assert daemon._scaled_client_timeout(short_root) == daemon._CLIENT_TIMEOUT
+
+
+def test_scaled_client_timeout_floors_for_a_small_map(
+    short_root: Path,
+) -> None:
+    """A small map.json's scaled budget never drops below the floor."""
+    dekko_dir = short_root / ".dekko"
+    dekko_dir.mkdir()
+    (dekko_dir / "map.json").write_bytes(b"{}")
+    assert daemon._scaled_client_timeout(short_root) == daemon._CLIENT_TIMEOUT
+
+
+def test_scaled_client_timeout_scales_past_the_floor_for_a_large_map(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-15 finding: a large enough map.json widens the budget.
+
+    Uses a tiny ``_TIMEOUT_BYTES_PER_SECOND`` rather than writing a
+    genuinely large file to disk, so the test stays fast -- the real
+    constant is derived from round-15's own measurements (see that
+    constant's docstring), not re-derived here.
+    """
+    monkeypatch.setattr(daemon, "_TIMEOUT_BYTES_PER_SECOND", 100)
+    dekko_dir = short_root / ".dekko"
+    dekko_dir.mkdir()
+    (dekko_dir / "map.json").write_bytes(b"x" * 10_000)
+    scaled = daemon._scaled_client_timeout(short_root)
+    assert scaled == pytest.approx(100.0)
+    assert scaled > daemon._CLIENT_TIMEOUT
+
+
+def test_scaled_client_timeout_is_capped(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pathologically large map.json is capped, not unbounded."""
+    monkeypatch.setattr(daemon, "_TIMEOUT_BYTES_PER_SECOND", 1)
+    dekko_dir = short_root / ".dekko"
+    dekko_dir.mkdir()
+    (dekko_dir / "map.json").write_bytes(b"x" * 10_000)
+    assert (
+        daemon._scaled_client_timeout(short_root)
+        == daemon._SCALED_CLIENT_TIMEOUT_CAP
+    )
+
+
+def test_try_daemon_uses_scaled_client_timeout(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``try_daemon()`` connects with the size-aware budget, not the
+    fixed ``_CLIENT_TIMEOUT`` -- the actual round-15 fix, not just the
+    helper function it's built on."""
+    root = daemon_thread_root
+    seen: list[Path] = []
+    sentinel = 12345.0
+
+    def _fake_scaled(r: Path) -> float:
+        seen.append(r)
+        return sentinel
+
+    monkeypatch.setattr(daemon, "_scaled_client_timeout", _fake_scaled)
+
+    # DaemonTransport is abstract; the concrete class in play depends
+    # on the platform (Unix socket vs. TCP loopback), so patch
+    # whichever one default_transport_for() actually picked here --
+    # patching the abstract base wouldn't reach either subclass's own
+    # override.
+    transport_cls = type(dt.default_transport_for(root))
+    original_connect = transport_cls.client_connect
+    seen_timeouts: list[float] = []
+
+    def _spy_connect(
+        self: dt.DaemonTransport, timeout: float
+    ) -> socket.socket:
+        seen_timeouts.append(timeout)
+        return original_connect(self, timeout)
+
+    monkeypatch.setattr(transport_cls, "client_connect", _spy_connect)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["status", "--root", str(root), "--json"]
+    )
+    result = daemon.try_daemon(args)
+
+    assert result is not None
+    assert seen == [root.resolve()]
+    assert seen_timeouts == [sentinel]
+
+
 def test_status_true_positive_while_daemon_busy_on_slow_request(
     short_root: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1063,11 +1157,11 @@ def test_daemon_status_reports_cache_state_after_a_request(
 # Phase 4: diff/affected's current-tree load shares the warm cache.
 #
 # diff.run/affected.changes used to call mapfile.load_map(root)
-# directly, bypassing _load_or_regen (and therefore the daemon's
+# directly, bypassing load_or_regen (and therefore the daemon's
 # warm-cache hook) entirely -- the "partial exception" the design doc
-# flagged at §2.4's last bullet. cli.load_current_index_no_regen()
+# flagged at §2.4's last bullet. repo_ops.load_current_index_no_regen()
 # closes that gap: it checks the same _daemon_cache_get/_put hooks
-# _load_or_regen uses, without adopting its regen-on-stale side
+# load_or_regen uses, without adopting its regen-on-stale side
 # effect (diff/affected never wrote map.json as a side effect before,
 # and still don't). These tests prove the cache is now genuinely
 # shared -- a query warms it for diff/affected and vice versa -- and

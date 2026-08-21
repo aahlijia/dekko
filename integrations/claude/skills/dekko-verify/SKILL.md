@@ -1,6 +1,6 @@
 ---
 name: dekko-verify
-description: Sanity-check a suspiciously low or zero call-graph result from dekko (get_callers, get_callees, find_usages, impacted_tests, unused) before concluding "no callers" or "dead code." Trigger whenever such a result looks surprising given the symbol's apparent importance, or before deleting/renaming a symbol based on a zero-caller result, or when the repo mixes languages/has any unsupported-language files.
+description: Sanity-check a suspiciously low or zero call-graph result from dekko (get_callers, get_callees, find_usages, impacted_tests, unused) before concluding "no callers" or "dead code," or a heritage/throws-provenance result (query supertypes, query subtypes, query throws) that labels something (external) when you expect it to be in-repo. Trigger whenever such a result looks surprising given the symbol's apparent importance, before deleting/renaming a symbol based on a zero-caller result, when the repo mixes languages/has any unsupported-language files, or when an (external)/(unresolved) label lands on a name you're confident is first-party code.
 ---
 
 # Verifying a low-confidence dekko answer
@@ -48,6 +48,18 @@ sanity check — not a full re-verification — when any of these apply:
   dead-code list.** Same blind spots apply; a callback passed
   by reference rather than called directly, or a call from an
   unparsed file, can both read as "no inbound calls."
+- **A heritage or throws-provenance result labels something
+  `(external)`.** `query supertypes`/`subtypes` and `query throws`
+  can mislabel an in-repo type-alias-as-heritage-base or a
+  pattern-bound rethrow as a fake external entry when the extractor
+  doesn't yet model that language's specific syntax shape (confirmed
+  historically on TS `implements <type-alias>` and Java 16+
+  `instanceof`-pattern rethrows — both since fixed, but the general
+  failure shape, a present result that's mislabeled rather than a
+  missing one, can recur in a new syntax shape any of dekko's language
+  extractors hasn't seen yet). An `(external)`/`(unresolved)` label on
+  a name you're confident is first-party code is worth a `query symbol
+  <name>` check before trusting it.
 
 ## What "good" looks like
 
@@ -60,13 +72,22 @@ blanket "always grep after dekko."
 
 ## Boundaries
 
-- This is about **call-graph relation tools** (`get_callers`,
-  `get_callees`, `find_usages`, `impacted_tests`, `unused`) —
-  `outline`/`query_symbol`/`search_code` describe what's in the repo,
-  not what calls what, and don't share this failure mode the same
-  way.
+- This is primarily about **call-graph relation tools**
+  (`get_callers`, `get_callees`, `find_usages`, `impacted_tests`,
+  `unused`) plus **heritage/throws-provenance tools**
+  (`query supertypes`/`subtypes`, `query throws`) — anything that
+  resolves a relationship or provenance rather than just describing a
+  symbol's own shape. `outline`/`query_symbol`/`search_code` describe
+  what's in the repo, not a resolved relationship to something else,
+  and don't share this failure mode the same way.
 - One grep, scoped to the symbol name, is enough to sanity-check —
   don't fall back to reading whole files or re-deriving the call
   graph by hand; that defeats the point of using dekko at all. See
   `dekko-orient` for the general "reach for dekko before grep" guidance
   this skill is a narrow exception to.
+- For the call-graph relation tools specifically, `dekko sanity
+  <target>` (`dekko sanity <target> --usages` for a `find_usages`-style
+  check) automates the exact grep sweep this skill describes — same
+  comparison, same blind-spot causes, run deterministically instead of
+  by hand. It doesn't cover heritage/throws-provenance mislabeling yet;
+  the `query symbol <name>` check above is still manual for that case.

@@ -41,7 +41,7 @@ class LanguageSpec:
         reference_query: Query capturing non-call usage edges — a
             single ``@ref`` capture per match, fed into the same
             ``referenced_in``/``referenced_out`` pipeline
-            ``call_query`` feeds. Two distinct shapes so far: bare
+            ``call_query`` feeds. Three distinct shapes so far: bare
             identifiers used as *values* rather than invoked —
             object-literal property values, array elements, call
             arguments, assignment/declarator right-hand sides, and (for
@@ -53,8 +53,93 @@ class LanguageSpec:
             const declaration types and composite-literal types (Go's
             struct/interface usage, bug #1.1a) — which a
             definition/call query never visits at all since they name
-            a *type*, not a callable or a value. ``None`` for languages
-            without one yet (JS, TS, TSX, Go as of this writing).
+            a *type*, not a callable or a value; and (Java) method
+            references (``this::method``/``Class::method``, bug
+            #2/round-19), which are call-shaped nowhere in the syntax
+            tree (no argument list) and so are invisible to
+            ``call_query`` too. ``None`` for languages without one yet
+            (JS, TS, TSX, Go, Java as of this writing).
+        heritage_query: Query capturing a type definition's own
+            ``extends``/``implements`` clause(s) — one ``@classdef``
+            match per type, with the clause(s) attached as sibling
+            captures on the same match rather than a second query over
+            the same node (the "container node walked like a param
+            list" shape: a whole heritage container — Python's
+            ``argument_list``, TS's ``class_heritage``/
+            ``extends_type_clause``, Java's ``superclass``/
+            ``super_interfaces``/``extends_interfaces`` — is captured
+            whole and walked by a dedicated per-language parser in
+            ``extractor.py``, mirroring ``_params_*``). Rust is the
+            one exception to the "container attached to ``@classdef``"
+            shape: ``impl Trait for Type`` is its own top-level
+            construct (``@implblock``, no ``@classdef`` at all), so
+            ``extractor._collect_heritage`` special-cases it, resolving
+            the type side by same-file name lookup instead of span
+            correlation (see ``extractor._heritage_rust_impl``). ``None``
+            for languages without one yet (Go — optional bonus item,
+            deferred; see the design doc's Phase 2 section for why).
+            Covers Python/JavaScript/TypeScript/TSX/Java (Phase 1) and
+            Rust/C++ (Phase 2).
+        throw_query: Query capturing raise/throw sites (``@throw``) and,
+            Java only, a method's declared checked-exception clause
+            (``@throws_clause``) — a second, independent signal for
+            "what can calling this raise" beyond throw-site scanning
+            (see ``extractor._collect_throws``). Exception/error
+            handling is not a uniform language feature (see the design
+            doc's own per-language analysis): this is a deliberately
+            scoped pilot covering Python/Java/C++/JS/TS only.
+            ``None`` for Rust/Go/C — a **permanent** exclusion, not a
+            placeholder awaiting a future pass the way an unset
+            ``heritage_query`` slot can be: Rust's ``Result``/``?``
+            propagation and Go's returned-``error``-value convention
+            are type-inference problems, not tree-sitter-query-able
+            syntax, and C has no exception concept at all.
+        catch_query: Query capturing except/catch clauses (``@catch``,
+            plus Java's ``@catch_type``/C++'s ``@catch_params`` helper
+            captures for their container-node shapes — see
+            ``extractor._collect_catches``). Same Python/Java/C++/JS/TS
+            scope and same permanent Rust/Go/C exclusion as
+            ``throw_query``. JS/TS catch clauses are never
+            type-discriminated at the syntax level (no runtime type
+            check on the caught value), so every JS catch and every
+            untyped TS catch extracts as a catch-all (``bare=True``) —
+            only a TS ``catch (e: SomeType)`` annotation (rare) yields
+            a real type name; a "weak signal" caveat, not a bug,
+            disclosed in ``dekko query catches``' own output.
+        env_read_query: Query capturing statically-known
+            environment-variable read call sites (``@call``, plus
+            per-shape helper captures — ``@mod``/``@fn``/``@sub`` for
+            Python/Java/Go's attribute-chain calls, ``@proc``/``@env``
+            for JS/TS's ``process.env`` member access — see
+            ``extractor._collect_env_reads``). Unlike every other
+            query field, this targets a small, hand-curated allowlist
+            of known "config/env read" call shapes, not a general
+            syntactic category — closer in spirit to ``stats.py``'s
+            ``_NOISE_NAMES`` than to a broad grammar-driven capture
+            (see the design doc's own framing). The key argument must
+            be a literal string node for a match to occur at all — a
+            dynamic key (``os.getenv(some_var)``) or an f-string/
+            template-literal key structurally does not match, so no
+            filtering-out step is needed for those; identifier-text
+            filtering (``@mod`` must actually read ``"os"``, etc.) is
+            done in ``extractor.py`` Python code rather than the query
+            itself, matching the codebase's established
+            capture-broadly-then-filter convention (see
+            ``extractor._CLASSDEF_KIND``). Set for every Tier-1
+            language (no permanent exclusion the way ``throw_query``/
+            ``catch_query`` exclude Rust/Go/C — an env-var read is
+            just a call/member-access expression, not a language
+            feature some languages structurally lack).
+        type_alias_query: Query capturing a type-alias declaration's
+            bare name (``@name``) — e.g. TS's ``type X = {...}``,
+            which is never extracted as a ``Symbol`` (see
+            ``query._heritage_external_label``'s docstring for why
+            this matters: an ``implements``/``extends`` clause naming
+            a same-file type alias has no other structural signal to
+            distinguish it from a genuinely external base type,
+            round-19 claude-code finding). ``None`` for languages
+            without one (only TS/TSX have this construct as of this
+            writing — plain JS has no ``type`` keyword at all).
     """
 
     name: str
@@ -68,6 +153,11 @@ class LanguageSpec:
     param_style: str = "generic"
     function_boundary_types: tuple[str, ...] = ()
     reference_query: str | None = None
+    heritage_query: str | None = None
+    throw_query: str | None = None
+    catch_query: str | None = None
+    env_read_query: str | None = None
+    type_alias_query: str | None = None
 
 
 PYTHON = LanguageSpec(
@@ -108,6 +198,59 @@ PYTHON = LanguageSpec(
     container_types={"class_definition": "name"},
     method_containers=("class_definition",),
     param_style="python",
+    heritage_query="""
+(class_definition
+  name: (identifier) @classname
+  superclasses: (argument_list)? @bases) @classdef
+""",
+    # ``raise_statement``'s raised expression is an unfielded first
+    # named child (absent for a bare re-raise) — the same shape as
+    # C++'s ``throw_statement``, walked by the shared
+    # ``extractor._raise_expr`` helper. ``except_clause``'s optional
+    # ``value`` field is an identifier/attribute (single type), a
+    # ``tuple`` (multi-catch), or an ``as_pattern`` wrapping either
+    # (``except X as e:``) — absent entirely for a bare ``except:``.
+    # Verified against the pinned tree-sitter-python grammar.
+    throw_query="""
+(raise_statement) @throw
+""",
+    catch_query="""
+(except_clause) @catch
+""",
+    # Three independent shapes, each a separate top-level pattern (one
+    # match per shape, disambiguated in ``extractor._env_read_python``
+    # by which captures are present — mirrors ``throw_query``'s
+    # ``@throw``/``@throws_clause`` dispatch). Every pattern requires
+    # the key argument/subscript to be a literal ``(string)`` node —
+    # a dynamic key (a bare variable) or an f-string key structurally
+    # fails to match the first two shapes at all; an f-string *does*
+    # still match (an f-string is also node type ``string``), so
+    # ``extractor._string_literal_value`` rejects it by its ``f``/``F``
+    # prefix. ``.`` anchors the key to the argument list's first
+    # child, so a default-value second argument
+    # (``os.getenv("PORT", "8080")``) is never captured. Verified live
+    # against the pinned tree-sitter-python grammar.
+    env_read_query="""
+(call
+  function: (attribute
+    object: (identifier) @mod
+    attribute: (identifier) @fn)
+  arguments: (argument_list . (string) @key)) @call
+
+(call
+  function: (attribute
+    object: (attribute
+      object: (identifier) @mod
+      attribute: (identifier) @sub)
+    attribute: (identifier) @fn)
+  arguments: (argument_list . (string) @key)) @call
+
+(subscript
+  value: (attribute
+    object: (identifier) @mod
+    attribute: (identifier) @sub)
+  subscript: (string) @key) @call
+""",
 )
 
 RUST = LanguageSpec(
@@ -143,6 +286,37 @@ RUST = LanguageSpec(
     method_containers=("impl_item", "trait_item"),
     param_style="rust",
     function_boundary_types=("function_item", "closure_expression"),
+    # ``impl_item`` with a ``trait:`` field is heritage (``impl Trait
+    # for Type``); an inherent ``impl Type { ... }`` (no ``trait:``
+    # field) never matches this pattern at all, so no query-time
+    # filtering is needed to exclude it. ``trait_item``'s optional
+    # ``bounds: (trait_bounds)`` field covers supertrait bounds
+    # (``trait Sub: Super``), attached to ``@classdef`` the same way
+    # Phase 1's languages attach their heritage container.
+    heritage_query="""
+(impl_item
+  trait: (_) @impl_trait
+  type: (_) @impl_type) @implblock
+
+(trait_item
+  name: (type_identifier) @classname
+  bounds: (trait_bounds)? @bounds) @classdef
+""",
+    # ``std::env::var("X")``/``env::var("X")``/``*_os`` variants all
+    # parse as ``call_expression`` whose ``function`` is a (possibly
+    # nested) ``scoped_identifier`` — captured whole as ``@fn`` rather
+    # than matched shape-by-shape, since ``std::env::var`` and bare
+    # ``env::var`` differ in nesting depth but both render to plain
+    # ``::``-joined text; ``extractor._env_read_rust`` checks that
+    # text ends with ``env::var``/``env::var_os`` rather than the
+    # query itself branching on depth. ``.`` anchors the key to the
+    # first argument. Verified live against the pinned
+    # tree-sitter-rust grammar.
+    env_read_query="""
+(call_expression
+  function: (scoped_identifier) @fn
+  arguments: (arguments . (string_literal) @key)) @call
+""",
 )
 
 _C_DEFINITIONS = """
@@ -164,6 +338,21 @@ _C_DEFINITIONS = """
   body: (field_declaration_list)) @classdef
 """
 
+# C/C++'s bare ``getenv("X")`` is a plain ``call_expression`` whose
+# function is a bare ``identifier`` — no ``std``/``os``-style
+# namespace/attribute chain to walk, unlike every other language's
+# shape. ``.`` anchors the key to the first argument; ``extractor.
+# _env_read_c_cpp`` still requires ``@fn`` to read exactly
+# ``"getenv"`` (not merely contain it — see the design doc's
+# ``my_getenv_wrapper`` false-positive test). Verified live against
+# the pinned tree-sitter-c/tree-sitter-cpp grammars (both accept this
+# identical query).
+_C_ENV_READ_QUERY = """
+(call_expression
+  function: (identifier) @fn
+  arguments: (argument_list . (string_literal) @key)) @call
+"""
+
 C = LanguageSpec(
     name="c",
     grammar="c",
@@ -176,6 +365,7 @@ C = LanguageSpec(
 (preproc_include path: (_) @module)
 """,
     param_style="c",
+    env_read_query=_C_ENV_READ_QUERY,
 )
 
 CPP = LanguageSpec(
@@ -237,6 +427,46 @@ CPP = LanguageSpec(
     },
     method_containers=("class_specifier", "struct_specifier"),
     param_style="c",
+    # ``base_class_clause``'s named children alternate between an
+    # ``access_specifier`` wrapper (``public``/``private``/
+    # ``protected`` — absent on a struct base with no explicit
+    # specifier) and the actual base type node; the specifier must be
+    # stripped before the type name is usable (see
+    # ``extractor._heritage_cpp``). The pattern mirrors ``definition_
+    # query``'s own ``@classdef`` shape exactly (``body: (field_
+    # declaration_list)`` required) so the two queries' ``@classdef``
+    # spans line up byte-for-byte for correlation — a forward
+    # declaration (``class Foo;``, no body) is excluded from heritage
+    # extraction the same way it's already excluded from definitions.
+    heritage_query="""
+(struct_specifier
+  name: (type_identifier) @classname
+  (base_class_clause)? @heritage
+  body: (field_declaration_list)) @classdef
+
+(class_specifier
+  name: (type_identifier) @classname
+  (base_class_clause)? @heritage
+  body: (field_declaration_list)) @classdef
+""",
+    # ``throw_statement``'s raised expression is an unfielded first
+    # named child, same shape as Python's ``raise_statement`` (see
+    # ``extractor._raise_expr``) — absent for a bare ``throw;``
+    # re-raise. ``catch_clause``'s ``parameters`` field is a
+    # ``parameter_list`` with either a single ``parameter_declaration``
+    # (a typed catch, its own ``type``/``declarator`` fields) or zero
+    # named children for a catch-all ``catch (...)`` (``...`` parses as
+    # an anonymous token, not a named node — confirmed live against the
+    # pinned tree-sitter-cpp grammar, so ``named_child_count == 0``
+    # reliably means catch-all; C++ has no true empty ``catch ()``).
+    throw_query="""
+(throw_statement) @throw
+""",
+    catch_query="""
+(catch_clause
+  parameters: (parameter_list) @catch_params) @catch
+""",
+    env_read_query=_C_ENV_READ_QUERY,
 )
 
 # Function/method/closure node types shared by JS/TS/TSX's
@@ -256,11 +486,17 @@ _JS_FUNCTION_BOUNDARIES = (
 # callback wired up by name rather than invoked at that site — an
 # object-literal property value, a shorthand property, an array
 # element, a bare call argument, an assignment/declarator
-# right-hand side, or a ``${...}`` template-literal substitution.
-# Only ``identifier`` nodes are captured, so a string/number literal
-# can never be mistaken for one; a same-named local variable
-# shadowing a repo-wide function is a real ambiguity, resolved by
-# reusing ``resolver.py``'s existing candidate ladder.
+# right-hand side, a ``${...}`` template-literal substitution, or
+# (round-18 claude-buddy finding) an operand of a binary expression
+# (``x >= 0``, ``a + clearLine``) or a branch/condition of a ternary
+# (``cond ? a : b``) — plain reads that ``dekko unused`` was silently
+# missing for module-level ``const``-bound variables read (not
+# called) elsewhere in the same file, e.g. a guard condition or a
+# string-concatenation operand. Only ``identifier`` nodes are
+# captured, so a string/number literal can never be mistaken for one;
+# a same-named local variable shadowing a repo-wide function is a
+# real ambiguity, resolved by reusing ``resolver.py``'s existing
+# candidate ladder.
 #
 # The shorthand-property capture is scoped to an ``object`` (value)
 # parent, not a bare ``(shorthand_property_identifier) @ref`` — this
@@ -285,6 +521,11 @@ _JS_REFERENCE_BASE = """
 (variable_declarator value: (identifier) @ref)
 (assignment_expression right: (identifier) @ref)
 (template_substitution (identifier) @ref)
+(binary_expression left: (identifier) @ref)
+(binary_expression right: (identifier) @ref)
+(ternary_expression condition: (identifier) @ref)
+(ternary_expression consequence: (identifier) @ref)
+(ternary_expression alternative: (identifier) @ref)
 """
 
 # JSX attribute/expression values (``<Button onClick={handleClick}
@@ -302,6 +543,52 @@ _JSX_REFERENCE_EXTRA = """
 """
 
 _JS_REFERENCE_QUERY = _JS_REFERENCE_BASE + _JSX_REFERENCE_EXTRA
+
+# JS/TS/TSX throw/catch: ``throw_statement``'s expression is an
+# unfielded first named child (see ``extractor._raise_expr``, shared
+# with Python/C++'s identically-shaped ``raise_statement``/
+# ``throw_statement``). ``catch_clause`` is captured whole for every
+# JS/TS/TSX file, but the *walk* differs by language: plain JS never
+# type-discriminates a caught value (no ``type`` field exists on JS's
+# grammar node at all), so a JS catch always extracts as a catch-all
+# regardless of whether it binds a name; TS/TSX additionally carry an
+# optional ``type`` field (a ``type_annotation`` wrapping the actual
+# type node) for a real, if rare, typed catch — see
+# ``extractor._catches_js``/``_catches_ts``. Confirmed against the
+# pinned tree-sitter-javascript/typescript grammars.
+_JS_THROW_QUERY = """
+(throw_statement) @throw
+"""
+_JS_CATCH_QUERY = """
+(catch_clause) @catch
+"""
+
+# JS/TS/TSX ``process.env.X``/``process.env["X"]``: dot access reads
+# the key as a plain ``property_identifier`` (never dynamic — there is
+# no dot-access syntax for a computed name), so
+# ``extractor._env_read_js`` reads its text directly, no quote
+# stripping needed. Bracket access requires a literal ``(string)``
+# index — ``process.env[SOME_VAR]`` structurally fails to match (the
+# index node type is ``identifier``, not ``string``) and a template
+# literal (`` `APP_${x}` ``) parses as ``template_string``, a distinct
+# node type this pattern never captures either — both dynamic-key
+# forms are excluded by the query shape itself, no extra filtering
+# needed (unlike Python's f-string, which shares node type ``string``
+# with a plain literal). Confirmed live against the pinned
+# tree-sitter-javascript/typescript grammars.
+_JS_ENV_READ_QUERY = """
+(member_expression
+  object: (member_expression
+    object: (identifier) @proc
+    property: (property_identifier) @env)
+  property: (property_identifier) @key) @call
+
+(subscript_expression
+  object: (member_expression
+    object: (identifier) @proc
+    property: (property_identifier) @env)
+  index: (string) @key) @call
+"""
 
 JAVASCRIPT = LanguageSpec(
     name="javascript",
@@ -361,12 +648,29 @@ JAVASCRIPT = LanguageSpec(
 (import_statement
   (import_clause (identifier) @name)
   source: (string) @from_module)
+
+(import_statement
+  (import_clause
+    (namespace_import
+      (identifier) @name))
+  source: (string) @from_module)
+
+(import_statement
+  . (string) @from_module) @stmt
 """,
     container_types={"class_declaration": "name"},
     method_containers=("class_declaration",),
     param_style="js",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY,
+    heritage_query="""
+(class_declaration
+  name: (identifier) @classname
+  (class_heritage)? @heritage) @classdef
+""",
+    throw_query=_JS_THROW_QUERY,
+    catch_query=_JS_CATCH_QUERY,
+    env_read_query=_JS_ENV_READ_QUERY,
 )
 
 _TS_DEFINITIONS = """
@@ -432,6 +736,52 @@ _TS_CONTAINERS = {
     "interface_declaration": "name",
 }
 
+# TS/TSX heritage: ``class_declaration``/``abstract_class_declaration``
+# carry an optional ``class_heritage`` node (in turn containing an
+# ``extends_clause`` and/or ``implements_clause``); ``interface_
+# declaration`` carries an optional ``extends_type_clause`` list
+# directly (an interface has no ``implements`` of its own). Both
+# container shapes land in the same ``@heritage`` capture name — the
+# per-language parser in ``extractor.py`` dispatches on the captured
+# node's own ``.type`` to walk each shape correctly. Confirmed against
+# the pinned tree-sitter-typescript grammar at implementation time
+# (``class_heritage``'s ``extends_clause`` has a ``value`` field;
+# ``implements_clause``/``extends_type_clause`` list their types as
+# plain, unfielded named children).
+_TS_HERITAGE = """
+(class_declaration
+  name: (type_identifier) @classname
+  (class_heritage)? @heritage) @classdef
+
+(abstract_class_declaration
+  name: (type_identifier) @classname
+  (class_heritage)? @heritage) @classdef
+
+(interface_declaration
+  name: (type_identifier) @classname
+  (extends_type_clause)? @heritage) @classdef
+"""
+
+# Same-file type-alias registry (round-19 claude-code finding, bug #3):
+# TS's ``type X = {...}``/``type X = A | B``/etc. is never extracted as
+# a ``Symbol`` at all (no ``definition_query`` pattern covers it), so an
+# ``implements``/``extends`` clause naming a same-file alias had no
+# structural signal to tell it apart from a genuinely external base
+# type -- ``_heritage_external_label`` in ``query.py`` consults this
+# field's output (``FileMap.type_aliases`` -> ``MapIndex.
+# type_aliases_by_path``) as a same-file counterpart to its existing
+# same-named-relative-import check. Only the bare name is needed (not a
+# full symbol), so this is a lightweight per-file name registry, not a
+# new definition_query pattern. Confirmed against the pinned
+# tree-sitter-typescript grammar: ``type_alias_declaration``'s ``name``
+# field is a ``type_identifier``, fielded as ``name:`` -- no anchor
+# tricks needed. Not wired onto ``JAVASCRIPT``: the ``javascript``
+# tree-sitter grammar has no ``type_alias_declaration`` node type at
+# all (no ``type`` keyword in the language).
+_TS_TYPE_ALIAS_QUERY = """
+(type_alias_declaration name: (type_identifier) @name)
+"""
+
 TYPESCRIPT = LanguageSpec(
     name="typescript",
     grammar="typescript",
@@ -445,6 +795,11 @@ TYPESCRIPT = LanguageSpec(
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     # Plain (non-JSX) TypeScript has no jsx_expression node type.
     reference_query=_JS_REFERENCE_BASE,
+    heritage_query=_TS_HERITAGE,
+    throw_query=_JS_THROW_QUERY,
+    catch_query=_JS_CATCH_QUERY,
+    env_read_query=_JS_ENV_READ_QUERY,
+    type_alias_query=_TS_TYPE_ALIAS_QUERY,
 )
 
 TSX = LanguageSpec(
@@ -459,6 +814,11 @@ TSX = LanguageSpec(
     param_style="ts",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY,
+    heritage_query=_TS_HERITAGE,
+    throw_query=_JS_THROW_QUERY,
+    catch_query=_JS_CATCH_QUERY,
+    env_read_query=_JS_ENV_READ_QUERY,
+    type_alias_query=_TS_TYPE_ALIAS_QUERY,
 )
 
 # Type-reference edges (bug #1.1a): a struct/interface type used only
@@ -542,7 +902,41 @@ GO = LanguageSpec(
 """,
     param_style="go",
     reference_query=_GO_REFERENCE_QUERY,
+    # ``os.Getenv("X")``/``os.LookupEnv("X")`` are ``call_expression``
+    # whose function is a ``selector_expression`` with ``operand:``/
+    # ``field:`` fields; the key is an ``interpreted_string_literal``
+    # (Go also has ``raw_string_literal`` — backtick-quoted — not
+    # matched here, since a raw-string env-var key is vanishingly rare
+    # and the design table only specifies the interpreted form). ``.``
+    # anchors the key to the first argument. Verified live against the
+    # pinned tree-sitter-go grammar.
+    env_read_query="""
+(call_expression
+  function: (selector_expression
+    operand: (identifier) @mod
+    field: (field_identifier) @fn)
+  arguments: (argument_list . (interpreted_string_literal) @key)) @call
+""",
 )
+
+# Round-19 (spring-boot) finding: a Java 8 method reference
+# (``this::configureBuildInfoTask``, ``Foo::staticMethod``,
+# ``java.util.Objects::requireNonNull`` -- tree-sitter node type
+# ``method_reference``) is neither a call (no argument list, no
+# invocation) nor covered by any reference query, since JAVA previously
+# set none at all -- a method used only as a callback reference (e.g.
+# passed to a functional-interface parameter) was indistinguishable
+# from dead code to ``dekko unused``. The ``"::"`` anchor requires the
+# captured ``@ref`` node to immediately follow the literal ``::``
+# token; Java's ``Class::new`` constructor-reference form has ``new``
+# as an anonymous keyword token in that position, not an
+# ``identifier`` node, so it never matches this pattern -- no separate
+# exclusion predicate needed. Verified live against the pinned
+# tree-sitter-java grammar for ``this::baz``/``Foo::staticMethod``/
+# ``java.util.Objects::requireNonNull``/``Class::new``.
+_JAVA_REFERENCE_QUERY = """
+(method_reference "::" (identifier) @ref)
+"""
 
 JAVA = LanguageSpec(
     name="java",
@@ -583,7 +977,68 @@ JAVA = LanguageSpec(
         "record_declaration",
     ),
     param_style="generic",
+    reference_query=_JAVA_REFERENCE_QUERY,
+    heritage_query="""
+(class_declaration
+  name: (identifier) @classname
+  superclass: (superclass)? @superclass
+  interfaces: (super_interfaces)? @interfaces) @classdef
+
+(interface_declaration
+  name: (identifier) @classname
+  (extends_interfaces)? @heritage) @classdef
+""",
+    # ``throw_statement``'s raised expression is always an
+    # ``object_creation_expression`` in practice (walked via
+    # ``extractor._callee_java``, reused from call resolution). The
+    # second pattern, a bare ``(throws)`` node, is Java's declared
+    # checked-exception clause on a method — a distinct, independent
+    # signal beyond throw-site scanning (see ``LanguageSpec.
+    # throw_query``'s docstring); unfielded on ``method_declaration``,
+    # so it's captured standalone rather than nested in the first
+    # pattern, and ``extractor._enclosing`` still attributes it to the
+    # right method by byte-range containment.
+    throw_query="""
+(throw_statement) @throw
+(throws) @throws_clause
+""",
+    # ``catch_clause``'s ``catch_formal_parameter`` child is an
+    # unfielded positional child (not a named field), itself wrapping
+    # an unfielded ``catch_type`` child that lists one or more
+    # ``type_identifier`` types directly as named children — a single
+    # type for an ordinary catch, 2+ separated by unnamed ``|`` tokens
+    # for Java's multi-catch (``catch (A | B e)``). Java requires a
+    # typed parameter on every catch clause — there is no catch-all
+    # syntax the way C++/Python have one, so ``bare`` is always
+    # ``False`` here. Confirmed against the pinned tree-sitter-java
+    # grammar.
+    catch_query="""
+(catch_clause
+  (catch_formal_parameter
+    (catch_type) @catch_type)) @catch
+""",
+    # ``System.getenv("X")`` is a ``method_invocation`` with an
+    # ``object:``/``name:`` field pair (unlike JS/Python's attribute-
+    # chain shape, Java fields these directly). ``.`` anchors the key
+    # to the first argument. Verified live against the pinned
+    # tree-sitter-java grammar.
+    env_read_query="""
+(method_invocation
+  object: (identifier) @sys
+  name: (identifier) @fn
+  arguments: (argument_list . (string_literal) @key)) @call
+""",
 )
+
+# ``RUST``, ``GO``, and ``C`` above deliberately leave ``throw_query``/
+# ``catch_query`` at their default ``None`` — a **permanent** exclusion,
+# not a placeholder awaiting a future pass (contrast with
+# ``heritage_query``'s Go slot, left ``None`` only because that
+# extraction hasn't been written yet). Rust's ``Result<T, E>``/``?``
+# propagation and Go's returned-``error``-value convention are
+# type-inference problems, not syntax a tree-sitter query can point at;
+# C has no exception concept to extract at all. See the design doc's
+# per-language analysis for the full reasoning.
 
 TIER1_SPECS: tuple[LanguageSpec, ...] = (
     PYTHON,
@@ -601,6 +1056,50 @@ EXTENSION_MAP: dict[str, LanguageSpec] = {
     ext: spec for spec in TIER1_SPECS for ext in spec.extensions
 }
 
+SPEC_BY_NAME: dict[str, LanguageSpec] = {
+    spec.name: spec for spec in TIER1_SPECS
+}
+
+
+def exception_handling_supported(language: str) -> bool:
+    """Whether ``throws``/``catches`` extract anything for ``language``.
+
+    False for Rust/Go/C (permanent exclusion — see the comment above
+    ``TIER1_SPECS``) and for any language not in ``TIER1_SPECS`` at
+    all (Tier-2 generic-grammar languages, which never extract
+    throw/catch sites in the first place — same practical answer, a
+    different reason).
+
+    Args:
+        language: A language name as recorded on ``Symbol.language``
+            or in ``MapIndex.languages_by_path``.
+
+    Returns:
+        ``True`` if the language's ``LanguageSpec`` defines a
+        ``throw_query``, ``False`` otherwise.
+    """
+    spec = SPEC_BY_NAME.get(language)
+    return spec is not None and spec.throw_query is not None
+
+
+# Bumped whenever ``repo_ops._resolve_header_spec``'s C/C++ ``.h``
+# dispatch heuristic (``extractor.looks_like_cpp_header``) changes in
+# a way that could reclassify a file differently than before. That
+# heuristic lives outside any ``LanguageSpec``, so ``spec_fingerprint``
+# would otherwise be blind to it entirely -- a ``.dekko/`` cache built
+# before the heuristic shipped (or before a later change to it) would
+# keep silently reusing a stale, possibly-wrong-grammar ``FileMap`` for
+# every ``.h`` file after an upgrade, exactly the silent-wrong-answer
+# failure mode the heuristic itself was added to close, just relocated
+# to the upgrade boundary (round 18 tensorflow finding; see the
+# h-header-cpp-c-grammar implementation plan/report under
+# ``test-repos/reports/18-tokentest-7repo-post0404/``). Folding this
+# into the fingerprint below means a cache built under old dispatch
+# logic is discarded automatically -- every file re-parses once on the
+# next non-``--full`` ``dekko map`` run -- rather than requiring users
+# to know to pass ``--full`` themselves.
+_HEADER_DISPATCH_HEURISTIC_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.
@@ -609,16 +1108,22 @@ def spec_fingerprint() -> str:
     of a file — queries, container/method-container types, parameter
     style, and any field added to ``LanguageSpec`` later (the loop is
     driven by ``dataclasses.fields``, not a hand-kept list, so a new
-    field is covered automatically). Used to invalidate a stale
-    ``.dekko`` cache entry or flag a stale ``map.json`` even when the
-    released package version string hasn't changed — a dev iteration
-    or hotfix that reuses the same version, or an unreleased checkout.
+    field is covered automatically) — plus
+    ``_HEADER_DISPATCH_HEURISTIC_VERSION``, which covers the one piece
+    of dispatch logic that lives outside any ``LanguageSpec`` (the
+    C/C++ ``.h`` content-sniffing heuristic — see that constant's
+    comment). Used to invalidate a stale ``.dekko`` cache entry or flag
+    a stale ``map.json`` even when the released package version string
+    hasn't changed — a dev iteration or hotfix that reuses the same
+    version, or an unreleased checkout.
 
     Returns:
         A stable hex digest, unchanged as long as extraction behavior
         is unchanged.
     """
-    parts: list[str] = []
+    parts: list[str] = [
+        f"header_dispatch_heuristic={_HEADER_DISPATCH_HEURISTIC_VERSION}",
+    ]
     for spec in TIER1_SPECS:
         for f in fields(spec):
             value = getattr(spec, f.name)

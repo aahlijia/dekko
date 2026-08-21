@@ -23,6 +23,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dekko import repo_ops
 from dekko.storage import cache as cache_mod
 from dekko.render import mapfile
 from dekko.storage import revcache
@@ -34,6 +35,21 @@ from dekko.core.resolver import MODULE_CALLER_SUFFIX, resolve
 EXIT_SAME = 0
 EXIT_DIFFERENT = 1
 EXIT_ERROR = 2
+
+# Round-15 finding (round15-jobs-default-latency-plan.md): a bare
+# `diff`/`affected`/`workset` invocation with no rev-cache entry for
+# its target commit falls into old_snapshot()'s cache-miss path,
+# which -- at the default `--jobs 1` -- re-parses and resolves every
+# tracked file at that rev single-threaded. On the fleet's largest
+# repos this produced several minutes of zero-feedback silence
+# indistinguishable from a hang (tensorflow, 14,285 files: 5+ minutes
+# sequential vs. ~35s with `--jobs 0`). Chosen empirically from
+# round-15's own per-repo file counts: comfortably above cline/zed/
+# claude-code (up to ~2,730 files, none flagged as slow) and well
+# below spring-boot/tensorflow (9,942/14,285 files, the two repos
+# where this was actually noticeable), so the note only fires where
+# it's likely to matter.
+_SEQUENTIAL_DISCLOSURE_THRESHOLD = 5000
 
 
 @dataclass
@@ -145,7 +161,7 @@ def snapshot(
             pass ``tracked_at_rev(root, rev)`` (queried against the
             *real* repo, which does have ``.git/``) here instead.
         jobs: Resolved worker count (1 = sequential) for both file
-            extraction (``cli.map_repository``) and call-graph
+            extraction (``repo_ops.map_repository``) and call-graph
             resolution (``resolve``). Round-12 master report §3.3:
             this call used to always run both single-threaded
             regardless of ``dekko map --full``'s own ``--jobs``
@@ -153,13 +169,11 @@ def snapshot(
             first-touch/cold-rev-cache ``diff``/``affected``/
             ``workset`` call minutes slower than it needed to be on
             a large repo. Callers pass an already-resolved concrete
-            count (see ``cli._resolve_workers``), not the raw
+            count (see ``repo_ops.resolve_workers``), not the raw
             ``--jobs`` CLI value (which allows ``0`` for "all
             cores").
     """
-    from dekko.integrations import cli
-
-    files, _ = cli.map_repository(
+    files, _ = repo_ops.map_repository(
         root,
         subpath,
         excludes,
@@ -288,18 +302,60 @@ def old_snapshot(
         old_root = Path(tmp)
         if not export_rev(root, target_rev, old_root):
             return None
+        candidates = tracked_at_rev(root, target_rev)
+        _maybe_warn_sequential(jobs, candidates)
         old = snapshot(
             old_root,
             subpath,
             excludes,
             max_file_size,
             cache=old_cache,
-            candidates=tracked_at_rev(root, target_rev),
+            candidates=candidates,
             jobs=jobs,
         )
     if sha is not None:
         revcache.save(root, sha, old)
     return old
+
+
+def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
+    """Disclose a slow single-threaded rev-cache-miss re-parse/resolve.
+
+    Round-15 finding: at the default ``--jobs 1``, a first-touch
+    ``diff``/``affected``/``workset`` call on a large repo re-parses
+    and resolves every tracked file at the target rev single-threaded
+    with no progress output -- on the largest repos in the fleet this
+    ran for several minutes, indistinguishable from a hang (see
+    ``_SEQUENTIAL_DISCLOSURE_THRESHOLD``). Mirrors the pattern
+    ``render_lean.run`` already uses for its own budget-floor
+    disclosure: a one-line ``note:`` to stderr, printed once, before
+    the slow work starts -- no behavior change, purely additive.
+
+    Args:
+        jobs: Resolved worker count about to be passed to
+            ``snapshot()`` (1 = sequential).
+        candidates: The file list about to be re-parsed, or ``None``
+            (an unreadable rev -- ``snapshot()`` will fall back to its
+            own discovery, so there's nothing to count here).
+    """
+    if jobs > 1 or candidates is None:
+        return
+    if len(candidates) < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
+        return
+    # round-18 tensorflow finding: `candidates` is `git ls-tree`'s full
+    # tracked-file count at the target rev -- before `walker.discover`
+    # excludes vendored/no-parser/too-large files -- so it can read
+    # much larger than the repo's actual mapped file count (36,518
+    # tracked vs. 14,285 mapped on tensorflow) and mislead a reader
+    # into thinking the wait scales with the mapped set. Naming it
+    # "git-tracked" makes that distinction explicit instead of
+    # implying it's the same count `dekko map`'s own summary reports.
+    print(
+        f"note: no rev-cache for this commit; single-threaded resolve "
+        f"on {len(candidates)} git-tracked files may take a while -- "
+        f"pass --jobs 0 to use all cores",
+        file=sys.stderr,
+    )
 
 
 def tracked_at_rev(root: Path, rev: str) -> list[str] | None:
@@ -495,9 +551,7 @@ def run(
     Returns:
         Process exit code (0 no changes, 1 changes, 2 error).
     """
-    from dekko.integrations import cli
-
-    index = cli.load_current_index_no_regen(root)
+    index = repo_ops.load_current_index_no_regen(root)
     prov = (index.provenance if index else None) or {}
     subpath = prov.get("subpath")
     excludes = tuple(prov.get("excludes", []))

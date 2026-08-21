@@ -130,11 +130,13 @@ def test_ambiguous_candidates_rank_prod_first(
 ) -> None:
     root = make_mapped_repo(SRC)
     doc = json.loads((root / ".dekko" / "map.json").read_text())
+    ids = doc["ids"]
     entry = next(
-        a for a in doc["ambiguous"] if a["caller"] == "src/other.py::go"
+        a for a in doc["ambiguous"] if ids[a["caller"]] == "src/other.py::go"
     )
-    assert entry["candidates"][0] == "src/app.py::fetch"
-    assert entry["candidates"][-1] == "tests/test_app.py::fetch"
+    candidates = [ids[c] for c in entry["candidates"]]
+    assert candidates[0] == "src/app.py::fetch"
+    assert candidates[-1] == "tests/test_app.py::fetch"
 
 
 def test_token_footer_in_text_not_json(
@@ -194,11 +196,14 @@ def test_uses_resolves_bare_name_despite_repo_wide_collision(
 ) -> None:
     root = make_mapped_repo(COLLISION_SRC)
     doc = json.loads((root / ".dekko" / "map.json").read_text())
+    ids = doc["ids"]
     # The collision must not create an ambiguous edge or an in-repo
     # edge — the receiver ("subprocess") is a non-repo import, so the
     # bare-name lookup must never run at all.
     assert doc["ambiguous"] == []
-    assert any(ext["callee"] == "subprocess.run" for ext in doc["external"])
+    assert any(
+        ids[ext["callee"]] == "subprocess.run" for ext in doc["external"]
+    )
 
     assert _query(root, "uses", "run") == 0
     out = capsys.readouterr().out

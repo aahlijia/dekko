@@ -6,7 +6,19 @@ from pathlib import Path
 from typing import Callable
 
 from dekko.core.languages import LanguageSpec
-from dekko.core.model import FileMap, Import, Param, RawCall, RawRef, Symbol
+from dekko.core.model import (
+    TYPE_KINDS,
+    EnvRead,
+    FileMap,
+    Import,
+    Param,
+    RawCall,
+    RawCatch,
+    RawHeritage,
+    RawRef,
+    RawThrow,
+    Symbol,
+)
 from tree_sitter import Node, Parser, Query, QueryCursor
 from dekko.core.grammars import get_grammar
 
@@ -78,17 +90,69 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
 
     defs = _collect_definitions(spec, tree.root_node, rel)
     calls = _collect_calls(spec, tree.root_node, rel, defs)
+    if spec.name == "rust":
+        calls.extend(_collect_rust_macro_calls(tree.root_node, rel, defs))
     refs = _collect_refs(spec, tree.root_node, rel, defs)
+    heritage = _collect_heritage(spec, tree.root_node, rel, defs)
+    throws = _collect_throws(spec, tree.root_node, rel, defs)
+    catches = _collect_catches(spec, tree.root_node, rel, defs)
+    env_reads = _collect_env_reads(spec, tree.root_node, rel, defs)
     imports = _collect_imports(spec, tree.root_node, rel)
+    type_aliases = _collect_type_aliases(spec, tree.root_node)
     return FileMap(
         path=rel,
         language=spec.name,
         symbols=[sym for _, sym in defs],
         calls=calls,
         refs=refs,
+        heritage=heritage,
+        throws=throws,
+        catches=catches,
+        env_reads=env_reads,
         imports=imports,
+        type_aliases=type_aliases,
         doc=_module_doc(spec.name, tree.root_node),
     )
+
+
+# Node types produced only by a genuine C++ construct -- the C grammar
+# has no ``class``/``namespace``/``template`` productions at all, so
+# these never appear in a parse tree built with that grammar. Used to
+# disambiguate a ``.h`` file's actual language from its own content
+# (both C and C++ claim the extension; see
+# ``repo_ops._resolve_header_spec``).
+_CPP_HEADER_MARKER_QUERY = """
+(class_specifier) @marker
+(namespace_definition) @marker
+(template_declaration) @marker
+"""
+
+
+def looks_like_cpp_header(source: bytes) -> bool:
+    """Whether ``source`` contains a genuine C++-only construct.
+
+    Parses ``source`` with the C++ tree-sitter grammar (a Tier-1,
+    offline dependency -- no optional-grammar gap) and checks whether
+    the resulting parse tree contains a ``class_specifier``,
+    ``namespace_definition``, or ``template_declaration`` node
+    anywhere. Tree-sitter's error recovery means this still classifies
+    correctly around unrelated parse trouble elsewhere in the file
+    (unknown macros, etc.) -- verified live against a plain C header,
+    an ``extern "C"``-wrapped C header, and a C file using ``class``/
+    ``template`` as ordinary identifiers (legal in C, not in C++):
+    none of these three marker node types appear for any of them.
+
+    Args:
+        source: Raw file bytes.
+
+    Returns:
+        True if a C++-only construct was found anywhere in the parse
+        tree.
+    """
+    parser = Parser(get_grammar("cpp"))
+    tree = parser.parse(source)
+    matches = _run_query("cpp", _CPP_HEADER_MARKER_QUERY, tree.root_node)
+    return bool(matches)
 
 
 # ---------------------------------------------------------------------
@@ -164,6 +228,12 @@ def _collect_definitions(
             continue
 
         params_node = _one(caps, "params")
+
+        if _looks_like_c_macro_invocation(
+            spec.name, _text(name_node), params_node
+        ):
+            continue
+
         ret_node = _one(caps, "ret")
         params = (
             _parse_params(spec.param_style, params_node)
@@ -190,6 +260,64 @@ def _collect_definitions(
         defs.append((def_node, sym))
 
     return defs
+
+
+# ALL-CAPS-with-underscores is the near-universal C/C++ convention for
+# function-like macros (``TF_DEVICELIST_METHOD``, ``EXPECT_DEATH``,
+# ``TF_ASSERT_OK_AND_ASSIGN``, ...). Combined with a malformed
+# parameter list (see ``_looks_like_c_macro_invocation``), this
+# reliably identifies an unexpanded macro invocation misparsed as a
+# function definition without also flagging legitimate ALL-CAPS
+# macro-shaped test helpers like gtest's ``TEST(Suite, Case) { ... }``
+# — those parse with a syntactically clean (if semantically nonsense)
+# parameter list, so requiring an actual parse error keeps this from
+# over-triggering (verified empirically against round 15's
+# tensorflow/zed/spring-boot/cline/awesome-go/claude-code test-repos
+# corpus: 228 flagged out of 137,705 C/C++ definitions, one false
+# negative risk accepted — see the macro-extraction-gaps plan).
+_ALL_CAPS_NAME = re.compile(r"^[A-Z_]*[A-Z][A-Z0-9_]*$")
+
+
+def _looks_like_c_macro_invocation(
+    language: str, name: str, params_node: Node | None
+) -> bool:
+    """Detect a C/C++ macro invocation misparsed as a function def.
+
+    Tree-sitter's C/C++ grammars have no dedicated node type for an
+    unexpanded, function-like macro invocation at file/namespace
+    scope (``FOO(a, b, c);``) — dekko never runs a preprocessor, by
+    design. Best-effort grammar error recovery sometimes lands on a
+    ``function_definition``/``function_declarator`` shape anyway,
+    whose "name" is the macro's own name and whose "parameters" node
+    itself contains a syntax error (round 15's ``TF_DEVICELIST_
+    METHOD`` finding in tensorflow's C API layer — see
+    ``round15-macro-extraction-gaps-plan.md`` Track B). Symbols
+    matching this shape are dropped rather than emitted garbled.
+
+    Note: this only suppresses the one garbled symbol. Definitions
+    that tree-sitter's error recovery swallows entirely into the same
+    malformed subtree (real functions textually following the macro
+    invocation) are not recovered by this check — they were already
+    invisible to ``_collect_definitions`` before this function runs,
+    since no separate query match exists for them. Recovering those
+    would need source-level preprocessing before parsing, out of
+    scope here.
+
+    Args:
+        language: Registry language name (only ``c``/``cpp`` apply).
+        name: The captured definition name.
+        params_node: The captured parameter-list node, or ``None``.
+
+    Returns:
+        Whether this definition should be treated as a probable
+        macro invocation rather than a real function.
+    """
+    if language not in ("c", "cpp"):
+        return False
+    if params_node is None or not params_node.has_error:
+        return False
+
+    return bool(_ALL_CAPS_NAME.match(name))
 
 
 def _receiver_container(recv_node: Node | None) -> str | None:
@@ -819,6 +947,151 @@ def _collect_calls(
     return calls
 
 
+# Rust macros whose arguments are ordinary expressions in practice
+# (even though tree-sitter-rust never parses them as such — see
+# ``_collect_rust_macro_calls``). Deliberately narrow: the highest-
+# value, lowest-risk subset (round 15's assert-family recommendation)
+# rather than an attempt at general macro-argument parsing.
+_RUST_ASSERT_MACROS = frozenset(
+    {
+        "assert",
+        "assert_eq",
+        "assert_ne",
+        "debug_assert",
+        "debug_assert_eq",
+        "debug_assert_ne",
+    }
+)
+
+
+def _collect_rust_macro_calls(
+    root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawCall]:
+    """Recover calls made as arguments to assert-family macros.
+
+    tree-sitter-rust does not parse a macro invocation's arguments as
+    Rust expression syntax — ``assert_eq!(helper(1), 2)``'s argument
+    list is an opaque ``token_tree`` of raw tokens, not a structured
+    ``call_expression``, so ``_collect_calls``'s tree-sitter-query
+    mechanism has nothing to match inside it. This is a real, common
+    coverage gap: ``assert!``/``assert_eq!`` wrapping a direct call is
+    an everyday Rust test idiom, and a call made only this way was
+    previously invisible to the call graph entirely (round 15's zed
+    finding — see ``round15-macro-extraction-gaps-plan.md`` Track A).
+
+    Scans ``_RUST_ASSERT_MACROS`` invocations' token trees for
+    ``identifier(...)``/``identifier.identifier(...)``-shaped
+    subsequences and treats each as a call site. General user-defined
+    macro bodies are out of scope.
+
+    Args:
+        root: Parsed file's root node.
+        rel: Repo-relative POSIX path of the file.
+        defs: Definitions found in this file, used to attribute each
+            recovered call to its enclosing function.
+
+    Returns:
+        Recovered ``RawCall``s, one per call-shaped site found inside
+        a target macro's arguments.
+    """
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    calls: list[RawCall] = []
+    _find_target_macro_invocations(root, rel, spans, calls)
+    return calls
+
+
+def _find_target_macro_invocations(
+    node: Node,
+    rel: str,
+    spans: list[tuple[int, int, Symbol]],
+    calls: list[RawCall],
+) -> None:
+    """Recurse the whole tree for target-macro invocations."""
+    if node.type == "macro_invocation":
+        macro_name = node.child_by_field_name("macro")
+        token_tree = _first_child_of_type(node, "token_tree")
+        if (
+            macro_name is not None
+            and token_tree is not None
+            and _text(macro_name) in _RUST_ASSERT_MACROS
+        ):
+            for site, name, receiver in _rust_macro_call_sites(token_tree):
+                caller = _enclosing(spans, site.start_byte)
+                text = f"{receiver}.{name}" if receiver else name
+                calls.append(
+                    RawCall(
+                        caller_id=caller.id if caller else None,
+                        path=rel,
+                        text=text,
+                        name=name,
+                        receiver=receiver,
+                        line=site.start_point[0] + 1,
+                    )
+                )
+
+    for child in node.children:
+        _find_target_macro_invocations(child, rel, spans, calls)
+
+
+def _first_child_of_type(node: Node, node_type: str) -> Node | None:
+    """First direct child matching a node type, or ``None``."""
+    for child in node.children:
+        if child.type == node_type:
+            return child
+    return None
+
+
+def _rust_macro_call_sites(
+    token_tree: Node,
+) -> list[tuple[Node, str, str | None]]:
+    """Find identifier-shaped call sites inside a macro's token tree.
+
+    Structural, not textual: a call written inside a macro argument
+    still nests correctly as an ``identifier`` node immediately
+    followed by a sibling ``token_tree`` node whose own text starts
+    with ``(`` — tree-sitter still balances the raw token stream's
+    brackets, it just doesn't type them as ``call_expression``/
+    ``arguments``. Recurses into nested token trees, so
+    ``outer(inner())`` finds both calls for free (the nesting is
+    already structural, no extra bracket-matching needed).
+
+    Args:
+        token_tree: A macro invocation's ``token_tree`` argument node.
+
+    Returns:
+        ``(identifier_node, name, receiver)`` for each call-shaped
+        site found, in document order.
+    """
+    found: list[tuple[Node, str, str | None]] = []
+    _scan_rust_token_tree(token_tree, found)
+    return found
+
+
+def _scan_rust_token_tree(
+    node: Node, found: list[tuple[Node, str, str | None]]
+) -> None:
+    """Depth-first scan for ``identifier(...)``-shaped subsequences."""
+    children = node.children
+    for i, child in enumerate(children):
+        if child.type == "identifier":
+            nxt = children[i + 1] if i + 1 < len(children) else None
+            if (
+                nxt is not None
+                and nxt.type == "token_tree"
+                and _text(nxt).startswith("(")
+            ):
+                receiver = None
+                if (
+                    i >= 2
+                    and children[i - 1].type in (".", "::")
+                    and children[i - 2].type == "identifier"
+                ):
+                    receiver = _text(children[i - 2])
+                found.append((child, _text(child), receiver))
+        elif child.type == "token_tree":
+            _scan_rust_token_tree(child, found)
+
+
 def _collect_refs(
     spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
 ) -> list[RawRef]:
@@ -936,6 +1209,1094 @@ def _enclosing(
 
 
 # ---------------------------------------------------------------------
+# Heritage (extends/implements clauses)
+
+# Python ``superclasses`` argument_list entries that are real base
+# names: a bare identifier, an ``attribute`` access (``mod.Base``), or
+# a ``subscript`` (``Generic[T]``/``Protocol[T]``-shaped — the design
+# doc's own documented edge case: no attempt is made to distinguish a
+# structural-typing marker from a real base, both resolve the same
+# way). ``keyword_argument`` (``metaclass=Meta``) is deliberately
+# absent — filtered out by simply never matching one of these types.
+_PY_BASE_TYPES = ("identifier", "attribute")
+
+
+def _heritage_python(bases_node: Node) -> list[tuple[Node, str]]:
+    """Walk a Python ``superclasses`` argument_list into base nodes.
+
+    Every kept entry is an ``extends`` clause — Python has no syntactic
+    distinction between "extends a class" and "implements an
+    interface," everything is ``class X(Y):``.
+    """
+    out: list[tuple[Node, str]] = []
+    for child in bases_node.named_children:
+        if child.type in _PY_BASE_TYPES:
+            out.append((child, "extends"))
+        elif child.type == "subscript":
+            value = child.child_by_field_name("value")
+            if value is not None and value.type in _PY_BASE_TYPES:
+                out.append((value, "extends"))
+        # keyword_argument (metaclass=...) and anything else (a
+        # *args/**kwargs splat) are not base names; skip silently.
+    return out
+
+
+def _heritage_js(heritage_node: Node) -> list[tuple[Node, str]]:
+    """Walk a JS ``class_heritage`` node: always exactly one ``extends``.
+
+    Unlike TypeScript, plain JS's ``class_heritage`` has no
+    ``extends_clause`` wrapper — its sole named child *is* the base
+    type expression directly (verified against the pinned
+    tree-sitter-javascript grammar).
+    """
+    children = heritage_node.named_children
+    return [(children[0], "extends")] if children else []
+
+
+def _heritage_ts(heritage_node: Node) -> list[tuple[Node, str]]:
+    """Walk a TS ``class_heritage``/``extends_type_clause`` container.
+
+    ``class_heritage`` (class/abstract-class declarations) wraps an
+    optional ``extends_clause`` (single ``value`` field) and/or
+    ``implements_clause`` (a flat list of unfielded type children).
+    ``extends_type_clause`` (interface declarations) is itself already
+    the flat list — an interface extending other interfaces.
+    """
+    if heritage_node.type == "extends_type_clause":
+        return [(c, "extends") for c in heritage_node.named_children]
+    out: list[tuple[Node, str]] = []
+    for child in heritage_node.named_children:
+        if child.type == "extends_clause":
+            value = child.child_by_field_name("value")
+            if value is not None:
+                out.append((value, "extends"))
+        elif child.type == "implements_clause":
+            out.extend((c, "implements") for c in child.named_children)
+    return out
+
+
+def _type_list_children(node: Node) -> list[Node]:
+    """A Java heritage container's actual type nodes.
+
+    Java's ``superclass`` field wraps its single base type directly as
+    a named child, but ``super_interfaces``/``extends_interfaces`` wrap
+    a ``type_list`` node one level down instead (verified against the
+    pinned tree-sitter-java grammar) — this drills into that wrapper
+    when present so every Java heritage container can be walked the
+    same way regardless of which of the two shapes it is.
+    """
+    type_list = _first_child_of_type(node, "type_list")
+    return (
+        type_list.named_children
+        if type_list is not None
+        else node.named_children
+    )
+
+
+def _heritage_java(caps: dict[str, list[Node]]) -> list[tuple[Node, str]]:
+    """Combine a Java ``@classdef`` match's heritage captures.
+
+    A single ``class_declaration`` match can carry both ``@superclass``
+    (``extends``, at most one) and ``@interfaces`` (``implements``, a
+    list) at once; an ``interface_declaration`` match instead carries
+    ``@heritage`` (its own ``extends_interfaces``, also a list, still
+    an ``extends`` relation since one interface extending another is
+    not "implementing").
+    """
+    out: list[tuple[Node, str]] = []
+    superclass = _one(caps, "superclass")
+    if superclass is not None:
+        out.extend((c, "extends") for c in _type_list_children(superclass))
+    interfaces = _one(caps, "interfaces")
+    if interfaces is not None:
+        out.extend((c, "implements") for c in _type_list_children(interfaces))
+    heritage = _one(caps, "heritage")
+    if heritage is not None:
+        out.extend((c, "extends") for c in _type_list_children(heritage))
+    return out
+
+
+def _heritage_cpp(clause_node: Node) -> list[tuple[Node, str]]:
+    """Walk a C++ ``base_class_clause`` into ``(type_node, "extends")``.
+
+    Each base is either a bare type node (``struct S : Base1 {}`` —
+    no explicit access specifier; a struct base defaults to public and
+    carries no ``access_specifier`` sibling at all) or preceded by its
+    own ``access_specifier`` wrapper node (``public``/``private``/
+    ``protected``) that must be stripped, not treated as part of the
+    type name — the design doc's own documented pitfall
+    (``"public Base"`` would never equal any real symbol name).
+    Verified against the pinned tree-sitter-cpp grammar:
+    ``base_class_clause``'s named children are a flat sequence, each
+    base's own ``access_specifier`` (when present) a preceding
+    sibling, not nested inside the type node. C++ has no syntactic
+    extends/implements distinction — every base, public or private, is
+    an ``extends`` relation.
+    """
+    return [
+        (child, "extends")
+        for child in clause_node.named_children
+        if child.type != "access_specifier"
+    ]
+
+
+def _heritage_rust_bounds(bounds_node: Node) -> list[tuple[Node, str]]:
+    """Walk a Rust ``trait_bounds`` node into supertrait entries.
+
+    ``trait Sub: Super + Clone`` bounds every named supertrait the
+    same way — Rust has no syntactic distinction for a supertrait
+    bound, it's always ``extends`` (mirrors how Python's
+    ``class X(Y):`` collapses everything to ``extends`` too). A
+    lifetime bound (``trait Sub<'a>: 'a + Super``) surfaces as its own
+    ``lifetime`` named child here, not a type — filtered out, since a
+    lifetime is not a supertrait and has no symbol to resolve against
+    (verified against the pinned tree-sitter-rust grammar).
+    """
+    return [
+        (child, "extends")
+        for child in bounds_node.named_children
+        if child.type != "lifetime"
+    ]
+
+
+def _heritage_rust_impl(
+    caps: dict[str, list[Node]],
+    rel: str,
+    defs: list[tuple[Node, Symbol]],
+) -> list[RawHeritage]:
+    """Resolve one ``impl Trait for Type`` block into a ``RawHeritage``.
+
+    Structurally different from every other language's heritage shape
+    (see ``LanguageSpec.heritage_query``'s docstring): the clause
+    isn't attached to the type's own definition node, so there's no
+    ``@classdef`` span to correlate against the way ``_collect_
+    heritage``'s main loop does for every other language. Instead,
+    ``@impl_type``'s name is looked up against this file's own
+    already-extracted ``TYPE_KINDS`` symbols by exact name match —
+    Rust ``impl`` blocks are almost always in the same file as the
+    type they're for, though not required by the language. When the
+    type isn't defined in this file, or its name is ambiguous within
+    it (same-named types in two different ``mod`` blocks — legal but
+    rare), no symbol id exists to attach a ``RawHeritage`` to
+    (``subtype_id`` is never ``None``), so the impl block is silently
+    skipped rather than guessed at.
+
+    An inherent ``impl Type { ... }`` block (no ``trait:`` field)
+    never reaches this function — ``heritage_query``'s ``trait: (_)``
+    field requirement means the query itself never matches one (the
+    design's own flagged false-signal risk: inherent impls vastly
+    outnumber trait impls in typical Rust code).
+    """
+    impl_trait = _one(caps, "impl_trait")
+    impl_type = _one(caps, "impl_type")
+    if impl_trait is None or impl_type is None:
+        return []
+    _, type_name, _ = _heritage_name_parts(impl_type)
+    if not type_name:
+        return []
+    candidates = [
+        sym
+        for _, sym in defs
+        if sym.kind in TYPE_KINDS and sym.name == type_name
+    ]
+    if len(candidates) != 1:
+        return []
+    text, name, receiver = _heritage_name_parts(impl_trait)
+    if not name:
+        return []
+    return [
+        RawHeritage(
+            subtype_id=candidates[0].id,
+            path=rel,
+            text=text,
+            name=name,
+            receiver=receiver,
+            relation="impl",
+            line=impl_trait.start_point[0] + 1,
+        )
+    ]
+
+
+def _heritage_entries(
+    language: str, caps: dict[str, list[Node]]
+) -> list[tuple[Node, str]]:
+    """Dispatch one ``@classdef`` match's captures to its language parser.
+
+    Returns ``(type_node, relation)`` pairs — mirrors how ``_params_*``
+    returns one entry per parameter, just for heritage clauses instead.
+    Rust's ``impl Trait for Type`` heritage (``@implblock`` matches,
+    which carry no ``@classdef``) is handled separately by
+    ``_heritage_rust_impl``, called directly from ``_collect_heritage``
+    before this dispatch ever runs — only Rust's supertrait-bound
+    shape (``@classdef``-attached, like every other language here)
+    reaches this function for Rust.
+    """
+    if language == "python":
+        bases = _one(caps, "bases")
+        return _heritage_python(bases) if bases is not None else []
+    if language == "javascript":
+        heritage = _one(caps, "heritage")
+        return _heritage_js(heritage) if heritage is not None else []
+    if language in ("typescript", "tsx"):
+        heritage = _one(caps, "heritage")
+        return _heritage_ts(heritage) if heritage is not None else []
+    if language == "java":
+        return _heritage_java(caps)
+    if language == "cpp":
+        heritage = _one(caps, "heritage")
+        return _heritage_cpp(heritage) if heritage is not None else []
+    if language == "rust":
+        bounds = _one(caps, "bounds")
+        return _heritage_rust_bounds(bounds) if bounds is not None else []
+    return []
+
+
+def _heritage_name_parts(node: Node) -> tuple[str, str, str | None]:
+    """Split a heritage clause's type node into (text, name, receiver).
+
+    Reuses ``_split_callee_text`` — the same dotted/scoped-path
+    splitting a callee expression already needs (``mod.Base`` ->
+    name ``Base``, receiver ``mod``; ``Comparable<Foo>`` -> name
+    ``Comparable``, its generic argument stripped the same way a call's
+    argument list already is).
+    """
+    text = _text(node)
+    name, receiver = _split_callee_text(text)
+    return text, name, receiver
+
+
+def _collect_heritage(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawHeritage]:
+    """Find extends/implements/impl-for clauses on type definitions.
+
+    Mirrors ``_collect_refs``'s "return empty for languages without a
+    query yet" shape. Each ``heritage_query`` match's ``@classdef``
+    node is correlated back to the ``Symbol`` ``_collect_definitions``
+    already built for it by exact byte span (the same node, re-matched
+    by a second query pass — see ``_collect_calls``/``_enclosing`` for
+    the analogous span-based correlation used for call attribution),
+    restricted to ``TYPE_KINDS`` symbols so a match can never
+    accidentally attach to something else.
+
+    Rust's ``impl Trait for Type`` matches (``@implblock``) carry no
+    ``@classdef`` at all — a structurally different shape handled
+    before span correlation ever runs, via same-file name lookup in
+    ``_heritage_rust_impl`` instead.
+    """
+    if spec.heritage_query is None:
+        return []
+    by_span = {
+        (node.start_byte, node.end_byte): sym
+        for node, sym in defs
+        if sym.kind in TYPE_KINDS
+    }
+    out: list[RawHeritage] = []
+    for _, caps in _run_query(spec.grammar, spec.heritage_query, root):
+        if "implblock" in caps:
+            out.extend(_heritage_rust_impl(caps, rel, defs))
+            continue
+        classdef = _one(caps, "classdef")
+        if classdef is None:
+            continue
+        sym = by_span.get((classdef.start_byte, classdef.end_byte))
+        if sym is None:
+            continue
+        for node, relation in _heritage_entries(spec.name, caps):
+            text, name, receiver = _heritage_name_parts(node)
+            if not name:
+                continue
+            out.append(
+                RawHeritage(
+                    subtype_id=sym.id,
+                    path=rel,
+                    text=text,
+                    name=name,
+                    receiver=receiver,
+                    relation=relation,
+                    line=node.start_point[0] + 1,
+                )
+            )
+    return out
+
+
+# ---------------------------------------------------------------------
+# Throws/catches (raise/throw sites, except/catch clauses)
+
+# Node types a raised/caught type node might reasonably be — anything
+# outside this set (a string/object/array literal, e.g. JS ``throw "a
+# string"``) yields ``name=None`` deliberately rather than a garbage
+# name pulled from an unrelated node's text (see ``_throw_type_parts``,
+# ``_catch_type_name``). Reused across Python/C++'s bare-identifier and
+# attribute/member-access re-raise shapes and Java/C++'s (possibly
+# scoped/qualified) type names.
+_NAMEABLE_TYPE_NODES = (
+    "identifier",
+    "attribute",
+    "field_expression",
+    "qualified_identifier",
+    "scoped_identifier",
+    "member_expression",
+    "type_identifier",
+)
+
+
+def _raise_expr(stmt_node: Node) -> Node | None:
+    """First unfielded named child of a raise/throw statement.
+
+    Shared by Python's ``raise_statement`` and C++/JS/TS's
+    ``throw_statement`` — all three park the raised expression as a
+    bare (unfielded) first named child, absent entirely for a bare
+    re-raise (Python bare ``raise``, C++ bare ``throw;``). Python's
+    optional ``raise X from Y`` re-raise-cause uses its own fielded
+    ``cause:`` child, which must be skipped rather than mistaken for
+    the raised expression itself — confirmed against the pinned
+    tree-sitter-python grammar (``cause`` is the only fielded child a
+    raise/throw statement in any of these languages ever carries).
+    """
+    for i, child in enumerate(stmt_node.children):
+        if not child.is_named:
+            continue
+        if stmt_node.field_name_for_child(i) is not None:
+            continue
+        return child
+    return None
+
+
+def _throw_type_parts(expr: Node) -> tuple[str, str | None]:
+    """Best-effort ``(text, name)`` for a raised/thrown expression.
+
+    ``name`` is the raised type's base identifier for a type
+    construction (``SomeError(...)``, ``new SomeError(...)``, Java's
+    ``new SomeError(...)``) or a bare type/identifier reference
+    (``raise SomeError`` / ``raise err`` re-raising a caught
+    variable) — ``None`` for anything else (a string/object-literal
+    throw, valid in JS/TS but not a name-able type; the design doc's
+    own documented JS/TS caveat).
+    """
+    text = _text(expr)
+    if expr.type in ("call", "call_expression"):
+        func = expr.child_by_field_name("function")
+        if func is None:
+            return text, None
+        _, name, _ = _heritage_name_parts(func)
+        return text, name or None
+    if expr.type == "object_creation_expression":
+        special = _callee_java(expr)
+        return text, (special[1] or None) if special else None
+    if expr.type == "new_expression":
+        ctor = expr.child_by_field_name("constructor")
+        if ctor is None:
+            return text, None
+        _, name, _ = _heritage_name_parts(ctor)
+        return text, name or None
+    if expr.type in _NAMEABLE_TYPE_NODES:
+        _, name, _ = _heritage_name_parts(expr)
+        return text, name or None
+    return text, None
+
+
+def _innermost_identifier(node: Node) -> str | None:
+    """Unwrap a declarator (C++ ``reference_declarator``/
+    ``pointer_declarator``) down to its base ``identifier``'s text.
+    """
+    while node is not None and node.type != "identifier":
+        named = [c for c in node.children if c.is_named]
+        node = named[0] if named else None
+    return _text(node) if node is not None else None
+
+
+def _java_instanceof_pattern_name(if_node: Node) -> str | None:
+    """Bound pattern variable of a Java ``if (x instanceof T t)`` guard.
+
+    ``None`` if the ``if``'s condition isn't (only) a pattern-matching
+    ``instanceof`` test. Handles the direct case only — the condition's
+    ``parenthesized_expression`` wraps exactly one
+    ``instanceof_expression`` carrying a ``name`` field (Java 16+
+    pattern matching for ``instanceof``) — not compound/negated
+    conditions (``!(x instanceof T t)`` guards paired with an early
+    return, De Morgan-style reordering, etc.), which would need real
+    flow analysis to scope correctly and are out of scope for this
+    fix. Verified against the pinned tree-sitter-java grammar.
+    """
+    cond = if_node.child_by_field_name("condition")
+    if cond is not None and cond.type == "parenthesized_expression":
+        inner = cond.named_children
+        cond = inner[0] if inner else None
+    if cond is None or cond.type != "instanceof_expression":
+        return None
+    name = cond.child_by_field_name("name")
+    return _text(name) if name is not None else None
+
+
+def _java_if_pattern_binding(node: Node, prev: Node) -> str | None:
+    """``_java_instanceof_pattern_name(node)`` if ``prev`` (the child
+    ``_nearest_catch_binding`` arrived from) is inside ``node``'s own
+    ``consequence`` block, ``None`` otherwise (including when ``node``
+    isn't a pattern-matching ``instanceof`` guard at all) — split out
+    of ``_nearest_catch_binding`` purely to keep that function's
+    branch count under the project's complexity cap.
+    """
+    consequence = node.child_by_field_name("consequence")
+    if (
+        consequence is None
+        or consequence.start_byte > prev.start_byte
+        or prev.end_byte > consequence.end_byte
+    ):
+        return None
+    return _java_instanceof_pattern_name(node)
+
+
+# Node type that terminates ``_nearest_catch_binding``'s upward walk
+# for each language — reaching it (whether or not a bound name can be
+# extracted from it) always stops the search, since it's the nearest
+# enclosing except/catch construct.
+_CATCH_TERMINAL_TYPE = {
+    "python": "except_clause",
+    "javascript": "catch_clause",
+    "typescript": "catch_clause",
+    "tsx": "catch_clause",
+    "cpp": "catch_clause",
+    "java": "catch_clause",
+}
+
+
+def _catch_binding_name(language: str, node: Node) -> str | None:
+    """Bound exception-variable name from one matched terminal
+    except/catch node (see ``_CATCH_TERMINAL_TYPE``), dispatched by
+    language. Split out of ``_nearest_catch_binding`` purely to keep
+    that function's branch count under the project's complexity cap.
+
+    Verified against the pinned grammars:
+    - Python: ``except_clause``'s ``value`` field is an ``as_pattern``
+      whose ``alias`` field is the bound name (``except X as e:``).
+    - JS/TS: ``catch_clause``'s ``parameter`` field is the bound name
+      directly (``catch (e)``), when it's a plain identifier (not a
+      destructuring pattern, which this deliberately doesn't try to
+      match — a destructured catch can't plausibly rethrow "the whole
+      exception" by any single name).
+    - C++: ``catch_clause``'s ``parameters`` field is a
+      ``parameter_list``; its sole ``parameter_declaration``'s
+      ``declarator`` field wraps the bound name (possibly through a
+      ``reference_declarator``, e.g. ``catch (std::exception& e)``),
+      unwrapped via ``_innermost_identifier``.
+    - Java: ``catch_clause``'s unfielded ``catch_formal_parameter``
+      child has a ``name`` field directly (``catch (Exception ex)``)
+      — see ``_java_catch_param_binding``.
+    """
+    if language == "python":
+        value = node.child_by_field_name("value")
+        if value is not None and value.type == "as_pattern":
+            alias = value.child_by_field_name("alias")
+            return _text(alias) if alias is not None else None
+        return None
+    if language in ("javascript", "typescript", "tsx"):
+        param = node.child_by_field_name("parameter")
+        if param is not None and param.type == "identifier":
+            return _text(param)
+        return None
+    if language == "cpp":
+        params = node.child_by_field_name("parameters")
+        if params is not None and params.named_child_count == 1:
+            decl = params.named_children[0]
+            declarator = decl.child_by_field_name("declarator")
+            if declarator is not None:
+                return _innermost_identifier(declarator)
+        return None
+    if language == "java":
+        return _java_catch_param_binding(node)
+    return None
+
+
+def _java_catch_param_binding(node: Node) -> str | None:
+    """Bound exception-variable name of a Java ``catch_clause``.
+
+    Split out of ``_catch_binding_name`` purely to keep that
+    function's branch count under the project's complexity cap.
+    """
+    param = next(
+        (c for c in node.named_children if c.type == "catch_formal_parameter"),
+        None,
+    )
+    if param is None:
+        return None
+    name = param.child_by_field_name("name")
+    return _text(name) if name is not None else None
+
+
+def _nearest_catch_binding(
+    language: str, stmt: Node, boundary_types: tuple[str, ...]
+) -> str | None:
+    """Bound exception-variable name of the nearest enclosing
+    except/catch clause containing ``stmt`` (a raise/throw statement),
+    or ``None`` if it isn't confidently inside one before crossing a
+    function boundary.
+
+    Java additionally recognizes one narrower binding *nested inside*
+    a catch clause, checked before the terminal ``catch_clause`` node
+    is reached: a pattern-matching ``instanceof`` guard's bound
+    variable (``if (ex instanceof BindException bindException) {
+    throw bindException; }``, Java 16+), scoped to that ``if``'s own
+    consequence block only — see ``_java_if_pattern_binding``. Round-18
+    spring-boot finding: without this, a rethrown pattern-bound
+    variable was labeled ``(external)`` with the raw variable
+    identifier standing in for a fabricated type name. See
+    ``_catch_binding_name`` for the per-language terminal-node
+    extraction this defers to once a match is found.
+    """
+    terminal_type = _CATCH_TERMINAL_TYPE.get(language)
+    prev = stmt
+    node = stmt.parent
+    while node is not None:
+        if node.type in boundary_types:
+            return None
+        if language == "java" and node.type == "if_statement":
+            name = _java_if_pattern_binding(node, prev)
+            if name is not None:
+                return name
+        if node.type == terminal_type:
+            return _catch_binding_name(language, node)
+        prev = node
+        node = node.parent
+    return None
+
+
+def _catch_type_name(node: Node) -> str | None:
+    """Base identifier of one caught-type node, or ``None``.
+
+    Mirrors ``_heritage_name_parts``'s text-splitting — a caught type
+    is written the same shapes a heritage clause's base type is
+    (bare identifier, dotted/scoped path).
+    """
+    _, name, _ = _heritage_name_parts(node)
+    return name or None
+
+
+def _catches_python(except_node: Node) -> tuple[list[str], bool]:
+    """Walk a Python ``except_clause``'s optional ``value`` field.
+
+    ``value`` is absent for a bare ``except:`` (catch-all). When
+    present it is an identifier/attribute (single type), a ``tuple``
+    (multi-catch, ``except (A, B):``), or an ``as_pattern`` wrapping
+    either (``except X as e:`` / ``except (A, B) as e:``) — the
+    ``as_pattern``'s own first named child (not its fielded ``alias``)
+    is the actual caught-type value, unwrapped here before the
+    tuple-vs-single check runs.
+    """
+    value = except_node.child_by_field_name("value")
+    if value is None:
+        return [], True
+    if value.type == "as_pattern":
+        children = value.named_children
+        value = children[0] if children else None
+        if value is None:
+            return [], True
+    if value.type == "tuple":
+        names = []
+        for child in value.named_children:
+            name = _catch_type_name(child)
+            if name:
+                names.append(name)
+        return names, False
+    name = _catch_type_name(value)
+    return ([name] if name else []), False
+
+
+def _catches_java(catch_type_node: Node) -> tuple[list[str], bool]:
+    """Walk a Java ``catch_type``'s named children into type names.
+
+    A single type for an ordinary catch, 2+ (``catch_type``'s named
+    children, separated by unnamed ``|`` tokens the query never
+    captures) for Java's multi-catch. Java requires a typed parameter
+    on every catch clause — no catch-all syntax exists — so ``bare``
+    is always ``False``.
+    """
+    names = []
+    for child in catch_type_node.named_children:
+        name = _catch_type_name(child)
+        if name:
+            names.append(name)
+    return names, False
+
+
+def _catches_cpp(params_node: Node) -> tuple[list[str], bool]:
+    """Walk a C++ ``catch_clause``'s ``parameters`` (a ``parameter_list``).
+
+    Zero named children means a catch-all ``catch (...)`` (the ``...``
+    token parses as anonymous, not a named node — see
+    ``LanguageSpec.catch_query``'s docstring); otherwise the sole
+    ``parameter_declaration``'s ``type`` field is the caught type. C++
+    catch clauses never carry more than one type.
+    """
+    if params_node.named_child_count == 0:
+        return [], True
+    decl = params_node.named_children[0]
+    type_node = decl.child_by_field_name("type")
+    if type_node is None:
+        return [], False
+    name = _catch_type_name(type_node)
+    return ([name] if name else []), False
+
+
+def _catches_js(_catch_node: Node) -> tuple[list[str], bool]:
+    """Plain JS never type-discriminates a caught value.
+
+    Whether or not the clause binds a name (``catch (e) {}`` vs. bare
+    ``catch {}``), there is no syntactic type to extract — always a
+    catch-all. See ``LanguageSpec.catch_query``'s docstring.
+    """
+    return [], True
+
+
+_TS_CATCH_ALL_TYPES = frozenset({"any", "unknown"})
+
+
+def _catches_ts(catch_node: Node) -> tuple[list[str], bool]:
+    """TS/TSX's optional ``type`` field on a ``catch_clause``.
+
+    Absent, or annotated with the only two types TS's compiler permits
+    on a catch variable (``any``/``unknown``, semantically a
+    catch-all — see ``useUnknownInCatchVariables``), means catch-all;
+    any other annotation is not valid TypeScript and can't occur in
+    real code, but is still walked defensively rather than assumed
+    unreachable.
+    """
+    type_node = catch_node.child_by_field_name("type")
+    if type_node is None:
+        return [], True
+    inner = type_node.named_children
+    if not inner:
+        return [], True
+    name = _catch_type_name(inner[0])
+    if name is None or name in _TS_CATCH_ALL_TYPES:
+        return [], True
+    return [name], False
+
+
+def _catch_entries(
+    language: str, caps: dict[str, list[Node]], catch_node: Node
+) -> tuple[list[str], bool]:
+    """Dispatch one ``@catch`` match to its language-specific walker."""
+    if language == "python":
+        return _catches_python(catch_node)
+    if language == "java":
+        catch_type = _one(caps, "catch_type")
+        if catch_type is None:
+            return [], False
+        return _catches_java(catch_type)
+    if language == "cpp":
+        params = _one(caps, "catch_params")
+        if params is None:
+            return [], True
+        return _catches_cpp(params)
+    if language == "javascript":
+        return _catches_js(catch_node)
+    if language in ("typescript", "tsx"):
+        return _catches_ts(catch_node)
+    return [], False
+
+
+def _collect_throws(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawThrow]:
+    """Find raise/throw sites and (Java) declared ``throws``-clause
+    entries, attributed to their enclosing definition.
+
+    Mirrors ``_collect_refs``'s "return empty for languages without a
+    query yet" shape (Rust/Go/C — see ``LanguageSpec.throw_query``'s
+    docstring for why this is permanent, not "not yet implemented").
+    Java's query produces two independently-matched shapes in one
+    pass — an actual ``@throw`` site and a method's own ``@throws_
+    clause`` — each attributed via ``_enclosing`` the same way, since
+    a declared checked exception is just as much part of "what this
+    method's error surface includes" as an explicit throw statement.
+    """
+    if spec.throw_query is None:
+        return []
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    out: list[RawThrow] = []
+    for _, caps in _run_query(spec.grammar, spec.throw_query, root):
+        throw_node = _one(caps, "throw")
+        if throw_node is not None:
+            caller = _enclosing(spans, throw_node.start_byte)
+            caller_id = caller.id if caller else None
+            expr = _raise_expr(throw_node)
+            line = throw_node.start_point[0] + 1
+            is_bound_reraise = (
+                expr is not None
+                and expr.type == "identifier"
+                and _nearest_catch_binding(
+                    spec.name, throw_node, spec.function_boundary_types
+                )
+                == _text(expr)
+            )
+            if expr is None or is_bound_reraise:
+                out.append(
+                    RawThrow(
+                        caller_id=caller_id,
+                        path=rel,
+                        text=None,
+                        name=None,
+                        line=line,
+                    )
+                )
+                continue
+            text, name = _throw_type_parts(expr)
+            out.append(
+                RawThrow(
+                    caller_id=caller_id,
+                    path=rel,
+                    text=text,
+                    name=name,
+                    line=line,
+                )
+            )
+            continue
+        throws_clause = _one(caps, "throws_clause")
+        if throws_clause is None:
+            continue
+        caller = _enclosing(spans, throws_clause.start_byte)
+        caller_id = caller.id if caller else None
+        line = throws_clause.start_point[0] + 1
+        for child in throws_clause.named_children:
+            name = _catch_type_name(child)
+            if not name:
+                continue
+            out.append(
+                RawThrow(
+                    caller_id=caller_id,
+                    path=rel,
+                    text=_text(child),
+                    name=name,
+                    line=line,
+                )
+            )
+    return out
+
+
+def _collect_catches(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawCatch]:
+    """Find except/catch clauses, attributed to their enclosing definition.
+
+    Mirrors ``_collect_throws``'s "return empty for languages without
+    a query yet" shape.
+    """
+    if spec.catch_query is None:
+        return []
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    out: list[RawCatch] = []
+    for _, caps in _run_query(spec.grammar, spec.catch_query, root):
+        catch_node = _one(caps, "catch")
+        if catch_node is None:
+            continue
+        caller = _enclosing(spans, catch_node.start_byte)
+        types, bare = _catch_entries(spec.name, caps, catch_node)
+        out.append(
+            RawCatch(
+                caller_id=caller.id if caller else None,
+                path=rel,
+                types=types,
+                bare=bare,
+                line=catch_node.start_point[0] + 1,
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------
+# Env-var reads (config/env value tracing — scoped pilot)
+
+
+def _string_literal_value(node: Node) -> str | None:
+    """Interior text of a plain string-literal node, or ``None`` when
+    the literal is an f-string — a dynamic-key form dekko can't
+    statically resolve, even one with no ``{...}`` interpolation at
+    all (e.g. ``f"PORT"``), rejected purely by its ``f``/``F`` prefix
+    rather than by inspecting for an ``interpolation`` child.
+
+    Handles every language's key-literal node shape captured by
+    ``LanguageSpec.env_read_query`` (Python's ``string``, Java/Rust/
+    Go/C/C++'s ``string_literal``/``interpreted_string_literal``) —
+    all quote a plain string body the same way once any prefix
+    (``r``/``b``/``u``/``f``, Python's only) is stripped. Every
+    non-Python language's env-read query captures only a node type
+    that a computed/formatted key structurally cannot produce (a JS
+    template literal is node type ``template_string``, not
+    ``string``; Rust's ``format!`` is a macro call, not a
+    ``string_literal`` argument) — so this f-prefix check is a
+    Python-only concern in practice, harmless as a no-op elsewhere.
+    """
+    raw = _raw(node)
+    prefix_match = _STR_PREFIX.match(raw)
+    prefix = prefix_match.group(0) if prefix_match else ""
+    if "f" in prefix.lower():
+        return None
+    text = raw[len(prefix) :]
+    for quote in ('"""', "'''", '"', "'"):
+        if (
+            text.startswith(quote)
+            and text.endswith(quote)
+            and len(text) >= 2 * len(quote)
+        ):
+            return text[len(quote) : -len(quote)]
+    return None
+
+
+def _env_read_python(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one Python env-read match, or
+    ``None`` when the identifier names don't match a known shape or
+    the key literal is an f-string.
+
+    Dispatches on which captures are present (mirrors ``_catch_
+    entries``' presence-based dispatch): ``sub`` absent means the
+    two-level ``os.getenv(...)`` shape; ``sub`` + ``fn`` present means
+    the three-level ``os.environ.get(...)`` shape; ``sub`` present
+    without ``fn`` means the ``os.environ[...]`` subscript form.
+    """
+    mod = _one(caps, "mod")
+    key_node = _one(caps, "key")
+    if mod is None or key_node is None or _text(mod) != "os":
+        return None
+    sub = _one(caps, "sub")
+    fn = _one(caps, "fn")
+    if sub is not None:
+        if _text(sub) != "environ":
+            return None
+        call = "os.environ[]"
+        if fn is not None:
+            if _text(fn) != "get":
+                return None
+            call = "os.environ.get"
+    elif fn is not None and _text(fn) == "getenv":
+        call = "os.getenv"
+    else:
+        return None
+    value = _string_literal_value(key_node)
+    return (call, value) if value is not None else None
+
+
+def _env_read_js(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one JS/TS/TSX env-read match.
+
+    The dot-access shape's ``@key`` is a plain ``property_identifier``
+    — its text *is* the env-var name already, never dynamic (dot
+    syntax has no computed-name form). The bracket-access shape's
+    ``@key`` is a ``(string)`` node, unwrapped by
+    ``_string_literal_value``; a computed bracket key
+    (``process.env[SOME_VAR]``) or template literal
+    (`` `APP_${x}` ``) never matches the query's ``(string)``/
+    ``property_identifier`` node types at all (see
+    ``languages._JS_ENV_READ_QUERY``'s docstring), so no extra
+    dynamic-key filtering is needed here.
+    """
+    proc = _one(caps, "proc")
+    env = _one(caps, "env")
+    key_node = _one(caps, "key")
+    if proc is None or env is None or key_node is None:
+        return None
+    if _text(proc) != "process" or _text(env) != "env":
+        return None
+    if key_node.type == "property_identifier":
+        return "process.env", _text(key_node)
+    value = _string_literal_value(key_node)
+    return ("process.env[]", value) if value is not None else None
+
+
+def _env_read_java(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one Java ``System.getenv(...)`` match."""
+    sys_node = _one(caps, "sys")
+    fn = _one(caps, "fn")
+    key_node = _one(caps, "key")
+    if sys_node is None or fn is None or key_node is None:
+        return None
+    if _text(sys_node) != "System" or _text(fn) != "getenv":
+        return None
+    value = _string_literal_value(key_node)
+    return ("System.getenv", value) if value is not None else None
+
+
+def _env_read_rust(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one Rust ``env::var``-family match.
+
+    ``call`` is the captured scoped-identifier text exactly as
+    written (``std::env::var``, bare ``env::var``, either's ``_os``
+    variant) rather than a canonicalized label — so the same key read
+    via ``std::env::var`` in one function and bare ``env::var`` (after
+    a local ``use std::env;``) in another still surfaces as two
+    distinct ``call`` values, same as every other language's
+    shape-disclosure intent.
+    """
+    fn = _one(caps, "fn")
+    key_node = _one(caps, "key")
+    if fn is None or key_node is None:
+        return None
+    fn_text = _text(fn)
+    if not (fn_text.endswith("::var") or fn_text.endswith("::var_os")):
+        return None
+    value = _string_literal_value(key_node)
+    return (fn_text, value) if value is not None else None
+
+
+def _env_read_go(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one Go ``os.Getenv``/``os.LookupEnv``
+    match."""
+    mod = _one(caps, "mod")
+    fn = _one(caps, "fn")
+    key_node = _one(caps, "key")
+    if mod is None or fn is None or key_node is None:
+        return None
+    if _text(mod) != "os":
+        return None
+    fn_name = _text(fn)
+    if fn_name not in ("Getenv", "LookupEnv"):
+        return None
+    value = _string_literal_value(key_node)
+    return (f"os.{fn_name}", value) if value is not None else None
+
+
+def _env_read_c_cpp(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
+    """``(call_shape, key)`` for one C/C++ bare ``getenv(...)`` match."""
+    fn = _one(caps, "fn")
+    key_node = _one(caps, "key")
+    if fn is None or key_node is None or _text(fn) != "getenv":
+        return None
+    value = _string_literal_value(key_node)
+    return ("getenv", value) if value is not None else None
+
+
+# Per-language env-read match walker, keyed by ``LanguageSpec.name`` —
+# every walker returns ``(call_shape, key)`` for a name-matched hit or
+# ``None`` for a structurally-matched but name-mismatched call (e.g.
+# Python's ``json.dumps("x")``, which shares ``os.getenv``'s two-level
+# attribute-call shape; see the design doc's own "curated, not general
+# string-matching" precision requirement).
+_ENV_READ_DISPATCH: dict[
+    str, Callable[[dict[str, list[Node]]], tuple[str, str] | None]
+] = {
+    "python": _env_read_python,
+    "javascript": _env_read_js,
+    "typescript": _env_read_js,
+    "tsx": _env_read_js,
+    "java": _env_read_java,
+    "rust": _env_read_rust,
+    "go": _env_read_go,
+    "c": _env_read_c_cpp,
+    "cpp": _env_read_c_cpp,
+}
+
+
+def _is_env_write_or_delete_target(language: str, call_node: Node) -> bool:
+    """Whether ``call_node`` (the matched env-read subscript/member
+    node) sits in a write or delete position rather than a read
+    position.
+
+    A write is an assignment's ``left`` field (Python ``assignment``,
+    JS/TS ``assignment_expression`` — **not** Python's
+    ``augmented_assignment``, since ``x += v`` genuinely reads ``x``
+    before writing it). A delete is Python's ``delete_statement`` (an
+    unfielded child) or JS/TS's ``unary_expression`` with a ``delete``
+    operator (the ``argument`` field). Every other Tier-1 language's
+    env-read idiom is a call expression, which can never be an
+    assignment target or delete operand — this check is a no-op for
+    them by construction (see ``LanguageSpec.env_read_query``'s
+    docstring).
+    """
+    # Tree-sitter ``Node`` objects are re-wrapped on each access (e.g.
+    # each call to ``child_by_field_name``), so identity comparison
+    # with ``is`` unreliably returns ``False`` even for the same
+    # underlying node -- confirmed live against the pinned grammar
+    # (two separately-fetched handles to the identical node compare
+    # ``==`` True but ``is`` False). Compare by ``==`` instead, as
+    # tree-sitter's own ``Node.__eq__`` is defined for exactly this.
+    parent = call_node.parent
+    if parent is None:
+        return False
+    if language == "python":
+        if parent.type == "assignment":
+            return parent.child_by_field_name("left") == call_node
+        return parent.type == "delete_statement"
+    if language in ("javascript", "typescript", "tsx"):
+        if parent.type == "assignment_expression":
+            return parent.child_by_field_name("left") == call_node
+        if parent.type == "unary_expression":
+            operator = parent.child_by_field_name("operator")
+            return (
+                operator is not None
+                and _text(operator) == "delete"
+                and parent.child_by_field_name("argument") == call_node
+            )
+    return False
+
+
+def _collect_env_reads(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[EnvRead]:
+    """Find statically-known environment-variable read call sites,
+    attributed to their enclosing definition.
+
+    A detector, not a resolver — the literal key text extracted here
+    *is* the fully-resolved fact (see ``model.EnvRead``'s docstring).
+    Mirrors ``_collect_throws``/``_collect_catches``'s "no query for
+    this language" empty-list shape, though every Tier-1 language sets
+    ``env_read_query`` (no permanent per-language exclusion here, per
+    ``LanguageSpec.env_read_query``'s docstring).
+    """
+    if spec.env_read_query is None:
+        return []
+    dispatch = _ENV_READ_DISPATCH.get(spec.name)
+    if dispatch is None:
+        return []
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    out: list[EnvRead] = []
+    for _, caps in _run_query(spec.grammar, spec.env_read_query, root):
+        call_node = _one(caps, "call")
+        if call_node is None:
+            continue
+        if _is_env_write_or_delete_target(spec.name, call_node):
+            continue
+        hit = dispatch(caps)
+        if hit is None:
+            continue
+        call, key = hit
+        caller = _enclosing(spans, call_node.start_byte)
+        out.append(
+            EnvRead(
+                caller_id=caller.id if caller else None,
+                path=rel,
+                key=key,
+                call=call,
+                line=call_node.start_point[0] + 1,
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------
+# Type aliases
+
+
+def _collect_type_aliases(spec: LanguageSpec, root: Node) -> list[str]:
+    """Bare names of type-alias declarations in this file.
+
+    TS/TSX only (see ``LanguageSpec.type_alias_query``'s docstring) --
+    a lightweight file-scoped name registry, not full symbols, feeding
+    ``query._heritage_external_label``'s same-file lookup (round-19
+    claude-code finding: ``ShellCommandImpl implements ShellCommand``
+    where ``ShellCommand`` is a same-file ``type X = {...}`` alias was
+    mislabeled ``(external)`` for lack of this signal).
+    """
+    if spec.type_alias_query is None:
+        return []
+    names: list[str] = []
+    for _, caps in _run_query(spec.grammar, spec.type_alias_query, root):
+        name_node = _one(caps, "name")
+        if name_node is not None:
+            names.append(_text(name_node))
+    return names
+
+
+# ---------------------------------------------------------------------
 # Imports
 
 
@@ -999,14 +2360,23 @@ def _imports_rust(
 def _imports_js(
     matches: list[tuple[int, dict[str, list[Node]]]], rel: str
 ) -> list[Import]:
-    """Normalize JS/TS import statements (named and default)."""
+    """Normalize JS/TS import statements (named, default, namespace,
+    and side-effect/bare)."""
     out: list[Import] = []
     for _, caps in matches:
         module = _one(caps, "from_module")
-        name = _one(caps, "name")
-        if module is None or name is None:
+        if module is None:
             continue
         source = _strip_quotes(_text(module))
+        name = _one(caps, "name")
+        if name is None:
+            # Side-effect import (`import "./foo.css";`) — no local
+            # binding. ``name=""`` is the signal downstream JS-specific
+            # resolver code (``resolver._resolve_import_js``,
+            # ``bare_import_source``) uses to know this source has no
+            # appended "/name" suffix to strip.
+            out.append(Import(path=rel, name="", source=source))
+            continue
         alias = _one(caps, "alias")
         local = _text(alias) if alias else _text(name)
         out.append(

@@ -112,6 +112,51 @@ def test_rust_calls_and_receivers() -> None:
     assert any(name == "dist" for name, _ in calls)
 
 
+def test_rust_assert_macro_calls_are_visible(tmp_path: Path) -> None:
+    # Round 15 (zed): tree-sitter-rust never parses a macro's
+    # arguments as expression syntax, so a call made only as a direct
+    # argument to assert!/assert_eq!/etc — an everyday Rust test
+    # idiom — used to be entirely invisible to the call graph. This
+    # covers the assert-family scan added to recover them: a plain
+    # call, a receiver-qualified call, a nested call, and (as a
+    # negative case) vec!/println! staying untouched since they are
+    # not in the target macro set.
+    spec = languages.spec_for_path("lib.rs")
+    assert spec is not None
+    (tmp_path / "lib.rs").write_text(
+        "struct S;\n"
+        "impl S {\n"
+        "    fn intersects(&self, other: &S) -> bool { true }\n"
+        "}\n"
+        "fn helper(x: i32) -> i32 { x + 1 }\n"
+        "fn outer(x: i32) -> i32 { x }\n"
+        "fn nested_helper() -> i32 { 2 }\n"
+        "fn test_it() {\n"
+        "    let s = S;\n"
+        "    let o = S;\n"
+        "    assert!(s.intersects(&o));\n"
+        "    assert_eq!(helper(1), 2);\n"
+        "    assert_ne!(helper(1), helper(2));\n"
+        "    debug_assert!(helper(1) == 2);\n"
+        "    assert_eq!(outer(nested_helper()), 3);\n"
+        "    let v = vec![helper(1), helper(2)];\n"
+        '    println!("{}", helper(1).to_string());\n'
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "lib.rs", spec)
+    assert fm.error is None
+    calls = {(c.name, c.receiver) for c in fm.calls if c.caller_id}
+    assert ("intersects", "s") in calls
+    assert ("helper", None) in calls
+    assert ("outer", None) in calls
+    assert ("nested_helper", None) in calls
+    # vec!/println! aren't assert-family macros — not scanned at all.
+    call_count_from_vec_and_println = sum(
+        1 for c in fm.calls if c.line in (15, 16) and c.name == "helper"
+    )
+    assert call_count_from_vec_and_println == 0
+
+
 def test_rust_nested_fn_not_a_method(tmp_path: Path) -> None:
     # Bug #2(a): a fn nested inside another fn's body is a closure-
     # local helper, not a member of whatever impl block contains the
@@ -143,7 +188,7 @@ def test_rust_inline_test_module_marks_symbol_test(tmp_path: Path) -> None:
     # Master report #7 (round 11, zed): Rust's idiomatic
     # ``#[cfg(test)] mod tests { ... }`` co-locates unit tests inside
     # the same file as the production code they test, so the
-    # file-level `is_test_path` pass in `cli.map_repository` never
+    # file-level `is_test_path` pass in `repo_ops.map_repository` never
     # sees a test-path file and never sets `Symbol.test`. The
     # extractor's own `_qualify` already climbs through the `mod_item`
     # container and knows the qualname prefix is `tests` — it must now
@@ -266,6 +311,58 @@ def test_javascript_template_substitution_captured_as_ref(
     assert "RED" in ref_names
 
 
+def test_ts_binary_expression_operand_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """A module-level ``const`` read as a binary-expression operand
+    (a guard condition, a string-concatenation operand) is a bare
+    reference.
+
+    Round-18 claude-buddy finding: ``dekko unused`` false-flagged live
+    module-level ``const`` variables read this way (``biomeArgIdx >= 0
+    ? ... : undefined``, ``moveTo() + clearLine``) as dead code,
+    because ``_JS_REFERENCE_BASE`` had no pattern for
+    ``binary_expression`` operands.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const biomeArgIdx = 3;\n"
+        "const clearLine = 'clear';\n"
+        "export const run = () => {\n"
+        "  const override = biomeArgIdx >= 0 ? 1 : 0;\n"
+        "  return 'x' + clearLine;\n"
+        "};\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "biomeArgIdx" in ref_names
+    assert "clearLine" in ref_names
+
+
+def test_ts_ternary_branch_and_condition_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """A module-level ``const`` read as a ternary's condition or
+    either branch is a bare reference.
+
+    Round-18 claude-buddy finding: ``panelFocus ? ... : CYAN`` false-
+    flagged both ``panelFocus`` (the condition) and ``CYAN`` (the
+    alternative branch) as unused.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const panelFocus = true;\n"
+        "const CYAN = '\\x1b[36m';\n"
+        "export const color = panelFocus ? '' : CYAN;\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "panelFocus" in ref_names
+    assert "CYAN" in ref_names
+
+
 def test_go_struct_type_positions_captured_as_refs(tmp_path: Path) -> None:
     """Track G / bug #1.1a: Go struct types used only as *types*.
 
@@ -354,6 +451,40 @@ def test_cpp_include_derives_header_stem_as_import_name(
     assert "tensorflow/core/data/rewrite_utils.h" in sources
 
 
+def test_cpp_macro_invocation_not_emitted_as_garbled_symbol(
+    tmp_path: Path,
+) -> None:
+    """Round 15 (tensorflow): an unexpanded, function-like macro
+    invocation at file scope (dekko never runs a preprocessor) can
+    land tree-sitter's error recovery on a genuine
+    ``function_definition`` node whose "name" is the macro's own name
+    and whose parameter list itself contains a parse error — this
+    used to surface as a garbled synthetic symbol (e.g.
+    ``TF_DEVICELIST_METHOD(_: int64_t, ...)``) polluting ``unused``/
+    ``query symbol``. An ALL-CAPS name plus a malformed parameter
+    list (not just an ALL-CAPS name alone, which also matches
+    legitimate gtest-style ``TEST(Suite, Case) { ... }`` macros —
+    verified empirically not to trip this) suppresses the symbol; an
+    ordinary function elsewhere in the same file is unaffected.
+    """
+    spec = languages.spec_for_path("c_api.cc")
+    assert spec is not None
+    (tmp_path / "c_api.cc").write_text(
+        "MY_MACRO(int a, int b,) {\n"
+        "    return a;\n"
+        "}\n"
+        "\n"
+        "int real_function(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "c_api.cc", spec)
+    assert fm.error is None
+    syms = _by_qualname(fm.symbols)
+    assert "MY_MACRO" not in syms
+    assert syms["real_function"].kind == "function"
+
+
 def test_tsx_jsx_tag_name_captured_as_ref(tmp_path: Path) -> None:
     """Track G / bug #1.1b: a TSX component used only as ``<Foo />``.
 
@@ -372,6 +503,67 @@ def test_tsx_jsx_tag_name_captured_as_ref(tmp_path: Path) -> None:
     fm = extract_file(tmp_path, "data.tsx", spec)
     ref_names = {ref.name for ref in fm.refs}
     assert "Sidebar" in ref_names
+
+
+def test_java_method_reference_captured_as_ref(tmp_path: Path) -> None:
+    """Round-19 (spring-boot) finding: Java 8 method references.
+
+    ``this::configureBuildInfoTask``/``Foo::staticMethod``/
+    ``java.util.Objects::requireNonNull`` are never call-shaped (no
+    argument list) and, before ``_JAVA_REFERENCE_QUERY``, Java had no
+    ``reference_query`` at all -- a method passed only as a callback
+    reference was indistinguishable from dead code to ``dekko unused``.
+    """
+    spec = languages.spec_for_path("Data.java")
+    assert spec is not None
+    (tmp_path / "Data.java").write_text(
+        "class Data {\n"
+        "    void configureBuildInfoTask(BuildInfo info) {}\n"
+        "    static void staticMethod() {}\n"
+        "    void wire() {\n"
+        "        java.util.function.Consumer<BuildInfo> c ="
+        " this::configureBuildInfoTask;\n"
+        "        Runnable r = Data::staticMethod;\n"
+        "        java.util.function.Function<String, Long> p ="
+        " java.util.Objects::requireNonNull;\n"
+        "    }\n"
+        "}\n\n"
+        "class BuildInfo {}\n"
+    )
+    fm = extract_file(tmp_path, "Data.java", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "configureBuildInfoTask" in ref_names
+    assert "staticMethod" in ref_names
+    assert "requireNonNull" in ref_names
+
+
+def test_java_constructor_reference_not_captured_as_ref_to_new(
+    tmp_path: Path,
+) -> None:
+    """Negative case for the fix above: ``Class::new``.
+
+    ``new`` is an anonymous keyword token in tree-sitter-java, not an
+    ``identifier`` node, so it must never satisfy
+    ``_JAVA_REFERENCE_QUERY``'s ``"::" (identifier) @ref`` anchor --
+    locks in that a constructor reference doesn't spuriously surface a
+    reference to a symbol literally named ``new`` (and doesn't
+    misattribute the reference to the object identifier, ``Data``,
+    either).
+    """
+    spec = languages.spec_for_path("Data.java")
+    assert spec is not None
+    (tmp_path / "Data.java").write_text(
+        "import java.util.function.Supplier;\n\n"
+        "class Data {\n"
+        "    void wire() {\n"
+        "        Supplier<Data> s = Data::new;\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "Data.java", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "new" not in ref_names
+    assert "Data" not in ref_names
 
 
 def test_ts_object_literal_shorthand_captured_as_ref(

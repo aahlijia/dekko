@@ -6,7 +6,17 @@ from pathlib import Path
 import pytest
 
 from dekko.render import mapfile
-from dekko.core.model import CallGraph, Edge, FileMap, Symbol
+from dekko.integrations import cli
+from dekko.core.model import (
+    CallGraph,
+    Edge,
+    ExternalCall,
+    FileMap,
+    HeritageEdge,
+    ModuleEdge,
+    ModuleGraph,
+    Symbol,
+)
 
 from conftest import RepoFactory
 
@@ -37,7 +47,7 @@ def test_load_round_trip(make_mapped_repo: RepoFactory) -> None:
 def test_provenance_written(make_mapped_repo: RepoFactory) -> None:
     root = make_mapped_repo(CHAIN)
     doc = json.loads((root / ".dekko" / "map.json").read_text())
-    assert doc["version"] == 4
+    assert doc["version"] == mapfile.MAP_DOC_VERSION
     prov = doc["provenance"]
     assert prov["tool_version"]
     assert prov["spec_hash"]
@@ -104,6 +114,61 @@ def test_v1_map_is_always_stale(
 
 def test_missing_map_loads_none(tmp_path: Path) -> None:
     assert mapfile.load_map(tmp_path) is None
+
+
+def test_load_map_raises_on_too_new_doc_version(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A stale in-memory process (long-lived MCP server/daemon) reading
+    # a map.json written by a newer dekko build, whose doc version it
+    # has no parsing logic for, must fail loudly and clearly instead
+    # of returning None (which callers like repo_ops.load_or_regen
+    # would read as "missing" and regenerate over, silently
+    # downgrading a perfectly good, newer-format map.json) or letting
+    # some unrelated downstream TypeError/KeyError surface first.
+    root = make_mapped_repo(CHAIN)
+    doc_path = root / ".dekko" / "map.json"
+    doc = json.loads(doc_path.read_text())
+    doc["version"] = mapfile.MAP_DOC_VERSION + 1
+    doc_path.write_text(json.dumps(doc))
+
+    with pytest.raises(mapfile.MapFormatTooNewError) as exc_info:
+        mapfile.load_map(root)
+
+    message = str(exc_info.value)
+    assert str(mapfile.MAP_DOC_VERSION + 1) in message
+    assert str(mapfile.MAP_DOC_VERSION) in message
+    assert "restart" in message.lower()
+
+
+@pytest.mark.parametrize(
+    "bad_version",
+    [None, "not-a-number", 5.7, True],
+    ids=["null", "string", "float", "bool"],
+)
+def test_load_map_raises_on_malformed_doc_version(
+    make_mapped_repo: RepoFactory,
+    bad_version: object,
+) -> None:
+    # A malformed/corrupted "version" field (null, non-numeric, or a
+    # float rather than an int) must not fall through the
+    # MapFormatTooNewError guard's `isinstance(doc_version, int)`
+    # check and hit the old opaque TypeError from
+    # `doc_version > MAP_DOC_VERSION` comparing incompatible types —
+    # it needs its own clear, distinct error instead (the document is
+    # broken, not merely "too new").
+    root = make_mapped_repo(CHAIN)
+    doc_path = root / ".dekko" / "map.json"
+    doc = json.loads(doc_path.read_text())
+    doc["version"] = bad_version
+    doc_path.write_text(json.dumps(doc))
+
+    with pytest.raises(mapfile.MapFormatInvalidError) as exc_info:
+        mapfile.load_map(root)
+
+    message = str(exc_info.value)
+    assert "version" in message.lower()
+    assert "dekko map" in message
 
 
 def test_provenance_records_unsupported_files(
@@ -203,6 +268,51 @@ def test_vendored_excluded_none_when_no_vendored_dirs_present(
     index = mapfile.load_map(root)
     assert index is not None
     assert index.provenance["vendored_excluded"] is None
+
+
+def test_provenance_records_too_large_files_with_paths(
+    tmp_path: Path,
+) -> None:
+    # round-18 zed finding: a real, first-party file skipped only for
+    # exceeding --max-file-size vanished with zero disclosure ("no
+    # mapped file or directory", no hint a size cap was the reason).
+    # The path itself (not just a count) must survive into provenance
+    # so `status`/`summary`/`map_status` can name it.
+    big_file = tmp_path / "big_module.py"
+    big_file.write_text("def f() -> None:\n    pass\n" + "# pad\n" * 100)
+    small_file = tmp_path / "small_module.py"
+    small_file.write_text("def g() -> None:\n    pass\n")
+    assert (
+        cli.main(
+            [
+                "map",
+                str(tmp_path),
+                "--quiet",
+                "--max-file-size",
+                "50",
+            ]
+        )
+        == 0
+    )
+    index = mapfile.load_map(tmp_path)
+    assert index is not None
+    assert index.provenance is not None
+    too_large = index.provenance["too_large"]
+    assert too_large == {"count": 1, "paths": ["big_module.py"]}
+    note = mapfile.format_unsupported(index.provenance)
+    assert note is not None
+    assert "1 file(s) exceeded the size cap" in note
+    assert "big_module.py" in note
+    assert "--max-file-size" in note
+
+
+def test_too_large_none_when_no_files_exceed_cap(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.provenance["too_large"] is None
 
 
 def test_version_stamp_stale_even_with_unchanged_source(
@@ -400,17 +510,34 @@ def test_load_map_works_without_orjson(
     assert mapfile.load_provenance(root) == index.provenance
 
 
-def _sym(path: str, name: str) -> Symbol:
+def _sym(path: str, name: str, kind: str = "function") -> Symbol:
     return Symbol(
         id=f"{path}::{name}",
         name=name,
         qualname=name,
-        kind="function",
+        kind=kind,
         path=path,
         language="python",
         start_line=1,
         end_line=2,
     )
+
+
+def _intern(doc: dict, value: str) -> int:
+    """Test-side mirror of ``mapfile.build_id_table``'s intern step.
+
+    Hand-edited map.json fixtures below inject new caller/callee/
+    candidate entries; since v5+ documents store those as integer
+    indices into the top-level ``"ids"`` table (round-15 plan) rather
+    than raw strings, a fixture that wants to add
+    ``{"caller": "a.py::main", ...}`` must add ``"a.py::main"`` to
+    ``doc["ids"]`` (or reuse its existing index) and reference the
+    index instead.
+    """
+    ids = doc.setdefault("ids", [])
+    if value not in ids:
+        ids.append(value)
+    return ids.index(value)
 
 
 def test_load_map_reads_referenced_edge_lines(
@@ -423,7 +550,11 @@ def test_load_map_reads_referenced_edge_lines(
     map_path = root / ".dekko" / "map.json"
     doc = json.loads(map_path.read_text())
     doc["referenced"] = [
-        {"caller": "a.py::main", "callee": "a.py::helper", "lines": [42]}
+        {
+            "caller": _intern(doc, "a.py::main"),
+            "callee": _intern(doc, "a.py::helper"),
+            "lines": [42],
+        }
     ]
     map_path.write_text(json.dumps(doc))
 
@@ -494,9 +625,12 @@ def test_load_map_reads_ambiguous_out(make_mapped_repo: RepoFactory) -> None:
     doc = json.loads(map_path.read_text())
     doc["ambiguous"] = [
         {
-            "caller": "a.py::main",
+            "caller": _intern(doc, "a.py::main"),
             "name": "g",
-            "candidates": ["b.py::g", "c.py::g"],
+            "candidates": [
+                _intern(doc, "b.py::g"),
+                _intern(doc, "c.py::g"),
+            ],
         }
     ]
     map_path.write_text(json.dumps(doc))
@@ -618,3 +752,260 @@ def test_atomic_write_bytes_never_exposes_partial_content(
     mapfile.atomic_write_bytes(target, b"new-complete-content")
     after = target.read_bytes()
     assert after == b"new-complete-content"
+
+
+def test_index_from_maps_builds_heritage_adjacency() -> None:
+    files = [
+        FileMap(
+            path="a.py",
+            language="python",
+            symbols=[_sym("a.py", "Dog", "class")],
+        ),
+        FileMap(
+            path="b.py",
+            language="python",
+            symbols=[_sym("b.py", "Animal", "class")],
+        ),
+    ]
+    graph = CallGraph(
+        heritage=[
+            HeritageEdge(
+                subtype="a.py::Dog",
+                supertype="b.py::Animal",
+                relation="extends",
+                lines=[3],
+            )
+        ]
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    assert index.heritage_out["a.py::Dog"] == ["b.py::Animal"]
+    assert index.heritage_in["b.py::Animal"] == ["a.py::Dog"]
+    assert index.heritage_lines[("a.py::Dog", "b.py::Animal")] == [3]
+    assert index.heritage_relation[("a.py::Dog", "b.py::Animal")] == "extends"
+
+
+def test_index_from_maps_builds_heritage_ambiguous() -> None:
+    files = [
+        FileMap(
+            path="a.py",
+            language="python",
+            symbols=[_sym("a.py", "Dog", "class")],
+        ),
+        FileMap(
+            path="b.py",
+            language="python",
+            symbols=[_sym("b.py", "Base", "class")],
+        ),
+        FileMap(
+            path="c.py",
+            language="python",
+            symbols=[_sym("c.py", "Base", "class")],
+        ),
+    ]
+    graph = CallGraph(
+        heritage_ambiguous=[
+            ("a.py::Dog", "Base", ["b.py::Base", "c.py::Base"])
+        ]
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    assert index.heritage_ambiguous_out["a.py::Dog"] == ["Base"]
+    assert index.heritage_ambiguous_in["b.py::Base"] == [("a.py::Dog", "Base")]
+    assert index.heritage_ambiguous_in["c.py::Base"] == [("a.py::Dog", "Base")]
+
+
+def test_index_from_maps_builds_heritage_external_out() -> None:
+    files = [
+        FileMap(
+            path="a.py",
+            language="python",
+            symbols=[_sym("a.py", "MyModel", "class")],
+        )
+    ]
+    graph = CallGraph(
+        heritage_external=[
+            ExternalCall(
+                caller="a.py::MyModel",
+                callee="pydantic.BaseModel",
+                lines=[1],
+            )
+        ]
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    exts = index.heritage_external_out["a.py::MyModel"]
+    assert len(exts) == 1
+    assert exts[0].callee == "pydantic.BaseModel"
+
+
+def test_load_map_reads_heritage(make_mapped_repo: RepoFactory) -> None:
+    root = make_mapped_repo(
+        {
+            "base.py": "class Animal:\n    pass\n",
+            "dog.py": (
+                "from base import Animal\n\n\nclass Dog(Animal):\n    pass\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.heritage_out["dog.py::Dog"] == ["base.py::Animal"]
+    assert index.heritage_in["base.py::Animal"] == ["dog.py::Dog"]
+    assert index.heritage_relation[("dog.py::Dog", "base.py::Animal")] == (
+        "extends"
+    )
+
+
+def test_load_map_reads_heritage_rust_and_cpp(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Phase 2 round-trip: write via render_json, read back via
+    # load_map, on a repo mixing Rust's `impl` relation and C++'s
+    # multi-base `extends` relation in the same map.json — confirms
+    # MAP_DOC_VERSION 6 and id-interning (round 15's own concern)
+    # extend to the new languages without any render_json.py/
+    # mapfile.py changes, exactly as the design predicted.
+    root = make_mapped_repo(
+        {
+            "shapes.rs": (
+                "pub trait Shape {}\n"
+                "\n"
+                "pub struct Circle;\n"
+                "\n"
+                "impl Shape for Circle {}\n"
+            ),
+            "shapes.cpp": (
+                "class Base1 {};\n"
+                "class Base2 {};\n"
+                "class Derived : public Base1, private Base2 {\n"
+                "public:\n"
+                "};\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.heritage_out["shapes.rs::Circle"] == ["shapes.rs::Shape"]
+    assert (
+        index.heritage_relation[("shapes.rs::Circle", "shapes.rs::Shape")]
+        == "impl"
+    )
+    assert index.heritage_out["shapes.cpp::Derived"] == [
+        "shapes.cpp::Base1",
+        "shapes.cpp::Base2",
+    ]
+    assert (
+        index.heritage_relation[("shapes.cpp::Derived", "shapes.cpp::Base1")]
+        == "extends"
+    )
+
+    doc = json.loads((root / ".dekko" / "map.json").read_text())
+    assert doc["version"] == mapfile.MAP_DOC_VERSION
+
+
+def test_without_tests_drops_heritage_touching_test_paths() -> None:
+    files = [
+        FileMap(
+            path="a.py",
+            language="python",
+            symbols=[_sym("a.py", "Dog", "class")],
+        ),
+        FileMap(
+            path="b.py",
+            language="python",
+            symbols=[_sym("b.py", "Animal", "class")],
+        ),
+        FileMap(
+            path="tests/test_a.py",
+            language="python",
+            symbols=[_sym("tests/test_a.py", "TestDog", "class")],
+        ),
+    ]
+    graph = CallGraph(
+        heritage=[
+            HeritageEdge(
+                subtype="a.py::Dog",
+                supertype="b.py::Animal",
+                relation="extends",
+                lines=[1],
+            ),
+            HeritageEdge(
+                subtype="tests/test_a.py::TestDog",
+                supertype="b.py::Animal",
+                relation="extends",
+                lines=[1],
+            ),
+        ],
+        heritage_ambiguous=[
+            ("tests/test_a.py::TestDog", "Animal", ["b.py::Animal"])
+        ],
+        heritage_external=[
+            ExternalCall(
+                caller="tests/test_a.py::TestDog",
+                callee="unittest.TestCase",
+                lines=[1],
+            )
+        ],
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    filtered = index.without_tests()
+    assert filtered.heritage_out == {"a.py::Dog": ["b.py::Animal"]}
+    assert filtered.heritage_in == {"b.py::Animal": ["a.py::Dog"]}
+    assert "tests/test_a.py::TestDog" not in filtered.heritage_ambiguous_out
+    assert filtered.heritage_external_out == {}
+
+
+def test_index_from_maps_builds_module_graph_adjacency() -> None:
+    files = [
+        FileMap(path="a.py", language="python"),
+        FileMap(path="b.py", language="python"),
+    ]
+    graph = CallGraph(
+        modules=ModuleGraph(
+            edges=[ModuleEdge(importer="a.py", imported="b.py", names=["x"])],
+            deps_out={"a.py": ["b.py"]},
+            deps_in={"b.py": ["a.py"]},
+            external={"a.py": ["os"]},
+        )
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    assert index.module_deps_out["a.py"] == ["b.py"]
+    assert index.module_deps_in["b.py"] == ["a.py"]
+    assert index.module_edge_names[("a.py", "b.py")] == ["x"]
+    assert index.module_external["a.py"] == ["os"]
+
+
+def test_load_map_reads_module_graph(make_mapped_repo: RepoFactory) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "from .b import helper\ndef main():\n    return helper()\n"
+            ),
+            "b.py": "def helper():\n    return 1\n",
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.module_deps_out["a.py"] == ["b.py"]
+    assert index.module_deps_in["b.py"] == ["a.py"]
+    assert index.module_edge_names[("a.py", "b.py")] == ["helper"]
+
+
+def test_without_tests_drops_module_edges_touching_test_paths() -> None:
+    files = [
+        FileMap(path="a.py", language="python"),
+        FileMap(path="tests/test_a.py", language="python"),
+    ]
+    graph = CallGraph(
+        modules=ModuleGraph(
+            edges=[
+                ModuleEdge(importer="tests/test_a.py", imported="a.py"),
+            ],
+            deps_out={"tests/test_a.py": ["a.py"]},
+            deps_in={"a.py": ["tests/test_a.py"]},
+            external={"tests/test_a.py": ["pytest"]},
+        )
+    )
+    index = mapfile.index_from_maps(files, graph, "demo")
+    filtered = index.without_tests()
+    assert filtered.module_deps_out == {}
+    assert filtered.module_deps_in == {}
+    assert filtered.module_external == {}

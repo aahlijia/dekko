@@ -572,6 +572,46 @@ def test_tcp_loopback_rejects_mismatched_token(tmp_path: Path) -> None:
     assert received == []
 
 
+def test_tcp_loopback_rejects_same_length_wrong_token(
+    tmp_path: Path,
+) -> None:
+    """Pins the ``secrets.compare_digest`` swap-in for plain ``==``.
+
+    A same-length-but-wrong token exercises the one case where a
+    naive ``==`` and ``compare_digest`` could in principle diverge
+    (constant-time comparison still must return ``False`` here, not
+    just for length-mismatched tokens).
+    """
+    transport = dt.TcpLoopbackTransport(tmp_path)
+    listener = transport.bind_and_listen()
+
+    ready = threading.Event()
+    received: list[str] = []
+
+    def _serve() -> None:
+        received.extend(_serve_one_line(listener, transport, True, ready))
+
+    server_thread = threading.Thread(target=_serve, daemon=True)
+    server_thread.start()
+    ready.wait(timeout=5.0)
+
+    try:
+        port, real_token = transport._read_port_file()
+        wrong_token = real_token[:-1] + ("0" if real_token[-1] != "0" else "1")
+        assert len(wrong_token) == len(real_token)
+        raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw.settimeout(3.0)
+        raw.connect(("127.0.0.1", port))
+        raw.sendall(f"{wrong_token}\n".encode("utf-8"))
+    finally:
+        server_thread.join(timeout=5.0)
+        listener.close()
+        transport.cleanup()
+        raw.close()
+
+    assert received == []
+
+
 def test_tcp_loopback_accepts_correct_token(tmp_path: Path) -> None:
     transport = dt.TcpLoopbackTransport(tmp_path)
     listener = transport.bind_and_listen()

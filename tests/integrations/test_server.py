@@ -2,10 +2,13 @@
 
 import io
 import json
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import pytest
 
+from dekko import repo_ops
+from dekko.analysis import query
 from dekko.integrations import cli
 from dekko.render import mapfile
 from dekko.integrations import server
@@ -82,10 +85,14 @@ def test_tools_list_exposes_the_read_surface() -> None:
         "get_callers",
         "get_callees",
         "find_usages",
+        "find_type_usages",
+        "get_supertypes",
+        "get_subtypes",
         "get_context_pack",
         "outline",
         "impacted_tests",
         "workset",
+        "check_ambiguous",
         "summary",
         "add_note",
         "list_notes",
@@ -235,6 +242,210 @@ def test_get_callers_tool(make_mapped_repo: RepoFactory) -> None:
     result = _call(ctx, "get_callers", {"symbol": "f"})
     assert result["isError"] is False
     assert "g() -> int" in result["content"][0]["text"]
+
+
+def test_find_type_usages_tool(make_mapped_repo: RepoFactory) -> None:
+    files = {
+        "app.py": (
+            "class Config:\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            "def start(cfg: Config) -> None:\n"
+            "    pass\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(ctx, "find_type_usages", {"type": "Config"})
+    assert result["isError"] is False
+    assert "start(cfg: Config) -> None" in result["content"][0]["text"]
+
+
+def test_find_type_usages_tool_exact_passthrough(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {
+        "app.py": (
+            "from typing import Optional\n"
+            "\n"
+            "\n"
+            "class Config:\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            "def start(cfg: Optional[Config] = None) -> None:\n"
+            "    pass\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    loose = _call(ctx, "find_type_usages", {"type": "Config"})
+    assert loose["isError"] is False
+    assert "start" in loose["content"][0]["text"]
+
+    exact = _call(ctx, "find_type_usages", {"type": "Config", "exact": True})
+    assert exact["isError"] is True
+
+
+PY_HERITAGE = {
+    "base.py": "class Animal:\n    pass\n",
+    "dog.py": ("from base import Animal\n\n\nclass Dog(Animal):\n    pass\n"),
+}
+
+
+def test_get_supertypes_tool(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(PY_HERITAGE))
+    result = _call(ctx, "get_supertypes", {"symbol": "Dog"})
+    assert result["isError"] is False
+    assert "class Animal" in result["content"][0]["text"]
+
+
+def test_get_subtypes_tool(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(PY_HERITAGE))
+    result = _call(ctx, "get_subtypes", {"symbol": "Animal"})
+    assert result["isError"] is False
+    assert "class Dog" in result["content"][0]["text"]
+
+
+def test_get_supertypes_transitive_passthrough(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {
+        "a.py": (
+            "class A:\n    pass\n\n\nclass B(A):\n    pass\n\n\nclass C(B):\n"
+            "    pass\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    one_hop = _call(ctx, "get_supertypes", {"symbol": "C"})
+    assert one_hop["isError"] is False
+    assert "class B" in one_hop["content"][0]["text"]
+    assert "class A" not in one_hop["content"][0]["text"]
+
+    transitive = _call(
+        ctx, "get_supertypes", {"symbol": "C", "transitive": True}
+    )
+    assert transitive["isError"] is False
+    text = transitive["content"][0]["text"]
+    assert "class B" in text
+    assert "class A" in text
+
+
+def test_get_supertypes_relation_passthrough(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {
+        "Shapes.java": (
+            "class Base {}\n"
+            "interface IFoo {}\n"
+            "class Foo extends Base implements IFoo {}\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(
+        ctx, "get_supertypes", {"symbol": "Foo", "relation": "implements"}
+    )
+    assert result["isError"] is False
+    text = result["content"][0]["text"]
+    assert "IFoo" in text
+    assert "Base" not in text
+
+
+def test_get_subtypes_excludes_test_files_by_default(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = dict(
+        PY_HERITAGE,
+        **{
+            "tests/test_dog.py": (
+                "from base import Animal\n"
+                "\n"
+                "\n"
+                "class FakeAnimal(Animal):\n"
+                "    pass\n"
+            )
+        },
+    )
+    ctx = _ctx(make_mapped_repo(files))
+    default_text = _call(ctx, "get_subtypes", {"symbol": "Animal"})["content"][
+        0
+    ]["text"]
+    assert "Dog" in default_text
+    assert "FakeAnimal" not in default_text
+
+    included = _call(
+        ctx, "get_subtypes", {"symbol": "Animal", "include_tests": True}
+    )["content"][0]["text"]
+    assert "FakeAnimal" in included
+
+
+def test_get_supertypes_tool_rust_impl(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {
+        "shapes.rs": (
+            "pub trait Shape {}\n"
+            "\n"
+            "pub struct Circle;\n"
+            "\n"
+            "impl Shape for Circle {}\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(ctx, "get_supertypes", {"symbol": "Circle"})
+    assert result["isError"] is False
+    assert "trait Shape" in result["content"][0]["text"]
+
+
+def test_get_subtypes_tool_cpp_multiple_inheritance(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {
+        "shapes.cpp": (
+            "class Base1 {};\n"
+            "class Base2 {};\n"
+            "class Derived : public Base1, private Base2 {\n"
+            "public:\n"
+            "};\n"
+        ),
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(ctx, "get_subtypes", {"symbol": "Base1"})
+    assert result["isError"] is False
+    assert "class Derived" in result["content"][0]["text"]
+
+
+def test_get_supertypes_tool_schema_shape() -> None:
+    tool = next(t for t in server.TOOLS if t["name"] == "get_supertypes")
+    assert set(tool) == {"name", "description", "inputSchema", "handler"}
+    schema = tool["inputSchema"]
+    assert schema["required"] == ["symbol"]
+    props = schema["properties"]
+    assert set(props) == {
+        "symbol",
+        "transitive",
+        "relation",
+        "budget",
+        "include_tests",
+        "root",
+    }
+    assert props["relation"]["enum"] == list(query.HERITAGE_RELATIONS)
+
+
+def test_get_subtypes_tool_schema_shape() -> None:
+    tool = next(t for t in server.TOOLS if t["name"] == "get_subtypes")
+    assert set(tool) == {"name", "description", "inputSchema", "handler"}
+    schema = tool["inputSchema"]
+    assert schema["required"] == ["symbol"]
+    props = schema["properties"]
+    assert set(props) == {
+        "symbol",
+        "transitive",
+        "relation",
+        "budget",
+        "include_tests",
+        "root",
+    }
+    assert props["relation"]["enum"] == list(query.HERITAGE_RELATIONS)
 
 
 def test_get_context_pack_tool(make_mapped_repo: RepoFactory) -> None:
@@ -407,6 +618,18 @@ def test_find_unused_handler(make_mapped_repo: RepoFactory) -> None:
     assert "g" in server.tool_find_unused(ctx, {})
 
 
+def test_find_unused_handler_kinds_unexposed(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # unused-types-design.md: no MCP schema/tool change for --kinds —
+    # find_unused stays CLI-only and always runs the unchanged
+    # default ("callables") kind, ignoring any stray "kinds" argument.
+    assert not any(t["name"] == "find_unused" for t in server.TOOLS)
+    ctx = _ctx(make_mapped_repo(SRC))
+    out = server.tool_find_unused(ctx, {"kinds": "types"})
+    assert "g" in out
+
+
 def test_stats_handler(make_mapped_repo: RepoFactory) -> None:
     ctx = _ctx(make_mapped_repo(SRC))
     text = server.tool_stats(ctx, {"top": 3})
@@ -538,6 +761,85 @@ def test_map_status_reports_spec_hash_stale_distinctly(
     assert "deadbeef" in text
     assert "same version string" in text
     assert "call refresh_map" in text
+
+
+def test_tool_call_reports_too_new_doc_version_clearly(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A long-lived MCP server process (this test's Context stands in
+    # for one) that predates a doc-version bump must not surface the
+    # opaque "internal error: expected string or bytes-like object,
+    # got 'int'" that a downstream shape mismatch would otherwise
+    # raise first (round-16 finding). mapfile.load_map() now raises
+    # MapFormatTooNewError instead, and the MCP tool-call path must
+    # translate it into an actionable "restart the server" message
+    # rather than falling through to the generic internal-error catch.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["version"] = mapfile.MAP_DOC_VERSION + 1
+    map_path.write_text(json.dumps(doc))
+
+    ctx = _ctx(root)
+    result = _call(ctx, "map_status", {})
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "restart" in text.lower()
+    assert "dekko serve --mcp" in text
+    assert "internal error" not in text
+
+
+def test_tool_call_reports_malformed_doc_version_clearly(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A corrupted/mid-write map.json with a non-numeric "version"
+    # (null here) must not fall through to the generic "internal
+    # error" catch-all with an opaque TypeError message — it needs
+    # its own actionable text distinct from the "too new" case, since
+    # restarting the server won't fix a broken file.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["version"] = None
+    map_path.write_text(json.dumps(doc))
+
+    ctx = _ctx(root)
+    result = _call(ctx, "map_status", {})
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "version" in text.lower()
+    assert "dekko map" in text
+    assert "internal error" not in text
+
+
+def test_tool_call_reports_persistent_broken_pool_clearly(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round 17: a BrokenProcessPool that survives resolver.py's own
+    # reduced-parallelism retry (persistent, not transient, sibling
+    # multiprocessing contention on the host machine) must not fall
+    # through to the generic "internal error: {exc}" catch-all -- it
+    # gets its own actionable message pointing at the likely cause and
+    # a workaround (`dekko map --jobs 1`), mirroring how
+    # MapFormatTooNewError/MapFormatInvalidError are already handled
+    # just above this in server.py.
+    root = make_mapped_repo(SRC)
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise BrokenProcessPool(
+            "A process in the process pool was terminated abruptly"
+        )
+
+    monkeypatch.setattr(repo_ops, "load_or_regen", _raise)
+
+    ctx = _ctx(root)  # fresh Context -> empty index_cache -> forces load
+    result = _call(ctx, "query_symbol", {"symbol": "f"})
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "process-pool" in text or "process pool" in text
+    assert "dekko map --jobs 1" in text
+    assert "internal error" not in text
 
 
 def test_serve_loop_frames_messages(
@@ -693,6 +995,42 @@ def test_find_usages_tool_defaults_budget(
         is False
     )
     assert seen["budget"] == 9000
+
+
+def test_find_type_usages_tool_defaults_budget(
+    monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    seen: dict = {}
+
+    def fake_run(
+        index,  # noqa: ANN001
+        action,  # noqa: ANN001
+        target,  # noqa: ANN001
+        as_json,  # noqa: ANN001
+        limit,  # noqa: ANN001
+        budget=None,  # noqa: ANN001
+        exact=False,  # noqa: ANN001
+    ) -> int:
+        seen["budget"] = budget
+        seen["exact"] = exact
+        print("type")
+        return 0
+
+    monkeypatch.setattr(server.query, "run", fake_run)
+    basic = _call(ctx, "find_type_usages", {"type": "Config"})
+    assert basic["isError"] is False
+    assert seen["budget"] == server.DEFAULT_RELATION_BUDGET
+    assert seen["exact"] is False
+
+    result = _call(
+        ctx,
+        "find_type_usages",
+        {"type": "Config", "budget": 9000, "exact": True},
+    )
+    assert result["isError"] is False
+    assert seen["budget"] == 9000
+    assert seen["exact"] is True
 
 
 def test_get_context_pack_tool_defaults_budget(
@@ -969,3 +1307,72 @@ def test_lean_discloses_budget_floor_note(
     ctx = _ctx(make_mapped_repo(files))
     text = server.tool_lean(ctx, {"budget": 1})
     assert "path-only floor" in text
+
+
+def test_check_ambiguous_tool(make_mapped_repo: RepoFactory) -> None:
+    ctx = _ctx(make_mapped_repo(AMBIGUOUS_CALL))
+    result = _call(ctx, "check_ambiguous", {})
+    assert result["isError"] is False
+    text = result["content"][0]["text"]
+    assert "1 ambiguous call sites" in text
+    assert "target" in text
+
+
+def test_check_ambiguous_tool_no_ambiguity(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = {"a.py": "def main() -> int:\n    return 1\n"}
+    ctx = _ctx(make_mapped_repo(files))
+    result = _call(ctx, "check_ambiguous", {})
+    assert result["isError"] is False
+    assert "no ambiguous call sites" in result["content"][0]["text"]
+
+
+def test_check_ambiguous_tool_defaults_budget(
+    monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
+) -> None:
+    ctx = _ctx(make_mapped_repo(AMBIGUOUS_CALL))
+    seen: dict = {}
+
+    def fake_run(
+        index,  # noqa: ANN001
+        by,  # noqa: ANN001
+        name,  # noqa: ANN001
+        top,  # noqa: ANN001
+        limit,  # noqa: ANN001
+        budget,  # noqa: ANN001
+        as_json,  # noqa: ANN001
+    ) -> int:
+        seen["by"] = by
+        seen["name"] = name
+        seen["top"] = top
+        seen["limit"] = limit
+        seen["budget"] = budget
+        print("ambiguous")
+        return 0
+
+    monkeypatch.setattr(server.ambiguous, "run", fake_run)
+    basic = _call(ctx, "check_ambiguous", {})
+    assert basic["isError"] is False
+    assert seen["by"] is None
+    assert seen["name"] is None
+    assert seen["top"] == 5
+    assert seen["limit"] == 10
+    assert seen["budget"] == 500
+
+    result = _call(ctx, "check_ambiguous", {"top": 3, "budget": 9000})
+    assert result["isError"] is False
+    assert seen["top"] == 3
+    assert seen["limit"] == 6
+    assert seen["budget"] == 9000
+
+
+def test_check_ambiguous_tool_schema_has_no_drilldown_params() -> None:
+    # The MCP surface is deliberately narrower than the CLI (design
+    # doc: summary-only, no --by/--name drill-down) — a schema-shape
+    # assertion, not just a behavioral one, so a later "helpful"
+    # addition of a 'by'/'name' parameter without revisiting the
+    # token-budget tradeoff regresses loudly here.
+    tool = next(t for t in server.TOOLS if t["name"] == "check_ambiguous")
+    props = set(tool["inputSchema"]["properties"])
+    assert props == {"top", "budget", "root"}

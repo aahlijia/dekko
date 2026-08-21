@@ -15,13 +15,16 @@ import io
 import json
 import sys
 from collections.abc import Callable
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any
 
+from dekko import repo_ops
 from dekko.analysis import affected
+from dekko.analysis import ambiguous
 from dekko.analysis import contextpack
 from dekko.storage import ledger as ledger_mod
 from dekko.render import mapfile
@@ -208,9 +211,7 @@ def _index_for(
     if cached is not None and mapfile.check_freshness(root, cached).fresh:
         index = cached
     else:
-        from dekko.integrations import cli
-
-        index, code = cli._load_or_regen(root, ctx.no_regen)
+        index, code = repo_ops.load_or_regen(root, ctx.no_regen)
         if index is None:
             raise ToolError(f"no usable map under {root} (exit {code})")
         ctx.index_cache[root] = index
@@ -305,6 +306,87 @@ def tool_find_usages(ctx: Context, args: dict) -> str:
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
     return _with_notes(out, err)
+
+
+def tool_find_type_usages(ctx: Context, args: dict) -> str:
+    """Symbols that use a type as a parameter or return type."""
+    index = _index_for(ctx, args)
+    name = _require(args, "type")
+    exact = bool(args.get("exact", False))
+    limit = int(args.get("limit", 50))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
+    code, out, err = _capture(
+        lambda: query.run(
+            index,
+            "type",
+            name,
+            as_json=False,
+            limit=limit,
+            budget=budget,
+            exact=exact,
+        )
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return _with_notes(out, err)
+
+
+def _heritage_tool(
+    ctx: Context,
+    action: str,
+    args: dict,
+    default_include_tests: bool = True,
+) -> str:
+    """Run the supertypes/subtypes query action and return text.
+
+    Mirrors ``_relation_tool``'s shape (index load, error handling,
+    fallback text), plus the two heritage-specific arguments
+    (``transitive``/``relation``) neither ``callers``/``callees`` nor
+    ``symbol`` need.
+
+    Args:
+        ctx: Server-wide settings.
+        action: ``"supertypes"`` or ``"subtypes"``.
+        args: The tool call's raw arguments.
+        default_include_tests: Value to use for ``include_tests`` when
+            the caller omits it — see ``_relation_tool``.
+
+    Returns:
+        Rendered text result, or a placeholder when there are none.
+    """
+    include_tests = bool(args.get("include_tests", default_include_tests))
+    index = _index_for(ctx, args, include_tests=include_tests)
+    target = _require(args, "symbol")
+    transitive = bool(args.get("transitive", False))
+    relation = args.get("relation")
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
+    code, out, err = _capture(
+        lambda: query.run(
+            index,
+            action,
+            target,
+            as_json=False,
+            limit=int(args.get("limit", 50)),
+            budget=budget,
+            transitive=transitive,
+            relation=relation,
+        )
+    )
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return _with_notes(out, err, fallback=f"(no {action} for {target})")
+
+
+def tool_get_supertypes(ctx: Context, args: dict) -> str:
+    """What a type extends/implements/impl-for's — one hop by default."""
+    return _heritage_tool(ctx, "supertypes", args)
+
+
+def tool_get_subtypes(ctx: Context, args: dict) -> str:
+    """What extends/implements/impl-for's a type — one hop by default."""
+    return _heritage_tool(ctx, "subtypes", args, default_include_tests=False)
 
 
 def tool_get_context_pack(ctx: Context, args: dict) -> str:
@@ -457,6 +539,12 @@ def tool_workset(ctx: Context, args: dict) -> str:
     symbol = symbol if isinstance(symbol, str) and symbol else None
     if rev is not None and symbol is not None:
         raise ToolError("give 'rev' or 'symbol', not both")
+    type_impact = bool(args.get("type_impact", False))
+    if type_impact and symbol is None:
+        raise ToolError(
+            "'type_impact' requires 'symbol' (a rev diff has no single "
+            "target type)"
+        )
     budget = args.get("budget")
     budget = int(budget) if budget is not None else workset_mod.DEFAULT_BUDGET
     packs = int(args.get("packs", workset_mod.DEFAULT_PACKS))
@@ -471,6 +559,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
             as_json=False,
             no_regen=False,
             task=task,
+            type_impact=type_impact,
         )
     )
     if code != 0:
@@ -483,6 +572,37 @@ def tool_stats(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     top = int(args.get("top", 10))
     code, out, err = _capture(lambda: stats.run(index, top, as_json=False))
+    if code != 0:
+        raise ToolError(err.strip() or out.strip() or f"exit {code}")
+    return _with_notes(out, err)
+
+
+def tool_check_ambiguous(ctx: Context, args: dict) -> str:
+    """Repo-wide resolver-trust summary: how ambiguous call resolution is.
+
+    Deliberately narrower than the CLI (no ``--by``/``--name``
+    drill-down parameters — those stay CLI-only, reachable via
+    ``dekko ambiguous --by name`` for an agent with shell access) and
+    a tighter default budget (500 vs. ``DEFAULT_RELATION_BUDGET``'s
+    800), since this tool's whole value is being a *cheap* sanity
+    check before trusting ``get_callers``/``get_callees``/``workset``,
+    not a full report.
+    """
+    index = _index_for(ctx, args)
+    top = int(args.get("top", 5))
+    budget = args.get("budget")
+    budget = int(budget) if budget is not None else 500
+    code, out, err = _capture(
+        lambda: ambiguous.run(
+            index,
+            by=None,
+            name=None,
+            top=top,
+            limit=top * 2,
+            budget=budget,
+            as_json=False,
+        )
+    )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
     return _with_notes(out, err)
@@ -539,7 +659,7 @@ def tool_add_note(ctx: Context, args: dict) -> str:
             raise ToolError(f"'{target}' is ambiguous ({len(candidates)})")
         raise ToolError(f"no symbol matches '{target}'")
     notes_mod.add(_root_of(ctx, args), sym.id, text)
-    return f"noted {sym.id}"
+    return f"noted {sym.id} ({sym.path}:{sym.start_line})"
 
 
 def tool_list_notes(ctx: Context, args: dict) -> str:
@@ -670,12 +790,10 @@ def tool_map_status(ctx: Context, args: dict) -> str:
 
 def tool_refresh_map(ctx: Context, args: dict) -> str:
     """Regenerate the map (optionally a full, uncached rebuild)."""
-    from dekko.integrations import cli
-
     root = _root_of(ctx, args)
     full = bool(args.get("full", False))
     code, out, err = _capture(
-        lambda: cli.regen_map(root, full=full, quiet=False)
+        lambda: repo_ops.regen_map(root, full=full, quiet=False)
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
@@ -760,12 +878,14 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "scorer": {
                     "type": "string",
-                    "enum": ["lexical", "embedding"],
+                    "enum": list(search.SCORER_CHOICES),
                     "description": "Relevance scorer: 'lexical' "
-                    "(default, BM25, always available) or 'embedding' "
-                    "(hashing-trick embedding; only works if the "
+                    "(default, BM25, always available), 'embedding' "
+                    "(hashing-trick embedding), or 'both' (fuses "
+                    "lexical + embedding rankings via reciprocal rank "
+                    "fusion) — 'embedding' and 'both' only work if the "
                     "server was installed with the dekko[search] "
-                    "extra)",
+                    "extra",
                 },
                 "root": _ROOT_PROP,
             },
@@ -851,6 +971,115 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["name"],
         },
         "handler": tool_find_usages,
+    },
+    {
+        "name": "find_type_usages",
+        "description": "Every function/method that uses a type as a "
+        "parameter or return type — for 'what breaks if I change this "
+        "struct/class's shape' questions the call graph alone can't "
+        "answer, since a function can use a type without calling "
+        "anything on it. Matches the bare type name inside wrapper "
+        "syntax (Optional[Config], Vec<Config>, Config | None all match "
+        "'Config') unless exact=true. Only functions/methods carry "
+        "typed params/returns — struct/class fields typed with the "
+        "target type are not covered.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "description": "Type/class/struct/interface name "
+                    "to search for, e.g. 'Config'",
+                },
+                "exact": {
+                    "type": "boolean",
+                    "description": "Match the declared type text "
+                    "exactly instead of the bare identifier inside "
+                    "wrapper syntax (default false)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max result lines (default 50)",
+                },
+                "budget": _BUDGET_PROP,
+                "root": _ROOT_PROP,
+            },
+            "required": ["type"],
+        },
+        "handler": tool_find_type_usages,
+    },
+    {
+        "name": "get_supertypes",
+        "description": "What a class/interface/struct/trait extends, "
+        "implements, or is impl'd for — its own declared heritage. Set "
+        "transitive=true for the full ancestor chain/DAG (multiple "
+        "inheritance and multi-interface implementation both fan out, "
+        "not a single line). Covers Python/JavaScript/TypeScript/Java/"
+        "Rust/C++. Go struct embedding is not extracted (only answers "
+        "composition, not interface satisfaction, so not worth the "
+        "confusion) and Go's structural interface satisfaction has no "
+        "declaring syntax to extract at all — no tree-sitter query can "
+        "see it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": _SYMBOL_PROP,
+                "transitive": {
+                    "type": "boolean",
+                    "description": "Full ancestor chain/DAG instead of "
+                    "one hop (default false)",
+                },
+                "relation": {
+                    "type": "string",
+                    "enum": list(query.HERITAGE_RELATIONS),
+                    "description": "Filter to one heritage-relation "
+                    "kind ('embeds' is Go struct embedding, not "
+                    "extracted, and never appears in current "
+                    "results)",
+                },
+                "budget": _BUDGET_PROP,
+                "include_tests": _INCLUDE_TESTS_PROP,
+                "root": _ROOT_PROP,
+            },
+            "required": ["symbol"],
+        },
+        "handler": tool_get_supertypes,
+    },
+    {
+        "name": "get_subtypes",
+        "description": "What extends, implements, or is impl'd for a "
+        "class/interface/struct/trait — the 'if I change this, who's "
+        "affected' blast-radius question for type declarations. Set "
+        "transitive=true for every direct and indirect implementor, "
+        "not just direct ones. Does not include each implementor's own "
+        "callers — pair with get_callers on individual results for "
+        "that. Test-file subtypes are excluded by default — set "
+        "include_tests=true to see them.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": _SYMBOL_PROP,
+                "transitive": {
+                    "type": "boolean",
+                    "description": "Every direct and indirect "
+                    "implementor instead of just direct ones (default "
+                    "false)",
+                },
+                "relation": {
+                    "type": "string",
+                    "enum": list(query.HERITAGE_RELATIONS),
+                    "description": "Filter to one heritage-relation "
+                    "kind ('embeds' is Go struct embedding, not "
+                    "extracted, and never appears in current "
+                    "results)",
+                },
+                "budget": _BUDGET_PROP,
+                "include_tests": _INCLUDE_TESTS_PROP,
+                "root": _ROOT_PROP,
+            },
+            "required": ["symbol"],
+        },
+        "handler": tool_get_subtypes,
     },
     {
         "name": "get_context_pack",
@@ -950,7 +1179,11 @@ TOOLS: list[dict[str, Any]] = [
         "packs for the most central touched symbols under one token "
         "budget. One call replaces affected + N outlines + N packs — "
         "and grepping a diff for touched names then reading each file "
-        "whole to work it.",
+        "whole to work it. Set type_impact=true when the target is a "
+        "class/interface/struct/trait to also union in every type-usage "
+        "site and implementor into the touched set — the full blast "
+        "radius of changing a shared type's shape, not just its direct "
+        "callers.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -964,6 +1197,13 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Seed from a symbol instead of a diff "
                     "(name, Class.method, file.py:name); not with 'rev'",
+                },
+                "type_impact": {
+                    "type": "boolean",
+                    "description": "Also include type-usage sites and "
+                    "implementors in the touched set (only meaningful "
+                    "when 'symbol' is a class/interface/struct/trait; "
+                    "no-op otherwise). Requires 'symbol'. default false",
                 },
                 "budget": {
                     "type": "integer",
@@ -980,6 +1220,31 @@ TOOLS: list[dict[str, Any]] = [
             },
         },
         "handler": tool_workset,
+    },
+    {
+        "name": "check_ambiguous",
+        "description": "Repo-wide resolver-trust summary: total ambiguous "
+        "call sites, the ambiguous rate, and the top colliding names/files. "
+        "Run this before leaning on get_callers/get_callees/workset for an "
+        "impact-analysis decision on a repo with generic/common method "
+        "names — a low ambiguous rate means the call graph is trustworthy "
+        "as-is; a high one concentrated in a few files means spot-check "
+        "those files' call sites by hand before trusting the graph there.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "top": {
+                    "type": "integer",
+                    "description": "Top-N entries per ranking (default 5)",
+                },
+                "budget": {
+                    "type": "integer",
+                    "description": "Approx token budget (default 500)",
+                },
+                "root": _ROOT_PROP,
+            },
+        },
+        "handler": tool_check_ambiguous,
     },
     {
         "name": "summary",
@@ -1171,6 +1436,55 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         is_error = False
     except ToolError as exc:
         text, is_error = _prefixed(str(exc)), True
+    except mapfile.MapFormatTooNewError:
+        # This MCP server process has been running since before the
+        # map.json on disk was regenerated in a newer on-disk format
+        # (e.g. after a `dekko` upgrade) — its in-memory parsing code
+        # predates that format and can't safely read it. Restarting
+        # the process (not the repo) is the fix, so say that plainly
+        # instead of surfacing whatever opaque shape-mismatch error
+        # would otherwise fire first (see
+        # .features/fixes/stale-map-json-mcp-crash.md).
+        text, is_error = (
+            "dekko: this MCP server process was started before "
+            "map.json was last regenerated in a newer format (e.g. "
+            "after a dekko upgrade), so it can no longer read it. "
+            "Restart the MCP server (dekko serve --mcp) to pick up "
+            "the current version.",
+            True,
+        )
+    except mapfile.MapFormatInvalidError:
+        # map.json's "version" field itself is malformed (null,
+        # non-numeric, ...) — the document is corrupted or was read
+        # mid-write, not merely newer than this process understands.
+        # Restarting the server won't fix a broken file, so point at
+        # regenerating the map instead (see
+        # .features/fixes/stale-map-json-mcp-crash.md).
+        text, is_error = (
+            'dekko: map.json\'s "version" field is missing or '
+            "invalid, so it can't be read. The file may be "
+            "corrupted or truncated. Regenerate it with `dekko map` "
+            "(or call refresh_map).",
+            True,
+        )
+    except BrokenProcessPool:
+        # A process pool broke twice in a row (once on the first
+        # attempt, once on round 17's reduced-parallelism retry —
+        # see resolver.py's run_pooled_with_retry) -- persistent, not
+        # transient, contention. Most often another concurrent
+        # ``dekko`` process on this machine (e.g. a heavy `dekko map
+        # --jobs 0`) is oversubscribing the CPU badly enough that
+        # even a small worker pool can't start up. Point at the fix
+        # instead of surfacing the raw "A process in the process pool
+        # was terminated abruptly..." text.
+        text, is_error = (
+            "dekko: map regeneration failed twice due to a process-pool "
+            "failure (often caused by heavy CPU/multiprocessing load from "
+            "another concurrent dekko process on this machine). Try again "
+            "once system load drops, or run `dekko map --jobs 1` manually "
+            "against this repo to avoid the parallel pool entirely.",
+            True,
+        )
     except Exception as exc:  # surface any tool crash as an error result
         text, is_error = f"dekko: internal error: {exc}", True
     return _ok(

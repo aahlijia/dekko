@@ -989,6 +989,28 @@ def test_overload_ambiguous_report_hints_line_qualifier(
     assert "Foo.java:Foo.run:2" in err
 
 
+def test_truncation_hint_not_duplicated_for_qualified_overload_target(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """round-15 (cline): querying an already ``path:qualname`` target
+    that still resolves to a same-file/same-qualname overload set past
+    the truncation cap must not build the "+N more" hint by prepending
+    ``sample.path`` onto the already-qualified ``target`` string — that
+    produced a duplicated ``path:path:qualname`` hint. The hint must be
+    built from the candidate's own bare ``qualname`` instead."""
+    overloads = "".join(
+        f"    void run(int p{i}) {{\n    }}\n\n" for i in range(25)
+    )
+    root = make_mapped_repo({"Foo.java": f"class Foo {{\n{overloads}}}\n"})
+    code = cli.main(
+        ["query", "symbol", "Foo.java:Foo.run", "--root", str(root)]
+    )
+    assert code == 4
+    err = capsys.readouterr().err
+    assert "Foo.java:Foo.java:Foo.run" not in err
+    assert "`Foo.java:Foo.run`" in err
+
+
 def test_ambiguous_bare_name_no_overload_hint_for_distinct_paths(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

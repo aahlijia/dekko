@@ -22,8 +22,8 @@ reload on every invocation. This module owns:
 
 Phase 3 (``.features/daemon-mode/TRACKER.md``) adds a single-slot warm
 ``MapIndex`` cache (``_WarmCache``) that ``serve_daemon`` installs into
-``cli.py``'s ``_load_or_regen`` via ``cli.set_daemon_cache_hook`` at
-startup, re-validated on every access via ``mapfile.check_freshness``
+``repo_ops.py``'s ``load_or_regen`` via ``repo_ops.set_daemon_cache_hook``
+at startup, re-validated on every access via ``mapfile.check_freshness``
 -- the same freshness oracle ``server.py``'s ``Context.index_cache``
 already uses for the MCP server's analogous cache. A daemon serving
 repeated requests against an unchanged map skips the JSON-parse/
@@ -42,7 +42,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from dekko import repo_ops
 from dekko.render import mapfile
+from dekko.storage import cache as cache_mod
 from dekko.daemon.daemon_transport import (
     DaemonTransport,
     DaemonUnavailableError,
@@ -72,10 +74,12 @@ _DAEMON_ELIGIBLE = frozenset(
         "summary",
         "lean",
         "unused",
+        "ambiguous",
         "status",
         "ledger",
         "note",
         "export",
+        "deps",
     }
 )
 
@@ -129,6 +133,73 @@ _REQUEST_TIMEOUT = 30.0
 # docstring for why it's single-threaded on purpose).
 _CLIENT_TIMEOUT = _REQUEST_TIMEOUT
 
+# Round-15 finding: ``_CLIENT_TIMEOUT``'s fixed 30s budget covers the
+# entire connect-send-recv round trip (see above), but an edit-
+# triggered auto-regen on the fleet's largest repos can legitimately
+# exceed it -- not a hang, just genuinely slow work. Isolated,
+# contention-free benchmarks (round-15 daemon-large-repo-timeout-plan
+# investigation) of a single-file-change auto-regen (map_repository's
+# extraction + resolve(), both already run with regen_map's hardcoded
+# jobs=0/all-cores) measured ~21s on spring-boot (853 MB map.json)
+# and ~209s on tensorflow (1.1 GB map.json) -- a sharply super-linear
+# jump for only a ~1.35x size increase, since resolve()'s call-graph
+# cost scales with the graph's size, not just file count/bytes. A
+# straight-line fit through both points would either badly
+# under-provision tensorflow-scale repos or badly over-provision
+# spring-boot-scale ones, so this is fit to the slower (tensorflow)
+# measurement alone -- 1,212,389,046 bytes in 209.08s, rounded down
+# to ~5.5 MB/s for margin -- so every smaller repo gets *more*
+# headroom than it measured needing, never less.
+_TIMEOUT_BYTES_PER_SECOND = 5_500_000
+
+# Upper bound on the size-scaled client timeout: keeps a hypothetical
+# multi-GB map.json from making a routed request's client wait
+# effectively unboundedly -- matches this module's "generous but
+# bounded" convention elsewhere (_STOP_TEARDOWN_TIMEOUT,
+# repo_ops._REGEN_LOCK_WAIT_CAP).
+_SCALED_CLIENT_TIMEOUT_CAP = 300.0
+
+
+def _scaled_client_timeout(root: Path) -> float:
+    """Repo-size-aware client timeout for a routed daemon request.
+
+    Scales with ``root``'s on-disk ``.dekko/map.json`` size (readable
+    with a single ``stat()``, no daemon round trip needed) rather than
+    a guessed multiplier -- see ``_TIMEOUT_BYTES_PER_SECOND`` for the
+    measurements this is fit to.
+
+    Deliberately scoped to ``try_daemon()``'s routed-command connect
+    only -- not ``stop()``'s shutdown handshake, which has its own
+    fast fallback to ``force_stop`` and should stay bounded by the
+    fixed ``_CLIENT_TIMEOUT`` rather than grow with repo size (a
+    slower shutdown handshake would only delay that fallback), and
+    not the status-listener probes, already governed by the separate,
+    always-fast ``_STATUS_PROBE_TIMEOUT``. The server's own per-
+    connection ``_REQUEST_TIMEOUT`` (``_handle_connection``'s
+    ``conn.settimeout``) doesn't need to scale either: it bounds
+    socket I/O against a slow/wedged *client*, not the time a routed
+    command's own computation takes between the request being read
+    and its response being sent, so a slow regen was never actually
+    constrained by it in the first place.
+
+    Args:
+        root: Repo root whose ``.dekko/map.json`` size (if any) to
+            scale from.
+
+    Returns:
+        ``_CLIENT_TIMEOUT`` when ``map.json`` is missing/unreadable
+        or small enough that the scaled value wouldn't exceed it;
+        otherwise a larger budget, capped at
+        ``_SCALED_CLIENT_TIMEOUT_CAP``.
+    """
+    try:
+        size = (root / cache_mod.CACHE_DIR / "map.json").stat().st_size
+    except OSError:
+        return _CLIENT_TIMEOUT
+    scaled = size / _TIMEOUT_BYTES_PER_SECOND
+    return min(max(_CLIENT_TIMEOUT, scaled), _SCALED_CLIENT_TIMEOUT_CAP)
+
+
 # Round-14 master report §"Daemon-lifecycle investigation": bound on
 # how long stop() will poll for the daemon's transport artifacts to
 # actually disappear before giving up and reporting success anyway
@@ -143,8 +214,10 @@ _STOP_TEARDOWN_POLL_INTERVAL = 0.02
 
 # Budget for the liveness/status *round trip* specifically (status(),
 # _query_pid(), and stop()'s forced-fallback reachability probe) --
-# distinct from _CLIENT_TIMEOUT, which stays 30s for an actual routed
-# command's own reply. Round-14 daemon-status-contention-plan.md §2:
+# distinct from _CLIENT_TIMEOUT (stop()'s shutdown handshake stays a
+# fixed 30s; a routed command's own reply gets _scaled_client_timeout,
+# which can grow past 30s on the largest repos -- see that function).
+# Round-14 daemon-status-contention-plan.md §2:
 # round-12's reason for making the old, single liveness timeout
 # generous (a short probe timeout used to mean "lie and say not
 # running") no longer applies once a probe timeout produces an honest
@@ -199,10 +272,12 @@ def _dispatch_table() -> dict[str, Callable[[argparse.Namespace], int]]:
         "summary": cli.run_summary,
         "lean": cli.run_lean,
         "unused": cli.run_unused,
+        "ambiguous": cli.run_ambiguous,
         "status": cli.run_status,
         "ledger": cli.run_ledger,
         "note": cli.run_note,
         "export": cli.run_export,
+        "deps": cli.run_deps,
     }
 
 
@@ -215,8 +290,8 @@ class _WarmCache:
     multi-root MCP server session does -- a single slot is enough,
     re-validated via ``mapfile.check_freshness`` on every access
     exactly as that cache is (design doc §2.4). Installed into
-    ``cli._load_or_regen`` via ``cli.set_daemon_cache_hook`` for the
-    lifetime of ``serve_daemon``'s accept loop.
+    ``repo_ops.load_or_regen`` via ``repo_ops.set_daemon_cache_hook``
+    for the lifetime of ``serve_daemon``'s accept loop.
 
     ``get``/``put`` are only ever called from the main accept loop's
     thread (single-threaded by design). ``snapshot()`` is also called
@@ -614,14 +689,9 @@ def serve_daemon(
         transport.cleanup()
         return 1
 
-    # Deferred import: avoids a circular import at module load time
-    # with cli.py, which imports this module (see _dispatch_table's
-    # docstring for the same reasoning).
-    from dekko.integrations import cli
-
     dispatch = _dispatch_table()
     cache = _WarmCache()
-    cli.set_daemon_cache_hook(cache.get, cache.put)
+    repo_ops.set_daemon_cache_hook(cache.get, cache.put)
     start_time = time.monotonic()
     busy_event = threading.Event()
     status_stop = threading.Event()
@@ -658,10 +728,11 @@ def serve_daemon(
         transport.cleanup()
         # Uninstall so this process-global hook never leaks past this
         # daemon's lifetime -- matters for tests running serve_daemon
-        # in-thread (same process, same cli module) across several
+        # in-thread (same process, same repo_ops module) across several
         # daemon instances, and simply keeps a stopped daemon's stale
-        # cache from being reachable through cli.py by anything else.
-        cli.set_daemon_cache_hook(None, None)
+        # cache from being reachable through repo_ops.py by anything
+        # else.
+        repo_ops.set_daemon_cache_hook(None, None)
     return 0
 
 
@@ -788,7 +859,7 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
         return None
 
     try:
-        sock = transport.client_connect(_CLIENT_TIMEOUT)
+        sock = transport.client_connect(_scaled_client_timeout(root))
     except DaemonUnavailableError:
         return None
 

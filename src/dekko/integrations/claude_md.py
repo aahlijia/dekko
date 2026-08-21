@@ -138,7 +138,13 @@ def uninstall(root: Path) -> int:
     remainder = text[:start] + text[end:]
     remainder = _EXCESS_BLANK_LINES.sub("\n\n", remainder)
     new_text = remainder.strip("\n")
-    new_text = f"{new_text}\n" if new_text else ""
-    path.write_text(new_text, encoding="utf-8")
+    if not new_text:
+        path.unlink()
+        print(
+            f"dekko: removed usage-policy block from {path} "
+            "(file was created by install; deleted)."
+        )
+        return 0
+    path.write_text(f"{new_text}\n", encoding="utf-8")
     print(f"dekko: removed usage-policy block from {path}.")
     return 0

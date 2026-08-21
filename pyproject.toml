@@ -1,6 +1,6 @@
 [project]
 name = "dekko"
-version = "0.31.1"
+version = "0.43.2"
 description = "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin"
 readme = "README.md"
 license = "MIT"
@@ -87,11 +87,19 @@ packages = ["src/dekko"]
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pytest-cov>=5",
     "ruff>=0.8",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/dekko"]
+branch = true
+
+[tool.coverage.report]
+skip_covered = false
 
 [tool.ruff]
 line-length = 79

@@ -78,6 +78,33 @@ def test_install_then_uninstall_round_trips_cleanly(tmp_path: Path) -> None:
     assert path.read_text() == original
 
 
+def test_uninstall_deletes_file_it_created_from_nothing(
+    tmp_path: Path,
+) -> None:
+    # round-19 claude-buddy finding: uninstall previously left a 0-byte
+    # CLAUDE.md instead of deleting it when install had created the file
+    # from nothing -- a full install/uninstall round trip should restore
+    # the pre-install state exactly (no file at all).
+    claude_md.install(tmp_path)
+    assert (tmp_path / "CLAUDE.md").is_file()
+    claude_md.uninstall(tmp_path)
+    assert not (tmp_path / "CLAUDE.md").exists()
+
+
+def test_uninstall_keeps_file_when_other_content_remains(
+    tmp_path: Path,
+) -> None:
+    # Regression guard: the fix only deletes the file when the remainder
+    # is genuinely empty, not whenever uninstall runs.
+    path = tmp_path / "CLAUDE.md"
+    path.write_text("# My project\n\nSome notes.\n")
+    claude_md.install(tmp_path)
+    claude_md.uninstall(tmp_path)
+    text = path.read_text()
+    assert "My project" in text
+    assert _START not in text
+
+
 def test_cli_claude_md_install_smoke(tmp_path: Path) -> None:
     code = cli.main(["--claude-md-install", "--root", str(tmp_path)])
     assert code == 0
@@ -85,8 +112,10 @@ def test_cli_claude_md_install_smoke(tmp_path: Path) -> None:
 
 
 def test_cli_claude_md_uninstall_smoke(tmp_path: Path) -> None:
+    path = tmp_path / "CLAUDE.md"
+    path.write_text("# Notes\n\nKeep me.\n")
     cli.main(["--claude-md-install", "--root", str(tmp_path)])
     code = cli.main(["--claude-md-uninstall", "--root", str(tmp_path)])
     assert code == 0
-    text = (tmp_path / "CLAUDE.md").read_text()
+    text = path.read_text()
     assert _START not in text

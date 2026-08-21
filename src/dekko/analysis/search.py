@@ -67,7 +67,7 @@ from dekko.textutil import fit_to_budget, oneline, signature
 EXIT_OK = 0
 # A bad/unavailable --scorer choice. Same value as workset.EXIT_ERROR
 # (2) — both mean "the request itself can't be satisfied," distinct
-# from EXIT_STALE (5, cli._load_or_regen's --no-regen convention).
+# from EXIT_STALE (5, repo_ops.load_or_regen's --no-regen convention).
 EXIT_ERROR = 2
 
 DEFAULT_LIMIT = 15

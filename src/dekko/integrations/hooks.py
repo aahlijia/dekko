@@ -39,6 +39,7 @@ import shlex
 import sys
 from pathlib import Path
 
+from dekko import repo_ops
 from dekko.storage import ledger
 from dekko.analysis import outline, relevance, summary
 from dekko.render import render_lean
@@ -84,12 +85,11 @@ def _root_from(payload: dict) -> Path:
 
 def _load_index(root: Path, *, allow_regen: bool) -> MapIndex | None:
     """Load the map; optionally auto-regenerate a stale one."""
-    from dekko.integrations import cli
     from dekko.render import mapfile
 
     if not allow_regen:
         return mapfile.load_map(root)
-    index, _ = cli._load_or_regen(root, no_regen=False)
+    index, _ = repo_ops.load_or_regen(root, no_regen=False)
     return index
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko.integrations.cli import map_repository
+from dekko.repo_ops import map_repository
 from dekko.core.resolver import resolve
 
 FIXTURES = Path(__file__).parent / "fixtures"

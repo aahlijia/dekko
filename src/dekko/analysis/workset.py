@@ -18,13 +18,15 @@ import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from dekko import repo_ops
 from dekko.analysis import affected
 from dekko.analysis import outline
+from dekko.analysis import query
 from dekko.analysis import relevance
 from dekko.classify import relevance_key
 from dekko.analysis.contextpack import Pack, build_pack
 from dekko.render.mapfile import MapIndex
-from dekko.core.model import Symbol
+from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.analysis.query import report_unresolved, resolve_target
 from dekko.analysis.relevance import TaskContext
 from dekko.textutil import fit_to_budget, oneline, signature
@@ -45,6 +47,34 @@ _TIER_TITLES = {
 
 
 @dataclass
+class BlastRadius:
+    """The widened-touched-set breakdown ``--type-impact`` discloses.
+
+    Set on a symbol-mode :class:`Seed` whenever ``type_impact=True``
+    was requested — including when the target isn't a type-kind
+    symbol, in which case ``type_usage``/``heritage`` are both ``0``
+    (a harmless no-op, not an error; see ``_type_impact_touched``).
+
+    Attributes:
+        direct: Always ``1`` — the target symbol itself.
+        type_usage: Raw count of type-usage-matching rows found
+            (``query.type_usage_rows``), before deduping against
+            heritage overlap — a symbol can appear in this count more
+            than once (e.g. taking and returning the same type).
+        heritage: Raw count of transitive implementors found
+            (``query.walk_heritage``), before deduping.
+        note: Undercount caveat when the target's heritage has
+            inbound edges the resolver couldn't disambiguate, or
+            ``None``.
+    """
+
+    direct: int
+    type_usage: int
+    heritage: int
+    note: str | None = None
+
+
+@dataclass
 class Seed:
     """What a change (rev or symbol) resolves to before composition.
 
@@ -57,6 +87,8 @@ class Seed:
             ranked most-central first.
         files: Touched files, ranked by aggregate centrality.
         impacts: Impacted test files (strongest evidence first).
+        blast_radius: ``--type-impact``'s widened-set breakdown
+            (symbol mode only), or ``None`` when the flag wasn't used.
     """
 
     mode: str
@@ -66,6 +98,7 @@ class Seed:
     touched: list[Symbol]
     files: list[str]
     impacts: list[affected.TestImpact] = field(default_factory=list)
+    blast_radius: BlastRadius | None = None
 
 
 @dataclass
@@ -105,6 +138,7 @@ def _make_seed(
     touched: list[Symbol],
     impacts: list[affected.TestImpact],
     index: MapIndex,
+    blast_radius: BlastRadius | None = None,
 ) -> Seed:
     """Rank a raw touched set into a fully-populated ``Seed``."""
     ranked = sorted(touched, key=lambda s: relevance_key(s, index))
@@ -116,7 +150,61 @@ def _make_seed(
         touched=ranked,
         files=_rank_files(touched, index),
         impacts=impacts,
+        blast_radius=blast_radius,
     )
+
+
+def _type_impact_touched(
+    index: MapIndex, sym: Symbol
+) -> tuple[list[Symbol], BlastRadius]:
+    """Symbols/counts ``--type-impact`` adds beyond the target itself.
+
+    Returns an empty extras list and all-zero counts for a non-type
+    target (function/method/variable) — ``--type-impact`` is a no-op,
+    not an error, when the target isn't a ``TYPE_KINDS`` symbol, since
+    a caller might reasonably pass ``--type-impact`` defensively
+    without checking the target's kind first.
+
+    Args:
+        index: Loaded map index.
+        sym: The already-resolved target symbol.
+
+    Returns:
+        ``(extra, blast_radius)`` — ``extra`` is the deduped union of
+        every type-usage-matching function/method and every transitive
+        implementor, excluding ``sym`` itself; ``blast_radius`` is the
+        disclosed breakdown (see :class:`BlastRadius`).
+    """
+    if sym.kind not in TYPE_KINDS:
+        return [], BlastRadius(direct=1, type_usage=0, heritage=0)
+    usage_rows = query.type_usage_rows(index, sym.name, exact=False)
+    heritage_hits = query.walk_heritage(
+        index, sym.id, direction="in", relation=None
+    )
+    extra: dict[str, Symbol] = {}
+    for row_sym, _usage, _param, _raw in usage_rows:
+        extra[row_sym.id] = row_sym
+    for sub_sym, _relation, _depth in heritage_hits:
+        extra[sub_sym.id] = sub_sym
+    # Heritage's own ambiguity disclosure (`_run_heritage`'s ambig_in
+    # for `subtypes`) is scoped to the target itself only, not every
+    # hop of the transitive walk — mirrored here for the same reason:
+    # an ambiguous inbound edge has no symbol id to keep walking from.
+    ambig_in = len(index.heritage_ambiguous_in.get(sym.id, []))
+    note = None
+    if ambig_in:
+        note = (
+            f"{ambig_in} additional subtype(s) named this type "
+            "ambiguously — not counted here; blast radius may be an "
+            "undercount"
+        )
+    blast_radius = BlastRadius(
+        direct=1,
+        type_usage=len(usage_rows),
+        heritage=len(heritage_hits),
+        note=note,
+    )
+    return list(extra.values()), blast_radius
 
 
 def seed_from_rev(
@@ -143,16 +231,40 @@ def seed_from_rev(
 
 
 def seed_from_symbol(
-    index: MapIndex, target: str
+    index: MapIndex, target: str, type_impact: bool = False
 ) -> tuple[Seed | None, list[Symbol]]:
-    """Seed from a single symbol; ``(None, candidates)`` if unresolved."""
+    """Seed from a single symbol; ``(None, candidates)`` if unresolved.
+
+    Args:
+        index: Loaded map index.
+        target: Symbol target string (see ``query.resolve_target``).
+        type_impact: When true, also union in every type-usage site
+            and transitive implementor into the touched set — the
+            full blast radius of changing a shared type's shape, not
+            just its direct callers. No-op when the resolved target
+            isn't a class/interface/struct/trait/enum/record symbol.
+    """
     sym, candidates = resolve_target(index, target)
     if sym is None:
         return None, candidates
-    impacts = affected.impacts_from_symbol(index, {sym.id})
+    touched = [sym]
+    blast_radius = None
+    if type_impact:
+        extra, blast_radius = _type_impact_touched(index, sym)
+        touched += extra
+    impacts = affected.impacts_from_symbol(index, {s.id for s in touched})
     label = f"symbol {sym.path}:{sym.qualname}"
+    if type_impact:
+        label += " (+ type-impact)"
     seed = _make_seed(
-        "symbol", label, None, sym.qualname, [sym], impacts, index
+        "symbol",
+        label,
+        None,
+        sym.qualname,
+        touched,
+        impacts,
+        index,
+        blast_radius=blast_radius,
     )
     return seed, candidates
 
@@ -223,10 +335,25 @@ def _manifest(ws: Workset, root: Path) -> list[str]:
         f"{len(seed.touched)} symbols, "
         f"{len(seed.impacts)} impacted tests"
     ]
+    if seed.blast_radius is not None:
+        lines.append(_blast_radius_line(seed.blast_radius))
+        if seed.blast_radius.note:
+            lines.append(f"  note: {seed.blast_radius.note}")
     hint = affected._test_hint(seed.impacts, root)
     if hint:
         lines.append(hint)
     return lines
+
+
+def _blast_radius_line(br: BlastRadius) -> str:
+    """The ``--type-impact`` disclosure line under the manifest."""
+    usage_noun = "site" if br.type_usage == 1 else "sites"
+    heritage_noun = "implementor" if br.heritage == 1 else "implementors"
+    return (
+        f"  blast radius: {br.direct} direct target, "
+        f"{br.type_usage} type-usage {usage_noun}, "
+        f"{br.heritage} {heritage_noun}"
+    )
 
 
 def _test_row(impact: affected.TestImpact) -> str:
@@ -401,14 +528,24 @@ def _render_json(ws: Workset, budget: int | None, root: Path) -> int:
     kept, meter = _fit(ws, budget, root)
     files, packs, tests = _kept_view(kept)
     seed = ws.seed
+    seed_doc = {
+        "mode": seed.mode,
+        "rev": seed.rev,
+        "symbol": seed.symbol,
+        "touched_files": list(seed.files),
+        "touched_symbols": len(seed.touched),
+    }
+    if seed.blast_radius is not None:
+        br = seed.blast_radius
+        seed_doc["blast_radius"] = {
+            "direct": br.direct,
+            "type_usage": br.type_usage,
+            "heritage": br.heritage,
+        }
+        if br.note:
+            seed_doc["blast_radius_note"] = br.note
     doc = {
-        "seed": {
-            "mode": seed.mode,
-            "rev": seed.rev,
-            "symbol": seed.symbol,
-            "touched_files": list(seed.files),
-            "touched_symbols": len(seed.touched),
-        },
+        "seed": seed_doc,
         # `tests` is the budget-fitted subset (bug #6/B6 — this used
         # to be every impacted path unconditionally, regardless of
         # budget); `impacted_tests_total` is the true count so a
@@ -438,6 +575,7 @@ def run(
     no_regen: bool,
     task: TaskContext | None = None,
     jobs: int = 1,
+    type_impact: bool = False,
 ) -> int:
     """Build and render a work-set bundle for a change or a symbol.
 
@@ -454,18 +592,25 @@ def run(
         jobs: Resolved worker count for a rev-cache-miss old-side
             re-parse/resolve on a rev seed — see ``seed_from_rev``. No
             effect on a ``symbol`` seed.
+        type_impact: Symbol-seed only (see ``seed_from_symbol``); also
+            union in every type-usage site and transitive implementor
+            into the touched set. Callers must reject this combined
+            with a rev seed before calling ``run`` — mirroring how
+            ``rev``/``symbol`` mutual exclusivity is already checked by
+            each caller (``cli.run_workset``, ``server.tool_workset``),
+            not here.
 
     Returns:
         ``0`` ok, ``2`` bad rev, ``3`` symbol not found, ``4`` ambiguous,
         ``5`` stale map with ``--no-regen``.
     """
-    from dekko.integrations import cli
-
-    index, code = cli._load_or_regen(root, no_regen)
+    index, code = repo_ops.load_or_regen(root, no_regen)
     if index is None:
         return code
     if symbol is not None:
-        seed, candidates = seed_from_symbol(index, symbol)
+        seed, candidates = seed_from_symbol(
+            index, symbol, type_impact=type_impact
+        )
         if seed is None:
             return report_unresolved(symbol, candidates, index)
     else:

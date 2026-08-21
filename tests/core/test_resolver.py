@@ -1,13 +1,29 @@
 """End-to-end resolution tests over the language fixtures."""
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import pytest
 
 from dekko.core import resolver as resolver_mod
-from dekko.integrations.cli import map_repository
-from dekko.core.model import FileMap, Import, Param, RawCall, RawRef, Symbol
-from dekko.core.resolver import resolve, resolve_refs
+from dekko.repo_ops import map_repository
+from dekko.core.model import (
+    FileMap,
+    Import,
+    Param,
+    RawCall,
+    RawCatch,
+    RawRef,
+    RawThrow,
+    Symbol,
+)
+from dekko.core.resolver import (
+    resolve,
+    resolve_catches,
+    resolve_refs,
+    resolve_throws,
+)
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -1593,6 +1609,38 @@ def test_resolve_parallel_matches_sequential(
     assert sequential.edges
 
 
+def test_resolve_all_oversubscribes_chunk_count_beyond_worker_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 17: ``_resolve_all``'s ``_run(w)`` closure must build
+    ``w * _RESOLVE_CHUNK_OVERSUBSCRIPTION`` chunks, not just ``w`` --
+    more chunks than workers is the whole point of the fix (an idle
+    worker can pick up the next queued chunk instead of sitting idle
+    once its one assigned chunk finishes). Byte-identical-output tests
+    alone wouldn't catch a silent revert to one-chunk-per-worker, since
+    output is correct either way -- this asserts the chunk *count*
+    the pool actually sees, by spying on ``_chunk_files``."""
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    files = _multi_file_call_fixture()  # 20 files, plenty to chunk finely
+
+    real_chunk_files = resolver_mod._chunk_files
+    seen_n: list[int] = []
+
+    def spy_chunk_files(files: list, n: int) -> list:
+        seen_n.append(n)
+        return real_chunk_files(files, n)
+
+    monkeypatch.setattr(resolver_mod, "_chunk_files", spy_chunk_files)
+
+    workers = 3
+    resolve(files, workers=workers)
+
+    assert seen_n  # _chunk_files was actually invoked
+    expected = workers * resolver_mod._RESOLVE_CHUNK_OVERSUBSCRIPTION
+    assert all(n == expected for n in seen_n)
+    assert expected > workers  # the actual oversubscription property
+
+
 def test_resolve_refs_parallel_matches_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1615,6 +1663,138 @@ def test_resolve_refs_parallel_matches_sequential(
     assert seq_edges  # sanity: real work happened
 
 
+def _multi_file_throws_fixture() -> list[FileMap]:
+    """20 files, each defining a same-named ``Err`` class plus a
+    ``load`` function that raises it (same-file resolution) — the
+    throw-resolution analog of ``_multi_file_call_fixture``, enough
+    shape to actually exercise chunk boundaries."""
+    files = []
+    for i in range(20):
+        err = Symbol(
+            id=f"mod{i}.py::Err",
+            name="Err",
+            qualname="Err",
+            kind="class",
+            path=f"mod{i}.py",
+            language="python",
+        )
+        fn = Symbol(
+            id=f"mod{i}.py::load",
+            name="load",
+            qualname="load",
+            kind="function",
+            path=f"mod{i}.py",
+            language="python",
+        )
+        files.append(
+            FileMap(
+                path=f"mod{i}.py",
+                language="python",
+                symbols=[err, fn],
+                throws=[
+                    RawThrow(
+                        caller_id=f"mod{i}.py::load",
+                        path=f"mod{i}.py",
+                        text="Err",
+                        name="Err",
+                        line=2,
+                    )
+                ],
+            )
+        )
+    return files
+
+
+def _multi_file_catches_fixture() -> list[FileMap]:
+    """20 files, each with an except clause naming a same-file ``Err``
+    class — the catch-resolution analog of ``_multi_file_throws_fixture``.
+    """
+    files = []
+    for i in range(20):
+        err = Symbol(
+            id=f"mod{i}.py::Err",
+            name="Err",
+            qualname="Err",
+            kind="class",
+            path=f"mod{i}.py",
+            language="python",
+        )
+        fn = Symbol(
+            id=f"mod{i}.py::run",
+            name="run",
+            qualname="run",
+            kind="function",
+            path=f"mod{i}.py",
+            language="python",
+        )
+        files.append(
+            FileMap(
+                path=f"mod{i}.py",
+                language="python",
+                symbols=[err, fn],
+                catches=[
+                    RawCatch(
+                        caller_id=f"mod{i}.py::run",
+                        path=f"mod{i}.py",
+                        types=["Err"],
+                        bare=False,
+                        line=2,
+                    )
+                ],
+            )
+        )
+    return files
+
+
+def test_resolve_throws_parallel_matches_sequential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    files = _multi_file_throws_fixture()
+
+    seq = resolve_throws(files, workers=1)
+    par = resolve_throws(files, workers=4)
+
+    def shape(result: tuple) -> tuple:
+        edges, out, ambiguous, external, bare = result
+        return (
+            sorted((e.caller, e.type, tuple(e.lines)) for e in edges),
+            sorted(out.items()),
+            sorted(ambiguous),
+            sorted((e.caller, e.callee, tuple(e.lines)) for e in external),
+            sorted(bare),
+        )
+
+    assert shape(seq) == shape(par)
+    assert seq[0]  # sanity: real work happened
+
+
+def test_resolve_catches_parallel_matches_sequential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    files = _multi_file_catches_fixture()
+
+    seq = resolve_catches(files, workers=1)
+    par = resolve_catches(files, workers=4)
+
+    def shape(sites: list) -> list:
+        return [
+            (
+                s.caller,
+                s.path,
+                tuple(s.type_names),
+                tuple(sorted(s.repo_types.items())),
+                s.bare,
+                s.line,
+            )
+            for s in sites
+        ]
+
+    assert shape(seq) == shape(par)
+    assert seq  # sanity: real work happened
+
+
 def test_resolve_below_threshold_stays_sequential_by_default() -> None:
     """The default ``workers=1`` (every caller except ``cli.py``'s
     ``run_map``) must behave exactly as before this change — no pool,
@@ -1622,6 +1802,194 @@ def test_resolve_below_threshold_stays_sequential_by_default() -> None:
     files = _multi_file_call_fixture()
     graph = resolve(files)
     assert graph.edges  # unchanged baseline behavior, still resolves
+
+
+# 1.5 (round 17): a BrokenProcessPool on the parallel path gets one
+# bounded retry at reduced parallelism (``run_pooled_with_retry``)
+# before propagating — see
+# .features/plans/round17/round17-mcp-process-pool-concurrent-load-plan.md.
+# No existing test simulated a broken pool before this; ``_FlakyPool``
+# replaces ``ProcessPoolExecutor`` with a fake that raises
+# ``BrokenProcessPool`` on ``__enter__`` for its first ``fail_times``
+# constructions, then falls back to a real ``ThreadPoolExecutor`` (same
+# submit/map/future.result() interface, but in-process — fast,
+# deterministic, and avoids pickling module-level resolver functions
+# across a real subprocess boundary just to prove the retry wiring).
+
+
+def _flaky_pool_factory(fail_times: int) -> type:
+    """Build a ``ProcessPoolExecutor``-shaped fake that raises
+    ``BrokenProcessPool`` on ``__enter__`` for its first ``fail_times``
+    constructions (counted across every instance built from this one
+    factory call), then delegates to ``ThreadPoolExecutor``.
+
+    Accepts (and forwards) ``initializer``/``initargs`` the same way
+    ``ProcessPoolExecutor`` does (round 17: ``_resolve_all`` and its
+    siblings now construct their real pool with these) --
+    ``ThreadPoolExecutor`` supports both natively, and since threads
+    share process memory, running the initializer per-thread still
+    populates the same module-level ``_worker_*`` globals the real
+    worker wrapper functions read from, just redundantly rather than
+    once-per-process -- harmless for a same-value re-assignment in a
+    test fake."""
+    state = {"calls": 0}
+
+    class _FlakyPool:
+        def __init__(
+            self,
+            max_workers: int | None = None,
+            initializer: object = None,
+            initargs: tuple = (),
+        ) -> None:
+            self._max_workers = max_workers
+            self._initializer = initializer
+            self._initargs = initargs
+            self._real: ThreadPoolExecutor | None = None
+
+        def __enter__(self) -> "_FlakyPool | ThreadPoolExecutor":
+            state["calls"] += 1
+            if state["calls"] <= fail_times:
+                raise BrokenProcessPool("simulated: process pool broken")
+            self._real = ThreadPoolExecutor(
+                max_workers=self._max_workers,
+                initializer=self._initializer,
+                initargs=self._initargs,
+            )
+            return self._real.__enter__()
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            if self._real is not None:
+                return bool(self._real.__exit__(exc_type, exc, tb))
+            return False
+
+    return _FlakyPool
+
+
+def test_run_pooled_with_retry_retries_once_then_succeeds() -> None:
+    calls: list[int] = []
+
+    def run(w: int) -> str:
+        calls.append(w)
+        if len(calls) == 1:
+            raise BrokenProcessPool("simulated: process pool broken")
+        return f"ok-{w}"
+
+    result = resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+    assert result == "ok-2"  # retry_workers = min(8, _POOL_RETRY_WORKERS=2)
+    assert calls == [8, 2]
+
+
+def test_run_pooled_with_retry_caps_retry_at_original_workers() -> None:
+    """A retry never requests *more* workers than the first attempt —
+    ``min(workers, _POOL_RETRY_WORKERS)``, not always exactly 2."""
+    calls: list[int] = []
+
+    def run(w: int) -> str:
+        calls.append(w)
+        if len(calls) == 1:
+            raise BrokenProcessPool("simulated: process pool broken")
+        return "ok"
+
+    resolver_mod.run_pooled_with_retry(run, workers=1, what="test")
+    assert calls == [1, 1]
+
+
+def test_run_pooled_with_retry_propagates_after_second_failure() -> None:
+    calls: list[int] = []
+
+    def run(w: int) -> str:
+        calls.append(w)
+        raise BrokenProcessPool("simulated: process pool broken")
+
+    with pytest.raises(BrokenProcessPool):
+        resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+    assert calls == [8, 2]  # exactly one retry, no loop
+
+
+def test_run_pooled_with_retry_prints_disclosure_note_on_retry(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def run(w: int) -> str:
+        if w == 8:
+            raise BrokenProcessPool("simulated: process pool broken")
+        return "ok"
+
+    resolver_mod.run_pooled_with_retry(run, workers=8, what="call resolution")
+
+    err = capsys.readouterr().err
+    assert "note:" in err
+    assert "call resolution" in err
+    assert "reduced parallelism" in err
+
+
+def test_resolve_parallel_retries_once_on_broken_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(
+        resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
+    )
+    files = _multi_file_call_fixture()
+
+    graph = resolve(files, workers=4)
+
+    assert graph.edges  # succeeded despite the first pool breaking
+
+
+def test_resolve_parallel_propagates_when_retry_also_broken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(
+        resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(99)
+    )
+    files = _multi_file_call_fixture()
+
+    with pytest.raises(BrokenProcessPool):
+        resolve(files, workers=4)
+
+
+def test_resolve_refs_parallel_retries_once_on_broken_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(
+        resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
+    )
+    files = _multi_file_ref_fixture()
+
+    edges, _referenced_in, _referenced_out = resolve_refs(files, workers=4)
+
+    assert edges  # succeeded despite the first pool breaking
+
+
+def test_resolve_throws_parallel_retries_once_on_broken_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(
+        resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
+    )
+    files = _multi_file_throws_fixture()
+
+    throw_edges, *_rest = resolve_throws(files, workers=4)
+
+    assert throw_edges  # succeeded despite the first pool breaking
+
+
+def test_resolve_catches_parallel_retries_once_on_broken_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(
+        resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
+    )
+    files = _multi_file_catches_fixture()
+
+    sites = resolve_catches(files, workers=4)
+
+    assert sites  # succeeded despite the first pool breaking
 
 
 # --- Bare-call vs. unrelated method collision (round-12 §3.2) ---

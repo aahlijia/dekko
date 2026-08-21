@@ -9,6 +9,276 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.2] — 2026-08-21
+
+### Changed
+- **`dekko sanity`** — `classify_miss()` now recognizes a bare-name
+  mention in a comment/docstring near a symbol's own definition
+  (`CAUSE_COMMENT_MENTION`) instead of falling into the generic
+  "unexplained miss" bucket. Uses a per-grammar comment-prefix table
+  covering Tier-1 and Tier-2 languages (Vue/Svelte/Astro excluded as
+  mixed-content SFCs) gated on two independent signals — proximity to
+  the definition and comment-line shape — so a line-wrapped
+  multiplication or decrement operator near a definition can't
+  misfire as a comment mention.
+
+## [0.43.1] — 2026-08-21
+
+### Changed
+- **`dekko-verify` skill** — broadened scope from the two specific
+  bugs it originally called out (heritage/throws mislabeling, since
+  fixed) to the general failure-shape category they belonged to, so
+  the skill still applies when a *different* mislabeling bug surfaces
+  in the future. Notes that `dekko sanity` now automates the
+  call-graph half of this check, but not the heritage/throws half.
+
+## [0.43.0] — 2026-08-21
+
+### Added
+- **`dekko sanity <target>`** / **`/sanity`** — cross-checks a
+  `callers`/`uses` result against a scoped, word-bounded `grep`
+  sweep, diffing hits into matches/dekko-only/grep-only and naming
+  the likely cause of any grep-only miss (qualified call, unsupported
+  language, test-filter exclusion, generic name). Automates the
+  manual spot check `dekko-verify` already documented, so it's cheap
+  enough to run habitually instead of only when a result looks
+  suspicious.
+
+## [0.42.0] — 2026-08-21
+
+### Added
+- **`dekko-review-context` skill** — orchestrates `workset` +
+  `impacted_tests` + `check_ambiguous` to give PR-description and
+  code-review flows a structural head start on a diff (what changed,
+  what calls it, what tests should run, where the resolver itself is
+  unsure) ahead of the not-yet-built `dekko review` command (#14).
+
+## [0.41.0] — 2026-08-21
+
+### Added
+- **`dekko doctor`** / **`/doctor`** — unified environment and
+  install-state diagnostic. Checks for PATH shadowing (a stale
+  globally-installed `dekko` binary resolving ahead of the project's
+  intended one — the single most-repeated cause of silent
+  wrong/empty answers across past eval rounds), map freshness,
+  MCP/plugin registration, whether the MCP server actually starts,
+  hook install state, and the `CLAUDE.md` policy block. Each check
+  degrades independently to "unknown" on its own failure rather than
+  aborting the rest.
+
+## [0.40.6] — 2026-08-21
+
+### Fixed
+- **`dekko deps`** — Rust crate-root resolution now recognizes crates
+  whose `Cargo.toml` `[lib] path` points somewhere other than
+  `src/lib.rs`, falling back to matching a `src/<crate-name>.rs`
+  layout. Previously undercounted resolved edges on repos using
+  non-standard crate roots (216/222 of zed's crates, for example).
+- **`dekko unused`** — recognizes Java method-reference syntax
+  (`this::method`, `Class::method`) as a use site, so methods only
+  reached that way are no longer false-flagged as dead code.
+- **`query supertypes`/`subtypes`** — same-file TypeScript type
+  aliases used with `implements`/`extends` now resolve correctly
+  instead of being mislabeled `(external)`. Adds type-alias
+  extraction for TS/TSX and bumps `MAP_DOC_VERSION` 9→10.
+- **`--claude-md-uninstall`** — deletes `CLAUDE.md` when removing the
+  dekko usage block leaves nothing behind, instead of leaving a
+  0-byte file.
+
+## [0.40.5] — 2026-08-20
+
+### Fixed
+- **`.h` header files** — now content-sniffed to disambiguate C vs.
+  C++ (checking for `class_specifier`/`namespace_definition`/
+  `template_declaration` nodes) instead of always parsing as C, which
+  silently mis-resolved heritage/call edges on large C++ codebases
+  using the `.h` convention (LLVM, gRPC, Chromium-style, TensorFlow).
+  Existing `.dekko/` caches self-heal on the next `dekko map` via a
+  fingerprint bump, no `--full` required.
+- **`dekko unused`** — no longer false-flags module-level `const`
+  variables that are read as binary/ternary operands rather than
+  called.
+- **`query supertypes`/`subtypes`** — in-repo type aliases used with
+  `implements` that can't be resolved are now labeled `(unresolved)`
+  instead of the misleading `(external)`.
+- **`query throws`** — recognizes Java `instanceof`-pattern-bound
+  rethrow variables instead of mislabeling them as a fake external
+  type.
+- **`dekko query catches`** — dropped its hardcoded Rust/Go/C
+  exclusion note in favor of reflecting the languages actually present
+  in the scanned repo.
+- **`mapfile`** — files dropped by the 1MB size cap are now disclosed
+  instead of silently omitted from the map.
+- **`affected`/`workset`** — fixed a cold-resolve note overstating the
+  file count via a git-tracked-vs-mapped count mismatch.
+
+## [0.40.4] — 2026-08-19
+
+### Changed
+- **Call/ref/throws/catches resolution parallelism** — `resolver.py`'s
+  `ProcessPoolExecutor` passes now use oversubscribed chunking
+  (submitted to the pool's task queue for dynamic rebalancing instead
+  of exactly one static chunk per worker) plus a shared-index pool
+  initializer, cutting run-to-run variance on heterogeneous-core
+  machines from ~2.2x-3.9x swings to a tight ~3% spread at a
+  consistent ~3.3x-3.5x parallel speedup.
+
+## [0.40.3] — 2026-08-19
+
+### Added
+- **`dekko query throws`/`dekko query catches`** — Rust/Go/C exclusion
+  is now disclosed in-CLI rather than only in docs: `throws` prints a
+  distinct message (and `language_supported: false` in `--json`) when
+  the target symbol's language has no syntax-level exception concept;
+  `catches` notes how many repo files were excluded from its scan for
+  the same reason (`language_coverage` in `--json`).
+
+## [0.40.2] — 2026-08-19
+
+### Fixed
+- **MCP server / process pools** — every `ProcessPoolExecutor` call
+  site (`repo_ops` extraction; `resolver`'s calls, refs, throws, and
+  catches resolution) now retries once at a reduced worker count on
+  `BrokenProcessPool` instead of surfacing an opaque crash under
+  contended-core load, with a disclosure note on retry and an
+  actionable MCP-level error message if the retry also fails.
+
+## [0.40.1] — 2026-08-19
+
+### Fixed
+- **`dekko deps`** — self-import false positives, ambiguous `--file`
+  matches, and env-write detection (D1, D2, E1); NodeNext/ESM-style
+  relative TS imports (specifier carries a compiled `.js` extension,
+  source is `.ts`) now resolve correctly.
+- **`dekko query importers`** — `--exact` matching fixed; JS/TS
+  side-effect and namespace imports now resolved (I1, I2).
+- **`dekko query catches`/`throws`** — false positives fixed (T1, T2);
+  `--transitive`'s "N of TOTAL omitted" truncation footer no longer
+  miscounts header lines as data rows; both passes now resolve in
+  parallel across workers like the existing calls/refs passes.
+- **`dekko query peers`** — no longer mislabels a symbol as a leaf
+  function when its only outgoing call resolved ambiguously rather
+  than being genuinely absent.
+
+## [0.40.0] — 2026-08-18
+
+### Added
+- **`dekko deps` — module-level dependency graph.** File-to-file
+  import graph resolved from raw `import`/`use`/`#include` source
+  text (full resolution for Python, JS/TS/TSX, Rust, Java, C/C++; Go
+  imports always external, undocumented `go.mod` prefix). `--file`
+  shows one file's resolved imports/importers/external sources,
+  `--cycles` reports circular-import clusters via Tarjan's SCC,
+  `--top` widens the most-depended-on ranking, `--export
+  {mermaid,dot}` reuses `export.py`'s existing renderers. CLI-only, no
+  MCP tool.
+- **`dekko query importers`/`dekko query peers` — shared-dependency
+  and co-usage lookups.** `importers SOURCE` is a reverse, raw-import-
+  text match (substring by default, `--exact` for the literal
+  string) — "what else imports the same thing as X," distinct from
+  `deps --file`'s cross-language-resolved answer. `peers SYMBOL` finds
+  other symbols sharing at least `--min-shared` (default 2) callees
+  with the target, ranked by shared-callee count, each row naming the
+  shared callees. CLI-only, no MCP tool.
+- **`dekko query throws`/`dekko query catches` — exception/error-flow
+  tracing.** `throws SYMBOL` traces raise/throw sites one level deep
+  by default, `--transitive --depth N` walks the call graph outward;
+  `catches TYPE` scans every catch clause repo-wide for an exact-name
+  or catch-all match. A scoped pilot: full support for Python/Java/
+  C++, `throws`-only for JS/TS (`catches` is a disclosed weak signal
+  there), Rust/Go/C permanently excluded (no syntax-level exception
+  concept to extract, not a future gap). CLI-only, no MCP tool.
+- **`dekko query env` — static env-var read tracing.** Detects
+  `getenv`-shaped call sites (`os.getenv`, `process.env.X`,
+  `System.getenv`, `std::env::var`, `os.Getenv`, bare `getenv`) across
+  all 9 Tier-1 languages. Exact-match only, no data-flow or config-file
+  (YAML/JSON/TOML/`.env`) tracing — explicitly out of scope.
+  `--list` ranks every distinct env-var name read anywhere by
+  read-site count. CLI-only, no MCP tool.
+- **`dekko query cohesion FILE` — intra-file symbol-cohesion
+  clustering.** Groups a file's symbols into connected components
+  over same-file call/reference edges (Union-Find); isolated symbols
+  reported separately. A deliberately weak "mutually reachable"
+  signal, not real modularity-style clustering — every run prints a
+  non-droppable disclosure note to that effect, since most non-trivial
+  files come back as one single connected component with zero useful
+  split signal. CLI-only, no MCP tool.
+- **`dekko unused --kinds {callables,types,all}` — dead-type
+  detection.** Extends `unused` to classes/interfaces/enums/structs/
+  records/traits, counting heritage (`extends`/`implements`) and
+  type-usage (parameter/return-type) evidence alongside existing
+  call/reference evidence, so a class only ever constructed or
+  extended isn't misflagged as dead. Default (`callables`) behavior is
+  unchanged; `all` unions both kinds with a per-kind subtotal. No MCP
+  change (`find_unused` was already CLI-only).
+- **`dekko workset --symbol NAME --type-impact` — combined
+  blast-radius report.** Widens `workset`'s touched set beyond a
+  type target's direct callers to include every type-usage site
+  (parameter/return type) and every transitive implementor — the
+  union of call-graph, type-usage, and heritage impact in one call.
+  No-op on a non-type target; requires `--symbol` (rejected with a
+  rev diff). The only feature in this batch exposed via MCP (the
+  `workset` tool's `type_impact` boolean).
+
+## [0.31.4] — 2026-08-17
+
+### Fixed
+- **MCP server crash on newer `map.json` format made opaque instead
+  of clear.** A long-lived `dekko serve --mcp` process running
+  pre-id-interning code would raise a bare `TypeError` when it read a
+  v5 `map.json` whose `caller`/`callee` fields are now interned ints
+  instead of strings, surfaced to callers as an unhelpful "internal
+  error". `mapfile.load_map()` now raises `MapFormatTooNewError` when
+  the doc's `version` exceeds `MAP_DOC_VERSION`, and
+  `server.py`'s `_handle_tools_call()` catches it with a message
+  telling the caller to restart the MCP server.
+- **Malformed `map.json` `version` field (`null`, string, float,
+  bool) fell through the above guard** and still hit the old opaque
+  `TypeError`. Added a distinct `MapFormatInvalidError` — "restart
+  the server" is the wrong advice for a corrupted doc — pointing the
+  caller at `dekko map` instead.
+
+## [0.31.3] — 2026-08-14
+
+### Changed
+- **`.dekko/map.json`'s on-disk size cut 5.6-7.9x on large repos**
+  (measured: zed 853.5MB→117.2MB, spring-boot 894.2MB→113.9MB,
+  tensorflow 1212.4MB→217.6MB) via two changes to `render_json.py`/
+  `mapfile.py`: a shared symbol-id interning table
+  (`mapfile.build_id_table`) for the `ambiguous`/`edges`/`referenced`/
+  `external` fields, which previously spelled out full symbol ids at
+  every occurrence instead of referencing them by index; and dropping
+  `indent=2` pretty-printing, since `mapfile.load_map()` is the only
+  consumer of `map.json`, not a human reader. `MAP_DOC_VERSION` bumped
+  4→5, with `load_map()` gaining version-branch handling to keep
+  reading pre-v5 map.json files. `repo_ops._map_run_is_noop` and
+  `MapIndex` gained a `doc_version` check so an already-mapped repo
+  picks up the new format on a plain `dekko map` re-run instead of
+  no-op'ing on a stale pre-v5 file.
+
+## [0.31.2] — 2026-08-14
+
+### Changed
+- **`cli.py`'s repo-loading/map pipeline extracted into a new
+  `src/dekko/repo_ops.py`** (`cli.py` shrank from 2,679 to 1,855
+  lines). Purely structural: `hooks.py`, `orient.py`, `server.py`,
+  and `daemon.py` now import the pipeline from `repo_ops` directly
+  instead of deferred-importing it from `cli` to dodge a circular
+  import; `_resolve_workers` moved alongside it since `cli.py` still
+  calls it directly. Tests that monkeypatched the moved functions via
+  `cli.<name>` were updated to target `repo_ops.<name>`.
+- Daemon auth token comparison now uses `secrets.compare_digest`
+  instead of `==`, closing a timing side-channel on the local
+  loopback auth handshake.
+- CI now runs `pytest` with `--cov=dekko --cov-report=term-missing`
+  (report-only, no coverage gate yet; baseline is 89%) and a
+  non-blocking `pip-audit` job against the locked dependency set.
+
+### Added
+- Unit tests for `textutil.py` (`signature`, `oneline`, `dir_of`,
+  `estimate_tokens`, `count_lines`, `Meter`, `fit_to_budget`) and
+  `source.py`.
+
 ## [0.31.1] — 2026-08-14
 
 ### Changed
