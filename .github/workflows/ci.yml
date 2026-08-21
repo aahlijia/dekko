@@ -10,9 +10,6 @@ jobs:
   test:
     name: ${{ matrix.os }} · py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
-    # Windows is best-effort for 1.0.0: surface failures without gating
-    # the merge until the cross-platform fixes are proven green.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -36,12 +33,6 @@ jobs:
   audit:
     name: dependency audit (pip-audit)
     runs-on: ubuntu-latest
-    # Non-blocking: surfaces advisories for a human to triage without
-    # gating merges on a signal that hasn't earned trust yet (grammar
-    # packages in particular may carry advisories that don't apply to
-    # how dekko uses them). Revisit once a few weeks of runs show the
-    # noise level is low enough to gate on.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
