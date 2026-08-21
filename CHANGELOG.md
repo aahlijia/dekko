@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.40.6] — 2026-08-21
+
+### Fixed
+- **`dekko deps`** — Rust crate-root resolution now recognizes crates
+  whose `Cargo.toml` `[lib] path` points somewhere other than
+  `src/lib.rs`, falling back to matching a `src/<crate-name>.rs`
+  layout. Previously undercounted resolved edges on repos using
+  non-standard crate roots (216/222 of zed's crates, for example).
+- **`dekko unused`** — recognizes Java method-reference syntax
+  (`this::method`, `Class::method`) as a use site, so methods only
+  reached that way are no longer false-flagged as dead code.
+- **`query supertypes`/`subtypes`** — same-file TypeScript type
+  aliases used with `implements`/`extends` now resolve correctly
+  instead of being mislabeled `(external)`. Adds type-alias
+  extraction for TS/TSX and bumps `MAP_DOC_VERSION` 9→10.
+- **`--claude-md-uninstall`** — deletes `CLAUDE.md` when removing the
+  dekko usage block leaves nothing behind, instead of leaving a
+  0-byte file.
+
 ## [0.40.5] — 2026-08-20
 
 ### Fixed
