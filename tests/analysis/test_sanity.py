@@ -107,6 +107,169 @@ def test_classify_miss_unexplained() -> None:
     assert cause == sanity.CAUSE_UNEXPLAINED
 
 
+def test_classify_miss_comment_mention_near_definition() -> None:
+    cause = sanity.classify_miss(
+        "// Helper is a small utility function.",
+        "Helper",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=True,
+        looks_like_comment=True,
+    )
+    assert cause == sanity.CAUSE_COMMENT_MENTION
+
+
+def test_classify_miss_comment_far_from_definition_falls_through() -> None:
+    cause = sanity.classify_miss(
+        "// Helper is a small utility function.",
+        "Helper",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=False,
+        looks_like_comment=True,
+    )
+    assert cause != sanity.CAUSE_COMMENT_MENTION
+
+
+def test_classify_miss_near_definition_but_not_comment_shaped() -> None:
+    # A real recursive self-call sitting right next to the
+    # definition -- proximity alone must never be sufficient.
+    cause = sanity.classify_miss(
+        "return Helper(x - 1)",
+        "Helper",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=True,
+        looks_like_comment=False,
+    )
+    assert cause != sanity.CAUSE_COMMENT_MENTION
+
+
+def test_classify_miss_qualified_call_still_wins_near_definition() -> None:
+    cause = sanity.classify_miss(
+        "// e.g. pkg.Helper(3)",
+        "Helper",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=True,
+        looks_like_comment=True,
+    )
+    assert cause == sanity.CAUSE_QUALIFIED_CALL
+
+
+def test_classify_miss_python_docstring_opening_line() -> None:
+    cause = sanity.classify_miss(
+        '"""Helper does X."""',
+        "Helper",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=True,
+        looks_like_comment=True,
+    )
+    assert cause == sanity.CAUSE_COMMENT_MENTION
+
+
+# --- _looks_like_comment_line: pure, grammar-scoped ---------------------
+
+
+def test_looks_like_comment_line_slash_style() -> None:
+    assert sanity._looks_like_comment_line(
+        "  // Helper does X", "pkg/helper.go"
+    )
+    assert sanity._looks_like_comment_line(
+        "  /* Helper does X */", "pkg/helper.go"
+    )
+
+
+def test_looks_like_comment_line_hash_style() -> None:
+    assert sanity._looks_like_comment_line(
+        "  # Helper does X", "src/helper.py"
+    )
+
+
+def test_looks_like_comment_line_python_docstrings() -> None:
+    assert sanity._looks_like_comment_line(
+        '"""Helper does X."""', "src/helper.py"
+    )
+    assert sanity._looks_like_comment_line(
+        "'''Helper does X.'''", "src/helper.py"
+    )
+
+
+def test_looks_like_comment_line_plain_code_is_false() -> None:
+    assert not sanity._looks_like_comment_line(
+        "def helper(x):", "src/helper.py"
+    )
+
+
+def test_looks_like_comment_line_wrapped_multiplication_not_comment() -> None:
+    # A gofmt-style line-wrapped recursive-call continuation starting
+    # with "*" must not be mistaken for a comment -- bare "*" is no
+    # longer in any C-family grammar's marker set.
+    for path in (
+        "pkg/helper.go",
+        "src/helper.rs",
+        "src/helper.c",
+        "src/Helper.java",
+    ):
+        assert not sanity._looks_like_comment_line("* Helper(x-1)", path)
+
+
+def test_looks_like_comment_line_pointer_deref_not_comment() -> None:
+    assert not sanity._looks_like_comment_line(
+        "*Helper = compute(x);", "src/helper.c"
+    )
+
+
+def test_looks_like_comment_line_c_preprocessor_not_comment() -> None:
+    assert not sanity._looks_like_comment_line(
+        "#define Helper(x) ...", "src/helper.c"
+    )
+    assert not sanity._looks_like_comment_line(
+        "#include <foo.h>", "src/helper.c"
+    )
+
+
+def test_looks_like_comment_line_python_hash_still_fires() -> None:
+    assert sanity._looks_like_comment_line("# Helper does X", "src/helper.py")
+
+
+def test_looks_like_comment_line_dash_scoped_to_its_own_grammars() -> None:
+    assert sanity._looks_like_comment_line(
+        "-- Helper does X", "src/helper.lua"
+    )
+    assert sanity._looks_like_comment_line(
+        "-- Helper does X", "src/helper.sql"
+    )
+    for path in ("pkg/helper.go", "src/Helper.java", "src/helper.ts"):
+        assert not sanity._looks_like_comment_line("--counter;", path)
+
+
+def test_looks_like_comment_line_tier2_spot_checks() -> None:
+    assert sanity._looks_like_comment_line(
+        "; Helper does X", "src/helper.lisp"
+    )
+    assert sanity._looks_like_comment_line("% Helper does X", "src/helper.erl")
+    assert sanity._looks_like_comment_line("! Helper does X", "src/helper.f90")
+
+
+def test_looks_like_comment_line_vue_deliberately_unmapped() -> None:
+    assert not sanity._looks_like_comment_line(
+        "// Helper does X", "src/Helper.vue"
+    )
+
+
+def test_looks_like_comment_line_unsupported_language() -> None:
+    assert not sanity._looks_like_comment_line(
+        "// Helper does X", "src/Helper.astro"
+    )
+
+
 # --- full pipeline: grep sweep + classification -------------------------
 
 
@@ -221,6 +384,58 @@ def test_sanity_unexplained_miss_says_so(
     doc = json.loads(capsys.readouterr().out)
     causes = {row["cause"] for row in doc["grep_only"]}
     assert sanity.CAUSE_UNEXPLAINED in causes
+
+
+def test_sanity_detects_comment_mention_miss(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "# helper is a small utility.\n"
+                "def helper():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return helper()\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "helper", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["cause"] for row in doc["grep_only"]}
+    assert sanity.CAUSE_COMMENT_MENTION in causes
+    # The definition line itself is out of scope entirely -- not
+    # merely reclassified, still excluded from every bucket.
+    grep_only_lines = {row["line"] for row in doc["grep_only"]}
+    assert 2 not in grep_only_lines
+
+
+def test_sanity_wrapped_recursive_call_not_comment_mention(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "helper.go": (
+                "package pkg\n"
+                "\n"
+                "func Helper(x int) int {\n"
+                "	return x\n"
+                "		* Helper(x-1)\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "Helper", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    wrapped_row = next(row for row in doc["grep_only"] if row["line"] == 5)
+    assert wrapped_row["cause"] != sanity.CAUSE_COMMENT_MENTION
 
 
 def test_sanity_usages_flag_runs_uses_action(

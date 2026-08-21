@@ -9,6 +9,19 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.2] — 2026-08-21
+
+### Changed
+- **`dekko sanity`** — `classify_miss()` now recognizes a bare-name
+  mention in a comment/docstring near a symbol's own definition
+  (`CAUSE_COMMENT_MENTION`) instead of falling into the generic
+  "unexplained miss" bucket. Uses a per-grammar comment-prefix table
+  covering Tier-1 and Tier-2 languages (Vue/Svelte/Astro excluded as
+  mixed-content SFCs) gated on two independent signals — proximity to
+  the definition and comment-line shape — so a line-wrapped
+  multiplication or decrement operator near a definition can't
+  misfire as a comment mention.
+
 ## [0.43.1] — 2026-08-21
 
 ### Changed

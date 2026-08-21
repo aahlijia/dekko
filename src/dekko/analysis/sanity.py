@@ -121,6 +121,9 @@ CAUSE_GENERIC_NAME = (
     "generic name in a dense repo; treat dekko's count as directional, "
     "not exact"
 )
+CAUSE_COMMENT_MENTION = (
+    "comment mention near the symbol's own definition — not a call site"
+)
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
 
 # A name this short is common enough on its own (loop variables aside,
@@ -190,6 +193,153 @@ def _looks_qualified_call(snippet: str, bare_name: str) -> bool:
     return pattern.search(snippet) is not None
 
 
+# How close a grep-only hit must be to the target's own definition
+# line to be considered "near" it for doc-comment classification.
+# Wide enough to cover a leading block/line comment stacked directly
+# above a def (Go/Rust/Java/C/C++ doc-comment convention) and a
+# same-line-opening Python docstring immediately below it, without
+# being so wide it starts absorbing unrelated nearby code.
+_COMMENT_PROXIMITY_LINES = 3
+
+# Comment-marker "families" shared by multiple grammars. Each tuple is
+# a set of line-start prefixes that -- within the *specific* grammars
+# assigned that family below -- can only ever open a comment, never a
+# real statement/expression/operator. Bare "*" is deliberately absent
+# from every C-style family: a Javadoc/JSDoc "* @param ..." line is
+# real, but so is a gofmt/rustfmt/clang-format line-wrapped
+# "* Helper(x-1)" multiplication/dereference continuation right next
+# to a definition -- the false-positive risk outweighs the narrow
+# benefit, the same "accept the gap" trade-off this design already
+# makes for multi-line docstring prose (see the module's design plan).
+_SLASH_STYLE = ("//", "/*")
+_HASH_STYLE = ("#",)
+_DASH_STYLE = ("--",)
+_SEMI_STYLE = (";",)
+_PERCENT_STYLE = ("%",)
+_BANG_STYLE = ("!",)
+_PAREN_STAR_STYLE = ("(*",)
+_QUOTE_STYLE = ('"',)
+_PYTHON_DOCSTRING = ('"""', "'''")
+
+# grammar name -> comment/docstring line-start prefixes. Covers every
+# Tier-1 grammar (languages.TIER1_SPECS, via each spec's .grammar) and
+# every Tier-2 grammar (languages.TIER2_GRAMMARS's values) *except*
+# Vue and Svelte, deliberately left unmapped: both are mixed-content
+# SFC formats (an HTML-ish template plus embedded script/style blocks,
+# each with its own comment convention), and a single-line-start
+# prefix check has no way to know which embedded language a hit's
+# line belongs to. ``_grammar_for_path`` still resolves "vue"/
+# "svelte" as a grammar name for these paths (``is_supported()``
+# stays True, so ``unsupported_language`` is computed correctly
+# elsewhere) -- ``_looks_like_comment_line`` just falls back to False
+# for them, a false negative (heuristic doesn't fire) never a false
+# positive.
+#
+# fsharp is intentionally SLASH_STYLE-only, not
+# SLASH_STYLE + _PAREN_STAR_STYLE like ocaml/pascal: real F# code can
+# reference the multiplication operator as a first-class value
+# written ``(*)`` (e.g. ``List.reduce (*) xs``) -- an idiom OCaml's
+# own lexer forbids for exactly this reason (OCaml requires
+# ``( * )`` with spaces, because bare ``(*`` always opens a comment
+# there), which is why ocaml/ocaml_interface keep
+# ``_PAREN_STAR_STYLE`` safely but fsharp doesn't.
+_COMMENT_PREFIXES_BY_GRAMMAR: dict[str, tuple[str, ...]] = {
+    # Tier-1 (languages.TIER1_SPECS)
+    "python": _HASH_STYLE + _PYTHON_DOCSTRING,
+    "rust": _SLASH_STYLE,
+    "c": _SLASH_STYLE,
+    "cpp": _SLASH_STYLE,
+    "javascript": _SLASH_STYLE,
+    "typescript": _SLASH_STYLE,
+    "tsx": _SLASH_STYLE,
+    "go": _SLASH_STYLE,
+    "java": _SLASH_STYLE,
+    # Tier-2 (languages.TIER2_GRAMMARS), grouped by family
+    "csharp": _SLASH_STYLE,
+    "kotlin": _SLASH_STYLE,
+    "swift": _SLASH_STYLE,
+    "scala": _SLASH_STYLE,
+    "dart": _SLASH_STYLE,
+    "zig": _SLASH_STYLE,
+    "gleam": _SLASH_STYLE,
+    "groovy": _SLASH_STYLE,
+    "solidity": _SLASH_STYLE,
+    "d": _SLASH_STYLE,
+    "hare": _SLASH_STYLE,
+    "odin": _SLASH_STYLE,
+    "haxe": _SLASH_STYLE,
+    "fsharp": _SLASH_STYLE,
+    "php": _SLASH_STYLE + _HASH_STYLE,
+    "nix": _SLASH_STYLE + _HASH_STYLE,
+    "pascal": _SLASH_STYLE + _PAREN_STAR_STYLE,
+    "ruby": _HASH_STYLE,
+    "perl": _HASH_STYLE,
+    "r": _HASH_STYLE,
+    "julia": _HASH_STYLE,
+    "elixir": _HASH_STYLE,
+    "nim": _HASH_STYLE,
+    "bash": _HASH_STYLE,
+    "zsh": _HASH_STYLE,
+    "powershell": _HASH_STYLE,
+    "crystal": _HASH_STYLE,
+    "gdscript": _HASH_STYLE,
+    "mojo": _HASH_STYLE,
+    "starlark": _HASH_STYLE,
+    "cmake": _HASH_STYLE,
+    "tcl": _HASH_STYLE,
+    "lua": _DASH_STYLE,
+    "haskell": _DASH_STYLE,
+    "elm": _DASH_STYLE,
+    "ada": _DASH_STYLE,
+    "sql": (*_DASH_STYLE, "/*"),
+    "clojure": _SEMI_STYLE,
+    "racket": _SEMI_STYLE,
+    "scheme": _SEMI_STYLE,
+    "commonlisp": _SEMI_STYLE,
+    "elisp": _SEMI_STYLE,
+    "erlang": _PERCENT_STYLE,
+    "fortran": _BANG_STYLE,
+    "ocaml": _PAREN_STAR_STYLE,
+    "ocaml_interface": _PAREN_STAR_STYLE,
+    "vim": _QUOTE_STYLE,
+}
+
+
+def _grammar_for_path(path: str) -> str | None:
+    """The tree-sitter grammar name backing ``path``, Tier-1 or
+    Tier-2.
+
+    Mirrors ``languages.is_supported()``'s own Tier-1-then-Tier-2
+    check, returning the grammar name itself instead of a bool, so
+    ``_looks_like_comment_line`` can look up a grammar-specific
+    marker set rather than guessing from one global list. ``None``
+    for anything ``is_supported()`` also rejects, and for Vue/Svelte
+    -- ``is_supported() == True`` for both, but they're deliberately
+    left out of ``_COMMENT_PREFIXES_BY_GRAMMAR`` (see that table's
+    comment).
+    """
+    spec = languages.spec_for_path(path)
+    if spec is not None:
+        return spec.grammar
+    return languages.tier2_grammar_for_path(path)
+
+
+def _looks_like_comment_line(snippet: str, path: str) -> bool:
+    """Whether ``snippet``, considered alone, has the shape of a
+    comment/docstring line in ``path``'s own grammar.
+
+    Still pure/I/O-free -- ``path`` is only ever used as a string to
+    resolve a grammar name (``_grammar_for_path``), never opened or
+    read. Returns ``False`` for a path whose grammar isn't in
+    ``_COMMENT_PREFIXES_BY_GRAMMAR`` (unsupported entirely, or one of
+    the deliberately-unmapped Vue/Svelte SFC grammars).
+    """
+    prefixes = _COMMENT_PREFIXES_BY_GRAMMAR.get(_grammar_for_path(path) or "")
+    if not prefixes:
+        return False
+    return snippet.strip().startswith(prefixes)
+
+
 def classify_miss(
     snippet: str,
     bare_name: str,
@@ -197,6 +347,8 @@ def classify_miss(
     is_test_file: bool,
     unsupported_language: bool,
     tests_excluded: bool,
+    near_own_definition: bool = False,
+    looks_like_comment: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
@@ -205,13 +357,15 @@ def classify_miss(
     the order ``dekko-verify/SKILL.md`` lists its blind spots: a
     qualified-call syntax match is checked first (it's visible in the
     line itself and the most specific signal available), then whether
-    the file is in a language dekko can't parse at all, then whether
-    it's a test file excluded by ``sanity``'s own default filtering,
-    then whether the target name is short/generic enough that dekko's
-    count should be read as directional rather than exact. A line
-    matching none of these is reported as "unexplained" rather than
-    forcing a guess that doesn't fit — matching the plan's own
-    "false confidence from the classifier itself" caution.
+    the hit is a doc-comment/docstring line sitting near the symbol's
+    own definition mentioning its bare name (not a call at all), then
+    whether the file is in a language dekko can't parse at all, then
+    whether it's a test file excluded by ``sanity``'s own default
+    filtering, then whether the target name is short/generic enough
+    that dekko's count should be read as directional rather than
+    exact. A line matching none of these is reported as "unexplained"
+    rather than forcing a guess that doesn't fit — matching the plan's
+    own "false confidence from the classifier itself" caution.
 
     Args:
         snippet: The grep-matched line's text.
@@ -223,12 +377,22 @@ def classify_miss(
         tests_excluded: Whether the dekko-side query this hit is being
             compared against excluded test files (``sanity``'s own
             default; see the module docstring).
+        near_own_definition: Whether the hit sits in the same file as
+            the target's own definition, within
+            ``_COMMENT_PROXIMITY_LINES`` of it. Always ``False`` in
+            ``--usages`` mode, where there is no in-repo definition to
+            be near.
+        looks_like_comment: Whether the hit line, taken alone, has the
+            syntactic shape of a comment/docstring line in its file's
+            grammar (``_looks_like_comment_line``).
 
     Returns:
         One of the ``CAUSE_*`` constants.
     """
     if _looks_qualified_call(snippet, bare_name):
         return CAUSE_QUALIFIED_CALL
+    if near_own_definition and looks_like_comment:
+        return CAUSE_COMMENT_MENTION
     if unsupported_language:
         return CAUSE_UNSUPPORTED_LANGUAGE
     if tests_excluded and is_test_file:
@@ -565,6 +729,13 @@ def run(
                 is_test_file=is_test_path(h.path),
                 unsupported_language=not languages.is_supported(h.path),
                 tests_excluded=tests_excluded,
+                near_own_definition=(
+                    own_def_loc is not None
+                    and h.path == own_def_loc[0]
+                    and abs(h.line - own_def_loc[1])
+                    <= _COMMENT_PROXIMITY_LINES
+                ),
+                looks_like_comment=_looks_like_comment_line(h.snippet, h.path),
             ),
         )
         for h in grep_only_hits
