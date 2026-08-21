@@ -40,6 +40,7 @@ dekko deps --file src/app.py         # one file's resolved imports/importers/ext
 dekko deps --cycles                  # every detected circular-import cluster
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
+dekko doctor                         # diagnose install/environment issues (PATH shadowing, hooks, MCP, ...)
 dekko daemon start                   # warm-cache background process (see below)
 ```
 
@@ -163,6 +164,20 @@ Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
 `ledger`, `orient`, `deps` cover more specialized workflows; hooks are
 documented in [claude-code.md](claude-code.md#push-hooks-opt-in)).
+
+## Diagnosing environment issues
+
+`dekko doctor` reports, in one shot: whether a bare `dekko` on `$PATH`
+resolves to the binary you think it is (the single most-repeated
+friction point across past eval rounds — a stale globally-installed
+`dekko` silently answering from the wrong build), whether the map is
+fresh, and the install state of every opt-in Claude Code layer (MCP
+registration, plugin, hooks, the `CLAUDE.md` policy block). Each row is
+`ok`/`missing`/`stale`/`unknown`, with the exact fix command named for
+anything not `ok`; `--json` for scripting. It never regenerates the map
+and never auto-fixes anything — reporting only. Full check list and the
+Claude Code `/doctor` slash command:
+[claude-code.md](claude-code.md#the-doctor-command).
 
 ## Excluding files
 

@@ -9,6 +9,19 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.41.0] — 2026-08-21
+
+### Added
+- **`dekko doctor`** / **`/doctor`** — unified environment and
+  install-state diagnostic. Checks for PATH shadowing (a stale
+  globally-installed `dekko` binary resolving ahead of the project's
+  intended one — the single most-repeated cause of silent
+  wrong/empty answers across past eval rounds), map freshness,
+  MCP/plugin registration, whether the MCP server actually starts,
+  hook install state, and the `CLAUDE.md` policy block. Each check
+  degrades independently to "unknown" on its own failure rather than
+  aborting the rest.
+
 ## [0.40.6] — 2026-08-21
 
 ### Fixed

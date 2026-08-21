@@ -11,6 +11,41 @@
 server (see below); the plugin just runs the installed `dekko` CLI, so
 install the package first — see [install.md](install.md).
 
+## The `/doctor` command
+
+```sh
+/doctor
+```
+
+A read-only diagnostic (`dekko doctor` under the hood, also runnable
+standalone from a shell): what's actually wired up in this project
+right now, in one report — no more piecing it together from `dekko
+status`, `dekko hooks install --help`, and manually checking `command
+-v dekko`. Checks:
+
+- **PATH shadowing** — whether the `dekko` a bare `dekko` invocation
+  resolves to on `$PATH` is the same binary this process is actually
+  running. This is the single most-repeated friction point across past
+  eval rounds: a stale globally-installed `dekko` silently answering
+  from the wrong build, with no "command not found"-style error to
+  flag it. This is the automated version of the manual `command -v
+  dekko` check in `test-repos/TESTING-GUIDE.md` §0.
+- **Map freshness** — the same signal `dekko status` reports.
+- **MCP registration** (`claude mcp list`) and whether a `dekko serve
+  --mcp` process is currently running (best-effort, POSIX only).
+- **Plugin registration** (`claude plugin list`).
+- **Hooks** — which of the four events (`session-start`,
+  `prompt-submit`, `pre-read`, `pre-bash`) are wired in
+  `.claude/settings.json`.
+- **The CLAUDE.md usage-policy block** — present or absent.
+
+Every check degrades independently to `unknown` on its own failure (a
+missing `claude`/`pgrep` binary, an unreadable settings file) instead
+of aborting the report. `dekko doctor` never auto-fixes anything and
+always exits `0` — the findings are advisory, not errors; each
+`missing`/`stale` row names the exact command to fix it. `--json` emits
+the same findings as structured data for scripting.
+
 ## A persistent usage policy in CLAUDE.md (opt-in)
 
 `dekko hooks` (below) injects per-turn context an agent can weigh
@@ -116,7 +151,12 @@ For a standalone registration: `dekko --mcp-install` (runs
 
 **Note:** a running `dekko serve --mcp` process holds its code in memory
 for its whole lifetime — restart it after any dekko upgrade or source
-change, or its output can silently disagree with the CLI.
+change, or its output can silently disagree with the CLI. `/doctor`
+(above) surfaces a currently-running server as an active finding, not
+just this doc note — it just can't tell you whether that process's
+loaded code is actually stale (no way to introspect that from outside
+without an MCP round trip), so it always reports "restart if you
+upgraded since it started" rather than a definitive verdict.
 
 ## Cline
 

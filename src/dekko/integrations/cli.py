@@ -24,6 +24,7 @@ from dekko.analysis import contextpack
 from dekko.daemon import daemon as daemon_mod
 from dekko.analysis import deps
 from dekko.analysis import diff
+from dekko.integrations import doctor as doctor_mod
 from dekko.render import export
 from dekko.integrations import hooks as hooks_mod
 from dekko.storage import ledger as ledger_mod
@@ -59,6 +60,7 @@ SUBCOMMANDS = (
     "workset",
     "search",
     "status",
+    "doctor",
     "ledger",
     "hooks",
     "daemon",
@@ -739,6 +741,25 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="emit structured JSON",
     )
     p_status.set_defaults(func=run_status)
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="diagnose install/environment issues (PATH shadowing, "
+        "map freshness, MCP/plugin/hooks/CLAUDE.md install state)",
+    )
+    p_doctor.add_argument(
+        "--root",
+        default=".",
+        metavar="DIR",
+        help="repo root to diagnose (default: cwd)",
+    )
+    p_doctor.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="emit structured JSON",
+    )
+    p_doctor.set_defaults(func=run_doctor)
 
     p_ledger = sub.add_parser(
         "ledger",
@@ -2036,6 +2057,26 @@ def _version_stale_note(provenance: dict | None) -> str:
     built = (provenance or {}).get("tool_version", "unknown")
     running = _pkg_version("dekko")
     return f"built by dekko {built}, running {running} — run `dekko map`"
+
+
+def run_doctor(args: argparse.Namespace) -> int:
+    """Handle ``dekko doctor`` (never regenerates, never auto-fixes).
+
+    Diagnoses PATH shadowing, map freshness, and every opt-in layer's
+    install state (MCP registration, plugin, hooks, the CLAUDE.md
+    policy block) in one composed report — see
+    ``dekko.integrations.doctor`` for the individual checks. Exits
+    ``2`` only for a genuinely broken invocation (``--root`` pointing
+    at something that isn't a directory at all); every other gap it
+    finds is advisory and still exits ``0``, matching ``dekko
+    orient``'s contract — an uninstalled opt-in layer is not a broken
+    invocation.
+    """
+    root = Path(args.root).resolve()
+    if not root.is_dir():
+        print(f"dekko: not a directory: {root}", file=sys.stderr)
+        return 2
+    return doctor_mod.run(root, args.as_json)
 
 
 def _legacy_main(args_list: list[str]) -> int:
