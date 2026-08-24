@@ -39,7 +39,7 @@ from dekko.core import languages
 from dekko.core.model import TYPE_KINDS, CallGraph, FileMap
 from dekko.render.render_json import render_json
 from dekko.core.resolver import (
-    POOL_RESULT_TIMEOUT_S,
+    _run_pool_bounded,
     resolve,
     run_pooled_with_retry,
 )
@@ -146,12 +146,13 @@ def _extract_misses(
         return {rel: extract_one(root, rel) for rel in misses}
 
     def _run(w: int) -> dict[str, FileMap | None]:
-        with ProcessPoolExecutor(max_workers=w) as pool:
+        pool = ProcessPoolExecutor(max_workers=w)
+        try:
             futures = [pool.submit(extract_one, root, rel) for rel in misses]
-            results = [
-                f.result(timeout=POOL_RESULT_TIMEOUT_S) for f in futures
-            ]
+            results = _run_pool_bounded(pool, futures)
             return dict(zip(misses, results))
+        finally:
+            pool.shutdown(wait=False)
 
     return run_pooled_with_retry(_run, workers, "file extraction")
 

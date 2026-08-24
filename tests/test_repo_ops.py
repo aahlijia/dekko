@@ -21,34 +21,41 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def _flaky_pool_factory(fail_times: int) -> type:
     """Build a ``ProcessPoolExecutor``-shaped fake that raises
-    ``BrokenProcessPool`` on ``__enter__`` for its first ``fail_times``
+    ``BrokenProcessPool`` on construction for its first ``fail_times``
     constructions (counted across every instance built from this one
     factory call), then delegates to ``ThreadPoolExecutor`` -- same
-    ``pool.map``/context-manager interface, but in-process, so
+    ``submit``/``shutdown`` interface, but in-process, so
     ``extract_one`` needs no pickling across a real subprocess just to
     prove the retry wiring. See ``tests/core/test_resolver.py``'s
     identical helper (kept as a separate copy rather than a shared
     test util, since it's small and each module's real pool site has
-    its own call shape: ``pool.map`` here vs. ``pool.submit`` there).
+    its own call shape).
+
+    Round 22: ``_extract_misses`` now owns its pool via
+    ``pool = ProcessPoolExecutor(...)`` / ``try``/``finally:
+    pool.shutdown(wait=False)`` instead of ``with ProcessPoolExecutor(
+    ...) as pool:`` (see ``resolver._run_pool_bounded``'s docstring
+    for why) -- so the failure trigger point moves from ``__enter__``
+    to ``__init__``, and ``submit``/``shutdown`` delegate straight to
+    the real ``ThreadPoolExecutor`` instead of relying on
+    context-manager protocol.
     """
     state = {"calls": 0}
 
     class _FlakyPool:
         def __init__(self, max_workers: int | None = None) -> None:
-            self._max_workers = max_workers
-            self._real: ThreadPoolExecutor | None = None
-
-        def __enter__(self) -> "_FlakyPool | ThreadPoolExecutor":
             state["calls"] += 1
             if state["calls"] <= fail_times:
                 raise BrokenProcessPool("simulated: process pool broken")
-            self._real = ThreadPoolExecutor(max_workers=self._max_workers)
-            return self._real.__enter__()
+            self._real = ThreadPoolExecutor(max_workers=max_workers)
 
-        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-            if self._real is not None:
-                return bool(self._real.__exit__(exc_type, exc, tb))
-            return False
+        def submit(self, fn: object, *args: object) -> object:
+            return self._real.submit(fn, *args)
+
+        def shutdown(
+            self, wait: bool = True, *, cancel_futures: bool = False
+        ) -> None:
+            self._real.shutdown(wait=wait, cancel_futures=cancel_futures)
 
     return _FlakyPool
 
@@ -120,7 +127,12 @@ def test_extract_misses_raises_pool_stalled_error_on_stalled_worker(
 
     class _StalledPool:
         def __init__(self, max_workers: int | None = None) -> None:
-            pass
+            # ``_run_pool_bounded`` reads the private
+            # ``_processes`` attribute (dict of pid -> Process) to
+            # force-kill any still-wedged worker after a timeout --
+            # empty here since this fake never launches a real
+            # subprocess.
+            self._processes: dict = {}
 
         def __enter__(self) -> "_StalledPool":
             return self
@@ -130,6 +142,11 @@ def test_extract_misses_raises_pool_stalled_error_on_stalled_worker(
 
         def submit(self, fn: object, *args: object) -> _StalledFuture:
             return _StalledFuture()
+
+        def shutdown(
+            self, wait: bool = True, *, cancel_futures: bool = False
+        ) -> None:
+            pass
 
     monkeypatch.setattr(repo_ops, "_PARALLEL_MIN", 0)
     monkeypatch.setattr(repo_ops, "ProcessPoolExecutor", _StalledPool)
