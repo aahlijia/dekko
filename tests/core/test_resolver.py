@@ -2258,6 +2258,159 @@ def test_receiver_qualified_call_unaffected_by_non_method_fallback() -> None:
     assert len(graph.ambiguous) == 1
 
 
+# --- Language-aware candidate pre-filter (round-21 §Track D) --------------
+
+
+def test_language_filtered_drops_candidates_in_a_different_language() -> None:
+    """``_language_filtered`` (used as ``_pick_candidate``'s first
+    ladder step) narrows a repo-wide candidate list to the call site's
+    own language before anything else runs."""
+    py_candidate = Symbol(
+        id="a.py::Thing",
+        name="Thing",
+        qualname="Thing",
+        kind="class",
+        path="a.py",
+        language="python",
+    )
+    cpp_candidate = Symbol(
+        id="a.cc::Thing",
+        name="Thing",
+        qualname="Thing",
+        kind="function",
+        path="a.cc",
+        language="cpp",
+    )
+    call = RawCall(
+        caller_id=None, path="caller.cc", text="Thing", name="Thing", line=1
+    )
+    filtered = resolver_mod._language_filtered(
+        call, [py_candidate, cpp_candidate]
+    )
+    assert filtered == [cpp_candidate]
+
+
+def test_language_filtered_falls_through_when_nothing_matches() -> None:
+    """Round 21 (Track D fix approach): removing candidates that can
+    never legitimately be the right answer must never turn a
+    resolvable call into an unresolvable one -- if the language
+    filter would leave *nothing*, it must return the original,
+    unfiltered list instead (e.g. a C header declaring something a
+    C++ file uses, or any other legitimate cross-language case dekko
+    might currently handle some other way)."""
+    c_header_candidate = Symbol(
+        id="a.h::Thing",
+        name="Thing",
+        qualname="Thing",
+        kind="function",
+        path="a.h",
+        language="c",
+    )
+    call = RawCall(
+        caller_id=None, path="caller.cc", text="Thing", name="Thing", line=1
+    )
+    filtered = resolver_mod._language_filtered(call, [c_header_candidate])
+    assert filtered == [c_header_candidate]
+
+
+def test_language_filtered_unchanged_for_unrecognized_call_site_path() -> None:
+    """The call site's own language must be determinable to filter at
+    all -- an unrecognized extension leaves ``candidates`` untouched
+    rather than dropping everything."""
+    candidate = Symbol(
+        id="a.py::Thing",
+        name="Thing",
+        qualname="Thing",
+        kind="class",
+        path="a.py",
+        language="python",
+    )
+    call = RawCall(
+        caller_id=None,
+        path="caller.unknownext",
+        text="Thing",
+        name="Thing",
+        line=1,
+    )
+    filtered = resolver_mod._language_filtered(call, [candidate])
+    assert filtered == [candidate]
+
+
+def test_cross_language_bare_call_no_longer_resolves_to_wrong_symbol() -> None:
+    """Round 21 (tensorflow.md §5, Issue 6, Track D): a C++ namespace-
+    qualified factory call (``errors::InvalidArgumentError(...)``,
+    extracted with no receiver -- C++ namespace qualifiers are not
+    treated as a receiver the way a ``.``/``->`` method call is) used
+    to be able to resolve to a same-bare-name Python class defined
+    completely unrelated elsewhere in the repo. The real mechanism:
+    the actual C++ target is itself method-kind, so
+    ``_bare_call_non_method_match``'s "drop every method-kind
+    candidate" step used to drop it too, leaving the Python class as
+    the *sole* surviving non-method candidate -- a confidently wrong
+    single-candidate resolution, not even flagged ambiguous.
+
+    ``_pick_candidate`` now drops the Python candidate before any
+    ladder step runs at all (it's a different language than the C++
+    call site), so the call resolves directly to the real C++ target
+    via the earlier single-candidate fast path, never reaching -- or
+    needing -- the non-method fallback."""
+    python_class = Symbol(
+        id="tensorflow/python/framework/errors_impl.py::InvalidArgumentError",
+        name="InvalidArgumentError",
+        qualname="InvalidArgumentError",
+        kind="class",
+        path="tensorflow/python/framework/errors_impl.py",
+        language="python",
+    )
+    cpp_factory = Symbol(
+        id="tensorflow/core/platform/errors.cc::errors.InvalidArgumentError",
+        name="InvalidArgumentError",
+        qualname="errors.InvalidArgumentError",
+        kind="method",
+        path="tensorflow/core/platform/errors.cc",
+        language="cpp",
+    )
+    caller = Symbol(
+        id="tensorflow/core/kernels/foo.cc::Compute",
+        name="Compute",
+        qualname="Compute",
+        kind="method",
+        path="tensorflow/core/kernels/foo.cc",
+        language="cpp",
+    )
+    files = [
+        FileMap(
+            "tensorflow/python/framework/errors_impl.py",
+            "python",
+            symbols=[python_class],
+        ),
+        FileMap(
+            "tensorflow/core/platform/errors.cc",
+            "cpp",
+            symbols=[cpp_factory],
+        ),
+        FileMap(
+            "tensorflow/core/kernels/foo.cc",
+            "cpp",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="tensorflow/core/kernels/foo.cc",
+                    text="errors::InvalidArgumentError",
+                    name="InvalidArgumentError",
+                    line=5,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, cpp_factory.id) in edges
+    assert (caller.id, python_class.id) not in edges
+    assert graph.ambiguous == []
+
+
 # --- Go cross-package qualified-call resolution (round-13 §1) -------------
 
 

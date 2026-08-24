@@ -110,6 +110,7 @@ from pathlib import PurePosixPath
 from typing import TypeVar
 
 from dekko.classify import is_test_path
+from dekko.core import languages
 from dekko.core.model import (
     TYPE_KINDS,
     CallGraph,
@@ -1409,6 +1410,43 @@ def _record_ambiguous(
     ambiguous.setdefault((caller_id, name), [c.id for c in ranked])
 
 
+def _language_filtered(
+    call: _Referable, candidates: list[Symbol]
+) -> list[Symbol]:
+    """Drop candidates whose language can never be the real target.
+
+    A Python class is never the target of a C++ call site, and vice
+    versa — no step later in ``_pick_candidate``'s ladder ever compares
+    a candidate's language against the call/heritage site's own, so a
+    same-bare-name symbol in a completely unrelated language could
+    otherwise win a later, weaker heuristic (round 21 tensorflow.md
+    §5: ``errors::InvalidArgumentError`` calls resolving to a same-
+    named, unrelated Python class purely because it was the sole
+    non-method candidate left once ``_bare_call_non_method_match``
+    ran). ``call.path``'s registry language (Tier-1 only — every
+    symbol candidate comes from Tier-1 extraction, so a Tier-2/
+    unrecognized call-site path has nothing meaningful to compare
+    against) is the source of truth for the call site's own language.
+
+    Falls through to the full, unfiltered ``candidates`` whenever the
+    filter would leave nothing at all — either the call site's own
+    language couldn't be determined, or (a legitimate, if rare, case)
+    every candidate is in a different language than the call site,
+    e.g. a C header declaring something a C++ file uses. Removing
+    candidates that can never legitimately be the right answer must
+    never turn a resolvable call into an unresolvable one.
+    """
+    spec = languages.spec_for_path(call.path)
+    if spec is None:
+        return candidates
+
+    same_language = [c for c in candidates if c.language == spec.name]
+    if not same_language:
+        return candidates
+
+    return same_language
+
+
 def _pick_candidate(
     call: _Referable,
     candidates: list[Symbol],
@@ -1444,7 +1482,18 @@ def _pick_candidate(
     import list — passed only for whole-file-include languages
     (C/C++), and used by ``_import_match``'s fallback step. See
     ``_WHOLE_FILE_IMPORT_LANGUAGES``.
+
+    Before any of the above runs, ``candidates`` is narrowed to those
+    matching the call site's own language (see ``_language_filtered``)
+    — a same-bare-name candidate in a language that can never
+    legitimately be the target is removed before it gets a chance to
+    win one of the later, weaker heuristics (round 21 tensorflow.md
+    §5). ``same_file`` needs no equivalent filtering: every symbol in
+    it is already, by construction, in the same file (and therefore
+    the same language) as the call site.
     """
+    candidates = _language_filtered(call, candidates)
+
     container_match = _container_match(call, caller, same_file)
     if container_match is not None:
         return container_match
