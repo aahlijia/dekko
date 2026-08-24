@@ -26,6 +26,7 @@ from dekko import repo_ops
 from dekko.analysis import affected
 from dekko.analysis import ambiguous
 from dekko.analysis import contextpack
+from dekko.core.resolver import PoolStalledError
 from dekko.storage import ledger as ledger_mod
 from dekko.render import mapfile
 from dekko.storage import notes as notes_mod
@@ -1485,6 +1486,16 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
             "against this repo to avoid the parallel pool entirely.",
             True,
         )
+    except PoolStalledError as exc:
+        # A process-pool worker never returned a result within
+        # resolver.POOL_RESULT_TIMEOUT_S (round 21 Track A: a spawned
+        # worker resolving a completely different Python interpreter
+        # than its own parent hung indefinitely at 0% CPU with no
+        # error). Same "point at the fix" shape as the
+        # BrokenProcessPool handler above, since the underlying cause
+        # and remedy are the same -- this just catches the "hung, not
+        # crashed" half of that failure family.
+        text, is_error = (f"dekko: {exc}", True)
     except Exception as exc:  # surface any tool crash as an error result
         text, is_error = f"dekko: internal error: {exc}", True
     return _ok(

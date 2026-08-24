@@ -9,6 +9,30 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.4] — 2026-08-24
+
+### Fixed
+- **`dekko map --jobs 0` worker-pool hangs** — `run_pooled_with_retry`
+  now pins `multiprocessing.set_executable(sys.executable)` before
+  every pool attempt and bounds each pooled future with a
+  `POOL_RESULT_TIMEOUT_S` (600s) timeout, raising a clear
+  `PoolStalledError` instead of hanging indefinitely under concurrent
+  load. The MCP server catches `PoolStalledError` alongside the
+  existing `BrokenProcessPool` handling.
+- **`dekko sanity` truncated-grep false verdicts** — a truncated grep
+  sweep (>5,000 lines) no longer silently reports a false `dekko-only`
+  count of `0`; it now discloses truncation via `grep_truncated` /
+  `dekko_only_note` and suppresses that bucket instead of fabricating
+  a verdict.
+- **`dekko sanity` unbounded snippets** — rendered snippets are now
+  capped at 240 characters (classification still runs against the
+  full line); pathological lines (>10k chars) are dropped from
+  snippets and counted separately.
+- **`dekko sanity` missing import-statement classification** — added
+  a `CAUSE_IMPORT_STATEMENT` classifier for ESM/Python/CJS import
+  lines, so import-only mentions of a symbol no longer fall into the
+  generic "unexplained miss" bucket.
+
 ## [0.43.3] — 2026-08-21
 
 ### Fixed

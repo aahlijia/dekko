@@ -91,7 +91,32 @@ _GREP_TIMEOUT = 30
 # bare name (see ``_GENERIC_NAMES``) on a huge repo could otherwise
 # return an unbounded number of matches; this is a hard ceiling on
 # work done, independent of the report's own --limit/--budget caps.
+# Round 21 Track B1: this cap used to truncate silently -- cline's
+# repro showed ``matches (24) + grep_only (4976) == 5000`` exactly,
+# with every "dekko-only" row past the cap a truncation artifact
+# rather than a real resolver disagreement. ``_run_grep`` now reports
+# whether the cap was hit (``GrepSweepResult.truncated``) so ``run()``
+# can disclose it and stop reporting a false-confidence "dekko-only"
+# count under truncation — see ``run()``'s own handling.
 _MAX_GREP_LINES = 5000
+
+# Round 21 Track B2: a single-line 26 MB cache/data file that grep's
+# own ``-I`` binary-skip heuristic didn't catch (claude-code.md §2.2)
+# produced 26 MB of terminal output from one command. A real source
+# line is never remotely this long -- a raw grep line past this many
+# characters is definitionally a binary/data blob, not code worth
+# reporting as a hit at all (see ``_run_grep``'s pathological-line
+# guard).
+_PATHOLOGICAL_LINE_CHARS = 10_000
+
+# Round 21 Track B2: an unconditional length cap on any snippet that
+# does make it into a rendered/serialized row -- independent of, and a
+# lower bar than, ``_PATHOLOGICAL_LINE_CHARS`` (that guard drops a hit
+# entirely; this one just keeps an ordinary-but-long real source line
+# from bloating the report). Applied at render/serialize time in
+# ``_grep_row``, never during classification -- ``classify_miss`` is
+# always called with the hit's full, untruncated snippet.
+_SNIPPET_MAX_CHARS = 240
 
 # Effectively-unbounded caps for the internal dekko-side callers/uses
 # query this module runs to build its own comparison set — see the
@@ -123,6 +148,9 @@ CAUSE_GENERIC_NAME = (
 )
 CAUSE_COMMENT_MENTION = (
     "comment mention near the symbol's own definition — not a call site"
+)
+CAUSE_IMPORT_STATEMENT = (
+    "import/require statement naming the symbol — not a call site"
 )
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
 
@@ -191,6 +219,59 @@ def _looks_qualified_call(snippet: str, bare_name: str) -> bool:
         _QUALIFIED_CALL_TEMPLATE.format(name=re.escape(bare_name))
     )
     return pattern.search(snippet) is not None
+
+
+# Round 21 Track B3: the single most common "grep-only" shape on any
+# import-heavy codebase (~300+ of claude-code's grep-only bucket, 8 of
+# claude-buddy's) is a bare import/require statement naming the
+# target — correctly excluded from dekko's own callers count (an
+# import binds a name, it doesn't call it), but with no dedicated
+# ``classify_miss()`` cause before this, every one fell through to
+# ``CAUSE_UNEXPLAINED``. Each template is anchored at the line start
+# (after stripping leading whitespace) so a line that merely mentions
+# "import" mid-sentence (prose, a different identifier) never
+# false-positives -- a real import/require statement's keyword always
+# opens the (stripped) line.
+_ESM_NAMED_IMPORT_TEMPLATE = (
+    r"^import\s+(?:type\s+)?\{{[^}}]*\b{name}\b[^}}]*\}}\s*from\s+['\"]"
+)
+_ESM_DEFAULT_IMPORT_TEMPLATE = (
+    r"^import\s+(?:\*\s+as\s+)?{name}\s+from\s+['\"]"
+)
+_PY_FROM_IMPORT_TEMPLATE = r"^from\s+\S+\s+import\s+.*\b{name}\b"
+_IMPORT_LINE_TEMPLATES = (
+    _ESM_NAMED_IMPORT_TEMPLATE,
+    _ESM_DEFAULT_IMPORT_TEMPLATE,
+    _PY_FROM_IMPORT_TEMPLATE,
+)
+# CJS ``require(...)`` doesn't bind its target the way ESM/Python
+# imports do (it's an ordinary call expression, e.g. ``const { NAME }
+# = require('x')`` or ``const NAME = require('x')``) — checked
+# separately: "is this a require(...) call, and does the line mention
+# the bare name outside the call's own module-path argument" rather
+# than one combined regex, since the destructuring/assignment shape in
+# front of ``require(...)`` varies too much for one anchored template.
+# The module-path argument itself is excluded from the name search
+# below (not just the whole line checked as-is) so a require of a
+# module whose *path* happens to contain the bare name (e.g.
+# ``require('./target')`` binding to some other local name) doesn't
+# false-positive the way a naive whole-line search would.
+_REQUIRE_CALL = re.compile(r"\brequire\(\s*['\"][^'\"]+['\"]\s*\)")
+
+
+def _looks_like_import_statement(snippet: str, bare_name: str) -> bool:
+    """Whether a grep-matched line is a bare import/require statement
+    naming ``bare_name`` — not a call or reference to it."""
+    stripped = snippet.strip()
+    name = re.escape(bare_name)
+    for template in _IMPORT_LINE_TEMPLATES:
+        if re.search(template.format(name=name), stripped):
+            return True
+    match = _REQUIRE_CALL.search(stripped)
+    if match:
+        outside_call = stripped[: match.start()] + stripped[match.end() :]
+        return re.search(rf"\b{name}\b", outside_call) is not None
+    return False
 
 
 # How close a grep-only hit must be to the target's own definition
@@ -357,15 +438,19 @@ def classify_miss(
     the order ``dekko-verify/SKILL.md`` lists its blind spots: a
     qualified-call syntax match is checked first (it's visible in the
     line itself and the most specific signal available), then whether
-    the hit is a doc-comment/docstring line sitting near the symbol's
-    own definition mentioning its bare name (not a call at all), then
-    whether the file is in a language dekko can't parse at all, then
-    whether it's a test file excluded by ``sanity``'s own default
-    filtering, then whether the target name is short/generic enough
-    that dekko's count should be read as directional rather than
-    exact. A line matching none of these is reported as "unexplained"
-    rather than forcing a guess that doesn't fit — matching the plan's
-    own "false confidence from the classifier itself" caution.
+    the line is a bare import/require statement naming the symbol
+    (round 21 Track B3 — the dominant "grep-only" shape on any
+    import-heavy codebase, same "visible in the line itself" precedence
+    as the qualified-call check), then whether the hit is a
+    doc-comment/docstring line sitting near the symbol's own definition
+    mentioning its bare name (not a call at all), then whether the file
+    is in a language dekko can't parse at all, then whether it's a test
+    file excluded by ``sanity``'s own default filtering, then whether
+    the target name is short/generic enough that dekko's count should
+    be read as directional rather than exact. A line matching none of
+    these is reported as "unexplained" rather than forcing a guess that
+    doesn't fit — matching the plan's own "false confidence from the
+    classifier itself" caution.
 
     Args:
         snippet: The grep-matched line's text.
@@ -391,6 +476,8 @@ def classify_miss(
     """
     if _looks_qualified_call(snippet, bare_name):
         return CAUSE_QUALIFIED_CALL
+    if _looks_like_import_statement(snippet, bare_name):
+        return CAUSE_IMPORT_STATEMENT
     if near_own_definition and looks_like_comment:
         return CAUSE_COMMENT_MENTION
     if unsupported_language:
@@ -420,9 +507,38 @@ class GrepHit:
     snippet: str
 
 
-def _run_grep(
-    root: Path, bare_name: str
-) -> tuple[list[GrepHit], str, str | None]:
+@dataclass(frozen=True)
+class GrepSweepResult:
+    """One scoped grep sweep's outcome, plus its safety-cap disclosures.
+
+    Attributes:
+        hits: Matched lines that passed both safety caps.
+        command_text: The grep command actually run — echoed in the
+            report so a reader can rerun it by hand.
+        error: ``None`` on success (including "zero matches", grep's
+            own exit code 1); a message on a broken invocation.
+            ``hits``/``command_text`` are best-effort when set.
+        truncated: Whether raw grep output exceeded
+            ``_MAX_GREP_LINES`` and was capped. A run with real
+            matches beyond the cap makes the ``dekko-only`` bucket
+            unreliable (grep may well have matched a line dekko
+            "unexpectedly" lacks, just past the cutoff) — see
+            ``run()``'s handling.
+        skipped_pathological: Count of raw lines dropped for
+            exceeding ``_PATHOLOGICAL_LINE_CHARS`` (a binary/data blob
+            grep's own ``-I`` heuristic didn't catch, e.g. a
+            single-line minified/cache file) — excluded from ``hits``
+            entirely, counted toward neither a match nor a miss.
+    """
+
+    hits: list[GrepHit]
+    command_text: str
+    error: str | None
+    truncated: bool = False
+    skipped_pathological: int = 0
+
+
+def _run_grep(root: Path, bare_name: str) -> GrepSweepResult:
     """Run the scoped grep sweep for ``bare_name`` under ``root``.
 
     Fixed-string (``-F``), whole-word (``-w`` — without it, a search
@@ -436,9 +552,9 @@ def _run_grep(
     repo-relative, matching every path dekko's map already uses.
 
     Returns:
-        ``(hits, command_text, error)`` — ``error`` is ``None`` on
-        success (including "zero matches", grep's own exit code 1);
-        ``hits``/``command_text`` are best-effort on error.
+        A :class:`GrepSweepResult` — see its own docstring for what
+        each field means, including the ``truncated``/
+        ``skipped_pathological`` safety-cap disclosures.
     """
     cmd = ["grep", "-rn", "-I", "-w", "-F"]
     for d in _grep_exclude_dirs():
@@ -454,14 +570,24 @@ def _run_grep(
             timeout=_GREP_TIMEOUT,
         )
     except FileNotFoundError:
-        return [], command_text, "'grep' not found on this system"
+        return GrepSweepResult(
+            [], command_text, "'grep' not found on this system"
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return [], command_text, f"grep sweep failed: {exc}"
+        return GrepSweepResult([], command_text, f"grep sweep failed: {exc}")
     if result.returncode not in (0, 1):
         detail = result.stderr.strip() or f"exit {result.returncode}"
-        return [], command_text, f"grep sweep failed: {detail}"
+        return GrepSweepResult(
+            [], command_text, f"grep sweep failed: {detail}"
+        )
+    raw_lines = result.stdout.splitlines()
+    truncated = len(raw_lines) > _MAX_GREP_LINES
     hits: list[GrepHit] = []
-    for raw in result.stdout.splitlines()[:_MAX_GREP_LINES]:
+    skipped_pathological = 0
+    for raw in raw_lines[:_MAX_GREP_LINES]:
+        if len(raw) > _PATHOLOGICAL_LINE_CHARS:
+            skipped_pathological += 1
+            continue
         path, _, rest = raw.partition(":")
         line_str, _, snippet = rest.partition(":")
         if not line_str.isdigit():
@@ -469,7 +595,13 @@ def _run_grep(
         if path.startswith("./"):
             path = path[2:]
         hits.append(GrepHit(path=path, line=int(line_str), snippet=snippet))
-    return hits, command_text, None
+    return GrepSweepResult(
+        hits,
+        command_text,
+        None,
+        truncated=truncated,
+        skipped_pathological=skipped_pathological,
+    )
 
 
 # --- dekko-side comparison set ----------------------------------------
@@ -563,8 +695,27 @@ def _hit_row(path: str, line: int) -> dict:
     return {"file": path, "line": line}
 
 
+def _cap_snippet(snippet: str) -> str:
+    """Cap a snippet to ``_SNIPPET_MAX_CHARS``, ellipsized when cut.
+
+    Applied only here, at render/serialize time — ``classify_miss``
+    and its helpers (``_looks_qualified_call``,
+    ``_looks_like_comment_line``, ``_looks_like_import_statement``)
+    always see a hit's full, untruncated ``snippet`` first, so
+    truncation can never hide the very syntax a classification check
+    is looking for.
+    """
+    if len(snippet) <= _SNIPPET_MAX_CHARS:
+        return snippet
+    return snippet[:_SNIPPET_MAX_CHARS] + "...(truncated)"
+
+
 def _grep_row(hit: GrepHit, cause: str | None = None) -> dict:
-    row = {"file": hit.path, "line": hit.line, "snippet": hit.snippet.strip()}
+    row = {
+        "file": hit.path,
+        "line": hit.line,
+        "snippet": _cap_snippet(hit.snippet.strip()),
+    }
     if cause is not None:
         row["cause"] = cause
     return row
@@ -589,6 +740,93 @@ def _fit_rows(
     return rows[: len(kept)], len(rows)
 
 
+# Round 21 Track B1/B2 disclosure notes -- printed (text mode) or
+# attached (JSON mode) whenever ``_run_grep``'s safety caps actually
+# fired, so a reader isn't left to (re-)discover on their own that the
+# sweep was incomplete.
+_TRUNCATION_NOTE = (
+    f"grep sweep hit its {_MAX_GREP_LINES:,}-line safety cap; a "
+    "dekko-resolved location the (incomplete) grep hit set doesn't "
+    "cover may simply be past the cutoff, not a genuine resolver "
+    "disagreement -- the dekko-only bucket below is reported as "
+    "inconclusive rather than a count. matches/grep-only may also be "
+    "undercounted."
+)
+
+
+def _pathological_skip_note(count: int) -> str:
+    plural = "" if count == 1 else "s"
+    return (
+        f"{count} line{plural} skipped as pathological "
+        f"(>{_PATHOLOGICAL_LINE_CHARS:,} characters, not real source) "
+        "-- likely a minified/binary/cache-data blob grep's own -I "
+        "check didn't catch"
+    )
+
+
+def _dekko_only_report(
+    dekko_only: tuple[list[dict], int], truncated: bool
+) -> tuple[list[dict], int | None]:
+    """Suppress the ``dekko-only`` bucket under a truncated grep sweep.
+
+    See ``run()``'s own docstring and ``_TRUNCATION_NOTE`` for why: a
+    truncated sweep can't rule out that grep would have matched a
+    dekko-resolved location past its cutoff, so reporting a count here
+    would be false confidence, not a finding.
+
+    Returns:
+        ``dekko_only`` unchanged when not truncated; ``([], None)``
+        when it was.
+    """
+    if truncated:
+        return [], None
+    return dekko_only
+
+
+def _build_json_doc(
+    *,
+    query_action: str,
+    label: str,
+    bare_name: str,
+    include_tests: bool,
+    grep_command: str,
+    sweep: GrepSweepResult,
+    matches: tuple[list[dict], int],
+    dekko_only_rows: list[dict],
+    dekko_only_count: int | None,
+    grep_only: tuple[list[dict], int],
+    module_level: list[str],
+) -> dict:
+    """Assemble ``sanity --json``'s output document."""
+    doc = {
+        "action": "sanity",
+        "query_action": query_action,
+        "target": label,
+        "bare_name": bare_name,
+        "include_tests": include_tests,
+        "grep_command": grep_command,
+        "grep_truncated": sweep.truncated,
+        "grep_skipped_pathological": sweep.skipped_pathological,
+        "matches": matches[0],
+        "dekko_only": dekko_only_rows,
+        "grep_only": grep_only[0],
+        "counts": {
+            "matches": matches[1],
+            "dekko_only": dekko_only_count,
+            "grep_only": grep_only[1],
+        },
+    }
+    if sweep.truncated:
+        doc["dekko_only_note"] = _TRUNCATION_NOTE
+    if sweep.skipped_pathological:
+        doc["grep_skipped_pathological_note"] = _pathological_skip_note(
+            sweep.skipped_pathological
+        )
+    if module_level:
+        doc["dekko_module_level"] = sorted(module_level)
+    return doc
+
+
 def _print_bucket_text(title: str, rows: list[dict], total: int) -> None:
     print(f"  {title}: {total}")
     for row in rows:
@@ -611,18 +849,28 @@ def _print_text(
     dekko_only: tuple[list[dict], int],
     grep_only: tuple[list[dict], int],
     module_level: list[str],
+    *,
+    grep_truncated: bool = False,
+    skipped_pathological: int = 0,
 ) -> None:
     print(f"dekko sanity: '{target}' ({action}) vs. grep '{bare_name}'")
     print(f"  grep: {grep_command}")
+    if grep_truncated:
+        print(f"  note: {_TRUNCATION_NOTE}")
+    if skipped_pathological:
+        print(f"  note: {_pathological_skip_note(skipped_pathological)}")
     _print_bucket_text("matches", *matches)
-    _print_bucket_text("dekko-only", *dekko_only)
+    if grep_truncated:
+        print("  dekko-only: inconclusive (grep sweep truncated)")
+    else:
+        _print_bucket_text("dekko-only", *dekko_only)
     _print_bucket_text("grep-only", *grep_only)
     if module_level:
         print(
             f"  dekko also reports {len(module_level)} module-level call "
             f"site(s) (no line info): {', '.join(sorted(module_level))}"
         )
-    if grep_only[1] == 0:
+    if grep_only[1] == 0 and not grep_truncated:
         print("  clean: no grep-only misses — spot check passed")
 
 
@@ -643,6 +891,21 @@ def run(
     condition (mirrors ``doctor``'s "reports, doesn't judge"
     contract). Only a genuinely broken invocation (target doesn't
     resolve, or the grep sweep itself couldn't run) exits nonzero.
+
+    When the grep sweep itself hits its ``_MAX_GREP_LINES`` safety cap
+    (round 21 Track B1 — a generic bare name on a large repo), the
+    ``dekko-only`` bucket is reported as inconclusive (empty rows, a
+    ``None``/absent count in JSON's ``counts.dekko_only``) rather than
+    a false-confidence number — a location dekko resolved that the
+    incomplete grep hit set doesn't cover may simply be past the
+    cutoff, not a genuine resolver disagreement. ``matches``/
+    ``grep_only`` are still reported (grep's own truncated view of
+    them), alongside a ``grep_truncated``/``dekko_only_note`` (JSON)
+    or a printed ``note:`` line (text) disclosing the cap was hit.
+    Any raw grep line long enough to be a binary/data blob rather than
+    real source (round 21 Track B2) is dropped from the sweep entirely
+    and counted in ``grep_skipped_pathological`` instead of being
+    reported as a hit or bloating the report.
 
     Args:
         index: Loaded map index (unfiltered — this function applies
@@ -698,10 +961,12 @@ def run(
         except _QueryFailedError as exc:
             return exc.code
 
-    grep_hits, grep_command, grep_error = _run_grep(root, bare_name)
-    if grep_error is not None:
-        print(f"dekko: {grep_error}", file=sys.stderr)
+    sweep = _run_grep(root, bare_name)
+    if sweep.error is not None:
+        print(f"dekko: {sweep.error}", file=sys.stderr)
         return EXIT_GREP_FAILED
+    grep_command = sweep.command_text
+    grep_hits = sweep.hits
     if own_def_loc is not None:
         # The target's own definition line always contains its bare
         # name and would otherwise show up as a spurious "grep-only"
@@ -747,25 +1012,24 @@ def run(
     dekko_only = _fit_rows(dekko_only_rows, budget, limit)
     grep_only = _fit_rows(grep_only_rows, budget, limit)
 
+    dekko_only_rows_out, dekko_only_count = _dekko_only_report(
+        dekko_only, sweep.truncated
+    )
+
     if as_json:
-        doc = {
-            "action": "sanity",
-            "query_action": query_action,
-            "target": label,
-            "bare_name": bare_name,
-            "include_tests": include_tests,
-            "grep_command": grep_command,
-            "matches": matches[0],
-            "dekko_only": dekko_only[0],
-            "grep_only": grep_only[0],
-            "counts": {
-                "matches": matches[1],
-                "dekko_only": dekko_only[1],
-                "grep_only": grep_only[1],
-            },
-        }
-        if module_level:
-            doc["dekko_module_level"] = sorted(module_level)
+        doc = _build_json_doc(
+            query_action=query_action,
+            label=label,
+            bare_name=bare_name,
+            include_tests=include_tests,
+            grep_command=grep_command,
+            sweep=sweep,
+            matches=matches,
+            dekko_only_rows=dekko_only_rows_out,
+            dekko_only_count=dekko_only_count,
+            grep_only=grep_only,
+            module_level=module_level,
+        )
         print(json.dumps(doc, indent=2))
         return EXIT_OK
 
@@ -778,5 +1042,7 @@ def run(
         dekko_only,
         grep_only,
         module_level,
+        grep_truncated=sweep.truncated,
+        skipped_pathological=sweep.skipped_pathological,
     )
     return EXIT_OK

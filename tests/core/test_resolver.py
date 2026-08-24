@@ -1,6 +1,8 @@
 """End-to-end resolution tests over the language fixtures."""
 
+import sys
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
@@ -1921,6 +1923,136 @@ def test_run_pooled_with_retry_prints_disclosure_note_on_retry(
     assert "note:" in err
     assert "call resolution" in err
     assert "reduced parallelism" in err
+
+
+# Round 21 Track A: cline reproduced a spawned worker resolving a
+# completely different Python interpreter than its own parent process
+# (the system Anaconda install instead of the parent's `uv
+# tool`-managed venv), hanging 6+ minutes at 0% CPU before a manual
+# kill revealed the mismatch. ``run_pooled_with_retry`` now pins
+# ``multiprocessing``'s spawn executable to ``sys.executable`` before
+# every pool attempt, and turns a stalled future (one that never
+# returns within ``POOL_RESULT_TIMEOUT_S``) into a clear
+# ``PoolStalledError`` instead of hanging indefinitely.
+
+
+def test_run_pooled_with_retry_pins_interpreter_before_first_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        resolver_mod.multiprocessing,
+        "set_executable",
+        lambda exe: calls.append(exe),
+    )
+
+    resolver_mod.run_pooled_with_retry(lambda w: "ok", workers=4, what="test")
+
+    assert calls == [sys.executable]
+
+
+def test_run_pooled_with_retry_pins_interpreter_before_retry_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        resolver_mod.multiprocessing,
+        "set_executable",
+        lambda exe: calls.append(exe),
+    )
+    attempts: list[int] = []
+
+    def run(w: int) -> str:
+        attempts.append(w)
+        if len(attempts) == 1:
+            raise BrokenProcessPool("simulated: process pool broken")
+        return "ok"
+
+    resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+    # Pinned once before the first attempt and again before the retry
+    # -- a fresh pool is constructed each time, so each needs its own
+    # pin.
+    assert calls == [sys.executable, sys.executable]
+
+
+def test_run_pooled_with_retry_raises_pool_stalled_error_on_timeout() -> None:
+    def run(w: int) -> str:
+        raise PoolTimeoutError("simulated: worker never returned")
+
+    with pytest.raises(resolver_mod.PoolStalledError, match="test"):
+        resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+
+def test_run_pooled_with_retry_timeout_is_not_retried() -> None:
+    """Unlike ``BrokenProcessPool``, a stalled future gets no bounded
+    retry -- a worker that never returns at reduced parallelism is no
+    more likely to un-wedge than at full parallelism, so surfacing the
+    clear error immediately beats waiting twice as long for the same
+    outcome."""
+    calls: list[int] = []
+
+    def run(w: int) -> str:
+        calls.append(w)
+        raise PoolTimeoutError("simulated: worker never returned")
+
+    with pytest.raises(resolver_mod.PoolStalledError):
+        resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+    assert calls == [8]
+
+
+def test_run_pooled_with_retry_stalled_error_message_is_actionable() -> None:
+    def run(w: int) -> str:
+        raise PoolTimeoutError("simulated: worker never returned")
+
+    with pytest.raises(resolver_mod.PoolStalledError) as exc_info:
+        resolver_mod.run_pooled_with_retry(
+            run, workers=8, what="file extraction"
+        )
+
+    message = str(exc_info.value)
+    assert "file extraction" in message
+    assert str(resolver_mod.POOL_RESULT_TIMEOUT_S) in message
+    assert "--jobs 1" in message
+
+
+def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a worker future that never completes surfaces as
+    ``PoolStalledError`` from a real ``resolve()`` call, not an
+    indefinite hang."""
+
+    class _StalledFuture:
+        def result(self, timeout: float | None = None) -> object:
+            raise PoolTimeoutError("simulated: worker never returned")
+
+    class _StalledPool:
+        def __init__(
+            self,
+            max_workers: int | None = None,
+            initializer: object = None,
+            initargs: tuple = (),
+        ) -> None:
+            if initializer is not None:
+                initializer(*initargs)
+
+        def __enter__(self) -> "_StalledPool":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+        def submit(self, fn: object, *args: object) -> _StalledFuture:
+            return _StalledFuture()
+
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(resolver_mod, "ProcessPoolExecutor", _StalledPool)
+    files = _multi_file_call_fixture()
+
+    with pytest.raises(resolver_mod.PoolStalledError):
+        resolve(files, workers=4)
 
 
 def test_resolve_parallel_retries_once_on_broken_pool(

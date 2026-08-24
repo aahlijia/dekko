@@ -195,12 +195,26 @@ sets by `(file, line)` into three buckets:
   didn't match (an alias, a multi-line call) — informational.
 - **grep-only** — grep found a line dekko's answer missed. Each entry
   is labeled with a likely cause: a cross-package/qualified call
-  (`pkg.Func(`, `Type::method(`, `Type.method(`), a file in a language
-  dekko can't parse, a test-only call site (tests are excluded from
-  the dekko-side query by default here, unlike the plain
-  `query callers` default — see `--include-tests`), a short/generic
-  target name (resolver precision degrades in a dense repo), or
-  "unexplained" when none of those fit.
+  (`pkg.Func(`, `Type::method(`, `Type.method(`), a bare
+  import/require statement naming the symbol (`import { X } from
+  '...'`, `from x import X`, `const { X } = require('...')` — not a
+  call site), a file in a language dekko can't parse, a test-only call
+  site (tests are excluded from the dekko-side query by default here,
+  unlike the plain `query callers` default — see `--include-tests`), a
+  short/generic target name (resolver precision degrades in a dense
+  repo), or "unexplained" when none of those fit.
+
+The grep sweep itself has two safety caps: it stops reading raw grep
+output past 5,000 lines, and drops any single raw line over ~10,000
+characters (a binary/data blob grep's own binary-skip heuristic didn't
+catch, not real source — e.g. a stray minified/cache file). A snippet
+shown in the report is also capped at ~240 characters. If the 5,000-line
+cap is hit, that's disclosed explicitly (`grep_truncated` in `--json`,
+a `note:` line otherwise) and the **dekko-only** bucket is reported as
+inconclusive rather than a count — a truncated sweep can't rule out
+that grep would have matched a dekko-resolved location past the
+cutoff, so a "dekko-only" number under truncation would be false
+confidence, not a finding.
 
 ```sh
 dekko sanity resolve                 # cross-check `callers resolve`

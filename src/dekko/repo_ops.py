@@ -38,7 +38,11 @@ from dekko.core.extractor_generic import extract_file_generic
 from dekko.core import languages
 from dekko.core.model import TYPE_KINDS, CallGraph, FileMap
 from dekko.render.render_json import render_json
-from dekko.core.resolver import resolve, run_pooled_with_retry
+from dekko.core.resolver import (
+    POOL_RESULT_TIMEOUT_S,
+    resolve,
+    run_pooled_with_retry,
+)
 
 
 # Below this many cache-miss files, a process pool costs more in startup
@@ -131,14 +135,22 @@ def _extract_misses(
     multiprocessing contention from another concurrent ``dekko``
     process on this machine — round 17) gets one bounded retry at
     reduced parallelism via ``run_pooled_with_retry`` before
-    propagating.
+    propagating. A worker that never returns a result at all within
+    ``POOL_RESULT_TIMEOUT_S`` (round 21 Track A: a spawned worker
+    resolving a completely different Python interpreter than its own
+    parent, hanging indefinitely at 0% CPU with no error) surfaces as
+    ``resolver.PoolStalledError`` instead of hanging forever — see
+    ``run_pooled_with_retry``'s docstring.
     """
     if workers <= 1 or len(misses) < _PARALLEL_MIN:
         return {rel: extract_one(root, rel) for rel in misses}
 
     def _run(w: int) -> dict[str, FileMap | None]:
         with ProcessPoolExecutor(max_workers=w) as pool:
-            results = pool.map(extract_one, [root] * len(misses), misses)
+            futures = [pool.submit(extract_one, root, rel) for rel in misses]
+            results = [
+                f.result(timeout=POOL_RESULT_TIMEOUT_S) for f in futures
+            ]
             return dict(zip(misses, results))
 
     return run_pooled_with_retry(_run, workers, "file extraction")

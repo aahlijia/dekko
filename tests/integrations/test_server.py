@@ -9,6 +9,7 @@ import pytest
 
 from dekko import repo_ops
 from dekko.analysis import query
+from dekko.core.resolver import PoolStalledError
 from dekko.integrations import cli
 from dekko.render import mapfile
 from dekko.integrations import server
@@ -839,6 +840,38 @@ def test_tool_call_reports_persistent_broken_pool_clearly(
     text = result["content"][0]["text"]
     assert "process-pool" in text or "process pool" in text
     assert "dekko map --jobs 1" in text
+    assert "internal error" not in text
+
+
+def test_tool_call_reports_stalled_pool_worker_clearly(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round 21 Track A: a stalled process-pool worker (one that never
+    # returns a result at all -- cline's reproduced 6+ minute hang at
+    # 0% CPU from a worker resolving the wrong Python interpreter) now
+    # surfaces as resolver.PoolStalledError instead of hanging the MCP
+    # server indefinitely. Same "point at the fix, don't fall through
+    # to the generic internal-error bucket" shape as the
+    # BrokenProcessPool test just above.
+    root = make_mapped_repo(SRC)
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise PoolStalledError(
+            "process pool made no progress during file extraction "
+            "within 600s -- a worker likely failed to start or "
+            "stalled. Retry with --jobs 1, or after system load has "
+            "subsided."
+        )
+
+    monkeypatch.setattr(repo_ops, "load_or_regen", _raise)
+
+    ctx = _ctx(root)  # fresh Context -> empty index_cache -> forces load
+    result = _call(ctx, "query_symbol", {"symbol": "f"})
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "process pool" in text
+    assert "--jobs 1" in text
     assert "internal error" not in text
 
 
