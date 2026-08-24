@@ -9,6 +9,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.5] — 2026-08-24
+
+### Fixed
+- **`dekko daemon stop` false success** — when the daemon is confirmed
+  alive and busy, `stop()` no longer falls through to the same
+  `"stopped"` message and exit `0` as a genuine stop. It now reports
+  that the daemon is still running and busy and returns a new
+  `EXIT_DAEMON_STILL_RUNNING` (8) exit code.
+- **Resolver cross-language false matches** — `_pick_candidate()` did
+  not filter candidates by language, so a same-named symbol in an
+  unrelated language could win a confident wrong resolution with no
+  ambiguity flagged, corrupting heritage and `query callers` results.
+  Candidates are now filtered by language first, falling back to the
+  unfiltered set when that would leave nothing (preserving legitimate
+  cross-language cases like C headers used from C++).
+
 ## [0.43.4] — 2026-08-24
 
 ### Fixed

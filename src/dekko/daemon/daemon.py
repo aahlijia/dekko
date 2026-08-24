@@ -98,6 +98,14 @@ _STATUS_CMD = "_status"
 # working on this in the background" from every other failure shape.
 EXIT_DAEMON_ABANDONED = 7
 
+# stop()'s dedicated exit code for the one branch that is not "gone"
+# in any sense -- the daemon was confirmed alive and busy and
+# deliberately left untouched (see stop()'s own docstring/body).
+# Distinct from every code already in use (0-7 above) so a caller
+# checking stop()'s exit code programmatically can't mistake "still
+# running" for "stopped."
+EXIT_DAEMON_STILL_RUNNING = 8
+
 # Default self-shutdown window: 30 minutes with no requests (design
 # doc §2.1).
 DEFAULT_IDLE_TIMEOUT = 1800.0
@@ -1057,8 +1065,15 @@ def stop(root: Path) -> int:
         root: Resolved repo root whose daemon to stop.
 
     Returns:
-        ``0`` in every case -- "no daemon running" and "stopped" are
-        both successful outcomes of this command.
+        ``0`` for "no daemon running" or "stopped" -- both are
+        successful outcomes of this command. ``EXIT_DAEMON_STILL_
+        RUNNING`` for the one remaining branch: the daemon was
+        confirmed alive and busy and deliberately left untouched (see
+        the forced-fallback branch below) -- this is neither a
+        "stopped" nor a "no daemon running" outcome, so it gets its
+        own honest message and a distinct, non-zero exit code rather
+        than reusing the "stopped" success message for a daemon that
+        is, in fact, still running.
     """
     transport = default_transport_for(root)
     if not transport.exists():
@@ -1095,13 +1110,22 @@ def stop(root: Path) -> int:
             # fails -- now there's real (if not airtight) evidence
             # nothing is listening. Safe to clean up.
             transport.cleanup()
-        # else: pid lookup failed but the daemon still answers a plain
-        # reachability probe -- it's alive, just hasn't replied to
-        # either of our two attempts. Leave its transport alone; a
-        # subsequent stop() (or the daemon's own idle-timeout) can
-        # retry. Matches this command's existing "always returns 0"
-        # contract without silently orphaning a live process to keep
-        # that contract.
+        else:
+            # pid lookup failed but the daemon still answers a plain
+            # reachability probe -- it's alive, just hasn't replied to
+            # either of our two attempts. Leave its transport alone; a
+            # subsequent stop() (or the daemon's own idle-timeout) can
+            # retry. This is the one branch that did not stop
+            # anything, so it gets its own honest message/exit code
+            # below instead of the unconditional "stopped" success
+            # every other branch reports.
+            print(
+                f"dekko daemon: still running and busy for {root}; "
+                "could not confirm stop -- it may be mid-request. Try "
+                "again once it's idle, or run 'dekko daemon stop' "
+                "again to retry the PID/reachability check."
+            )
+            return EXIT_DAEMON_STILL_RUNNING
     else:
         _wait_for_teardown(transport)
 

@@ -451,6 +451,23 @@ def test_stop_does_not_unlink_live_daemon_when_ack_and_pid_query_both_fail(
     finds the daemon alive, and that ``stop()`` leaves its transport
     artifacts (and the process itself) alone as a result, rather than
     orphaning a live, now-unreachable-by-path daemon.
+
+    Round 21 (tensorflow.md §3, Track C): this branch used to print
+    the same unconditional "stopped" success message and return ``0``
+    even here -- the one branch that did not stop anything. Now
+    returns the distinct ``EXIT_DAEMON_STILL_RUNNING`` exit code
+    instead (asserted below). The new message's own text is *not*
+    asserted here: this test's busy double runs its 2-second sleep
+    inside the daemon thread's own request-capture window, and
+    ``contextlib.redirect_stdout``-style capture swaps ``sys.stdout``
+    process-globally, not per-thread -- so this test's own
+    ``daemon.stop()`` call on the main thread can race that window and
+    have its ``print()`` land in the *daemon's own* captured response
+    buffer instead of real stdout, making a ``capsys`` assertion here
+    inherently flaky. See
+    ``test_stop_reports_still_running_message_and_exit_code`` below
+    for a race-free, non-threaded check of the new message's exact
+    text.
     """
     started = threading.Event()
     real_run_stats = cli.run_stats
@@ -489,7 +506,7 @@ def test_stop_does_not_unlink_live_daemon_when_ack_and_pid_query_both_fail(
         assert started.wait(timeout=5.0), "slow request never started"
 
         daemon._CLIENT_TIMEOUT = 0.3
-        assert daemon.stop(root) == 0
+        assert daemon.stop(root) == daemon.EXIT_DAEMON_STILL_RUNNING
 
         assert transport.exists()
         assert dt.is_daemon_reachable(transport, timeout=2.0)
@@ -498,6 +515,67 @@ def test_stop_does_not_unlink_live_daemon_when_ack_and_pid_query_both_fail(
         daemon._CLIENT_TIMEOUT = original_timeout
         daemon.stop(root)
         thread.join(timeout=_POLL_DEADLINE)
+
+
+def test_stop_reports_still_running_message_and_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Round 21 (tensorflow.md §3, Track C), text/exit-code companion
+    to ``test_stop_does_not_unlink_live_daemon_when_ack_and_pid_query_
+    both_fail`` above, which can't safely assert ``print()`` output
+    itself (see that test's docstring for why). Exercises the exact
+    same "still running and busy, left alone" branch in ``stop()``
+    without a real daemon thread or its busy-request stdout-capture
+    race at all: a ``socketpair()`` stands in for the client
+    connection (a short ``settimeout`` deterministically fails the
+    graceful-shutdown-ack read, no sleep-based busy double needed),
+    and a minimal fake transport skips real auth/socket-file handling
+    so ``stop()`` runs single-threaded, synchronously, start to finish.
+
+    Confirms the new honest message and ``EXIT_DAEMON_STILL_RUNNING``
+    exit code, and that ``cleanup()`` -- which would strand a live
+    daemon's transport in this branch, the exact bug round 14 already
+    fixed once -- is never called here.
+    """
+    client_sock, server_sock = socket.socketpair()
+    client_sock.settimeout(0.2)
+
+    class _FakeTransport:
+        def exists(self) -> bool:
+            return True
+
+        def client_connect(self, timeout: float) -> socket.socket:
+            return client_sock
+
+        def send_auth_preamble(self, sock: socket.socket) -> None:
+            pass
+
+        def cleanup(self) -> None:
+            raise AssertionError(
+                "cleanup() must not run on the still-running branch"
+            )
+
+    transport = _FakeTransport()
+    monkeypatch.setattr(
+        daemon, "default_transport_for", lambda root: transport
+    )
+    monkeypatch.setattr(daemon, "_query_pid", lambda t: None)
+    monkeypatch.setattr(
+        daemon, "is_daemon_reachable", lambda t, timeout=0.0: True
+    )
+
+    try:
+        code = daemon.stop(tmp_path)
+        out = capsys.readouterr().out
+    finally:
+        client_sock.close()
+        server_sock.close()
+
+    assert code == daemon.EXIT_DAEMON_STILL_RUNNING
+    assert "still running and busy" in out
+    assert "stopped" not in out
 
 
 def test_stop_then_immediate_command_falls_back_not_abandoned(

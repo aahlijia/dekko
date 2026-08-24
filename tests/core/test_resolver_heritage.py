@@ -145,6 +145,62 @@ def test_same_named_types_in_two_files_are_ambiguous() -> None:
     ]
 
 
+def test_cross_language_name_collision_no_longer_ambiguous() -> None:
+    """Round 21 (tensorflow.md §4/§7, Track D): before the language-
+    aware candidate pre-filter, a bare type name colliding with a
+    same-named type *anywhere* in the repo -- even a completely
+    unrelated one in a different language -- landed the whole clause
+    in ``heritage_ambiguous``, dropping a locally, unambiguously
+    determinable real target purely because ``_pick_candidate`` never
+    compared candidate/call-site language. Contrast with
+    ``test_same_named_types_in_two_files_are_ambiguous`` above, a
+    genuine same-language collision, which must stay ambiguous
+    unchanged (not this fix's target -- see round 21's
+    IMPLEMENTATION-PLAN.md Track D, "substantially improve, but not
+    fully fix, Issue 7")."""
+    base_py = Symbol(
+        id="unrelated/base.py::Base",
+        name="Base",
+        qualname="Base",
+        kind="class",
+        path="unrelated/base.py",
+        language="python",
+    )
+    base_cpp = Symbol(
+        id="kernels/base.cc::Base",
+        name="Base",
+        qualname="Base",
+        kind="class",
+        path="kernels/base.cc",
+        language="cpp",
+    )
+    foo = Symbol(
+        id="kernels/foo.cc::Foo",
+        name="Foo",
+        qualname="Foo",
+        kind="class",
+        path="kernels/foo.cc",
+        language="cpp",
+    )
+    files = [
+        FileMap("unrelated/base.py", "python", symbols=[base_py]),
+        FileMap("kernels/base.cc", "cpp", symbols=[base_cpp]),
+        FileMap(
+            "kernels/foo.cc",
+            "cpp",
+            symbols=[foo],
+            heritage=[
+                _heritage("kernels/foo.cc::Foo", "kernels/foo.cc", "Base")
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.heritage_out["kernels/foo.cc::Foo"] == [
+        "kernels/base.cc::Base"
+    ]
+    assert graph.heritage_ambiguous == []
+
+
 def test_bare_name_with_no_in_repo_candidate_is_external() -> None:
     foo = _cls("a.py", "MyModel")
     files = [
