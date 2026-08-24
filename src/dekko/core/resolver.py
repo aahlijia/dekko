@@ -97,11 +97,13 @@ receiver/arity, ``(g *IDGenerator) Generate(...)`` in ``pkg/markdown``
 tests for a change a same-package unit test directly covered.
 """
 
+import multiprocessing
 import posixpath
 import re
 import sys
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -188,7 +190,35 @@ _RESOLVE_CHUNK_OVERSUBSCRIPTION = 4
 # -- see ``run_pooled_with_retry``'s docstring for why.
 _POOL_RETRY_WORKERS = 2
 
+# Per-future result-retrieval bound (round 21 Track A: cline's
+# ``dekko map --jobs 0`` hung 6+ minutes at 0% CPU across every
+# worker, later revealed via a manual kill to be a worker that
+# resolved a completely different Python interpreter than its parent
+# process and never came up at all). A single chunk/file's real
+# extraction or resolution work is seconds at most even on a
+# tensorflow-scale repo -- this is deliberately generous (an order of
+# magnitude beyond that) so it only ever fires on a genuinely wedged
+# worker, never a merely slow one, while still turning an indefinite
+# silent hang into a bounded, actionable error. Applied per future
+# (each call/chunk gets its own fresh budget), never as a shared
+# deadline across a whole batch -- see each call site's own
+# ``.result(timeout=POOL_RESULT_TIMEOUT_S)`` usage.
+POOL_RESULT_TIMEOUT_S = 600
+
 _PoolResultT = TypeVar("_PoolResultT")
+
+
+class PoolStalledError(RuntimeError):
+    """A process-pool future made no progress within its timeout.
+
+    Raised by ``run_pooled_with_retry`` when a worker never returns a
+    result within ``POOL_RESULT_TIMEOUT_S`` -- almost always a wedged
+    worker spawn (round 21 Track A), not a legitimately slow
+    computation. Deliberately distinct from ``BrokenProcessPool``
+    (which the pool itself raises on an outright crash): a stalled
+    worker that never starts or never finishes doesn't necessarily
+    crash the pool at all, so nothing else would ever surface this.
+    """
 
 
 def _pool_retry_note(what: str, retry_workers: int) -> None:
@@ -232,6 +262,23 @@ def run_pooled_with_retry(
     machine should surface a clear error, not hang retrying
     indefinitely.
 
+    Before every attempt, pins ``multiprocessing``'s spawn executable
+    to this process's own ``sys.executable`` (round 21 Track A: cline
+    reproduced a spawned worker resolving a completely different
+    Python interpreter -- the system Anaconda install -- than its own
+    parent's ``uv tool``-managed venv, under host CPU contention,
+    producing a 6+ minute silent hang). Explicit pinning is cheap,
+    always correct (a worker should always run under the exact
+    interpreter its own parent is running under), and closes off that
+    failure mode regardless of whichever PATH/resolution mechanism
+    let it happen. Each call site's own ``run`` closure is separately
+    responsible for bounding its own ``future.result()``/``.result()``
+    retrieval with ``POOL_RESULT_TIMEOUT_S`` -- a
+    :class:`PoolTimeoutError` escaping ``run`` is re-raised here as
+    :class:`PoolStalledError` with an actionable message, turning what
+    would otherwise be an indefinite silent hang into a bounded,
+    diagnosable error.
+
     Args:
         run: Builds a fresh pool at the given worker count and
             returns the merged result. Called once, or twice on a
@@ -248,13 +295,27 @@ def run_pooled_with_retry(
 
     Raises:
         BrokenProcessPool: If the retry attempt also fails.
+        PoolStalledError: If a worker made no progress within
+            ``POOL_RESULT_TIMEOUT_S``.
     """
+    multiprocessing.set_executable(sys.executable)
     try:
-        return run(workers)
-    except BrokenProcessPool:
-        retry_workers = min(workers, _POOL_RETRY_WORKERS)
-        _pool_retry_note(what, retry_workers)
-        return run(retry_workers)
+        try:
+            return run(workers)
+        except BrokenProcessPool:
+            retry_workers = min(workers, _POOL_RETRY_WORKERS)
+            _pool_retry_note(what, retry_workers)
+            multiprocessing.set_executable(sys.executable)
+            return run(retry_workers)
+    except PoolTimeoutError as exc:
+        raise PoolStalledError(
+            f"process pool made no progress during {what} within "
+            f"{POOL_RESULT_TIMEOUT_S}s -- a worker likely failed to "
+            "start or stalled (e.g. under heavy CPU contention from "
+            "another concurrent dekko process on this machine). "
+            "Retry with --jobs 1, or after system load has "
+            "subsided."
+        ) from exc
 
 
 # Worker-process-local copies of the shared, read-only indices every
@@ -556,7 +617,9 @@ def _resolve_all(
                 for chunk in chunks
             ]
             for future in futures:
-                chunk_edges, chunk_ambiguous, chunk_external = future.result()
+                chunk_edges, chunk_ambiguous, chunk_external = future.result(
+                    timeout=POOL_RESULT_TIMEOUT_S
+                )
                 for key, lines in chunk_edges.items():
                     edges.setdefault(key, set()).update(lines)
                 for key, cands in chunk_ambiguous.items():
@@ -672,7 +735,8 @@ def resolve_refs(
                 for chunk in chunks
             ]
             for future in futures:
-                for key, lines in future.result().items():
+                result = future.result(timeout=POOL_RESULT_TIMEOUT_S)
+                for key, lines in result.items():
                     edges.setdefault(key, set()).update(lines)
         return edges
 
@@ -1092,7 +1156,9 @@ def resolve_throws(
                 for chunk in chunks
             ]
             for future in futures:
-                c_edges, c_ambiguous, c_external, c_bare = future.result()
+                c_edges, c_ambiguous, c_external, c_bare = future.result(
+                    timeout=POOL_RESULT_TIMEOUT_S
+                )
                 for key, lines in c_edges.items():
                     edges.setdefault(key, set()).update(lines)
                 for key, cands in c_ambiguous.items():
@@ -1230,7 +1296,7 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
                 for chunk in chunks
             ]
             for future in futures:
-                sites.extend(future.result())
+                sites.extend(future.result(timeout=POOL_RESULT_TIMEOUT_S))
         return sites
 
     sites = run_pooled_with_retry(_run, workers, "catch resolution")

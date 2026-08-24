@@ -13,6 +13,7 @@ involved at all.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -483,3 +484,400 @@ def test_sanity_json_shape(
         assert {"file", "line", "snippet", "cause"} <= set(row)
     for row in doc["matches"]:
         assert {"file", "line"} <= set(row)
+
+
+# --- Round 21 Track B1: silent 5,000-line grep truncation ---------------
+
+
+class _FakeCompletedProcess:
+    def __init__(self, stdout: str, returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+        self.stderr = ""
+
+
+def test_run_grep_reports_truncated_when_over_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One line past the cap is enough to prove the flag fires; the
+    # cap itself (not the exact overshoot) is what matters here.
+    n = sanity._MAX_GREP_LINES + 1
+    stdout = "\n".join(f"a.py:{i}:target()" for i in range(1, n + 1)) + "\n"
+    monkeypatch.setattr(
+        sanity.subprocess,
+        "run",
+        lambda *a, **kw: _FakeCompletedProcess(stdout),
+    )
+
+    result = sanity._run_grep(Path("/fake"), "target")
+
+    assert result.truncated is True
+    assert len(result.hits) == sanity._MAX_GREP_LINES
+
+
+def test_run_grep_not_truncated_under_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdout = "a.py:1:target()\nb.py:2:target()\n"
+    monkeypatch.setattr(
+        sanity.subprocess,
+        "run",
+        lambda *a, **kw: _FakeCompletedProcess(stdout),
+    )
+
+    result = sanity._run_grep(Path("/fake"), "target")
+
+    assert result.truncated is False
+    assert len(result.hits) == 2
+
+
+def test_sanity_json_suppresses_dekko_only_when_grep_truncated(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # A genuine dekko-resolved call site (a.py:6, "return target()")
+    # that a truncated grep sweep simply doesn't happen to contain --
+    # this must NOT be reported as a confident "dekko-only" finding,
+    # since the sweep can't rule out that grep would have matched it
+    # past the cutoff.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def target():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return target()\n"
+            ),
+        }
+    )
+    fake_sweep = sanity.GrepSweepResult(
+        hits=[],
+        command_text="grep -rn -I -w -F -- target .",
+        error=None,
+        truncated=True,
+        skipped_pathological=0,
+    )
+    monkeypatch.setattr(sanity, "_run_grep", lambda *a, **kw: fake_sweep)
+
+    code = cli.main(["sanity", "target", "--root", str(root), "--json"])
+
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["grep_truncated"] is True
+    assert doc["dekko_only"] == []
+    assert doc["counts"]["dekko_only"] is None
+    assert "dekko_only_note" in doc
+
+
+def test_sanity_text_reports_truncation_and_inconclusive_dekko_only(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def target():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return target()\n"
+            ),
+        }
+    )
+    fake_sweep = sanity.GrepSweepResult(
+        hits=[],
+        command_text="grep -rn -I -w -F -- target .",
+        error=None,
+        truncated=True,
+        skipped_pathological=0,
+    )
+    monkeypatch.setattr(sanity, "_run_grep", lambda *a, **kw: fake_sweep)
+
+    code = cli.main(["sanity", "target", "--root", str(root)])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "note:" in out
+    assert "safety cap" in out
+    assert "dekko-only: inconclusive" in out
+    # The whole spot check is compromised under truncation -- "clean"
+    # would be a false-confidence claim even if grep-only happens to
+    # be empty.
+    assert "clean:" not in out
+
+
+def test_sanity_json_reports_skipped_pathological_lines(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    fake_sweep = sanity.GrepSweepResult(
+        hits=[],
+        command_text="grep -rn -I -w -F -- target .",
+        error=None,
+        truncated=False,
+        skipped_pathological=2,
+    )
+    monkeypatch.setattr(sanity, "_run_grep", lambda *a, **kw: fake_sweep)
+
+    code = cli.main(["sanity", "target", "--root", str(root), "--json"])
+
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["grep_skipped_pathological"] == 2
+    assert "grep_skipped_pathological_note" in doc
+    assert (
+        "2 lines skipped as pathological"
+        in (doc["grep_skipped_pathological_note"])
+    )
+
+
+# --- Round 21 Track B2: pathological-line guard + snippet cap -----------
+
+
+def test_run_grep_skips_pathological_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    huge = "x" * (sanity._PATHOLOGICAL_LINE_CHARS + 100)
+    stdout = f"a.py:1:target()\ndata.json:2:{huge}\n"
+    monkeypatch.setattr(
+        sanity.subprocess,
+        "run",
+        lambda *a, **kw: _FakeCompletedProcess(stdout),
+    )
+
+    result = sanity._run_grep(Path("/fake"), "target")
+
+    assert result.skipped_pathological == 1
+    assert len(result.hits) == 1
+    assert result.hits[0].path == "a.py"
+
+
+def test_grep_row_caps_snippet_length() -> None:
+    long_snippet = "target(" + "x" * 1000 + ")"
+    hit = sanity.GrepHit(path="a.py", line=1, snippet=long_snippet)
+
+    row = sanity._grep_row(hit)
+
+    assert len(row["snippet"]) <= sanity._SNIPPET_MAX_CHARS + len(
+        "...(truncated)"
+    )
+    assert row["snippet"].endswith("...(truncated)")
+
+
+def test_grep_row_short_snippet_unchanged() -> None:
+    hit = sanity.GrepHit(path="a.py", line=1, snippet="  target(x)  ")
+
+    row = sanity._grep_row(hit)
+
+    assert row["snippet"] == "target(x)"
+
+
+def test_classify_miss_still_sees_full_snippet_not_capped() -> None:
+    # Classification must run against the hit's real, untruncated
+    # text -- a qualified-call marker sitting past
+    # ``_SNIPPET_MAX_CHARS`` must still be found.
+    padding = "x" * (sanity._SNIPPET_MAX_CHARS + 50)
+    snippet = f"# {padding} pkg.target(x)"
+    cause = sanity.classify_miss(
+        snippet,
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_QUALIFIED_CALL
+
+
+# --- Round 21 Track B3: import/require-statement classifier -------------
+
+
+def test_classify_miss_esm_named_import() -> None:
+    cause = sanity.classify_miss(
+        "import { target } from './a';",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_esm_named_import_multiple() -> None:
+    cause = sanity.classify_miss(
+        "import { other, target, another } from './a';",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_esm_type_import() -> None:
+    cause = sanity.classify_miss(
+        "import type { target } from './a';",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_esm_default_import() -> None:
+    cause = sanity.classify_miss(
+        "import target from './a';",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_esm_namespace_import() -> None:
+    cause = sanity.classify_miss(
+        "import * as target from './a';",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_python_from_import() -> None:
+    cause = sanity.classify_miss(
+        "from a import target",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_python_from_import_multiple() -> None:
+    cause = sanity.classify_miss(
+        "from a import other, target, another",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_python_from_import_indented() -> None:
+    cause = sanity.classify_miss(
+        "    from a import target",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_cjs_require_destructure() -> None:
+    cause = sanity.classify_miss(
+        "const { target } = require('./a');",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_cjs_require_plain_assignment() -> None:
+    cause = sanity.classify_miss(
+        "const target = require('./a');",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_require_call_without_name_not_import() -> None:
+    # A require(...) call on the line, but the bare name isn't
+    # actually mentioned on it -- must not false-positive.
+    cause = sanity.classify_miss(
+        "const other = require('./target');",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_word_import_mid_sentence_not_import_statement() -> None:
+    # The word "import" appearing mid-line/mid-sentence (prose, not a
+    # real import statement) must never false-positive -- only a line
+    # that genuinely opens with the import/require syntax counts.
+    cause = sanity.classify_miss(
+        "# remember to import the target module before calling this",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_import_of_other_name_not_flagged() -> None:
+    # An import statement that exists on the line but doesn't actually
+    # name the target must not be misclassified.
+    cause = sanity.classify_miss(
+        "import { other } from './a';",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_qualified_call_wins_over_import_shape() -> None:
+    # Precedence: a genuine qualified call is checked first, even on a
+    # line that also happens to contain import-like text.
+    cause = sanity.classify_miss(
+        "pkg.target(x)  # not import { target }",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_QUALIFIED_CALL
+
+
+def test_sanity_detects_import_statement_miss(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": "def target():\n    return 1\n",
+            "b.js": (
+                "import { target } from './a';\n\nfunction caller() {\n"
+                "  return target();\n}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["cause"] for row in doc["grep_only"]}
+    assert sanity.CAUSE_IMPORT_STATEMENT in causes

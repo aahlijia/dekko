@@ -14,6 +14,7 @@ import pytest
 
 from dekko import repo_ops
 from dekko.core import languages
+from dekko.core import resolver
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -96,6 +97,46 @@ def test_extract_misses_propagates_when_retry_also_broken(
     misses = ["main.py", "util.py"]
 
     with pytest.raises(BrokenProcessPool):
+        repo_ops._extract_misses(root, misses, workers=4)
+
+
+# Round 21 Track A: cline reproduced a spawned extraction worker
+# hanging indefinitely at 0% CPU (a worker that resolved a completely
+# different Python interpreter than its own parent and never came
+# up). ``_extract_misses`` now submits each file individually and
+# bounds each future's ``.result()`` with
+# ``resolver.POOL_RESULT_TIMEOUT_S``, so a worker that never returns a
+# result surfaces as ``resolver.PoolStalledError`` instead of hanging
+# forever -- see ``tests/core/test_resolver.py``'s equivalent coverage
+# for ``resolve()``'s own pool call sites.
+
+
+def test_extract_misses_raises_pool_stalled_error_on_stalled_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StalledFuture:
+        def result(self, timeout: float | None = None) -> object:
+            raise TimeoutError("simulated: worker never returned")
+
+    class _StalledPool:
+        def __init__(self, max_workers: int | None = None) -> None:
+            pass
+
+        def __enter__(self) -> "_StalledPool":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            return False
+
+        def submit(self, fn: object, *args: object) -> _StalledFuture:
+            return _StalledFuture()
+
+    monkeypatch.setattr(repo_ops, "_PARALLEL_MIN", 0)
+    monkeypatch.setattr(repo_ops, "ProcessPoolExecutor", _StalledPool)
+    root = FIXTURES / "python"
+    misses = ["main.py", "util.py"]
+
+    with pytest.raises(resolver.PoolStalledError):
         repo_ops._extract_misses(root, misses, workers=4)
 
 
