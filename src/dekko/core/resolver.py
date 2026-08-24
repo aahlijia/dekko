@@ -140,6 +140,24 @@ _INDEX_STEMS = {"__init__", "mod", "lib", "index"}
 # ``_import_match``'s whole-file fallback and
 # ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
 _WHOLE_FILE_IMPORT_LANGUAGES = frozenset({"c", "cpp"})
+# Language groupings that genuinely interoperate within one codebase --
+# a C header routinely declares something only a C++ ``.cc``/``.cpp``
+# implements or calls, and a JS/TS/TSX toolchain routinely shares
+# same-named exports across those three extensions. Mirrors the exact
+# same pairing/triple ``_WHOLE_FILE_IMPORT_LANGUAGES`` and
+# ``_IMPORT_RESOLVERS`` (below) already encode for import resolution --
+# see ``_language_filtered``'s docstring for why this is the boundary
+# a same-bare-name candidate is allowed to cross. Every language with
+# no declared family here (python, rust, go, java, ...) has no such
+# precedent anywhere in the resolver and defaults to a same-language-
+# only singleton family in ``_language_filtered``.
+_LANGUAGE_FAMILIES: dict[str, frozenset[str]] = {
+    "c": frozenset({"c", "cpp"}),
+    "cpp": frozenset({"c", "cpp"}),
+    "javascript": frozenset({"javascript", "typescript", "tsx"}),
+    "typescript": frozenset({"javascript", "typescript", "tsx"}),
+    "tsx": frozenset({"javascript", "typescript", "tsx"}),
+}
 # Every raw-usage shape the shared candidate ladder resolves — a call,
 # a bare-value reference, and a heritage clause all expose the same
 # ``name``/``receiver`` fields and only differ in what table the
@@ -1428,23 +1446,45 @@ def _language_filtered(
     unrecognized call-site path has nothing meaningful to compare
     against) is the source of truth for the call site's own language.
 
-    Falls through to the full, unfiltered ``candidates`` whenever the
-    filter would leave nothing at all — either the call site's own
-    language couldn't be determined, or (a legitimate, if rare, case)
-    every candidate is in a different language than the call site,
-    e.g. a C header declaring something a C++ file uses. Removing
-    candidates that can never legitimately be the right answer must
-    never turn a resolvable call into an unresolvable one.
+    Two-stage narrowing, not a single same-language check: same-
+    language candidates win outright when any exist. Otherwise, the
+    result narrows to ``_LANGUAGE_FAMILIES``' same-*family* candidates
+    — the legitimate cross-language case (a C header declaring
+    something only a C++ ``.cc`` implements/calls; a JS/TS/TSX
+    toolchain sharing exports across those three extensions) that
+    dekko already treats as one interoperating unit elsewhere in this
+    module (``_WHOLE_FILE_IMPORT_LANGUAGES``, ``_IMPORT_RESOLVERS``).
+
+    This **can legitimately return an empty list** — round 21's
+    residual tensorflow finding (`.features/fixes/resolver-vendored-
+    exclusion-false-match.md`): when the real C++ target is itself
+    excluded from the index (e.g. it lives under a vendored/excluded
+    directory like ``third_party/``) and the only remaining bare-name
+    candidate is a same-named symbol in a wholly unrelated language
+    family (e.g. Python), that candidate must never win by default —
+    there is no legitimate precedent anywhere in the resolver for
+    Python answering a C++ call the way C headers answer C++ calls.
+    Removing candidates that can never legitimately be the right
+    answer must never turn a resolvable call into an unresolvable one
+    *when a same-family candidate exists*; a call that can only
+    "resolve" via a definitively unrelated language family is
+    intentionally downgraded to unresolved/ambiguous (via
+    ``_pick_candidate``'s caller falling through to
+    ``_record_ambiguous`` with the original, unfiltered candidate
+    list) rather than answered wrong. A language with no declared
+    family (python, rust, go, java, ...) behaves exactly as before:
+    same-language-or-nothing, since its family is itself alone.
     """
     spec = languages.spec_for_path(call.path)
     if spec is None:
         return candidates
 
     same_language = [c for c in candidates if c.language == spec.name]
-    if not same_language:
-        return candidates
+    if same_language:
+        return same_language
 
-    return same_language
+    family = _LANGUAGE_FAMILIES.get(spec.name, frozenset({spec.name}))
+    return [c for c in candidates if c.language in family]
 
 
 def _pick_candidate(
@@ -1484,13 +1524,23 @@ def _pick_candidate(
     ``_WHOLE_FILE_IMPORT_LANGUAGES``.
 
     Before any of the above runs, ``candidates`` is narrowed to those
-    matching the call site's own language (see ``_language_filtered``)
-    — a same-bare-name candidate in a language that can never
-    legitimately be the target is removed before it gets a chance to
-    win one of the later, weaker heuristics (round 21 tensorflow.md
-    §5). ``same_file`` needs no equivalent filtering: every symbol in
-    it is already, by construction, in the same file (and therefore
-    the same language) as the call site.
+    matching the call site's own language, or failing that its
+    language *family* (see ``_language_filtered`` and
+    ``_LANGUAGE_FAMILIES``) — a same-bare-name candidate in a language
+    that can never legitimately be the target is removed before it
+    gets a chance to win one of the later, weaker heuristics (round 21
+    tensorflow.md §5). This narrowing can leave ``candidates`` empty
+    (no same-language *or* same-family candidate exists), in which
+    case every remaining ladder step below is a no-op over an empty
+    list and this function returns ``None`` — the caller
+    (``_resolve_call``/``_resolve_ref``/``_resolve_one_heritage``)
+    then records the call as ambiguous against the original,
+    unfiltered candidate list, rather than silently resolving through
+    a candidate in a definitively unrelated language family (see
+    `.features/fixes/resolver-vendored-exclusion-false-match.md`).
+    ``same_file`` needs no equivalent filtering: every symbol in it is
+    already, by construction, in the same file (and therefore the
+    same language) as the call site.
     """
     candidates = _language_filtered(call, candidates)
 

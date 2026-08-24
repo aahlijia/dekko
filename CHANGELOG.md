@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.7] — 2026-08-24
+
+### Fixed
+- **Resolver cross-family false matches** — `_language_filtered()`
+  previously fell back to the *full* unfiltered candidate list when
+  no same-language candidate existed in the map index (e.g. because
+  the true definition lives under an excluded `third_party/`-style
+  directory), letting a same-named symbol in an unrelated language
+  win a confident, wrong resolution with no ambiguity disclosure
+  (e.g. a C++ `InvalidArgumentError` falsely resolving to an
+  unrelated Python class). The fallback is now language-family-aware
+  (grouping only genuinely-interoperating languages, e.g. c/cpp,
+  javascript/typescript/tsx) and can legitimately return empty,
+  so a cross-family miss now fails safe into the existing ambiguous
+  bucket instead of silently reporting a wrong fan-in. Legitimate
+  cross-language cases (a C header used from C++) still resolve.
+
 ## [0.43.6] — 2026-08-24
 
 ### Fixed

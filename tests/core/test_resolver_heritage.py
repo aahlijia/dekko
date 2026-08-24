@@ -201,6 +201,51 @@ def test_cross_language_name_collision_no_longer_ambiguous() -> None:
     assert graph.heritage_ambiguous == []
 
 
+def test_cross_family_heritage_miss_lands_in_ambiguous() -> None:
+    """Heritage-path counterpart to ``test_resolve_call_records_cross_
+    family_miss_as_ambiguous`` (`.features/fixes/resolver-vendored-
+    exclusion-false-match.md`): a C++ base-class name with only a
+    same-bare-name, unrelated-language Python candidate (no C/C++
+    family candidate at all -- simulating the real C++ base living
+    outside the map, e.g. under an excluded vendored directory) must
+    land in ``heritage_ambiguous``, not silently resolve to the Python
+    class. ``resolve_heritage`` shares ``_pick_candidate`` with
+    ``resolve()``, so it must get the identical fail-safe guarantee
+    the call-resolution test above pins down."""
+    base_py = Symbol(
+        id="unrelated/base.py::Base",
+        name="Base",
+        qualname="Base",
+        kind="class",
+        path="unrelated/base.py",
+        language="python",
+    )
+    foo = Symbol(
+        id="kernels/foo.cc::Foo",
+        name="Foo",
+        qualname="Foo",
+        kind="class",
+        path="kernels/foo.cc",
+        language="cpp",
+    )
+    files = [
+        FileMap("unrelated/base.py", "python", symbols=[base_py]),
+        FileMap(
+            "kernels/foo.cc",
+            "cpp",
+            symbols=[foo],
+            heritage=[
+                _heritage("kernels/foo.cc::Foo", "kernels/foo.cc", "Base")
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.heritage_out == {}
+    assert graph.heritage_ambiguous == [
+        ("kernels/foo.cc::Foo", "Base", ["unrelated/base.py::Base"])
+    ]
+
+
 def test_bare_name_with_no_in_repo_candidate_is_external() -> None:
     foo = _cls("a.py", "MyModel")
     files = [

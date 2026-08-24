@@ -31,7 +31,11 @@ FIXTURES = Path(__file__).parent.parent / "fixtures"
 
 
 def _fn(
-    path: str, name: str, qual: str | None = None, line: int = 1
+    path: str,
+    name: str,
+    qual: str | None = None,
+    line: int = 1,
+    language: str = "python",
 ) -> Symbol:
     qual = qual or name
     return Symbol(
@@ -40,7 +44,7 @@ def _fn(
         qualname=qual,
         kind="method" if "." in qual else "function",
         path=path,
-        language="python",
+        language=language,
         start_line=line,
         end_line=line + 1,
     )
@@ -266,8 +270,8 @@ def test_reference_resolves_into_referenced_not_calls() -> None:
     # resolve into graph.referenced/_in/_out and nowhere near
     # edges/calls_in/calls_out — the two are deliberately kept apart
     # (see resolver.py's module docstring).
-    handler = _fn("a.ts", "handleClick")
-    wire_up = _fn("b.ts", "wireUp")
+    handler = _fn("a.ts", "handleClick", language="typescript")
+    wire_up = _fn("b.ts", "wireUp", language="typescript")
     files = [
         FileMap("a.ts", "typescript", symbols=[handler]),
         FileMap(
@@ -494,12 +498,17 @@ def test_cpp_call_disambiguated_via_whole_file_include() -> None:
     # always landed in ``ambiguous`` — C++'s ``#include`` has no
     # per-symbol binding, so the ordinary name-keyed import hint could
     # never fire.
-    real = _fn("tensorflow/core/data/rewrite_utils.cc", "GetGrapplerItem")
-    unrelated = _fn("other/pkg/helpers.cc", "GetGrapplerItem")
+    real = _fn(
+        "tensorflow/core/data/rewrite_utils.cc",
+        "GetGrapplerItem",
+        language="cpp",
+    )
+    unrelated = _fn("other/pkg/helpers.cc", "GetGrapplerItem", language="cpp")
     caller = _fn(
         "tensorflow/core/data/rewrite_utils_test.cc",
         "TEST",
         line=86,
+        language="cpp",
     )
     files = [
         FileMap(
@@ -542,9 +551,9 @@ def test_cpp_call_stays_ambiguous_when_no_include_matches() -> None:
     # over-match — when neither candidate's file is actually included
     # by the caller's file, the call stays genuinely ambiguous rather
     # than guessing.
-    a_impl = _fn("a/impl.cc", "Frobnicate")
-    b_impl = _fn("b/impl.cc", "Frobnicate")
-    caller = _fn("caller.cc", "Run")
+    a_impl = _fn("a/impl.cc", "Frobnicate", language="cpp")
+    b_impl = _fn("b/impl.cc", "Frobnicate", language="cpp")
+    caller = _fn("caller.cc", "Run", language="cpp")
     files = [
         FileMap("a/impl.cc", "cpp", symbols=[a_impl]),
         FileMap("b/impl.cc", "cpp", symbols=[b_impl]),
@@ -657,8 +666,10 @@ def test_typed_parameter_call_resolves_to_declared_type_method() -> None:
     # that class's method — not fall into ``ambiguous`` just because
     # another same-named method exists elsewhere in the repo, and not
     # get guessed via the (unrelated) same-file step either.
-    right = _fn("a.ts", "initTask", "Controller.initTask")
-    wrong = _fn("b.ts", "initTask", "Other.initTask")
+    right = _fn(
+        "a.ts", "initTask", "Controller.initTask", language="typescript"
+    )
+    wrong = _fn("b.ts", "initTask", "Other.initTask", language="typescript")
     caller = Symbol(
         id="caller.ts::setup",
         name="setup",
@@ -697,8 +708,10 @@ def test_typed_parameter_call_resolves_to_declared_type_method() -> None:
 def test_typed_parameter_match_strips_generic_wrapper() -> None:
     # A declared type dressed in a common wrapper (``Optional[X]``,
     # ``X | undefined``) must still narrow to the bare class name.
-    right = _fn("a.ts", "initTask", "Controller.initTask")
-    wrong = _fn("b.ts", "initTask", "Other.initTask")
+    right = _fn(
+        "a.ts", "initTask", "Controller.initTask", language="typescript"
+    )
+    wrong = _fn("b.ts", "initTask", "Other.initTask", language="typescript")
     caller = Symbol(
         id="caller.ts::setup",
         name="setup",
@@ -1299,13 +1312,22 @@ def test_explicit_type_receiver_resolves_same_file_new_collision() -> None:
         path="buffer_diff.rs",
         language="rust",
     )
-    buffer_diff_new = _fn("buffer_diff.rs", "new", "BufferDiff.new", line=5)
-    other_new = _fn("buffer_diff.rs", "new", "Other.new", line=20)
+    buffer_diff_new = _fn(
+        "buffer_diff.rs",
+        "new",
+        "BufferDiff.new",
+        line=5,
+        language="rust",
+    )
+    other_new = _fn(
+        "buffer_diff.rs", "new", "Other.new", line=20, language="rust"
+    )
     caller = _fn(
         "buffer_diff.rs",
         "new_with_base_text",
         "BufferDiff.new_with_base_text",
         line=40,
+        language="rust",
     )
     files = [
         FileMap(
@@ -1474,8 +1496,8 @@ def test_reference_resolution_unaffected_by_noise_guard() -> None:
     # noise-listed name resolves exactly as it did before this fix; the
     # fan-in bug this pass targets never affected the separate
     # ``referenced``/``referenced_in`` tables.
-    local = _fn("helpers.ts", "describe")
-    caller = _fn("spec.ts", "run")
+    local = _fn("helpers.ts", "describe", language="typescript")
+    caller = _fn("spec.ts", "run", language="typescript")
     files = [
         FileMap("helpers.ts", "typescript", symbols=[local]),
         FileMap(
@@ -2290,14 +2312,16 @@ def test_language_filtered_drops_candidates_in_a_different_language() -> None:
     assert filtered == [cpp_candidate]
 
 
-def test_language_filtered_falls_through_when_nothing_matches() -> None:
-    """Round 21 (Track D fix approach): removing candidates that can
-    never legitimately be the right answer must never turn a
-    resolvable call into an unresolvable one -- if the language
-    filter would leave *nothing*, it must return the original,
-    unfiltered list instead (e.g. a C header declaring something a
-    C++ file uses, or any other legitimate cross-language case dekko
-    might currently handle some other way)."""
+def test_language_filtered_falls_through_within_c_cpp_family() -> None:
+    """Round 21 residual fix (`.features/fixes/resolver-vendored-
+    exclusion-false-match.md`): when no same-language candidate
+    exists, the fallback narrows to the call site's language *family*
+    rather than the full unfiltered list -- but a legitimate same-
+    family case (a C header declaring something a C++ file uses) must
+    still resolve exactly as before, since c/cpp is one of the two
+    families the resolver already treats as one interoperating unit
+    (mirroring ``_WHOLE_FILE_IMPORT_LANGUAGES``/``_IMPORT_RESOLVERS``).
+    """
     c_header_candidate = Symbol(
         id="a.h::Thing",
         name="Thing",
@@ -2311,6 +2335,55 @@ def test_language_filtered_falls_through_when_nothing_matches() -> None:
     )
     filtered = resolver_mod._language_filtered(call, [c_header_candidate])
     assert filtered == [c_header_candidate]
+
+
+def test_language_filtered_falls_through_within_js_family() -> None:
+    """Same shape as the c/cpp family test above, for the
+    javascript/typescript/tsx family -- no direct test coverage
+    existed for this family before this fix."""
+    ts_candidate = Symbol(
+        id="a.ts::helper",
+        name="helper",
+        qualname="helper",
+        kind="function",
+        path="a.ts",
+        language="typescript",
+    )
+    call = RawCall(
+        caller_id=None,
+        path="caller.tsx",
+        text="helper",
+        name="helper",
+        line=1,
+    )
+    filtered = resolver_mod._language_filtered(call, [ts_candidate])
+    assert filtered == [ts_candidate]
+
+
+def test_language_filtered_returns_empty_across_unrelated_families() -> None:
+    """The literal tensorflow shape: a C++ call site with only a
+    same-bare-name Python candidate (no same-language, no same-family
+    candidate exists at all) must narrow to an empty list, not fall
+    back to the full unfiltered candidates -- python and cpp share no
+    family, so there is no legitimate precedent for python answering
+    a cpp call the way a C header answers a C++ call."""
+    python_candidate = Symbol(
+        id="a.py::InvalidArgumentError",
+        name="InvalidArgumentError",
+        qualname="InvalidArgumentError",
+        kind="class",
+        path="a.py",
+        language="python",
+    )
+    call = RawCall(
+        caller_id=None,
+        path="caller.cc",
+        text="InvalidArgumentError",
+        name="InvalidArgumentError",
+        line=1,
+    )
+    filtered = resolver_mod._language_filtered(call, [python_candidate])
+    assert filtered == []
 
 
 def test_language_filtered_unchanged_for_unrecognized_call_site_path() -> None:
@@ -2334,6 +2407,101 @@ def test_language_filtered_unchanged_for_unrecognized_call_site_path() -> None:
     )
     filtered = resolver_mod._language_filtered(call, [candidate])
     assert filtered == [candidate]
+
+
+def test_pick_candidate_returns_none_when_language_filtered_empty() -> None:
+    """End-to-end ``_pick_candidate`` pin for the tensorflow shape: a
+    C++ call site with only a same-bare-name Python candidate must
+    return ``None`` (defer to ambiguous), not the wrong-language
+    ``Symbol`` -- this exercises every downstream ladder step
+    (receiver-type, typed-param, same-file, import-hint, noise-guard,
+    single-candidate fast path, and the last-resort steps) against an
+    empty ``candidates`` list, pinning down that each one tolerates it
+    rather than assuming they do."""
+    python_candidate = Symbol(
+        id="a.py::InvalidArgumentError",
+        name="InvalidArgumentError",
+        qualname="InvalidArgumentError",
+        kind="class",
+        path="a.py",
+        language="python",
+    )
+    call = RawCall(
+        caller_id=None,
+        path="caller.cc",
+        text="InvalidArgumentError",
+        name="InvalidArgumentError",
+        line=1,
+    )
+    result = resolver_mod._pick_candidate(
+        call,
+        [python_candidate],
+        same_file=[],
+        file_imports={},
+        caller=None,
+        by_name_path={},
+        index={},
+        repo_stems=set(),
+    )
+    assert result is None
+
+
+def test_resolve_call_records_cross_family_miss_as_ambiguous() -> None:
+    """Full ``_resolve_call``/``resolve()`` integration test for the
+    residual tensorflow gap (`.features/fixes/resolver-vendored-
+    exclusion-false-match.md`): the real C++ target lives outside the
+    map entirely (simulating a vendored/excluded directory), leaving
+    only a same-bare-name, unrelated-language Python class as the sole
+    candidate. This must land in ``graph.ambiguous`` -- not silently
+    resolve to the Python symbol as an edge -- so
+    ``query.py``'s existing ambiguous-call disclosure surfaces it
+    instead of reporting a confidently wrong fan-in."""
+    python_class = Symbol(
+        id="tensorflow/python/framework/errors_impl.py::InvalidArgumentError",
+        name="InvalidArgumentError",
+        qualname="InvalidArgumentError",
+        kind="class",
+        path="tensorflow/python/framework/errors_impl.py",
+        language="python",
+    )
+    caller = Symbol(
+        id="tensorflow/core/kernels/foo.cc::Compute",
+        name="Compute",
+        qualname="Compute",
+        kind="method",
+        path="tensorflow/core/kernels/foo.cc",
+        language="cpp",
+    )
+    files = [
+        FileMap(
+            "tensorflow/python/framework/errors_impl.py",
+            "python",
+            symbols=[python_class],
+        ),
+        FileMap(
+            "tensorflow/core/kernels/foo.cc",
+            "cpp",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="tensorflow/core/kernels/foo.cc",
+                    text="errors::InvalidArgumentError",
+                    name="InvalidArgumentError",
+                    line=5,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, python_class.id) not in edges
+    assert edges == set()
+    assert len(graph.ambiguous) == 1
+    ambiguous_caller, ambiguous_name, ambiguous_cands = graph.ambiguous[0]
+    assert ambiguous_caller == caller.id
+    assert ambiguous_name == "InvalidArgumentError"
+    assert ambiguous_cands == [python_class.id]
 
 
 def test_cross_language_bare_call_no_longer_resolves_to_wrong_symbol() -> None:
