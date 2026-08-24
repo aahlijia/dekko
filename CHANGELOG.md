@@ -9,6 +9,29 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.8] — 2026-08-24
+
+### Fixed
+- **`dekko map --jobs 0` hang past the 600s pool-stall timeout under
+  concurrent load** — every `ProcessPoolExecutor` call site (four in
+  `core/resolver.py`, one in `repo_ops.py`) used
+  `with ProcessPoolExecutor(...) as pool:` around a
+  `future.result(timeout=POOL_RESULT_TIMEOUT_S)` loop. When that
+  `.result()` call timed out on a genuinely wedged worker (e.g. a
+  spawned worker that resolved the wrong Python interpreter), the
+  `TimeoutError` unwound out through `__exit__`, which
+  unconditionally calls `shutdown(wait=True)` — blocking
+  indefinitely on the very wedged worker the 600s bound exists to
+  stop waiting for. A round-22 7-repo eval reproduced a 14:53
+  wall-clock hang (well past the documented 600s bound) under
+  genuine concurrent CPU contention. Every call site now owns its
+  pool via `pool = ProcessPoolExecutor(...)` / `try`/`finally:
+  pool.shutdown(wait=False)` instead of `with`, and a new shared
+  `resolver._run_pool_bounded()` helper shuts the pool down without
+  waiting and force-kills any still-alive worker on a timeout before
+  re-raising, so the documented timeout now actually bounds the
+  call's wall-clock time.
+
 ## [0.43.7] — 2026-08-24
 
 ### Fixed

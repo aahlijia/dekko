@@ -1,7 +1,8 @@
 """End-to-end resolution tests over the language fixtures."""
 
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -1843,9 +1844,18 @@ def test_resolve_below_threshold_stays_sequential_by_default() -> None:
 
 def _flaky_pool_factory(fail_times: int) -> type:
     """Build a ``ProcessPoolExecutor``-shaped fake that raises
-    ``BrokenProcessPool`` on ``__enter__`` for its first ``fail_times``
+    ``BrokenProcessPool`` on construction for its first ``fail_times``
     constructions (counted across every instance built from this one
     factory call), then delegates to ``ThreadPoolExecutor``.
+
+    Round 22: every call site now owns its pool via
+    ``pool = ProcessPoolExecutor(...)`` / ``try``/``finally:
+    pool.shutdown(wait=False)`` instead of ``with ProcessPoolExecutor(
+    ...) as pool:`` (see ``_run_pool_bounded``'s docstring for why) --
+    so the failure trigger point moves from ``__enter__`` to
+    ``__init__``, and ``submit``/``shutdown`` delegate straight to the
+    real ``ThreadPoolExecutor`` instead of relying on context-manager
+    protocol.
 
     Accepts (and forwards) ``initializer``/``initargs`` the same way
     ``ProcessPoolExecutor`` does (round 17: ``_resolve_all`` and its
@@ -1865,26 +1875,22 @@ def _flaky_pool_factory(fail_times: int) -> type:
             initializer: object = None,
             initargs: tuple = (),
         ) -> None:
-            self._max_workers = max_workers
-            self._initializer = initializer
-            self._initargs = initargs
-            self._real: ThreadPoolExecutor | None = None
-
-        def __enter__(self) -> "_FlakyPool | ThreadPoolExecutor":
             state["calls"] += 1
             if state["calls"] <= fail_times:
                 raise BrokenProcessPool("simulated: process pool broken")
             self._real = ThreadPoolExecutor(
-                max_workers=self._max_workers,
-                initializer=self._initializer,
-                initargs=self._initargs,
+                max_workers=max_workers,
+                initializer=initializer,
+                initargs=initargs,
             )
-            return self._real.__enter__()
 
-        def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-            if self._real is not None:
-                return bool(self._real.__exit__(exc_type, exc, tb))
-            return False
+        def submit(self, fn: object, *args: object) -> object:
+            return self._real.submit(fn, *args)
+
+        def shutdown(
+            self, wait: bool = True, *, cancel_futures: bool = False
+        ) -> None:
+            self._real.shutdown(wait=wait, cancel_futures=cancel_futures)
 
     return _FlakyPool
 
@@ -2059,6 +2065,11 @@ def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
         ) -> None:
             if initializer is not None:
                 initializer(*initargs)
+            # ``_run_pool_bounded`` reads the private ``_processes``
+            # attribute (dict of pid -> Process) to force-kill any
+            # still-wedged worker after a timeout -- empty here since
+            # this fake never launches a real subprocess.
+            self._processes: dict = {}
 
         def __enter__(self) -> "_StalledPool":
             return self
@@ -2069,12 +2080,87 @@ def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
         def submit(self, fn: object, *args: object) -> _StalledFuture:
             return _StalledFuture()
 
+        def shutdown(
+            self, wait: bool = True, *, cancel_futures: bool = False
+        ) -> None:
+            pass
+
     monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
     monkeypatch.setattr(resolver_mod, "ProcessPoolExecutor", _StalledPool)
     files = _multi_file_call_fixture()
 
     with pytest.raises(resolver_mod.PoolStalledError):
         resolve(files, workers=4)
+
+
+# Round 22 claude-code.md §1: the tests above all mock the pool away
+# (``_StalledPool``/``_flaky_pool_factory``), so none of them ever let
+# a timeout unwind through a *real* ``ProcessPoolExecutor``'s
+# context-manager exit -- which is exactly the gap that let the bug
+# ship. ``ProcessPoolExecutor.__exit__`` unconditionally calls
+# ``shutdown(wait=True)``, which blocks until every worker the pool
+# ever launched terminates; a genuinely wedged worker never does, so
+# the 600s ``POOL_RESULT_TIMEOUT_S`` bound was reached but then masked
+# by an unbounded wait immediately afterward. These two tests exercise
+# ``_run_pool_bounded`` (the fix: pool owned via ``try``/``finally``
+# instead of ``with``, timeout tears the pool down with
+# ``wait=False`` and force-kills any still-alive worker) against a
+# real pool and a worker that never returns, asserting the *timing*
+# guarantee -- bounded wall-clock return, and no leaked live worker
+# processes -- not just the exception type.
+
+
+def _sleep_worker(seconds: float) -> str:
+    """Module-level (spawn-picklable) worker that sleeps far longer
+    than the test-scale timeout below it, standing in for a wedged
+    worker process that never completes on its own."""
+    time.sleep(seconds)
+    return "done"
+
+
+def test_run_pool_bounded_returns_promptly_on_real_pool_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "POOL_RESULT_TIMEOUT_S", 0.3)
+    pool = ProcessPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(_sleep_worker, 30.0)
+        start = time.monotonic()
+        with pytest.raises(PoolTimeoutError):
+            resolver_mod._run_pool_bounded(pool, [future])
+        elapsed = time.monotonic() - start
+        # Well under the 30s the worker is actually sleeping for --
+        # before the fix, this would have blocked for the full 30s
+        # (or longer) inside ``__exit__``'s ``shutdown(wait=True)``.
+        assert elapsed < 5.0
+    finally:
+        pool.shutdown(wait=False)
+
+
+def test_run_pool_bounded_kills_wedged_worker_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "POOL_RESULT_TIMEOUT_S", 0.3)
+    pool = ProcessPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(_sleep_worker, 30.0)
+        # Snapshot the worker process handles before calling, since
+        # ``_run_pool_bounded`` (via ``pool.shutdown()``) clears
+        # ``pool._processes`` to ``None`` as part of its own teardown.
+        while not pool._processes:
+            time.sleep(0.01)
+        procs = list(pool._processes.values())
+        assert procs, "expected at least one worker process to check"
+
+        with pytest.raises(PoolTimeoutError):
+            resolver_mod._run_pool_bounded(pool, [future])
+
+        deadline = time.monotonic() + 5.0
+        while any(p.is_alive() for p in procs) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not any(p.is_alive() for p in procs)
+    finally:
+        pool.shutdown(wait=False)
 
 
 def test_resolve_parallel_retries_once_on_broken_pool(

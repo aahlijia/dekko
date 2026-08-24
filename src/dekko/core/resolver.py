@@ -102,7 +102,7 @@ import posixpath
 import re
 import sys
 from collections.abc import Callable, Iterator
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
@@ -335,6 +335,70 @@ def run_pooled_with_retry(
             "Retry with --jobs 1, or after system load has "
             "subsided."
         ) from exc
+
+
+def _run_pool_bounded(
+    pool: ProcessPoolExecutor, futures: list["Future[_PoolResultT]"]
+) -> list[_PoolResultT]:
+    """Collect every future's result, each bounded by
+    ``POOL_RESULT_TIMEOUT_S`` -- and, on a timeout, tear the pool down
+    without waiting on wedged workers, instead of letting the call
+    site's ``with ProcessPoolExecutor(...) as pool:`` block on
+    ``ProcessPoolExecutor.__exit__``'s default ``shutdown(wait=True)``.
+
+    Round 22 claude-code.md finding: every pool call site used to be a
+    bare ``with ProcessPoolExecutor(...) as pool:`` around a
+    ``future.result(timeout=POOL_RESULT_TIMEOUT_S)`` loop. When that
+    ``.result()`` call raised ``PoolTimeoutError``, the exception
+    unwound out through ``__exit__``, which unconditionally calls
+    ``shutdown(wait=True)`` -- and ``wait=True`` blocks until every
+    worker process the pool ever launched actually terminates and is
+    joined. A genuinely wedged worker (spawned but never running --
+    exactly the failure ``POOL_RESULT_TIMEOUT_S`` exists to bound)
+    never self-terminates, so the pool hung indefinitely *after* the
+    600s bound was already hit, silently, with zero output -- the
+    documented timeout never actually protected anyone. This function
+    is called with the pool built and owned by the caller (no ``with``
+    statement involved), so a timeout here can shut the pool down
+    without waiting and forcibly kill any still-wedged worker before
+    re-raising, rather than blocking on them.
+
+    Args:
+        pool: An already-constructed, not-yet-``with``-entered pool
+            (the caller owns its lifecycle via ``try``/``finally``).
+        futures: Futures already submitted to ``pool``.
+
+    Returns:
+        Each future's result, in submission order.
+
+    Raises:
+        PoolTimeoutError: If any future doesn't resolve within
+            ``POOL_RESULT_TIMEOUT_S`` -- after tearing the pool down.
+    """
+    try:
+        return [f.result(timeout=POOL_RESULT_TIMEOUT_S) for f in futures]
+    except PoolTimeoutError:
+        # ``_processes`` is a private ``concurrent.futures.process``
+        # attribute (dict of pid -> multiprocessing.Process) -- there
+        # is no public API to force-kill an already-launched-but-
+        # wedged worker; ``shutdown()`` alone only stops the pool from
+        # accepting new work, it doesn't touch a worker that never
+        # started running. A future CPython release could rename this
+        # attribute, in which case this becomes a no-op (the
+        # ``AttributeError`` is deliberately not caught here so that
+        # shows up loudly rather than silently reverting to the old
+        # hang) -- see the accompanying test that exercises this exact
+        # branch against a real ``ProcessPoolExecutor``. Snapshotted
+        # *before* ``shutdown()`` -- ``shutdown()`` clears
+        # ``self._processes`` to ``None`` as part of its own teardown
+        # regardless of ``wait``, so reading it after would always see
+        # ``None``.
+        procs = list(pool._processes.values())
+        pool.shutdown(wait=False, cancel_futures=True)
+        for proc in procs:
+            if proc.is_alive():
+                proc.kill()
+        raise
 
 
 # Worker-process-local copies of the shared, read-only indices every
@@ -620,7 +684,7 @@ def _resolve_all(
         edges: dict[tuple[str, str], set[int]] = {}
         ambiguous: dict[tuple[str, str], list[str]] = {}
         external: dict[tuple[str, str], set[int]] = {}
-        with ProcessPoolExecutor(
+        pool = ProcessPoolExecutor(
             max_workers=w,
             initializer=_init_resolve_worker,
             initargs=(
@@ -630,21 +694,25 @@ def _resolve_all(
                 repo_stems,
                 symbols_by_id,
             ),
-        ) as pool:
+        )
+        try:
             futures = [
                 pool.submit(_resolve_files_chunk_worker, chunk)
                 for chunk in chunks
             ]
-            for future in futures:
-                chunk_edges, chunk_ambiguous, chunk_external = future.result(
-                    timeout=POOL_RESULT_TIMEOUT_S
-                )
+            for (
+                chunk_edges,
+                chunk_ambiguous,
+                chunk_external,
+            ) in _run_pool_bounded(pool, futures):
                 for key, lines in chunk_edges.items():
                     edges.setdefault(key, set()).update(lines)
                 for key, cands in chunk_ambiguous.items():
                     ambiguous.setdefault(key, cands)
                 for key, lines in chunk_external.items():
                     external.setdefault(key, set()).update(lines)
+        finally:
+            pool.shutdown(wait=False)
         return edges, ambiguous, external
 
     return run_pooled_with_retry(_run, workers, "call resolution")
@@ -738,7 +806,7 @@ def resolve_refs(
             )
 
         edges: dict[tuple[str, str], set[int]] = {}
-        with ProcessPoolExecutor(
+        pool = ProcessPoolExecutor(
             max_workers=w,
             initializer=_init_resolve_worker,
             initargs=(
@@ -748,15 +816,17 @@ def resolve_refs(
                 None,
                 symbols_by_id,
             ),
-        ) as pool:
+        )
+        try:
             futures = [
                 pool.submit(_resolve_refs_chunk_worker, chunk)
                 for chunk in chunks
             ]
-            for future in futures:
-                result = future.result(timeout=POOL_RESULT_TIMEOUT_S)
+            for result in _run_pool_bounded(pool, futures):
                 for key, lines in result.items():
                     edges.setdefault(key, set()).update(lines)
+        finally:
+            pool.shutdown(wait=False)
         return edges
 
     edges = run_pooled_with_retry(_run, workers, "reference resolution")
@@ -1165,19 +1235,19 @@ def resolve_throws(
         ambiguous: dict[tuple[str, str], list[str]] = {}
         external: dict[tuple[str, str], set[int]] = {}
         bare: list[tuple[str, str, int]] = []
-        with ProcessPoolExecutor(
+        pool = ProcessPoolExecutor(
             max_workers=w,
             initializer=_init_resolve_worker,
             initargs=(index, by_name_path, imports_by_file, None, None),
-        ) as pool:
+        )
+        try:
             futures = [
                 pool.submit(_resolve_throws_chunk_worker, chunk)
                 for chunk in chunks
             ]
-            for future in futures:
-                c_edges, c_ambiguous, c_external, c_bare = future.result(
-                    timeout=POOL_RESULT_TIMEOUT_S
-                )
+            for c_edges, c_ambiguous, c_external, c_bare in _run_pool_bounded(
+                pool, futures
+            ):
                 for key, lines in c_edges.items():
                     edges.setdefault(key, set()).update(lines)
                 for key, cands in c_ambiguous.items():
@@ -1185,6 +1255,8 @@ def resolve_throws(
                 for key, lines in c_external.items():
                     external.setdefault(key, set()).update(lines)
                 bare.extend(c_bare)
+        finally:
+            pool.shutdown(wait=False)
         return edges, ambiguous, external, bare
 
     edges, ambiguous, external, bare = run_pooled_with_retry(
@@ -1305,17 +1377,20 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
             )
 
         sites: list[CatchSite] = []
-        with ProcessPoolExecutor(
+        pool = ProcessPoolExecutor(
             max_workers=w,
             initializer=_init_resolve_worker,
             initargs=(index, by_name_path, imports_by_file, None, None),
-        ) as pool:
+        )
+        try:
             futures = [
                 pool.submit(_resolve_catches_chunk_worker, chunk)
                 for chunk in chunks
             ]
-            for future in futures:
-                sites.extend(future.result(timeout=POOL_RESULT_TIMEOUT_S))
+            for chunk_sites in _run_pool_bounded(pool, futures):
+                sites.extend(chunk_sites)
+        finally:
+            pool.shutdown(wait=False)
         return sites
 
     sites = run_pooled_with_retry(_run, workers, "catch resolution")
