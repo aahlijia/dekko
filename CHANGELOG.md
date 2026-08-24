@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.6] — 2026-08-24
+
+### Fixed
+- **Plugin manifest version drift** — `integrations/claude/.claude-plugin/plugin.json`
+  and `marketplace.json` had fallen out of sync with `pyproject.toml`
+  (stuck at 0.43.3 across the 0.43.4/0.43.5 bumps). Synced both to the
+  current version.
+
+### Added
+- **`scripts/sync_plugin_version.py`** — syncs the plugin manifests to
+  `pyproject.toml`'s version (no-arg mode), or bumps all three plus
+  `uv.lock` together (version-arg mode), so manifest drift can't
+  recur on a future release.
+- **`sync-plugin-version` pre-commit hook** — runs the sync script in
+  check mode, mirroring the existing `uv-lock` hook's shape.
+- **Release-workflow manifest check** — `release.yml`'s `build` job
+  now verifies the plugin manifests match the release tag before a
+  release proceeds.
+
 ## [0.43.5] — 2026-08-24
 
 ### Fixed

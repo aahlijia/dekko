@@ -9,6 +9,7 @@ project, you agree to abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
 git clone https://github.com/aahlijia/dekko.git
 cd dekko
 uv sync --extra all        # include Tier-2 grammars + tokenizer
+pre-commit install         # local hooks: ruff, dekko map, uv.lock/plugin-version sync
 uv run pytest              # test suite
 uv run ruff check .        # lint
 uv run ruff format --check .  # format check
@@ -42,6 +43,19 @@ Releases are cut by pushing a `v*` tag to `main`; `.github/workflows/release.yml
 builds and publishes to PyPI via [trusted publishing](https://docs.pypi.org/trusted-publishers/).
 The trusted publisher for `aahlijia/dekko` must be configured on PyPI first.
 See [CHANGELOG.md](CHANGELOG.md) for per-version history.
+
+The version is declared in four places that must all agree
+(`pyproject.toml`, `plugin.json`, `marketplace.json`, `uv.lock`) --
+`tests/test_version.py::test_declared_versions_agree` checks this.
+Bump the version with `scripts/sync_plugin_version.py <new-version>`
+rather than hand-editing `pyproject.toml`; it updates `pyproject.toml`,
+both plugin manifests, and `uv.lock` together. If `pyproject.toml`
+still ends up hand-edited (e.g. a merge conflict resolution), the
+`sync-plugin-version` pre-commit hook re-syncs the plugin manifests to
+it automatically on commit, the same way the existing `uv-lock` hook
+already keeps `uv.lock` in sync. `release.yml`'s `build` job is the
+last line of defense: it fails the release if the plugin manifests
+don't match the tag being released.
 
 ## Reporting issues
 

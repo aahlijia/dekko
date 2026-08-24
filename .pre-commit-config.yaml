@@ -21,3 +21,10 @@ repos:
         language: system
         pass_filenames: false
         files: ^pyproject\.toml$
+
+      - id: sync-plugin-version
+        name: sync plugin.json/marketplace.json version with pyproject.toml
+        entry: uv run python scripts/sync_plugin_version.py
+        language: system
+        pass_filenames: false
+        files: ^pyproject\.toml$
