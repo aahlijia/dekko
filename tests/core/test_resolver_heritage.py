@@ -381,6 +381,140 @@ def test_type_fixture_repo_resolves(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------
+def test_cpp_heritage_disambiguated_via_whole_file_include() -> None:
+    """Round 22 tensorflow.md §5 (``resolve_heritage`` never built or
+    threaded ``raw_imports`` at all, unlike ``_resolve_files_chunk``'s
+    call-resolution path — see ``test_resolver.py::
+    test_cpp_call_disambiguated_via_whole_file_include`` for the
+    call-path counterpart this mirrors). Two files each declare an
+    unrelated, same-bare-name ``OpKernel`` class; a third file
+    ``#include``s only one of them and declares ``class Derived :
+    public OpKernel {}`` — no receiver, no same-file, no per-name
+    import hint (C++ ``#include`` binds no single symbol name), so
+    only the whole-file-include fallback can disambiguate. Before
+    threading ``raw_imports`` through, this always landed in
+    ``heritage_ambiguous``."""
+    real = Symbol(
+        id="kernels/op_kernel.h::OpKernel",
+        name="OpKernel",
+        qualname="OpKernel",
+        kind="class",
+        path="kernels/op_kernel.h",
+        language="cpp",
+    )
+    unrelated = Symbol(
+        id="other/pkg/kernel_base.h::OpKernel",
+        name="OpKernel",
+        qualname="OpKernel",
+        kind="class",
+        path="other/pkg/kernel_base.h",
+        language="cpp",
+    )
+    derived = Symbol(
+        id="kernels/my_op.cc::MyOp",
+        name="MyOp",
+        qualname="MyOp",
+        kind="class",
+        path="kernels/my_op.cc",
+        language="cpp",
+    )
+    files = [
+        FileMap("kernels/op_kernel.h", "cpp", symbols=[real]),
+        FileMap("other/pkg/kernel_base.h", "cpp", symbols=[unrelated]),
+        FileMap(
+            "kernels/my_op.cc",
+            "cpp",
+            symbols=[derived],
+            imports=[
+                Import(
+                    path="kernels/my_op.cc",
+                    name="op_kernel",
+                    source="kernels/op_kernel.h",
+                )
+            ],
+            heritage=[
+                _heritage(
+                    "kernels/my_op.cc::MyOp",
+                    "kernels/my_op.cc",
+                    "OpKernel",
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.heritage_out["kernels/my_op.cc::MyOp"] == [
+        "kernels/op_kernel.h::OpKernel"
+    ]
+    assert graph.heritage_ambiguous == []
+
+
+def test_cpp_heritage_stays_ambiguous_when_no_include_matches() -> None:
+    """Regression guard mirroring ``test_resolver.py::
+    test_cpp_call_stays_ambiguous_when_no_include_matches``: the
+    whole-file-include fallback must not fire when nothing in the
+    file's own ``#include`` list matches either candidate — the clause
+    must still land in ``heritage_ambiguous``, not guess."""
+    real = Symbol(
+        id="kernels/op_kernel.h::OpKernel",
+        name="OpKernel",
+        qualname="OpKernel",
+        kind="class",
+        path="kernels/op_kernel.h",
+        language="cpp",
+    )
+    unrelated = Symbol(
+        id="other/pkg/kernel_base.h::OpKernel",
+        name="OpKernel",
+        qualname="OpKernel",
+        kind="class",
+        path="other/pkg/kernel_base.h",
+        language="cpp",
+    )
+    derived = Symbol(
+        id="kernels/my_op.cc::MyOp",
+        name="MyOp",
+        qualname="MyOp",
+        kind="class",
+        path="kernels/my_op.cc",
+        language="cpp",
+    )
+    files = [
+        FileMap("kernels/op_kernel.h", "cpp", symbols=[real]),
+        FileMap("other/pkg/kernel_base.h", "cpp", symbols=[unrelated]),
+        FileMap(
+            "kernels/my_op.cc",
+            "cpp",
+            symbols=[derived],
+            imports=[
+                Import(
+                    path="kernels/my_op.cc",
+                    name="unrelated_header",
+                    source="kernels/unrelated_header.h",
+                )
+            ],
+            heritage=[
+                _heritage(
+                    "kernels/my_op.cc::MyOp",
+                    "kernels/my_op.cc",
+                    "OpKernel",
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.heritage_out == {}
+    assert graph.heritage_ambiguous == [
+        (
+            "kernels/my_op.cc::MyOp",
+            "OpKernel",
+            [
+                "kernels/op_kernel.h::OpKernel",
+                "other/pkg/kernel_base.h::OpKernel",
+            ],
+        )
+    ]
+
+
 # Phase 2: Rust / C++ (real extraction, end to end through resolve())
 
 

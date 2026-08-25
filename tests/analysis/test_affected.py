@@ -58,6 +58,32 @@ BASE = {
 }
 
 
+# Round 22 claude-buddy.md §2.1 (carried unfixed from rounds 20/21): a
+# repo-local ``server/path.ts`` collides by stem with Node's builtin
+# ``path`` module -- five unrelated files merely do ``import { join }
+# from "path"`` (Node's core module), and one genuinely imports the
+# repo's own ``path.ts`` via a relative specifier.
+NODE_BUILTIN_COLLISION = {
+    "server/path.ts": (
+        "export function resolvePath(): number {\n    return 1;\n}\n"
+    ),
+    "server/path.test.ts": (
+        'import { resolvePath } from "./path";\n\nconst ref = resolvePath;\n'
+    ),
+    "server/a.test.ts": 'import { join } from "path";\n\nconst ref = join;\n',
+    "server/b.test.ts": 'import { join } from "path";\n\nconst ref = join;\n',
+    "server/c.test.ts": 'import { join } from "path";\n\nconst ref = join;\n',
+    "server/d.test.ts": 'import { join } from "path";\n\nconst ref = join;\n',
+    "server/e.test.ts": 'import { join } from "path";\n\nconst ref = join;\n',
+}
+
+
+def _change_resolve_path(root: Path) -> None:
+    (root / "server/path.ts").write_text(
+        "export function resolvePath(): number {\n    return 2;\n}\n"
+    )
+
+
 def _git(root: Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(root), *args], check=True, capture_output=True
@@ -120,6 +146,28 @@ def test_tiers_direct_transitive_import(
     assert "[transitive] tests/test_transitive.py" in out
     assert "[import] tests/test_import_only.py" in out
     assert "test_unrelated.py" not in out
+
+
+def test_node_builtin_module_name_collision_not_falsely_impacted(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # The single most-repeated, longest-standing correctness gap in
+    # dekko's own eval history (3 consecutive rounds, per round 22's
+    # implementation guide item 3): a change to a repo-local
+    # ``server/path.ts`` must impact only the file that genuinely
+    # imports it (``./path``), not every unrelated file that happens
+    # to import Node's builtin ``path`` module by its bare specifier.
+    root = _repo(tmp_path, NODE_BUILTIN_COLLISION)
+    _change_resolve_path(root)
+
+    assert cli.main(["affected", "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "server/path.test.ts" in out
+    assert "server/a.test.ts" not in out
+    assert "server/b.test.ts" not in out
+    assert "server/c.test.ts" not in out
+    assert "server/d.test.ts" not in out
+    assert "server/e.test.ts" not in out
 
 
 def test_affected_rev_cache_hit_skips_reexport(

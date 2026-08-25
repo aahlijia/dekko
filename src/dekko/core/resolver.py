@@ -939,6 +939,9 @@ def resolve_heritage(
     external: dict[tuple[str, str], set[int]] = {}
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
+        raw_imports = (
+            fm.imports if fm.language in _WHOLE_FILE_IMPORT_LANGUAGES else None
+        )
         for h in fm.heritage:
             _resolve_one_heritage(
                 h,
@@ -950,6 +953,7 @@ def resolve_heritage(
                 relations,
                 ambiguous,
                 external,
+                raw_imports=raw_imports,
             )
 
     heritage_edges = [
@@ -996,12 +1000,24 @@ def _resolve_one_heritage(
     relations: dict[tuple[str, str], str],
     ambiguous: dict[tuple[str, str], list[str]],
     external: dict[tuple[str, str], set[int]],
+    raw_imports: list[Import] | None = None,
 ) -> None:
     """Resolve one heritage clause; mirrors ``_resolve_call``'s shape.
 
     Candidates are pre-filtered to ``TYPE_KINDS`` at every step (the
     bare-name index lookup, the same-file lookup, and the alias-import
     recovery) before ``_pick_candidate``'s ladder runs.
+
+    ``raw_imports``, when given, is the declaring file's full
+    (undeduped) import list for whole-file-include languages (C/C++)
+    -- mirrors ``_resolve_files_chunk``'s call-resolution path. Without
+    it, ``_pick_candidate``'s ``_import_match`` step has no way to
+    disambiguate a same-named C/C++ heritage base via "which one does
+    this file's own ``#include`` list actually pull in," which is the
+    *only* signal available for that language pair (round 22
+    tensorflow.md §5: ``resolve_heritage`` never built or threaded this
+    at all, unlike ``_resolve_files_chunk``, losing 828 of ~829 real
+    ``OpKernel`` subtype edges to ``ambiguous``).
     """
     if _receiver_is_external(h, file_imports, repo_stems):
         external.setdefault((h.subtype_id, h.text), set()).add(h.line)
@@ -1037,7 +1053,11 @@ def _resolve_one_heritage(
         by_name_path,
         index,
         repo_stems,
+        raw_imports,
     )
+    if target is _NOISE:
+        external.setdefault((h.subtype_id, h.text), set()).add(h.line)
+        return
     if target is not None:
         _add_heritage_edge(h, target.id, edges, relations)
         return
@@ -1442,6 +1462,9 @@ def _resolve_call(
         repo_stems,
         raw_imports,
     )
+    if target is _NOISE:
+        external.setdefault((caller_id, call.text), set()).add(call.line)
+        return
     if target is not None:
         _add_call_and_constructor(
             caller_id, target, call.line, by_name_path, edges
@@ -1562,6 +1585,19 @@ def _language_filtered(
     return [c for c in candidates if c.language in family]
 
 
+class _Noise:
+    """Sentinel: ``_pick_candidate`` determined this call is noise
+    (``_is_noise_call`` fired), not a genuine multi-candidate collision
+    -- distinguishes the two ``None``-shaped outcomes so the caller can
+    bucket correctly (round 22 cline.md §3.1: a noise-suppressed call
+    with exactly one real candidate used to be recorded as ambiguous,
+    identically to a real 2+-candidate collision, since both paths
+    returned bare ``None``)."""
+
+
+_NOISE = _Noise()
+
+
 def _pick_candidate(
     call: _Referable,
     candidates: list[Symbol],
@@ -1572,7 +1608,7 @@ def _pick_candidate(
     index: dict[str, list[Symbol]],
     repo_stems: set[str] | None = None,
     raw_imports: list[Import] | None = None,
-) -> Symbol | None:
+) -> Symbol | _Noise | None:
     """Apply the resolution ladder; ``None`` means ambiguous.
 
     Shared by ``_resolve_call`` and ``_resolve_ref`` — ``call`` is
@@ -1588,10 +1624,25 @@ def _pick_candidate(
     an in-repo type rather than a variable.
 
     ``repo_stems`` gates the built-in/global-name noise check (see
-    ``_is_noise_call``) — only ``_resolve_call`` passes it, so
-    ``_resolve_ref``'s reference resolution (a separate table from
-    ``calls_in``/fan-in, not affected by the bug this check targets)
-    is left byte-for-byte unchanged.
+    ``_is_noise_call``) — ``_resolve_call`` and ``_resolve_one_heritage``
+    both pass it (the latter's own candidates are pre-filtered to
+    ``TYPE_KINDS``, so the check rarely fires there in practice, but it
+    is reachable); ``_resolve_ref`` never does, so ``_resolve_ref``'s
+    reference resolution (a separate table from ``calls_in``/fan-in,
+    not affected by the bug this check targets) is left byte-for-byte
+    unchanged.
+
+    When the noise guard fires, this returns the ``_NOISE`` sentinel
+    rather than ``None`` — distinct from "genuinely ambiguous, 2+ real
+    candidates with no disambiguating signal" (round 22 cline.md §3.1:
+    a noise-suppressed call with exactly *one* real candidate was
+    previously indistinguishable from a real ambiguous collision, since
+    both returned bare ``None``, so every noise-suppressed call got
+    recorded via ``_record_ambiguous`` — contradicting that function's
+    own "2+ candidates" docstring and inflating the ambiguous count on
+    common built-in method names like ``trim``). Callers that pass a
+    non-``None`` ``repo_stems`` must check for ``_NOISE`` before
+    treating a non-``None`` return as a resolved ``Symbol``.
 
     ``raw_imports``, when given, is the calling file's full (undeduped)
     import list — passed only for whole-file-include languages
@@ -1652,7 +1703,7 @@ def _pick_candidate(
     if repo_stems is not None and _is_noise_call(
         call, file_imports, repo_stems
     ):
-        return None
+        return _NOISE
 
     if len(candidates) == 1:
         return candidates[0]
@@ -1754,6 +1805,11 @@ _AMBIENT_GLOBAL_NAMES = frozenset(
 # provably typed as the repo's own like-named class. See the same
 # investigation report: cline's ``trim`` (fan-in 1,404, true fan-in 8)
 # was almost entirely misattributed ``String.prototype.trim()`` calls.
+# ``get``/``resolve``/``create`` added round 22 (cline.md §3.1): confirmed
+# leaking through with inflated ``avg_candidates`` in cline's own report
+# (``get`` averaged 32.0 candidates -- almost certainly
+# ``Map.get()``/``Promise.resolve()``/``Object.create()`` noise, not real
+# repo-symbol collisions).
 _BUILTIN_METHOD_NAMES = frozenset(
     {
         "trim", "trimStart", "trimEnd", "toString", "valueOf",
@@ -1762,6 +1818,7 @@ _BUILTIN_METHOD_NAMES = frozenset(
         "forEach", "map", "filter", "reduce", "startsWith", "endsWith",
         "padStart", "padEnd", "repeat", "charAt", "substring",
         "replace", "replaceAll", "split", "flat", "hasOwnProperty",
+        "get", "resolve", "create",
     }
 )  # fmt: skip
 
@@ -1825,6 +1882,28 @@ _RUST_STD_METHOD_NAMES = frozenset(
         "is_none", "is_ok", "is_err", "ok", "err", "take", "replace",
     }
 )  # fmt: skip
+
+# Node's core module names -- a bare (non-relative) JS/TS import source
+# exactly matching one of these is never a same-named local file,
+# regardless of stem collision (round 22 claude-buddy.md §2.1: `import
+# { join } from "path"` was matching a repo's own `server/path.ts`
+# purely on stem equality, inflating `affected`/`workset`'s impacted-
+# test count with false positives across three consecutive rounds).
+# Deliberately short: only names common enough to plausibly collide
+# with a real repo module name are worth hard-coding here; extend as
+# new collisions turn up, same maintenance model as
+# ``_BUILTIN_METHOD_NAMES``.
+_NODE_BUILTIN_MODULE_NAMES = frozenset(
+    {
+        "path", "fs", "os", "util", "events", "stream", "crypto",
+        "http", "https", "net", "url", "querystring", "buffer",
+        "child_process", "assert", "zlib", "readline", "dns", "tls",
+        "cluster", "timers", "string_decoder", "vm", "module",
+        "constants", "worker_threads", "perf_hooks",
+    }
+)  # fmt: skip
+
+_JS_TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
 
 def _is_noise_call(
@@ -2326,7 +2405,34 @@ def _module_matches(source: str, candidate_path: str) -> bool:
     Returns:
         True when the file's stem (or its directory, for index files
         like ``__init__.py`` / ``mod.rs``) appears in the source.
+
+    A *bare* (non-relative) JS/TS import source naming a Node core
+    module (``_NODE_BUILTIN_MODULE_NAMES``) never matches, regardless
+    of stem collision -- round 22 claude-buddy.md §2.1: ``import {
+    join } from "path"`` was matching a repo's own ``server/path.ts``
+    purely because both reduce to the segment ``"path"``. A genuine
+    relative import (``"./path"``) is unaffected -- only the bare
+    specifier is denylisted -- and the ``candidate_path`` extension
+    gate keeps this JS/TS-only, leaving every other language's
+    stem-matching untouched.
+
+    Checked against ``source.split("/", 1)[0]``, not the whole
+    ``source`` string -- ``extractor._imports_js`` encodes every
+    *named* import's ``source`` as ``f"{module}/{name}"`` (e.g.
+    ``"path/join"`` for the ``join`` example above, confirmed via
+    direct extraction: only the rarer side-effect-import shape
+    (``import "path";``, no local binding) keeps ``source`` as the
+    bare module string with no suffix). Comparing the whole string
+    against the denylist would silently miss every named/default/
+    namespace import -- the dominant shape in the actual claude-buddy
+    repro -- and only catch the side-effect case.
     """
+    if (
+        not source.startswith((".", "/"))
+        and source.split("/", 1)[0] in _NODE_BUILTIN_MODULE_NAMES
+        and candidate_path.endswith(_JS_TS_EXTENSIONS)
+    ):
+        return False
     stem = _repo_stem(PurePosixPath(candidate_path))
     return stem in _import_segments(source)
 

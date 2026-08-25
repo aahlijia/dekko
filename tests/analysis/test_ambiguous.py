@@ -50,6 +50,19 @@ CANDIDATE_CAP_FILES = {
 }
 CANDIDATE_CAP_FILES["caller.py"] = "def entry() -> int:\n    return dup()\n"
 
+# Round 22 cline.md §3.1: exactly one real repo-wide ``trim`` symbol; a
+# call through an untyped local variable (``opts.config.trim()``) is
+# really JS's built-in ``String.prototype.trim()``, not the repo
+# symbol -- must never surface in ``dekko ambiguous`` at all (not even
+# with 1 candidate), since the noise guard should route it to
+# ``external`` before it ever reaches the ambiguous bucket.
+BUILTIN_NOISE_CALL = {
+    "util.ts": "export function trim(): number {\n    return 1;\n}\n",
+    "caller.ts": (
+        "export function run(opts: any): void {\n    opts.config.trim();\n}\n"
+    ),
+}
+
 
 def _many_ambiguous_names(n: int) -> dict[str, str]:
     """A fixture with ``n`` distinct bare-name collisions, one caller."""
@@ -385,6 +398,15 @@ def test_ambiguous_no_tests_excludes_test_caller(
 
     no_tests = cli.main(["ambiguous", "--root", str(root), "--no-tests"])
     assert no_tests == 0
+    assert "no ambiguous call sites" in capsys.readouterr().out
+
+
+def test_ambiguous_builtin_method_noise_not_listed(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(BUILTIN_NOISE_CALL)
+    code = cli.main(["ambiguous", "--root", str(root)])
+    assert code == 0
     assert "no ambiguous call sites" in capsys.readouterr().out
 
 
