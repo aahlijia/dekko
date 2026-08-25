@@ -78,6 +78,43 @@ def test_importers_not_found_suggests_closest_sources(
     assert "no imports match 'totally_unknown'" in err
 
 
+def test_importers_not_found_hints_deps_file_for_path_shaped_needle(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 22 item C: a needle shaped like a file path (out of habit
+    # from `deps --file`, which does take a path) gets a hint pointing
+    # at the right command instead of a silent "no imports match".
+    root = make_mapped_repo(PY_IMPORTERS)
+    code = cli.main(
+        [
+            "query",
+            "importers",
+            "some/pkg/File.java",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "this looks like a file path" in err
+    assert "deps --file some/pkg/File.java" in err
+
+
+def test_importers_not_found_no_hint_for_fqn_shaped_needle(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A genuine FQN-shaped miss (dotted, no recognized file extension)
+    # is exactly the shape `importers` wants -- no false hint should
+    # fire on a legitimately-import-string-shaped typo.
+    root = make_mapped_repo(PY_IMPORTERS)
+    code = cli.main(
+        ["query", "importers", "org.foo.Nonexistent", "--root", str(root)]
+    )
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "this looks like a file path" not in err
+
+
 def test_importers_json_shape(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

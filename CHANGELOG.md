@@ -9,6 +9,20 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.15] — 2026-08-25
+
+### Added
+- **`dekko unused --top`** — alias for `--limit`, matching the
+  `--top` flag `stats`/`ambiguous`/`deps` already use for a
+  ranked-list size, so the habit carries over to `unused` too.
+
+### Changed
+- **`dekko query importers`'s not-found message now hints at `deps
+  --file`** when the needle looks like a file path rather than an
+  import-source string (`org.foo.Bar`, `./utils`) — `importers`
+  matches the latter, not the former, and the two commands were easy
+  to reach for interchangeably.
+
 ## [0.43.14] — 2026-08-25
 
 ### Fixed

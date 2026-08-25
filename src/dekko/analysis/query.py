@@ -1841,6 +1841,14 @@ def _importers_entry(path: str, imp: Import, language: str) -> dict:
 def _run_importers_not_found(index: MapIndex, needle: str) -> int:
     """Report an ``importers`` target with zero matching imports."""
     print(f"dekko: no imports match '{needle}'", file=sys.stderr)
+    if languages.is_supported(needle):
+        print(
+            "  note: this looks like a file path -- 'importers' "
+            "matches an import string (e.g. 'org.foo.Bar', "
+            "'./utils'), not a path; for a file's own importers, "
+            f"try 'deps --file {needle}'",
+            file=sys.stderr,
+        )
     sources = sorted(
         {
             imp.source

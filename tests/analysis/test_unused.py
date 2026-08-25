@@ -636,3 +636,35 @@ def test_kinds_types_at_scale_stays_fast() -> None:
     elapsed = time.monotonic() - start
     assert found == []  # every type is used by exactly one function
     assert elapsed < 5.0
+
+
+DEAD_FUNCS = {
+    "a.py": (
+        "def main() -> int:\n"
+        "    return 0\n\n\n"
+        "def dead_one() -> int:\n"
+        "    return 1\n\n\n"
+        "def dead_two() -> int:\n"
+        "    return 2\n\n\n"
+        "def dead_three() -> int:\n"
+        "    return 3\n\n\n"
+        "def dead_four() -> int:\n"
+        "    return 4\n"
+    ),
+}
+
+
+def test_unused_top_flag_aliases_limit(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # --top is a same-dest alias for --limit (round 22 item B): unused
+    # has no separate ranked-summary view, so the two flags are
+    # interchangeable here, unlike stats/ambiguous where they differ.
+    root = make_mapped_repo(DEAD_FUNCS)
+    assert cli.main(["unused", "--root", str(root), "--top", "3"]) == 1
+    top_out = capsys.readouterr().out
+    assert cli.main(["unused", "--root", str(root), "--limit", "3"]) == 1
+    limit_out = capsys.readouterr().out
+    assert top_out == limit_out
+    assert "dead_one" in top_out
+    assert "dead_four" not in top_out  # beyond the cap of 3

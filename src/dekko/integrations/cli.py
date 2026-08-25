@@ -1018,6 +1018,16 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="max text result lines (default: 50)",
     )
     p_unused.add_argument(
+        "--top",
+        dest="limit",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="alias for --limit, kept for cross-command habit "
+        "(stats/ambiguous/deps all use --top for a ranked-list size; "
+        "unused has no separate ranked-summary view, so --top and "
+        "--limit mean the same thing here)",
+    )
+    p_unused.add_argument(
         "--budget",
         type=int,
         default=None,
