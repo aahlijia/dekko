@@ -7,6 +7,7 @@ for the investigation and design behind it.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
@@ -123,7 +124,7 @@ def test_extract_misses_raises_pool_stalled_error_on_stalled_worker(
 ) -> None:
     class _StalledFuture:
         def result(self, timeout: float | None = None) -> object:
-            raise TimeoutError("simulated: worker never returned")
+            raise PoolTimeoutError("simulated: worker never returned")
 
     class _StalledPool:
         def __init__(self, max_workers: int | None = None) -> None:
