@@ -190,6 +190,73 @@ def test_map_removed_file_forces_a_real_rewrite(
     assert "mapped 1 files" in out
 
 
+def test_map_scoped_run_refuses_to_overwrite_full_map(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # Round-22 item 7: a subpath-scoped `dekko map DIR SUBPATH` used to
+    # silently replace a full-repo map with a 1-file scoped one at the
+    # default .dekko/ location, same success shape as an ordinary run.
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path)]) == 0
+    before = (tmp_path / ".dekko" / "map.json").read_text()
+    capsys.readouterr()
+
+    code = cli.main(["map", str(tmp_path), "sub"])
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "refusing to overwrite" in err
+    assert (tmp_path / ".dekko" / "map.json").read_text() == before
+
+
+def test_map_scoped_run_force_overwrites_full_map(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path)]) == 0
+
+    assert cli.main(["map", str(tmp_path), "sub", "--force"]) == 0
+
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert len(doc["files"]) == 1
+
+
+def test_map_scoped_run_with_explicit_output_never_blocked(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path)]) == 0
+
+    out_dir = tmp_path / "scoped-out"
+    out_dir.mkdir()
+    code = cli.main(["map", str(tmp_path), "sub", "--output", str(out_dir)])
+
+    assert code == 0
+    assert (out_dir / "map.json").exists()
+    # The original full map at the default location is untouched.
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert len(doc["files"]) == 2
+
+
+def test_map_scoped_run_over_existing_scoped_map_not_blocked(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path), "sub"]) == 0
+
+    # Re-running the same scoped subpath is narrowing nothing -- the
+    # existing map was already scoped, so this must not be blocked.
+    assert cli.main(["map", str(tmp_path), "sub", "--full"]) == 0
+
+
 def test_map_exclude_persists_to_dekkoignore(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("def f():\n    return 1\n")
     (tmp_path / "widget.astro").write_text("---\n---\n")

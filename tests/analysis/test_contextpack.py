@@ -283,6 +283,39 @@ def test_build_pack_import_filter_shrinks_output(
     assert "+20 more imports (irrelevant to this pack)" in text
 
 
+JS_MULTI_NAME_IMPORT = {
+    "server/index.ts": (
+        "import { generateBones, generatePersonality } "
+        'from "./engine";\n\n'
+        "export function ensureCompanion(): void {\n"
+        "  generateBones();\n"
+        "  generatePersonality();\n"
+        "}\n"
+    ),
+    "server/engine.ts": (
+        "export function generateBones(): void {}\n\n"
+        "export function generatePersonality(): void {}\n"
+    ),
+}
+
+
+def test_render_text_strips_js_named_import_suffix(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # I2/round-22 item 6: a JS/TS multi-name import (`import { A, B }
+    # from "./engine";`) stores each name's Import.source as
+    # "./engine/A"/"./engine/B" for resolver-internal disambiguation —
+    # but that's not a real submodule path on disk, and must not be
+    # displayed as one (claude-buddy.md §2.2).
+    root = make_mapped_repo(JS_MULTI_NAME_IMPORT)
+    index, ensure = _resolved(root, "ensureCompanion")
+    pack = contextpack.build_pack(index, ensure, hops=1)
+    text = contextpack.render_text(pack)
+    assert "(from ./engine)" in text
+    assert "(from ./engine/generateBones)" not in text
+    assert "(from ./engine/generatePersonality)" not in text
+
+
 def test_trim_to_budget_drops_imports_before_source(
     make_mapped_repo: RepoFactory,
 ) -> None:

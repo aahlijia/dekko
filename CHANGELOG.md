@@ -9,6 +9,35 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.11] — 2026-08-25
+
+### Fixed
+- **`dekko context`/`dekko query`'s importer listing showed the
+  resolver-internal `module/name` encoding instead of the real
+  import source** — JS/TS multi-name imports (`import { join } from
+  "path"`) are encoded internally as `"module/name"` per binding to
+  disambiguate named/default/namespace imports during resolution,
+  but that encoding was leaking straight into human-facing output.
+  `contextpack.py` and `query.py` now derive the bare module
+  specifier (`bare_import_source`) for display, threaded through a
+  new `Pack.language`/`_importers_row`/`_importers_entry` `language`
+  parameter.
+
+### Added
+- **`dekko map --force`** — a subpath-scoped `dekko map` run (e.g.
+  `dekko map src/`) at the default `.dekko/` location used to
+  silently overwrite an existing full-repo map with a narrower one,
+  with no warning that most of the repo had just dropped out of the
+  map. `dekko map` now refuses that overwrite by default; `--force`
+  opts back into the old silent-overwrite behavior for anyone who
+  wants it deliberately.
+
+### Changed
+- **JS/TS caveat note in `dekko query` output is now conditional on
+  the repo actually containing JS/TS** — it previously printed
+  unconditionally, showing up (confusingly, with nothing to caveat)
+  on Go/Python/C++-only repos.
+
 ## [0.43.10] — 2026-08-25
 
 ### Fixed

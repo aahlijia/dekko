@@ -465,6 +465,75 @@ def _map_run_is_noop(
     return True
 
 
+def _maybe_block_scoped_overwrite(
+    root: Path, args: argparse.Namespace, new_file_count: int
+) -> bool:
+    """Refuse to silently narrow an existing broader map.
+
+    Round 22 cline.md §3.2: ``dekko map DIR SUBPATH`` (or its legacy
+    ``dekko --map DIR SUBPATH`` alias) used to overwrite a full
+    N-file map with a 1-file scoped one at the same default ``.dekko/``
+    location, with the same success-message shape as an ordinary run
+    and no warning that anything destructive happened. Only applies
+    when writing to that default location — an explicit
+    ``--output``/``--json-output`` redirect is an intentional "write
+    it somewhere else," never blocked.
+
+    Args:
+        root: Repository root.
+        args: Parsed CLI arguments for this run.
+        new_file_count: File count this run is about to write.
+
+    Returns:
+        True when the run should be refused (caller exits non-zero
+        without writing); False when it's safe to proceed.
+    """
+    if not args.subpath or args.output or args.json_output:
+        return False
+    if getattr(args, "force", False):
+        return False
+    existing = mapfile.load_map(root)
+    if existing is None or not existing.provenance:
+        return False  # no existing map (or one with no provenance)
+    if existing.provenance.get("subpath"):
+        return False  # it was already scoped too -- narrowing is fine
+    existing_count = len(existing.languages_by_path)
+    if new_file_count >= existing_count:
+        return False
+    print(
+        f"dekko: refusing to overwrite the existing {existing_count}-file "
+        f"full-repo map with a {new_file_count}-file scoped one at the "
+        "same .dekko/ location -- pass --output/--json-output to write "
+        "the scoped map elsewhere, or --force to overwrite anyway.",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _maybe_short_circuit(
+    root: Path,
+    args: argparse.Namespace,
+    cache: cache_mod.IncrementalCache | None,
+    files: list[FileMap],
+) -> int | None:
+    """Either of ``run_map``'s two pre-write early-exit checks.
+
+    Folded into one helper (rather than two sequential ``if``s inline
+    in ``run_map``) purely to keep that function's own cyclomatic
+    complexity under this repo's Ruff-enforced cap -- the two checks
+    are otherwise independent and unrelated.
+
+    Returns:
+        ``0`` (unchanged no-op), ``2`` (refused scoped overwrite), or
+        ``None`` to let the write proceed.
+    """
+    if _map_run_is_noop(root, args, cache, files):
+        return 0
+    if _maybe_block_scoped_overwrite(root, args, len(files)):
+        return 2
+    return None
+
+
 def _maybe_persist_excludes(
     root: Path, args: argparse.Namespace, persist_excludes: bool
 ) -> None:
@@ -528,8 +597,9 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
 
     _maybe_persist_excludes(root, args, persist_excludes)
 
-    if _map_run_is_noop(root, args, cache, files):
-        return 0
+    early_exit = _maybe_short_circuit(root, args, cache, files)
+    if early_exit is not None:
+        return early_exit
 
     graph = resolve(files, workers=resolve_workers(getattr(args, "jobs", 1)))
     label = root.name + (f"/{args.subpath}" if args.subpath else "")

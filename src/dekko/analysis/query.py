@@ -1359,6 +1359,14 @@ def _run_catches(
     coverage = _coverage_note(index)
     excluded, total, excluded_langs = _catches_excluded_file_count(index)
     lang_list = "/".join(excluded_langs) if excluded_langs else "Rust/Go/C"
+    # The JS/TS caveat only applies to a repo that actually has JS/TS
+    # files -- printing it unconditionally (round 22 awesome-go.md
+    # §3.1) is noise on a 100%-Go/C++/Python repo, where it can never
+    # be relevant.
+    has_jsts = any(
+        lang in {"javascript", "typescript", "tsx"}
+        for lang in index.languages_by_path.values()
+    )
     if as_json:
         entries = [_catch_entry(s) for s in hits]
         kept, meter = _fit_entries(entries, budget, limit)
@@ -1368,9 +1376,10 @@ def _run_catches(
             "results": kept,
             "exact_matches": exact_count,
             "catch_all_matches": catch_all_count,
-            "note": _CATCHES_CAVEAT,
             "meta": meter.as_dict(),
         }
+        if has_jsts:
+            doc["note"] = _CATCHES_CAVEAT
         if coverage:
             doc["coverage_warning"] = coverage
         if excluded:
@@ -1388,7 +1397,8 @@ def _run_catches(
         else ""
     )
     rows = [_catch_row(index, s) for s in hits]
-    print(f"  note: {_CATCHES_CAVEAT}", file=sys.stderr)
+    if has_jsts:
+        print(f"  note: {_CATCHES_CAVEAT}", file=sys.stderr)
     if excluded:
         print(
             f"  note: {excluded:,} of {total:,} mapped files are in a "
@@ -1789,19 +1799,32 @@ def _source_matches(
     return needle in imp.source
 
 
-def _importers_row(path: str, imp: Import) -> str:
-    """One text row for an ``importers`` hit."""
+def _importers_row(path: str, imp: Import, language: str) -> str:
+    """One text row for an ``importers`` hit.
+
+    Displays ``bare_import_source(imp, language)`` rather than the raw
+    ``imp.source`` — for JS/TS, the stored source has an arbitrary
+    local binding name appended (``"./engine/generateBones"`` for
+    ``import { generateBones } from "./engine"``), which would
+    otherwise print a submodule path that doesn't exist on disk (round
+    22 claude-buddy.md §2.2).
+    """
+    bare = bare_import_source(imp, language)
     if not imp.name:
-        return f"{path}  {imp.source}  (side-effect import)"
-    return f"{path}  {imp.source}  (as {imp.name})"
+        return f"{path}  {bare}  (side-effect import)"
+    return f"{path}  {bare}  (as {imp.name})"
 
 
-def _importers_entry(path: str, imp: Import) -> dict:
-    """One JSON entry for an ``importers`` hit."""
+def _importers_entry(path: str, imp: Import, language: str) -> dict:
+    """One JSON entry for an ``importers`` hit.
+
+    ``source`` is ``bare_import_source(imp, language)`` — see
+    ``_importers_row`` for why.
+    """
     return {
         "path": path,
         "local_name": imp.name or None,
-        "source": imp.source,
+        "source": bare_import_source(imp, language),
     }
 
 
@@ -1865,7 +1888,10 @@ def _run_importers(
         return _run_importers_not_found(index, needle), None
     rows.sort(key=lambda r: (is_test_path(r[0]), r[0], r[1].name))
     if as_json:
-        entries = [_importers_entry(p, imp) for p, imp in rows]
+        entries = [
+            _importers_entry(p, imp, index.languages_by_path.get(p, ""))
+            for p, imp in rows
+        ]
         kept, meter = _fit_entries(entries, budget, limit)
         doc = {
             "action": "importers",
@@ -1879,7 +1905,10 @@ def _run_importers(
             doc["coverage_warning"] = coverage
         print(json.dumps(doc, indent=2))
         return EXIT_OK, None
-    lines = [_importers_row(p, imp) for p, imp in rows]
+    lines = [
+        _importers_row(p, imp, index.languages_by_path.get(p, ""))
+        for p, imp in rows
+    ]
     return EXIT_OK, _emit_lines(lines, budget, limit)
 
 
