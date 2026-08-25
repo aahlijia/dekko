@@ -387,6 +387,71 @@ def test_deps_rust_crate_import_resolves_against_named_lib_root(
     assert "external (0):" in out
 
 
+def test_deps_rust_item_resolves_at_named_crate_root_top_level(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-22 zed finding (5a): `crate::App`, re-exported at the top
+    # level of a custom-named crate root (`[lib] path =
+    # "src/gpui.rs"`), previously resolved as external -- the
+    # "item defined at crate-root scope" fallback only ever tried
+    # mod.rs/lib.rs/main.rs, with no way to know this crate's own
+    # root file is actually named gpui.rs.
+    root = make_mapped_repo(
+        {
+            "crates/gpui/src/gpui.rs": "pub struct App;\n",
+            "crates/gpui/src/geometry.rs": (
+                "use crate::App;\npub fn make() -> App { App }\n"
+            ),
+        }
+    )
+    code = cli.main(
+        [
+            "deps",
+            "--root",
+            str(root),
+            "--file",
+            "crates/gpui/src/geometry.rs",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "imports (1):" in out
+    assert "crates/gpui/src/gpui.rs" in out
+    assert "external (0):" in out
+
+
+def test_deps_rust_cross_crate_import_resolves_to_sibling_crate(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-22 zed finding (5b): a Cargo-workspace sibling crate
+    # referenced by its bare crate name (`use editor::Editor;` from a
+    # different crate) previously always resolved as external,
+    # unconditionally -- the dominant cross-crate shape in a large
+    # multi-crate workspace.
+    root = make_mapped_repo(
+        {
+            "crates/editor/src/lib.rs": "pub struct Editor;\n",
+            "crates/workspace/src/pane.rs": (
+                "use editor::Editor;\npub fn make() -> Editor { Editor }\n"
+            ),
+        }
+    )
+    code = cli.main(
+        [
+            "deps",
+            "--root",
+            str(root),
+            "--file",
+            "crates/workspace/src/pane.rs",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "imports (1):" in out
+    assert "crates/editor/src/lib.rs" in out
+    assert "external (0):" in out
+
+
 def test_deps_compute_top_by_deps_in_ranking(
     make_mapped_repo: RepoFactory,
 ) -> None:
