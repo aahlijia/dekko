@@ -27,7 +27,7 @@ from dekko.analysis.query import (
 )
 from dekko.source import read_lines
 from dekko.textutil import signature
-from dekko.core.resolver import MODULE_CALLER_SUFFIX
+from dekko.core.resolver import MODULE_CALLER_SUFFIX, bare_import_source
 from dekko.textutil import Meter, estimate_tokens
 
 # Call-site excerpts shown per hop-1 caller entry.
@@ -64,6 +64,9 @@ class Pack:
         label: Human label, ``path:qualname`` or a bare file path.
         target: Target symbol, or ``None`` in file mode.
         file_path: File the target (or pack) belongs to.
+        language: ``file_path``'s language, for display-only source
+            stripping (see ``bare_import_source``) — never empty
+            except on an index that predates language tracking.
         file_symbols: All symbols of the file (file mode only).
         imports: Imports declared in ``file_path``. In symbol mode
             this is filtered to imports referenced by the target or
@@ -83,6 +86,7 @@ class Pack:
     label: str
     target: Symbol | None
     file_path: str
+    language: str = ""
     file_symbols: list[Symbol] = field(default_factory=list)
     imports: list[Import] = field(default_factory=list)
     entries: list[PackEntry] = field(default_factory=list)
@@ -186,6 +190,7 @@ def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
         label=f"{target.path}:{target.qualname}",
         target=target,
         file_path=target.path,
+        language=target.language,
         imports=index.imports_by_path.get(target.path, []),
         notes=list(index.notes.get(target.id, [])),
     )
@@ -233,6 +238,7 @@ def build_file_pack(index: MapIndex, path: str) -> Pack:
         label=path,
         target=None,
         file_path=path,
+        language=index.languages_by_path.get(path, ""),
         file_symbols=list(index.symbols_by_path.get(path, [])),
         imports=index.imports_by_path.get(path, []),
     )
@@ -362,7 +368,10 @@ def render_text(pack: Pack) -> str:
     lines += _source_lines(pack)
     if pack.imports or pack.imports_dropped:
         lines.append(f"imports ({pack.file_path}):")
-        lines += [f"  {imp.name}  (from {imp.source})" for imp in pack.imports]
+        lines += [
+            f"  {imp.name}  (from {bare_import_source(imp, pack.language)})"
+            for imp in pack.imports
+        ]
         if pack.imports_dropped:
             n = pack.imports_dropped
             lines.append(f"  +{n} more imports (irrelevant to this pack)")

@@ -242,6 +242,13 @@ def _add_map_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--quiet", action="store_true", help="suppress the summary on stdout"
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite an existing full-repo map with a subpath-"
+        "scoped one at the default .dekko/ location, instead of "
+        "refusing (see the subpath-narrowing guard this bypasses)",
+    )
 
 
 def _add_read_options(parser: argparse.ArgumentParser) -> None:

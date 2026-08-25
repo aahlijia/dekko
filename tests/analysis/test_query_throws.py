@@ -317,7 +317,33 @@ def test_catches_js_weak_signal_caveat_in_output(
     )
 
 
-def test_catches_json_includes_note(
+def test_catches_json_includes_note_on_jsts_repo(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(JS_CATCHES)
+    code = cli.main(
+        ["query", "catches", "SomeError", "--json", "--root", str(root)]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["action"] == "catches"
+    assert "note" in doc
+
+
+def test_catches_caveat_absent_on_non_jsts_repo(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round-22 item 9 (awesome-go.md §3.1): the JS/TS caveat must not
+    # print on a repo with no JS/TS files at all -- it survived a full
+    # release cycle unflagged as noise on Go/C++/Python repos.
+    root = make_mapped_repo(PY_THROWS)
+    code = cli.main(["query", "catches", "ValueError", "--root", str(root)])
+    assert code == 0
+    result = capsys.readouterr()
+    assert "JS/TS catch clauses" not in (result.out + result.err)
+
+
+def test_catches_json_omits_note_on_non_jsts_repo(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     root = make_mapped_repo(PY_THROWS)
@@ -327,7 +353,7 @@ def test_catches_json_includes_note(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["action"] == "catches"
-    assert "note" in doc
+    assert "note" not in doc
 
 
 def _catch_all_repo(n: int) -> dict[str, str]:

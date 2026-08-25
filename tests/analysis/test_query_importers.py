@@ -214,6 +214,52 @@ def test_importers_exact_js_does_not_substring_match_similar_package(
     assert code == 3
 
 
+def test_importers_default_strips_js_named_import_suffix(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round-22 item 6: default (non-exact) `importers` output must
+    # also display the bare module specifier, not the resolver-
+    # internal "module/localName" encoding (see the identical fix for
+    # --exact matching in _source_matches / bare_import_source).
+    root = make_mapped_repo(
+        {
+            "server/index.ts": (
+                "import { generateBones, generatePersonality } "
+                'from "./engine";\n'
+            ),
+            "server/engine.ts": (
+                "export function generateBones(): void {}\n\n"
+                "export function generatePersonality(): void {}\n"
+            ),
+        }
+    )
+    code = cli.main(["query", "importers", "engine", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "(from ./engine)" not in out  # not this command's format
+    assert "./engine  (as generateBones)" in out
+    assert "./engine  (as generatePersonality)" in out
+    assert "./engine/generateBones" not in out
+    assert "./engine/generatePersonality" not in out
+
+
+def test_importers_json_strips_js_named_import_suffix(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "server/index.ts": ('import { generateBones } from "./engine";\n'),
+        }
+    )
+    code = cli.main(
+        ["query", "importers", "engine", "--json", "--root", str(root)]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    sources = {e["source"] for e in doc["results"]}
+    assert sources == {"./engine"}
+
+
 def test_source_matches_substring_default() -> None:
     imp = _imp("join", "os.path.join")
     assert _source_matches(imp, "python", "os.path", exact=False)
