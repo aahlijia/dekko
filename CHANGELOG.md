@@ -9,6 +9,29 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.13] — 2026-08-25
+
+### Fixed
+- **`query subtypes`/`query supertypes` dropped a Rust trait
+  implementor to `heritage_ambiguous` when the trait was only
+  reachable through a crate-root re-export** — `impl Render for
+  Editor` (`use gpui::Render;`, where `Render` is actually declared
+  in `gpui`'s `element.rs` and surfaced at the crate root via `pub
+  use element::*;`) fell through `_import_match`'s `_module_matches`
+  check, since that check only ever compares an import source
+  against a candidate's own declaring-file stem, never the crate it
+  re-exports through — round 22 zed.md §3.2. A new
+  `_rust_crate_hint_matches`, reusing item 5b's
+  `_rust_crate_roots_index`, is threaded through
+  `resolve_heritage()` → `_resolve_one_heritage` → `_pick_candidate`
+  → `_import_match` as a crate-aware fallback: does the hint's
+  leading segment name a known crate, and does the candidate live
+  under that crate's root. Scoped to heritage resolution only
+  (`resolve()`'s call/ref path is unchanged). One documented residual
+  gap: two same-named crates in the repo (an in-workspace one
+  shadowed by an unrelated same-named fixture/vendor crate) can still
+  collapse onto the wrong one.
+
 ## [0.43.12] — 2026-08-25
 
 ### Fixed

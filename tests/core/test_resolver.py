@@ -2661,6 +2661,35 @@ def test_module_matches_node_builtin_denylist_is_js_ts_only() -> None:
     assert resolver_mod._module_matches("path", "server/path.py")
 
 
+def test_rust_crate_hint_matches_crate_root_re_export() -> None:
+    # Round 22 zed.md §3.2: a trait declared in one file
+    # (``crates/gpui/src/element.rs``) but only reachable elsewhere
+    # via its crate-root re-export (``use gpui::Render;``) must match
+    # through the crate's root directory, not the declaring file's
+    # own stem.
+    crate_roots = {"gpui": "crates/gpui/src"}
+    assert resolver_mod._rust_crate_hint_matches(
+        "gpui::Render", "crates/gpui/src/element.rs", crate_roots
+    )
+    # A candidate outside that crate's root, or a hint naming a
+    # different/unknown crate, must not match.
+    assert not resolver_mod._rust_crate_hint_matches(
+        "gpui::Render", "crates/other/src/lib.rs", crate_roots
+    )
+    assert not resolver_mod._rust_crate_hint_matches(
+        "unknown_crate::Render", "crates/gpui/src/element.rs", crate_roots
+    )
+
+
+def test_rust_crate_hint_matches_only_rust_candidates() -> None:
+    # A crate-name/candidate-path coincidence must never leak into a
+    # non-Rust candidate.
+    crate_roots = {"gpui": "crates/gpui/src"}
+    assert not resolver_mod._rust_crate_hint_matches(
+        "gpui::Render", "crates/gpui/src/element.py", crate_roots
+    )
+
+
 def test_pick_candidate_returns_none_when_language_filtered_empty() -> None:
     """End-to-end ``_pick_candidate`` pin for the tensorflow shape: a
     C++ call site with only a same-bare-name Python candidate must

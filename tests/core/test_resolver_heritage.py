@@ -571,6 +571,53 @@ def test_rust_impl_unknown_trait_is_external(tmp_path: Path) -> None:
     assert graph.heritage_external[0].callee == "std::fmt::Debug"
 
 
+def test_rust_impl_trait_resolves_via_crate_root_reexport(
+    tmp_path: Path,
+) -> None:
+    """Round 22 zed.md §3.2: ``Render`` is declared in ``gpui``'s
+    ``element.rs``, only reachable elsewhere via the crate root's
+    ``pub use element::*;`` re-export, and collides repo-wide with an
+    unrelated, differently-named trait in a completely different
+    crate. ``impl Render for Editor`` imports it as ``use
+    gpui::Render;`` -- a hint ``_module_matches`` can never match
+    against ``element.rs``'s own stem, so before threading
+    ``_rust_crate_roots_index`` through ``_import_match``, this always
+    fell through to ``heritage_ambiguous`` (dekko 0.43.8, confirmed
+    reproducing live against the real zed checkout)."""
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "crates" / "gpui" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "gpui" / "src" / "gpui.rs").write_text(
+        "pub use element::*;\n"
+    )
+    (tmp_path / "crates" / "gpui" / "src" / "element.rs").write_text(
+        "pub trait Render {}\n"
+    )
+    (tmp_path / "crates" / "other" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "other" / "src" / "lib.rs").write_text(
+        "pub trait Render {}\n"
+    )
+    (tmp_path / "crates" / "editor" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "editor" / "src" / "editor.rs").write_text(
+        "use gpui::Render;\n\nstruct Editor;\n\nimpl Render for Editor {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    rel_paths = [
+        "crates/gpui/src/gpui.rs",
+        "crates/gpui/src/element.rs",
+        "crates/other/src/lib.rs",
+        "crates/editor/src/editor.rs",
+    ]
+    files = [extract_file(tmp_path, p, spec) for p in rel_paths]
+    graph = resolve(files)
+    assert graph.heritage_out["crates/editor/src/editor.rs::Editor"] == [
+        "crates/gpui/src/element.rs::Render"
+    ]
+    assert graph.heritage_ambiguous == []
+
+
 def test_cpp_multiple_inheritance_resolves(tmp_path: Path) -> None:
     from dekko.core import languages
     from dekko.core.extractor import extract_file
