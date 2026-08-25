@@ -881,3 +881,221 @@ def test_sanity_detects_import_statement_miss(
     doc = json.loads(capsys.readouterr().out)
     causes = {row["cause"] for row in doc["grep_only"]}
     assert sanity.CAUSE_IMPORT_STATEMENT in causes
+
+
+# --- multi-line destructured import member (round 22 §8) ---------------
+
+
+def test_classify_miss_multiline_import_member() -> None:
+    # classify_miss itself stays pure/I/O-free -- the caller computes
+    # looks_like_import_member and passes it in, same contract as
+    # near_own_definition/looks_like_comment.
+    cause = sanity.classify_miss(
+        "  target,",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_import_member=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_multiline_import_member_false_stays_unexplained() -> (
+    None
+):
+    cause = sanity.classify_miss(
+        "  target,",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_import_member=False,
+    )
+    assert cause == sanity.CAUSE_UNEXPLAINED
+
+
+def test_looks_like_multiline_import_member_detects_bare_member(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "buddy.ts").write_text(
+        "import {\n"
+        "  buddyStateDir,\n"
+        "  claudeSettingsPath,\n"
+        "} from '../server/path.ts';\n"
+    )
+    hit = sanity.GrepHit(path="buddy.ts", line=2, snippet="  buddyStateDir,")
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "buddyStateDir"
+    )
+
+
+def test_looks_like_multiline_import_member_second_name_also_detected(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "buddy.ts").write_text(
+        "import {\n"
+        "  buddyStateDir,\n"
+        "  claudeSettingsPath,\n"
+        "} from '../server/path.ts';\n"
+    )
+    hit = sanity.GrepHit(
+        path="buddy.ts", line=3, snippet="  claudeSettingsPath,"
+    )
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "claudeSettingsPath"
+    )
+
+
+def test_looks_like_multiline_import_member_false_when_block_closed(
+    tmp_path: Path,
+) -> None:
+    # A bare "name," line appearing *after* an import block has already
+    # closed (e.g. one argument of an unrelated multi-line function
+    # call) must not be misclassified as an import member.
+    (tmp_path / "a.ts").write_text(
+        "import {\n"
+        "  other,\n"
+        "} from './mod';\n"
+        "\n"
+        "doSomething(\n"
+        "  target,\n"
+        "  another,\n"
+        ");\n"
+    )
+    hit = sanity.GrepHit(path="a.ts", line=6, snippet="  target,")
+    assert not sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "target"
+    )
+
+
+def test_looks_like_multiline_import_member_false_without_bare_line(
+    tmp_path: Path,
+) -> None:
+    # Cheap bail-out: a line that isn't a bare "name,"/"name" at all
+    # (e.g. it also contains a call) is never treated as an import
+    # member, regardless of surrounding context.
+    (tmp_path / "a.ts").write_text(
+        "import {\n  target,\n} from './mod';\n\ntarget(1);\n"
+    )
+    hit = sanity.GrepHit(path="a.ts", line=5, snippet="target(1);")
+    assert not sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "target"
+    )
+
+
+def test_sanity_detects_multiline_destructured_import_member_miss(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 22 claude-buddy.md §2.4: the residual gap in the
+    # single-line import fix -- a multi-line destructured import puts
+    # the bare-name hit on a line with no import/{/from token at all.
+    root = make_mapped_repo(
+        {
+            "path.ts": "export function buddyStateDir(): string {\n"
+            "  return '/tmp';\n"
+            "}\n",
+            "index.ts": (
+                "import {\n"
+                "  buddyStateDir,\n"
+                "  claudeSettingsPath,\n"
+                "} from './path';\n"
+                "\n"
+                "function main() {\n"
+                "  return buddyStateDir();\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "buddyStateDir", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows_by_line = {row["line"]: row["cause"] for row in doc["grep_only"]}
+    # The destructured-import line itself (index.ts:2) must classify
+    # as an import statement, not fall through to unexplained.
+    assert rows_by_line[2] == sanity.CAUSE_IMPORT_STATEMENT
+
+
+# --- other same-named symbols' own def lines (round 22 §10) -------------
+
+
+def test_sanity_excludes_unrelated_same_named_symbols_own_def_line(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 22 zed.md §3.3: dekko's own map already knows a genuinely
+    # unrelated MetalRenderer.new_internal's own declaration line is a
+    # definition, not a call site -- but only the *query target's own*
+    # definition line was excluded from grep-only, so this unrelated
+    # same-bare-named symbol's own def line still landed in
+    # CAUSE_UNEXPLAINED. Mirrors the zed repro's shape: two
+    # `new_internal`s in different files, query the first by qualified
+    # path so it resolves unambiguously.
+    root = make_mapped_repo(
+        {
+            "editor.py": (
+                "def new_internal():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def entry():\n"
+                "    return new_internal()\n"
+            ),
+            "renderer.py": "def new_internal():\n    return 2\n",
+        }
+    )
+    code = cli.main(
+        [
+            "sanity",
+            "editor.py:new_internal",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    grep_only_locs = {(row["file"], row["line"]) for row in doc["grep_only"]}
+    assert ("renderer.py", 1) not in grep_only_locs
+    assert doc["counts"]["grep_only"] == 0
+
+
+def test_sanity_near_own_definition_checks_every_same_named_symbol(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The comment-proximity check must also widen: a comment mentioning
+    # the bare name near an *unrelated* same-named symbol's own
+    # definition is just as much "not a call site" as one near the
+    # query target's own definition.
+    root = make_mapped_repo(
+        {
+            "editor.py": "def new_internal():\n    return 1\n",
+            "renderer.py": (
+                "# new_internal creates the renderer state.\n"
+                "def new_internal():\n"
+                "    return 2\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "editor.py:new_internal",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows_by_line = {
+        row["line"]: row["cause"]
+        for row in doc["grep_only"]
+        if row["file"] == "renderer.py"
+    }
+    assert rows_by_line.get(1) == sanity.CAUSE_COMMENT_MENTION

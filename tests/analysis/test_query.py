@@ -588,6 +588,59 @@ def test_get_callers_without_sites_shows_def_line(
     assert "wire.ts:3" in out
 
 
+TS_MODULE_LEVEL_ANONYMOUS_CALLBACK = {
+    "target.ts": (
+        "export function buddyStateDir(): string {\n  return '/tmp';\n}\n"
+    ),
+    "index.ts": (
+        "import { buddyStateDir } from './target';\n"
+        "\n"
+        "document.addEventListener('load', () => {\n"
+        "  buddyStateDir();\n"
+        "});\n"
+    ),
+}
+
+
+def test_get_callers_module_level_shows_line_without_sites_flag(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 22 claude-buddy.md §2.3: a call from inside an anonymous
+    # callback (no enclosing named function) has no real symbol to be
+    # a caller, so it renders as a module-level pseudo-caller row. The
+    # per-site line data is already recorded in edge_lines regardless
+    # of --sites; the module-level row must show it unconditionally,
+    # not only when --sites is passed (unlike the named-caller default
+    # path, which stays coarser without --sites).
+    root = make_mapped_repo(TS_MODULE_LEVEL_ANONYMOUS_CALLBACK)
+    code = cli.main(
+        ["query", "callers", "target.ts:buddyStateDir", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "index.ts:4" in out
+    assert "(module level)" in out
+
+
+def test_module_rows_pre_v3_map_falls_back_to_bare_form() -> None:
+    # A map written before doc version 3 has no edge_lines at all —
+    # _module_rows must still degrade to the bare "path  (module
+    # level)" form rather than crashing or emitting a bogus line.
+    sym = Symbol(
+        id="target.py::target",
+        name="target",
+        qualname="target",
+        kind="function",
+        path="target.py",
+        language="python",
+        start_line=1,
+        end_line=2,
+    )
+    index = mapfile.MapIndex(root_label="root")
+    rows = query._module_rows(index, "callers", sym, "caller.py", False)
+    assert rows == ["caller.py  (module level)"]
+
+
 def test_get_callers_json_sites_shows_reference_line(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

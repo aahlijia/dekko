@@ -274,6 +274,57 @@ def _looks_like_import_statement(snippet: str, bare_name: str) -> bool:
     return False
 
 
+# Round 22 claude-buddy.md §2.4: ``_looks_like_import_statement`` only
+# catches the single-line ``import { X } from "...";`` shape --
+# _ESM_NAMED_IMPORT_TEMPLATE is anchored at line start and requires
+# ``import``/``{``/``from`` all on the matched line. A multi-line
+# destructured import (``import {\n  X,\n  Y,\n} from "...";``) puts
+# the bare-name hit on a line containing only ``  X,`` -- none of
+# those tokens are on that line, so the anchored regex never matches
+# and it fell through to CAUSE_UNEXPLAINED. This was the dominant
+# "grep-only" shape in that repo (6 of 8 flagged rows), not the edge
+# case.
+_IMPORT_OPEN_BRACE = re.compile(r"^\s*import\s+(?:type\s+)?\{")
+# How many lines above a bare-name hit to scan for an unclosed
+# ``import {`` block opener -- generous enough for a real multi-line
+# destructured import list (which rarely runs past a couple dozen
+# names) without scanning the whole file.
+_IMPORT_WINDOW_LINES = 20
+
+
+def _looks_like_multiline_import_member(
+    root: Path, hit: "GrepHit", bare_name: str
+) -> bool:
+    """Whether ``hit``'s line is a bare ``name,``/``name`` member
+    inside a multi-line destructured ``import { ... } from "...";``
+    block -- ``_looks_like_import_statement`` only catches the
+    single-line shape (round 22 claude-buddy.md §2.4: 6 of 8 flagged
+    rows in that repo are this multi-line shape, the dominant style
+    there). Reads a small window of the hit's own file around its
+    line -- the only file re-read this module does, kept small and
+    best-effort (any read/decode failure returns ``False``, same
+    fallback as the rest of this module's parsing).
+    """
+    stripped = hit.snippet.strip().rstrip(",")
+    if stripped != bare_name:
+        return False  # not a bare "name," line at all -- cheap bail-out
+    try:
+        lines = (
+            (root / hit.path)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+        )
+    except OSError:
+        return False
+    start = max(0, hit.line - 1 - _IMPORT_WINDOW_LINES)
+    window = lines[start : hit.line - 1]  # lines strictly above the hit
+    opened = any(_IMPORT_OPEN_BRACE.match(ln) for ln in window)
+    if not opened:
+        return False
+    closed_before_hit = any("}" in ln for ln in window)
+    return not closed_before_hit
+
+
 # How close a grep-only hit must be to the target's own definition
 # line to be considered "near" it for doc-comment classification.
 # Wide enough to cover a leading block/line comment stacked directly
@@ -430,27 +481,34 @@ def classify_miss(
     tests_excluded: bool,
     near_own_definition: bool = False,
     looks_like_comment: bool = False,
+    looks_like_import_member: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
     A pure function over one grep-matched line plus its context — no
-    repo/grep I/O, so it's directly testable in isolation. Checked in
-    the order ``dekko-verify/SKILL.md`` lists its blind spots: a
-    qualified-call syntax match is checked first (it's visible in the
-    line itself and the most specific signal available), then whether
-    the line is a bare import/require statement naming the symbol
-    (round 21 Track B3 — the dominant "grep-only" shape on any
-    import-heavy codebase, same "visible in the line itself" precedence
-    as the qualified-call check), then whether the hit is a
-    doc-comment/docstring line sitting near the symbol's own definition
-    mentioning its bare name (not a call at all), then whether the file
-    is in a language dekko can't parse at all, then whether it's a test
-    file excluded by ``sanity``'s own default filtering, then whether
-    the target name is short/generic enough that dekko's count should
-    be read as directional rather than exact. A line matching none of
-    these is reported as "unexplained" rather than forcing a guess that
-    doesn't fit — matching the plan's own "false confidence from the
-    classifier itself" caution.
+    repo/grep I/O, so it's directly testable in isolation (the one
+    check that needs file I/O, ``_looks_like_multiline_import_member``,
+    is computed by the caller and passed in as
+    ``looks_like_import_member`` rather than given to this function
+    directly, to keep that contract). Checked in the order
+    ``dekko-verify/SKILL.md`` lists its blind spots: a qualified-call
+    syntax match is checked first (it's visible in the line itself and
+    the most specific signal available), then whether the line is a
+    bare import/require statement naming the symbol (round 21 Track
+    B3 — the dominant "grep-only" shape on any import-heavy codebase,
+    same "visible in the line itself" precedence as the qualified-call
+    check), then whether the line is a bare member of a multi-line
+    destructured import block (round 22 claude-buddy.md §2.4 — the
+    residual gap in the single-line check above), then whether the
+    hit is a doc-comment/docstring line sitting near the symbol's own
+    definition mentioning its bare name (not a call at all), then
+    whether the file is in a language dekko can't parse at all, then
+    whether it's a test file excluded by ``sanity``'s own default
+    filtering, then whether the target name is short/generic enough
+    that dekko's count should be read as directional rather than
+    exact. A line matching none of these is reported as "unexplained"
+    rather than forcing a guess that doesn't fit — matching the plan's
+    own "false confidence from the classifier itself" caution.
 
     Args:
         snippet: The grep-matched line's text.
@@ -470,6 +528,9 @@ def classify_miss(
         looks_like_comment: Whether the hit line, taken alone, has the
             syntactic shape of a comment/docstring line in its file's
             grammar (``_looks_like_comment_line``).
+        looks_like_import_member: Whether the hit line is a bare
+            member of a multi-line destructured import block
+            (``_looks_like_multiline_import_member``).
 
     Returns:
         One of the ``CAUSE_*`` constants.
@@ -477,6 +538,8 @@ def classify_miss(
     if _looks_qualified_call(snippet, bare_name):
         return CAUSE_QUALIFIED_CALL
     if _looks_like_import_statement(snippet, bare_name):
+        return CAUSE_IMPORT_STATEMENT
+    if looks_like_import_member:
         return CAUSE_IMPORT_STATEMENT
     if near_own_definition and looks_like_comment:
         return CAUSE_COMMENT_MENTION
@@ -935,7 +998,7 @@ def run(
         the grep sweep itself couldn't run.
     """
     query_index = index if include_tests else index.without_tests()
-    own_def_loc: tuple[str, int] | None = None
+    own_def_locs: frozenset[tuple[str, int]] = frozenset()
 
     if usages:
         bare_name = target
@@ -952,7 +1015,17 @@ def run(
         bare_name = sym.name
         query_action = "callers"
         label = sym.id
-        own_def_loc = (sym.path, sym.start_line)
+        # Every symbol sharing the target's bare name, not just the
+        # target itself -- a same-bare-named symbol's own definition
+        # line (e.g. an unrelated MetalRenderer.new_internal, when the
+        # query target is Editor.new_internal) is just as much "not a
+        # call site" as the target's own, and MapIndex.symbols_by_name
+        # already indexes every symbol by bare name repo-wide (round
+        # 22 zed.md §3.3).
+        own_def_locs = frozenset(
+            (s.path, s.start_line)
+            for s in query_index.symbols_by_name.get(sym.name, [])
+        )
         sym_target = f"{sym.path}:{sym.qualname}:{sym.start_line}"
         try:
             dekko_hits, module_level = _dekko_hits_callers(
@@ -967,14 +1040,18 @@ def run(
         return EXIT_GREP_FAILED
     grep_command = sweep.command_text
     grep_hits = sweep.hits
-    if own_def_loc is not None:
-        # The target's own definition line always contains its bare
-        # name and would otherwise show up as a spurious "grep-only"
-        # miss on every single callers check — dekko's callers query
-        # correctly never treats a symbol's own definition as a call
-        # site, so grep matching it isn't a miss to explain, it's out
-        # of scope for a caller/uses cross-check entirely.
-        grep_hits = [h for h in grep_hits if (h.path, h.line) != own_def_loc]
+    if own_def_locs:
+        # The target's own definition line -- and every other
+        # same-bare-named symbol's own definition line -- always
+        # contains the bare name and would otherwise show up as a
+        # spurious "grep-only" miss on every single callers check —
+        # dekko's callers query correctly never treats a symbol's own
+        # definition as a call site, so grep matching one isn't a miss
+        # to explain, it's out of scope for a caller/uses cross-check
+        # entirely.
+        grep_hits = [
+            h for h in grep_hits if (h.path, h.line) not in own_def_locs
+        ]
 
     dekko_set = set(dekko_hits)
     grep_by_loc = {(h.path, h.line): h for h in grep_hits}
@@ -994,13 +1071,15 @@ def run(
                 is_test_file=is_test_path(h.path),
                 unsupported_language=not languages.is_supported(h.path),
                 tests_excluded=tests_excluded,
-                near_own_definition=(
-                    own_def_loc is not None
-                    and h.path == own_def_loc[0]
-                    and abs(h.line - own_def_loc[1])
-                    <= _COMMENT_PROXIMITY_LINES
+                near_own_definition=any(
+                    h.path == p
+                    and abs(h.line - ln) <= _COMMENT_PROXIMITY_LINES
+                    for p, ln in own_def_locs
                 ),
                 looks_like_comment=_looks_like_comment_line(h.snippet, h.path),
+                looks_like_import_member=_looks_like_multiline_import_member(
+                    root, h, bare_name
+                ),
             ),
         )
         for h in grep_only_hits

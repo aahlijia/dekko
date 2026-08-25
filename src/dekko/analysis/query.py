@@ -550,12 +550,22 @@ def _site_rows(
 def _module_rows(
     index: MapIndex, action: str, sym: Symbol, path: str, sites: bool
 ) -> list[str]:
-    """Rows for a module-level pseudo-caller."""
-    if sites:
-        module_id = f"{path}{MODULE_CALLER_SUFFIX}"
-        lines = index.edge_lines.get(_edge_key(action, sym, module_id), [])
-        if lines:
-            return [f"{path}:{line}  (module level)" for line in lines]
+    """Rows for a module-level pseudo-caller.
+
+    Always attempts the per-site line lookup, regardless of ``sites``
+    (unlike ``_site_rows``, whose named-caller default deliberately
+    stays gated on the flag). "path  (module level)" with several
+    distinct anonymous-callback call sites in the same file is
+    genuinely ambiguous in a way the named-caller default isn't, and
+    the real per-line data is already sitting in ``index.edge_lines``
+    whenever it was recorded — round 22 claude-buddy.md §2.3. Falls
+    back to the bare form only when the map predates per-site line
+    tracking, or this specific edge has no recorded site line.
+    """
+    module_id = f"{path}{MODULE_CALLER_SUFFIX}"
+    lines = index.edge_lines.get(_edge_key(action, sym, module_id), [])
+    if lines:
+        return [f"{path}:{line}  (module level)" for line in lines]
     return [f"{path}  (module level)"]
 
 

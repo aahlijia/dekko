@@ -9,6 +9,36 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.12] — 2026-08-25
+
+### Fixed
+- **`dekko sanity` misfiled bare names inside multi-line destructured
+  imports as `CAUSE_UNEXPLAINED`** — `_looks_like_import_statement`
+  only recognizes the single-line `import { X } from "...";` shape;
+  a multi-line `import {\n  X,\n  Y,\n} from "...";` block puts the
+  bare-name hit on a line with none of `import`/`{`/`from` on it,
+  so the anchored check never matched (round 22 claude-buddy.md
+  §2.4 — the dominant "grep-only" shape there, 6 of 8 flagged rows).
+  A new `_looks_like_multiline_import_member` scans a small window
+  above the hit line for an unclosed `import {` opener and routes a
+  match to `CAUSE_IMPORT_STATEMENT`.
+- **`dekko sanity`'s own-definition-line exclusion only covered the
+  query target itself** — `run()`'s `near_own_definition` check used
+  a single `own_def_loc`, so a grep hit landing on an unrelated
+  same-bare-named symbol's own definition line (e.g. a different
+  class's `new_internal`) wasn't excluded and could still misfire.
+  `own_def_loc` is now `own_def_locs`, a frozenset covering every
+  symbol sharing the target's bare name via `symbols_by_name`.
+- **`dekko query`'s module-level pseudo-caller rows lost per-site
+  line numbers unless `--sites` was passed** — `_module_rows` gated
+  its per-line lookup on the `sites` flag to match `_site_rows`'s
+  named-caller default, but a module-level "path (module level)" row
+  with several distinct anonymous-callback call sites in the same
+  file is ambiguous in a way the named-caller default isn't, and the
+  per-line data was already recorded in `index.edge_lines` regardless
+  of the flag. `_module_rows` now always attempts the per-site lookup,
+  falling back to the bare form only when no site line was recorded.
+
 ## [0.43.11] — 2026-08-25
 
 ### Fixed
