@@ -2528,12 +2528,20 @@ class _ImportResolveContext:
             real path(s), scoped to C/C++-shaped extensions only (a
             same-named Python/JS file must never satisfy a ``#include``
             filename search).
+        crate_roots: Rust workspace-member crate name → that crate's
+            own root directory (its ``src/``), for every crate this
+            repo's convention-based detection can find (see
+            ``_rust_crate_roots_index``). Lets a bare, non-``crate``/
+            ``self``/``super`` ``use`` path be recognized as a
+            cross-crate, in-workspace import rather than assumed
+            external by default.
     """
 
     paths: frozenset[str]
     py_package_roots: dict[str, list[str]] = field(default_factory=dict)
     java_suffix_index: dict[str, list[str]] = field(default_factory=dict)
     cpp_basename_index: dict[str, list[str]] = field(default_factory=dict)
+    crate_roots: dict[str, str] = field(default_factory=dict)
 
 
 def _dirname(path: str) -> str:
@@ -2817,6 +2825,93 @@ def _rust_crate_root(importer_path: str, paths: frozenset[str]) -> str | None:
         d = _dirname(d)
 
 
+def _rust_crate_root_index_names(
+    base: str, paths: frozenset[str]
+) -> tuple[str, ...]:
+    """``_RUST_INDEX_NAMES``, plus the crate's own custom root filename
+    when ``base`` was found via ``_rust_crate_root``'s second
+    (named-file) heuristic rather than a literal ``lib.rs``/``main.rs``
+    -- e.g. ``"gpui.rs"`` for ``crates/gpui/src``.
+
+    Needed because ``_dir_module_candidates`` has no other way to know
+    a ``crate::X`` item re-exported at crate-root scope (not a
+    submodule) might live in that custom-named file rather than one of
+    the three standard index names (round 22 zed.md §3.1: ``crate::
+    App`` for a ``[lib] path = "src/gpui.rs"`` crate never resolved,
+    since the fixed ``_RUST_INDEX_NAMES`` tuple has no way to know
+    this crate's own root file isn't named ``lib.rs``/``main.rs``/
+    ``mod.rs``).
+
+    Args:
+        base: The crate root directory, as found by
+            ``_rust_crate_root`` (or looked up in ``ctx.crate_roots``
+            for a cross-crate import).
+        paths: Every known file path.
+
+    Returns:
+        ``_RUST_INDEX_NAMES``, extended with the crate's own
+        custom-named root file when one exists in ``paths`` and isn't
+        already one of the standard names.
+    """
+    if f"{base}/lib.rs" in paths or f"{base}/main.rs" in paths:
+        return _RUST_INDEX_NAMES
+    parent = _dirname(base)
+    crate_name = parent.rsplit("/", 1)[-1] if parent else ""
+    custom = f"{base}/{crate_name}.rs"
+    if crate_name and custom in paths:
+        return (*_RUST_INDEX_NAMES, f"{crate_name}.rs")
+    return _RUST_INDEX_NAMES
+
+
+def _rust_crate_roots_index(paths: frozenset[str]) -> dict[str, str]:
+    """Repo-wide Rust crate name → crate-root-directory index, built
+    once per ``resolve_imports()`` call.
+
+    Applies the same convention-based detection ``_rust_crate_root``
+    performs reactively per importer, but proactively across every
+    ``src/`` directory in the repo: a workspace-member crate's name is
+    the name of the directory containing its ``src/lib.rs``/``src/
+    main.rs`` (or, for a custom ``[lib] path`` override, its ``src/
+    <crate-name>.rs``) -- round 19's own convention, reused rather
+    than reinvented. Lets a cross-crate ``use other_crate::X;`` import
+    in a Cargo workspace resolve against the sibling crate's real root
+    directory, without parsing ``Cargo.toml`` (out of scope; see
+    ``_rust_crate_root``'s own docstring for why).
+
+    Scoped to the ``<crate>/src/...`` nesting shape only -- the same
+    shape confirmed dominant against zed in ``_rust_crate_root``'s own
+    docstring. A crate root file sitting directly at its crate
+    directory with no ``src/`` nesting, or a crate whose external/
+    public name (a ``[package] name = "..."`` override) differs from
+    its directory name, is not found here -- an acceptable,
+    documentable residual gap, the same "honest can't tell" shape
+    ``_rust_crate_root`` itself already accepts for its own edge case
+    (round 22 zed.md §3.1).
+
+    Args:
+        paths: Every known file path.
+
+    Returns:
+        Crate name → that crate's ``src/`` directory path, for every
+        crate this convention can find.
+    """
+    roots: dict[str, str] = {}
+    for p in paths:
+        if not p.endswith(".rs"):
+            continue
+        src_dir = _dirname(p)
+        if src_dir.rsplit("/", 1)[-1] != "src":
+            continue
+        crate_dir = _dirname(src_dir)
+        if not crate_dir:
+            continue
+        crate_name = crate_dir.rsplit("/", 1)[-1]
+        name = p.rsplit("/", 1)[-1]
+        if name in ("lib.rs", "main.rs") or name == f"{crate_name}.rs":
+            roots[crate_name] = src_dir
+    return roots
+
+
 def _resolve_import_rust(
     imp: Import, importer_path: str, ctx: _ImportResolveContext
 ) -> str | None:
@@ -2826,9 +2921,13 @@ def _resolve_import_rust(
     against the crate root (``_rust_crate_root``), ``self::``/
     ``super::`` (one or more, e.g. ``super::super::foo``) against the
     importer's own module position (``_rust_self_base``, walked up
-    once per ``super``). A bare crate name (``serde::Deserialize``,
-    no recognized prefix) is external by construction — real
-    third-party crates never start with ``crate``/``self``/``super``.
+    once per ``super``). A bare crate name recognized as another
+    workspace member (looked up in ``ctx.crate_roots``, see
+    ``_rust_crate_roots_index``) resolves against *that* crate's own
+    root the same way ``crate::`` does -- a Cargo workspace's sibling
+    crates are referenced by bare crate name too, not just genuine
+    third-party dependencies (round 22 zed.md §3.1). Any other bare
+    crate name is external by construction.
 
     Like Python, the trailing segment is ambiguous between "a
     submodule" and "an item defined in the parent module" — resolved
@@ -2838,9 +2937,11 @@ def _resolve_import_rust(
     if not segs:
         return None
 
+    at_crate_root = False
     if segs[0] == "crate":
         base = _rust_crate_root(importer_path, ctx.paths)
         rest = segs[1:]
+        at_crate_root = True
     elif segs[0] in ("self", "super"):
         base = _rust_self_base(importer_path)
         i = 0
@@ -2851,18 +2952,27 @@ def _resolve_import_rust(
             i += 1
         rest = segs[i:]
     else:
-        return None
+        base = ctx.crate_roots.get(segs[0])
+        rest = segs[1:]
+        at_crate_root = True
 
     if base is None or not rest:
         return None
     # A nested package directory's own index file is always mod.rs —
-    # lib.rs/main.rs only ever names the crate root itself, which is
-    # only reachable here when ``rest``/``rest[:-1]`` is empty (base
-    # itself is the target). Trying all three index names whenever
-    # the remaining segment list is empty covers both shapes without
-    # needing to track "is base the crate root" separately.
-    full = _dir_module_candidates(base, rest, ".rs", _RUST_INDEX_NAMES)
-    dropped = _dir_module_candidates(base, rest[:-1], ".rs", _RUST_INDEX_NAMES)
+    # lib.rs/main.rs (or a custom-named crate root, see
+    # _rust_crate_root_index_names) only ever names the crate root
+    # itself, reached here when ``base`` is a crate root (``crate::``
+    # or a cross-crate import) and ``rest``/``rest[:-1]`` is empty.
+    # Trying every applicable index name whenever the remaining
+    # segment list is empty covers both shapes without needing to
+    # track "is base the crate root" separately.
+    index_names = (
+        _rust_crate_root_index_names(base, ctx.paths)
+        if at_crate_root
+        else _RUST_INDEX_NAMES
+    )
+    full = _dir_module_candidates(base, rest, ".rs", index_names)
+    dropped = _dir_module_candidates(base, rest[:-1], ".rs", index_names)
     return _resolve_two_candidate_lists(ctx.paths, full, dropped)
 
 
@@ -3137,6 +3247,7 @@ def resolve_imports(files: list[FileMap]) -> ModuleGraph:
         py_package_roots=_py_package_roots(paths),
         java_suffix_index=_java_suffix_index(paths),
         cpp_basename_index=_cpp_basename_index(paths),
+        crate_roots=_rust_crate_roots_index(paths),
     )
 
     edge_names: dict[tuple[str, str], set[str]] = {}

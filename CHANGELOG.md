@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.10] — 2026-08-25
+
+### Fixed
+- **Rust resolver couldn't follow `crate::X` into a custom-named
+  crate root, or resolve cross-crate `use other_crate::X;` imports at
+  all** — `_resolve_import_rust` only tried the fixed `lib.rs`/
+  `main.rs`/`mod.rs` index names, so a `[lib] path = "src/gpui.rs"`
+  crate's own root-scope items were unreachable via `crate::` (round
+  22 zed.md §3.1: `crate::App` never resolved), and any bare crate
+  name with no `crate`/`self`/`super` prefix was assumed external by
+  construction — true for real third-party dependencies, but also
+  swallowing genuine in-workspace sibling-crate imports. A new
+  `_rust_crate_roots_index()` builds a repo-wide crate-name → crate-
+  root index (reusing round 19's own directory convention), threaded
+  into resolution via a new `crate_roots` field on
+  `_ImportResolveContext`; `_rust_crate_root_index_names()` extends
+  the index-name search with a crate's own custom root filename when
+  one exists.
+
 ## [0.43.9] — 2026-08-25
 
 ### Fixed

@@ -377,6 +377,101 @@ def test_rust_crate_path_still_external_when_no_named_root_matches() -> None:
     assert "crate::entry_point::Thing" in external
 
 
+def test_rust_crate_item_resolves_at_named_crate_root_top_level() -> None:
+    # round-22 zed finding (5a): `crate::App`, re-exported at the top
+    # level of a custom-named crate root (crates/gpui/src/gpui.rs,
+    # matching round 19's `[lib] path = "src/gpui.rs"` convention),
+    # previously never resolved -- _dir_module_candidates's "item
+    # defined in the parent module" fallback only ever tried
+    # mod.rs/lib.rs/main.rs, with no way to know this crate's own
+    # root file is actually named gpui.rs.
+    files = [
+        _fm("crates/gpui/src/gpui.rs", "rust", []),
+        _fm("crates/gpui/src/app.rs", "rust", []),
+        _fm(
+            "crates/gpui/src/geometry.rs",
+            "rust",
+            [_imp("crates/gpui/src/geometry.rs", "App", "crate::App")],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["crates/gpui/src/geometry.rs"] == [
+        "crates/gpui/src/gpui.rs"
+    ]
+
+
+def test_rust_cross_crate_bare_name_resolves_to_sibling_crate() -> None:
+    # round-22 zed finding (5b): a Cargo-workspace sibling crate
+    # referenced by its bare crate name (`use editor::Editor;` from a
+    # different crate that depends on `editor`) previously fell
+    # straight through _resolve_import_rust's "no recognized prefix"
+    # else branch and was always external, unconditionally -- the
+    # dominant shape for a large multi-crate workspace.
+    files = [
+        _fm("crates/editor/src/lib.rs", "rust", []),
+        _fm(
+            "crates/workspace/src/pane.rs",
+            "rust",
+            [
+                _imp(
+                    "crates/workspace/src/pane.rs",
+                    "Editor",
+                    "editor::Editor",
+                )
+            ],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["crates/workspace/src/pane.rs"] == [
+        "crates/editor/src/lib.rs"
+    ]
+
+
+def test_rust_cross_crate_bare_name_to_named_crate_root_top_level() -> None:
+    # 5a + 5b combined: the sibling crate's own root uses a custom
+    # [lib] path filename too, and the imported item is defined at
+    # that crate root's own top level.
+    files = [
+        _fm("crates/gpui/src/gpui.rs", "rust", []),
+        _fm("crates/gpui/src/app.rs", "rust", []),
+        _fm(
+            "crates/other/src/lib.rs",
+            "rust",
+            [_imp("crates/other/src/lib.rs", "App", "gpui::App")],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["crates/other/src/lib.rs"] == [
+        "crates/gpui/src/gpui.rs"
+    ]
+
+
+def test_rust_cross_crate_unknown_bare_name_stays_external() -> None:
+    # A genuinely third-party crate (no matching directory in this
+    # repo's own convention-based crate index) must still resolve to
+    # external, not be misrouted through the new crate_roots lookup.
+    files = [
+        _fm("crates/editor/src/lib.rs", "rust", []),
+        _fm(
+            "crates/workspace/src/pane.rs",
+            "rust",
+            [
+                _imp(
+                    "crates/workspace/src/pane.rs",
+                    "Deserialize",
+                    "serde::Deserialize",
+                )
+            ],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
+    assert (
+        "serde::Deserialize"
+        in (graph.external["crates/workspace/src/pane.rs"])
+    )
+
+
 # ---------------------------------------------------------------------
 # Java
 
