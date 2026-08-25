@@ -9,6 +9,20 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.14] — 2026-08-25
+
+### Fixed
+- **`dekko unused` false-flagged Python callback/dispatch-table
+  values as dead code** — Python had no `reference_query`, so a
+  function passed by bare name and never itself called at that site
+  (a keyword-argument value, positional call argument, dict/list/
+  tuple/set element, assignment/default-parameter right-hand side, or
+  bare `return` value — e.g. `check_success=valid_ndk_path`) was
+  structurally invisible to the call-expression-only `call_query`
+  (round 22 tensorflow.md §6). A new `_PY_REFERENCE_QUERY`, mirroring
+  `_JS_REFERENCE_BASE`'s identical JS/TS shape, is now wired into
+  `PYTHON`'s `LanguageSpec`.
+
 ## [0.43.13] — 2026-08-25
 
 ### Fixed

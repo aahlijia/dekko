@@ -665,6 +665,65 @@ def test_ts_array_destructuring_not_captured_as_ref(
     assert "b" not in ref_names
 
 
+def test_python_keyword_argument_value_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """Round-22 (tensorflow) finding: a function passed by name as a
+    call's keyword-argument value.
+
+    ``configure.py``'s exact shape: ``check_success=valid_ndk_path``
+    passes ``valid_ndk_path`` as a callback *value*, never invoking it
+    at that site (``valid_ndk_path(...)``). Before
+    ``_PY_REFERENCE_QUERY``, Python had no ``reference_query`` at all
+    -- a function wired up only this way was indistinguishable from
+    dead code to ``dekko unused``.
+    """
+    spec = languages.spec_for_path("configure.py")
+    assert spec is not None
+    (tmp_path / "configure.py").write_text(
+        "def valid_ndk_path(path):\n"
+        "    return path\n\n"
+        "def get_var(name, check_success=None):\n"
+        "    return name\n\n"
+        "def setup_android():\n"
+        "    get_var('ANDROID_NDK_HOME',"
+        " check_success=valid_ndk_path)\n"
+    )
+    fm = extract_file(tmp_path, "configure.py", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "valid_ndk_path" in ref_names
+
+
+def test_python_dict_value_and_default_parameter_captured_as_refs(
+    tmp_path: Path,
+) -> None:
+    """Two more ``_PY_REFERENCE_QUERY`` value-position shapes.
+
+    A dict literal's value (``{"cb": handler}``) and a function
+    parameter's default value (``def f(cb=handler):``) are both bare-
+    identifier value reads a plain call-expression query cannot see --
+    covered in one fixture rather than one test per query line, matching
+    this test file's existing economy for multi-shape reference queries
+    (the JS ``reference_query`` isn't unit-tested shape-by-shape
+    either).
+    """
+    spec = languages.spec_for_path("data.py")
+    assert spec is not None
+    (tmp_path / "data.py").write_text(
+        "def handler():\n"
+        "    return None\n\n"
+        "def default_handler():\n"
+        "    return None\n\n"
+        "registry = {'cb': handler}\n\n"
+        "def run(cb=default_handler):\n"
+        "    return cb\n"
+    )
+    fm = extract_file(tmp_path, "data.py", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "handler" in ref_names
+    assert "default_handler" in ref_names
+
+
 def test_parse_rust_use() -> None:
     assert _parse_rust_use("a::b::c") == [("c", "a::b::c")]
     assert _parse_rust_use("a::b as d") == [("d", "a::b")]

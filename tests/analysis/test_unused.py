@@ -210,6 +210,31 @@ def test_unused_does_not_flag_const_read_as_binary_or_ternary_operand(
     assert "no unused symbols" in capsys.readouterr().out
 
 
+PY_KEYWORD_ARGUMENT_CALLBACK = {
+    "handlers.py": ("def valid_ndk_path(path):\n    return path\n"),
+    "configure.py": (
+        "from handlers import valid_ndk_path\n\n\n"
+        "def get_var(name, check_success=None):\n"
+        "    return name\n\n\n"
+        "def main():\n"
+        "    get_var('ANDROID_NDK_HOME',"
+        " check_success=valid_ndk_path)\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_python_keyword_argument_callback(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round-22 (tensorflow) finding: valid_ndk_path is never *called*
+    # anywhere, only wired up as a call's keyword-argument value in
+    # configure.py — before Python's reference_query, this was
+    # indistinguishable from genuinely dead code.
+    root = make_mapped_repo(PY_KEYWORD_ARGUMENT_CALLBACK)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
 GO_TYPE_ONLY = {
     "types.go": ("package main\n\ntype prEvent struct {\n\tName string\n}\n"),
     "main.go": (

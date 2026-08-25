@@ -57,8 +57,8 @@ class LanguageSpec:
             references (``this::method``/``Class::method``, bug
             #2/round-19), which are call-shaped nowhere in the syntax
             tree (no argument list) and so are invisible to
-            ``call_query`` too. ``None`` for languages without one yet
-            (JS, TS, TSX, Go, Java as of this writing).
+            ``call_query`` too. ``None`` for languages still lacking
+            one (Rust, C, C++ as of this writing).
         heritage_query: Query capturing a type definition's own
             ``extends``/``implements`` clause(s) — one ``@classdef``
             match per type, with the clause(s) attached as sibling
@@ -160,6 +160,28 @@ class LanguageSpec:
     type_alias_query: str | None = None
 
 
+# Bare identifiers used as *values* rather than invoked -- keyword-
+# argument values, positional call arguments, dict/list/tuple/set
+# literal elements, assignment/default-parameter right-hand sides, and
+# bare `return` values. Closes the dispatch-table/callback-wiring
+# shape a plain call-expression query structurally cannot see (a
+# function passed by name and never itself called at that site is not
+# a call site) -- mirrors _JS_REFERENCE_BASE's identical shape for
+# JS/TS (round 22 tensorflow.md §6: `check_success=valid_ndk_path` is
+# a call *keyword argument*, not a call). Verified against the pinned
+# tree-sitter-python grammar.
+_PY_REFERENCE_QUERY = """
+(keyword_argument value: (identifier) @ref)
+(argument_list (identifier) @ref)
+(pair value: (identifier) @ref)
+(list (identifier) @ref)
+(tuple (identifier) @ref)
+(set (identifier) @ref)
+(assignment right: (identifier) @ref)
+(default_parameter value: (identifier) @ref)
+(return_statement (identifier) @ref)
+"""
+
 PYTHON = LanguageSpec(
     name="python",
     grammar="python",
@@ -198,6 +220,7 @@ PYTHON = LanguageSpec(
     container_types={"class_definition": "name"},
     method_containers=("class_definition",),
     param_style="python",
+    reference_query=_PY_REFERENCE_QUERY,
     heritage_query="""
 (class_definition
   name: (identifier) @classname
