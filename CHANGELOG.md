@@ -9,6 +9,51 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.9] — 2026-08-25
+
+### Fixed
+- **`dekko ambiguous` misfiled builtin-method noise as genuine
+  ambiguity** — `_pick_candidate`'s noise guard (`_is_noise_call`,
+  round 21) rejected a receiver-qualified call to a well-known
+  built-in method name (`trim`, `describe`, `.then()`, ...) by
+  returning `None`, the same value used for "genuinely ambiguous,
+  2+ real candidates." The caller couldn't tell the two apart, so a
+  noise-suppressed call — even with exactly one real candidate —
+  was unconditionally recorded as ambiguous, inflating `dekko
+  ambiguous`'s reported rate ~2-3x on JS/TS repos (cline: 1,403
+  `trim` sites, 0 real). A new `_NOISE` sentinel now distinguishes
+  the two outcomes; noise-suppressed calls route to `external`
+  instead. Also widened `_BUILTIN_METHOD_NAMES` with `get`,
+  `resolve`, `create` (confirmed leaking through with inflated
+  `avg_candidates` — `get` averaged 32.0 in one report, almost
+  certainly `Map.get()`/`Promise.resolve()`/`Object.create()` noise).
+- **`affected`/`workset` false-positive impacted tests on a Node
+  builtin module-name collision** — `_module_matches()` matched a
+  bare (non-relative) JS/TS import source against any repo file
+  whose stem happened to collide, with no awareness that names like
+  `path`, `fs`, `os`, `util` are Node core modules, not local files.
+  `import { join } from "path"` was matching a repo's own
+  `server/path.ts`, falsely marking every unrelated importer of
+  Node's real `path` module as impacted by a change to that file —
+  the single most-repeated correctness gap in three consecutive eval
+  rounds. A new `_NODE_BUILTIN_MODULE_NAMES` denylist, checked
+  against the bare module portion of the import source (accounting
+  for `extractor._imports_js`'s `"module/name"` encoding for named/
+  default/namespace imports), now excludes this match; genuine
+  relative imports (`"./path"`) and non-JS/TS candidates are
+  unaffected.
+- **Heritage `subtypes`/`supertypes` lost same-named C/C++ base
+  classes to `ambiguous`** — `resolve_heritage()` never built or
+  threaded a calling file's whole-file `#include` list (`raw_imports`)
+  into `_pick_candidate`, unlike `_resolve_files_chunk`'s call-
+  resolution path. For C/C++, that whole-file-include fallback is
+  the *only* signal available to disambiguate a same-named base class
+  in a large tree (e.g. `query subtypes OpKernel` surfaced 1 of
+  ~800+ real subtypes on tensorflow, the other 828 dropped into
+  `ambiguous`). `resolve_heritage()` now builds `raw_imports` the
+  same way call resolution does and threads it through
+  `_resolve_one_heritage()` into `_pick_candidate()`.
+
 ## [0.43.8] — 2026-08-24
 
 ### Fixed

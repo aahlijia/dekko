@@ -1032,7 +1032,13 @@ def test_receiver_qualified_builtin_method_name_not_guessed() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, trim_fn.id) not in edges
     assert graph.calls_in.get(trim_fn.id, []) == []
-    assert len(graph.ambiguous) == 1
+    # Round 22 cline.md §3.1: a noise-suppressed call with exactly one
+    # real candidate used to land in ``ambiguous`` (indistinguishable
+    # from a genuine 2+-candidate collision) — it must now route to
+    # ``external`` instead, via the ``_NOISE`` sentinel.
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "opts.config.trim" in externals
 
 
 def test_bare_call_to_same_file_builtin_named_function_still_resolves() -> (
@@ -1168,7 +1174,12 @@ def test_receiver_qualified_schema_builder_method_not_guessed() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, describe_fn.id) not in edges
     assert graph.calls_in.get(describe_fn.id, []) == []
-    assert len(graph.ambiguous) == 1
+    # Round 22 cline.md §3.1: noise-suppressed, single-candidate calls
+    # now route to ``external`` via the ``_NOISE`` sentinel, not
+    # ``ambiguous``.
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "z.string().describe" in externals
 
 
 def test_receiver_qualified_commander_builder_method_not_guessed() -> None:
@@ -1225,7 +1236,12 @@ def test_receiver_qualified_commander_builder_method_not_guessed() -> None:
     assert (caller_a.id, description_binding.id) not in edges
     assert (caller_b.id, description_binding.id) not in edges
     assert graph.calls_in.get(description_binding.id, []) == []
-    assert len(graph.ambiguous) == 2
+    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # ``external``, not ``ambiguous``.
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "program.description" in externals
+    assert "cmd.description" in externals
 
 
 def test_receiver_qualified_rust_std_method_not_guessed() -> None:
@@ -1260,7 +1276,11 @@ def test_receiver_qualified_rust_std_method_not_guessed() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, then_fn.id) not in edges
     assert graph.calls_in.get(then_fn.id, []) == []
-    assert len(graph.ambiguous) == 1
+    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # ``external``, not ``ambiguous``.
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "mode.then" in externals
 
 
 def test_rust_iter_mut_not_guessed_into_unrelated_repo_symbol() -> None:
@@ -1291,7 +1311,11 @@ def test_rust_iter_mut_not_guessed_into_unrelated_repo_symbol() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, iter_mut_fn.id) not in edges
     assert graph.calls_in.get(iter_mut_fn.id, []) == []
-    assert len(graph.ambiguous) == 1
+    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # ``external``, not ``ambiguous``.
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "highlights.iter_mut" in externals
 
 
 def test_explicit_type_receiver_resolves_same_file_new_collision() -> None:
@@ -1426,7 +1450,11 @@ def test_bare_call_shadowed_by_external_import_not_guessed() -> None:
     graph = resolve(files)
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, shim.id) not in edges
-    assert len(graph.ambiguous) == 1
+    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # ``external``, not ``ambiguous``.
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "expect" in externals
 
 
 def test_bare_call_to_ambient_global_name_not_guessed_without_import() -> None:
@@ -1455,7 +1483,11 @@ def test_bare_call_to_ambient_global_name_not_guessed_without_import() -> None:
     graph = resolve(files)
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, local.id) not in edges
-    assert len(graph.ambiguous) == 1
+    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # ``external``, not ``ambiguous``.
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "describe" in externals
 
 
 def test_bare_call_to_global_type_name_not_guessed() -> None:
@@ -1487,7 +1519,110 @@ def test_bare_call_to_global_type_name_not_guessed() -> None:
     graph = resolve(files)
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, aug.id) not in edges
-    assert len(graph.ambiguous) == 1
+    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # ``external``, not ``ambiguous``.
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "String" in externals
+
+
+def test_noise_guard_wins_over_ambiguous_with_two_candidates() -> None:
+    # Round 22 cline.md §3.1: noise detection (``_is_noise_call``) runs
+    # *before* the candidate-count branch in ``_pick_candidate``'s
+    # ladder — a receiver-qualified builtin-method-shaped call must
+    # still route to ``external`` via the ``_NOISE`` sentinel even
+    # when the repo happens to have 2+ unrelated same-named candidates
+    # (not just the single-candidate shape every other noise-guard
+    # test here covers), since noise detection never even looks at
+    # candidate count.
+    trim_a = _fn("util_a.ts", "trim", "A.trim")
+    trim_b = _fn("util_b.ts", "trim", "B.trim")
+    caller = _fn("caller.ts", "run")
+    files = [
+        FileMap("util_a.ts", "typescript", symbols=[trim_a]),
+        FileMap("util_b.ts", "typescript", symbols=[trim_b]),
+        FileMap(
+            "caller.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="opts.config.trim",
+                    name="trim",
+                    receiver="opts.config",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, trim_a.id) not in edges
+    assert (caller.id, trim_b.id) not in edges
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "opts.config.trim" in externals
+
+
+def test_receiver_qualified_get_resolve_create_not_guessed() -> None:
+    # Part B of round 22 cline.md §3.1: ``_BUILTIN_METHOD_NAMES`` was
+    # missing several very common JS/TS names that hit this same fast
+    # path once every stronger heuristic fails -- ``get`` averaged
+    # 32.0 candidates in cline's own report, almost certainly
+    # ``Map.get()``/``Promise.resolve()``/``Object.create()`` noise,
+    # not real repo-symbol collisions.
+    get_fn = _fn("registry.ts", "get")
+    resolve_fn = _fn("registry.ts", "resolve", line=2)
+    create_fn = _fn("registry.ts", "create", line=3)
+    caller = _fn("caller.ts", "run")
+    files = [
+        FileMap(
+            "registry.ts",
+            "typescript",
+            symbols=[get_fn, resolve_fn, create_fn],
+        ),
+        FileMap(
+            "caller.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="cache.get",
+                    name="get",
+                    receiver="cache",
+                    line=2,
+                ),
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="Promise.resolve",
+                    name="resolve",
+                    receiver="Promise",
+                    line=3,
+                ),
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="Object.create",
+                    name="create",
+                    receiver="Object",
+                    line=4,
+                ),
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, get_fn.id) not in edges
+    assert (caller.id, resolve_fn.id) not in edges
+    assert (caller.id, create_fn.id) not in edges
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert {"cache.get", "Promise.resolve", "Object.create"} <= externals
 
 
 def test_reference_resolution_unaffected_by_noise_guard() -> None:
@@ -2493,6 +2628,37 @@ def test_language_filtered_unchanged_for_unrecognized_call_site_path() -> None:
     )
     filtered = resolver_mod._language_filtered(call, [candidate])
     assert filtered == [candidate]
+
+
+def test_module_matches_bare_node_builtin_specifier_denylisted() -> None:
+    # Round 22 claude-buddy.md §2.1: a bare (non-relative) JS/TS import
+    # source naming a Node core module must never match a same-named
+    # repo file, regardless of stem collision -- confirmed against the
+    # actual extractor encoding (``"path/join"`` for a named import of
+    # ``join`` from ``"path"``, per ``extractor._imports_js``).
+    assert not resolver_mod._module_matches("path/join", "server/path.ts")
+    # Default and namespace imports get the same "/name" suffix.
+    assert not resolver_mod._module_matches(
+        "path/defaultPath", "server/path.ts"
+    )
+    assert not resolver_mod._module_matches("path/path", "server/path.ts")
+    # Side-effect import (no local binding) keeps the bare source.
+    assert not resolver_mod._module_matches("path", "server/path.ts")
+
+
+def test_module_matches_relative_import_still_matches() -> None:
+    # A genuine relative import must be unaffected by the Node-builtin
+    # denylist -- only the bare specifier shape is denylisted.
+    assert resolver_mod._module_matches("./path/resolvePath", "server/path.ts")
+    assert resolver_mod._module_matches("./path", "server/path.ts")
+
+
+def test_module_matches_node_builtin_denylist_is_js_ts_only() -> None:
+    # The denylist is gated on the candidate file's own extension -- a
+    # Python file legitimately named ``path.py`` must not be affected
+    # by a JS-only denylist just because some unrelated JS/TS file
+    # elsewhere imports Node's real ``path`` module.
+    assert resolver_mod._module_matches("path", "server/path.py")
 
 
 def test_pick_candidate_returns_none_when_language_filtered_empty() -> None:
