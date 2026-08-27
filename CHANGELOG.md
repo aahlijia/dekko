@@ -9,6 +9,34 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.18] — 2026-08-27
+
+### Fixed
+- **`dekko sanity`'s multi-line destructured-import detection defeated
+  by any earlier import statement in the 20-line lookback window** —
+  `_looks_like_multiline_import_member`'s flat `any()`/`any()` scan
+  for an "opener anywhere" and a "closer anywhere" let an unrelated,
+  already-closed earlier import's `}` falsely "close" a genuinely
+  still-open block sitting directly above the hit, as soon as the
+  window contained both — the common case on any real, import-heavy
+  file, not the edge case (13 of 21 grep-only rows misclassified as
+  `CAUSE_UNEXPLAINED` on claude-buddy). Replaced with a single
+  backward walk from the hit toward the top of the window that
+  answers based on the *nearest* brace-relevant line only, checking a
+  `}` before an opener match on the same line so a complete
+  single-line import isn't misread as a dangling opener (round23
+  issue 04).
+- **`dekko sanity --json` silently truncated its `matches`/
+  `dekko_only`/`grep_only` row arrays at `DEFAULT_REPORT_LIMIT` (200)
+  with no disclosure anywhere in the output** — unlike `query --json`,
+  which already surfaces a `meta` block (`Meter.as_dict()`) whenever a
+  budget/limit cap trims a result set. `_fit_rows()` now returns the
+  `Meter` it was already discarding instead of a bare `int`, threaded
+  through into a new top-level `meta` object (one `Meter.as_dict()`
+  per bucket, same shape `query --json` already uses). `counts` is
+  unchanged and still present for back-compat; `meta` is purely
+  additive (round23 issue 05).
+
 ## [0.43.17] — 2026-08-27
 
 ### Fixed

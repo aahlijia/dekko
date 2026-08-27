@@ -505,12 +505,124 @@ def test_sanity_json_shape(
         "dekko_only",
         "grep_only",
         "counts",
+        "meta",
     } <= set(doc)
     assert doc["grep_only"], "expected at least one grep-only hit"
     for row in doc["grep_only"]:
         assert {"file", "line", "snippet", "cause"} <= set(row)
     for row in doc["matches"]:
         assert {"file", "line"} <= set(row)
+    # Round 23 claude-code.md §2.1: every bucket's meta mirrors
+    # ``query --json``'s own Meter.as_dict() shape, and under no
+    # truncation reports truncated_by as None.
+    for bucket in ("matches", "dekko_only", "grep_only"):
+        assert {
+            "tokens",
+            "returned",
+            "total",
+            "budget",
+            "limit",
+            "truncated_by",
+        } <= set(doc["meta"][bucket])
+        assert doc["meta"][bucket]["truncated_by"] is None
+        assert doc["meta"][bucket]["total"] == doc["counts"][bucket]
+
+
+# --- Round 23 claude-code.md §2.1: report-row truncation disclosure ----
+
+
+def _make_many_grep_only_hits_repo(
+    make_mapped_repo: RepoFactory, n: int
+) -> Path:
+    """A repo whose ``target`` symbol has ``n`` grep-only call sites,
+    one per file -- cheap-to-construct stand-in for the round-23
+    report's 379-row ``grep_only`` bucket, small enough to drive
+    through an explicit ``--limit``/``--budget`` rather than the real
+    ``DEFAULT_REPORT_LIMIT`` (200)."""
+    files = {"a.py": "def target():\n    return 1\n"}
+    for i in range(n):
+        files[f"caller{i}.py"] = f"def other{i}():\n    return target()\n"
+    return make_mapped_repo(files)
+
+
+def test_sanity_json_meta_discloses_limit_truncation(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 23 claude-code.md §2.1: ``sanity --json`` used to cap its
+    # row arrays with zero disclosure anywhere in the JSON. Drive the
+    # same code path DEFAULT_REPORT_LIMIT (200) exercises, via a small
+    # explicit --limit on a 5-hit fixture (cheaper than constructing
+    # 200+ real hits).
+    root = _make_many_grep_only_hits_repo(make_mapped_repo, 5)
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "target",
+            "--root",
+            str(root),
+            "--json",
+            "--limit",
+            "2",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    meta = doc["meta"]["grep_only"]
+    assert meta["truncated_by"] == "limit"
+    assert meta["total"] == 5
+    assert meta["returned"] == 2
+    assert meta["returned"] == len(doc["grep_only"])
+    # counts stays exactly as-is -- purely additive schema change.
+    assert doc["counts"]["grep_only"] == 5
+
+
+def test_sanity_json_meta_no_truncation_under_every_cap(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = _make_many_grep_only_hits_repo(make_mapped_repo, 2)
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["meta"]["matches"]["truncated_by"] is None
+    assert doc["meta"]["grep_only"]["truncated_by"] is None
+
+
+def test_sanity_json_meta_discloses_budget_truncation(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Distinguishes budget-driven truncation from limit-driven: a
+    # generous --limit that never binds, but a --budget small enough
+    # that only the first row or two fit.
+    root = _make_many_grep_only_hits_repo(make_mapped_repo, 10)
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "target",
+            "--root",
+            str(root),
+            "--json",
+            "--limit",
+            "1000",
+            "--budget",
+            "20",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    meta = doc["meta"]["grep_only"]
+    assert meta["truncated_by"] == "budget"
+    assert meta["total"] == 10
+    assert meta["returned"] < 10
+    assert meta["returned"] == len(doc["grep_only"])
 
 
 # --- Round 21 Track B1: silent 5,000-line grep truncation ---------------
@@ -597,6 +709,11 @@ def test_sanity_json_suppresses_dekko_only_when_grep_truncated(
     assert doc["dekko_only"] == []
     assert doc["counts"]["dekko_only"] is None
     assert "dekko_only_note" in doc
+    # Round 23 claude-code.md §2.1: the suppressed dekko-only bucket
+    # carries no Meter either -- a real count for data explicitly
+    # being suppressed as inconclusive would be false confidence,
+    # mirroring counts.dekko_only's own None.
+    assert doc["meta"]["dekko_only"] is None
 
 
 def test_sanity_text_reports_truncation_and_inconclusive_dekko_only(
@@ -1011,6 +1128,80 @@ def test_looks_like_multiline_import_member_false_without_bare_line(
     )
 
 
+def test_looks_like_multiline_import_member_nearest_opener_wins(
+    tmp_path: Path,
+) -> None:
+    # Round 23 claude-buddy.md §2.1: the prior any()/any() scan let an
+    # unrelated, already-closed earlier import's "}" falsely "close" a
+    # genuinely still-open block sitting directly above the hit, as
+    # soon as the window contained *any* opener and *any* closer
+    # anywhere, regardless of which opener each closer actually
+    # belonged to. Here an unrelated single-line import (self-closing)
+    # and an unrelated multi-line import (opens and closes fully
+    # within the window) both sit above the real, still-open block
+    # whose member is the hit -- the old code saw an opener (any of
+    # the three "import {"s) and a closer (either unrelated close) and
+    # returned False; the fix must find the *nearest* opener (the real
+    # block's own) has no intervening close and return True.
+    (tmp_path / "state.ts").write_text(
+        "import { unrelated } from 'os';\n"
+        "import {\n"
+        "  other,\n"
+        "} from 'fs';\n"
+        "\n"
+        "import {\n"
+        "  buddyStateDir,\n"
+        "  claudeSettingsPath,\n"
+        "} from './path';\n"
+    )
+    hit = sanity.GrepHit(path="state.ts", line=7, snippet="  buddyStateDir,")
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "buddyStateDir"
+    )
+
+
+def test_looks_like_multiline_import_member_many_unrelated_imports_stacked(
+    tmp_path: Path,
+) -> None:
+    # Same shape as above, but with three unrelated imports stacked
+    # above the real block (mixing single-line and already-closed
+    # multi-line) -- confirms the fix is genuinely nearest-opener
+    # based, not just "handle one extra import".
+    (tmp_path / "state.ts").write_text(
+        "import { a } from 'os';\n"
+        "import {\n"
+        "  b,\n"
+        "} from 'fs';\n"
+        "import { c } from 'path';\n"
+        "\n"
+        "import {\n"
+        "  buddyStateDir,\n"
+        "} from './path';\n"
+    )
+    hit = sanity.GrepHit(path="state.ts", line=8, snippet="  buddyStateDir,")
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "buddyStateDir"
+    )
+
+
+def test_looks_like_multiline_import_member_single_line_not_dangling(
+    tmp_path: Path,
+) -> None:
+    # Check-order case: a complete single-line import immediately
+    # above the hit matches both the opener pattern (starts with
+    # "import {") and contains "}" -- it must be read as closed, not
+    # misread as a dangling opener that would otherwise cause a
+    # completely unrelated bare "name," line below it to be
+    # misclassified as an import member.
+    (tmp_path / "a.ts").write_text(
+        "import { unrelated } from 'os';\ntarget,\n"
+    )
+    hit = sanity.GrepHit(path="a.ts", line=2, snippet="target,")
+    assert not sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "target"
+    )
+
+
 def test_sanity_detects_multiline_destructured_import_member_miss(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -1044,6 +1235,44 @@ def test_sanity_detects_multiline_destructured_import_member_miss(
     # The destructured-import line itself (index.ts:2) must classify
     # as an import statement, not fall through to unexplained.
     assert rows_by_line[2] == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_sanity_multiline_import_member_with_unrelated_import_above(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 23 claude-buddy.md §2.1 end-to-end regression: an unrelated
+    # single-line import sits above the real, still-open multi-line
+    # import block whose member is the hit -- the exact shape that
+    # defeated the flat any()/any() scan on any file with more than
+    # one import statement above the target block (the common case on
+    # a real codebase, per the round-23 repro).
+    root = make_mapped_repo(
+        {
+            "path.ts": "export function buddyStateDir(): string {\n"
+            "  return '/tmp';\n"
+            "}\n",
+            "index.ts": (
+                "import { unrelated } from 'os';\n"
+                "\n"
+                "import {\n"
+                "  buddyStateDir,\n"
+                "  claudeSettingsPath,\n"
+                "} from './path';\n"
+                "\n"
+                "function main() {\n"
+                "  return buddyStateDir();\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "buddyStateDir", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows_by_line = {row["line"]: row["cause"] for row in doc["grep_only"]}
+    assert rows_by_line[4] == sanity.CAUSE_IMPORT_STATEMENT
 
 
 # --- other same-named symbols' own def lines (round 22 §10) -------------

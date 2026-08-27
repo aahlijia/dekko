@@ -62,7 +62,7 @@ from dekko.core import languages
 from dekko.core.walker import DEFAULT_EXCLUDE_DIRS
 from dekko.render.mapfile import MapIndex
 from dekko.storage.cache import CACHE_DIR
-from dekko.textutil import fit_to_budget
+from dekko.textutil import Meter, fit_to_budget
 
 EXIT_OK = 0
 # A genuinely broken invocation (grep unavailable/timed out/errored) —
@@ -304,6 +304,19 @@ def _looks_like_multiline_import_member(
     line -- the only file re-read this module does, kept small and
     best-effort (any read/decode failure returns ``False``, same
     fallback as the rest of this module's parsing).
+
+    Scans backward from the hit line (nearest line first) for the
+    first brace-relevant line -- an ``import {`` opener or a line
+    containing ``}`` -- and answers based on *that* line alone, not
+    "any opener/any closer anywhere in the window" (round 23
+    claude-buddy.md §2.1: a flat any()/any() scan let an unrelated
+    earlier import's closing ``}`` falsely "close" a still-open block
+    sitting directly above the hit, as soon as *any* window line
+    happened to contain a ``}`` regardless of which opener it actually
+    belonged to). A ``}``-bearing line is checked before an opener
+    match on the *same* line so a complete single-line import
+    (``import { X } from 'y';``, which matches both patterns) is
+    correctly treated as closed, not as a dangling opener.
     """
     stripped = hit.snippet.strip().rstrip(",")
     if stripped != bare_name:
@@ -318,11 +331,12 @@ def _looks_like_multiline_import_member(
         return False
     start = max(0, hit.line - 1 - _IMPORT_WINDOW_LINES)
     window = lines[start : hit.line - 1]  # lines strictly above the hit
-    opened = any(_IMPORT_OPEN_BRACE.match(ln) for ln in window)
-    if not opened:
-        return False
-    closed_before_hit = any("}" in ln for ln in window)
-    return not closed_before_hit
+    for ln in reversed(window):
+        if "}" in ln:
+            return False  # nearest brace event is a close
+        if _IMPORT_OPEN_BRACE.match(ln):
+            return True  # nearest brace event is an unclosed opener
+    return False  # no opener at all within the window
 
 
 # How close a grep-only hit must be to the target's own definition
@@ -800,21 +814,24 @@ def _grep_row(hit: GrepHit, cause: str | None = None) -> dict:
 
 def _fit_rows(
     rows: list[dict], budget: int | None, limit: int
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], Meter]:
     """Cap one report bucket by row count then token budget.
 
-    Mirrors ``query._fit_entries``: each bucket (matches/dekko-only/
-    grep-only) gets ``budget`` applied independently, the same way
-    every existing ``query`` relation action already applies ``budget``
-    to its own single result set rather than splitting one budget
-    across unrelated calls.
+    Mirrors ``query._fit_entries`` exactly -- including returning the
+    full ``Meter``, not just a bare total, so ``sanity --json`` can
+    disclose truncation the same way every other budget-capped
+    ``--json`` command already does (round 23 claude-code.md §2.1:
+    ``sanity --json`` silently capped its row arrays at
+    ``DEFAULT_REPORT_LIMIT`` with no ``meta``/``truncated`` disclosure
+    anywhere in the output, unlike ``query --json``'s existing
+    contract).
 
     Returns:
-        ``(kept_rows, total_before_capping)``.
+        ``(kept_rows, meter)``.
     """
     serialized = [json.dumps(r) for r in rows]
-    kept, _meter = fit_to_budget(serialized, budget, limit)
-    return rows[: len(kept)], len(rows)
+    kept, meter = fit_to_budget(serialized, budget, limit)
+    return rows[: len(kept)], meter
 
 
 # Round 21 Track B1/B2 disclosure notes -- printed (text mode) or
@@ -842,8 +859,8 @@ def _pathological_skip_note(count: int) -> str:
 
 
 def _dekko_only_report(
-    dekko_only: tuple[list[dict], int], truncated: bool
-) -> tuple[list[dict], int | None]:
+    dekko_only: tuple[list[dict], Meter], truncated: bool
+) -> tuple[list[dict], Meter | None]:
     """Suppress the ``dekko-only`` bucket under a truncated grep sweep.
 
     See ``run()``'s own docstring and ``_TRUNCATION_NOTE`` for why: a
@@ -868,13 +885,26 @@ def _build_json_doc(
     include_tests: bool,
     grep_command: str,
     sweep: GrepSweepResult,
-    matches: tuple[list[dict], int],
+    matches: tuple[list[dict], Meter],
     dekko_only_rows: list[dict],
-    dekko_only_count: int | None,
-    grep_only: tuple[list[dict], int],
+    dekko_only_meter: Meter | None,
+    grep_only: tuple[list[dict], Meter],
     module_level: list[str],
 ) -> dict:
-    """Assemble ``sanity --json``'s output document."""
+    """Assemble ``sanity --json``'s output document.
+
+    ``meta`` mirrors ``query --json``'s existing truncation-disclosure
+    contract byte-for-byte (one ``Meter.as_dict()`` per bucket) so a
+    consumer already handling ``query``'s ``meta`` shape needs no new
+    parsing to detect a capped ``sanity`` bucket (round 23
+    claude-code.md §2.1: the row arrays were silently capped at
+    ``DEFAULT_REPORT_LIMIT`` with nothing in the JSON disclosing it).
+    ``counts`` is kept exactly as-is alongside ``meta`` -- purely
+    additive, so any existing consumer parsing ``counts`` keeps
+    working unmodified.
+    """
+    matches_rows, matches_meter = matches
+    grep_only_rows, grep_only_meter = grep_only
     doc = {
         "action": "sanity",
         "query_action": query_action,
@@ -884,13 +914,22 @@ def _build_json_doc(
         "grep_command": grep_command,
         "grep_truncated": sweep.truncated,
         "grep_skipped_pathological": sweep.skipped_pathological,
-        "matches": matches[0],
+        "matches": matches_rows,
         "dekko_only": dekko_only_rows,
-        "grep_only": grep_only[0],
+        "grep_only": grep_only_rows,
         "counts": {
-            "matches": matches[1],
-            "dekko_only": dekko_only_count,
-            "grep_only": grep_only[1],
+            "matches": matches_meter.total,
+            "dekko_only": (
+                dekko_only_meter.total if dekko_only_meter else None
+            ),
+            "grep_only": grep_only_meter.total,
+        },
+        "meta": {
+            "matches": matches_meter.as_dict(),
+            "dekko_only": (
+                dekko_only_meter.as_dict() if dekko_only_meter else None
+            ),
+            "grep_only": grep_only_meter.as_dict(),
         },
     }
     if sweep.truncated:
@@ -904,7 +943,8 @@ def _build_json_doc(
     return doc
 
 
-def _print_bucket_text(title: str, rows: list[dict], total: int) -> None:
+def _print_bucket_text(title: str, rows: list[dict], meter: Meter) -> None:
+    total = meter.total
     print(f"  {title}: {total}")
     for row in rows:
         loc = f"{row['file']}:{row['line']}"
@@ -922,9 +962,9 @@ def _print_text(
     target: str,
     bare_name: str,
     grep_command: str,
-    matches: tuple[list[dict], int],
-    dekko_only: tuple[list[dict], int],
-    grep_only: tuple[list[dict], int],
+    matches: tuple[list[dict], Meter],
+    dekko_only: tuple[list[dict], Meter],
+    grep_only: tuple[list[dict], Meter],
     module_level: list[str],
     *,
     grep_truncated: bool = False,
@@ -947,7 +987,7 @@ def _print_text(
             f"  dekko also reports {len(module_level)} module-level call "
             f"site(s) (no line info): {', '.join(sorted(module_level))}"
         )
-    if grep_only[1] == 0 and not grep_truncated:
+    if grep_only[1].total == 0 and not grep_truncated:
         print("  clean: no grep-only misses — spot check passed")
 
 
@@ -1105,7 +1145,7 @@ def run(
     dekko_only = _fit_rows(dekko_only_rows, budget, limit)
     grep_only = _fit_rows(grep_only_rows, budget, limit)
 
-    dekko_only_rows_out, dekko_only_count = _dekko_only_report(
+    dekko_only_rows_out, dekko_only_meter = _dekko_only_report(
         dekko_only, sweep.truncated
     )
 
@@ -1119,7 +1159,7 @@ def run(
             sweep=sweep,
             matches=matches,
             dekko_only_rows=dekko_only_rows_out,
-            dekko_only_count=dekko_only_count,
+            dekko_only_meter=dekko_only_meter,
             grep_only=grep_only,
             module_level=module_level,
         )
