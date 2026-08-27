@@ -9,6 +9,59 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.19] — 2026-08-27
+
+### Fixed
+- **Resolver's single-repo-wide-candidate fast path guessed a
+  builtin/stdlib/third-party method call into a same-named repo
+  symbol's fan-in with no arity/receiver check** — confirmed live as
+  ~1,100x fan-in inflation on spring-boot's AssertJ `.isTrue()` calls
+  (1,103 reported vs. 1 real) and cline's `Date.now()`/`Map.has()`
+  calls (404/436 misattributed sites vs. 0 credible). Extended
+  `_is_noise_call`'s denylist mechanism: added `has`/`now` to
+  `_BUILTIN_METHOD_NAMES`, added a new `_JAVA_ASSERTION_METHOD_NAMES`
+  set (AssertJ/JUnit/Hamcrest chain terminals: `isTrue`, `isEqualTo`,
+  `hasSize`, `contains`, ...), and a new `_BUILDER_METHOD_NAMES` set
+  scoped to just `build` (the confirmed spring-boot repro) rather than
+  the originally proposed broader `of`/`from`/`with` set, dropped
+  after finding real collisions in this repo's own test fixtures and
+  because `from` in particular is Rust's own `impl From<X> for Y`
+  convention name, too common a legitimate repo-defined method to
+  safely denylist repo-wide. A structural arity-aware layer (comparing
+  candidate parameter count against call-site argument count) remains
+  a documented follow-up — the extractor doesn't capture argument
+  counts yet, which is a larger, separate change (round23 issue 01,
+  see `.features/plans/round23/
+  01-resolver-single-candidate-false-confidence.md`).
+- **`dekko subtypes` left ~41% of Rust `impl Trait for X` clauses
+  stuck in "ambiguous," and a same-crate-named collision (a real
+  in-workspace crate plus an unrelated same-named vendor/fixture
+  directory elsewhere in the repo) resolved a coin flip's worth of the
+  time to the *wrong* crate's same-named symbol, silently** —
+  confirmed live against zed's `Render` trait: `crates/gpui` and a
+  synthetic lint-test-fixture directory both named `gpui` collide on
+  the crate-name convention `_rust_crate_roots_index` uses, and which
+  one won was a genuine 50/50 split across process hash seeds (167
+  vs. ~1 correctly-resolved `Render` impls depending purely on
+  `PYTHONHASHSEED`). Two fixes: (a) `_import_match` now also tries a
+  Rust heritage clause's bare `receiver` segment directly as a
+  crate-name hint when the ordinary `file_imports`-derived hint list
+  comes up empty, covering the fully-qualified `impl gpui::Render for
+  X` spelling (no `use` statement to build a hint from, previously
+  never reaching the crate-root fallback at all); (b) a new
+  collision-aware `_rust_crate_roots_index_all` (crate name → every
+  matching root directory, not just the last one indexed) used only
+  by heritage resolution, converting the previous silent coin flip
+  into a deterministic, honest `heritage_ambiguous` for a genuine
+  same-named-crate collision — trading the coin flip's lucky-draw
+  resolved count for eliminating its unlucky draw's silent wrong
+  answers, matching the resolver's own "report as ambiguous rather
+  than guessed" design philosophy.
+  `resolve_imports()`'s unrelated `use`-resolution path keeps the
+  original single-root `_rust_crate_roots_index` unchanged (round23
+  issue 09, see `.features/plans/round23/
+  09-subtypes-ambiguous-resolution-rate.md`).
+
 ## [0.43.18] — 2026-08-27
 
 ### Fixed

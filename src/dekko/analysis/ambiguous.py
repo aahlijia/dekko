@@ -28,6 +28,30 @@ accumulator on ``(caller_id, name)``, not ``(caller_id, name, line)``
 same caller collapse into one triple here. Counts in this report are
 "distinct (caller, name) collisions," not "physical ambiguous
 call-site count."
+
+Methodology limit -- this report is structurally blind to
+single-candidate false confidence (round 23
+``test-repos/reports/23-tokentest-7repo-fable5eval/cline.md`` §2.1,
+``spring-boot.md`` §2.1/§2.2): ``CallGraph.ambiguous`` is only ever
+populated when a bare call name matches 2+ repo-defined candidates
+with no disambiguating signal. When exactly *one* repo-defined
+candidate shares a call's bare name, ``resolver.py``'s
+``_pick_candidate`` accepts it via its ``len(candidates) == 1`` fast
+path — even when many call sites sharing that name are really calls to
+a same-named builtin/stdlib/third-party method (JS's
+``Date.now()``/``Map.has()``, Java's AssertJ ``.isTrue()``, ...), not
+the repo symbol. Such calls resolve "successfully" and never appear
+here at all, however inflated the resulting fan-in — this report's
+"0 ambiguous sites" cannot be read as "resolution is trustworthy" on
+its own; cross-check a suspiciously high fan-in with ``dekko sanity``.
+``_is_noise_call``'s denylists (``_BUILTIN_METHOD_NAMES``,
+``_CHAIN_BUILDER_METHOD_NAMES``, ``_RUST_STD_METHOD_NAMES``,
+``_JAVA_ASSERTION_METHOD_NAMES``, ``_BUILDER_METHOD_NAMES``) catch
+known instances of this shape by routing them to ``external`` instead,
+but the denylist approach is reactive by construction — see
+``.features/plans/round23/01-resolver-single-candidate-false-confidence.md``
+for the full analysis and the deferred structural (arity-aware)
+follow-up.
 """
 
 import json

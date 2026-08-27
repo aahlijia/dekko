@@ -914,7 +914,7 @@ def resolve_heritage(
     same-file, import hints, the noise guard, and the fallbacks) run
     unmodified.
 
-    Also builds ``crate_roots`` (``_rust_crate_roots_index``) once,
+    Also builds ``crate_roots`` (``_rust_crate_roots_index_all``) once,
     repo-wide, and threads it through every ``_resolve_one_heritage``
     call so ``_import_match``'s Rust crate-aware fallback step (see
     ``_rust_crate_hint_matches``) can resolve a heritage clause naming
@@ -922,7 +922,22 @@ def resolve_heritage(
     repo-wide collision — round 22 zed.md §3.2 (``impl Render for
     Editor`` previously fell through to ``heritage_ambiguous`` because
     ``Render``'s own declaring file, ``element.rs``, is never a
-    segment of its ``use gpui::Render;`` import source).
+    segment of its ``use gpui::Render;`` import source). Round 23
+    (``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md``) added two things: Fix
+    A, a ``call.receiver``-as-crate-hint step in ``_import_match`` for
+    the fully-qualified ``impl gpui::Render for X`` spelling, which has
+    no ``use`` binding for either ``Render`` or ``gpui`` to build a
+    hint from otherwise (see ``_rust_receiver_crate_match``); and Fix
+    B, switching this from the single-root ``_rust_crate_roots_index``
+    to the collision-aware ``_rust_crate_roots_index_all`` (one crate
+    name can map to multiple root directories, e.g. a real crate plus
+    a same-named test-fixture directory) after live measurement
+    against zed showed the single-root version was a genuine 50/50
+    coin flip between "every affected clause resolves correctly" and
+    "every affected clause silently resolves to the wrong crate's
+    same-named symbol" -- see ``_rust_crate_hint_matches``'s docstring
+    and the design doc's "Implemented" note for the numbers.
 
     Args:
         files: Per-file extraction results.
@@ -942,7 +957,9 @@ def resolve_heritage(
     by_name_path = _build_name_path_index(files)
     imports_by_file = _imports_by_file(files)
     repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
-    crate_roots = _rust_crate_roots_index(frozenset(fm.path for fm in files))
+    crate_roots = _rust_crate_roots_index_all(
+        frozenset(fm.path for fm in files)
+    )
 
     edges: dict[tuple[str, str], set[int]] = {}
     relations: dict[tuple[str, str], str] = {}
@@ -1013,7 +1030,7 @@ def _resolve_one_heritage(
     ambiguous: dict[tuple[str, str], list[str]],
     external: dict[tuple[str, str], set[int]],
     raw_imports: list[Import] | None = None,
-    crate_roots: dict[str, str] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
 ) -> None:
     """Resolve one heritage clause; mirrors ``_resolve_call``'s shape.
 
@@ -1033,8 +1050,9 @@ def _resolve_one_heritage(
     ``OpKernel`` subtype edges to ``ambiguous``).
 
     ``crate_roots``, when given, is the repo-wide Rust crate-name to
-    crate-root-directory index (``_rust_crate_roots_index``, built
-    once by ``resolve_heritage()``), passed straight through to
+    every matching crate-root-directory index
+    (``_rust_crate_roots_index_all``, built once by
+    ``resolve_heritage()``), passed straight through to
     ``_pick_candidate``'s own ``crate_roots`` parameter -- see that
     docstring and ``_rust_crate_hint_matches`` for what it fixes
     (round 22 zed.md §3.2: a crate-root re-exported Rust trait
@@ -1630,7 +1648,7 @@ def _pick_candidate(
     index: dict[str, list[Symbol]],
     repo_stems: set[str] | None = None,
     raw_imports: list[Import] | None = None,
-    crate_roots: dict[str, str] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
 ) -> Symbol | _Noise | None:
     """Apply the resolution ladder; ``None`` means ambiguous.
 
@@ -1673,14 +1691,14 @@ def _pick_candidate(
     ``_WHOLE_FILE_IMPORT_LANGUAGES``.
 
     ``crate_roots``, when given, is the repo-wide Rust crate-name to
-    crate-root-directory index (``_rust_crate_roots_index``), used by
-    ``_import_match``'s crate-aware fallback step (see
-    ``_rust_crate_hint_matches``) to resolve a crate-root re-exported
-    Rust trait/type against a same-named repo-wide collision that its
-    own file-stem can't reach. Currently only threaded in by
-    ``resolve_heritage()`` (round 22 zed.md §3.2, the ``query
-    subtypes``/heritage-resolution path); ``resolve()``'s call/ref
-    resolution path leaves this ``None``.
+    every matching crate-root-directory index
+    (``_rust_crate_roots_index_all``), used by ``_import_match``'s
+    crate-aware fallback step (see ``_rust_crate_hint_matches``) to
+    resolve a crate-root re-exported Rust trait/type against a
+    same-named repo-wide collision that its own file-stem can't reach.
+    Currently only threaded in by ``resolve_heritage()`` (round 22
+    zed.md §3.2, the ``query subtypes``/heritage-resolution path);
+    ``resolve()``'s call/ref resolution path leaves this ``None``.
 
     Before any of the above runs, ``candidates`` is narrowed to those
     matching the call site's own language, or failing that its
@@ -1844,7 +1862,13 @@ _AMBIENT_GLOBAL_NAMES = frozenset(
 # leaking through with inflated ``avg_candidates`` in cline's own report
 # (``get`` averaged 32.0 candidates -- almost certainly
 # ``Map.get()``/``Promise.resolve()``/``Object.create()`` noise, not real
-# repo-symbol collisions).
+# repo-symbol collisions). ``has``/``now`` added round 23
+# (cline.md §2.1): a closure-local ``const now = () => Date.now()``
+# was credited with every ``Date.now()``/``performance.now()`` call in
+# the repo (404 misattributed sites), and ``Map.prototype.has``/
+# ``Set.prototype.has``/``Reflect.has`` calls through untyped
+# receivers inflated an unrelated repo-defined ``has`` to 436
+# misattributed sites vs. 0 credible.
 _BUILTIN_METHOD_NAMES = frozenset(
     {
         "trim", "trimStart", "trimEnd", "toString", "valueOf",
@@ -1853,7 +1877,7 @@ _BUILTIN_METHOD_NAMES = frozenset(
         "forEach", "map", "filter", "reduce", "startsWith", "endsWith",
         "padStart", "padEnd", "repeat", "charAt", "substring",
         "replace", "replaceAll", "split", "flat", "hasOwnProperty",
-        "get", "resolve", "create",
+        "get", "resolve", "create", "has", "now",
     }
 )  # fmt: skip
 
@@ -1917,6 +1941,56 @@ _RUST_STD_METHOD_NAMES = frozenset(
         "is_none", "is_ok", "is_err", "ok", "err", "take", "replace",
     }
 )  # fmt: skip
+
+# AssertJ/JUnit/Hamcrest fluent-assertion chain terminals
+# (``assertThat(x).isTrue()``, ``assertThat(list).hasSize(3)``). Same
+# false-positive shape as the three sets above, just for Java's
+# dominant assertion-library idiom: a receiver-qualified call whose
+# receiver is an untyped ``assertThat(...)`` chain result reaches this
+# guard, and these names are called constantly across test suites
+# rather than naming an in-repo type sharing the name. Confirmed live
+# against spring-boot round 23 (§2.1): a single real
+# ``ResolvedDockerHost.isTrue`` caller had its fan-in inflated to 1,103
+# by unrelated AssertJ ``.isTrue()`` chain calls (~1,100x inflation).
+_JAVA_ASSERTION_METHOD_NAMES = frozenset(
+    {
+        "isTrue", "isFalse", "isEqualTo", "isNotEqualTo", "isNotNull",
+        "isNull", "isEmpty", "isNotEmpty", "isPresent", "isAbsent",
+        "hasSize", "contains", "containsExactly", "doesNotContain",
+        "isInstanceOf", "isSameAs", "isNotSameAs",
+    }
+)  # fmt: skip
+
+# Generic builder-pattern terminal method name, shared across
+# Java/Kotlin/Go/Rust builder idioms alike (``SomeBuilder.build()``)
+# -- not JS-flavored like ``_CHAIN_BUILDER_METHOD_NAMES`` above, which
+# only covers Zod/Commander's specific fluent APIs. Same false-positive
+# shape: a receiver-qualified call whose receiver isn't provably typed
+# as the repo's own like-named builder reaches this guard purely on
+# "otherwise unique repo-wide" name evidence. Confirmed live against
+# spring-boot round 23 (§2.2): a repo-defined ``Builder.build`` read 43
+# real callers plus 1,131 additional ambiguous-but-uncounted sites from
+# unrelated builder types across the codebase.
+#
+# Deliberately narrower than the design doc's original proposal, which
+# also suggested ``of``/``from``/``with``: dropped after finding real
+# collisions during implementation, not merely speculative risk --
+# this repo's own resolver test fixtures already use a same-file
+# ``build`` method as an incidental placeholder name in two unrelated
+# ladder-step tests, and ``from`` in particular is Rust's own trait
+# convention name (``impl From<X> for Y { fn from(x: X) -> Y }`) --
+# virtually every Rust repo defines many legitimate, resolvable
+# same-named ``from`` methods, so denylisting it repo-wide (this guard
+# is not language-gated) would trade a modest inflation fix for a much
+# larger true-resolution loss on a language dekko already invests
+# heavily in getting right. See the "Implemented" note in
+# ``.features/plans/round23/
+# 01-resolver-single-candidate-false-confidence.md`` for the full
+# reasoning; ``of``/``with`` were dropped alongside ``from`` for
+# consistency (no repro evidence backs them individually either) with
+# nothing lost, since the confirmed spring-boot repro is specifically
+# ``Builder.build()``.
+_BUILDER_METHOD_NAMES = frozenset({"build"})
 
 # Node's core module names -- a bare (non-relative) JS/TS import source
 # exactly matching one of these is never a same-named local file,
@@ -1986,6 +2060,8 @@ def _is_noise_call(
         call.name in _BUILTIN_METHOD_NAMES
         or call.name in _CHAIN_BUILDER_METHOD_NAMES
         or call.name in _RUST_STD_METHOD_NAMES
+        or call.name in _JAVA_ASSERTION_METHOD_NAMES
+        or call.name in _BUILDER_METHOD_NAMES
     )
 
 
@@ -2255,7 +2331,7 @@ def _import_match(
     candidates: list[Symbol],
     file_imports: dict[str, Import],
     raw_imports: list[Import] | None = None,
-    crate_roots: dict[str, str] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
 ) -> Symbol | None:
     """Match candidates against import hints for this file.
 
@@ -2276,15 +2352,26 @@ def _import_match(
     ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md`` and
     ``tests/test_resolver.py::test_cpp_call_disambiguated_via_whole_file_include``.
 
-    ``crate_roots`` (Rust only, see ``_rust_crate_roots_index``) is
+    ``crate_roots`` (Rust only, see ``_rust_crate_roots_index_all``) is
     tried, per hint, right after that hint's own ``_module_matches``
     attempt comes up empty: a Rust trait/type re-exported at its
     crate root (``pub use submodule::*;``) is imported elsewhere by
     crate-qualified path (``use gpui::Render;``), which
     ``_module_matches``'s file-stem check can never match against the
     symbol's *actual* declaring file — round 22 zed.md §3.2. See
-    ``_rust_crate_hint_matches`` for the matching rule and its one
-    documented residual gap (two same-named crates in the repo).
+    ``_rust_crate_hint_matches`` for the matching rule.
+
+    Round 23 Fix A (``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md``): when the ``hints``
+    loop above finds nothing at all -- because neither the callee name
+    nor the receiver's leading segment has a local ``use`` binding to
+    build a hint from in the first place -- a Rust heritage clause's
+    own ``call.receiver`` is tried directly as a bare crate-name hint.
+    This covers Rust's fully-qualified impl spelling
+    (``impl gpui::Render for X``, no ``use gpui::Render;`` anywhere in
+    the file), which previously produced an empty ``hints`` list and
+    never even reached ``_rust_crate_hint_matches`` -- the crate-root
+    fallback existed but had nothing to loop over.
     """
     hints: list[str] = []
     imp = file_imports.get(call.name)
@@ -2295,6 +2382,35 @@ def _import_match(
         rec_imp = file_imports.get(first)
         if rec_imp is not None:
             hints.append(rec_imp.source)
+    hinted = _hint_match(hints, candidates, crate_roots)
+    if hinted is not None:
+        return hinted
+    receiver_hint = _rust_receiver_crate_match(call, candidates, crate_roots)
+    if receiver_hint is not None:
+        return receiver_hint
+    if raw_imports:
+        matched = [
+            c
+            for c in candidates
+            if any(_module_matches(i.source, c.path) for i in raw_imports)
+        ]
+        if len(matched) == 1:
+            return matched[0]
+    return None
+
+
+def _hint_match(
+    hints: list[str],
+    candidates: list[Symbol],
+    crate_roots: dict[str, list[str]] | None,
+) -> Symbol | None:
+    """Try each ``file_imports``-derived hint against ``candidates``.
+
+    Split out of ``_import_match`` purely to keep that function's
+    cyclomatic complexity under the project's Ruff limit -- the
+    per-hint ``_module_matches``-then-``_rust_crate_hint_matches``
+    loop that function has run unmodified since before round 23.
+    """
     for hint in hints:
         matched = [c for c in candidates if _module_matches(hint, c.path)]
         if len(matched) == 1:
@@ -2307,14 +2423,38 @@ def _import_match(
             ]
             if len(crate_matched) == 1:
                 return crate_matched[0]
-    if raw_imports:
-        matched = [
-            c
-            for c in candidates
-            if any(_module_matches(i.source, c.path) for i in raw_imports)
-        ]
-        if len(matched) == 1:
-            return matched[0]
+    return None
+
+
+def _rust_receiver_crate_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    crate_roots: dict[str, list[str]] | None,
+) -> Symbol | None:
+    """Round 23 Fix A: try a heritage clause's bare receiver as a
+    crate-name hint directly, split out of ``_import_match`` purely to
+    keep that function's cyclomatic complexity under the project's
+    Ruff limit.
+
+    Rust's fully-qualified impl spelling (``impl gpui::Render for X``)
+    binds no ``use`` for either ``Render`` or ``gpui``, so
+    ``_import_match``'s ordinary ``hints`` list (built only from
+    ``file_imports`` lookups) stays empty and its crate-aware loop
+    never runs. ``call.receiver`` (``"gpui"`` here) is itself a
+    directly usable crate-name hint in that case -- reuses
+    ``_rust_crate_hint_matches`` unchanged, just fed a hint sourced
+    from the call site rather than a ``file_imports`` entry.
+    """
+    if not crate_roots or not call.receiver:
+        return None
+    first = _PATH_SPLIT.split(call.receiver)[0]
+    crate_matched = [
+        c
+        for c in candidates
+        if _rust_crate_hint_matches(first, c.path, crate_roots)
+    ]
+    if len(crate_matched) == 1:
+        return crate_matched[0]
     return None
 
 
@@ -2492,7 +2632,7 @@ def _module_matches(source: str, candidate_path: str) -> bool:
 
 
 def _rust_crate_hint_matches(
-    hint: str, candidate_path: str, crate_roots: dict[str, str]
+    hint: str, candidate_path: str, crate_roots: dict[str, list[str]]
 ) -> bool:
     """Check a Rust import hint against a candidate via its crate root.
 
@@ -2509,47 +2649,61 @@ def _rust_crate_hint_matches(
     to ambiguous even though the import hint, read correctly, points
     unambiguously at the real trait.
 
-    This reuses ``_rust_crate_roots_index`` (built once per
-    ``resolve_heritage()`` call, the same repo-wide crate-name ->
-    crate-root-``src/``-directory index ``resolve_imports()`` already
-    relies on for cross-crate ``use`` resolution) to check the
+    This reuses ``_rust_crate_roots_index_all`` (built once per
+    ``resolve_heritage()`` call, a repo-wide crate-name -> *every*
+    matching crate-root-``src/``-directory index) to check the
     *crate*, not just the file: does the hint's leading path segment
     name a known crate, and does the candidate's own file live under
-    that crate's root directory.
+    any of that crate name's root directories.
 
     Args:
         hint: One import source string from ``_import_match``'s hint
-            list (e.g. ``"gpui::Render"``).
+            list (e.g. ``"gpui::Render"``), or (round 23 Fix A) a bare
+            heritage-clause receiver segment used directly as a
+            crate-name hint.
         candidate_path: Repo-relative path of a candidate symbol.
-        crate_roots: Crate name to that crate's ``src/`` directory,
-            as built by ``_rust_crate_roots_index``.
+        crate_roots: Crate name to every matching crate's ``src/``
+            directory, as built by ``_rust_crate_roots_index_all``.
 
     Returns:
-        True when ``candidate_path`` is a Rust file living under the
-        crate root named by ``hint``'s leading segment.
+        True when ``candidate_path`` is a Rust file living under any
+        root registered for the crate name in ``hint``'s leading
+        segment.
 
-    Known residual gap (documented, not fixed here): ``crate_roots``
-    holds one root per crate *name*, so two same-named crates (an
+    Round 23 Fix B (``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md``) -- see that design
+    doc's "Implemented" note for the live measurement this decision
+    is based on. Before Fix B, ``crate_roots`` held one root per crate
+    *name* (``dict[str, str]``), so two same-named crates (an
     in-workspace one and an unrelated same-named fixture/vendor crate
-    elsewhere in the repo — the exact zed shape this was verified
+    elsewhere in the repo -- the exact zed shape this was verified
     against, ``tooling/lints/test_fixture/gpui`` shadowing the real
-    ``gpui`` crate) collapse onto whichever one
-    ``_rust_crate_roots_index`` happens to index last; this can still
-    pick the wrong one of the two in that specific adversarial case.
-    Every other shape (a re-exported trait colliding with an
-    unrelated, differently-named type elsewhere in the repo — the far
-    more common case) resolves correctly.
+    ``gpui`` crate) silently collapsed onto whichever one
+    ``_rust_crate_roots_index`` happened to index last, which measured
+    live as a genuine 50/50 coin flip across process hash seeds: about
+    half the time every affected clause resolved correctly (the real
+    crate won), the other half every one of them silently resolved to
+    the *wrong* (fixture) crate's same-named symbol -- confidently
+    wrong data, not merely missing data. Matching *any* registered
+    root instead removes the coin flip entirely: a genuine collision
+    (both roots match, ``len(crate_matched) > 1``) now deterministically
+    falls through to ``heritage_ambiguous`` instead of a 50%-chance
+    silent misattribution, matching this module's own stated
+    philosophy ("report as ambiguous rather than guessed" -- see the
+    module docstring). This trades away the "lucky half" of the old
+    coin flip's resolved-count along with the "unlucky half"'s silent
+    wrong answers -- an intentional, examined tradeoff, not an
+    oversight; see the design doc for the exact numbers.
     """
     if not candidate_path.endswith(".rs"):
         return False
     segments = _PATH_SPLIT.split(hint)
     if not segments or not segments[0]:
         return False
-    crate_root = crate_roots.get(segments[0])
-    if crate_root is None:
-        return False
-    return candidate_path == crate_root or candidate_path.startswith(
-        f"{crate_root}/"
+    crate_dirs = crate_roots.get(segments[0], [])
+    return any(
+        candidate_path == d or candidate_path.startswith(f"{d}/")
+        for d in crate_dirs
     )
 
 
@@ -3004,6 +3158,20 @@ def _rust_crate_roots_index(paths: frozenset[str]) -> dict[str, str]:
     ``_rust_crate_root`` itself already accepts for its own edge case
     (round 22 zed.md §3.1).
 
+    Single-root-per-name only: when two directories both convention-
+    match the same crate name (a genuine in-workspace crate plus an
+    unrelated same-named fixture/vendor crate elsewhere in the repo),
+    whichever this function encounters last silently wins. That
+    winner-take-all behavior is intentional and unchanged here since
+    ``resolve_imports()``'s cross-crate ``use`` resolution
+    (``_resolve_import_rust``) needs exactly one directory to resolve
+    against; see ``_rust_crate_roots_index_all`` for the
+    collision-aware variant used by heritage resolution instead (round
+    23, ``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md`` Fix B), which is safe
+    there because its own caller (``_rust_crate_hint_matches``) already
+    requires an unambiguous single match before accepting one.
+
     Args:
         paths: Every known file path.
 
@@ -3025,6 +3193,66 @@ def _rust_crate_roots_index(paths: frozenset[str]) -> dict[str, str]:
         name = p.rsplit("/", 1)[-1]
         if name in ("lib.rs", "main.rs") or name == f"{crate_name}.rs":
             roots[crate_name] = src_dir
+    return roots
+
+
+def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
+    """Repo-wide Rust crate name → every matching crate-root directory.
+
+    Collision-aware sibling of ``_rust_crate_roots_index``: applies the
+    identical convention-based detection, but retains *every*
+    directory that matches a given crate name instead of letting the
+    last one encountered silently overwrite the rest. Built once per
+    ``resolve_heritage()`` call and threaded through
+    ``_pick_candidate``/``_import_match`` as that path's ``crate_roots``
+    -- ``resolve_imports()``'s ``use``-resolution path
+    (``_resolve_import_rust``) keeps using the single-root
+    ``_rust_crate_roots_index`` unchanged, since it needs exactly one
+    directory to resolve a bare crate-name import against and isn't
+    the path round 23's zed finding was about.
+
+    Round 23 (``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md`` Fix B): zed's
+    ``crates/gpui`` (the real crate) and
+    ``tooling/lints/test_fixture/gpui`` (a same-named synthetic test
+    fixture) both convention-match crate name ``"gpui"`` --
+    ``_rust_crate_roots_index``'s single-winner behavior meant this
+    collision was a genuine, measured 50/50 coin flip per process hash
+    seed (see ``_rust_crate_hint_matches``'s docstring and this design
+    doc's "Implemented" note for the live zed measurement): winning
+    half the time resolved every affected clause correctly, losing the
+    other half silently misattributed every one of them to the wrong
+    (fixture) crate's same-named symbol. Kept as every candidate
+    (``_rust_crate_hint_matches``) rather than resolved to one here,
+    since only that function's caller has the full candidate-symbol
+    list needed to tell "matches one real root" apart from "matches
+    two, still genuinely ambiguous" -- converting the coin flip into a
+    deterministic, honest "ambiguous" for the genuinely unresolvable
+    case, at the cost of the coin flip's lucky-draw resolved count.
+
+    Args:
+        paths: Every known file path.
+
+    Returns:
+        Crate name → every ``src/`` directory this convention finds
+        matching that name, in path-iteration order (deduplicated).
+    """
+    roots: dict[str, list[str]] = {}
+    for p in paths:
+        if not p.endswith(".rs"):
+            continue
+        src_dir = _dirname(p)
+        if src_dir.rsplit("/", 1)[-1] != "src":
+            continue
+        crate_dir = _dirname(src_dir)
+        if not crate_dir:
+            continue
+        crate_name = crate_dir.rsplit("/", 1)[-1]
+        name = p.rsplit("/", 1)[-1]
+        if name in ("lib.rs", "main.rs") or name == f"{crate_name}.rs":
+            dirs = roots.setdefault(crate_name, [])
+            if src_dir not in dirs:
+                dirs.append(src_dir)
     return roots
 
 

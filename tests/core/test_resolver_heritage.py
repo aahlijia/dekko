@@ -618,6 +618,188 @@ def test_rust_impl_trait_resolves_via_crate_root_reexport(
     assert graph.heritage_ambiguous == []
 
 
+def test_rust_impl_trait_resolves_via_fully_qualified_crate_path(
+    tmp_path: Path,
+) -> None:
+    """Round 23 Fix A (``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md``): Rust's other
+    equally-common spelling for a cross-crate impl,
+    ``impl gpui::Render for Editor`` (fully crate-qualified, no
+    ``use`` needed since external crate names are always in scope in
+    Rust 2018+), previously never built a ``file_imports`` hint for
+    either ``Render`` or ``gpui`` -- the crate-qualified path lives
+    only inside the ``impl`` clause itself, nowhere else in the file
+    -- so ``_import_match``'s ``for hint in hints:`` loop had nothing
+    to iterate and the crate-root fallback it guards never even ran.
+    Confirmed reproducing live against the real zed checkout (dekko
+    0.43.18)."""
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "crates" / "gpui" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "gpui" / "src" / "gpui.rs").write_text(
+        "pub use element::*;\n"
+    )
+    (tmp_path / "crates" / "gpui" / "src" / "element.rs").write_text(
+        "pub trait Render {}\n"
+    )
+    (tmp_path / "crates" / "other" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "other" / "src" / "lib.rs").write_text(
+        "pub trait Render {}\n"
+    )
+    (tmp_path / "crates" / "editor" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "editor" / "src" / "editor.rs").write_text(
+        # No ``use gpui::Render;`` anywhere -- fully crate-qualified
+        # in the impl clause only, the shape Fix A targets.
+        "struct Editor;\n\nimpl gpui::Render for Editor {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    rel_paths = [
+        "crates/gpui/src/gpui.rs",
+        "crates/gpui/src/element.rs",
+        "crates/other/src/lib.rs",
+        "crates/editor/src/editor.rs",
+    ]
+    files = [extract_file(tmp_path, p, spec) for p in rel_paths]
+    graph = resolve(files)
+    assert graph.heritage_out["crates/editor/src/editor.rs::Editor"] == [
+        "crates/gpui/src/element.rs::Render"
+    ]
+    assert graph.heritage_ambiguous == []
+
+
+def test_rust_impl_trait_resolves_despite_unrelated_fixture_crate_present(
+    tmp_path: Path,
+) -> None:
+    """Round 23 Fix A + Fix B combined, mirroring the real zed shape
+    verified live -- a genuine ``crates/gpui`` crate coexists with an
+    unrelated same-named synthetic test-fixture directory
+    (``tooling/lints/test_fixture/gpui``); both convention-match crate
+    name ``"gpui"``, so ``crate_roots["gpui"]`` now legitimately holds
+    *two* directories (Fix B). The trait being resolved here
+    (``Focusable``) is declared only in the real crate, not
+    re-declared by the fixture crate -- unlike two genuinely
+    same-named traits under the same crate name (see
+    ``test_rust_crate_hint_matches_genuine_collision_stays_ambiguous``
+    below, an irreducible case neither fix claims to solve), a
+    crate-name collision alone must not block resolution when only one
+    of the collision's roots actually contains a matching candidate.
+    Exercises both the ``use``-imported and Fix A's fully-qualified
+    impl spelling, since round 23's zed finding was that the two
+    mechanisms compound.
+    """
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "crates" / "gpui" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "gpui" / "src" / "gpui.rs").write_text(
+        "pub use element::*;\n"
+    )
+    (tmp_path / "crates" / "gpui" / "src" / "element.rs").write_text(
+        "pub trait Focusable {}\n"
+    )
+    # Unrelated same-named fixture crate -- mirrors zed's
+    # ``tooling/lints/test_fixture/gpui``, a synthetic crate used to
+    # test a custom lint. It shares the crate *name* "gpui" but does
+    # not itself declare a ``Focusable`` trait, so it must not block
+    # resolution of clauses naming ``Focusable`` through the "gpui"
+    # crate-name hint.
+    (tmp_path / "tooling" / "lints" / "test_fixture" / "gpui" / "src").mkdir(
+        parents=True
+    )
+    (
+        tmp_path
+        / "tooling"
+        / "lints"
+        / "test_fixture"
+        / "gpui"
+        / "src"
+        / "lib.rs"
+    ).write_text("pub struct FixtureOnly;\n")
+    (tmp_path / "crates" / "other" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "other" / "src" / "lib.rs").write_text(
+        "pub trait Focusable {}\n"
+    )
+    (tmp_path / "crates" / "editor" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "editor" / "src" / "editor.rs").write_text(
+        "use gpui::Focusable;\n\n"
+        "struct Editor;\n\n"
+        "impl Focusable for Editor {}\n"
+    )
+    (tmp_path / "crates" / "panel" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "panel" / "src" / "panel.rs").write_text(
+        "struct Panel;\n\nimpl gpui::Focusable for Panel {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    rel_paths = [
+        "crates/gpui/src/gpui.rs",
+        "crates/gpui/src/element.rs",
+        "tooling/lints/test_fixture/gpui/src/lib.rs",
+        "crates/other/src/lib.rs",
+        "crates/editor/src/editor.rs",
+        "crates/panel/src/panel.rs",
+    ]
+    files = [extract_file(tmp_path, p, spec) for p in rel_paths]
+    graph = resolve(files)
+    assert graph.heritage_out["crates/editor/src/editor.rs::Editor"] == [
+        "crates/gpui/src/element.rs::Focusable"
+    ]
+    assert graph.heritage_out["crates/panel/src/panel.rs::Panel"] == [
+        "crates/gpui/src/element.rs::Focusable"
+    ]
+    assert graph.heritage_ambiguous == []
+
+
+def test_rust_crate_hint_matches_genuine_collision_stays_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """Fix B only ever *adds* a previously-dropped match -- it must not
+    turn a genuine collision between two *distinct, both-real* crates
+    into a false resolution. Here both same-named ``gpui`` directories
+    define their own, unrelated ``Render`` trait and both are
+    plausible real crates (unlike the fixture-crate case above, this
+    fixture gives both directories equally legitimate-looking
+    ``Cargo``-style ``src/lib.rs`` layouts with no naming cue that
+    either is synthetic) -- a fully-qualified
+    ``impl gpui::Render for X`` naming the collision by bare crate
+    name alone must stay ambiguous, since ``_rust_crate_hint_matches``
+    now matches *both* roots and ``_import_match``'s
+    ``len(crate_matched) == 1`` gate correctly declines. This is the
+    intentional, examined tradeoff documented in
+    ``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md``'s "Implemented" note:
+    honest ambiguity instead of a 50/50 chance of a silently wrong
+    resolution."""
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "crates" / "gpui" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "gpui" / "src" / "lib.rs").write_text(
+        "pub trait Render {}\n"
+    )
+    (tmp_path / "vendor" / "gpui" / "src").mkdir(parents=True)
+    (tmp_path / "vendor" / "gpui" / "src" / "lib.rs").write_text(
+        "pub trait Render {}\n"
+    )
+    (tmp_path / "crates" / "panel" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "panel" / "src" / "panel.rs").write_text(
+        "struct Panel;\n\nimpl gpui::Render for Panel {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    rel_paths = [
+        "crates/gpui/src/lib.rs",
+        "vendor/gpui/src/lib.rs",
+        "crates/panel/src/panel.rs",
+    ]
+    files = [extract_file(tmp_path, p, spec) for p in rel_paths]
+    graph = resolve(files)
+    assert graph.heritage_out == {}
+    assert len(graph.heritage_ambiguous) == 1
+
+
 def test_cpp_multiple_inheritance_resolves(tmp_path: Path) -> None:
     from dekko.core import languages
     from dekko.core.extractor import extract_file
