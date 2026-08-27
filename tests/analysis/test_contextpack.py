@@ -388,3 +388,85 @@ def test_run_applies_default_pack_budget(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["meta"]["budget"] == contextpack.DEFAULT_PACK_BUDGET
+
+
+# round23 issue 07: get_context_pack silently dropped the "N
+# ambiguous, not counted" disclosure that query callers/callees and
+# the CLI both show — a.py:target's fan-in looks exhaustive (no
+# calls_in edge) even though c.py's call to the bare name "target"
+# exists but resolved ambiguously against a.py/b.py's same-named
+# definitions.
+AMBIGUOUS_CALL = {
+    "a.py": "def target() -> int:\n    return 1\n",
+    "b.py": "def target() -> int:\n    return 2\n",
+    "c.py": "def caller() -> int:\n    return target()\n",
+}
+
+
+def test_build_pack_carries_ambiguous_in_count(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    index, target = _resolved(root, "target")
+    pack = contextpack.build_pack(index, target, hops=1)
+    assert pack.ambig_in == 1
+    assert pack.ambig_out == 0
+
+
+def test_render_text_notes_ambiguous_in(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    index, target = _resolved(root, "target")
+    pack = contextpack.build_pack(index, target, hops=1)
+    text = contextpack.render_text(pack)
+    assert (
+        "note: 1 additional call site(s) named 'target' resolved "
+        "ambiguously — not counted here" in text
+    )
+
+
+def test_render_text_notes_ambiguous_out(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    index, caller = _resolved(root, "caller")
+    pack = contextpack.build_pack(index, caller, hops=1)
+    text = contextpack.render_text(pack)
+    assert (
+        "note: 1 outgoing call(s) from this symbol resolved "
+        "ambiguously (name matched 2+ candidates) — not counted here" in text
+    )
+
+
+def test_render_text_no_ambiguous_note_when_zero(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN3)
+    index, mid = _resolved(root, "mid")
+    pack = contextpack.build_pack(index, mid, hops=1)
+    assert pack.ambig_in == 0
+    assert pack.ambig_out == 0
+    assert "resolved ambiguously" not in contextpack.render_text(pack)
+
+
+def test_context_pack_json_carries_ambiguous_in(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    code = cli.main(["context", "a.py:target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["ambiguous_in"] == 1
+    assert "ambiguous_out" not in doc
+
+
+def test_context_pack_json_no_ambiguous_key_when_zero(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CHAIN3)
+    code = cli.main(["context", "mid", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "ambiguous_in" not in doc
+    assert "ambiguous_out" not in doc

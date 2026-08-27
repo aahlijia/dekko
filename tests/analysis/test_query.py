@@ -239,6 +239,15 @@ AMBIGUOUS_CALL = {
 }
 
 
+def test_ambiguous_counts_helper_returns_incoming_and_outgoing(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SYMBOL_CARD_BOTH_DIRECTIONS_AMBIGUOUS)
+    index = mapfile.load_map(root)
+    mid = next(s for s in index.symbols_by_qualname["mid"] if s.path == "a.py")
+    assert query.ambiguous_counts(index, mid) == (2, 1)
+
+
 def test_symbol_card_shows_ambiguous_in_count(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
@@ -251,8 +260,10 @@ def test_symbol_card_shows_ambiguous_in_count(
     code = cli.main(["query", "symbol", "a.py:target", "--root", str(root)])
     assert code == 0
     out = capsys.readouterr().out
-    assert "fan-in: 0, fan-out: 0" in out
-    assert "(+1 ambiguous call sites not counted)" in out
+    assert (
+        "fan-in: 0 (+1 additional call site(s) named 'target' "
+        "resolved ambiguously — not counted), fan-out: 0" in out
+    )
 
 
 def test_symbol_card_json_ambiguous_in(
@@ -266,6 +277,50 @@ def test_symbol_card_json_ambiguous_in(
     doc = json.loads(capsys.readouterr().out)
     assert doc["fan_in"] == 0
     assert doc["ambiguous_in"] == 1
+
+
+SYMBOL_CARD_BOTH_DIRECTIONS_AMBIGUOUS = {
+    # a.py:mid's incoming side collides on the bare name "mid" (b.py
+    # defines another), and its outgoing side calls a bare "shared"
+    # that also collides (shared1.py/shared2.py) — two independent
+    # ambiguous call sites named "mid" (entry1, entry2) vs. one
+    # ambiguous outgoing call, so ambig_in (2) != ambig_out (1) and a
+    # swapped fan-in/fan-out label would be caught by asserting exact
+    # values, not just presence of a number (round23 issue 08).
+    "a.py": "def mid() -> int:\n    return shared()\n",
+    "b.py": "def mid() -> int:\n    return 1\n",
+    "shared1.py": "def shared() -> int:\n    return 1\n",
+    "shared2.py": "def shared() -> int:\n    return 2\n",
+    "caller1.py": "def entry1() -> int:\n    return mid()\n",
+    "caller2.py": "def entry2() -> int:\n    return mid()\n",
+}
+
+
+def test_symbol_card_labels_ambig_in_and_ambig_out_correctly(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SYMBOL_CARD_BOTH_DIRECTIONS_AMBIGUOUS)
+    code = cli.main(["query", "symbol", "a.py:mid", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert (
+        "fan-in: 0 (+2 additional call site(s) named 'mid' resolved "
+        "ambiguously — not counted), fan-out: 0 (+1 outgoing "
+        "call(s) resolved ambiguously — not counted)" in out
+    )
+
+
+def test_symbol_card_json_carries_both_ambiguous_directions(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SYMBOL_CARD_BOTH_DIRECTIONS_AMBIGUOUS)
+    code = cli.main(
+        ["query", "symbol", "a.py:mid", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["ambiguous_in"] == 2
+    assert doc["ambiguous_out"] == 1
 
 
 def test_get_callers_notes_ambiguous_call_sites(

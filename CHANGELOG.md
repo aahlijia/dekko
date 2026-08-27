@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.16] — 2026-08-27
+
+### Fixed
+- **MCP `get_context_pack` silently dropped the "N ambiguous, not
+  counted" disclosure** that `get_callers`/CLI `query callers` both
+  show — `contextpack.py` never read `index.ambiguous_in`/
+  `ambiguous_out`, so a caller list could look fully resolved when
+  hundreds of same-named call sites were actually dropped (round23
+  issue 07).
+- **`dekko query symbol` mislabeled its ambiguous-call note as
+  outgoing when it was incoming, and never showed the real outgoing
+  count** — the fan-line's `(+N ambiguous call sites not counted)`
+  note was always the *incoming* ambiguous count but read as
+  qualifying `fan-out`; it now attaches to `fan-in`, and the real
+  `fan-out`-qualifying outgoing-ambiguous count is computed and shown
+  alongside it, in both text and JSON (round23 issue 08). Both fixes
+  share a new `ambiguous_counts()` helper in `query.py` so the
+  incoming/outgoing counts are computed identically everywhere.
+
 ## [0.43.15] — 2026-08-25
 
 ### Added

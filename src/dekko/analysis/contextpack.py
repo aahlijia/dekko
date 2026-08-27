@@ -21,6 +21,7 @@ from dekko.analysis.relevance import TaskContext
 from dekko.analysis.query import (
     EXIT_AMBIGUOUS,
     EXIT_OK,
+    ambiguous_counts,
     paths_matching,
     report_unresolved,
     resolve_target,
@@ -81,6 +82,13 @@ class Pack:
             ``None``.
         source_truncated: Whether budget trimming dropped source lines.
         notes: Note texts anchored to the target symbol.
+        ambig_in: Additional call sites named after the target that
+            resolved ambiguously and so never became a ``calls_in``
+            edge (symbol mode only; always 0 in file mode — see
+            ``build_file_pack``).
+        ambig_out: Names the target itself called that resolved
+            ambiguously and so never became a ``calls_out`` edge
+            (symbol mode only; always 0 in file mode).
     """
 
     label: str
@@ -96,6 +104,8 @@ class Pack:
     source_lines: list[str] | None = None
     source_truncated: bool = False
     notes: list[str] = field(default_factory=list)
+    ambig_in: int = 0
+    ambig_out: int = 0
 
 
 def _neighbors(index: MapIndex, sym_id: str) -> list[tuple[str, str]]:
@@ -194,6 +204,7 @@ def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
         imports=index.imports_by_path.get(target.path, []),
         notes=list(index.notes.get(target.id, [])),
     )
+    pack.ambig_in, pack.ambig_out = ambiguous_counts(index, target)
     seen = {target.id}
     frontier = [target.id]
     for hop in range(1, hops + 1):
@@ -365,6 +376,18 @@ def render_text(pack: Pack) -> str:
     """Render a pack as compact text."""
     lines = [f"context: {pack.label}"]
     lines += _target_lines(pack)
+    if pack.ambig_in:
+        lines.append(
+            f"  note: {pack.ambig_in} additional call site(s) named "
+            f"'{pack.target.name}' resolved ambiguously — not "
+            "counted here"
+        )
+    if pack.ambig_out:
+        lines.append(
+            f"  note: {pack.ambig_out} outgoing call(s) from this "
+            "symbol resolved ambiguously (name matched 2+ "
+            "candidates) — not counted here"
+        )
     lines += _source_lines(pack)
     if pack.imports or pack.imports_dropped:
         lines.append(f"imports ({pack.file_path}):")
@@ -540,6 +563,10 @@ def _render_json(pack: Pack, meter: Meter) -> str:
     }
     if pack.notes:
         doc["notes"] = pack.notes
+    if pack.ambig_in:
+        doc["ambiguous_in"] = pack.ambig_in
+    if pack.ambig_out:
+        doc["ambiguous_out"] = pack.ambig_out
     if pack.source_lines is not None:
         doc["source"] = "\n".join(pack.source_lines)
         doc["source_truncated"] = pack.source_truncated

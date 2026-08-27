@@ -252,6 +252,30 @@ def _related(
     return symbols, modules
 
 
+def ambiguous_counts(index: MapIndex, sym: Symbol) -> tuple[int, int]:
+    """(incoming, outgoing) ambiguous-call counts for ``sym``.
+
+    Incoming: additional call sites named ``sym.name`` that could have
+    targeted ``sym`` but resolved ambiguously (2+ same-name repo
+    candidates), so never became a ``calls_in`` edge. Outgoing: names
+    ``sym`` itself called that resolved ambiguously, so never became a
+    ``calls_out`` edge. Shared by every read-side surface that reports
+    fan-in/fan-out or a caller/callee list, so "N ambiguous, not
+    counted" is computed and worded identically everywhere.
+
+    Args:
+        index: Loaded map index.
+        sym: Resolved symbol to look up.
+
+    Returns:
+        ``(ambig_in, ambig_out)`` counts.
+    """
+    return (
+        len(index.ambiguous_in.get(sym.id, [])),
+        len(index.ambiguous_out.get(sym.id, [])),
+    )
+
+
 def _sym_line(sym: Symbol) -> str:
     """One-line text rendering of a symbol."""
     return f"{sym.path}:{sym.start_line}  {signature(sym)}"
@@ -719,12 +743,9 @@ def _run_relation(
     # outgoing-side counterpart for "what does this call" (names this
     # symbol itself called ambiguously) — round-09 §2.1 part A flagged
     # that only the callers direction disclosed this gap.
-    ambig_in = (
-        len(index.ambiguous_in.get(sym.id, [])) if action == "callers" else 0
-    )
-    ambig_out = (
-        len(index.ambiguous_out.get(sym.id, [])) if action == "callees" else 0
-    )
+    raw_ambig_in, raw_ambig_out = ambiguous_counts(index, sym)
+    ambig_in = raw_ambig_in if action == "callers" else 0
+    ambig_out = raw_ambig_out if action == "callees" else 0
     if as_json:
         _print_relation_json(
             index,
@@ -2461,13 +2482,49 @@ _TYPE_ZERO_FAN_NOTE = (
 )
 
 
+def _fan_line(
+    sym: Symbol, fan_in: int, fan_out: int, ambig_in: int, ambig_out: int
+) -> str:
+    """Build the ``fan-in: N, fan-out: M`` line with ambiguity notes.
+
+    Each ambiguous count is attached to the fan- value it qualifies:
+    ``ambig_in`` (additional same-named call sites the resolver
+    couldn't confidently attribute to this symbol) sits next to
+    ``fan-in``, ``ambig_out`` (this symbol's own ambiguously-resolved
+    outgoing calls) sits next to ``fan-out`` — see round23 issue 08.
+
+    Args:
+        sym: The symbol the card is for.
+        fan_in: Resolved incoming call count.
+        fan_out: Resolved outgoing call count.
+        ambig_in: Additional ambiguous incoming call sites.
+        ambig_out: Additional ambiguous outgoing calls.
+
+    Returns:
+        The formatted fan-in/fan-out line, without a trailing newline.
+    """
+    line = f"  fan-in: {fan_in}"
+    if ambig_in:
+        line += (
+            f" (+{ambig_in} additional call site(s) named "
+            f"'{sym.name}' resolved ambiguously — not counted)"
+        )
+    line += f", fan-out: {fan_out}"
+    if ambig_out:
+        line += (
+            f" (+{ambig_out} outgoing call(s) resolved ambiguously "
+            "— not counted)"
+        )
+    return line
+
+
 def _run_symbol(
     index: MapIndex, sym: Symbol, as_json: bool, notes: bool
 ) -> tuple[int, Meter | None]:
     """Execute the symbol card action."""
     fan_in = len(index.calls_in.get(sym.id, []))
     fan_out = len(index.calls_out.get(sym.id, []))
-    ambig_in = len(index.ambiguous_in.get(sym.id, []))
+    ambig_in, ambig_out = ambiguous_counts(index, sym)
     referenced_by = len(index.referenced_in.get(sym.id, []))
     sym_notes = index.notes.get(sym.id, []) if notes else []
     # A struct/class/interface/... only ever gets call/reference edges
@@ -2492,6 +2549,8 @@ def _run_symbol(
         )
         if ambig_in:
             doc["ambiguous_in"] = ambig_in
+        if ambig_out:
+            doc["ambiguous_out"] = ambig_out
         if referenced_by:
             doc["referenced_by"] = referenced_by
         if type_zero_fan:
@@ -2503,10 +2562,7 @@ def _run_symbol(
     print(signature(sym))
     print(f"  kind: {sym.kind} ({sym.language})")
     print(f"  at: {sym.path}:{sym.start_line}-{sym.end_line}")
-    fan_line = f"  fan-in: {fan_in}, fan-out: {fan_out}"
-    if ambig_in:
-        fan_line += f" (+{ambig_in} ambiguous call sites not counted)"
-    print(fan_line)
+    print(_fan_line(sym, fan_in, fan_out, ambig_in, ambig_out))
     if referenced_by:
         # fan-in alone can read as "definitely unused" for a callback
         # wired up by reference and never itself called (bug #2b) —
