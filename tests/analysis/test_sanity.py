@@ -274,6 +274,33 @@ def test_looks_like_comment_line_unsupported_language() -> None:
 # --- full pipeline: grep sweep + classification -------------------------
 
 
+def test_dekko_hits_callers_folds_lined_module_level_into_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round 23 §10: query.py's module_level entries now carry a
+    # "lines" key when a site line was recorded. _dekko_hits_callers
+    # must fold those (path, line) pairs into hits alongside
+    # named-caller sites, matching grep like any other hit, rather
+    # than stranding a known-line module-level call site in the
+    # line-less bucket where it was previously misclassified as an
+    # "unexplained miss" (the exact claude-buddy `server/index.ts:709`
+    # shape this fix closes). Only entries with no "lines" key remain
+    # in module_level_bare.
+    doc = {
+        "results": [],
+        "module_level": [
+            {"path": "server/index.ts", "lines": [709]},
+            {"path": "server/path.test.ts"},
+        ],
+    }
+    monkeypatch.setattr(sanity, "_run_query_json", lambda *_a, **_kw: doc)
+    hits, module_level_bare = sanity._dekko_hits_callers(
+        None, "server/index.ts:buddyStateDir:1"
+    )
+    assert hits == [("server/index.ts", 709)]
+    assert module_level_bare == ["server/path.test.ts"]
+
+
 def test_sanity_all_matches_reports_clean(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

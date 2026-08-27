@@ -174,6 +174,39 @@ def test_type_no_matches_reports_closest_type_names(
     assert "Config" in err
 
 
+def test_type_exact_no_matches_does_not_self_echo_suggestion(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 23 §16: `Project` is a real declared type, but every usage
+    # in this fixture is wrapped (`Optional[Project]`), so --exact's
+    # literal-text match rejects all of them and the not-found path is
+    # reached. The "closest type names" suggester must not echo
+    # `Project` back as its own closest match -- that's the exact
+    # string that just failed, offering nothing new.
+    files = {
+        "app.py": (
+            "from typing import Optional\n"
+            "\n"
+            "\n"
+            "class Project:\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            "def start(p: Optional[Project] = None) -> None:\n"
+            "    pass\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+    code = cli.main(
+        ["query", "type", "Project", "--exact", "--root", str(root)]
+    )
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "no results for type 'Project'" in err
+    assert "closest type names: Project\n" not in err
+    assert "closest type names: Project," not in err
+
+
 def test_type_no_matches_json_success_path_unaffected(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

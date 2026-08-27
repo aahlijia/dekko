@@ -353,16 +353,34 @@ _MIN_SUBSTRING_CANDIDATE_LEN = 2
 _MAX_AMBIGUOUS_CANDIDATES = 20
 
 
-def _close_names(needle: str, names: list[str]) -> list[str]:
+def _close_names(
+    needle: str, names: list[str], *, exclude_verbatim: bool = False
+) -> list[str]:
     """Names close to ``needle``: exact (case-insensitive) first, then
     prefix, then substring either way, then edit-distance for typos.
-    Deterministic, capped."""
+    Deterministic, capped.
+
+    ``exclude_verbatim`` drops any candidate that is character-for-
+    character identical to ``needle`` — useful only when ``needle`` is
+    itself the literal string a lookup already failed on, so a
+    verbatim candidate would just echo the input back with no new
+    information (round 23 §16: ``query type --exact``'s not-found
+    path). It defaults to ``False`` because not every caller's
+    ``needle`` has that shape: ``_suggest_symbols`` passes a *derived*
+    bare qualname (stripped of a wrong/stale path qualifier), where a
+    verbatim match in ``names`` is precisely the useful "right name,
+    wrong path" suggestion, not an echo — excluding it there would
+    silently drop the single most common case the suggester exists
+    to catch.
+    """
     low = needle.lower()
     if not low:
         return []
     scored: list[tuple[int, str]] = []
     rest: list[str] = []
     for name in names:
+        if exclude_verbatim and name == needle:
+            continue  # verbatim self-match: never a useful suggestion
         cand = name.lower()
         if cand == low:
             scored.append((0, name))
@@ -571,6 +589,22 @@ def _site_rows(
     return [f"{site_path}:{line}  {signature(other)}" for line in lines]
 
 
+def _module_site_lines(
+    index: MapIndex, action: str, sym: Symbol, path: str
+) -> list[int]:
+    """Recorded call-site line numbers for one module-level pseudo-caller.
+
+    Empty when the map predates per-site line tracking (doc version <
+    3) or this specific edge has no recorded site line — callers fall
+    back to a bare path/no-lines representation in that case. Shared
+    by both the text (``_module_rows``) and JSON
+    (``_module_level_entries``) renderers so they can't drift apart on
+    where module-level line numbers come from.
+    """
+    module_id = f"{path}{MODULE_CALLER_SUFFIX}"
+    return index.edge_lines.get(_edge_key(action, sym, module_id), [])
+
+
 def _module_rows(
     index: MapIndex, action: str, sym: Symbol, path: str, sites: bool
 ) -> list[str]:
@@ -586,11 +620,33 @@ def _module_rows(
     back to the bare form only when the map predates per-site line
     tracking, or this specific edge has no recorded site line.
     """
-    module_id = f"{path}{MODULE_CALLER_SUFFIX}"
-    lines = index.edge_lines.get(_edge_key(action, sym, module_id), [])
+    lines = _module_site_lines(index, action, sym, path)
     if lines:
         return [f"{path}:{line}  (module level)" for line in lines]
     return [f"{path}  (module level)"]
+
+
+def _module_level_entries(
+    index: MapIndex,
+    action: str,
+    sym: Symbol,
+    modules: list[str],
+) -> list[dict]:
+    """JSON entries for module-level pseudo-callers, one per path.
+
+    Mirrors ``_module_rows``'s "always attempt the per-site line
+    lookup, regardless of ``sites``" convention so text and JSON agree
+    on when lines are available — only omitted when the map predates
+    per-site line tracking or this edge has no recorded site line.
+    """
+    entries = []
+    for path in modules:
+        entry: dict = {"path": path}
+        lines = _module_site_lines(index, action, sym, path)
+        if lines:
+            entry["lines"] = lines
+        entries.append(entry)
+    return entries
 
 
 def _coverage_note(index: MapIndex) -> str | None:
@@ -706,7 +762,7 @@ def _print_relation_json(
         "action": action,
         "target": sym.id,
         "results": kept,
-        "module_level": modules,
+        "module_level": _module_level_entries(index, action, sym, modules),
         "meta": meter.as_dict(),
     }
     if coverage:
@@ -1516,7 +1572,9 @@ def _env_entry(index: MapIndex, read: EnvRead) -> dict:
 def _run_env_not_found(index: MapIndex, needle: str) -> int:
     """Report an ``env`` target with zero matching read sites."""
     print(f"dekko: no env-var reads found for '{needle}'", file=sys.stderr)
-    close = _close_names(needle, sorted(index.env_reads_by_key))
+    close = _close_names(
+        needle, sorted(index.env_reads_by_key), exclude_verbatim=True
+    )
     if close:
         print("closest env vars: " + ", ".join(close), file=sys.stderr)
     coverage = _coverage_note(index)
@@ -1656,8 +1714,8 @@ def _run_env_list(
         f"{len(files)} files"
     )
     print(f"  note: {_ENV_CAVEAT}", file=sys.stderr)
-    lines_out = [header] + [_env_list_row(k, c) for k, c in counts]
-    return EXIT_OK, _emit_lines(lines_out, budget, limit)
+    lines_out = [_env_list_row(k, c) for k, c in counts]
+    return EXIT_OK, _emit_lines(lines_out, budget, limit, prefix=header)
 
 
 def _shadow_note(index: MapIndex, target: str) -> str | None:
@@ -1712,7 +1770,9 @@ def _run_uses_not_found(index: MapIndex, target: str) -> int:
         )
         return EXIT_NOT_FOUND
     print(f"dekko: no external reference matches '{target}'", file=sys.stderr)
-    close = _close_names(target, list(index.externals_by_name))
+    close = _close_names(
+        target, list(index.externals_by_name), exclude_verbatim=True
+    )
     if close:
         print("closest external names: " + ", ".join(close), file=sys.stderr)
     coverage = _coverage_note(index)
@@ -1877,7 +1937,7 @@ def _run_importers_not_found(index: MapIndex, needle: str) -> int:
             for imp in imports
         }
     )
-    close = _close_names(needle, sources)
+    close = _close_names(needle, sources, exclude_verbatim=True)
     if close:
         print("closest import sources: " + ", ".join(close), file=sys.stderr)
     coverage = _coverage_note(index)
@@ -2007,7 +2067,7 @@ def _run_type_not_found(index: MapIndex, needle: str) -> int:
     type_names = [
         s.name for s in index.symbols_by_id.values() if s.kind in TYPE_KINDS
     ]
-    close = _close_names(needle, type_names)
+    close = _close_names(needle, type_names, exclude_verbatim=True)
     if close:
         print("closest type names: " + ", ".join(close), file=sys.stderr)
     coverage = _coverage_note(index)

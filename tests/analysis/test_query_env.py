@@ -10,6 +10,7 @@ unless --list" CLI-level validation.
 """
 
 import json
+import re
 
 import pytest
 
@@ -98,6 +99,51 @@ def test_env_list_ranking(
         if "DATABASE_URL" in line or "PORT" in line or "LOG_LEVEL" in line
     ]
     assert lines[0].strip().endswith("DATABASE_URL")
+
+
+def test_env_list_footer_total_matches_distinct_key_count(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 23 §17: the text footer's TOTAL previously folded the
+    # summary header line into the counted/droppable row list, so with
+    # N distinct keys and truncation active it reported N+1. TOTAL must
+    # equal the real distinct-key count, and shown + omitted must equal
+    # that same TOTAL exactly.
+    files = {
+        f"src/config_{i}.py": (
+            f"import os\n\nVAR_{i:02d} = os.getenv('VAR_{i:02d}')\n"
+        )
+        for i in range(20)
+    }
+    root = make_mapped_repo(files)
+    code = cli.main(
+        ["query", "env", "--list", "--limit", "5", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "20 distinct env vars read across 20 files" in out
+    match = re.search(r"(\d+) of (\d+) omitted", out)
+    assert match is not None
+    omitted, total = int(match.group(1)), int(match.group(2))
+    assert total == 20
+    data_rows = [
+        line for line in out.splitlines() if re.match(r"^\s*\d+\s+VAR_", line)
+    ]
+    assert len(data_rows) + omitted == total
+
+
+def test_env_list_footer_no_omitted_clause_when_untruncated(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression check for the untruncated case: with few enough keys
+    # that nothing is omitted, no "N of TOTAL omitted" clause should
+    # appear at all, and the header count is unaffected by the fix.
+    root = make_mapped_repo(ENV_SRC)
+    code = cli.main(["query", "env", "--list", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "3 distinct env vars read across 2 files" in out
+    assert "omitted" not in out
 
 
 def test_env_json_output(

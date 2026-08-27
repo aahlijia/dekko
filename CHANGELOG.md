@@ -9,6 +9,42 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.17] — 2026-08-27
+
+### Fixed
+- **`dekko query type --exact`'s not-found path echoed the query
+  itself back as its own "closest match" suggestion** — a verbatim
+  (case-sensitive) self-match offered nothing new, since it's exactly
+  the string that already failed to match. `_close_names()` gained an
+  opt-in `exclude_verbatim` guard, now used by the four not-found
+  paths (`type`, `env`, `uses`/`external`, `importers`) whose needle
+  is the literal failed query string; the general symbol-not-found
+  suggester (`_suggest_symbols`) keeps the old behavior, since its
+  needle is a *derived* bare qualname where a verbatim match is the
+  intended "right name, wrong path" suggestion, not an echo (round23
+  issue 16).
+- **`dekko query env --list`'s text footer TOTAL was off by one**
+  when results were truncated — the summary header line was folded
+  into the counted/droppable row list instead of passed through
+  `_emit_lines()`'s `prefix` parameter, inflating `Meter.total` by
+  one. Routed through `prefix=header` like every other call site in
+  `query.py` already does; JSON output was already correct and is
+  unchanged (round23 issue 17).
+- **`dekko query callers/callees --json --sites` dropped per-site
+  line numbers for module-level pseudo-callers** that text output
+  already shows — `module_level` was a flat `list[str]` of bare
+  paths, never consulting the recorded `edge_lines` the text renderer
+  (`_module_rows`) already used. `module_level` is now a `list[dict]`
+  (`{"path": ..., "lines": [...]}`, `"lines"` omitted when no site
+  line was recorded), built via new shared helpers
+  `_module_site_lines()`/`_module_level_entries()`. This is a
+  breaking JSON schema change for any external consumer of
+  `module_level`. `sanity.py`'s `_dekko_hits_callers()` was updated
+  to fold lined module-level entries into its `hits` set instead of
+  leaving them in the line-less "no line info" bucket, fixing the
+  cascading false "unexplained miss" this caused in `dekko sanity`
+  (round23 issue 10).
+
 ## [0.43.16] — 2026-08-27
 
 ### Fixed

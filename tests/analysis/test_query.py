@@ -193,6 +193,25 @@ def test_close_names_raised_cutoff_excludes_marginal_fuzzy_match(
     assert query._close_names("trix", ["trib"]) == ["trib"]
 
 
+def test_close_names_excludes_verbatim_self_match() -> None:
+    # Round 23 §16: a needle that's a verbatim (case-sensitive) match
+    # for a real candidate name offers nothing new as a "closest
+    # match" suggestion -- it's just echoing the input back. A
+    # case-differing match (still a real, different string) must stay
+    # eligible, as must a genuinely different prefix match. Only
+    # opt-in via exclude_verbatim=True: callers whose needle is a
+    # *derived* substring (e.g. _suggest_symbols's bare qualname) rely
+    # on a verbatim match being the useful "right name" suggestion.
+    assert query._close_names(
+        "Project",
+        ["Project", "ProjectConfig", "project"],
+        exclude_verbatim=True,
+    ) == ["project", "ProjectConfig"]
+    assert query._close_names(
+        "Project", ["Project", "ProjectConfig", "project"]
+    ) == ["Project", "project", "ProjectConfig"]
+
+
 def test_qualname_near_miss_requires_segment_boundary() -> None:
     # ``_is_qualname_near_miss`` requires a preceding ``.`` before the
     # requested qualname, not a bare substring match — a qualname that
@@ -718,6 +737,73 @@ def test_get_callers_json_sites_shows_reference_line(
     assert len(referenced) == 1
     assert referenced[0]["path"] == "wire.ts"
     assert referenced[0]["sites"] == [5]
+
+
+def test_get_callers_json_module_level_carries_lines(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 23 §10: `--json --sites` previously dropped module-level
+    # pseudo-callers to a flat list of bare paths, even though the
+    # per-site line (already recorded in edge_lines) is exactly what
+    # text output shows unconditionally. module_level entries must now
+    # be structured dicts carrying the line when one was recorded.
+    root = make_mapped_repo(TS_MODULE_LEVEL_ANONYMOUS_CALLBACK)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.ts:buddyStateDir",
+            "--root",
+            str(root),
+            "--sites",
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["module_level"] == [{"path": "index.ts", "lines": [4]}]
+
+
+def test_get_callers_json_module_level_lines_unconditional_on_sites(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Matches _module_rows's text-side convention: module-level lines
+    # are always attempted regardless of --sites, so JSON must agree
+    # rather than gating module_level on the flag the way per-symbol
+    # "sites" entries do.
+    root = make_mapped_repo(TS_MODULE_LEVEL_ANONYMOUS_CALLBACK)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.ts:buddyStateDir",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["module_level"] == [{"path": "index.ts", "lines": [4]}]
+
+
+def test_module_level_entries_pre_v3_map_omits_lines() -> None:
+    # A map written before doc version 3 has no edge_lines at all —
+    # _module_level_entries must degrade to a bare {"path": ...} entry
+    # with no "lines" key, matching _module_rows's bare-form fallback.
+    sym = Symbol(
+        id="target.py::target",
+        name="target",
+        qualname="target",
+        kind="function",
+        path="target.py",
+        language="python",
+        start_line=1,
+        end_line=2,
+    )
+    index = mapfile.MapIndex(root_label="root")
+    entries = query._module_level_entries(index, "callers", sym, ["caller.py"])
+    assert entries == [{"path": "caller.py"}]
 
 
 def test_not_found(

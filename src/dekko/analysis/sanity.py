@@ -719,13 +719,27 @@ def _dekko_hits_callers(
     ``note add``/``note rm`` already use for an overload set (resolves
     the plan's "overload/#N-suffixed target resolution" open
     question).
+
+    ``module_level`` entries carry per-site lines when the map
+    recorded them (round-23 §10 fix); those fold straight into
+    ``hits`` alongside named-caller sites so a module-level call site
+    with a known line matches grep like any other hit. Only entries
+    with no recorded line (pre-v3 maps, or no site line captured)
+    remain in the returned ``module_level_paths`` bucket.
     """
     doc = _run_query_json(index, "callers", sym_target)
     hits: list[tuple[str, int]] = []
     for entry in doc.get("results", []):
         sites = entry.get("sites") or [entry["line"]]
         hits.extend((entry["path"], ln) for ln in sites)
-    return hits, list(doc.get("module_level", []))
+    module_level_bare: list[str] = []
+    for m in doc.get("module_level", []):
+        lines = m.get("lines")
+        if lines:
+            hits.extend((m["path"], ln) for ln in lines)
+        else:
+            module_level_bare.append(m["path"])
+    return hits, module_level_bare
 
 
 def _dekko_hits_uses(
