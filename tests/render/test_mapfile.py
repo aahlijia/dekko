@@ -369,6 +369,66 @@ def test_spec_hash_stale_even_with_matching_tool_version(
     assert fresh.running_spec_hash != "deadbeef"
 
 
+def test_describe_version_stale_version_only() -> None:
+    fresh = mapfile.Freshness(
+        fresh=False,
+        reason="version",
+        version_stale=True,
+        spec_stale=False,
+        built_version="0.40.0",
+        running_version="0.43.20",
+        built_spec_hash="abc123",
+        running_spec_hash="abc123",
+    )
+    text = mapfile.describe_version_stale(fresh)
+    assert text.startswith("stale (version):")
+    assert "built by dekko 0.40.0, running 0.43.20" in text
+    assert "spec_hash" not in text
+
+
+def test_describe_version_stale_spec_only() -> None:
+    # round-09 §2.3: identical tool_version on both sides, only
+    # spec_hash drifted — the message must name spec_hash and carry
+    # the long-lived-process caveat, not repeat the (identical, thus
+    # self-contradictory-looking) version string as the differentiator.
+    fresh = mapfile.Freshness(
+        fresh=False,
+        reason="version",
+        version_stale=False,
+        spec_stale=True,
+        built_version="0.43.20",
+        running_version="0.43.20",
+        built_spec_hash="deadbeef0000",
+        running_spec_hash="cafef00dbaad",
+    )
+    text = mapfile.describe_version_stale(fresh)
+    assert text.startswith("stale (spec_hash):")
+    assert "tool_version:" not in text
+    assert "deadbeef0000" in text
+    assert "cafef00dbaad" in text
+    assert "long-lived process" in text
+    assert "restart it" in text
+
+
+def test_describe_version_stale_both() -> None:
+    fresh = mapfile.Freshness(
+        fresh=False,
+        reason="version",
+        version_stale=True,
+        spec_stale=True,
+        built_version="0.40.0",
+        running_version="0.43.20",
+        built_spec_hash="deadbeef0000",
+        running_spec_hash="cafef00dbaad",
+    )
+    text = mapfile.describe_version_stale(fresh)
+    assert text.startswith("stale (version+spec_hash):")
+    assert "built by dekko 0.40.0, running 0.43.20" in text
+    assert "deadbeef0000" in text
+    # The long-lived-process caveat only applies to the spec-only case.
+    assert "long-lived process" not in text
+
+
 def test_freshness_reason_missing_for_v1_map(
     make_mapped_repo: RepoFactory,
 ) -> None:

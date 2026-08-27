@@ -9,6 +9,67 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.21] — 2026-08-27
+
+### Fixed
+- **`dekko status`/`dekko status --json`/`dekko doctor` collapsed
+  `tool_version` and `spec_hash` staleness into one generic "stale"
+  message**, printing a self-contradictory `built by dekko X, running
+  X` when only `spec_hash` had drifted (e.g. a long-lived MCP server
+  reinstalled underneath it mid-session) — the MCP `map_status` tool
+  already disambiguated this in round 09, but the fix was never
+  ported to the CLI surface. All three now share
+  `mapfile.describe_version_stale()`, and `dekko status --json` gains
+  `version_stale`/`spec_stale`/`built_spec_hash`/`running_spec_hash`
+  fields (gated behind `reason == "version"`, so the common-case JSON
+  shape is unchanged). See
+  `.features/plans/round23/11-cli-status-doctor-staleness-disambiguation.md`.
+- **MCP `refresh_map` re-synced a stale server process to its own old
+  code, not to what's on disk** — calling `refresh_map` from inside a
+  long-lived `dekko serve` process that's stale on `spec_hash` and/or
+  `tool_version` re-extracts using that same process's stale
+  in-memory extractor code and self-consistently re-stamps "fresh,"
+  silently corrupting a map that a fresh CLI `dekko map` may have
+  already built correctly. `map_status`'s suggested next step for a
+  `reason == "version"` verdict now says "restart the dekko MCP
+  server process" instead of "call refresh_map" (which can't fix
+  this from inside the same process either way), and `refresh_map`'s
+  response now discloses a restart caveat whenever this process's own
+  pre-regen freshness check showed it was already the stale party.
+  See `.features/plans/round23/12-refresh-map-stale-process-resync.md`.
+- **`dekko daemon status` could intermittently (~1/6) report "not
+  running" immediately after `dekko daemon start` printed "started"**
+  — `start()` returned the instant the child process was spawned,
+  before the child had necessarily finished binding its listening
+  socket, letting an immediately-following `status` call race
+  `transport.exists()` into a false negative. `start()` now polls
+  (bounded, ~3s cap) for confirmation the child has actually bound
+  before returning; on the rare case the cap is hit, it prints a
+  distinct "spawned but unconfirmed" message instead of falsely
+  claiming "started," and still returns exit `0`. See
+  `.features/plans/round23/13-daemon-status-false-negative.md`.
+- **`run_pooled_with_retry`'s one bounded `BrokenProcessPool` retry
+  fired with zero delay**, giving it a real chance of landing in the
+  same transient window (CPU contention, or a `uv tool install
+  --reinstall` shim relink race) that caused the first failure — a
+  `dekko map --full --jobs 0` run immediately after a reinstall could
+  see the retry itself also fail. Added a fixed 1.5s backoff before
+  the retry attempt. See
+  `.features/plans/round23/15-brokenprocesspool-transient-crash.md`.
+- **Concurrent bare-CLI commands against the same repo silently
+  serialized with zero feedback** — a command waiting on another
+  process's advisory regen lock (`.dekko/regen.lock`), and the
+  fallback path that launches an independent regen after the wait cap
+  is hit, both printed nothing, reading as indistinguishable from a
+  hang on a large repo. Both paths now print a one-line `note:` to
+  stderr (mirroring round 15's `_maybe_warn_sequential` pattern) —
+  pure disclosure, no behavior change. The exact tensorflow-scale
+  timing this was found against involves an unconfirmed, separately
+  unlocked cold-rev-cache path (`diff.py::old_snapshot`) that this fix
+  does not change; see
+  `.features/plans/round23/14-concurrent-cli-silent-serialization.md`
+  for what's confirmed vs. deferred.
+
 ## [0.43.20] — 2026-08-27
 
 ### Fixed

@@ -235,6 +235,22 @@ _STOP_TEARDOWN_POLL_INTERVAL = 0.02
 # consistency between the two liveness checks.
 _STATUS_PROBE_TIMEOUT = 2.0
 
+# Round-23 §13: bound on how long start() will poll for confirmation
+# that the just-spawned child has actually bound its listening socket
+# before returning "started". Without this, a `daemon status` issued
+# immediately after `daemon start` prints could race the child's own
+# interpreter-startup + bind_and_listen() and see `transport.exists()
+# == False` -- an honest-but-wrong "not running" (observed ~1/6 in
+# testing, round-23's awesome-go.md §2.2). Binding is normally
+# near-instant once the interpreter is up (the same report's `status
+# --json` moments later showed `uptime_seconds: 0.089`) -- a wait
+# anywhere near this cap would itself indicate a real problem worth
+# surfacing via the "unconfirmed" branch, not silently swallowing.
+# Mirrors _STOP_TEARDOWN_TIMEOUT/_STOP_TEARDOWN_POLL_INTERVAL's
+# symmetric pattern on the stop() side of the daemon lifecycle.
+_START_CONFIRM_TIMEOUT = 3.0
+_START_CONFIRM_POLL_INTERVAL = 0.02
+
 # Bootstrap script used to spawn the detached daemon process. There is
 # no ``src/dekko/__main__.py`` (the packaged entry point is the
 # ``dekko`` console script, ``dekko.integrations.cli:main``, per
@@ -914,13 +930,46 @@ def _query_pid(transport: DaemonTransport) -> int | None:
         sock.close()
 
 
+def _wait_for_bind(
+    transport: DaemonTransport, timeout: float = _START_CONFIRM_TIMEOUT
+) -> bool:
+    """Poll until the just-spawned daemon's transport artifact exists.
+
+    Round-23 §13: closes the race where `start()` used to return the
+    instant `spawn_detached` launched the child, before the child had
+    necessarily finished interpreter startup + `bind_and_listen()` --
+    a `status` call issued in that window would see `transport.exists()
+    == False` and report an honest-but-wrong "not running". Mirrors
+    `_wait_for_teardown`'s symmetric poll on the stop() side.
+
+    Args:
+        transport: The transport whose artifact to poll for.
+        timeout: Maximum time to wait before giving up.
+
+    Returns:
+        ``True`` once the artifact appears, ``False`` if the timeout
+        elapses first -- the child may still come up a moment later;
+        this is not treated as a failure, only as "couldn't confirm
+        in time."
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if transport.exists():
+            return True
+        time.sleep(_START_CONFIRM_POLL_INTERVAL)
+    return transport.exists()
+
+
 def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
     """Handle ``dekko daemon start``.
 
     No-op (not an error) if a live daemon is already reachable for
-    this root. Spawns a detached background process and returns
-    immediately -- it does not wait for the daemon to finish binding
-    (design doc §2.1: "returns immediately, does not block").
+    this root. Spawns a detached background process, then polls
+    (bounded by ``_START_CONFIRM_TIMEOUT``) for confirmation the child
+    has actually bound its listening socket before returning -- round-23
+    §13: an unconfirmed return here used to let an immediate ``daemon
+    status`` call race the child's own startup and report a false
+    "not running".
 
     Before spawning, runs ``transport.preflight_check()`` in the
     foreground and fails fast with a non-zero exit code if it raises.
@@ -945,8 +994,13 @@ def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
         idle_timeout: Self-shutdown window to pass to the daemon.
 
     Returns:
-        ``0`` on a successful spawn (or an already-running daemon),
-        ``1`` if the preflight check or the spawn itself failed.
+        ``0`` on a successful spawn (or an already-running daemon) --
+        including the case where the bind-confirmation poll times out
+        (the spawn itself genuinely succeeded; slow-to-bind is not the
+        same as failed, and a distinct exit code here would be a
+        breaking change for scripts that already gate on this
+        command's exit code). ``1`` if the preflight check or the
+        spawn itself failed.
     """
     transport = default_transport_for(root)
     if is_daemon_reachable(transport):
@@ -989,7 +1043,19 @@ def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
         print(f"dekko daemon: failed to start: {exc}", file=sys.stderr)
         return 1
 
-    print(f"dekko daemon: started for {root}")
+    if _wait_for_bind(transport):
+        print(f"dekko daemon: started for {root}")
+        return 0
+
+    # Cap hit without confirmation -- the spawn may still come up a
+    # moment later (heavy machine load, slow interpreter startup), so
+    # this is neither "started" (implies confirmed) nor a failure;
+    # say so honestly rather than picking one.
+    print(
+        f"dekko daemon: spawned for {root}, but didn't confirm it's "
+        f"listening within {_START_CONFIRM_TIMEOUT:.0f}s -- check "
+        "`dekko daemon status` shortly"
+    )
     return 0
 
 

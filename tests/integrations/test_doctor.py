@@ -103,6 +103,30 @@ def test_map_freshness_version_stale(
     assert finding.fix == "dekko map"
 
 
+def test_map_freshness_spec_hash_stale_distinctly(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Round-23 §11: doctor independently built its own bare
+    # "built by dekko X, running X" string, never touching
+    # spec_stale/built_spec_hash/running_spec_hash even though the
+    # full Freshness was already in scope — a spec_hash-only drift on
+    # a long-lived process read as self-contradictory. It must now
+    # name spec_hash explicitly, sharing the same logic status/
+    # map_status use.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["spec_hash"] = "deadbeef"
+    map_path.write_text(json.dumps(doc))
+
+    finding = doctor._check_map_freshness(root)
+    assert finding.status == "stale"
+    assert "stale (spec_hash)" in finding.detail
+    assert "tool_version:" not in finding.detail
+    assert "deadbeef" in finding.detail
+    assert finding.fix == "dekko map"
+
+
 # --- MCP/plugin registration --------------------------------------------
 
 

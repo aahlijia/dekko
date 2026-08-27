@@ -796,6 +796,15 @@ def _wait_for_other_regen(root: Path) -> mapfile.MapIndex | None:
     interval for that process's regen to finish and re-check
     freshness.
 
+    Round-23 §14: this wait used to print nothing at all -- on a large
+    repo (tensorflow.md §2.2: 14,285 files) a command blocked here for
+    up to ``_REGEN_LOCK_WAIT_CAP`` seconds read as indistinguishable
+    from a hang, reintroducing for the concurrent-process case exactly
+    the "long silent wait with no diagnostic" experience round 15
+    already fixed for the single-command case
+    (``diff._maybe_warn_sequential``). Mirrors that same pattern: one
+    stderr ``note:`` line, printed once, before the poll loop starts.
+
     Args:
         root: Repository root another process is regenerating.
 
@@ -804,6 +813,12 @@ def _wait_for_other_regen(root: Path) -> mapfile.MapIndex | None:
         the cap; ``None`` if the cap was hit first (caller should
         fail open and regen locally).
     """
+    print(
+        "note: another dekko process is already regenerating this "
+        f"repo's map -- waiting up to {_REGEN_LOCK_WAIT_CAP:.0f}s for "
+        "it to finish",
+        file=sys.stderr,
+    )
     deadline = time.monotonic() + _REGEN_LOCK_WAIT_CAP
     while time.monotonic() < deadline:
         time.sleep(_REGEN_LOCK_POLL_INTERVAL)
@@ -839,7 +854,19 @@ def _locked_regen(root: Path) -> tuple[mapfile.MapIndex | None, int]:
                     _daemon_cache_put(root, fresh)
                 return fresh, 0
             # Wait cap hit without the other process's regen landing
-            # -- fail open, fall through to a local regen below.
+            # -- fail open, fall through to a local regen below. This
+            # is an *uncoordinated*, independent regen running
+            # alongside whatever the other process is still doing
+            # (round-23 §14) -- disclosed here so a caller watching
+            # stderr sees "still not landed, proceeding with my own
+            # regen" rather than the silence that used to follow the
+            # first note straight into more silence.
+            print(
+                "note: gave up waiting for the other process's regen "
+                "-- running an independent regen now (the other "
+                "process may still be in progress)",
+                file=sys.stderr,
+            )
 
         code = regen_map(root, quiet=True)
         if code != 0:

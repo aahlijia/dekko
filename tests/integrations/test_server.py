@@ -706,6 +706,45 @@ def test_map_status_and_refresh(make_mapped_repo: RepoFactory) -> None:
     assert "fresh" in _call(ctx, "map_status", {})["content"][0]["text"]
 
 
+def test_refresh_map_discloses_self_staleness(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # round-23 §12: if this process's own pre-regen freshness check
+    # shows reason == "version" (this same process is the stale
+    # party), refresh_map's in-process regen re-extracts with this
+    # process's own stale extractor code and re-stamps "fresh" —
+    # self-consistent but wrong. The response must disclose that a
+    # restart, not another refresh_map call, is the real fix.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["spec_hash"] = "deadbeef"
+    map_path.write_text(json.dumps(doc))
+
+    ctx = _ctx(root)
+    refreshed = _call(ctx, "refresh_map", {})
+    assert refreshed["isError"] is False
+    text = refreshed["content"][0]["text"]
+    assert "restart the dekko MCP server process" in text
+    assert "stale extractor code" in text
+
+
+def test_refresh_map_no_caveat_when_not_self_stale(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Regression guard: the common case (reason == "content", or
+    # already fresh) must not gain the restart caveat — only a
+    # pre-regen reason == "version" verdict should trigger it.
+    root = make_mapped_repo(SRC)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\nY = 1\n")
+
+    ctx = _ctx(root)
+    refreshed = _call(ctx, "refresh_map", {})
+    assert refreshed["isError"] is False
+    text = refreshed["content"][0]["text"]
+    assert "restart the dekko MCP server process" not in text
+
+
 def test_map_status_reports_unsupported_coverage(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -735,7 +774,11 @@ def test_map_status_reports_version_stale(
     text = _call(ctx, "map_status", {})["content"][0]["text"]
     assert "stale (version)" in text
     assert "built by dekko 0.0.0-stale, running" in text
-    assert "call refresh_map" in text
+    # round-23 §12: `refresh_map` regens in-process using this same
+    # process's (possibly stale) loaded extractor code, so it cannot
+    # fix a version-stale process — only a restart can.
+    assert "restart the dekko MCP server process" in text
+    assert "call refresh_map" not in text
 
 
 def test_map_status_reports_spec_hash_stale_distinctly(
@@ -761,7 +804,8 @@ def test_map_status_reports_spec_hash_stale_distinctly(
     assert "tool_version:" not in text
     assert "deadbeef" in text
     assert "same version string" in text
-    assert "call refresh_map" in text
+    assert "restart the dekko MCP server process" in text
+    assert "call refresh_map" not in text
 
 
 def test_tool_call_reports_too_new_doc_version_clearly(

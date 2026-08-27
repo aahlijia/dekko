@@ -2075,6 +2075,19 @@ def run_status(args: argparse.Namespace) -> int:
             "unsupported": unsupported,
             "too_large": too_large,
         }
+        if fresh.reason == "version":
+            # Round-23 §11: distinguish a genuine tool_version bump
+            # (reinstall fixes it) from a spec_hash-only drift on a
+            # long-lived process (only a restart fixes it) — gated
+            # behind reason == "version" so the common-case JSON shape
+            # (content/missing/fresh) is unchanged for existing
+            # consumers.
+            doc["version_stale"] = fresh.version_stale
+            doc["spec_stale"] = fresh.spec_stale
+            doc["built_version"] = fresh.built_version
+            doc["running_version"] = fresh.running_version
+            doc["built_spec_hash"] = fresh.built_spec_hash
+            doc["running_spec_hash"] = fresh.running_spec_hash
         print(json.dumps(doc, indent=2))
         return 0 if fresh.fresh else 1
 
@@ -2109,7 +2122,7 @@ def _print_stale_status(
     """
     print("dekko: map is stale")
     if fresh.reason == "version":
-        print(f"  {_version_stale_note(provenance)}")
+        print(f"  {_version_stale_note(fresh)}")
         return
     note = mapfile.format_unsupported(provenance)
     if note:
@@ -2125,11 +2138,20 @@ def _print_stale_status(
             print(f"  ... and {len(items) - 10} more {title}")
 
 
-def _version_stale_note(provenance: dict | None) -> str:
-    """One-line explanation for a ``reason="version"`` freshness verdict."""
-    built = (provenance or {}).get("tool_version", "unknown")
-    running = _pkg_version("dekko")
-    return f"built by dekko {built}, running {running} — run `dekko map`"
+def _version_stale_note(fresh: mapfile.Freshness) -> str:
+    """One-line explanation for a ``reason="version"`` freshness verdict.
+
+    Round-23 §11: ``dekko status``/``dekko doctor`` used to build this
+    string straight from raw ``provenance``/``_pkg_version`` values,
+    which only ever named a ``tool_version`` mismatch — a long-lived
+    process stale on ``spec_hash`` alone (identical ``tool_version`` on
+    both sides) read as a self-contradictory "built by dekko X,
+    running X" with no explanation. This now shares the same
+    signal-naming logic the MCP ``map_status`` tool already used
+    (``mapfile.describe_version_stale``), so both surfaces name the
+    same differentiator the same way.
+    """
+    return f"{mapfile.describe_version_stale(fresh)} — run `dekko map`"
 
 
 def run_doctor(args: argparse.Namespace) -> int:

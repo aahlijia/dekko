@@ -101,6 +101,7 @@ import multiprocessing
 import posixpath
 import re
 import sys
+import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
@@ -209,6 +210,22 @@ _RESOLVE_CHUNK_OVERSUBSCRIPTION = 4
 # -- see ``run_pooled_with_retry``'s docstring for why.
 _POOL_RETRY_WORKERS = 2
 
+# Delay before the one bounded retry fires (round 23 §15: a
+# ``BrokenProcessPool`` right after `uv tool install --reinstall`
+# resolving `/…/bin/dekko`'s `FileNotFoundError` -- the reinstall's
+# shim delete-then-relink is a brief filesystem race, not just CPU
+# contention; firing the retry immediately gives it a real chance of
+# landing in the same still-unsettled window and failing identically,
+# which is consistent with the retry itself visibly failing in that
+# report despite this function's existing bounded-retry mechanism).
+# Cheap and harmless regardless of the exact transient cause -- CPU
+# contention (round 17's original motivating case) also benefits from
+# not immediately retrying into the same conditions. 1.5s is an
+# estimate (the report's own "30s later, worked cleanly" data point
+# suggests the window closes well under 30s), not empirically tuned;
+# revisit if a tighter repro becomes available.
+_POOL_RETRY_DELAY_S = 1.5
+
 # Per-future result-retrieval bound (round 21 Track A: cline's
 # ``dekko map --jobs 0`` hung 6+ minutes at 0% CPU across every
 # worker, later revealed via a manual kill to be a worker that
@@ -276,10 +293,14 @@ def run_pooled_with_retry(
 
     Not a retry loop: exactly one bounded second attempt at
     ``_POOL_RETRY_WORKERS`` (or fewer, if ``workers`` was already
-    smaller). If that attempt also raises ``BrokenProcessPool``, it
-    propagates unchanged -- a genuinely wedged or resource-exhausted
-    machine should surface a clear error, not hang retrying
-    indefinitely.
+    smaller), after a fixed ``_POOL_RETRY_DELAY_S`` backoff. If that
+    attempt also raises ``BrokenProcessPool``, it propagates unchanged
+    -- a genuinely wedged or resource-exhausted machine should surface
+    a clear error, not hang retrying indefinitely. The delay exists
+    because an immediate retry can land in the exact same transient
+    window that caused the first failure (round 23 §15: observed right
+    after ``uv tool install --reinstall``, where the retry itself also
+    failed -- see ``_POOL_RETRY_DELAY_S``'s comment).
 
     Before every attempt, pins ``multiprocessing``'s spawn executable
     to this process's own ``sys.executable`` (round 21 Track A: cline
@@ -324,6 +345,7 @@ def run_pooled_with_retry(
         except BrokenProcessPool:
             retry_workers = min(workers, _POOL_RETRY_WORKERS)
             _pool_retry_note(what, retry_workers)
+            time.sleep(_POOL_RETRY_DELAY_S)
             multiprocessing.set_executable(sys.executable)
             return run(retry_workers)
     except PoolTimeoutError as exc:

@@ -186,9 +186,12 @@ def _check_map_freshness(root: Path) -> Finding:
             "dekko map",
         )
     if fresh.reason == "version":
-        built = fresh.built_version or "unknown"
-        running = _running_version()
-        detail = f"map built by dekko {built}, running {running}"
+        # Round-23 §11: share the same signal-naming logic
+        # status/map_status already use, so a spec_hash-only drift on
+        # a long-lived process is named explicitly here too, instead
+        # of collapsing to a self-contradictory "built by dekko X,
+        # running X" tool_version-only message.
+        detail = mapfile.describe_version_stale(fresh)
     else:
         n_changed = len(fresh.added) + len(fresh.removed) + len(fresh.changed)
         detail = f"map stale: {n_changed} file(s) added/changed/removed"

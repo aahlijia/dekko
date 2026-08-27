@@ -1470,6 +1470,123 @@ def _deep_root(short_root: Path) -> Path:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is POSIX-only")
+class _FakeStartTransport:
+    """Minimal stub for exercising ``start()``'s bind-confirmation poll.
+
+    ``exists_after`` is the number of ``exists()`` calls that return
+    ``False`` before the transition to ``True`` (``None`` means it
+    never confirms, simulating a child that never finishes binding
+    within the poll cap).
+    """
+
+    def __init__(self, exists_after: int | None) -> None:
+        self._calls = 0
+        self._exists_after = exists_after
+
+    def preflight_check(self) -> None:
+        return None
+
+    def cleanup(self) -> None:
+        return None
+
+    def describe(self) -> str:
+        return "fake transport"
+
+    def exists(self) -> bool:
+        self._calls += 1
+        if self._exists_after is None:
+            return False
+        return self._calls > self._exists_after
+
+
+def test_start_waits_for_bind_confirmation_before_reporting_started(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Round-23 §13: ``start()`` used to return (and print "started")
+    the instant ``spawn_detached`` launched the child, before the
+    child had necessarily finished binding -- an immediate ``daemon
+    status`` call could race that and see ``transport.exists() ==
+    False``, an honest-but-wrong "not running" (observed ~1/6 in
+    testing). Confirms ``start()`` now polls
+    ``transport.exists()`` and only reports "started" once it
+    transitions to ``True``, not before."""
+    transport = _FakeStartTransport(exists_after=3)
+    monkeypatch.setattr(
+        daemon, "default_transport_for", lambda root: transport
+    )
+    monkeypatch.setattr(daemon, "is_daemon_reachable", lambda t: False)
+    monkeypatch.setattr(daemon, "_START_CONFIRM_POLL_INTERVAL", 0.001)
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(
+        daemon, "spawn_detached", lambda cmd: spawned.append(cmd)
+    )
+
+    code = daemon.start(short_root)
+
+    assert code == 0
+    assert spawned  # the spawn itself happened
+    assert transport._calls > 3  # polled past the False->True transition
+    out = capsys.readouterr().out
+    assert f"dekko daemon: started for {short_root}" in out
+    assert "didn't confirm" not in out
+
+
+def test_start_reports_unconfirmed_when_bind_poll_times_out(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Complements the confirmation test above: when the poll cap is
+    hit without ``transport.exists()`` ever going ``True``, ``start()``
+    must not lie and print "started" -- it prints a distinct,
+    honest "spawned but unconfirmed" message and still returns ``0``
+    (the spawn genuinely succeeded; slow-to-bind is not the same as
+    failed -- a new non-zero exit code here would be a breaking change
+    for scripts already gating on this command's exit code)."""
+    transport = _FakeStartTransport(exists_after=None)
+    monkeypatch.setattr(
+        daemon, "default_transport_for", lambda root: transport
+    )
+    monkeypatch.setattr(daemon, "is_daemon_reachable", lambda t: False)
+    monkeypatch.setattr(daemon, "_START_CONFIRM_TIMEOUT", 0.05)
+    monkeypatch.setattr(daemon, "_START_CONFIRM_POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(daemon, "spawn_detached", lambda cmd: None)
+
+    code = daemon.start(short_root)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert f"dekko daemon: started for {short_root}" not in out
+    assert "didn't confirm" in out
+    assert "dekko daemon status" in out
+
+
+def test_start_immediately_followed_by_status_never_false_negative(
+    short_root: Path,
+) -> None:
+    """The actual regression test for the reported bug (round-23 §13,
+    awesome-go.md §2.2): a real ``daemon start`` followed *immediately*
+    (no artificial wait) by ``daemon status`` must never report "not
+    running" once ``start()`` itself has returned -- run several
+    real start/stop cycles for a reasonable chance of statistically
+    catching the pre-fix ~1/6 failure rate if this fix were reverted."""
+    transport = dt.default_transport_for(short_root)
+    for _ in range(6):
+        try:
+            code = daemon.start(short_root)
+            assert code == 0
+            # No _wait_until here on purpose -- start() itself is now
+            # responsible for not returning until confirmed (or having
+            # honestly said it couldn't confirm).
+            assert transport.exists()
+            assert dt.is_daemon_reachable(transport)
+        finally:
+            daemon.stop(short_root)
+            assert _wait_until(lambda: not transport.exists())
+
+
 def test_start_fails_fast_on_unbindable_socket_path(
     short_root: Path, capsys: pytest.CaptureFixture
 ) -> None:

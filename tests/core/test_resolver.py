@@ -2229,6 +2229,23 @@ def _flaky_pool_factory(fail_times: int) -> type:
     return _FlakyPool
 
 
+@pytest.fixture(autouse=True)
+def _no_real_pool_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 23 §15 added a fixed backoff (``_POOL_RETRY_DELAY_S``)
+    before ``run_pooled_with_retry``'s bounded retry fires. Every
+    ``BrokenProcessPool``-retry test in this module (and the
+    ``_FlakyPool``-based tests further below) deliberately triggers
+    that retry path -- without this, each would pay a real multi-
+    second sleep, several times over across the suite. Autouse and
+    file-scoped since ``time.sleep`` has exactly one call site in
+    ``resolver.py`` (the retry backoff itself); the dedicated backoff
+    test below re-patches ``time.sleep`` itself to assert it fires
+    with the expected delay, superseding this no-op within that one
+    test.
+    """
+    monkeypatch.setattr(resolver_mod.time, "sleep", lambda _seconds: None)
+
+
 def test_run_pooled_with_retry_retries_once_then_succeeds() -> None:
     calls: list[int] = []
 
@@ -2269,6 +2286,39 @@ def test_run_pooled_with_retry_propagates_after_second_failure() -> None:
     with pytest.raises(BrokenProcessPool):
         resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
     assert calls == [8, 2]  # exactly one retry, no loop
+
+
+def test_run_pooled_with_retry_sleeps_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 23 §15: an immediate retry can land in the exact same
+    transient window (CPU contention, or a `uv tool install
+    --reinstall` shim relink race) that caused the first
+    ``BrokenProcessPool``. Confirms the backoff actually fires, with
+    the expected delay, between the two ``run()`` invocations -- and
+    that it fires *before* the retry attempt, not after (an
+    after-the-fact sleep would be a no-op for this bug)."""
+    events: list[str] = []
+
+    def fake_sleep(seconds: float) -> None:
+        assert seconds == resolver_mod._POOL_RETRY_DELAY_S
+        events.append("sleep")
+
+    monkeypatch.setattr(resolver_mod.time, "sleep", fake_sleep)
+
+    calls: list[int] = []
+
+    def run(w: int) -> str:
+        calls.append(w)
+        events.append(f"run-{w}")
+        if len(calls) == 1:
+            raise BrokenProcessPool("simulated: process pool broken")
+        return "ok"
+
+    result = resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+    assert result == "ok"
+    assert events == ["run-8", "sleep", "run-2"]
 
 
 def test_run_pooled_with_retry_prints_disclosure_note_on_retry(
