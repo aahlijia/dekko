@@ -8,7 +8,7 @@ import pytest
 from dekko.integrations import cli
 from dekko.analysis import unused
 from dekko.render.mapfile import MapIndex
-from dekko.core.model import Import, Param, Symbol
+from dekko.core.model import ExternalCall, Import, Param, Symbol
 
 from conftest import RepoFactory
 
@@ -41,6 +41,9 @@ def _index(symbols: list[Symbol], **kw: object) -> MapIndex:
     idx.imports_by_path = dict(kw.get("imports", {}))  # type: ignore
     idx.heritage_in = dict(  # type: ignore[arg-type]
         kw.get("heritage_in", {})
+    )
+    idx.heritage_external_out = dict(  # type: ignore[arg-type]
+        kw.get("heritage_external_out", {})
     )
     return idx
 
@@ -652,6 +655,267 @@ DEAD_FUNCS = {
         "    return 4\n"
     ),
 }
+
+
+# --- Rust trait-dispatched methods: unit-level fixtures -------------
+
+
+def _rust_method(container: str, method: str) -> Symbol:
+    return _sym(
+        method,
+        "m.rs",
+        qualname=f"{container}.{method}",
+        kind="method",
+        language="rust",
+    )
+
+
+def test_rust_trait_dispatch_std_trait_keeps_method_alive() -> None:
+    # Round-23 (zed) finding: impl Display for MyError { fn fmt ... }
+    # has no explicit callers -- Display::fmt is invoked implicitly
+    # via `{}`/`.to_string()`, invisible to a call-expression walk.
+    struct = _sym("MyError", "m.rs", kind="struct", language="rust")
+    method = _rust_method("MyError", "fmt")
+    idx = _index(
+        [struct, method],
+        heritage_external_out={
+            struct.id: [
+                ExternalCall(caller=struct.id, callee="Display", lines=[5])
+            ]
+        },
+    )
+    # Only the method's root-ness is under test here; the struct
+    # itself has no usage evidence in this minimal fixture and is
+    # flagged independently -- irrelevant to this check.
+    assert "fmt" not in {s.name for s in unused.find_unused(idx, ())}
+
+
+def test_rust_trait_dispatch_strips_module_prefix_and_generics() -> None:
+    # `use std::fmt; impl fmt::Display for X` and `impl From<String>
+    # for X` both carry the clause exactly as written in
+    # heritage_external_out -- module-qualified and/or generic.
+    struct = _sym("X", "m.rs", kind="struct", language="rust")
+    fmt_method = _rust_method("X", "fmt")
+    from_method = _rust_method("X", "from")
+    idx = _index(
+        [struct, fmt_method, from_method],
+        heritage_external_out={
+            struct.id: [
+                ExternalCall(
+                    caller=struct.id, callee="fmt::Display", lines=[5]
+                ),
+                ExternalCall(
+                    caller=struct.id, callee="From<String>", lines=[9]
+                ),
+            ]
+        },
+    )
+    found_names = {s.name for s in unused.find_unused(idx, ())}
+    assert "fmt" not in found_names
+    assert "from" not in found_names
+
+
+def test_rust_trait_dispatch_inherent_method_still_flagged() -> None:
+    # Negative control: an inherent method (no trait impl at all) with
+    # zero callers is still genuinely dead code.
+    struct = _sym("Inherent", "m.rs", kind="struct", language="rust")
+    method = _rust_method("Inherent", "fmt")
+    idx = _index([struct, method])
+    assert "fmt" in {s.name for s in unused.find_unused(idx, ())}
+
+
+def test_rust_trait_dispatch_custom_trait_still_flagged() -> None:
+    # A custom, non-std trait must not be exempted -- the fix is
+    # scoped to _RUST_STD_TRAIT_NAMES, not "any trait impl."
+    struct = _sym("Custom", "m.rs", kind="struct", language="rust")
+    method = _rust_method("Custom", "do_thing")
+    idx = _index(
+        [struct, method],
+        heritage_external_out={
+            struct.id: [
+                ExternalCall(caller=struct.id, callee="MyTrait", lines=[3])
+            ]
+        },
+    )
+    assert "do_thing" in {s.name for s in unused.find_unused(idx, ())}
+
+
+# --- Rust trait-dispatched methods: end-to-end fixtures --------------
+
+RUST_TRAIT_DISPATCH_FIXTURE = {
+    "lib.rs": (
+        "use std::fmt;\n\n"
+        "pub struct MyError;\n\n"
+        "impl fmt::Display for MyError {\n"
+        "    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {\n"
+        '        write!(f, "error")\n'
+        "    }\n"
+        "}\n\n"
+        "struct Inherent;\n\n"
+        "impl Inherent {\n"
+        "    fn fmt(&self) -> String {\n"
+        '        String::from("x")\n'
+        "    }\n"
+        "}\n\n"
+        "trait MyTrait {\n"
+        "    fn do_thing(&self);\n"
+        "}\n\n"
+        "struct Custom;\n\n"
+        "impl MyTrait for Custom {\n"
+        "    fn do_thing(&self) {}\n"
+        "}\n\n"
+        "fn main() {\n"
+        "    let e = MyError;\n"
+        '    println!("{}", e);\n'
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_rust_std_trait_dispatched_method(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(RUST_TRAIT_DISPATCH_FIXTURE)
+    code = cli.main(["unused", "--root", str(root)])
+    out = capsys.readouterr().out
+    # MyError.fmt is implicitly dispatched via Display -- not flagged.
+    assert "MyError.fmt" not in out
+    # Negative controls: still flagged.
+    assert code == 1
+    assert "Inherent.fmt" in out  # inherent method, no trait impl
+    assert "Custom.do_thing" in out  # custom, non-std trait
+
+
+RUST_TRAIT_DISPATCH_KNOWN_LIMITATION_FIXTURE = {
+    "lib.rs": (
+        "use std::fmt;\n\n"
+        "pub struct Widget;\n\n"
+        "impl fmt::Display for Widget {\n"
+        "    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {\n"
+        '        write!(f, "widget")\n'
+        "    }\n"
+        "}\n\n"
+        "impl Widget {\n"
+        "    fn dead_helper(&self) -> i32 {\n"
+        "        1\n"
+        "    }\n"
+        "}\n\n"
+        "fn main() {\n"
+        "    let w = Widget;\n"
+        '    println!("{}", w);\n'
+        "}\n"
+    ),
+}
+
+
+def test_unused_rust_trait_dispatch_known_limitation(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Documented, accepted false negative (see round-23 design doc
+    # 03-rust-trait-dispatch-unused-false-positive.md): the fix is
+    # type-level, not per-impl-block. Widget::dead_helper is a
+    # genuinely dead inherent method unrelated to Display, but because
+    # Widget implements a std trait somewhere, every method on Widget
+    # -- not just fmt -- reads as a plausible root. Broader than the
+    # design doc's own "same-name collision" framing of this risk;
+    # noted explicitly here so it's visible, not silently uncovered.
+    root = make_mapped_repo(RUST_TRAIT_DISPATCH_KNOWN_LIMITATION_FIXTURE)
+    code = cli.main(["unused", "--root", str(root)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "dead_helper" not in out
+
+
+# --- TS reference shapes: spread/typeof/subscript --------------------
+
+TS_SPREAD_ONLY = {
+    "consts.ts": "export const TOOL_DEFAULTS = { foo: 1 };\n",
+    "use.ts": (
+        "import { TOOL_DEFAULTS } from './consts';\n\n"
+        "export function useIt(def: Record<string, unknown>) {\n"
+        "  return { ...TOOL_DEFAULTS, ...def };\n"
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_ts_const_referenced_via_spread(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_SPREAD_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
+TS_TYPEOF_ONLY = {
+    "consts.ts": "export const TOOL_DEFAULTS = { foo: 1 };\n",
+    "use.ts": (
+        "import { TOOL_DEFAULTS } from './consts';\n\n"
+        "export type ToolDefaultsType = typeof TOOL_DEFAULTS;\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_ts_const_referenced_via_typeof(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_TYPEOF_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
+TS_SUBSCRIPT_ONLY = {
+    "consts.ts": (
+        "export const TASK_ID_PREFIXES: Record<string, string> = {\n"
+        "  x: 'y',\n"
+        "};\n"
+    ),
+    "use.ts": (
+        "import { TASK_ID_PREFIXES } from './consts';\n\n"
+        "export function useIt(type: string) {\n"
+        "  return TASK_ID_PREFIXES[type];\n"
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_ts_const_referenced_via_subscript(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_SUBSCRIPT_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
+TS_ROUND23_REGRESSION_FIXTURE = {
+    "Tool.ts": (
+        "export const TOOL_DEFAULTS = { foo: 1 };\n\n"
+        "type ToolDefaultsType = typeof TOOL_DEFAULTS;\n\n"
+        "export function useDefaults(def: Record<string, unknown>) {\n"
+        "  return { ...TOOL_DEFAULTS, ...def };\n"
+        "}\n"
+    ),
+    "Task.ts": (
+        "export const TASK_ID_PREFIXES: Record<string, string> = {\n"
+        "  x: 'y',\n"
+        "};\n\n"
+        "export function idFor(type: string) {\n"
+        "  return TASK_ID_PREFIXES[type];\n"
+        "}\n"
+    ),
+}
+
+
+def test_unused_ts_round23_two_symbol_regression(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Literal repro of round-23 claude-code.md §2.3: TOOL_DEFAULTS
+    # (Tool.ts:757, referenced via typeof + spread) and
+    # TASK_ID_PREFIXES (Task.ts:79, referenced via subscript) both
+    # previously read `fan-in: 0` and surfaced as unused.
+    root = make_mapped_repo(TS_ROUND23_REGRESSION_FIXTURE)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
 
 
 def test_unused_top_flag_aliases_limit(

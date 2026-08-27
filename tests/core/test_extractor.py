@@ -724,6 +724,119 @@ def test_python_dict_value_and_default_parameter_captured_as_refs(
     assert "default_handler" in ref_names
 
 
+def test_ts_spread_element_object_captured_as_ref(tmp_path: Path) -> None:
+    """Round-23 (claude-code) finding: object-spread of a symbol.
+
+    ``{...TOOL_DEFAULTS, ...def}`` never reaches
+    ``(object (shorthand_property_identifier) @ref)`` or ``(pair
+    value: (identifier) @ref)`` -- ``spread_element`` is a distinct
+    wrapper node those patterns don't match. Before
+    ``(spread_element (identifier) @ref)``, a const referenced only
+    this way read as dead code.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const x = { foo: 1 };\n"
+        "function useIt(def: object) {\n"
+        "  return { ...x, ...def };\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "x" in ref_names
+    assert "def" in ref_names
+
+
+def test_ts_spread_element_call_argument_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """Call-argument spread (``f(...x)``) is the same wrapper node."""
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const x = [1, 2];\nfunction f(...args: number[]) {}\nf(...x);\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "x" in ref_names
+
+
+def test_ts_subscript_object_captured_as_ref(tmp_path: Path) -> None:
+    """Round-23 (claude-code) finding: bracket-subscript access.
+
+    ``TASK_ID_PREFIXES[type]`` never reached any existing
+    ``_JS_REFERENCE_BASE`` pattern -- nothing read a
+    ``subscript_expression``'s ``object:`` field. The new pattern is
+    deliberately scoped to ``object:``, not ``index:`` (the container
+    being subscripted, not the key) -- confirmed here as a negative
+    check too.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const obj: Record<string, string> = { x: 'y' };\n"
+        "function useIt(key: string) {\n"
+        "  return obj[key];\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "obj" in ref_names
+    assert "key" not in ref_names
+
+
+def test_ts_typeof_type_query_captured_as_ref(tmp_path: Path) -> None:
+    """Round-23 (claude-code) finding: ``typeof T`` as a *type*.
+
+    Both ``type X = typeof T;`` and ``const w: typeof T = y;`` parse
+    as ``type_query``, a TS-only node type no existing pattern read.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const TOOL_DEFAULTS = { foo: 1 };\n"
+        "type ToolDefaultsType = typeof TOOL_DEFAULTS;\n"
+        "const OTHER = { bar: 2 };\n"
+        "const w: typeof OTHER = OTHER;\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "TOOL_DEFAULTS" in ref_names
+    assert "OTHER" in ref_names
+
+
+def test_js_type_query_fragment_not_wired_and_js_still_compiles(
+    tmp_path: Path,
+) -> None:
+    """Grammar-compile guard: ``type_query`` must stay TS/TSX-only.
+
+    ``type_query`` is a TS-grammar-only node type; merging
+    ``_TS_TYPE_REFERENCE_EXTRA`` into the shared ``_JS_REFERENCE_BASE``
+    would fail to *compile* against plain ``tree-sitter-javascript``,
+    breaking every ``.js``/``.jsx`` file's extraction. Confirms plain
+    JS's ``reference_query`` doesn't carry the fragment, and that base
+    spread/subscript syntax still extracts normally after the shared-
+    base edit (a compile-time regression here would be silent, hard
+    breakage, not a subtle bug).
+    """
+    assert "type_query" not in languages.JAVASCRIPT.reference_query
+    spec = languages.spec_for_path("data.js")
+    assert spec is not None
+    (tmp_path / "data.js").write_text(
+        "const x = { foo: 1 };\n"
+        "const obj = { x: 'y' };\n"
+        "function useIt(def, key) {\n"
+        "  return { ...x, ...def, y: obj[key] };\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "data.js", spec)
+    assert fm.error is None
+    ref_names = {ref.name for ref in fm.refs}
+    assert "x" in ref_names
+    assert "obj" in ref_names
+
+
 def test_parse_rust_use() -> None:
     assert _parse_rust_use("a::b::c") == [("c", "a::b::c")]
     assert _parse_rust_use("a::b as d") == [("d", "a::b")]

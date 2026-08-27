@@ -20,6 +20,7 @@ evidence) and ``"all"`` (both, unioned) — see ``find_unused``.
 
 import fnmatch
 import json
+import re
 
 from dekko.analysis import query
 from dekko.classify import is_test_path
@@ -30,6 +31,53 @@ from dekko.textutil import fit_to_budget, signature
 EXIT_NONE = 0
 EXIT_FOUND = 1
 KINDS_CHOICES = ("callables", "types", "all")
+
+# Rust std-library traits whose implementation implies implicit,
+# trait-dispatched calls to a type's method -- invisible to a static
+# call-expression walk (``Display::fmt`` via ``{}``/``.to_string()``,
+# ``From::from`` via ``.into()``/``?``, ``Iterator::next`` via
+# ``for``, operator overloads via ``+``/``==``/indexing, etc.). A
+# curated allowlist, same maintenance model as
+# ``resolver._RUST_STD_METHOD_NAMES`` (extended opportunistically as
+# future rounds find gaps), applied here to trait names rather than
+# method names. See round-23 design doc
+# ``03-rust-trait-dispatch-unused-false-positive.md``.
+_RUST_STD_TRAIT_NAMES = frozenset(
+    {
+        "Display",
+        "Debug",
+        "From",
+        "TryFrom",
+        "Into",
+        "Default",
+        "Clone",
+        "Copy",
+        "PartialEq",
+        "Eq",
+        "PartialOrd",
+        "Ord",
+        "Hash",
+        "Drop",
+        "Iterator",
+        "IntoIterator",
+        "Deref",
+        "DerefMut",
+        "Index",
+        "IndexMut",
+        "Add",
+        "Sub",
+        "Mul",
+        "Div",
+        "Neg",
+        "Not",
+        "AsRef",
+        "AsMut",
+        "Borrow",
+        "ToString",
+        "Send",
+        "Sync",
+    }
+)
 
 
 def _matches_globs(path: str, globs: tuple[str, ...]) -> bool:
@@ -54,8 +102,78 @@ def reexported_names(index: MapIndex) -> set[str]:
     return names
 
 
+_TRAIT_PATH_SPLIT_RE = re.compile(r"::|\.|->")
+
+
+def _trait_base_name(text: str) -> str:
+    """Extract a heritage clause's bare trait name.
+
+    Rust ``impl`` blocks are commonly written with a module-qualified
+    trait path (``impl fmt::Display for X`` after ``use std::fmt``)
+    and/or generic arguments (``impl From<String> for X``);
+    ``heritage_external_out``'s ``ExternalCall.callee`` carries the
+    clause exactly as written (``"fmt::Display"``, ``"From<String>"``),
+    so this strips both -- mirrors ``extractor._split_callee_text``'s
+    cut-at-``<``-then-split-on-path-separators shape (kept as a small
+    local copy rather than importing that module-private helper across
+    a package boundary).
+    """
+    cleaned = re.split(r"[(<]", text, maxsplit=1)[0]
+    parts = [
+        p.strip() for p in _TRAIT_PATH_SPLIT_RE.split(cleaned) if p.strip()
+    ]
+    return parts[-1] if parts else cleaned.strip()
+
+
+def _container_type_index(index: MapIndex) -> dict[tuple[str, str], Symbol]:
+    """``(path, qualname) -> Symbol`` for every ``TYPE_KINDS`` symbol.
+
+    Built once per ``find_unused`` run (not per symbol) so the Rust
+    trait-dispatch root check below can look up a method's enclosing
+    type in O(1) rather than scanning the map per method.
+    """
+    return {
+        (sym.path, sym.qualname): sym
+        for sym in index.symbols_by_id.values()
+        if sym.kind in TYPE_KINDS
+    }
+
+
+def _implements_std_trait(
+    sym: Symbol,
+    index: MapIndex,
+    container_index: dict[tuple[str, str], Symbol],
+) -> bool:
+    """Whether a Rust method's enclosing type implements a std trait.
+
+    Reads ``index.heritage_external_out`` (already-resolved "this type
+    implements external trait T" evidence) rather than tracking which
+    specific ``impl`` block a method came from -- a type-level
+    approximation, exact for the common case of one relevant
+    ``impl <StdTrait> for X`` block per type. See round-23 design doc
+    ``03-rust-trait-dispatch-unused-false-positive.md`` for the
+    known narrow false-negative this trades for (a same-named
+    inherent method sitting alongside a trait impl).
+    """
+    parts = sym.qualname.split(".")
+    if len(parts) < 2:
+        return False
+    container = container_index.get((sym.path, ".".join(parts[:-1])))
+    if container is None:
+        return False
+    externals = index.heritage_external_out.get(container.id, [])
+    return any(
+        _trait_base_name(ext.callee) in _RUST_STD_TRAIT_NAMES
+        for ext in externals
+    )
+
+
 def _is_root(
-    sym: Symbol, reexports: set[str], root_globs: tuple[str, ...]
+    sym: Symbol,
+    reexports: set[str],
+    root_globs: tuple[str, ...],
+    index: MapIndex,
+    container_index: dict[tuple[str, str], Symbol],
 ) -> bool:
     """Whether a symbol is a plausible entry point (not dead code)."""
     if sym.name == "main":
@@ -70,7 +188,11 @@ def _is_root(
         return True
     if _is_dunder(sym.name):
         return True
-    return sym.name in reexports
+    if sym.name in reexports:
+        return True
+    if sym.language == "rust" and sym.kind == "method":
+        return _implements_std_trait(sym, index, container_index)
+    return False
 
 
 def _mark_used(used: set[tuple[str, str]], sym: Symbol) -> None:
@@ -187,12 +309,13 @@ def find_unused(
     """
     reexports = reexported_names(index)
     used = _used_keys(index, kinds)
+    container_index = _container_type_index(index)
     found = [
         sym
         for sym in index.symbols_by_id.values()
         if (kinds != "types" or sym.kind in TYPE_KINDS)
         and (sym.path, sym.qualname) not in used
-        and not _is_root(sym, reexports, root_globs)
+        and not _is_root(sym, reexports, root_globs, index, container_index)
     ]
     return sorted(found, key=lambda s: (s.path, s.start_line))
 

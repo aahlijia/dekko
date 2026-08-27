@@ -549,6 +549,21 @@ _JS_REFERENCE_BASE = """
 (ternary_expression condition: (identifier) @ref)
 (ternary_expression consequence: (identifier) @ref)
 (ternary_expression alternative: (identifier) @ref)
+(spread_element (identifier) @ref)
+(subscript_expression object: (identifier) @ref)
+"""
+
+# TypeScript-only: ``typeof T`` as a *type* (a ``type_query`` node),
+# e.g. ``type X = typeof TOOL_DEFAULTS;`` or ``const w: typeof T = y;``.
+# ``type_query`` is a TS-grammar-only node type -- plain JS has no type
+# syntax at all, so this stays a separate fragment appended only to
+# TypeScript/TSX's reference_query, never merged into
+# ``_JS_REFERENCE_BASE`` (compiling a query containing ``type_query``
+# against tree-sitter-javascript raises "Invalid node type"). Mirrors
+# ``_JSX_REFERENCE_EXTRA``'s identical "grammar lacks this node type"
+# scoping discipline.
+_TS_TYPE_REFERENCE_EXTRA = """
+(type_query (identifier) @ref)
 """
 
 # JSX attribute/expression values (``<Button onClick={handleClick}
@@ -817,7 +832,7 @@ TYPESCRIPT = LanguageSpec(
     param_style="ts",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     # Plain (non-JSX) TypeScript has no jsx_expression node type.
-    reference_query=_JS_REFERENCE_BASE,
+    reference_query=_JS_REFERENCE_BASE + _TS_TYPE_REFERENCE_EXTRA,
     heritage_query=_TS_HERITAGE,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
@@ -836,7 +851,7 @@ TSX = LanguageSpec(
     method_containers=tuple(_TS_CONTAINERS),
     param_style="ts",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
-    reference_query=_JS_REFERENCE_QUERY,
+    reference_query=_JS_REFERENCE_QUERY + _TS_TYPE_REFERENCE_EXTRA,
     heritage_query=_TS_HERITAGE,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,

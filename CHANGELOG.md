@@ -9,6 +9,32 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.20] — 2026-08-27
+
+### Fixed
+- **`dekko unused` false-flagged Rust trait-dispatched methods
+  (`Display::fmt`, `From::from`, `Iterator::next`, operator overloads,
+  etc.) as dead code** — implicit trait dispatch (`{}`/`.to_string()`,
+  `.into()`/`?`, `for`, `+`/`==`/indexing) never produces a
+  `call_expression` node, so these methods always had zero explicit
+  callers. `unused.py` now consults the already-resolved
+  `heritage_external_out` evidence: a Rust method whose enclosing type
+  implements a curated standard-trait allowlist (`_RUST_STD_TRAIT_
+  NAMES`) is treated as a root. Type-level, not per-impl-block —
+  a genuinely dead inherent method sharing a type with a std-trait
+  impl can still be missed; see
+  `.features/plans/round23/03-rust-trait-dispatch-unused-false-
+  positive.md`.
+- **`dekko unused` false-flagged TypeScript `const`s referenced only
+  via object-spread (`{...x}`), a `typeof` type query
+  (`type X = typeof y`), or bracket subscript (`obj[x]`)** — none of
+  the three shapes were covered by `_JS_REFERENCE_BASE`. Added
+  `(spread_element (identifier) @ref)` and `(subscript_expression
+  object: (identifier) @ref)` to the shared JS/TS/TSX base, and a
+  TypeScript/TSX-only `(type_query (identifier) @ref)` fragment (kept
+  separate since `type_query` doesn't exist in the plain JS grammar).
+  See `.features/plans/round23/06-ts-unused-spread-typeof-subscript.md`.
+
 ## [0.43.19] — 2026-08-27
 
 ### Fixed
