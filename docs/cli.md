@@ -295,6 +295,20 @@ surface) is still excluded via the same root check every other symbol
 kind already gets, not flagged as dead just because `--kinds` widened
 the scan.
 
+**C/C++ caveat.** When results include at least one C or C++ symbol,
+`unused` prints an extra advisory line after the summary footer (text
+mode) or a non-empty `"caveats"` list (JSON mode, `[]` otherwise):
+`note: exported/extern "C" symbols may be consumed outside this repo's
+call graph — treat top hits on a public C API skeptically`. A C/C++
+codebase commonly exports a public ABI (`extern "C"` functions called
+from Go/Swift/pip bindings through a compiled `.so`) that no in-repo
+call graph can see, so a top hit on a `TF_*`-shaped or similarly
+ABI-flavored name deserves more scrutiny than a same-shaped internal
+helper. This is advisory only — it does not change which symbols are
+reported, and it's gated on the actual results (not just "this repo
+has a `.c` file somewhere"), so a repo whose C/C++ files happen to
+produce zero unused hits stays silent.
+
 **`--suspect` (off by default).** `unused` trusts inbound call-graph
 fan-in as proof a symbol is alive — but that fan-in can itself be a
 resolver misattribution: a bare-name call site resolves to *some*

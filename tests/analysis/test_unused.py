@@ -1082,3 +1082,91 @@ def test_unused_no_suspect_json_omits_key(
     assert code == 1
     doc = json.loads(capsys.readouterr().out)
     assert "suspects" not in doc
+
+
+# --- C/C++ ABI caveat (round-23 design doc 22, layer 1) --------------
+
+
+def test_c_abi_caveat_none_when_no_c_cpp_symbols() -> None:
+    found = [_sym("dead", "a.py", language="python")]
+    assert unused._c_abi_caveat(found) is None
+
+
+def test_c_abi_caveat_none_for_empty_results() -> None:
+    assert unused._c_abi_caveat([]) is None
+
+
+def test_c_abi_caveat_present_for_c_symbol() -> None:
+    found = [_sym("TF_GraphVersions", "c_api.c", language="c")]
+    caveat = unused._c_abi_caveat(found)
+    assert caveat is not None
+    assert 'extern "C"' in caveat
+    assert "skeptically" in caveat
+
+
+def test_c_abi_caveat_present_for_cpp_symbol() -> None:
+    found = [_sym("TF_GraphVersions", "c_api.cc", language="cpp")]
+    assert unused._c_abi_caveat(found) is not None
+
+
+def test_c_abi_caveat_present_when_mixed_with_other_languages() -> None:
+    found = [
+        _sym("dead_py", "a.py", language="python"),
+        _sym("TF_GraphVersions", "c_api.cc", language="cpp"),
+    ]
+    assert unused._c_abi_caveat(found) is not None
+
+
+def test_unused_text_mode_caveat_absent_for_python_only(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    dead = _sym("dead", "a.py", language="python")
+    idx = _index([dead])
+    unused.run(idx, (), as_json=False, limit=50)
+    out = capsys.readouterr().out
+    assert "dead()" in out
+    assert "note:" not in out
+
+
+def test_unused_text_mode_caveat_present_for_c_symbol(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    dead = _sym("TF_GraphVersions", "c_api.c", language="c")
+    idx = _index([dead])
+    unused.run(idx, (), as_json=False, limit=50)
+    out = capsys.readouterr().out
+    assert out.rstrip("\n").endswith(unused._C_ABI_CAVEAT)
+
+
+def test_unused_json_mode_caveats_empty_for_python_only(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    dead = _sym("dead", "a.py", language="python")
+    idx = _index([dead])
+    unused.run(idx, (), as_json=True, limit=50)
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["caveats"] == []
+
+
+def test_unused_json_mode_caveats_present_for_c_symbol(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    dead = _sym("TF_GraphVersions", "c_api.c", language="c")
+    idx = _index([dead])
+    unused.run(idx, (), as_json=True, limit=50)
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["caveats"] == [unused._C_ABI_CAVEAT]
+
+
+def test_unused_caveat_absent_when_no_unused_symbols_found(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # A repo whose C/C++ files happen to produce zero unused hits stays
+    # silent -- the gate is on `found`, not "this repo has a .c file".
+    # 'main' is always a root, so this C symbol never lands in `found`.
+    main_fn = _sym("main", "a.c", language="c")
+    idx = _index([main_fn])
+    unused.run(idx, (), as_json=False, limit=50)
+    out = capsys.readouterr().out
+    assert "no unused symbols" in out
+    assert "note:" not in out

@@ -9,6 +9,19 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.24] — 2026-08-27
+
+### Added
+- **`dekko unused` now caveats C/C++ results with a note that exported/
+  `extern "C"` symbols may be consumed outside this repo's call graph**
+  (e.g. via Go/Swift/Python bindings calling through a compiled `.so`)
+  and top hits on a public C API should be treated skeptically. Text
+  and `--json` (`caveats` field) both carry it. This is layer 1 of a
+  two-layer design; a deferred `--exclude-c-abi` flag that actually
+  correlates `extern "C"` header declarations to `.cc` definitions is
+  not yet implemented. See
+  `.features/plans/round23/22-unused-extern-c-caveat.md`.
+
 ## [0.43.23] — 2026-08-27
 
 ### Added

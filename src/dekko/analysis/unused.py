@@ -445,6 +445,32 @@ def _print_suspects_text(suspects: list[Symbol]) -> None:
         print(_suspect_row_text(sym))
 
 
+_C_ABI_CAVEAT = (
+    'note: exported/extern "C" symbols may be consumed outside this '
+    "repo's call graph — treat top hits on a public C API skeptically"
+)
+
+
+def _c_abi_caveat(found: list[Symbol]) -> str | None:
+    """Advisory caveat, or ``None``, gated on ``found`` containing C/C++.
+
+    ``unused``'s "no inbound calls" model is a static call-graph
+    analysis -- it cannot see cross-binary/ABI consumers (Go/Swift/pip
+    bindings calling through a compiled ``.so``) by construction, no
+    matter how good in-repo resolution gets. Gated on the *results*,
+    not just "this repo contains some C/C++ files somewhere" -- a
+    Python-heavy repo with one incidental ``.c`` file that produces
+    zero unused hits stays silent, while a repo where C/C++ symbols
+    make up the noisy tail gets the caveat exactly when it's relevant.
+    Layer 1 of round-23 design doc
+    ``.features/plans/round23/22-unused-extern-c-caveat.md`` -- purely
+    advisory text, no change to which symbols are reported.
+    """
+    if any(sym.language in ("c", "cpp") for sym in found):
+        return _C_ABI_CAVEAT
+    return None
+
+
 def _kind_totals(found: list[Symbol]) -> dict[str, int]:
     """Count ``found`` by broad category: ``types`` vs. ``callables``.
 
@@ -481,6 +507,13 @@ def run(
             (JSON). Off by default — costs nothing extra when unset
             and never changes the existing output shape.
 
+    Note:
+        When ``found`` contains at least one C or C++ symbol, an
+        advisory caveat is printed (text, after the footer line) or
+        added to ``doc["caveats"]`` (JSON, ``[]`` otherwise) — a static
+        call graph cannot see cross-binary/ABI consumers of exported
+        C symbols. See ``_c_abi_caveat``.
+
     Returns:
         ``0`` when none are found, ``1`` when some are. Reflects only
         ``find_unused``'s result — the suspects section/key never
@@ -488,6 +521,7 @@ def run(
     """
     found = find_unused(index, root_globs, kinds)
     suspects = find_suspects(index, root_globs, kinds) if suspect else []
+    c_abi_caveat = _c_abi_caveat(found)
 
     if as_json:
         entries = [_sym_json(s) for s in found]
@@ -497,6 +531,7 @@ def run(
             "results": entries[: len(kept_ser)],
             "meta": meter.as_dict(),
             "kind_totals": _kind_totals(found),
+            "caveats": [c_abi_caveat] if c_abi_caveat else [],
         }
         if suspect:
             doc["suspects"] = [
@@ -526,6 +561,8 @@ def run(
         for row in kept:
             print(row)
         print(meter.footer())
+        if c_abi_caveat:
+            print(c_abi_caveat)
 
     if suspect:
         _print_suspects_text(suspects)
