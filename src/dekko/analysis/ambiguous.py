@@ -112,6 +112,27 @@ def _raw_triples(index: MapIndex) -> list[_Triple]:
     return triples
 
 
+def collision_names(index: MapIndex) -> frozenset[str]:
+    """Bare names that `dekko ambiguous` has proven collision-prone.
+
+    A name appears here when at least one call site, somewhere in the
+    repo, matched 2+ repo-defined candidates and could not be resolved
+    (i.e. it appears in ``_raw_triples``). Built from the same triples
+    ``dekko ambiguous --name X`` itself drills into, so every name this
+    returns is guaranteed to have a non-empty ``ambiguous --name``
+    result -- callers should never see a name flagged here that then
+    reports "no ambiguous calls to X".
+
+    Args:
+        index: Loaded map index.
+
+    Returns:
+        Every distinct bare name that appears in at least one
+        surviving ambiguous ``(caller, name, candidates)`` triple.
+    """
+    return frozenset(name for _, name, _ in _raw_triples(index))
+
+
 def _caller_path(index: MapIndex, caller_id: str) -> str:
     """The file path a caller id belongs to, module-caller-aware."""
     if caller_id.endswith(MODULE_CALLER_SUFFIX):

@@ -631,6 +631,35 @@ def test_find_unused_handler_kinds_unexposed(
     assert "g" in out
 
 
+SUSPECT_SRC = {
+    "foo.py": (
+        "class Foo:\n"
+        "    def has(self) -> bool:\n"
+        "        return True\n\n"
+        "    def check(self) -> bool:\n"
+        "        return self.has()\n"
+    ),
+    "a.py": "def has() -> bool:\n    return True\n",
+    "b.py": "def has() -> bool:\n    return False\n",
+    "c.py": "def caller() -> bool:\n    return has()\n",
+}
+
+
+def test_find_unused_handler_suspect_forwards_to_unused_run(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # round-23 design doc 21-unused-ambiguous-crossref.md: tool_find_
+    # unused gains a `suspect` arg forwarded to unused.run, alongside
+    # (but not fixing) the pre-existing --kinds omission above.
+    ctx = _ctx(make_mapped_repo(SUSPECT_SRC))
+    default_out = server.tool_find_unused(ctx, {})
+    assert "suspects:" not in default_out
+
+    suspect_out = server.tool_find_unused(ctx, {"suspect": True})
+    assert "suspects:" in suspect_out
+    assert "dekko ambiguous --name has" in suspect_out
+
+
 def test_stats_handler(make_mapped_repo: RepoFactory) -> None:
     ctx = _ctx(make_mapped_repo(SRC))
     text = server.tool_stats(ctx, {"top": 3})

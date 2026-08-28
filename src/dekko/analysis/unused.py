@@ -16,13 +16,24 @@ still surface — treat the output as a lead, not a verdict.
 also accepts ``"types"`` (scan restricted to classes/interfaces/enums/
 structs/records/traits, additionally weighing heritage and type-usage
 evidence) and ``"all"`` (both, unioned) — see ``find_unused``.
+
+``--suspect`` (opt-in, off by default) cross-references excluded
+symbols against ``dekko ambiguous``'s collision list: a symbol kept
+off this report only by inbound call-graph fan-in is a suspect when
+its bare name is also one `dekko ambiguous` independently proved
+collision-prone (2+ repo-defined candidates, unresolved) somewhere
+else in the repo — see ``find_suspects`` and round-23 design doc
+``.features/plans/round23/21-unused-ambiguous-crossref.md``. This
+does not catch every misattribution (a name colliding with exactly
+one non-repo builtin never appears in ``ambiguous`` either), only the
+subset that also collides 2+ ways somewhere else in the repo.
 """
 
 import fnmatch
 import json
 import re
 
-from dekko.analysis import query
+from dekko.analysis import ambiguous, query
 from dekko.classify import is_test_path
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
@@ -320,6 +331,64 @@ def find_unused(
     return sorted(found, key=lambda s: (s.path, s.start_line))
 
 
+def _has_direct_fan_in(sym: Symbol, index: MapIndex) -> bool:
+    """Whether ``sym``'s own id carries direct inbound call/reference evidence.
+
+    Distinct from ``_mark_used``'s container-marking: a class excluded
+    from ``find_unused`` only because one of its methods was called
+    does not have direct fan-in on the class's own id, even though the
+    class itself counts as "used" for ``find_unused``'s purposes.
+    ``find_suspects`` cares specifically about the former case — a
+    symbol whose *own* id is a resolved call/reference target, which is
+    exactly the evidence a single-candidate resolver misattribution
+    would fabricate.
+    """
+    return bool(index.calls_in.get(sym.id)) or bool(
+        index.referenced_in.get(sym.id)
+    )
+
+
+def find_suspects(
+    index: MapIndex,
+    root_globs: tuple[str, ...],
+    kinds: str = "callables",
+) -> list[Symbol]:
+    """Symbols excluded from `find_unused` whose name is a proven collider.
+
+    A symbol is a suspect when: it would be in-scope for `find_unused`'s
+    kind filter, it was NOT reported unused, it is not a root (root
+    exclusion is unrelated to call-graph trust), it has at least one
+    *direct* calls_in/referenced_in entry for its own id (the fan-in
+    that specifically kept it off the unused list, as opposed to being
+    marked used only because a child method of it was called), and its
+    bare `name` is in `ambiguous.collision_names(index)`.
+
+    Args:
+        index: Loaded map index.
+        root_globs: Extra path globs whose symbols are always roots —
+            same set `find_unused` was called with, so root exclusion
+            agrees between the two passes.
+        kinds: Same `--kinds` scoping `find_unused` uses.
+
+    Returns:
+        Suspect symbols sorted by path then line.
+    """
+    reexports = reexported_names(index)
+    used = _used_keys(index, kinds)
+    container_index = _container_type_index(index)
+    collision_names = ambiguous.collision_names(index)
+    found = [
+        sym
+        for sym in index.symbols_by_id.values()
+        if (kinds != "types" or sym.kind in TYPE_KINDS)
+        and (sym.path, sym.qualname) in used
+        and not _is_root(sym, reexports, root_globs, index, container_index)
+        and sym.name in collision_names
+        and _has_direct_fan_in(sym, index)
+    ]
+    return sorted(found, key=lambda s: (s.path, s.start_line))
+
+
 def _sym_json(sym: Symbol) -> dict:
     """Structured rendering of one unused symbol."""
     return {
@@ -330,6 +399,50 @@ def _sym_json(sym: Symbol) -> dict:
         "language": sym.language,
         "signature": signature(sym),
     }
+
+
+# Independent, flat row cap for the `--suspect` section — deliberately
+# not routed through the primary list's `--limit`/`--budget` so the
+# suspects section never silently steals budget from the main unused
+# list (round-23 design doc `21-unused-ambiguous-crossref.md`).
+_SUSPECT_LIMIT = 20
+
+
+def _suspect_json(sym: Symbol) -> dict:
+    """Structured rendering of one suspect: unused fields + collision info."""
+    doc = _sym_json(sym)
+    doc["collides_with"] = sym.name
+    doc["check_command"] = f"dekko ambiguous --name {sym.name}"
+    return doc
+
+
+def _suspect_row_text(sym: Symbol) -> str:
+    """One suspect's listing row, text form."""
+    return (
+        f"  {sym.path}:{sym.start_line}  {signature(sym)}  [{sym.kind}]"
+        f"  -- name '{sym.name}' also collides ambiguously "
+        f"(dekko ambiguous --name {sym.name})"
+    )
+
+
+def _print_suspects_text(suspects: list[Symbol]) -> None:
+    """Print the ``--suspect`` section after the main unused listing.
+
+    A separate, independent section from the main list — printed even
+    when ``find_unused`` reported nothing, since a symbol can be
+    "suspiciously alive" regardless of how many other symbols are
+    genuinely dead.
+    """
+    print()
+    header = (
+        f"suspects: {len(suspects)} excluded symbols share a name with "
+        "1+ ambiguous call site(s) elsewhere in the repo -- their inbound "
+        "fan-in may be misattributed, not genuine. Run `dekko ambiguous "
+        "--name <name>` on each to check."
+    )
+    print(header)
+    for sym in suspects[:_SUSPECT_LIMIT]:
+        print(_suspect_row_text(sym))
 
 
 def _kind_totals(found: list[Symbol]) -> dict[str, int]:
@@ -351,6 +464,7 @@ def run(
     limit: int,
     budget: int | None = None,
     kinds: str = "callables",
+    suspect: bool = False,
 ) -> int:
     """Report unused symbols as text or JSON.
 
@@ -362,11 +476,19 @@ def run(
         budget: Approximate token budget for the rows, or ``None``.
         kinds: ``"callables"`` (default), ``"types"``, or ``"all"`` —
             see ``find_unused``.
+        suspect: When ``True``, also run ``find_suspects`` and append
+            its result as a ``"suspects"`` section (text) or key
+            (JSON). Off by default — costs nothing extra when unset
+            and never changes the existing output shape.
 
     Returns:
-        ``0`` when none are found, ``1`` when some are.
+        ``0`` when none are found, ``1`` when some are. Reflects only
+        ``find_unused``'s result — the suspects section/key never
+        changes the exit code.
     """
     found = find_unused(index, root_globs, kinds)
+    suspects = find_suspects(index, root_globs, kinds) if suspect else []
+
     if as_json:
         entries = [_sym_json(s) for s in found]
         serialized = [json.dumps(e) for e in entries]
@@ -376,27 +498,36 @@ def run(
             "meta": meter.as_dict(),
             "kind_totals": _kind_totals(found),
         }
+        if suspect:
+            doc["suspects"] = [
+                _suspect_json(s) for s in suspects[:_SUSPECT_LIMIT]
+            ]
         print(json.dumps(doc, indent=2))
         return EXIT_FOUND if found else EXIT_NONE
 
     if not found:
         print("dekko: no unused symbols")
-        return EXIT_NONE
-
-    if kinds == "all":
-        totals = _kind_totals(found)
-        header = (
-            f"dekko: {len(found)} unused symbols "
-            f"({totals['callables']} callables, {totals['types']} types)"
-        )
     else:
-        header = f"dekko: {len(found)} unused symbols"
-    rows = [
-        f"  {s.path}:{s.start_line}  {signature(s)}  [{s.kind}]" for s in found
-    ]
-    kept, meter = fit_to_budget(rows, budget, limit, prefix=header)
-    print(header)
-    for row in kept:
-        print(row)
-    print(meter.footer())
-    return EXIT_FOUND
+        if kinds == "all":
+            totals = _kind_totals(found)
+            header = (
+                f"dekko: {len(found)} unused symbols "
+                f"({totals['callables']} callables, {totals['types']} "
+                "types)"
+            )
+        else:
+            header = f"dekko: {len(found)} unused symbols"
+        rows = [
+            f"  {s.path}:{s.start_line}  {signature(s)}  [{s.kind}]"
+            for s in found
+        ]
+        kept, meter = fit_to_budget(rows, budget, limit, prefix=header)
+        print(header)
+        for row in kept:
+            print(row)
+        print(meter.footer())
+
+    if suspect:
+        _print_suspects_text(suspects)
+
+    return EXIT_FOUND if found else EXIT_NONE

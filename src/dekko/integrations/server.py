@@ -464,9 +464,15 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     limit = int(args.get("limit", 50))
     budget = args.get("budget")
     budget = int(budget) if budget is not None else None
+    suspect = bool(args.get("suspect", False))
     code, out, err = _capture(
         lambda: unused.run(
-            index, tuple(roots), as_json=False, limit=limit, budget=budget
+            index,
+            tuple(roots),
+            as_json=False,
+            limit=limit,
+            budget=budget,
+            suspect=suspect,
         )
     )
     if code not in (0, 1):

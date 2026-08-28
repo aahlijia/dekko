@@ -45,6 +45,12 @@ def _index(symbols: list[Symbol], **kw: object) -> MapIndex:
     idx.heritage_external_out = dict(  # type: ignore[arg-type]
         kw.get("heritage_external_out", {})
     )
+    idx.ambiguous_in = dict(  # type: ignore[arg-type]
+        kw.get("ambiguous_in", {})
+    )
+    idx.ambiguous_out = dict(  # type: ignore[arg-type]
+        kw.get("ambiguous_out", {})
+    )
     return idx
 
 
@@ -115,6 +121,69 @@ def test_roots_glob() -> None:
     idx = _index([_sym("keep", "gen/x.py"), _sym("drop", "src/y.py")])
     names = {s.name for s in unused.find_unused(idx, ("gen/*",))}
     assert names == {"drop"}
+
+
+# --- find_suspects: unit-level tests over hand-built MapIndex fixtures ---
+
+
+def test_find_suspects_flags_colliding_name_with_direct_fan_in() -> None:
+    # `has` is excluded from find_unused via one resolved call -- but
+    # `has` is also a proven collider (2 candidates) at an unrelated
+    # call site elsewhere in the repo, so its exclusion is a suspect.
+    has_target = _sym("has", "bar.py", qualname="Bar.has", kind="method")
+    idx = _index(
+        [has_target],
+        calls_in={has_target.id: ["caller.py::caller"]},
+        ambiguous_in={
+            "cand1": [("elsewhere.py::c", "has")],
+            "cand2": [("elsewhere.py::c", "has")],
+        },
+        ambiguous_out={"elsewhere.py::c": ["has"]},
+    )
+    suspects = unused.find_suspects(idx, ())
+    assert [s.name for s in suspects] == ["has"]
+
+
+def test_find_suspects_excludes_name_never_seen_by_ambiguous() -> None:
+    # Genuine, unambiguous fan-in whose name never collides anywhere
+    # -- not a suspect.
+    clean = _sym("clean_helper", "bar.py")
+    idx = _index([clean], calls_in={clean.id: ["caller.py::caller"]})
+    assert unused.find_suspects(idx, ()) == []
+
+
+def test_find_suspects_excludes_root_even_if_name_collides() -> None:
+    # A symbol that would otherwise qualify (name collides, has direct
+    # fan-in) but is excluded from `unused` purely via `_is_root`
+    # (here: exported) is not a call-graph-trust suspect at all.
+    exported = _sym(
+        "has", "bar.py", qualname="Bar.has", kind="method", exported=True
+    )
+    idx = _index(
+        [exported],
+        calls_in={exported.id: ["caller.py::caller"]},
+        ambiguous_in={"cand1": [("elsewhere.py::c", "has")]},
+        ambiguous_out={"elsewhere.py::c": ["has"]},
+    )
+    assert unused.find_suspects(idx, ()) == []
+
+
+def test_find_suspects_excludes_container_marked_only() -> None:
+    # Worker is kept alive only because its method `run` was called
+    # (container-marking) -- Worker's own id has no direct calls_in/
+    # referenced_in entry, so even though "Worker" happens to also be
+    # a proven collider, it must not be flagged: this is a different,
+    # unrelated exclusion mechanism from "this exact symbol's own name
+    # is a proven collider."
+    method = _sym("run", "a.py", qualname="Worker.run", kind="method")
+    klass = _sym("Worker", "a.py", qualname="Worker", kind="class")
+    idx = _index(
+        [method, klass],
+        calls_in={method.id: ["b.py::caller"]},
+        ambiguous_in={"cand1": [("elsewhere.py::c", "Worker")]},
+        ambiguous_out={"elsewhere.py::c": ["Worker"]},
+    )
+    assert unused.find_suspects(idx, ()) == []
 
 
 PY = {
@@ -932,3 +1001,84 @@ def test_unused_top_flag_aliases_limit(
     assert top_out == limit_out
     assert "dead_one" in top_out
     assert "dead_four" not in top_out  # beyond the cap of 3
+
+
+# --- --suspect: end-to-end fixtures through the real parse pipeline --
+
+# Foo.has is excluded from `unused` by a genuine, resolved call
+# (self.has() inside Foo.check, resolved via same-class dispatch) --
+# but the bare name "has" also collides across 3 repo-wide candidates
+# (a.has, b.has, Foo.has) at the unrelated bare call in c.py, so
+# `ambiguous` independently proves "has" collision-prone. Foo.has's
+# exclusion is exactly the shape `--suspect` exists to flag.
+SUSPECT_FIXTURE = {
+    "foo.py": (
+        "class Foo:\n"
+        "    def has(self) -> bool:\n"
+        "        return True\n\n"
+        "    def check(self) -> bool:\n"
+        "        return self.has()\n"
+    ),
+    "a.py": "def has() -> bool:\n    return True\n",
+    "b.py": "def has() -> bool:\n    return False\n",
+    "c.py": "def caller() -> bool:\n    return has()\n",
+}
+
+
+def test_unused_suspect_off_by_default_no_section(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SUSPECT_FIXTURE)
+    code = cli.main(["unused", "--root", str(root)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "suspects:" not in out
+    assert "Foo.has" not in out  # excluded by genuine fan-in, as today
+
+
+def test_unused_suspect_flag_adds_section(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SUSPECT_FIXTURE)
+    code = cli.main(["unused", "--root", str(root), "--suspect"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "Foo.has" not in out.split("suspects:")[0]  # not in main list
+    assert "suspects:" in out
+    assert "Foo.has" in out.split("suspects:")[1]
+    assert "dekko ambiguous --name has" in out
+
+
+def test_unused_suspect_flag_no_change_to_main_list(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # --suspect must not change the primary unused list's own output.
+    root = make_mapped_repo(SUSPECT_FIXTURE)
+    cli.main(["unused", "--root", str(root)])
+    without = capsys.readouterr().out
+    cli.main(["unused", "--root", str(root), "--suspect"])
+    with_suspect = capsys.readouterr().out
+    assert with_suspect[: len(without)] == without
+
+
+def test_unused_suspect_json_round_trip(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SUSPECT_FIXTURE)
+    code = cli.main(["unused", "--root", str(root), "--suspect", "--json"])
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert "suspects" in doc
+    entry = next(s for s in doc["suspects"] if s["collides_with"] == "has")
+    assert entry["id"] == "foo.py::Foo.has"
+    assert entry["check_command"] == "dekko ambiguous --name has"
+
+
+def test_unused_no_suspect_json_omits_key(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SUSPECT_FIXTURE)
+    code = cli.main(["unused", "--root", str(root), "--json"])
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert "suspects" not in doc

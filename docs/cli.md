@@ -34,6 +34,7 @@ dekko diff                           # symbols changed since the map's commit (e
 dekko unused                         # symbols nothing calls (dead-code leads)
 dekko unused --kinds types           # unused types only (heritage + type-usage aware)
 dekko unused --kinds all             # callables + types, unioned
+dekko unused --suspect               # + flag excluded symbols whose name is a proven collider
 dekko ambiguous                      # resolver-trust report: where resolution was ambiguous
 dekko deps                           # module-level dependency graph: edge/file counts, cycle count
 dekko deps --file src/app.py         # one file's resolved imports/importers/external sources
@@ -293,6 +294,25 @@ type with zero in-repo implementors or usages (a plausible public library
 surface) is still excluded via the same root check every other symbol
 kind already gets, not flagged as dead just because `--kinds` widened
 the scan.
+
+**`--suspect` (off by default).** `unused` trusts inbound call-graph
+fan-in as proof a symbol is alive — but that fan-in can itself be a
+resolver misattribution: a bare-name call site resolves to *some*
+repo-defined symbol whenever exactly one shares that name, with no
+arity or receiver-type check (see "Interpreting `dekko ambiguous`"
+below). `--suspect` cross-references every symbol `unused` excluded
+via direct fan-in against `dekko ambiguous`'s collision list — names
+`ambiguous` independently proved collide across 2+ repo-defined
+candidates somewhere else in the repo. A hit means the name is a
+proven collider *somewhere*, not that this specific symbol's credited
+calls are wrong; treat it as a lead worth a `dekko ambiguous --name
+<name>` glance, not a verdict. Coverage is inherently partial: a name
+colliding with exactly one non-repo builtin/library method and nothing
+else repo-wide never produces an `ambiguous` triple, so it never
+becomes a suspect either — this closes the loop only for names that
+also collide 2+ ways somewhere else in the repo. `--suspect` adds a
+`"suspects"` JSON key / text section without changing the existing
+unused-list output at all when omitted.
 
 ## Interpreting `dekko ambiguous`
 

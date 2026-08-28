@@ -9,6 +9,18 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.23] — 2026-08-27
+
+### Added
+- **`dekko unused --suspect`** — flags "unused" results that are kept
+  alive only by fan-in from a call-graph edge whose bare name also
+  collides ambiguously elsewhere in the repo, the exact shape that can
+  hide a genuinely dead symbol behind a misattributed call (see the
+  round-23 n=1-candidate resolver-confidence findings). Built on a new
+  `ambiguous.collision_names()` helper and `unused.find_suspects()`,
+  CLI-only for now. See
+  `.features/plans/round23/21-unused-ambiguous-crossref.md`.
+
 ## [0.43.22] — 2026-08-27
 
 ### Added

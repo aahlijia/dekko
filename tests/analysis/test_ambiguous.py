@@ -117,6 +117,28 @@ def test_raw_triples_drops_zero_candidate_pair() -> None:
     assert ambiguous._raw_triples(idx) == []
 
 
+def test_collision_names_returns_proven_colliders() -> None:
+    # "has" has 2 surviving candidates (a genuine collision) --
+    # "single" never appears in ambiguous_in/ambiguous_out at all,
+    # mirroring reality: the resolver only ever records a triple for a
+    # 2+-candidate collision, so a single-candidate name is
+    # structurally absent here, never present-but-filtered.
+    idx = MapIndex(root_label="t")
+    idx.ambiguous_in = {
+        "cand1": [("caller1", "has")],
+        "cand2": [("caller1", "has")],
+    }
+    idx.ambiguous_out = {"caller1": ["has"]}
+    names = ambiguous.collision_names(idx)
+    assert names == frozenset({"has"})
+    assert "single" not in names
+
+
+def test_collision_names_empty_when_no_ambiguity() -> None:
+    idx = MapIndex(root_label="t")
+    assert ambiguous.collision_names(idx) == frozenset()
+
+
 def test_by_name_ranking_and_stats() -> None:
     idx = MapIndex(root_label="t")
     idx.symbols_by_id = {

@@ -1044,6 +1044,16 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "using heritage + type-usage evidence in addition to call "
         "evidence), or 'all' (both, unioned)",
     )
+    p_unused.add_argument(
+        "--suspect",
+        action="store_true",
+        help="also flag excluded symbols whose bare name is a proven "
+        "collider in `dekko ambiguous` (2+ repo-defined candidates "
+        "elsewhere in the repo) -- a lead that their inbound fan-in "
+        "may be misattributed, not a verdict. Off by default; adds a "
+        "'suspects' section (text) or key (JSON) without changing the "
+        "existing unused-list output",
+    )
     _add_read_options(p_unused)
     p_unused.set_defaults(func=run_unused)
 
@@ -1738,6 +1748,7 @@ def run_unused(args: argparse.Namespace) -> int:
         limit=args.limit,
         budget=args.budget,
         kinds=args.kinds,
+        suspect=args.suspect,
     )
 
 
