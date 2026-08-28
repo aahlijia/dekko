@@ -9,6 +9,77 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.30] — 2026-08-28
+
+Fixes and small improvements from the round-24 7-repo eval
+(`test-repos/reports/24-tokentest-7repo-post04328/MASTER-REPORT.md`);
+see `.features/plans/round24/` for the design docs behind each item.
+
+### Fixed
+- **C++ "most vexing parse" constructor-argument calls were dropped**
+  — `Type name(Ctor(), deleter);` (idiomatic RAII construction, e.g.
+  `std::unique_ptr<TF_Status, D> s(TF_NewStatus(), del);`) misparses
+  under tree-sitter-cpp's most-vexing-parse ambiguity as a local
+  function declaration, silently dropping the constructor call from
+  the call graph. A second extraction pass recovers these calls for
+  `c`/`cpp` files. See
+  `.features/plans/round24/01-cpp-vexing-parse-ctor-calls-dropped.md`.
+- **Daemon-routed `diff`/`affected`/`workset` timeouts under-provision
+  on a cold rev-cache build** — the client timeout was scaled off
+  `map.json`'s byte size, a proxy that's stale and wrong for a
+  rev-cache miss, whose cost tracks the target rev's git-tracked file
+  count instead. On tensorflow this under-provisioned the timeout
+  ~5.3x, making the daemon path strictly worse than `--no-daemon`.
+  The timeout is now scaled by the target rev's tracked-file count
+  on a genuine rev-cache miss; hits and all other commands are
+  unchanged. See
+  `.features/plans/round24/02-daemon-cold-revcache-timeout-miscalibration.md`.
+- **Heritage resolver misattributed a Rust trait to a decoy
+  fixture/vendor crate** — `query subtypes`/`supertypes` couldn't
+  distinguish a real workspace crate root from a same-named
+  fixture/vendor crate, causing near-total under-resolution on
+  repos like zed (`gpui::Render`, 1/383 implementors found). A
+  crate-root collision now resolves to the non-fixture/vendor
+  candidate when exactly one side qualifies, and discloses when the
+  tiebreak fired via a new `heritage_synthetic_tiebreak_count` note
+  on `query subtypes`/`supertypes` output (bumps the map schema to
+  v11). See
+  `.features/plans/round24/03-heritage-crate-decoy-tiebreak.md`.
+- **`dekko sanity`'s comment-mention check missed file-header
+  mentions far from the symbol's definition** — a module-header
+  comment naming a symbol tens of lines before its definition fell
+  outside the existing 3-line adjacent-comment proximity gate,
+  producing a false "unexplained miss" (confirmed on
+  claude-buddy's `path.ts`/`buddyStateDir`). A new
+  `_in_leading_header_comment()` check recognizes an uninterrupted
+  comment run from line 1 through the hit line as a legitimate
+  module-header mention, alongside the existing adjacent-comment
+  check. See
+  `.features/plans/round24/07-sanity-comment-mention-file-header-gap.md`.
+
+### Added
+- **`dekko unused --dispatch`** — `dekko unused` false-positives on
+  polymorphic `this.method()`/`self.method()` dispatch, since the
+  static resolver can't always bind a dynamic-dispatch call to its
+  implementation. `sanity --unused` already caught these, but agents
+  skip that step. `unused` now surfaces an always-on advisory caveat
+  count for flagged symbols that are also unresolved dispatch
+  candidates (reusing the existing `ambiguous_in` table `--suspect`
+  is built on), plus an opt-in `--dispatch` section listing them. See
+  `.features/plans/round24/04-unused-dispatch-shaped-candidate-flag.md`.
+
+### Docs
+- Clarified in `test-repos/TESTING-GUIDE.md`: `query importers`
+  footer-arithmetic spot-checks must exclude the footer line itself
+  (`Meter`'s counters are algebraically tied and can't drift; the
+  apparent mismatch came from a bare `wc -l`), and `--json` on
+  ambiguous/not-found error paths intentionally stays plain-text on
+  stderr project-wide (documented in `docs/cli.md` and
+  `report_unresolved`'s docstring, not a bug). Both were re-filed
+  non-bugs from round 23; the notes should stop the re-filing. See
+  `.features/plans/round24/05-query-importers-footer-arithmetic-recheck.md`
+  and `.features/plans/round24/06-ambiguous-json-error-contract-recheck.md`.
+
 ## [0.43.29] — 2026-08-28
 
 ### Added

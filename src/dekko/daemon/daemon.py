@@ -43,8 +43,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from dekko import repo_ops
+from dekko.analysis import diff as diff_mod
 from dekko.render import mapfile
 from dekko.storage import cache as cache_mod
+from dekko.storage import revcache
 from dekko.daemon.daemon_transport import (
     DaemonTransport,
     DaemonUnavailableError,
@@ -82,6 +84,14 @@ _DAEMON_ELIGIBLE = frozenset(
         "deps",
     }
 )
+
+# Commands whose client-side timeout needs the rev-cache-miss-aware
+# calculation (see ``_scaled_client_timeout_for_revcache_miss``)
+# instead of the default ``map.json``-size-scaled one -- the only
+# three commands whose daemon-side handler can take
+# ``diff.old_snapshot``'s expensive export/re-parse/resolve path on a
+# rev-cache miss (round-24 §2).
+_REVCACHE_TIMEOUT_COMMANDS = frozenset({"diff", "affected", "workset"})
 
 # Reserved protocol verbs, distinct from any real subcommand name (no
 # entry in SUBCOMMANDS starts with "_") so they can never collide with
@@ -167,6 +177,26 @@ _TIMEOUT_BYTES_PER_SECOND = 5_500_000
 # repo_ops._REGEN_LOCK_WAIT_CAP).
 _SCALED_CLIENT_TIMEOUT_CAP = 300.0
 
+# Round-24 §2 finding: ``diff``/``affected``/``workset``'s rev-cache-
+# *miss* path (``diff.old_snapshot``) never touches ``map.json`` or
+# the daemon's warm ``_WarmCache`` at all -- it exports the *historical*
+# rev via ``git archive`` and re-parses/resolves it from scratch, the
+# same cost as a cold ``dekko map``. That cost tracks the target rev's
+# own git-tracked file count (``diff.tracked_at_rev()``), not the
+# current working tree's serialized ``map.json`` size -- the two only
+# looked correlated on a single-repo-at-a-nearby-revision measurement.
+# Only one real data point exists so far: tensorflow's 232.34s
+# (confirmed live, round-24 verification: a fresh cold-rev-cache
+# ``affected`` call's daemon-side ``busy`` flag genuinely stayed
+# ``True`` for ~230s server-side, matching this) against
+# ``tracked_at_rev()``'s 36,518-file count for that commit -- 232.34 /
+# 36,518 ~= 6.4ms/file, rounded down for margin (same convention as
+# ``_TIMEOUT_BYTES_PER_SECOND``'s own comment) to ~8ms/tracked-file.
+# Single-repo fit, same limitation that constant shipped with
+# originally -- a second large-repo data point (e.g. spring-boot) is a
+# follow-up validation, not a v1 blocker.
+_TIMEOUT_SECONDS_PER_TRACKED_FILE = 0.008
+
 
 def _scaled_client_timeout(root: Path) -> float:
     """Repo-size-aware client timeout for a routed daemon request.
@@ -206,6 +236,79 @@ def _scaled_client_timeout(root: Path) -> float:
         return _CLIENT_TIMEOUT
     scaled = size / _TIMEOUT_BYTES_PER_SECOND
     return min(max(_CLIENT_TIMEOUT, scaled), _SCALED_CLIENT_TIMEOUT_CAP)
+
+
+def _scaled_client_timeout_for_revcache_miss(root: Path, rev: str) -> float:
+    """Client timeout for a ``diff``/``affected``/``workset`` rev-cache
+    *miss*, scaled by the target rev's tracked-file count instead of
+    ``map.json`` size.
+
+    Sibling to :func:`_scaled_client_timeout`, used only when
+    :func:`try_daemon` has already determined (via
+    ``revcache.has_entry``) that the routed request will take the
+    expensive ``diff.old_snapshot`` export/re-parse/resolve path rather
+    than a fast rev-cache disk read -- see
+    :data:`_TIMEOUT_SECONDS_PER_TRACKED_FILE` for why ``map.json`` size
+    is the wrong proxy for that specific cost.
+
+    Args:
+        root: Repo root (the real repository, with ``.git/``).
+        rev: The target rev :func:`_target_rev_for` resolved -- passed
+            through to ``diff.tracked_at_rev`` unchanged.
+
+    Returns:
+        ``_CLIENT_TIMEOUT`` when the tracked-file count can't be
+        determined (unresolvable rev, ``git`` unavailable) or is small
+        enough that the scaled value wouldn't exceed it; otherwise a
+        larger budget, capped at the same
+        :data:`_SCALED_CLIENT_TIMEOUT_CAP` used by
+        :func:`_scaled_client_timeout`.
+    """
+    candidates = diff_mod.tracked_at_rev(root, rev)
+    if not candidates:
+        return _CLIENT_TIMEOUT
+    scaled = len(candidates) * _TIMEOUT_SECONDS_PER_TRACKED_FILE
+    return min(max(_CLIENT_TIMEOUT, scaled), _SCALED_CLIENT_TIMEOUT_CAP)
+
+
+def _target_rev_for(command: str, args: argparse.Namespace) -> str | None:
+    """Best-effort resolution of the rev a routed ``diff``/``affected``/
+    ``workset`` call will actually target, before connecting.
+
+    Replicates the rev-default logic each of those commands' own
+    ``run()`` already applies (``diff.run``, ``affected.run``,
+    ``workset.seed_from_rev`` via ``affected.changes``): an explicit
+    positional ``REV`` wins outright; otherwise the map's own recorded
+    ``git_commit`` provenance; otherwise ``"HEAD"``. Reads only the
+    small ``.dekko/provenance.json`` sidecar (``mapfile.
+    load_provenance``, a few KB) rather than the full ``map.json`` --
+    consistent with :func:`_scaled_client_timeout`'s own "cheap,
+    client-side-computable" bar for anything checked before connecting.
+
+    Args:
+        command: The daemon-eligible command name.
+        args: The already-parsed ``argparse.Namespace`` for it.
+
+    Returns:
+        The rev this request will target, or ``None`` when there is
+        nothing to scale by: a ``workset --symbol`` invocation (its
+        seed path never touches ``old_snapshot``), or ``root`` isn't
+        available to read a provenance sidecar from. A caller getting
+        ``None`` back falls to :func:`_scaled_client_timeout` instead
+        of guessing -- a wrong-but-safe fallback that only costs
+        provisioning accuracy, not correctness.
+    """
+    if command == "workset" and getattr(args, "symbol", None) is not None:
+        return None
+    rev = getattr(args, "rev", None)
+    if rev:
+        return rev
+    root_value = getattr(args, "root", None)
+    if not root_value:
+        return None
+    root = Path(root_value).resolve()
+    prov = mapfile.load_provenance(root) or {}
+    return prov.get("git_commit") or "HEAD"
 
 
 # Round-14 master report §"Daemon-lifecycle investigation": bound on
@@ -882,8 +985,16 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
     if not transport.exists():
         return None
 
+    timeout = _scaled_client_timeout(root)
+    if command in _REVCACHE_TIMEOUT_COMMANDS:
+        target_rev = _target_rev_for(command, args)
+        if target_rev is not None and not revcache.has_entry(root, target_rev):
+            timeout = _scaled_client_timeout_for_revcache_miss(
+                root, target_rev
+            )
+
     try:
-        sock = transport.client_connect(_scaled_client_timeout(root))
+        sock = transport.client_connect(timeout)
     except DaemonUnavailableError:
         return None
 

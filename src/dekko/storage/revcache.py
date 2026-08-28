@@ -76,6 +76,29 @@ def resolve_sha(root: Path, rev: str) -> str | None:
     return sha or None
 
 
+def has_entry(root: Path, rev: str) -> bool:
+    """Whether a rev-cache entry already exists for ``rev``.
+
+    Thin composition of :func:`resolve_sha` and :func:`_entry_path` --
+    a resolvable-but-uncached rev is a genuine miss, same as an
+    unresolvable one, since either way ``old_snapshot`` will have to
+    pay the full export/re-parse/resolve cost rather than a fast disk
+    read.
+
+    Args:
+        root: Repository root.
+        rev: Any git revision expression, exactly as accepted by
+            :func:`resolve_sha`.
+
+    Returns:
+        ``True`` only if ``rev`` resolves to a SHA *and* that SHA has
+        an on-disk cache entry; ``False`` otherwise (unresolvable rev,
+        or resolvable rev with no cached entry yet).
+    """
+    sha = resolve_sha(root, rev)
+    return sha is not None and _entry_path(root, sha).exists()
+
+
 def _cache_dir(root: Path) -> Path:
     """The ``.dekko/rev-cache/`` directory for a repository root."""
     return root / _MAP_DIR / REV_CACHE_DIR

@@ -36,6 +36,7 @@ dekko unused                         # symbols nothing calls (dead-code leads)
 dekko unused --kinds types           # unused types only (heritage + type-usage aware)
 dekko unused --kinds all             # callables + types, unioned
 dekko unused --suspect               # + flag excluded symbols whose name is a proven collider
+dekko unused --dispatch              # + list flagged symbols that are unresolved dispatch candidates
 dekko ambiguous                      # resolver-trust report: where resolution was ambiguous
 dekko deps                           # module-level dependency graph: edge/file counts, cycle count
 dekko deps --file src/app.py         # one file's resolved imports/importers/external sources
@@ -137,7 +138,18 @@ hiding. Rust's `impl` heritage resolves the `Type` side by same-file
 name lookup (an `impl` block's own file, not cross-file) — an `impl`
 block for a type defined in a different file, or a same-named type
 appearing twice in one file (two `mod` blocks), produces no heritage
-edge rather than a guess.
+edge rather than a guess. When a Rust trait/type name collides across
+two same-named crates in the workspace (e.g. a real crate plus a
+same-named `test_fixture`/`vendor`-shaped directory used to test
+tooling), dekko resolves the collision only when exactly one crate's
+own path avoids that synthetic-looking marker — a narrow,
+convention-based tiebreak, not a guess between two equally plausible
+real crates, which still resolves ambiguous. A `note: N heritage
+edge(s) repo-wide resolved by preferring a non-test-fixture/vendor
+crate root...` on `supertypes`/`subtypes` output (repo-wide, not
+scoped to that one query) discloses when this tiebreak fired anywhere
+in the map, so a caller can double-check results against the real
+source if the repo genuinely has two workspace crates sharing a name.
 
 `workset --symbol NAME --type-impact` widens the touched set beyond
 the target symbol's own direct callers: when the target is a
@@ -426,6 +438,46 @@ becomes a suspect either — this closes the loop only for names that
 also collide 2+ ways somewhere else in the repo. `--suspect` adds a
 `"suspects"` JSON key / text section without changing the existing
 unused-list output at all when omitted.
+
+**Dispatch-candidate caveat (always on) and `--dispatch` (off by
+default).** The mirror-image case of `--suspect`: a symbol *is*
+reported unused, but its own id is one of the unresolved candidates of
+some ambiguous call site elsewhere in the repo (`MapIndex.ambiguous_in`
+keyed by candidate id, the same table `--suspect`/`dekko ambiguous`
+already read). This is exactly the shape an OOP hierarchy produces
+when an abstract base calls its own virtual method (`this.method()`/
+`self.method()`) and 2+ concrete subclasses override it: the base
+never defines the method itself, every override is a same-named
+candidate, none can be picked over the others, and the resolver can
+never attribute the base's call to any single override — each
+override then shows up in `unused` with zero direct fan-in, even
+though every one of them is genuinely called through the base class.
+Unlike `--suspect`'s bare-name collision check, this is a
+same-symbol-id match, not a same-name match, so it's meaningfully more
+precise (though not perfectly so — a symbol's id can land in
+`ambiguous_in` for an unrelated collision that has nothing to do with
+polymorphic dispatch; the recommended check is still correct
+regardless of the exact reason). Because the check is cheap (one
+`dict.get()` per already-computed result row, no extra resolver pass),
+an advisory count is always printed the moment any exist — no flag
+needed — mirroring the C/C++ ABI caveat's "silent unless relevant"
+behavior:
+
+```
+note: 2 of these are unresolved-ambiguous-call candidates elsewhere in
+the repo -- may be reached via this.method()/self.method()
+polymorphic dispatch the resolver can't attribute. Run `dekko sanity
+--unused <name>` before deleting any of them (see --dispatch for
+which ones).
+```
+
+`--dispatch` additionally lists which flagged symbols these are, one
+row per candidate with the exact `dekko sanity --unused <qualname>`
+command to run before deleting it — `"dispatch_candidates"` JSON key /
+text section, independent of and composable with `--suspect`. As with
+`--suspect`, this is a lead, not a verdict: cross-check with `dekko
+sanity --unused` before deleting any flagged symbol this catches,
+especially on inheritance-heavy OOP codebases.
 
 ## Interpreting `dekko ambiguous`
 

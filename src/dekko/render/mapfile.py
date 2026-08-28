@@ -42,7 +42,7 @@ try:
 except ImportError:  # pragma: no cover - exercised in stdlib-only envs
     orjson = None  # type: ignore[assignment]
 
-MAP_DOC_VERSION = 10
+MAP_DOC_VERSION = 11
 _MAP_DIR = ".dekko"
 
 
@@ -658,6 +658,13 @@ class MapIndex:
             caller-indexed table is what ``supertypes`` rendering
             actually requires; see the design doc's "Implementation
             notes" for the rationale.
+        heritage_synthetic_tiebreak_count: Repo-wide count of resolved
+            heritage edges that rest on the round-24 heritage
+            crate-decoy tiebreak (``.features/plans/round24/
+            03-heritage-crate-decoy-tiebreak.md``) rather than an
+            unambiguous structural match — see
+            ``model.CallGraph.heritage_synthetic_tiebreak_count``.
+            ``0`` for maps written before doc version 11.
         module_deps_out: File path → sorted paths it imports (empty
             for maps written before doc version 7) — see
             ``resolver.resolve_imports``/``model.ModuleGraph``. Keyed
@@ -762,6 +769,7 @@ class MapIndex:
     heritage_external_out: dict[str, list[ExternalCall]] = field(
         default_factory=dict
     )
+    heritage_synthetic_tiebreak_count: int = 0
     module_deps_out: dict[str, list[str]] = field(default_factory=dict)
     module_deps_in: dict[str, list[str]] = field(default_factory=dict)
     module_edge_names: dict[tuple[str, str], list[str]] = field(
@@ -964,6 +972,11 @@ def _filter_heritage(
     for subtype, exts in src.heritage_external_out.items():
         if _prod_id(subtype, by_id):
             out.heritage_external_out[subtype] = exts
+    # Repo-wide scalar, not per-symbol -- carried over unfiltered,
+    # same as every other whole-repo count this view doesn't narrow.
+    out.heritage_synthetic_tiebreak_count = (
+        src.heritage_synthetic_tiebreak_count
+    )
 
 
 def _filter_module_graph(src: "MapIndex", out: "MapIndex") -> None:
@@ -1388,6 +1401,9 @@ def _load_heritage(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
             lines=d.get("lines", []),
         )
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
+    index.heritage_synthetic_tiebreak_count = doc.get(
+        "heritage_synthetic_tiebreak_count", 0
+    )
 
 
 def _load_module_graph(
@@ -1587,6 +1603,9 @@ def index_from_maps(
     )
     for ext in graph.heritage_external:
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
+    index.heritage_synthetic_tiebreak_count = (
+        graph.heritage_synthetic_tiebreak_count
+    )
     _index_module_graph(index, graph)
     _index_throws_catches(index, graph)
     _index_env_reads(index, graph)

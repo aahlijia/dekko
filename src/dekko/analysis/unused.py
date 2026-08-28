@@ -27,6 +27,17 @@ else in the repo — see ``find_suspects`` and round-23 design doc
 does not catch every misattribution (a name colliding with exactly
 one non-repo builtin never appears in ``ambiguous`` either), only the
 subset that also collides 2+ ways somewhere else in the repo.
+
+A mirror-image caveat is always on (no flag needed): a symbol *is*
+reported unused, but its own id is one of the unresolved candidates
+of some ambiguous call site elsewhere in the repo -- the shape a
+`this.method()`/`self.method()` polymorphic-dispatch call through an
+abstract base produces when 2+ concrete overrides exist and the
+resolver can't attribute the base's call to any single one of them.
+See ``find_dispatch_candidates`` and round-24 design doc
+``.features/plans/round24/04-unused-dispatch-shaped-candidate-flag.md``.
+``--dispatch`` (opt-in) additionally lists which flagged symbols these
+are.
 """
 
 import fnmatch
@@ -389,6 +400,43 @@ def find_suspects(
     return sorted(found, key=lambda s: (s.path, s.start_line))
 
 
+def find_dispatch_candidates(
+    index: MapIndex,
+    root_globs: tuple[str, ...],
+    kinds: str = "callables",
+) -> list[Symbol]:
+    """Symbols `find_unused` flagged whose own id is an unresolved
+    ambiguous-call candidate elsewhere in the repo.
+
+    A symbol is a dispatch candidate when: it would be in-scope for
+    `find_unused`'s kind filter, it WAS reported unused (unlike
+    `find_suspects`, which only checks excluded symbols), and its own
+    id appears as a candidate in `index.ambiguous_in` -- i.e. some
+    call site elsewhere in the repo named this symbol's bare name,
+    matched 2+ same-named repo-defined candidates including this one,
+    and could not be resolved to any single target. This is exactly
+    the shape a `this.method()`/`self.method()` polymorphic-dispatch
+    call through an abstract base produces when the base class itself
+    never defines the method: every concrete override is a same-named
+    candidate, none can be picked over the others, and the base
+    class's call to it never becomes a resolved edge for any of them.
+
+    Args:
+        index: Loaded map index.
+        root_globs: Same set `find_unused` was called with.
+        kinds: Same `--kinds` scoping `find_unused` uses.
+
+    Returns:
+        Dispatch-candidate symbols sorted by path then line -- a
+        subset of `find_unused`'s own result, never a disjoint set.
+    """
+    found = find_unused(index, root_globs, kinds)
+    return sorted(
+        (s for s in found if index.ambiguous_in.get(s.id)),
+        key=lambda s: (s.path, s.start_line),
+    )
+
+
 def _sym_json(sym: Symbol) -> dict:
     """Structured rendering of one unused symbol."""
     return {
@@ -445,6 +493,77 @@ def _print_suspects_text(suspects: list[Symbol]) -> None:
         print(_suspect_row_text(sym))
 
 
+# Independent, flat row cap for the `--dispatch` section -- same
+# rationale as `_SUSPECT_LIMIT`: kept out of the primary list's
+# `--limit`/`--budget` so this section never silently steals budget
+# from the main unused list.
+_DISPATCH_LIMIT = 20
+
+
+def _dispatch_json(sym: Symbol) -> dict:
+    """Structured rendering of one dispatch candidate.
+
+    Unused fields plus the check command to run before trusting the
+    "unused" verdict for this symbol.
+    """
+    doc = _sym_json(sym)
+    doc["check_command"] = f"dekko sanity --unused {sym.qualname}"
+    return doc
+
+
+def _dispatch_row_text(sym: Symbol) -> str:
+    """One dispatch candidate's listing row, text form."""
+    return (
+        f"  {sym.path}:{sym.start_line}  {signature(sym)}  [{sym.kind}]"
+        f"  -- possible polymorphic-dispatch target "
+        f"(dekko sanity --unused {sym.qualname})"
+    )
+
+
+def _print_dispatch_text(dispatch_candidates: list[Symbol]) -> None:
+    """Print the ``--dispatch`` section after the main unused listing.
+
+    A separate, independent section from the main list and from
+    ``--suspect``'s own section — printed even when ``find_unused``
+    reported nothing, matching ``_print_suspects_text``'s shape.
+    """
+    print()
+    header = (
+        f"dispatch candidates: {len(dispatch_candidates)} of these "
+        "unused-flagged symbols are unresolved-ambiguous-call "
+        "candidates elsewhere in the repo -- may be reached via "
+        "this.method()/self.method() polymorphic dispatch the "
+        "resolver can't attribute. Run `dekko sanity --unused <name>` "
+        "on each before deleting."
+    )
+    print(header)
+    for sym in dispatch_candidates[:_DISPATCH_LIMIT]:
+        print(_dispatch_row_text(sym))
+
+
+def _dispatch_caveat(dispatch_candidates: list[Symbol]) -> str | None:
+    """Advisory caveat, or ``None``, gated on a nonzero dispatch count.
+
+    Always-on (no flag needed), mirroring ``_c_abi_caveat``'s
+    structure: since ``find_dispatch_candidates`` only needs one extra
+    ``dict.get()`` per already-computed ``found`` row, this doesn't
+    need ``--suspect``'s opt-in gating, which exists for that
+    feature's costlier per-name lookup across a large collision-name
+    set. See round-24 design doc
+    ``.features/plans/round24/04-unused-dispatch-shaped-candidate-flag.md``.
+    """
+    n = len(dispatch_candidates)
+    if n == 0:
+        return None
+    return (
+        f"note: {n} of these are unresolved-ambiguous-call candidates "
+        "elsewhere in the repo -- may be reached via this.method()/"
+        "self.method() polymorphic dispatch the resolver can't "
+        "attribute. Run `dekko sanity --unused <name>` before "
+        "deleting any of them (see --dispatch for which ones)."
+    )
+
+
 _C_ABI_CAVEAT = (
     'note: exported/extern "C" symbols may be consumed outside this '
     "repo's call graph — treat top hits on a public C API skeptically"
@@ -483,6 +602,80 @@ def _kind_totals(found: list[Symbol]) -> dict[str, int]:
     return {"callables": len(found) - types_n, "types": types_n}
 
 
+def _build_json_doc(
+    found: list[Symbol],
+    suspects: list[Symbol],
+    dispatch_candidates: list[Symbol],
+    c_abi_caveat: str | None,
+    dispatch_caveat: str | None,
+    suspect: bool,
+    dispatch: bool,
+    budget: int | None,
+    limit: int,
+) -> dict:
+    """Build ``run``'s ``--json`` document, factored out to keep
+    ``run`` itself under the module's cyclomatic-complexity cap.
+    """
+    entries = [_sym_json(s) for s in found]
+    serialized = [json.dumps(e) for e in entries]
+    kept_ser, meter = fit_to_budget(serialized, budget, limit)
+    doc = {
+        "results": entries[: len(kept_ser)],
+        "meta": meter.as_dict(),
+        "kind_totals": _kind_totals(found),
+        "caveats": [c_abi_caveat] if c_abi_caveat else [],
+        "dispatch_caveat": dispatch_caveat,
+    }
+    if suspect:
+        doc["suspects"] = [_suspect_json(s) for s in suspects[:_SUSPECT_LIMIT]]
+    if dispatch:
+        doc["dispatch_candidates"] = [
+            _dispatch_json(s) for s in dispatch_candidates[:_DISPATCH_LIMIT]
+        ]
+    return doc
+
+
+def _print_text(
+    found: list[Symbol],
+    kinds: str,
+    budget: int | None,
+    limit: int,
+    c_abi_caveat: str | None,
+    dispatch_caveat: str | None,
+) -> None:
+    """Print ``run``'s text-mode listing, footer, and caveats.
+
+    Factored out of ``run`` to keep it under the module's cyclomatic-
+    complexity cap; prints nothing beyond the "no unused symbols" line
+    when ``found`` is empty, matching ``run``'s prior inline behavior.
+    """
+    if not found:
+        print("dekko: no unused symbols")
+        return
+
+    if kinds == "all":
+        totals = _kind_totals(found)
+        header = (
+            f"dekko: {len(found)} unused symbols "
+            f"({totals['callables']} callables, {totals['types']} "
+            "types)"
+        )
+    else:
+        header = f"dekko: {len(found)} unused symbols"
+    rows = [
+        f"  {s.path}:{s.start_line}  {signature(s)}  [{s.kind}]" for s in found
+    ]
+    kept, meter = fit_to_budget(rows, budget, limit, prefix=header)
+    print(header)
+    for row in kept:
+        print(row)
+    print(meter.footer())
+    if c_abi_caveat:
+        print(c_abi_caveat)
+    if dispatch_caveat:
+        print(dispatch_caveat)
+
+
 def run(
     index: MapIndex,
     root_globs: tuple[str, ...],
@@ -491,6 +684,7 @@ def run(
     budget: int | None = None,
     kinds: str = "callables",
     suspect: bool = False,
+    dispatch: bool = False,
 ) -> int:
     """Report unused symbols as text or JSON.
 
@@ -506,6 +700,10 @@ def run(
             its result as a ``"suspects"`` section (text) or key
             (JSON). Off by default — costs nothing extra when unset
             and never changes the existing output shape.
+        dispatch: When ``True``, also run ``find_dispatch_candidates``
+            and append its result as a ``"dispatch_candidates"``
+            section (text) or key (JSON). Off by default; the
+            always-on caveat below is unaffected by this flag.
 
     Note:
         When ``found`` contains at least one C or C++ symbol, an
@@ -514,57 +712,43 @@ def run(
         call graph cannot see cross-binary/ABI consumers of exported
         C symbols. See ``_c_abi_caveat``.
 
+        When one or more flagged symbols are dispatch candidates (see
+        ``find_dispatch_candidates``), an always-on advisory caveat is
+        printed (text) or added to ``doc["dispatch_caveat"]`` (JSON,
+        ``None`` otherwise) regardless of ``dispatch``. See
+        ``_dispatch_caveat``.
+
     Returns:
         ``0`` when none are found, ``1`` when some are. Reflects only
-        ``find_unused``'s result — the suspects section/key never
-        changes the exit code.
+        ``find_unused``'s result — the suspects/dispatch section/key
+        never changes the exit code.
     """
     found = find_unused(index, root_globs, kinds)
     suspects = find_suspects(index, root_globs, kinds) if suspect else []
+    dispatch_candidates = find_dispatch_candidates(index, root_globs, kinds)
     c_abi_caveat = _c_abi_caveat(found)
+    dispatch_caveat = _dispatch_caveat(dispatch_candidates)
 
     if as_json:
-        entries = [_sym_json(s) for s in found]
-        serialized = [json.dumps(e) for e in entries]
-        kept_ser, meter = fit_to_budget(serialized, budget, limit)
-        doc = {
-            "results": entries[: len(kept_ser)],
-            "meta": meter.as_dict(),
-            "kind_totals": _kind_totals(found),
-            "caveats": [c_abi_caveat] if c_abi_caveat else [],
-        }
-        if suspect:
-            doc["suspects"] = [
-                _suspect_json(s) for s in suspects[:_SUSPECT_LIMIT]
-            ]
+        doc = _build_json_doc(
+            found,
+            suspects,
+            dispatch_candidates,
+            c_abi_caveat,
+            dispatch_caveat,
+            suspect,
+            dispatch,
+            budget,
+            limit,
+        )
         print(json.dumps(doc, indent=2))
         return EXIT_FOUND if found else EXIT_NONE
 
-    if not found:
-        print("dekko: no unused symbols")
-    else:
-        if kinds == "all":
-            totals = _kind_totals(found)
-            header = (
-                f"dekko: {len(found)} unused symbols "
-                f"({totals['callables']} callables, {totals['types']} "
-                "types)"
-            )
-        else:
-            header = f"dekko: {len(found)} unused symbols"
-        rows = [
-            f"  {s.path}:{s.start_line}  {signature(s)}  [{s.kind}]"
-            for s in found
-        ]
-        kept, meter = fit_to_budget(rows, budget, limit, prefix=header)
-        print(header)
-        for row in kept:
-            print(row)
-        print(meter.footer())
-        if c_abi_caveat:
-            print(c_abi_caveat)
+    _print_text(found, kinds, budget, limit, c_abi_caveat, dispatch_caveat)
 
     if suspect:
         _print_suspects_text(suspects)
+    if dispatch:
+        _print_dispatch_text(dispatch_candidates)
 
     return EXIT_FOUND if found else EXIT_NONE

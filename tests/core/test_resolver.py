@@ -3012,6 +3012,125 @@ def test_rust_crate_roots_index_all_deduplicates_same_directory() -> None:
     assert roots["app"] == ["crates/app/src"]
 
 
+def test_rust_crate_dir_finds_nearest_src_ancestor() -> None:
+    # Round 24 (``.features/plans/round24/
+    # 03-heritage-crate-decoy-tiebreak.md``): a file directly inside
+    # ``src/`` finds that ``src/``'s own parent as the crate dir.
+    assert (
+        resolver_mod._rust_crate_dir("crates/gpui/src/element.rs")
+        == "crates/gpui"
+    )
+    # A file nested several submodules deep inside ``src/`` still finds
+    # the *nearest* enclosing ``src/`` ancestor, not some outer one.
+    assert (
+        resolver_mod._rust_crate_dir("crates/gpui/src/elements/text.rs")
+        == "crates/gpui"
+    )
+    # The real zed shape: a decoy crate nested several directories deep.
+    assert (
+        resolver_mod._rust_crate_dir(
+            "tooling/lints/test_fixture/gpui/src/lib.rs"
+        )
+        == "tooling/lints/test_fixture/gpui"
+    )
+    # No ``src`` ancestor at all -- falls back to the file's own parent
+    # directory rather than raising.
+    assert resolver_mod._rust_crate_dir("a.rs") == ""
+    assert resolver_mod._rust_crate_dir("crates/app/lib.rs") == "crates/app"
+
+
+def test_looks_like_synthetic_crate_root() -> None:
+    # Round 24: a real crate under an ordinary workspace path is never
+    # flagged, regardless of how many ancestor segments it has.
+    assert not resolver_mod._looks_like_synthetic_crate_root("crates/gpui")
+    assert not resolver_mod._looks_like_synthetic_crate_root("gpui")
+    # An ancestor segment matching a known marker (anywhere above the
+    # crate's own leaf directory) is the tell.
+    assert resolver_mod._looks_like_synthetic_crate_root(
+        "tooling/lints/test_fixture/gpui"
+    )
+    assert resolver_mod._looks_like_synthetic_crate_root("vendor/gpui")
+    assert resolver_mod._looks_like_synthetic_crate_root("third_party/gpui")
+
+
+def test_looks_like_synthetic_crate_root_ignores_leaf_name() -> None:
+    # The core false-positive defense: a crate whose own *leaf*
+    # directory happens to be named like a marker (a real crate
+    # legitimately named "fixtures" or "mocks", not uncommon in the
+    # wild) must not be flagged just because of its own name -- only
+    # ancestor segments above it count.
+    assert not resolver_mod._looks_like_synthetic_crate_root("crates/fixtures")
+    assert not resolver_mod._looks_like_synthetic_crate_root("libs/mocks")
+    assert not resolver_mod._looks_like_synthetic_crate_root("vendor")
+
+
+def test_prefer_non_synthetic_crate_match_resolves_sole_survivor() -> None:
+    real = _fn("crates/gpui/src/element.rs", "Render", "Render")
+    decoy = _fn(
+        "tooling/lints/test_fixture/gpui/src/lib.rs", "Render", "Render"
+    )
+    hits: list[int] = [0]
+    result = resolver_mod._prefer_non_synthetic_crate_match(
+        [real, decoy], "crates/editor/src/editor.rs", hits
+    )
+    assert result is real
+    assert hits == [1]
+
+
+def test_prefer_non_synthetic_crate_match_stays_ambiguous() -> None:
+    # Both or neither candidate synthetic -> no unambiguous signal,
+    # must fall through to ``None`` (the caller's existing "ambiguous"
+    # behavior), not guess.
+    a = _fn("crates/gpui/src/lib.rs", "Render", "Render")
+    b = _fn("workspace2/gpui/src/lib.rs", "Render", "Render")
+    assert (
+        resolver_mod._prefer_non_synthetic_crate_match(
+            [a, b], "crates/panel/src/panel.rs"
+        )
+        is None
+    )
+    c = _fn("tooling/lints/test_fixture/gpui/src/lib.rs", "Render", "Render")
+    d = _fn("vendor/gpui/src/lib.rs", "Render", "Render")
+    assert (
+        resolver_mod._prefer_non_synthetic_crate_match(
+            [c, d], "crates/panel/src/panel.rs"
+        )
+        is None
+    )
+
+
+def test_prefer_non_synthetic_crate_match_resolves_3_candidates() -> None:
+    # Not hardcoded to the 2-candidate case -- exactly one non-synthetic
+    # survivor among 3+ still resolves.
+    real = _fn("crates/gpui/src/lib.rs", "Render", "Render")
+    decoy1 = _fn("vendor/gpui/src/lib.rs", "Render", "Render")
+    decoy2 = _fn("mocks/gpui/src/lib.rs", "Render", "Render")
+    result = resolver_mod._prefer_non_synthetic_crate_match(
+        [real, decoy1, decoy2], "crates/panel/src/panel.rs"
+    )
+    assert result is real
+
+
+def test_prefer_non_synthetic_crate_match_prefers_caller_crate() -> None:
+    # Round 24's guard against the tiebreak overriding a legitimate
+    # self-reference: when the caller's own file lives inside one of
+    # the matched candidates' crate roots, that candidate wins outright
+    # -- even though its own root looks synthetic -- and this must not
+    # count toward ``tiebreak_hits`` (a structural fact, not a guess).
+    real = _fn("crates/gpui/src/lib.rs", "Render", "Render")
+    decoy = _fn(
+        "tooling/lints/test_fixture/gpui/src/lib.rs", "Render", "Render"
+    )
+    hits: list[int] = [0]
+    result = resolver_mod._prefer_non_synthetic_crate_match(
+        [real, decoy],
+        "tooling/lints/test_fixture/gpui/src/internal.rs",
+        hits,
+    )
+    assert result is decoy
+    assert hits == [0]
+
+
 def test_import_match_uses_receiver_as_rust_crate_hint_fallback() -> None:
     """Round 23 Fix A (``.features/plans/round23/
     09-subtypes-ambiguous-resolution-rate.md``): a fully-qualified

@@ -2679,6 +2679,7 @@ def _print_heritage_json(
     coverage: str | None,
     ambig_in: int,
     ambig_out: int,
+    tiebreak_count: int,
 ) -> None:
     """JSON rendering for ``_run_heritage`` (supertypes/subtypes)."""
     entries = [_heritage_entry(index, s, rel, depth) for s, rel, depth in hits]
@@ -2710,6 +2711,8 @@ def _print_heritage_json(
         doc["ambiguous_in"] = ambig_in
     if ambig_out:
         doc["ambiguous_out"] = ambig_out
+    if tiebreak_count:
+        doc["heritage_synthetic_tiebreak_count"] = tiebreak_count
     print(json.dumps(doc, indent=2))
 
 
@@ -2745,6 +2748,20 @@ def _run_heritage(
     how ``_run_relation`` already scopes ``ambig_in``/``ambig_out`` to
     the target alone rather than every hop of a (non-existent, for
     calls) multi-hop traversal.
+
+    Unlike ``ambig_in``/``ambig_out``, the round-24 heritage
+    crate-decoy tiebreak note (``index.
+    heritage_synthetic_tiebreak_count``) is deliberately *not* scoped
+    to ``sym`` — it is a repo-wide count of how many heritage edges,
+    anywhere, rest on ``resolver._prefer_non_synthetic_crate_match``'s
+    convention-based guess rather than a structural match (see
+    ``.features/plans/round24/03-heritage-crate-decoy-tiebreak.md``).
+    Per-edge attribution would require threading a flag through every
+    resolved ``HeritageEdge``, a materially larger change than this
+    disclosure warrants; a nonzero repo-wide count is still actionable
+    signal ("this repo has at least one same-named-crate collision,
+    verify low-confidence-looking results") even without pinpointing
+    which specific edges in *this* query's own results it affected.
     """
     direction = _heritage_direction(action)
     hits = (
@@ -2767,6 +2784,7 @@ def _run_heritage(
         if action == "subtypes"
         else 0
     )
+    tiebreak_count = index.heritage_synthetic_tiebreak_count
     coverage = _coverage_note(index)
     if as_json:
         _print_heritage_json(
@@ -2782,6 +2800,7 @@ def _run_heritage(
             coverage,
             ambig_in,
             ambig_out,
+            tiebreak_count,
         )
         return EXIT_OK, None
     lines: list[str] = []
@@ -2802,6 +2821,14 @@ def _run_heritage(
         print(
             f"  note: {ambig_in} additional subtype(s) named this "
             "type ambiguously — not counted here",
+            file=sys.stderr,
+        )
+    if tiebreak_count:
+        print(
+            f"  note: {tiebreak_count} heritage edge(s) repo-wide "
+            "resolved by preferring a non-test-fixture/vendor crate "
+            "root over a same-named one — verify if this repo's "
+            "workspace intentionally has two crates sharing a name",
             file=sys.stderr,
         )
     if not lines:

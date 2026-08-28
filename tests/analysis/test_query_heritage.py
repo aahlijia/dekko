@@ -291,6 +291,55 @@ def test_external_supertype_shown_as_labeled_row(
     assert "(external) pydantic.BaseModel" in out
 
 
+def test_heritage_synthetic_tiebreak_disclosed_as_note(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 24 (``.features/plans/round24/
+    # 03-heritage-crate-decoy-tiebreak.md``): a nonzero repo-wide
+    # tiebreak count must surface as an advisory note on both
+    # ``supertypes`` and ``subtypes`` text output, not just get
+    # silently dropped.
+    index = _ambiguous_external_index()
+    index.heritage_synthetic_tiebreak_count = 2
+    code = query.run(index, "supertypes", "Foo", as_json=False, limit=50)
+    assert code == query.EXIT_OK
+    err = capsys.readouterr().err
+    assert "2 heritage edge(s)" in err
+    assert "non-test-fixture/vendor crate root" in err
+
+
+def test_heritage_synthetic_tiebreak_absent_when_0(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    index = _ambiguous_external_index()
+    assert index.heritage_synthetic_tiebreak_count == 0
+    code = query.run(index, "supertypes", "Foo", as_json=False, limit=50)
+    assert code == query.EXIT_OK
+    err = capsys.readouterr().err
+    assert "heritage edge(s)" not in err
+
+
+def test_heritage_synthetic_tiebreak_in_json_output(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    index = _ambiguous_external_index()
+    index.heritage_synthetic_tiebreak_count = 5
+    code = query.run(index, "supertypes", "Foo", as_json=True, limit=50)
+    assert code == query.EXIT_OK
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["heritage_synthetic_tiebreak_count"] == 5
+
+
+def test_heritage_synthetic_tiebreak_omitted_from_json_when_0(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    index = _ambiguous_external_index()
+    code = query.run(index, "supertypes", "Foo", as_json=True, limit=50)
+    assert code == query.EXIT_OK
+    doc = json.loads(capsys.readouterr().out)
+    assert "heritage_synthetic_tiebreak_count" not in doc
+
+
 # round-18 claude-code finding: a TS object-type alias (``type X =
 # {...}``) used with ``implements`` isn't extracted as a heritage-
 # eligible symbol, so the resolver's terminal fallback previously

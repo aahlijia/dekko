@@ -1122,6 +1122,18 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "'suspects' section (text) or key (JSON) without changing the "
         "existing unused-list output",
     )
+    p_unused.add_argument(
+        "--dispatch",
+        action="store_true",
+        help="also flag unused-flagged symbols whose own id is an "
+        "unresolved ambiguous-call candidate elsewhere in the repo -- a "
+        "lead that this symbol is reached via this.method()/self.method() "
+        "polymorphic dispatch the resolver can't attribute, not a verdict "
+        "that it's dead. Off by default; adds a 'dispatch_candidates' "
+        "section (text) or key (JSON) without changing the existing "
+        "unused-list output. An always-on advisory count is printed "
+        "regardless of this flag whenever such candidates exist",
+    )
     _add_read_options(p_unused)
     p_unused.set_defaults(func=run_unused)
 
@@ -1818,6 +1830,7 @@ def run_unused(args: argparse.Namespace) -> int:
         budget=args.budget,
         kinds=args.kinds,
         suspect=args.suspect,
+        dispatch=args.dispatch,
     )
 
 

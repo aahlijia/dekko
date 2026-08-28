@@ -1170,3 +1170,235 @@ def test_unused_caveat_absent_when_no_unused_symbols_found(
     out = capsys.readouterr().out
     assert "no unused symbols" in out
     assert "note:" not in out
+
+
+# --- find_dispatch_candidates: unit-level tests over hand-built
+# MapIndex fixtures (round-24 design doc
+# 04-unused-dispatch-shaped-candidate-flag.md) ------------------------
+
+
+def test_find_dispatch_candidates_flags_own_id_ambiguous_candidate() -> None:
+    # DiscordConnector.createCommand has no direct fan-in (genuinely
+    # unused by call-graph evidence) but its own id is one of the
+    # unresolved candidates for an ambiguous `createCommand` call
+    # elsewhere (the `this.createCommand()` shape through an abstract
+    # base with 2+ concrete overrides) -- a dispatch candidate.
+    discord = _sym(
+        "createCommand",
+        "discord.ts",
+        qualname="DiscordConnector.createCommand",
+        kind="method",
+        language="typescript",
+    )
+    idx = _index(
+        [discord],
+        ambiguous_in={
+            discord.id: [("base.ts::ConnectorBase.dispatch", "createCommand")]
+        },
+    )
+    candidates = unused.find_dispatch_candidates(idx, ())
+    assert [s.id for s in candidates] == [discord.id]
+
+
+def test_find_dispatch_candidates_excludes_symbol_with_no_ambiguous_evidence() -> (  # noqa: E501
+    None
+):
+    # Genuinely dead method: in `find_unused`'s result, but its id
+    # never appears in `ambiguous_in` at all -- not a dispatch
+    # candidate.
+    dead = _sym("dead_helper", "a.py")
+    idx = _index([dead])
+    assert unused.find_unused(idx, ()) == [dead]
+    assert unused.find_dispatch_candidates(idx, ()) == []
+
+
+def test_find_dispatch_candidates_excludes_used_symbol() -> None:
+    # A symbol with direct fan-in is excluded from `find_unused`
+    # entirely -- `find_dispatch_candidates` only ever narrows
+    # `find_unused`'s own output, so it must not appear here either,
+    # even though its id happens to also sit in `ambiguous_in`.
+    used = _sym(
+        "createCommand",
+        "discord.ts",
+        qualname="DiscordConnector.createCommand",
+        kind="method",
+    )
+    idx = _index(
+        [used],
+        calls_in={used.id: ["caller.py::caller"]},
+        ambiguous_in={
+            used.id: [("base.ts::ConnectorBase.dispatch", "createCommand")]
+        },
+    )
+    assert unused.find_unused(idx, ()) == []
+    assert unused.find_dispatch_candidates(idx, ()) == []
+
+
+def test_find_dispatch_candidates_excludes_root_even_with_ambiguous_entry() -> (  # noqa: E501
+    None
+):
+    # Excluded from `find_unused` via `_is_root` (exported) -- root
+    # exclusion is unrelated to dispatch-candidate evidence, so this
+    # must not appear even though its id is ambiguous-associated.
+    exported = _sym(
+        "createCommand",
+        "discord.ts",
+        qualname="DiscordConnector.createCommand",
+        kind="method",
+        exported=True,
+    )
+    idx = _index(
+        [exported],
+        ambiguous_in={
+            exported.id: [("base.ts::ConnectorBase.dispatch", "createCommand")]
+        },
+    )
+    assert unused.find_unused(idx, ()) == []
+    assert unused.find_dispatch_candidates(idx, ()) == []
+
+
+# --- _dispatch_caveat -------------------------------------------------
+
+
+def test_dispatch_caveat_none_for_empty_list() -> None:
+    assert unused._dispatch_caveat([]) is None
+
+
+def test_dispatch_caveat_present_with_expected_count() -> None:
+    sym = _sym("createCommand", "discord.ts")
+    caveat = unused._dispatch_caveat([sym])
+    assert caveat is not None
+    assert "1 of these are unresolved-ambiguous-call candidates" in caveat
+    assert "dekko sanity --unused <name>" in caveat
+    assert "--dispatch" in caveat
+
+
+# --- --dispatch: end-to-end fixtures through the real parse pipeline -
+#
+# Mirrors the cline `ConnectorBase`/`DiscordConnector`/`SlackConnector`
+# shape from round-24's report: an abstract base whose own method body
+# calls `this.createCommand()`, never itself defining `createCommand`,
+# overridden by 2 concrete subclasses. Neither override has any direct
+# fan-in (the resolver can't attribute the base's call to either), so
+# both are flagged unused *and* both ids are recorded as candidates of
+# the one ambiguous `createCommand` call site.
+DISPATCH_FIXTURE = {
+    "connectors.ts": (
+        "abstract class ConnectorBase {\n"
+        "    dispatch(): void {\n"
+        "        this.createCommand();\n"
+        "    }\n"
+        "}\n\n"
+        "class DiscordConnector extends ConnectorBase {\n"
+        "    createCommand(): void {\n"
+        '        console.log("discord");\n'
+        "    }\n"
+        "}\n\n"
+        "class SlackConnector extends ConnectorBase {\n"
+        "    createCommand(): void {\n"
+        '        console.log("slack");\n'
+        "    }\n"
+        "}\n\n"
+        "function main(): void {\n"
+        "    new DiscordConnector().dispatch();\n"
+        "    new SlackConnector().dispatch();\n"
+        "}\n\n"
+        "main();\n"
+    ),
+}
+
+
+def test_unused_dispatch_caveat_always_on_without_flag(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DISPATCH_FIXTURE)
+    code = cli.main(["unused", "--root", str(root), "--kinds", "all"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "note: 2 of these are unresolved-ambiguous-call candidates" in out
+    assert "dispatch candidates:" not in out  # --dispatch not passed
+
+
+def test_unused_dispatch_flag_adds_section(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DISPATCH_FIXTURE)
+    code = cli.main(
+        ["unused", "--root", str(root), "--kinds", "all", "--dispatch"]
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "dispatch candidates:" in out
+    section = out.split("dispatch candidates:")[1]
+    assert "DiscordConnector.createCommand" in section
+    assert "SlackConnector.createCommand" in section
+    assert "dekko sanity --unused DiscordConnector.createCommand" in section
+    assert "dekko sanity --unused SlackConnector.createCommand" in section
+
+
+def test_unused_dispatch_flag_no_change_to_main_list(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # --dispatch must not change the primary unused list's own output.
+    root = make_mapped_repo(DISPATCH_FIXTURE)
+    cli.main(["unused", "--root", str(root), "--kinds", "all"])
+    without = capsys.readouterr().out
+    cli.main(["unused", "--root", str(root), "--kinds", "all", "--dispatch"])
+    with_dispatch = capsys.readouterr().out
+    assert with_dispatch[: len(without)] == without
+
+
+def test_unused_dispatch_json_round_trip(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DISPATCH_FIXTURE)
+    code = cli.main(
+        [
+            "unused",
+            "--root",
+            str(root),
+            "--kinds",
+            "all",
+            "--dispatch",
+            "--json",
+        ]
+    )
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["dispatch_caveat"] is not None
+    assert len(doc["dispatch_candidates"]) == 2
+    entry = next(
+        c
+        for c in doc["dispatch_candidates"]
+        if c["id"] == "connectors.ts::DiscordConnector.createCommand"
+    )
+    assert (
+        entry["check_command"]
+        == "dekko sanity --unused DiscordConnector.createCommand"
+    )
+
+
+def test_unused_no_dispatch_json_omits_key_but_keeps_caveat(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DISPATCH_FIXTURE)
+    code = cli.main(
+        ["unused", "--root", str(root), "--kinds", "all", "--json"]
+    )
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert "dispatch_candidates" not in doc
+    assert doc["dispatch_caveat"] is not None
+
+
+def test_unused_dispatch_caveat_absent_for_unrelated_dead_code(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A repo with no ambiguous-call evidence at all stays silent -- the
+    # gate is on actual dispatch-candidate hits, not "this repo has an
+    # unused list".
+    root = make_mapped_repo(PY)
+    code = cli.main(["unused", "--root", str(root), "--json"])
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["dispatch_caveat"] is None

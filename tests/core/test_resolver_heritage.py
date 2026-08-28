@@ -771,7 +771,22 @@ def test_rust_crate_hint_matches_genuine_collision_stays_ambiguous(
     ``.features/plans/round23/
     09-subtypes-ambiguous-resolution-rate.md``'s "Implemented" note:
     honest ambiguity instead of a 50/50 chance of a silently wrong
-    resolution."""
+    resolution.
+
+    The second root deliberately lives under ``workspace2/`` rather
+    than the more tempting ``vendor/`` this fixture originally used --
+    round 24's heritage crate-decoy tiebreak (``.features/plans/
+    round24/03-heritage-crate-decoy-tiebreak.md``) added ``"vendor"``
+    to ``_SYNTHETIC_CRATE_DIR_MARKERS``, which would make this
+    fixture's own second root look synthetic and let the new tiebreak
+    resolve it -- exactly the false-positive shape this test exists to
+    rule out. ``workspace2`` keeps both roots equally
+    unmarked/legitimate-looking, preserving the "genuinely irreducible
+    collision" intent this test is actually about; see
+    ``test_rust_crate_hint_matches_prefers_non_synthetic_root_when_one_
+    candidate_is_a_decoy`` below for the new tiebreak's own coverage,
+    including the marker-bearing case this test intentionally avoids.
+    """
     from dekko.core import languages
     from dekko.core.extractor import extract_file
 
@@ -779,8 +794,8 @@ def test_rust_crate_hint_matches_genuine_collision_stays_ambiguous(
     (tmp_path / "crates" / "gpui" / "src" / "lib.rs").write_text(
         "pub trait Render {}\n"
     )
-    (tmp_path / "vendor" / "gpui" / "src").mkdir(parents=True)
-    (tmp_path / "vendor" / "gpui" / "src" / "lib.rs").write_text(
+    (tmp_path / "workspace2" / "gpui" / "src").mkdir(parents=True)
+    (tmp_path / "workspace2" / "gpui" / "src" / "lib.rs").write_text(
         "pub trait Render {}\n"
     )
     (tmp_path / "crates" / "panel" / "src").mkdir(parents=True)
@@ -791,13 +806,101 @@ def test_rust_crate_hint_matches_genuine_collision_stays_ambiguous(
     assert spec is not None
     rel_paths = [
         "crates/gpui/src/lib.rs",
-        "vendor/gpui/src/lib.rs",
+        "workspace2/gpui/src/lib.rs",
         "crates/panel/src/panel.rs",
     ]
     files = [extract_file(tmp_path, p, spec) for p in rel_paths]
     graph = resolve(files)
     assert graph.heritage_out == {}
     assert len(graph.heritage_ambiguous) == 1
+    assert graph.heritage_synthetic_tiebreak_count == 0
+
+
+def test_rust_crate_decoy_tiebreak_resolves_real_crate_over_fixture(
+    tmp_path: Path,
+) -> None:
+    """Round 24 (``.features/plans/round24/
+    03-heritage-crate-decoy-tiebreak.md``): the actual zed shape round
+    23's own "Implemented" note flagged as an unattempted follow-up --
+    unlike ``test_rust_impl_trait_resolves_despite_unrelated_fixture_
+    crate_present`` above (where the fixture crate doesn't declare the
+    trait being resolved at all, so ``crate_matched`` never exceeds
+    one), here *both* ``crates/gpui`` (real) and
+    ``tooling/lints/test_fixture/gpui`` (decoy) declare their own
+    ``Render`` trait, exactly like zed's real ``crates/gpui`` vs.
+    ``tooling/lints/test_fixture/gpui``. A clause outside the fixture
+    directory naming ``gpui::Render`` must resolve to the real crate's
+    ``Render``, not fall through to ``heritage_ambiguous`` -- and the
+    edge must be flagged via ``heritage_synthetic_tiebreak_count`` as
+    resting on this convention-based tiebreak rather than a structural
+    match.
+
+    A second clause, written *inside* the decoy crate's own directory,
+    self-referentially names ``gpui::Render`` too (legitimate Rust:
+    the crate's own external name is in scope even from inside
+    itself). This must resolve to the *decoy's own* ``Render`` --
+    the design doc's own test plan calls this out explicitly: "the
+    tiebreak must not blindly prefer 'not synthetic' when the caller
+    itself lives inside the synthetic crate's own tree." This
+    self-crate resolution is a structural fact, not a guess, so it
+    must not itself increment ``heritage_synthetic_tiebreak_count``.
+    """
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "crates" / "gpui" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "gpui" / "src" / "lib.rs").write_text(
+        "pub trait Render {}\n"
+    )
+    (tmp_path / "tooling" / "lints" / "test_fixture" / "gpui" / "src").mkdir(
+        parents=True
+    )
+    (
+        tmp_path
+        / "tooling"
+        / "lints"
+        / "test_fixture"
+        / "gpui"
+        / "src"
+        / "lib.rs"
+    ).write_text("pub trait Render {}\n")
+    (
+        tmp_path
+        / "tooling"
+        / "lints"
+        / "test_fixture"
+        / "gpui"
+        / "src"
+        / "internal.rs"
+    ).write_text(
+        # Self-referential use of the decoy crate's own name, from
+        # inside the decoy crate's own directory tree.
+        "struct Internal;\n\nimpl gpui::Render for Internal {}\n"
+    )
+    (tmp_path / "crates" / "editor" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "editor" / "src" / "editor.rs").write_text(
+        # No ``use gpui::Render;`` anywhere -- fully crate-qualified,
+        # outside the decoy crate's own tree.
+        "struct Editor;\n\nimpl gpui::Render for Editor {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    rel_paths = [
+        "crates/gpui/src/lib.rs",
+        "tooling/lints/test_fixture/gpui/src/lib.rs",
+        "tooling/lints/test_fixture/gpui/src/internal.rs",
+        "crates/editor/src/editor.rs",
+    ]
+    files = [extract_file(tmp_path, p, spec) for p in rel_paths]
+    graph = resolve(files)
+    assert graph.heritage_out["crates/editor/src/editor.rs::Editor"] == [
+        "crates/gpui/src/lib.rs::Render"
+    ]
+    assert graph.heritage_out[
+        "tooling/lints/test_fixture/gpui/src/internal.rs::Internal"
+    ] == ["tooling/lints/test_fixture/gpui/src/lib.rs::Render"]
+    assert graph.heritage_ambiguous == []
+    assert graph.heritage_synthetic_tiebreak_count == 1
 
 
 def test_cpp_multiple_inheritance_resolves(tmp_path: Path) -> None:

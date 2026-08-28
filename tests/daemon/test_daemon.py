@@ -876,6 +876,235 @@ def test_try_daemon_uses_scaled_client_timeout(
     assert seen_timeouts == [sentinel]
 
 
+# ---------------------------------------------------------------------
+# Round-24 §2 fix: rev-cache-miss-aware timeout for diff/affected/
+# workset, scaled by tracked-file count instead of map.json size.
+# ---------------------------------------------------------------------
+
+
+def test_scaled_client_timeout_for_revcache_miss_floors_when_untrackable(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unresolvable rev (``tracked_at_rev`` returns ``None``) -- the
+    floor, same failure-mode contract as ``_scaled_client_timeout``
+    with no ``map.json``."""
+    monkeypatch.setattr(daemon.diff_mod, "tracked_at_rev", lambda r, rev: None)
+    assert (
+        daemon._scaled_client_timeout_for_revcache_miss(short_root, "HEAD")
+        == daemon._CLIENT_TIMEOUT
+    )
+
+
+def test_scaled_client_timeout_for_revcache_miss_floors_for_few_files(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A small tracked-file count never drops the budget below the
+    floor."""
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: ["a.py", "b.py"]
+    )
+    assert (
+        daemon._scaled_client_timeout_for_revcache_miss(short_root, "HEAD")
+        == daemon._CLIENT_TIMEOUT
+    )
+
+
+def test_scaled_client_timeout_for_revcache_miss_scales_past_the_floor(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-24 §2 fix: a large tracked-file count widens the budget,
+    scaled by ``_TIMEOUT_SECONDS_PER_TRACKED_FILE`` rather than
+    ``map.json`` size -- the tensorflow repro this fix targets never
+    even reaches a ``map.json`` read on this path.
+
+    Uses a tiny ``_TIMEOUT_SECONDS_PER_TRACKED_FILE`` rather than a
+    genuinely large file list, matching
+    ``test_scaled_client_timeout_scales_past_the_floor_for_a_large_map``'s
+    own convention for its byte-size sibling.
+    """
+    monkeypatch.setattr(daemon, "_TIMEOUT_SECONDS_PER_TRACKED_FILE", 1.0)
+    candidates = [f"f{i}.py" for i in range(100)]
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
+    )
+    scaled = daemon._scaled_client_timeout_for_revcache_miss(
+        short_root, "HEAD"
+    )
+    assert scaled == pytest.approx(100.0)
+    assert scaled > daemon._CLIENT_TIMEOUT
+
+
+def test_scaled_client_timeout_for_revcache_miss_is_capped(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pathologically large tracked-file count is capped, not
+    unbounded -- same cap ``_scaled_client_timeout`` shares."""
+    monkeypatch.setattr(daemon, "_TIMEOUT_SECONDS_PER_TRACKED_FILE", 1.0)
+    candidates = [f"f{i}.py" for i in range(10_000)]
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
+    )
+    assert (
+        daemon._scaled_client_timeout_for_revcache_miss(short_root, "HEAD")
+        == daemon._SCALED_CLIENT_TIMEOUT_CAP
+    )
+
+
+def test_target_rev_for_workset_symbol_seed_is_none(
+    short_root: Path,
+) -> None:
+    """A ``workset --symbol`` seed never reaches ``old_snapshot`` -- no
+    rev exists to scale a timeout by."""
+    args = cli.build_subcommand_parser().parse_args(
+        ["workset", "--symbol", "foo", "--root", str(short_root)]
+    )
+    assert daemon._target_rev_for("workset", args) is None
+
+
+def test_target_rev_for_explicit_rev_wins(short_root: Path) -> None:
+    """An explicit positional ``REV`` is used as-is -- no provenance
+    sidecar read needed (and none exists here)."""
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "deadbeef", "--root", str(short_root)]
+    )
+    assert daemon._target_rev_for("affected", args) == "deadbeef"
+
+
+def test_target_rev_for_defaults_to_provenance_git_commit(
+    short_root: Path,
+) -> None:
+    """No ``REV`` given -- falls back to the map's own recorded
+    ``git_commit`` provenance, matching ``diff.run``'s default chain
+    (``rev or prov.get("git_commit") or "HEAD"``)."""
+    dekko_dir = short_root / ".dekko"
+    dekko_dir.mkdir()
+    (dekko_dir / "map.json").write_bytes(
+        _json.dumps({"provenance": {"git_commit": "c" * 40}}).encode()
+    )
+    args = cli.build_subcommand_parser().parse_args(
+        ["diff", "--root", str(short_root)]
+    )
+    assert daemon._target_rev_for("diff", args) == "c" * 40
+
+
+def test_target_rev_for_defaults_to_head_with_no_provenance(
+    short_root: Path,
+) -> None:
+    """Neither a ``REV`` nor a recorded ``git_commit`` -- falls back to
+    ``"HEAD"``, matching ``diff.run``'s own final default."""
+    args = cli.build_subcommand_parser().parse_args(
+        ["diff", "--root", str(short_root)]
+    )
+    assert daemon._target_rev_for("diff", args) == "HEAD"
+
+
+def test_try_daemon_uses_revcache_miss_timeout_for_a_genuine_miss(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``affected``/``diff``/``workset`` route through the tracked-
+    file-count-scaled timeout, not the ``map.json``-size-scaled one,
+    when the target rev has no rev-cache entry yet."""
+    root = daemon_thread_root
+    sentinel = 54321.0
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda r, rev: sentinel,
+    )
+    # A wrong value here would mean the test passed for the wrong
+    # reason (the miss-aware path never actually got picked).
+    monkeypatch.setattr(daemon, "_scaled_client_timeout", lambda r: 999999.0)
+
+    transport_cls = type(dt.default_transport_for(root))
+    original_connect = transport_cls.client_connect
+    seen_timeouts: list[float] = []
+
+    def _spy_connect(
+        self: dt.DaemonTransport, timeout: float
+    ) -> socket.socket:
+        seen_timeouts.append(timeout)
+        return original_connect(self, timeout)
+
+    monkeypatch.setattr(transport_cls, "client_connect", _spy_connect)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+    daemon.try_daemon(args)
+
+    assert seen_timeouts == [sentinel]
+
+
+def test_try_daemon_uses_ordinary_timeout_on_a_revcache_hit(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rev-cache *hit* is a fast disk read regardless of repo size --
+    ``affected``/``diff``/``workset`` keep using the ordinary
+    ``map.json``-size-scaled budget, unchanged, exactly as they did
+    before this fix."""
+    root = daemon_thread_root
+    sentinel = 13579.0
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: True)
+    monkeypatch.setattr(daemon, "_scaled_client_timeout", lambda r: sentinel)
+    # A wrong value here would mean the test passed for the wrong
+    # reason (the miss-aware path got picked despite the hit).
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda r, rev: 999999.0,
+    )
+
+    transport_cls = type(dt.default_transport_for(root))
+    original_connect = transport_cls.client_connect
+    seen_timeouts: list[float] = []
+
+    def _spy_connect(
+        self: dt.DaemonTransport, timeout: float
+    ) -> socket.socket:
+        seen_timeouts.append(timeout)
+        return original_connect(self, timeout)
+
+    monkeypatch.setattr(transport_cls, "client_connect", _spy_connect)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+    daemon.try_daemon(args)
+
+    assert seen_timeouts == [sentinel]
+
+
+def test_try_daemon_other_commands_never_use_revcache_miss_timeout(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression check: this fix must not touch behavior for every
+    daemon-routed command outside ``diff``/``affected``/``workset`` --
+    ``query``/``search``/``outline``/etc. keep using
+    ``_scaled_client_timeout(root)`` exactly as before, never the new
+    rev-cache-miss branch at all."""
+    root = daemon_thread_root
+    called = False
+
+    def _fail_if_called(r: Path, rev: str) -> float:
+        nonlocal called
+        called = True
+        return 1.0
+
+    monkeypatch.setattr(
+        daemon, "_scaled_client_timeout_for_revcache_miss", _fail_if_called
+    )
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["status", "--root", str(root), "--json"]
+    )
+    daemon.try_daemon(args)
+
+    assert called is False
+
+
 def test_status_true_positive_while_daemon_busy_on_slow_request(
     short_root: Path,
     monkeypatch: pytest.MonkeyPatch,

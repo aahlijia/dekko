@@ -178,6 +178,56 @@ def test_classify_miss_python_docstring_opening_line() -> None:
     assert cause == sanity.CAUSE_COMMENT_MENTION
 
 
+def test_classify_miss_header_comment_far_from_definition() -> None:
+    # Round 24 07-sanity-comment-mention-file-header-gap.md: a
+    # module-header comment naming the symbol, far outside
+    # near_own_definition's proximity window, must still classify as
+    # a comment mention via the new independent qualifying path.
+    cause = sanity.classify_miss(
+        "//      claudeConfigDir, buddyStateDir.",
+        "buddyStateDir",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=False,
+        looks_like_comment=True,
+        in_leading_header_comment=True,
+    )
+    assert cause == sanity.CAUSE_COMMENT_MENTION
+
+
+def test_classify_miss_header_flag_alone_not_enough() -> None:
+    # Comment-shape stays a hard requirement -- only the proximity
+    # side of the AND became an OR, not the comment-shape side.
+    cause = sanity.classify_miss(
+        "return buddyStateDir(x)",
+        "buddyStateDir",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=False,
+        looks_like_comment=False,
+        in_leading_header_comment=True,
+    )
+    assert cause != sanity.CAUSE_COMMENT_MENTION
+
+
+def test_classify_miss_near_definition_unchanged_without_header_flag() -> None:
+    # Existing adjacent-doc-comment path stays correct and unaffected
+    # when the new flag simply isn't set.
+    cause = sanity.classify_miss(
+        "// Helper is a small utility function.",
+        "Helper",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=True,
+        looks_like_comment=True,
+        in_leading_header_comment=False,
+    )
+    assert cause == sanity.CAUSE_COMMENT_MENTION
+
+
 # --- _looks_like_comment_line: pure, grammar-scoped ---------------------
 
 
@@ -442,6 +492,52 @@ def test_sanity_detects_comment_mention_miss(
     # merely reclassified, still excluded from every bucket.
     grep_only_lines = {row["line"] for row in doc["grep_only"]}
     assert 2 not in grep_only_lines
+
+
+def test_sanity_detects_header_comment_mention_far_from_definition(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Mirrors the real gap confirmed against claude-buddy's
+    # server/path.ts (round 24
+    # 07-sanity-comment-mention-file-header-gap.md): a module-header
+    # comment block naming several exports sits well outside
+    # _COMMENT_PROXIMITY_LINES of any one definition, so only the new
+    # in_leading_header_comment path -- not near_own_definition --
+    # can explain the miss.
+    root = make_mapped_repo(
+        {
+            "path.ts": (
+                "// Path utilities and helpers\n"
+                "//\n"
+                "// Two related concerns live here:\n"
+                "//   1. Path normalization (Windows compat).\n"
+                "//   2. Resolution of Claude Code config / state "
+                "paths --\n"
+                "//      claudeConfigDir, buddyStateDir.\n"
+                "//      These honor CLAUDE_CONFIG_DIR.\n"
+                "//\n"
+                "// The shell counterpart lives in scripts/paths.sh.\n"
+                "\n"
+                "import { join } from 'path';\n"
+                "\n"
+                "export function toUnixPath(p: string): string {\n"
+                "  return p;\n"
+                "}\n"
+                "\n"
+                "export function buddyStateDir(): string {\n"
+                "  return join('state');\n"
+                "}\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "buddyStateDir", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows_by_line = {row["line"]: row["cause"] for row in doc["grep_only"]}
+    # Line 6 is 11 lines from buddyStateDir's own definition (line
+    # 17) -- well past _COMMENT_PROXIMITY_LINES -- yet must still
+    # classify as a comment mention, not fall through to unexplained.
+    assert rows_by_line.get(6) == sanity.CAUSE_COMMENT_MENTION
 
 
 def test_sanity_wrapped_recursive_call_not_comment_mention(
@@ -1276,6 +1372,102 @@ def test_sanity_multiline_import_member_with_unrelated_import_above(
     doc = json.loads(capsys.readouterr().out)
     rows_by_line = {row["line"]: row["cause"] for row in doc["grep_only"]}
     assert rows_by_line[4] == sanity.CAUSE_IMPORT_STATEMENT
+
+
+# --- leading-header-comment mention (round 24 plan 07) -----------------
+
+
+def test_in_leading_header_comment_true_for_module_header_shape(
+    tmp_path: Path,
+) -> None:
+    # Mirrors claude-buddy's server/path.ts: an uninterrupted comment
+    # run from line 1 through the hit line, well before the file's
+    # first real code.
+    (tmp_path / "path.ts").write_text(
+        "// Path utilities and helpers\n"
+        "//\n"
+        "// Two related concerns live here:\n"
+        "//   1. Path normalization (Windows compat) -- toUnixPath().\n"
+        "//   2. Resolution of Claude Code config / state paths --\n"
+        "//      claudeConfigDir, buddyStateDir.\n"
+        "//      These honor CLAUDE_CONFIG_DIR.\n"
+        "//\n"
+        "// The shell counterpart lives in scripts/paths.sh.\n"
+        "\n"
+        "import { join } from 'path';\n"
+    )
+    hit = sanity.GrepHit(
+        path="path.ts",
+        line=6,
+        snippet="//      claudeConfigDir, buddyStateDir.",
+    )
+    assert sanity._in_leading_header_comment(tmp_path, hit)
+
+
+def test_in_leading_header_comment_false_past_scan_cap(
+    tmp_path: Path,
+) -> None:
+    # Even an uninterrupted comment run for its first
+    # _HEADER_SCAN_LINES + 1 lines is deliberately not read past the
+    # cap -- a hit this far into the file is never treated as part of
+    # a "module header" mention.
+    lines = ["// header line naming target\n"] * (
+        sanity._HEADER_SCAN_LINES + 1
+    )
+    (tmp_path / "big.ts").write_text("".join(lines))
+    hit = sanity.GrepHit(
+        path="big.ts",
+        line=sanity._HEADER_SCAN_LINES + 1,
+        snippet="// header line naming target",
+    )
+    assert not sanity._in_leading_header_comment(tmp_path, hit)
+
+
+def test_in_leading_header_comment_false_when_no_header_at_all(
+    tmp_path: Path,
+) -> None:
+    # Line 1 is real code -- this shape stays correctly gated by
+    # near_own_definition alone, unchanged.
+    (tmp_path / "code.ts").write_text(
+        "import { join } from 'path';\n"
+        "\n"
+        "// mentions target here, but not from line 1\n"
+        "export function other() {}\n"
+    )
+    hit = sanity.GrepHit(
+        path="code.ts",
+        line=3,
+        snippet="// mentions target here, but not from line 1",
+    )
+    assert not sanity._in_leading_header_comment(tmp_path, hit)
+
+
+def test_in_leading_header_comment_false_when_interrupted_by_code(
+    tmp_path: Path,
+) -> None:
+    # A header block interrupted by one blank-then-code line before
+    # the hit -- confirms the all-comment-or-blank requirement is
+    # enforced line-by-line, not just at the hit line.
+    (tmp_path / "mixed.ts").write_text(
+        "// header line 1\n"
+        "// header line 2\n"
+        "\n"
+        "const x = 1;\n"
+        "// target mentioned here, after real code broke the run\n"
+    )
+    hit = sanity.GrepHit(
+        path="mixed.ts",
+        line=5,
+        snippet="// target mentioned here, after real code broke the run",
+    )
+    assert not sanity._in_leading_header_comment(tmp_path, hit)
+
+
+def test_in_leading_header_comment_unreadable_file_is_false(
+    tmp_path: Path,
+) -> None:
+    hit = sanity.GrepHit(path="missing.ts", line=1, snippet="// x")
+    assert not sanity._in_leading_header_comment(tmp_path, hit)
 
 
 # --- other same-named symbols' own def lines (round 22 §10) -------------

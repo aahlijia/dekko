@@ -201,7 +201,8 @@ CAUSE_GENERIC_NAME = (
     "not exact"
 )
 CAUSE_COMMENT_MENTION = (
-    "comment mention near the symbol's own definition — not a call site"
+    "comment mention — not a call site (near the symbol's own "
+    "definition, or in its file's leading header comment)"
 )
 CAUSE_IMPORT_STATEMENT = (
     "import/require statement naming the symbol — not a call site"
@@ -497,6 +498,58 @@ def _looks_like_multiline_import_member(
     return False  # no opener at all within the window
 
 
+# Bounded scan depth for the leading-header-comment check — matches
+# _TYPE_REFERENCE_WINDOW_LINES's "generous but bounded" precedent. A
+# hit farther into the file than this can't be part of an
+# uninterrupted from-line-1 comment run in any file worth trusting the
+# heuristic on, so it's treated as "not a header mention" rather than
+# triggering an unbounded read.
+_HEADER_SCAN_LINES = 60
+
+
+def _in_leading_header_comment(root: Path, hit: "GrepHit") -> bool:
+    """Whether ``hit`` sits inside an uninterrupted comment/blank-line
+    run starting at line 1 of its own file -- the "module summary"
+    shape a doc-comment-proximity check alone can't catch (a header
+    block naming several of the file's exports can sit dozens of lines
+    above any one of their definitions; see
+    ``.features/plans/round24/
+    07-sanity-comment-mention-file-header-gap.md``).
+
+    Deliberately stricter than a bare ``looks_like_comment`` check on
+    the hit line alone: every line from 1 up to and including the hit
+    line must be blank or comment-shaped, not just the hit line
+    itself. This is what keeps the check safe without a proximity
+    bound -- a false positive would require an unbroken comment run
+    from the very top of the file, which the operator-continuation
+    false-positive shape ``_COMMENT_PROXIMITY_LINES``'s own comment
+    warns about (a wrapped ``* Helper(x-1)`` multiplication
+    continuation) cannot produce on its own, since that shape only
+    ever appears *inside* an already-open real comment block, itself
+    only reachable via the same all-comment-since-line-1 run.
+
+    Reads a small, bounded prefix of the hit's own file -- the same
+    "small file re-read, best-effort" pattern as
+    ``_looks_like_multiline_import_member`` and ``_receiver_mismatch``;
+    any read/decode failure or a hit past ``_HEADER_SCAN_LINES``
+    returns ``False`` (never a guess).
+    """
+    if hit.line > _HEADER_SCAN_LINES:
+        return False
+    try:
+        lines = (
+            (root / hit.path)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+        )
+    except OSError:
+        return False
+    for ln in lines[: hit.line]:
+        if ln.strip() and not _looks_like_comment_line(ln, hit.path):
+            return False
+    return True
+
+
 # How close a grep-only hit must be to the target's own definition
 # line to be considered "near" it for doc-comment classification.
 # Wide enough to cover a leading block/line comment stacked directly
@@ -655,6 +708,7 @@ def classify_miss(
     looks_like_comment: bool = False,
     looks_like_import_member: bool = False,
     likely_unrelated_external: bool = False,
+    in_leading_header_comment: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
@@ -674,8 +728,11 @@ def classify_miss(
     whether the line is a bare member of a multi-line destructured
     import block (round 22 claude-buddy.md §2.4 — the residual gap in
     the single-line check above), then whether the hit is a
-    doc-comment/docstring line sitting near the symbol's own
-    definition mentioning its bare name (not a call at all), then
+    comment/docstring line either sitting near the symbol's own
+    definition or inside its file's uninterrupted leading header
+    comment block (round 24 07-sanity-comment-mention-file-header-gap.md
+    — a module-header comment naming several exports can sit far from
+    any one of their definitions; not a call at all either way), then
     whether the file is in a language dekko can't parse at all, then
     whether the caller's own receiver-mismatch heuristic flagged this
     hit as likely an unrelated external-library method sharing the
@@ -710,6 +767,13 @@ def classify_miss(
         looks_like_import_member: Whether the hit line is a bare
             member of a multi-line destructured import block
             (``_looks_like_multiline_import_member``).
+        in_leading_header_comment: Whether the hit sits inside an
+            uninterrupted comment/blank-line run starting at line 1 of
+            its own file (``_in_leading_header_comment``) — the
+            module-header-comment shape ``near_own_definition`` alone
+            doesn't cover. Independent of, and OR'd with,
+            ``near_own_definition`` in the ``CAUSE_COMMENT_MENTION``
+            check below; never a guess made from inside this function.
         likely_unrelated_external: Whether the caller's own
             receiver-mismatch gating (single-repo-candidate method
             target, resolvable declaring type) held for this run *and*
@@ -728,7 +792,9 @@ def classify_miss(
         return CAUSE_IMPORT_STATEMENT
     if looks_like_import_member:
         return CAUSE_IMPORT_STATEMENT
-    if near_own_definition and looks_like_comment:
+    if looks_like_comment and (
+        near_own_definition or in_leading_header_comment
+    ):
         return CAUSE_COMMENT_MENTION
     if unsupported_language:
         return CAUSE_UNSUPPORTED_LANGUAGE
@@ -972,6 +1038,10 @@ def _classify_grep_hits(
             looks_like_comment=_looks_like_comment_line(h.snippet, h.path),
             looks_like_import_member=_looks_like_multiline_import_member(
                 root, h, bare_name
+            ),
+            in_leading_header_comment=(
+                _looks_like_comment_line(h.snippet, h.path)
+                and _in_leading_header_comment(root, h)
             ),
             likely_unrelated_external=(
                 declaring_type is not None

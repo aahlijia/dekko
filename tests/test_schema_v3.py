@@ -39,11 +39,12 @@ def _resolve(doc: dict, ref: int) -> str:
     return doc["ids"][ref]
 
 
-def test_doc_version_is_10(make_mapped_repo: RepoFactory) -> None:
-    # Bumped 9 -> 10 for type_aliases_by_path (round-19 claude-code
-    # same-file TS type-alias heritage-mislabeling fix).
+def test_doc_version_is_11(make_mapped_repo: RepoFactory) -> None:
+    # Bumped 10 -> 11 for heritage_synthetic_tiebreak_count (round 24
+    # heritage crate-decoy tiebreak disclosure, ``.features/plans/
+    # round24/03-heritage-crate-decoy-tiebreak.md``).
     doc = _map_doc(make_mapped_repo(SRC))
-    assert doc["version"] == 10
+    assert doc["version"] == 11
 
 
 def test_edges_carry_call_site_lines(make_mapped_repo: RepoFactory) -> None:

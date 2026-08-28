@@ -200,12 +200,57 @@ def test_round_trip_matches_index_from_maps(tmp_path: Path) -> None:
     assert loaded.module_deps_in == expected.module_deps_in
     assert loaded.module_edge_names == expected.module_edge_names
     assert loaded.module_external == expected.module_external
+    assert (
+        loaded.heritage_synthetic_tiebreak_count
+        == expected.heritage_synthetic_tiebreak_count
+    )
 
 
-def test_map_doc_version_is_10() -> None:
-    # Bumped 9 -> 10 for type_aliases_by_path (round-19 claude-code
-    # same-file TS type-alias heritage-mislabeling fix).
-    assert mapfile.MAP_DOC_VERSION == 10
+def test_heritage_synthetic_tiebreak_count_round_trips(
+    tmp_path: Path,
+) -> None:
+    # Round 24 (``.features/plans/round24/
+    # 03-heritage-crate-decoy-tiebreak.md``): a nonzero count must
+    # survive a real write-then-load round trip, not just default to 0
+    # by coincidence.
+    files, graph = _sample_graph()
+    graph.heritage_synthetic_tiebreak_count = 3
+    map_dir = tmp_path / ".dekko"
+    map_dir.mkdir()
+    (map_dir / "map.json").write_bytes(render_json(files, graph, "demo"))
+
+    doc = json.loads((map_dir / "map.json").read_bytes())
+    assert doc["heritage_synthetic_tiebreak_count"] == 3
+
+    loaded = mapfile.load_map(tmp_path)
+    assert loaded is not None
+    assert loaded.heritage_synthetic_tiebreak_count == 3
+
+
+def test_heritage_synthetic_tiebreak_count_defaults_to_0_pre_v11(
+    tmp_path: Path,
+) -> None:
+    # A document written before doc version 11 has no
+    # "heritage_synthetic_tiebreak_count" key at all -- load_map()
+    # must default to 0 rather than crashing.
+    files, graph = _sample_graph()
+    doc = json.loads(render_json(files, graph, "demo"))
+    doc["version"] = 10
+    del doc["heritage_synthetic_tiebreak_count"]
+    map_dir = tmp_path / ".dekko"
+    map_dir.mkdir()
+    (map_dir / "map.json").write_text(json.dumps(doc))
+
+    loaded = mapfile.load_map(tmp_path)
+    assert loaded is not None
+    assert loaded.heritage_synthetic_tiebreak_count == 0
+
+
+def test_map_doc_version_is_11() -> None:
+    # Bumped 10 -> 11 for heritage_synthetic_tiebreak_count (round 24
+    # heritage crate-decoy tiebreak disclosure, ``.features/plans/
+    # round24/03-heritage-crate-decoy-tiebreak.md``).
+    assert mapfile.MAP_DOC_VERSION == 11
 
 
 def test_backward_read_v5_document_without_heritage_sections(

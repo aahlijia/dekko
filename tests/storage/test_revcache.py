@@ -1,10 +1,37 @@
 """The disk-backed rev-cache: round-trip, eviction, isolation."""
 
+import subprocess
 from pathlib import Path
 
 from dekko.storage import revcache
 from dekko.analysis.diff import Snapshot
 from dekko.core.model import Import, Param, Symbol
+
+
+def _git(root: Path, *args: str) -> None:
+    """Run a git command in ``root``, raising on failure."""
+    subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _repo_with_one_commit(root: Path) -> None:
+    """A minimal committed git repo, just enough for ``resolve_sha``."""
+    (root / "a.py").write_text("x = 1\n")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(
+        root,
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-m",
+        "base",
+    )
 
 
 def _symbol(sym_id: str, name: str) -> Symbol:
@@ -89,3 +116,31 @@ def test_eviction_caps_entries_and_drops_oldest_accessed(
 
 def test_resolve_sha_unknown_rev_returns_none(tmp_path: Path) -> None:
     assert revcache.resolve_sha(tmp_path, "not-a-real-rev") is None
+
+
+# ---------------------------------------------------------------------
+# Round-24 §2 fix: has_entry() -- a resolvable-rev/on-disk-cache-file
+# composition, used by try_daemon() to pick a rev-cache-miss-aware
+# client timeout instead of guessing every request is a fast hit.
+# ---------------------------------------------------------------------
+
+
+def test_has_entry_true_for_resolvable_rev_with_cache_file(
+    tmp_path: Path,
+) -> None:
+    _repo_with_one_commit(tmp_path)
+    sha = revcache.resolve_sha(tmp_path, "HEAD")
+    assert sha is not None
+    revcache.save(tmp_path, sha, _snapshot("f"))
+    assert revcache.has_entry(tmp_path, "HEAD") is True
+
+
+def test_has_entry_false_for_resolvable_rev_with_no_cache_file(
+    tmp_path: Path,
+) -> None:
+    _repo_with_one_commit(tmp_path)
+    assert revcache.has_entry(tmp_path, "HEAD") is False
+
+
+def test_has_entry_false_for_unresolvable_rev(tmp_path: Path) -> None:
+    assert revcache.has_entry(tmp_path, "not-a-real-rev") is False

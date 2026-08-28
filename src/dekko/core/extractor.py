@@ -92,6 +92,8 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     calls = _collect_calls(spec, tree.root_node, rel, defs)
     if spec.name == "rust":
         calls.extend(_collect_rust_macro_calls(tree.root_node, rel, defs))
+    if spec.name in ("c", "cpp"):
+        calls.extend(_collect_cpp_ctor_arg_calls(tree.root_node, rel, defs))
     refs = _collect_refs(spec, tree.root_node, rel, defs)
     heritage = _collect_heritage(spec, tree.root_node, rel, defs)
     throws = _collect_throws(spec, tree.root_node, rel, defs)
@@ -1090,6 +1092,133 @@ def _scan_rust_token_tree(
                 found.append((child, _text(child), receiver))
         elif child.type == "token_tree":
             _scan_rust_token_tree(child, found)
+
+
+def _collect_cpp_ctor_arg_calls(
+    root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawCall]:
+    """Recover constructor calls dropped by C/C++'s "most vexing parse".
+
+    ``Type name(Ctor(), deleter);`` at statement position is
+    grammatically indistinguishable from a local function declaration
+    (``Ctor``'s trailing ``()`` reads as "a parameter named ``Ctor`` of
+    function-returning-T type with no arguments," legal if archaic C++
+    parameter syntax). Real compilers resolve this with full semantic
+    analysis; tree-sitter-c/tree-sitter-cpp have no type information
+    and structurally cannot resolve it — they commit to the
+    declaration parse every time. ``Ctor()`` becomes a
+    ``parameter_declaration`` wrapping an ``abstract_function_declarator``
+    rather than a ``call_expression``, so ``_collect_calls``'s
+    ``call_query`` has no node to match: the call is silently dropped,
+    not misattributed. This is a common idiom in RAII-heavy C++
+    (``std::unique_ptr<T, D> p(Ctor(), deleter);``), not a rare edge
+    case (round 24's tensorflow eval found 100+ dropped sites).
+
+    Scans block-scoped ``declaration`` nodes shaped like the ambiguity
+    and synthesizes the call each ``abstract_function_declarator``
+    parameter represents. Deliberately narrow, matching
+    ``_collect_rust_macro_calls``'s precedent for a structurally
+    unreachable call shape:
+
+    - Only ``declaration`` nodes whose direct parent is a
+      ``compound_statement`` (block/local scope) are considered. A
+      genuine forward-declared local function prototype is legal C++
+      but vanishingly rare next to this construction idiom, and real
+      top-level/header prototypes (whose parameters are always types,
+      never call-shaped) are excluded outright by this check.
+    - Only single-level recovery: a call-shaped argument nested inside
+      another call-shaped argument (``Foo bar(Baz(Qux()), other);``)
+      recovers ``Baz`` but not ``Qux``. Documented, narrower residual
+      gap rather than a silent one.
+
+    Args:
+        root: Parsed file's root node.
+        rel: Repo-relative POSIX path of the file.
+        defs: Definitions found in this file, used to attribute each
+            recovered call to its enclosing function.
+
+    Returns:
+        Recovered ``RawCall``s, one per call-shaped constructor
+        argument found.
+    """
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    calls: list[RawCall] = []
+    _find_cpp_ctor_arg_declarations(root, rel, spans, calls)
+    return calls
+
+
+def _find_cpp_ctor_arg_declarations(
+    node: Node,
+    rel: str,
+    spans: list[tuple[int, int, Symbol]],
+    calls: list[RawCall],
+) -> None:
+    """Recurse the tree for block-scoped vexing-parse declarations."""
+    if node.type == "declaration" and _is_block_scoped(node):
+        declarator = node.child_by_field_name("declarator")
+        if declarator is not None and declarator.type == "function_declarator":
+            _collect_cpp_ctor_arg_params(declarator, rel, spans, calls)
+
+    for child in node.children:
+        _find_cpp_ctor_arg_declarations(child, rel, spans, calls)
+
+
+def _is_block_scoped(node: Node) -> bool:
+    """Whether a node's direct parent is a ``compound_statement``."""
+    return node.parent is not None and node.parent.type == "compound_statement"
+
+
+def _collect_cpp_ctor_arg_params(
+    declarator: Node,
+    rel: str,
+    spans: list[tuple[int, int, Symbol]],
+    calls: list[RawCall],
+) -> None:
+    """Synthesize a ``RawCall`` for each call-shaped constructor arg."""
+    params = declarator.child_by_field_name("parameters")
+    if params is None:
+        return
+    for param in params.named_children:
+        callee = _cpp_ctor_arg_callee(param)
+        if callee is None:
+            continue
+        text, name, receiver = _callee_parts(callee)
+        if not name:
+            continue
+        caller = _enclosing(spans, callee.start_byte)
+        calls.append(
+            RawCall(
+                caller_id=caller.id if caller else None,
+                path=rel,
+                text=text,
+                name=name,
+                receiver=receiver,
+                line=callee.start_point[0] + 1,
+            )
+        )
+
+
+def _cpp_ctor_arg_callee(param: Node) -> Node | None:
+    """Callee node for a call-shaped ``parameter_declaration``, if any.
+
+    A vexing-parse constructor argument surfaces as a
+    ``parameter_declaration`` whose ``declarator`` field is an
+    ``abstract_function_declarator`` (the "type name with an empty/
+    call-shaped parameter list" shape) — its ``type`` field is the
+    misparsed callee name. A bare-value argument (no nested call, e.g.
+    the plain ``deleter`` in ``p(Ctor(), deleter)``) has no declarator
+    at all and is left alone; it isn't call-shaped and recovering it is
+    out of scope for this pass.
+    """
+    if param.type != "parameter_declaration":
+        return None
+    param_declarator = param.child_by_field_name("declarator")
+    if (
+        param_declarator is None
+        or param_declarator.type != "abstract_function_declarator"
+    ):
+        return None
+    return param.child_by_field_name("type")
 
 
 def _collect_refs(

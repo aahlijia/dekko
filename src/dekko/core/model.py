@@ -577,6 +577,19 @@ class CallGraph:
             straight from each file's ``FileMap.env_reads``, no
             resolver pass involved (the literal key text is already
             the fully-resolved fact).
+        heritage_synthetic_tiebreak_count: How many entries in
+            ``heritage`` were resolved via the round-24 heritage
+            crate-decoy tiebreak (``.features/plans/round24/
+            03-heritage-crate-decoy-tiebreak.md``,
+            ``resolver._prefer_non_synthetic_crate_match``) rather than
+            an unambiguous structural match — a convention-based guess
+            about which of two same-named Rust crates is "the real
+            one" when a crate-name hint collides across 2+ registered
+            crate roots and exactly one candidate's ancestor path
+            avoids a test-fixture/vendor marker. Surfaced so ``query
+            subtypes``/``supertypes`` can disclose this lower-certainty
+            resolution rather than blending it silently into every
+            other, structurally-resolved edge.
     """
 
     edges: list[Edge] = field(default_factory=list)
@@ -604,3 +617,4 @@ class CallGraph:
     throws_bare: list[tuple[str, str, int]] = field(default_factory=list)
     catches: list[CatchSite] = field(default_factory=list)
     env_reads: list[EnvRead] = field(default_factory=list)
+    heritage_synthetic_tiebreak_count: int = 0

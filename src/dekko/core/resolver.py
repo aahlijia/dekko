@@ -535,6 +535,7 @@ def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
         graph.heritage_in,
         graph.heritage_ambiguous,
         graph.heritage_external,
+        graph.heritage_synthetic_tiebreak_count,
     ) = resolve_heritage(files)
     graph.modules = resolve_imports(files)
     (
@@ -913,6 +914,7 @@ def resolve_heritage(
     dict[str, list[str]],
     list[tuple[str, str, list[str]]],
     list[ExternalCall],
+    int,
 ]:
     """Resolve every heritage clause across the repo into a heritage graph.
 
@@ -966,14 +968,24 @@ def resolve_heritage(
 
     Returns:
         ``(heritage_edges, heritage_out, heritage_in,
-        heritage_ambiguous, heritage_external)`` — the same shapes
-        ``resolve()`` assigns onto ``CallGraph.heritage``/
+        heritage_ambiguous, heritage_external,
+        synthetic_tiebreak_count)`` — the first five are the same
+        shapes ``resolve()`` assigns onto ``CallGraph.heritage``/
         ``heritage_out``/``heritage_in``/``heritage_ambiguous``/
         ``heritage_external``. Built as a plain tuple return (mirroring
         ``resolve_refs()``'s own return shape) rather than a
         ``CallGraph`` method, since ``resolve()`` just assigns the
         pieces onto the graph it already built, exactly as it already
-        does for ``resolve_refs()``'s result.
+        does for ``resolve_refs()``'s result. ``synthetic_tiebreak_count``
+        (round 24, ``.features/plans/round24/
+        03-heritage-crate-decoy-tiebreak.md``) is how many of the
+        resolved edges above were resolved via
+        ``_prefer_non_synthetic_crate_match`` rather than an
+        unambiguous structural match — a convention-based guess about
+        which of two same-named crates is "the real one," surfaced to
+        ``CallGraph.heritage_synthetic_tiebreak_count`` so ``query
+        subtypes``/``supertypes`` can disclose it rather than blending
+        it silently into every other, more certain resolution.
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
@@ -982,6 +994,7 @@ def resolve_heritage(
     crate_roots = _rust_crate_roots_index_all(
         frozenset(fm.path for fm in files)
     )
+    tiebreak_hits = [0]
 
     edges: dict[tuple[str, str], set[int]] = {}
     relations: dict[tuple[str, str], str] = {}
@@ -1005,6 +1018,7 @@ def resolve_heritage(
                 external,
                 raw_imports=raw_imports,
                 crate_roots=crate_roots,
+                tiebreak_hits=tiebreak_hits,
             )
 
     heritage_edges = [
@@ -1038,6 +1052,7 @@ def resolve_heritage(
         heritage_in,
         heritage_ambiguous,
         heritage_external,
+        tiebreak_hits[0],
     )
 
 
@@ -1053,6 +1068,7 @@ def _resolve_one_heritage(
     external: dict[tuple[str, str], set[int]],
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
 ) -> None:
     """Resolve one heritage clause; mirrors ``_resolve_call``'s shape.
 
@@ -1079,6 +1095,12 @@ def _resolve_one_heritage(
     docstring and ``_rust_crate_hint_matches`` for what it fixes
     (round 22 zed.md §3.2: a crate-root re-exported Rust trait
     colliding with a same-named type elsewhere in the repo).
+
+    ``tiebreak_hits``, when given, is passed straight through to
+    ``_pick_candidate``'s own parameter of the same name (round 24
+    heritage crate-decoy tiebreak) so ``resolve_heritage()`` can count
+    how many resolved edges in this repo rest on that convention-based
+    guess.
     """
     if _receiver_is_external(h, file_imports, repo_stems):
         external.setdefault((h.subtype_id, h.text), set()).add(h.line)
@@ -1116,6 +1138,7 @@ def _resolve_one_heritage(
         repo_stems,
         raw_imports,
         crate_roots,
+        tiebreak_hits,
     )
     if target is _NOISE:
         external.setdefault((h.subtype_id, h.text), set()).add(h.line)
@@ -1671,6 +1694,7 @@ def _pick_candidate(
     repo_stems: set[str] | None = None,
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
 ) -> Symbol | _Noise | None:
     """Apply the resolution ladder; ``None`` means ambiguous.
 
@@ -1722,6 +1746,14 @@ def _pick_candidate(
     zed.md §3.2, the ``query subtypes``/heritage-resolution path);
     ``resolve()``'s call/ref resolution path leaves this ``None``.
 
+    ``tiebreak_hits``, when given, is a mutable single-element counter
+    passed straight through to ``_import_match`` (round 24, ``.features/
+    plans/round24/03-heritage-crate-decoy-tiebreak.md``) -- incremented
+    whenever a crate-root collision is broken by preferring the one
+    candidate whose crate root doesn't look like a test-fixture/vendor
+    stand-in. Same threading scope as ``crate_roots``: only
+    ``resolve_heritage()`` ever passes a live counter.
+
     Before any of the above runs, ``candidates`` is narrowed to those
     matching the call site's own language, or failing that its
     language *family* (see ``_language_filtered`` and
@@ -1770,7 +1802,7 @@ def _pick_candidate(
         # the real target.
 
     hinted = _import_match(
-        call, candidates, file_imports, raw_imports, crate_roots
+        call, candidates, file_imports, raw_imports, crate_roots, tiebreak_hits
     )
     if hinted is not None:
         return hinted
@@ -2354,6 +2386,7 @@ def _import_match(
     file_imports: dict[str, Import],
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
 ) -> Symbol | None:
     """Match candidates against import hints for this file.
 
@@ -2394,6 +2427,14 @@ def _import_match(
     the file), which previously produced an empty ``hints`` list and
     never even reached ``_rust_crate_hint_matches`` -- the crate-root
     fallback existed but had nothing to loop over.
+
+    ``tiebreak_hits`` (round 24, ``.features/plans/round24/
+    03-heritage-crate-decoy-tiebreak.md``) is an optional mutable
+    single-element counter, incremented whenever
+    ``_prefer_non_synthetic_crate_match`` fires inside either of the
+    two crate-hint steps below -- lets ``resolve_heritage()`` disclose
+    how many resolved edges rest on that convention-based tiebreak
+    rather than a structural match.
     """
     hints: list[str] = []
     imp = file_imports.get(call.name)
@@ -2404,10 +2445,14 @@ def _import_match(
         rec_imp = file_imports.get(first)
         if rec_imp is not None:
             hints.append(rec_imp.source)
-    hinted = _hint_match(hints, candidates, crate_roots)
+    hinted = _hint_match(
+        hints, candidates, crate_roots, call.path, tiebreak_hits
+    )
     if hinted is not None:
         return hinted
-    receiver_hint = _rust_receiver_crate_match(call, candidates, crate_roots)
+    receiver_hint = _rust_receiver_crate_match(
+        call, candidates, crate_roots, tiebreak_hits
+    )
     if receiver_hint is not None:
         return receiver_hint
     if raw_imports:
@@ -2425,6 +2470,8 @@ def _hint_match(
     hints: list[str],
     candidates: list[Symbol],
     crate_roots: dict[str, list[str]] | None,
+    caller_path: str,
+    tiebreak_hits: list[int] | None = None,
 ) -> Symbol | None:
     """Try each ``file_imports``-derived hint against ``candidates``.
 
@@ -2432,6 +2479,15 @@ def _hint_match(
     cyclomatic complexity under the project's Ruff limit -- the
     per-hint ``_module_matches``-then-``_rust_crate_hint_matches``
     loop that function has run unmodified since before round 23.
+
+    Round 24 (``.features/plans/round24/
+    03-heritage-crate-decoy-tiebreak.md``): when a hint matches 2+
+    crate roots, ``_prefer_non_synthetic_crate_match`` gets one more
+    try before this hint gives up -- see that function's own
+    docstring for why this can only ever resolve, never misresolve,
+    relative to the unmodified ``len(crate_matched) == 1`` check above
+    it. ``caller_path`` (``call.path``) is threaded through purely so
+    that function can apply its self-crate guard.
     """
     for hint in hints:
         matched = [c for c in candidates if _module_matches(hint, c.path)]
@@ -2445,6 +2501,11 @@ def _hint_match(
             ]
             if len(crate_matched) == 1:
                 return crate_matched[0]
+            tiebroken = _prefer_non_synthetic_crate_match(
+                crate_matched, caller_path, tiebreak_hits
+            )
+            if tiebroken is not None:
+                return tiebroken
     return None
 
 
@@ -2452,6 +2513,7 @@ def _rust_receiver_crate_match(
     call: _Referable,
     candidates: list[Symbol],
     crate_roots: dict[str, list[str]] | None,
+    tiebreak_hits: list[int] | None = None,
 ) -> Symbol | None:
     """Round 23 Fix A: try a heritage clause's bare receiver as a
     crate-name hint directly, split out of ``_import_match`` purely to
@@ -2466,6 +2528,10 @@ def _rust_receiver_crate_match(
     directly usable crate-name hint in that case -- reuses
     ``_rust_crate_hint_matches`` unchanged, just fed a hint sourced
     from the call site rather than a ``file_imports`` entry.
+
+    Round 24: the same ``_prefer_non_synthetic_crate_match`` fallback
+    ``_hint_match`` gained also applies here, since this is the other
+    call site that can produce a 2+-candidate ``crate_matched`` list.
     """
     if not crate_roots or not call.receiver:
         return None
@@ -2477,7 +2543,9 @@ def _rust_receiver_crate_match(
     ]
     if len(crate_matched) == 1:
         return crate_matched[0]
-    return None
+    return _prefer_non_synthetic_crate_match(
+        crate_matched, call.path, tiebreak_hits
+    )
 
 
 def _alias_candidates(
@@ -2653,6 +2721,160 @@ def _module_matches(source: str, candidate_path: str) -> bool:
     return stem in _import_segments(source)
 
 
+_SYNTHETIC_CRATE_DIR_MARKERS = frozenset(
+    {
+        "test_fixture",
+        "test_fixtures",
+        "fixture",
+        "fixtures",
+        "testdata",
+        "mock",
+        "mocks",
+        "vendor",
+        "third_party",
+    }
+)
+
+
+def _rust_crate_dir(candidate_path: str) -> str:
+    """Best-effort crate-root directory (``src/``'s own parent) for a
+    candidate's own file path, derived purely from path shape.
+
+    Walks upward from the candidate file's own directory looking for
+    the nearest ancestor directory literally named ``src`` and returns
+    *its* parent -- the same convention ``_rust_crate_roots_index``/
+    ``_all`` key their index by (a crate name maps to its ``src/``
+    directory), applied here in reverse to an arbitrary candidate file
+    that may be nested arbitrarily deep inside that ``src/`` tree
+    (unlike the root-file-only shape ``_rust_crate_roots_index_all``
+    itself scans for), so a candidate several submodules deep still
+    resolves to its crate's own root directory, not some intermediate
+    submodule directory.
+
+    Args:
+        candidate_path: Repo-relative path of a candidate symbol
+            (e.g. ``"tooling/lints/test_fixture/gpui/src/lib.rs"``).
+
+    Returns:
+        The crate directory (``src/``'s parent), e.g.
+        ``"tooling/lints/test_fixture/gpui"``. Falls back to the
+        candidate's own parent directory when no ``src`` ancestor is
+        found -- a path shape this heuristic can't classify either
+        way, which ``_looks_like_synthetic_crate_root`` will then
+        correctly find no markers in.
+    """
+    d = _dirname(candidate_path)
+    while d:
+        if d.rsplit("/", 1)[-1] == "src":
+            return _dirname(d)
+        d = _dirname(d)
+    return _dirname(candidate_path)
+
+
+def _looks_like_synthetic_crate_root(crate_dir: str) -> bool:
+    """Whether a Rust crate root's own *ancestor* path segments look
+    like a lint-testing/vendor stand-in rather than a real workspace
+    member.
+
+    Deliberately checks every path segment *above* the crate's own
+    leaf directory name (``crate_dir.rsplit("/", 1)[-1]``), never the
+    leaf itself -- a real, published crate can legitimately be named
+    ``test-utils``/``fixtures``/``mock-server`` (common package names
+    in the wild); it is the *containing* directory trail
+    (``tooling/lints/test_fixture/gpui`` -- the ``gpui`` leaf is fine,
+    ``test_fixture`` one level up is the tell) that signals "this
+    crate exists to test something else," per the exact zed shape this
+    is scoped against (round 23 design doc's own "preferring a root
+    that looks more like a real Cargo workspace member over one nested
+    under a `test_fixture`/`vendor`-shaped path" suggestion).
+
+    Args:
+        crate_dir: A crate root's ``src/``-parent directory (see
+            ``_rust_crate_dir``), e.g.
+            ``"tooling/lints/test_fixture/gpui"``.
+
+    Returns:
+        True when any ancestor segment (excluding the crate's own leaf
+        directory) matches a known synthetic/vendor marker.
+    """
+    segments = crate_dir.split("/")[:-1]
+    return any(seg in _SYNTHETIC_CRATE_DIR_MARKERS for seg in segments)
+
+
+def _prefer_non_synthetic_crate_match(
+    crate_matched: list[Symbol],
+    caller_path: str,
+    tiebreak_hits: list[int] | None = None,
+) -> Symbol | None:
+    """Round 24 heritage crate-decoy tiebreak (``.features/plans/
+    round24/03-heritage-crate-decoy-tiebreak.md``): break a 2+-way
+    crate-root collision when exactly one candidate's crate root
+    doesn't look synthetic (test-fixture/vendor-shaped).
+
+    Only ever returns non-``None`` when a step below leaves *exactly*
+    one survivor -- a genuine collision between two real, non-synthetic
+    crates (or two synthetic ones) stays correctly ambiguous, matching
+    this module's existing "resolve only on an unambiguous signal"
+    contract throughout (see ``_pick_candidate``'s own docstring and
+    round 23's "report as ambiguous rather than guessed" philosophy).
+    This is a strictly additive fallback tried only *after*
+    ``_rust_crate_hint_matches``'s own ``len(crate_matched) == 1``
+    check has already failed -- it can only ever turn a previously-
+    ambiguous edge into a resolved one, never the reverse.
+
+    Checked *before* the synthetic-path filter: if the clause's own
+    caller file lives inside one of ``crate_matched``'s own crate
+    roots, that candidate wins outright, synthetic-looking or not. A
+    decoy crate's own test code legitimately writing
+    ``impl gpui::Render for Y`` from *inside*
+    ``tooling/lints/test_fixture/gpui`` itself (the crate's own
+    external name is always in scope for self-reference, Rust 2018+)
+    must resolve to the decoy's own ``Render``, not get silently
+    redirected to a different, unrelated real crate just because that
+    other crate's path looks more legitimate -- the design doc's own
+    test plan calls this out explicitly: "the tiebreak must not
+    blindly prefer 'not synthetic' when the caller itself lives inside
+    the synthetic crate's own tree." This self-crate check does not
+    increment ``tiebreak_hits`` -- unlike the marker-based guess below,
+    "the caller's own file lives in this exact candidate's crate" is a
+    structural fact, not a convention-based guess.
+
+    Args:
+        crate_matched: Every candidate whose path matched the crate
+            name hint across 2+ registered crate roots (round 23 Fix
+            B) -- the set this tiebreak narrows.
+        caller_path: Repo-relative path of the file declaring the
+            heritage clause being resolved (``call.path``) -- used
+            only for the self-crate check above.
+        tiebreak_hits: When given, incremented by one each time the
+            synthetic-marker tiebreak actually fires (returns
+            non-``None`` via that path) -- lets ``resolve_heritage()``
+            count how many resolved edges rest on this convention-based
+            guess rather than a structural match, for disclosure to
+            callers (``query subtypes``/``supertypes``).
+
+    Returns:
+        The winning candidate, or ``None`` when neither step above
+        narrows ``crate_matched`` to exactly one.
+    """
+    caller_crate_dir = _rust_crate_dir(caller_path)
+    same_crate = [
+        c for c in crate_matched if _rust_crate_dir(c.path) == caller_crate_dir
+    ]
+    if len(same_crate) == 1:
+        return same_crate[0]
+    non_synthetic = [
+        c
+        for c in crate_matched
+        if not _looks_like_synthetic_crate_root(_rust_crate_dir(c.path))
+    ]
+    if len(non_synthetic) == 1:
+        if tiebreak_hits is not None:
+            tiebreak_hits[0] += 1
+        return non_synthetic[0]
+    return None
+
+
 def _rust_crate_hint_matches(
     hint: str, candidate_path: str, crate_roots: dict[str, list[str]]
 ) -> bool:
@@ -2716,6 +2938,21 @@ def _rust_crate_hint_matches(
     coin flip's resolved-count along with the "unlucky half"'s silent
     wrong answers -- an intentional, examined tradeoff, not an
     oversight; see the design doc for the exact numbers.
+
+    Round 24 (``.features/plans/round24/
+    03-heritage-crate-decoy-tiebreak.md``) narrows the residual gap
+    Fix B's "genuine collision -> ambiguous" left unattempted: when
+    ``len(crate_matched) > 1`` here, this function's own caller
+    (``_hint_match``/``_rust_receiver_crate_match``) now tries
+    ``_prefer_non_synthetic_crate_match`` before giving up -- if
+    exactly one matched candidate's crate root avoids a test-fixture/
+    vendor-shaped ancestor path (``_looks_like_synthetic_crate_root``),
+    that one wins instead of falling through to ambiguous. A genuine
+    collision between two equally-plausible-looking real crates (round
+    23's own regression fixture) is untouched by this and still
+    resolves ambiguous, exactly as before -- the narrowing only ever
+    fires on the specific, narrower shape of "one candidate's path
+    looks like a lint-testing/vendor stand-in, the other doesn't."
     """
     if not candidate_path.endswith(".rs"):
         return False
@@ -3251,6 +3488,16 @@ def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
     two, still genuinely ambiguous" -- converting the coin flip into a
     deterministic, honest "ambiguous" for the genuinely unresolvable
     case, at the cost of the coin flip's lucky-draw resolved count.
+
+    Round 24 (``.features/plans/round24/
+    03-heritage-crate-decoy-tiebreak.md``) narrows that residual gap
+    without touching this index's own shape: a genuine 2+-root
+    collision here still deterministically falls through to
+    ``_rust_crate_hint_matches``'s ``len(crate_matched) > 1`` branch
+    unchanged, but that branch's own caller now gets one more chance
+    (``_prefer_non_synthetic_crate_match``) to recover a resolution
+    when exactly one matched root's path doesn't look like a
+    test-fixture/vendor stand-in -- see that function's docstring.
 
     Args:
         paths: Every known file path.
