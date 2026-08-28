@@ -833,6 +833,21 @@ def test_scaled_client_timeout_is_capped(
     )
 
 
+def test_timeout_bytes_per_second_reflects_round24_recalibration() -> None:
+    """Round-24 finding: the pre-recalibration 5.5 MB/s fit was made
+    against a pre-symbol-interning map.json and stayed stale after
+    ``1f06c44e`` shrank map.json's on-disk size ~5.15x without
+    changing build cost, under-provisioning every non-rev-cache-miss
+    daemon-routed command on large repos by roughly that same factor.
+    Asserts bounds, not an exact pin -- this is explicitly a
+    single-repo fit (tensorflow) per the constant's own comment and
+    may reasonably move again with a second large-repo data point, but
+    it must never silently regress back toward the old, stale value.
+    """
+    assert daemon._TIMEOUT_BYTES_PER_SECOND < 5_500_000
+    assert 900_000 <= daemon._TIMEOUT_BYTES_PER_SECOND <= 1_500_000
+
+
 def test_try_daemon_uses_scaled_client_timeout(
     daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

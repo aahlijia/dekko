@@ -164,11 +164,22 @@ _CLIENT_TIMEOUT = _REQUEST_TIMEOUT
 # cost scales with the graph's size, not just file count/bytes. A
 # straight-line fit through both points would either badly
 # under-provision tensorflow-scale repos or badly over-provision
-# spring-boot-scale ones, so this is fit to the slower (tensorflow)
-# measurement alone -- 1,212,389,046 bytes in 209.08s, rounded down
-# to ~5.5 MB/s for margin -- so every smaller repo gets *more*
-# headroom than it measured needing, never less.
-_TIMEOUT_BYTES_PER_SECOND = 5_500_000
+# spring-boot-scale ones, so this was originally fit to the slower
+# (tensorflow) measurement alone -- 1,212,389,046 bytes in 209.08s,
+# rounded down to ~5.5 MB/s for margin.
+#
+# Round-24 recalibration (daemon-timeout-messaging-followup.md): that
+# 5.5 MB/s fit was measured against a pre-symbol-interning map.json.
+# ``1f06c44e`` ("intern symbol ids in map.json, drop pretty-printing")
+# landed three hours after the original calibration commit and shrank
+# map.json's on-disk size ~5.15x without changing how long a full/
+# auto-regen actually takes -- confirmed unchanged again this round:
+# tensorflow's `dekko map --full --jobs 0` wall time was 209.46s,
+# essentially identical to the original 209.08s calibration run,
+# against a map.json now measuring 235.6 MB, not the original ~1.16
+# GB. 235,600,000 / 209.46 =~ 1.12 MB/s; rounded down for margin, same
+# convention as the original fit, to ~1.1 MB/s.
+_TIMEOUT_BYTES_PER_SECOND = 1_100_000
 
 # Upper bound on the size-scaled client timeout: keeps a hypothetical
 # multi-GB map.json from making a routed request's client wait

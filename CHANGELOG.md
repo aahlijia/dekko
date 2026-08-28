@@ -9,6 +9,16 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.35] — 2026-08-28
+
+### Fixed
+- **Daemon-routed command timeouts under-provisioned on large repos**
+  — `_TIMEOUT_BYTES_PER_SECOND` in the daemon's cold-cache timeout
+  scaling was recalibrated from 5.5M to 1.1M bytes/sec, based on
+  round-24's tensorflow measurement, so large repos get realistic
+  timeout budgets instead of premature failures. See
+  `.features/plans/round24/12-daemon-timeout-messaging-followup.md`.
+
 ## [0.43.34] — 2026-08-28
 
 ### Changed
