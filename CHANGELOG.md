@@ -9,6 +9,20 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.27] — 2026-08-28
+
+### Added
+- **`dekko sanity` flags receiver-mismatch false confidence** — a
+  grep-only hit for a single-repo-candidate method target is now
+  classified `likely_unrelated_external` (instead of the misleading
+  `CAUSE_TEST_FILTER`/`CAUSE_GENERIC_NAME`) when neither the hit's
+  line nor its file's imports mention the target's declaring type,
+  fixing the false-confidence case where an unrelated same-name method
+  from another library (e.g. spring-boot's `isTrue`/AssertJ) reads as
+  a real reference. Scoped to `sanity <target>`; `--all` does not
+  apply this cue. See
+  `.features/plans/round23/25-sanity-receiver-mismatch-cue.md`.
+
 ## [0.43.26] — 2026-08-28
 
 ### Added

@@ -38,6 +38,18 @@ only — see ``run_all()``'s own docstring and
 ``.features/plans/round23/24-sanity-all-sweep.md`` for the full design
 and its ``--usages``-sweep-mode/MCP-exposure open questions.
 
+In callers mode (single-target ``run()`` only, not ``--all``), a
+grep-only hit can also be classified ``CAUSE_LIKELY_EXTERNAL_COLLISION``
+when the target is a method, no other repo-defined symbol shares its
+bare name, and neither the hit's own line nor its file's top-of-file
+imports mention the target's declaring type — the cheap, no-type-
+inference proxy for "this is almost certainly an unrelated external-
+library method sharing the name, not a real caller" (e.g. Java/AssertJ
+``.isTrue()`` colliding with a repo-defined ``isTrue`` method). See
+``_receiver_mismatch()`` and
+``.features/plans/round23/25-sanity-receiver-mismatch-cue.md`` for the
+full design.
+
 This is a spot check, not a re-verification — see the module's own
 ``EXIT_OK``-always-on-a-clean-run contract in ``run()``'s docstring.
 The blind-spot causes are heuristic pattern-matches on a grep-only
@@ -85,7 +97,7 @@ from dekko import repo_ops
 from dekko.analysis import query
 from dekko.classify import is_test_path
 from dekko.core import languages
-from dekko.core.model import Symbol
+from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.core.walker import DEFAULT_EXCLUDE_DIRS
 from dekko.render.mapfile import MapIndex
 from dekko.storage.cache import CACHE_DIR
@@ -194,7 +206,17 @@ CAUSE_COMMENT_MENTION = (
 CAUSE_IMPORT_STATEMENT = (
     "import/require statement naming the symbol — not a call site"
 )
+CAUSE_LIKELY_EXTERNAL_COLLISION = (
+    "likely an unrelated external-library method sharing this bare "
+    "name — no other repo-defined candidate exists, and neither this "
+    "line nor this file's imports mention the target's declaring type"
+)
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
+
+# Generous top-of-file import/using-block scan window for
+# ``_receiver_mismatch``'s cheap textual proxy check -- see that
+# function's own docstring.
+_TYPE_REFERENCE_WINDOW_LINES = 60
 
 # --- unused-mode reference-shape classification ------------------------
 #
@@ -632,33 +654,40 @@ def classify_miss(
     near_own_definition: bool = False,
     looks_like_comment: bool = False,
     looks_like_import_member: bool = False,
+    likely_unrelated_external: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
     A pure function over one grep-matched line plus its context — no
-    repo/grep I/O, so it's directly testable in isolation (the one
-    check that needs file I/O, ``_looks_like_multiline_import_member``,
-    is computed by the caller and passed in as
-    ``looks_like_import_member`` rather than given to this function
-    directly, to keep that contract). Checked in the order
-    ``dekko-verify/SKILL.md`` lists its blind spots: a qualified-call
-    syntax match is checked first (it's visible in the line itself and
-    the most specific signal available), then whether the line is a
-    bare import/require statement naming the symbol (round 21 Track
-    B3 — the dominant "grep-only" shape on any import-heavy codebase,
-    same "visible in the line itself" precedence as the qualified-call
-    check), then whether the line is a bare member of a multi-line
-    destructured import block (round 22 claude-buddy.md §2.4 — the
-    residual gap in the single-line check above), then whether the
-    hit is a doc-comment/docstring line sitting near the symbol's own
+    repo/grep I/O, so it's directly testable in isolation (the two
+    checks that need file I/O, ``_looks_like_multiline_import_member``
+    and the receiver-mismatch heuristic behind
+    ``likely_unrelated_external``, are computed by the caller and
+    passed in rather than given to this function directly, to keep
+    that contract). Checked in the order ``dekko-verify/SKILL.md``
+    lists its blind spots: a qualified-call syntax match is checked
+    first (it's visible in the line itself and the most specific
+    signal available), then whether the line is a bare import/require
+    statement naming the symbol (round 21 Track B3 — the dominant
+    "grep-only" shape on any import-heavy codebase, same "visible in
+    the line itself" precedence as the qualified-call check), then
+    whether the line is a bare member of a multi-line destructured
+    import block (round 22 claude-buddy.md §2.4 — the residual gap in
+    the single-line check above), then whether the hit is a
+    doc-comment/docstring line sitting near the symbol's own
     definition mentioning its bare name (not a call at all), then
     whether the file is in a language dekko can't parse at all, then
-    whether it's a test file excluded by ``sanity``'s own default
-    filtering, then whether the target name is short/generic enough
-    that dekko's count should be read as directional rather than
-    exact. A line matching none of these is reported as "unexplained"
-    rather than forcing a guess that doesn't fit — matching the plan's
-    own "false confidence from the classifier itself" caution.
+    whether the caller's own receiver-mismatch heuristic flagged this
+    hit as likely an unrelated external-library method sharing the
+    target's bare name (round 23 spring-boot.md §4 — a same-named
+    AssertJ/stdlib/third-party method colliding with the one
+    repo-defined candidate; see ``_receiver_mismatch``), then whether
+    it's a test file excluded by ``sanity``'s own default filtering,
+    then whether the target name is short/generic enough that dekko's
+    count should be read as directional rather than exact. A line
+    matching none of these is reported as "unexplained" rather than
+    forcing a guess that doesn't fit — matching the plan's own "false
+    confidence from the classifier itself" caution.
 
     Args:
         snippet: The grep-matched line's text.
@@ -681,6 +710,14 @@ def classify_miss(
         looks_like_import_member: Whether the hit line is a bare
             member of a multi-line destructured import block
             (``_looks_like_multiline_import_member``).
+        likely_unrelated_external: Whether the caller's own
+            receiver-mismatch gating (single-repo-candidate method
+            target, resolvable declaring type) held for this run *and*
+            ``_receiver_mismatch`` found no textual evidence of the
+            declaring type in this hit's line or file. Always ``False``
+            outside that gated scenario (see ``run()``'s own gating
+            computation) — never a guess made from inside this
+            function.
 
     Returns:
         One of the ``CAUSE_*`` constants.
@@ -695,6 +732,8 @@ def classify_miss(
         return CAUSE_COMMENT_MENTION
     if unsupported_language:
         return CAUSE_UNSUPPORTED_LANGUAGE
+    if likely_unrelated_external:
+        return CAUSE_LIKELY_EXTERNAL_COLLISION
     if tests_excluded and is_test_file:
         return CAUSE_TEST_FILTER
     if _is_generic_name(bare_name):
@@ -817,6 +856,52 @@ def _run_grep(root: Path, bare_name: str) -> GrepSweepResult:
     )
 
 
+def _receiver_mismatch(root: Path, hit: GrepHit, declaring_type: str) -> bool:
+    """Whether nothing in ``hit``'s own line or its file's top-of-file
+    import/using block textually mentions ``declaring_type`` — the
+    cheap, no-type-inference proxy for "this call's receiver almost
+    certainly isn't the target's type" (round 23 spring-boot.md §4's
+    own suggested heuristic: "target's declaring type recognizably
+    unrelated to the call site's surrounding class/import list").
+
+    Deliberately the same cost/precision tier as
+    ``_looks_like_multiline_import_member`` — a small, bounded,
+    best-effort re-read of the hit's own file, ``False`` on any I/O
+    failure — not a real import-resolution pass: no alias tracking, no
+    type inference, no wildcard-import handling. It answers "is there
+    *any* textual sign," not "is this definitely unrelated" (see
+    ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``'s
+    "Risks / tradeoffs" section for why false positives here are
+    low-cost and false negatives are the accepted, safe-direction
+    failure mode).
+
+    Args:
+        root: Repo root, for the one bounded file re-read.
+        hit: The grep-only candidate hit being checked.
+        declaring_type: The target's declaring type's own simple name
+            (the last segment of its container symbol's qualname).
+
+    Returns:
+        ``True`` when neither the hit's own line nor the first
+        ``_TYPE_REFERENCE_WINDOW_LINES`` lines of its file mention
+        ``declaring_type``; ``False`` otherwise (including on any file
+        read failure — matches the module's existing
+        I/O-failure-is-always-``False`` contract).
+    """
+    if declaring_type in hit.snippet:
+        return False  # the type name is right there on the line
+    try:
+        lines = (
+            (root / hit.path)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+        )
+    except OSError:
+        return False
+    window = lines[:_TYPE_REFERENCE_WINDOW_LINES]
+    return not any(declaring_type in ln for ln in window)
+
+
 def _classify_grep_hits(
     hits: list[GrepHit],
     bare_name: str,
@@ -824,6 +909,7 @@ def _classify_grep_hits(
     *,
     own_def_locs: frozenset[tuple[str, int]],
     tests_excluded: bool,
+    declaring_type: str | None = None,
 ) -> dict[tuple[str, int], str]:
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
@@ -843,13 +929,23 @@ def _classify_grep_hits(
             any dekko-side matching/diffing).
         bare_name: The bare identifier being searched for.
         root: Repo root, for ``_looks_like_multiline_import_member``'s
-            one small file re-read.
+            and ``_receiver_mismatch``'s one small file re-read.
         own_def_locs: Every same-bare-named symbol's own definition
             line — excluded from classification entirely, matching
             ``run()``'s existing "not a call site to explain either
             way" treatment of a target's own definition.
         tests_excluded: Whether the dekko-side query being compared
             against excluded test files by default.
+        declaring_type: The target's declaring type's own simple name,
+            when ``run()``'s receiver-mismatch gating held for this
+            run (single-repo-candidate method target with a resolvable
+            declaring type) — ``None`` otherwise (the default, and
+            always ``None`` from ``run_all()``'s sweep path, which
+            doesn't compute this gating; see
+            ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``).
+            When set, each hit is additionally checked with
+            ``_receiver_mismatch`` and the result threaded into
+            ``classify_miss`` as ``likely_unrelated_external``.
 
     Returns:
         ``(path, line) -> CAUSE_*`` for every hit not in
@@ -876,6 +972,10 @@ def _classify_grep_hits(
             looks_like_comment=_looks_like_comment_line(h.snippet, h.path),
             looks_like_import_member=_looks_like_multiline_import_member(
                 root, h, bare_name
+            ),
+            likely_unrelated_external=(
+                declaring_type is not None
+                and _receiver_mismatch(root, h, declaring_type)
             ),
         )
     return causes
@@ -1058,6 +1158,25 @@ def _pathological_skip_note(count: int) -> str:
     )
 
 
+def _receiver_mismatch_note(
+    bare_name: str, declaring_type: str, count: int
+) -> str:
+    """The one-per-run banner printed/attached when ``run()``'s
+    receiver-mismatch heuristic flagged at least one grep-only hit —
+    see ``_receiver_mismatch`` and the module docstring's paragraph on
+    ``CAUSE_LIKELY_EXTERNAL_COLLISION``.
+    """
+    plural = "" if count == 1 else "s"
+    return (
+        f"'{bare_name}' is the only repo-defined symbol with this "
+        f"bare name, but {count} grep-only hit{plural} below show no "
+        f"reference to its declaring type ('{declaring_type}') in "
+        "their file — these are likely calls to an unrelated "
+        "external-library method sharing the name, not genuine "
+        "callers of your target."
+    )
+
+
 def _dekko_only_report(
     dekko_only: tuple[list[dict], Meter], truncated: bool
 ) -> tuple[list[dict], Meter | None]:
@@ -1090,6 +1209,9 @@ def _build_json_doc(
     dekko_only_meter: Meter | None,
     grep_only: tuple[list[dict], Meter],
     module_level: list[str],
+    receiver_mismatch_note: str | None = None,
+    receiver_mismatch_declaring_type: str | None = None,
+    receiver_mismatch_count: int | None = None,
 ) -> dict:
     """Assemble ``sanity --json``'s output document.
 
@@ -1102,6 +1224,12 @@ def _build_json_doc(
     ``counts`` is kept exactly as-is alongside ``meta`` -- purely
     additive, so any existing consumer parsing ``counts`` keeps
     working unmodified.
+
+    ``receiver_mismatch_note``/``_declaring_type``/``_count`` are
+    present only when ``run()``'s receiver-mismatch heuristic actually
+    flagged at least one grep-only hit (mirrors ``dekko_only_note``'s
+    "only present when relevant" contract) — see
+    ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``.
     """
     matches_rows, matches_meter = matches
     grep_only_rows, grep_only_meter = grep_only
@@ -1140,6 +1268,12 @@ def _build_json_doc(
         )
     if module_level:
         doc["dekko_module_level"] = sorted(module_level)
+    if receiver_mismatch_note:
+        doc["receiver_mismatch_note"] = receiver_mismatch_note
+        doc["receiver_mismatch_declaring_type"] = (
+            receiver_mismatch_declaring_type
+        )
+        doc["receiver_mismatch_count"] = receiver_mismatch_count
     return doc
 
 
@@ -1169,6 +1303,7 @@ def _print_text(
     *,
     grep_truncated: bool = False,
     skipped_pathological: int = 0,
+    receiver_mismatch_note: str | None = None,
 ) -> None:
     print(f"dekko sanity: '{target}' ({action}) vs. grep '{bare_name}'")
     print(f"  grep: {grep_command}")
@@ -1176,6 +1311,8 @@ def _print_text(
         print(f"  note: {_TRUNCATION_NOTE}")
     if skipped_pathological:
         print(f"  note: {_pathological_skip_note(skipped_pathological)}")
+    if receiver_mismatch_note:
+        print(f"  note: {receiver_mismatch_note}")
     _print_bucket_text("matches", *matches)
     if grep_truncated:
         print("  dekko-only: inconclusive (grep sweep truncated)")
@@ -1403,6 +1540,56 @@ def _run_unused_check(
     return EXIT_OK
 
 
+def _resolve_declaring_type(query_index: MapIndex, sym: Symbol) -> str | None:
+    """The gated declaring-type simple name for ``run()``'s
+    receiver-mismatch heuristic, or ``None`` when the gate doesn't
+    hold.
+
+    All four conditions from
+    ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``'s
+    "Gating" section must hold:
+
+    1. ``sym.kind == "method"`` -- the heuristic is about a *receiver*
+       relationship, which only makes sense for a method on some type.
+       A free function/closure-local bare-name collision has no
+       declaring type to check imports against (layer 1's denylist
+       domain, not this heuristic's -- see the design doc).
+    2. ``sym.qualname`` has a container segment (a bare ``"."``-free
+       qualname, e.g. a free function, fails this and returns
+       ``None``).
+    3. The container qualname resolves to **exactly one** symbol in
+       ``query_index.symbols_by_qualname`` whose ``kind`` is in
+       ``TYPE_KINDS`` -- zero or multiple matches (an unusual qualname
+       collision) means "don't guess," matching the module's own
+       "false confidence from the classifier itself" caution.
+    4. Exactly one repo-defined symbol shares ``sym.name`` --
+       reuses the same list ``run()``'s own ``own_def_locs`` is built
+       from (no new query).
+
+    Returns:
+        The declaring type's own simple name (the last segment of the
+        container symbol's qualname, so a nested class like
+        ``Outer.Inner`` compares against ``Inner`` -- the name that
+        would actually appear in an import statement or receiver
+        expression) when every condition holds; ``None`` otherwise.
+    """
+    if sym.kind != "method":
+        return None
+    container_qualname, sep, _ = sym.qualname.rpartition(".")
+    if not sep:
+        return None
+    container_syms = [
+        s
+        for s in query_index.symbols_by_qualname.get(container_qualname, [])
+        if s.kind in TYPE_KINDS
+    ]
+    if len(container_syms) != 1:
+        return None
+    if len(query_index.symbols_by_name.get(sym.name, [])) != 1:
+        return None
+    return container_syms[0].qualname.rsplit(".", 1)[-1]
+
+
 def run(
     index: MapIndex,
     target: str,
@@ -1484,6 +1671,13 @@ def run(
 
     query_index = index if include_tests else index.without_tests()
     own_def_locs: frozenset[tuple[str, int]] = frozenset()
+    # The receiver-mismatch heuristic's declaring-type name -- set only
+    # when every gating condition below holds (callers mode, a method
+    # target, exactly one repo-defined candidate for its bare name, and
+    # an unambiguous declaring-type lookup). ``None`` leaves
+    # ``_classify_grep_hits`` in its existing, ungated behavior. See
+    # ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``.
+    declaring_type: str | None = None
 
     if usages:
         bare_name = target
@@ -1511,6 +1705,7 @@ def run(
             (s.path, s.start_line)
             for s in query_index.symbols_by_name.get(sym.name, [])
         )
+        declaring_type = _resolve_declaring_type(query_index, sym)
         sym_target = f"{sym.path}:{sym.qualname}:{sym.start_line}"
         try:
             dekko_hits, module_level = _dekko_hits_callers(
@@ -1553,6 +1748,7 @@ def run(
         root,
         own_def_locs=own_def_locs,
         tests_excluded=tests_excluded,
+        declaring_type=declaring_type,
     )
     grep_only_rows = [
         _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits
@@ -1568,6 +1764,17 @@ def run(
         dekko_only, sweep.truncated
     )
 
+    receiver_mismatch_note = None
+    receiver_mismatch_count = sum(
+        1
+        for h in grep_only_hits
+        if causes[(h.path, h.line)] == CAUSE_LIKELY_EXTERNAL_COLLISION
+    )
+    if declaring_type is not None and receiver_mismatch_count:
+        receiver_mismatch_note = _receiver_mismatch_note(
+            bare_name, declaring_type, receiver_mismatch_count
+        )
+
     if as_json:
         doc = _build_json_doc(
             query_action=query_action,
@@ -1581,6 +1788,11 @@ def run(
             dekko_only_meter=dekko_only_meter,
             grep_only=grep_only,
             module_level=module_level,
+            receiver_mismatch_note=receiver_mismatch_note,
+            receiver_mismatch_declaring_type=declaring_type,
+            receiver_mismatch_count=(
+                receiver_mismatch_count if receiver_mismatch_note else None
+            ),
         )
         print(json.dumps(doc, indent=2))
         return EXIT_OK
@@ -1596,6 +1808,7 @@ def run(
         module_level,
         grep_truncated=sweep.truncated,
         skipped_pathological=sweep.skipped_pathological,
+        receiver_mismatch_note=receiver_mismatch_note,
     )
     return EXIT_OK
 

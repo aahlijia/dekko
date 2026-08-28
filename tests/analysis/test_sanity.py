@@ -2105,3 +2105,228 @@ def test_sanity_all_regression_would_have_caught_multiline_import_bug(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED, 0) > 0
+
+
+# --- receiver-mismatch cue (round 23 plan 25) --------------------------
+#
+# See .features/plans/round23/25-sanity-receiver-mismatch-cue.md. A
+# grep-only hit for a single-repo-candidate *method* target can be
+# flagged CAUSE_LIKELY_EXTERNAL_COLLISION when neither the hit's own
+# line nor its file's top-of-file imports mention the target's
+# declaring type -- the cheap textual proxy for "this is almost
+# certainly an unrelated external-library method sharing the bare
+# name" (the spring-boot ``isTrue``/AssertJ repro this design closes).
+
+
+def test_receiver_mismatch_type_on_own_line_is_false(tmp_path: Path) -> None:
+    hit = sanity.GrepHit(
+        path="b.py", line=3, snippet="    return Widget.isTrue()"
+    )
+    assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is False
+
+
+def test_receiver_mismatch_type_in_file_imports_is_false(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "b.py").write_text(
+        "from a import Widget\n\n\ndef unrelated():\n    return isTrue()\n"
+    )
+    hit = sanity.GrepHit(path="b.py", line=5, snippet="    return isTrue()")
+    assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is False
+
+
+def test_receiver_mismatch_type_absent_is_true(tmp_path: Path) -> None:
+    (tmp_path / "b.py").write_text("def unrelated():\n    return isTrue()\n")
+    hit = sanity.GrepHit(path="b.py", line=2, snippet="    return isTrue()")
+    assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is True
+
+
+def test_receiver_mismatch_unreadable_file_is_false(tmp_path: Path) -> None:
+    hit = sanity.GrepHit(
+        path="missing.py", line=1, snippet="    return isTrue()"
+    )
+    assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is False
+
+
+def test_classify_miss_likely_unrelated_external() -> None:
+    cause = sanity.classify_miss(
+        "    return isTrue()",
+        "isTrue",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        likely_unrelated_external=True,
+    )
+    assert cause == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+
+
+def test_classify_miss_likely_unrelated_external_preempts_test_filter() -> (
+    None
+):
+    # Without the new flag this line would land on CAUSE_TEST_FILTER --
+    # the exact regression this design targets (round 23
+    # spring-boot.md §4: a grep-only AssertJ-style hit in a test file
+    # read as "re-run with --include-tests" when it was never a real
+    # caller to begin with).
+    cause = sanity.classify_miss(
+        "    return isTrue()",
+        "isTrue",
+        is_test_file=True,
+        unsupported_language=False,
+        tests_excluded=True,
+        likely_unrelated_external=True,
+    )
+    assert cause == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+
+
+def test_classify_miss_likely_unrelated_external_preempts_generic_name() -> (
+    None
+):
+    cause = sanity.classify_miss(
+        "    return map()",
+        "map",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        likely_unrelated_external=True,
+    )
+    assert cause == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+
+
+def test_classify_miss_unsupported_language_wins_over_receiver_cue() -> None:
+    # Precedence unchanged: a hard "dekko can't parse this file at
+    # all" fact still outranks a heuristic guess.
+    cause = sanity.classify_miss(
+        "    return isTrue()",
+        "isTrue",
+        is_test_file=False,
+        unsupported_language=True,
+        tests_excluded=True,
+        likely_unrelated_external=True,
+    )
+    assert cause == sanity.CAUSE_UNSUPPORTED_LANGUAGE
+
+
+def test_resolve_declaring_type_method_single_candidate(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "class Widget:\n    def isTrue(self):\n        return True\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    sym = next(
+        s for s in index.symbols_by_name["isTrue"] if s.kind == "method"
+    )
+    assert sanity._resolve_declaring_type(index, sym) == "Widget"
+
+
+def test_resolve_declaring_type_none_for_free_function(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Gating condition #2/#1: a free function has no "." in its
+    # qualname (no container) -- layer 1's denylist domain, not this
+    # heuristic's.
+    root = make_mapped_repo(
+        {"a.py": "def isTrue():\n    return True\n"},
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    sym = index.symbols_by_name["isTrue"][0]
+    assert sym.kind == "function"
+    assert sanity._resolve_declaring_type(index, sym) is None
+
+
+def test_resolve_declaring_type_none_when_multiple_candidates(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Gating condition #4: two repo-defined symbols share the bare
+    # name (the multi-candidate case `dekko ambiguous` already
+    # handles) -- don't guess.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "class Widget:\n    def isTrue(self):\n        return True\n"
+            ),
+            "b.py": (
+                "class Gadget:\n    def isTrue(self):\n        return False\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    sym = next(
+        s
+        for s in index.symbols_by_name["isTrue"]
+        if s.path == "a.py" and s.kind == "method"
+    )
+    assert sanity._resolve_declaring_type(index, sym) is None
+
+
+def test_sanity_receiver_mismatch_flags_unrelated_collision(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The isTrue/AssertJ shape as a synthetic, language-agnostic
+    # fixture: a class defining the target method, plus an unrelated
+    # same-named zero-arg call in a different file with no import of
+    # the defining class and no receiver identifier on the same line
+    # (so it doesn't already match the higher-precedence
+    # CAUSE_QUALIFIED_CALL check -- see _QUALIFIED_CALL_TEMPLATE).
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "class Widget:\n"
+                "    def isTrue(self):\n"
+                "        return True\n"
+                "\n\n"
+                "def caller():\n"
+                "    w = Widget()\n"
+                "    return w.isTrue()\n"
+            ),
+            "b.py": ("def unrelated():\n    return isTrue()\n"),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "isTrue", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert sanity.CAUSE_LIKELY_EXTERNAL_COLLISION in out
+    assert "declaring type ('Widget')" in out
+
+    code = cli.main(["sanity", "isTrue", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["file"]: row["cause"] for row in doc["grep_only"]}
+    assert causes["b.py"] == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+    assert doc["receiver_mismatch_declaring_type"] == "Widget"
+    assert doc["receiver_mismatch_count"] >= 1
+    assert "Widget" in doc["receiver_mismatch_note"]
+
+
+def test_sanity_receiver_mismatch_absent_when_gate_unheld(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # A free function shares a bare name with something external, but
+    # kind != "method" -- gating condition #1 fails, falls through
+    # unchanged (layer 1's domain, not this design's).
+    root = make_mapped_repo(
+        {
+            "a.py": "def isTrue():\n    return True\n",
+            "b.py": ("def unrelated():\n    return isTrue()\n"),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "isTrue", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["cause"] for row in doc["grep_only"]}
+    assert sanity.CAUSE_LIKELY_EXTERNAL_COLLISION not in causes
+    assert "receiver_mismatch_note" not in doc
