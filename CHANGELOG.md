@@ -9,6 +9,14 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.33] — 2026-08-28
+
+### Changed
+- **`dekko deps` accepts a `FILE` positional as an alias for
+  `--file`** — matches the verb-placement convention used elsewhere
+  in the CLI; giving both `FILE` and `--file` is a usage error. See
+  `.features/plans/round24/10-cli-verb-placement-consistency.md`.
+
 ## [0.43.32] — 2026-08-28
 
 ### Changed

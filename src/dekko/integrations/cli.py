@@ -345,6 +345,36 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         dest="command", required=True, metavar="COMMAND"
     )
 
+    # Argument-parsing shape rubric (round 24, 10-cli-verb-placement-
+    # consistency.md) -- pick deliberately when adding a new subcommand
+    # rather than copying whichever neighbor you scrolled past first:
+    #
+    #   A. Real `add_subparsers` verbs (note/hooks/daemon): use when
+    #      the verbs genuinely take different arguments -- a single
+    #      positional couldn't express "add TARGET TEXT" vs. "rm
+    #      TARGET [INDEX]" without inventing a mini-language.
+    #   B. Single bare positional, no verb (outline/context/sanity/
+    #      trace/diff/affected/workset): use when the command has
+    #      exactly one target concept and exactly one behavior --
+    #      there's nothing to dispatch on, so there's no verb to place.
+    #   C. `choices=`-constrained positional dispatching to N read-only
+    #      views sharing one large flag surface (query only): use only
+    #      when N is large enough (query: 14 actions) that N real
+    #      subparsers would mean copying the shared flag block N times
+    #      for zero behavior change. Not a pattern to reach for by
+    #      default -- it costs discoverability (the dispatch value
+    #      isn't a real subparser, so it won't tab-complete like one).
+    #   D. Flag-selected optional views, no positional (deps/ambiguous/
+    #      unused/stats): use when a command offers several mutually
+    #      exclusive optional views with a sensible zero-flag default.
+    #      If exactly one of those views is "look up this one target"
+    #      (as `deps --file` is), give it a positional alias too --
+    #      see `deps`'s `file_positional` for the pattern.
+    #
+    # This is documentation, not enforcement -- no linter checks "did
+    # you pick the right shape." Full audit: .features/plans/round24/
+    # 10-cli-verb-placement-consistency.md.
+
     p_map = sub.add_parser("map", help="generate MAP.md and map.json")
     p_map.add_argument(
         "dir",
@@ -1225,6 +1255,15 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "imports, plus circular-import detection",
     )
     p_deps.add_argument(
+        "file_positional",
+        nargs="?",
+        default=None,
+        metavar="FILE",
+        help="alias for --file: one file's resolved imports/importers/"
+        "external sources instead of the default repo-wide summary "
+        "(mutually exclusive with --file/--cycles/--export)",
+    )
+    p_deps.add_argument(
         "--file",
         default=None,
         metavar="PATH",
@@ -1901,16 +1940,23 @@ def run_ambiguous(args: argparse.Namespace) -> int:
 
 def run_deps(args: argparse.Namespace) -> int:
     """Handle ``dekko deps``."""
+    if args.file_positional is not None and args.file is not None:
+        print(
+            "dekko: give FILE or --file, not both",
+            file=sys.stderr,
+        )
+        return deps.EXIT_ERROR
+    file_arg = args.file if args.file is not None else args.file_positional
     given = sum(
         (
-            args.file is not None,
+            file_arg is not None,
             bool(args.cycles),
             args.export_fmt is not None,
         )
     )
     if given > 1:
         print(
-            "dekko: give one of --file, --cycles, --export, not several",
+            "dekko: give one of FILE, --cycles, --export, not several",
             file=sys.stderr,
         )
         return deps.EXIT_ERROR
@@ -1920,7 +1966,7 @@ def run_deps(args: argparse.Namespace) -> int:
     out = Path(args.output) if args.output else None
     return deps.run(
         index,
-        file=args.file,
+        file=file_arg,
         cycles=args.cycles,
         top=args.top,
         limit=args.limit,

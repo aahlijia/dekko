@@ -39,7 +39,7 @@ dekko unused --suspect               # + flag excluded symbols whose name is a p
 dekko unused --dispatch              # + list flagged symbols that are unresolved dispatch candidates
 dekko ambiguous                      # resolver-trust report: where resolution was ambiguous
 dekko deps                           # module-level dependency graph: edge/file counts, cycle count
-dekko deps --file src/app.py         # one file's resolved imports/importers/external sources
+dekko deps src/app.py                # one file's resolved imports/importers/external sources
 dekko deps --cycles                  # every detected circular-import cluster
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
@@ -547,16 +547,20 @@ can import a module purely for a type annotation or a side effect
 
 ```sh
 dekko deps                           # summary: file/edge counts, cycle count, top-N most-depended-on
-dekko deps --file src/app.py         # this file's resolved imports/importers + external sources
+dekko deps src/app.py                # this file's resolved imports/importers + external sources
+dekko deps --file src/app.py         # same as above -- explicit/scriptable spelling of FILE
 dekko deps --cycles                  # every detected circular-import cluster, one block per cycle
 dekko deps --top 20                  # widen the most-depended-on ranking in the default summary
 dekko deps --export mermaid          # emit the module graph via `export`'s existing renderers
 dekko deps --export dot --output deps.dot
 ```
 
-`--file`, `--cycles`, and `--export` are mutually exclusive — give at
-most one, the same "one, not several" rule `ambiguous`'s `--by`/
-`--name` already follows.
+`dekko deps FILE` and `dekko deps --file FILE` are equivalent — the
+bare positional is a convenience alias for interactive use, `--file`
+remains the explicit spelling for scripts. `FILE`/`--file`,
+`--cycles`, and `--export` are mutually exclusive — give at most one,
+the same "one, not several" rule `ambiguous`'s `--by`/`--name` already
+follows.
 
 Cycle detection groups files into strongly-connected components
 (Tarjan's SCC): a reported cycle is every file mutually reachable from
