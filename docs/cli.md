@@ -105,7 +105,8 @@ count, and each row lists the shared callee names so it's clear *why*
 two symbols are peers without a second lookup. A symbol with zero
 callees has no peers by construction (a clean empty result, not an
 error); a symbol with fewer callees than `--min-shared` gets a hint to
-lower the threshold.
+lower the threshold. Small/sparse repos often need `--min-shared 1`
+to find any peers at all under the default threshold of 2.
 
 `query supertypes`/`subtypes` cover declared heritage — `extends`/
 `implements` for Python, JavaScript, TypeScript, and Java; `impl`
@@ -254,7 +255,21 @@ confidence, not a finding.
 dekko sanity resolve                 # cross-check `callers resolve`
 dekko sanity Path --usages           # cross-check `uses Path` instead
 dekko sanity resolve --include-tests # include test files in the dekko-side query
+dekko sanity resolve --group-by-file # roll up grep-only rows by file
 ```
+
+`--group-by-file` rolls up the **grep-only** bucket by file (count and
+cause breakdown per file, largest cluster first) instead of listing
+individual match rows — useful for spotting a single file that
+accounts for a large share of a big "unexplained" count instead of
+reading past `--limit`'s default truncation or reaching for `--json`
+and aggregating by hand. Grouping happens over whatever rows already
+survived `--limit`/`--budget` fitting, not the pre-truncation total —
+pair it with a raised `--limit`/`--budget` when chasing a suspected
+large cluster, or the rollup only reflects a truncated sample. Scoped
+to the grep-only bucket in single-target text mode; has no effect
+under `--json` (already fully groupable by an external consumer) or
+`--all` (which rolls up by symbol, not by file).
 
 Always exits `0` on a completed comparison — a nonempty `grep-only`
 bucket is a finding to relay, not itself an error; this is a spot

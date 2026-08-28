@@ -87,7 +87,7 @@ import json
 import re
 import subprocess
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from dataclasses import dataclass
@@ -1361,6 +1361,33 @@ def _print_bucket_text(title: str, rows: list[dict], meter: Meter) -> None:
         print(f"    ... +{total - len(rows)} more")
 
 
+def _print_bucket_by_file(title: str, rows: list[dict], meter: Meter) -> None:
+    """Roll up a bucket's rows by file, largest cluster first.
+
+    Args:
+        title: Bucket label (``"grep-only"``).
+        rows: The bucket's rendered rows (post ``--limit``/budget
+            fitting — grouping still respects whatever rows survived
+            fitting, same as ``_print_bucket_text``).
+        meter: The bucket's cost meter, for the total-count header.
+    """
+    total = meter.total
+    print(f"  {title}: {total} (grouped by file)")
+    by_file: dict[str, Counter[str]] = defaultdict(Counter)
+    for row in rows:
+        by_file[row["file"]][row.get("cause", "(no cause)")] += 1
+    for file, causes in sorted(
+        by_file.items(), key=lambda kv: sum(kv[1].values()), reverse=True
+    ):
+        file_total = sum(causes.values())
+        print(f"    {file}: {file_total}")
+        for cause, count in causes.most_common():
+            marker = "   <-- look here" if cause == CAUSE_UNEXPLAINED else ""
+            print(f"      {count:>4}  {cause}{marker}")
+    if total > len(rows):
+        print(f"    ... +{total - len(rows)} more (outside --limit/budget)")
+
+
 def _print_text(
     action: str,
     target: str,
@@ -1374,6 +1401,7 @@ def _print_text(
     grep_truncated: bool = False,
     skipped_pathological: int = 0,
     receiver_mismatch_note: str | None = None,
+    group_by_file: bool = False,
 ) -> None:
     print(f"dekko sanity: '{target}' ({action}) vs. grep '{bare_name}'")
     print(f"  grep: {grep_command}")
@@ -1388,7 +1416,10 @@ def _print_text(
         print("  dekko-only: inconclusive (grep sweep truncated)")
     else:
         _print_bucket_text("dekko-only", *dekko_only)
-    _print_bucket_text("grep-only", *grep_only)
+    if group_by_file:
+        _print_bucket_by_file("grep-only", *grep_only)
+    else:
+        _print_bucket_text("grep-only", *grep_only)
     if module_level:
         print(
             f"  dekko also reports {len(module_level)} module-level call "
@@ -1670,6 +1701,7 @@ def run(
     limit: int = DEFAULT_REPORT_LIMIT,
     budget: int | None = None,
     as_json: bool = False,
+    group_by_file: bool = False,
 ) -> int:
     """Cross-check a ``callers``/``uses``/``unused`` result against a
     grep sweep.
@@ -1728,6 +1760,12 @@ def run(
             each of the three report buckets (see ``_fit_rows``), or
             ``None`` for unbounded.
         as_json: Emit structured JSON instead of a text report.
+        group_by_file: Roll up the grep-only bucket's text-mode
+            rendering by file (count and cause breakdown per file)
+            instead of a flat row list. Text mode only, single-target
+            only (no effect on ``--json`` or ``--unused``, which
+            already carries every row's ``file``/``cause`` for an
+            external consumer to group).
 
     Returns:
         ``0`` on a completed comparison (regardless of findings),
@@ -1879,6 +1917,7 @@ def run(
         grep_truncated=sweep.truncated,
         skipped_pathological=sweep.skipped_pathological,
         receiver_mismatch_note=receiver_mismatch_note,
+        group_by_file=group_by_file,
     )
     return EXIT_OK
 

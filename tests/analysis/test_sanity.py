@@ -2522,3 +2522,112 @@ def test_sanity_receiver_mismatch_absent_when_gate_unheld(
     causes = {row["cause"] for row in doc["grep_only"]}
     assert sanity.CAUSE_LIKELY_EXTERNAL_COLLISION not in causes
     assert "receiver_mismatch_note" not in doc
+
+
+# --- C.1/round-24 11-output-self-disclosure-hints.md: C.3
+# --group-by-file --------------------------------------------------
+
+
+def test_sanity_group_by_file_rolls_up_grep_only(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # C.3: two unexplained-cause hits clustered in b.py and one
+    # qualified-call hit in c.py must roll up into a per-file count
+    # with a per-cause breakdown, largest cluster first.
+    root = make_mapped_repo(
+        {
+            "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
+            "b.py": (
+                "value = totally_unrelated_wrapper(x)\n"
+                "value = totally_unrelated_wrapper(y)\n"
+            ),
+            "c.py": (
+                "import pkg\n\n\n"
+                "def caller():\n"
+                "    return pkg.totally_unrelated_wrapper()\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "totally_unrelated_wrapper",
+            "--root",
+            str(root),
+            "--group-by-file",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "grep-only: 3 (grouped by file)" in out
+    assert "b.py: 2" in out
+    assert "c.py: 1" in out
+    # b.py (2 hits) must sort before c.py (1 hit).
+    assert out.index("b.py: 2") < out.index("c.py: 1")
+    assert f"{sanity.CAUSE_UNEXPLAINED}   <-- look here" in out
+    assert sanity.CAUSE_QUALIFIED_CALL in out
+    assert f"{sanity.CAUSE_QUALIFIED_CALL}   <-- look here" not in out
+
+
+def test_sanity_group_by_file_omitted_keeps_flat_listing(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # C.3: default behavior (--group-by-file omitted) is unchanged —
+    # the existing flat _print_bucket_text rendering still applies.
+    root = make_mapped_repo(
+        {
+            "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
+            "b.py": (
+                "value = totally_unrelated_wrapper(x)\n"
+                "value = totally_unrelated_wrapper(y)\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        ["sanity", "totally_unrelated_wrapper", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "grep-only: 2" in out
+    assert "(grouped by file)" not in out
+    assert f"[{sanity.CAUSE_UNEXPLAINED}]" in out
+
+
+def test_sanity_group_by_file_respects_limit_truncation(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # C.3: grouping happens over whatever rows survived --limit
+    # fitting, not the pre-truncation total — the trailer must report
+    # against the already-truncated row count.
+    root = make_mapped_repo(
+        {
+            "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
+            "b.py": "value = totally_unrelated_wrapper(x)\n",
+            "c.py": "value = totally_unrelated_wrapper(x)\n",
+            "d.py": "value = totally_unrelated_wrapper(x)\n",
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "totally_unrelated_wrapper",
+            "--root",
+            str(root),
+            "--group-by-file",
+            "--limit",
+            "1",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "grep-only: 3 (grouped by file)" in out
+    assert "... +2 more (outside --limit/budget)" in out

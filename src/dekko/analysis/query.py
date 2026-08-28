@@ -2882,6 +2882,119 @@ def _fan_line(
     return line
 
 
+def _fan_in_note(sym_id: str) -> str:
+    """Build the fan-in axis-disambiguation note line.
+
+    Disclosed once a symbol has at least one caller, at the point a
+    reader might otherwise mistake fan-in for a total call-site count
+    (round-24 claude-code.md friction #3): fan-in is deduplicated by
+    caller (an ``Edge`` is built once per caller/callee pair), which
+    is a different axis from ``query callers --sites`` (one row per
+    call site) and ``sanity`` (a grep sweep that can also pick up
+    non-call textual mentions).
+
+    Args:
+        sym_id: The symbol's id, interpolated into the two pointers.
+
+    Returns:
+        The formatted note line, without a trailing newline.
+    """
+    return (
+        "  note: fan-in counts distinct callers (a caller invoking "
+        "this more than once still counts once) — use 'query "
+        f"callers {sym_id} --sites' for one row per call site, or "
+        f"'sanity {sym_id}' to cross-check against a grep sweep"
+    )
+
+
+def _sym_card_json(
+    index: MapIndex,
+    sym: Symbol,
+    fan_in: int,
+    fan_out: int,
+    ambig_in: int,
+    ambig_out: int,
+    referenced_by: int,
+    type_zero_fan: bool,
+    notes: bool,
+) -> dict:
+    """Build the ``query symbol --json`` doc.
+
+    Args:
+        index: Loaded map index.
+        sym: The symbol the card is for.
+        fan_in: Resolved incoming call count.
+        fan_out: Resolved outgoing call count.
+        ambig_in: Additional ambiguous incoming call sites.
+        ambig_out: Additional ambiguous outgoing calls.
+        referenced_by: Non-call reference count.
+        type_zero_fan: Whether the zero-fan type caveat applies.
+        notes: Whether to include anchored notes.
+
+    Returns:
+        The JSON-serializable doc.
+    """
+    doc = _sym_json(index, sym)
+    doc.update(
+        {
+            "language": sym.language,
+            "end_line": sym.end_line,
+            "fan_in": fan_in,
+            "fan_out": fan_out,
+        }
+    )
+    if ambig_in:
+        doc["ambiguous_in"] = ambig_in
+    if ambig_out:
+        doc["ambiguous_out"] = ambig_out
+    if referenced_by:
+        doc["referenced_by"] = referenced_by
+    if type_zero_fan:
+        doc["fan_note"] = _TYPE_ZERO_FAN_NOTE
+    if notes:
+        doc["notes"] = index.notes.get(sym.id, [])
+    return doc
+
+
+def _print_sym_card_text(
+    sym: Symbol,
+    fan_in: int,
+    fan_out: int,
+    ambig_in: int,
+    ambig_out: int,
+    referenced_by: int,
+    type_zero_fan: bool,
+    sym_notes: list[str],
+) -> None:
+    """Print the ``query symbol`` text-mode card.
+
+    Args:
+        sym: The symbol the card is for.
+        fan_in: Resolved incoming call count.
+        fan_out: Resolved outgoing call count.
+        ambig_in: Additional ambiguous incoming call sites.
+        ambig_out: Additional ambiguous outgoing calls.
+        referenced_by: Non-call reference count.
+        type_zero_fan: Whether the zero-fan type caveat applies.
+        sym_notes: Anchored notes to print, if any.
+    """
+    print(signature(sym))
+    print(f"  kind: {sym.kind} ({sym.language})")
+    print(f"  at: {sym.path}:{sym.start_line}-{sym.end_line}")
+    print(_fan_line(sym, fan_in, fan_out, ambig_in, ambig_out))
+    if fan_in:
+        print(_fan_in_note(sym.id))
+    if referenced_by:
+        # fan-in alone can read as "definitely unused" for a callback
+        # wired up by reference and never itself called (bug #2b) —
+        # this line is what stops that misread.
+        print(f"  referenced-by: {referenced_by} (not called)")
+    if type_zero_fan:
+        print(f"  note: {_TYPE_ZERO_FAN_NOTE}")
+    for text in sym_notes:
+        print(f"  note: {text}")
+
+
 def _run_symbol(
     index: MapIndex, sym: Symbol, as_json: bool, notes: bool
 ) -> tuple[int, Meter | None]:
@@ -2902,40 +3015,29 @@ def _run_symbol(
         and not referenced_by
     )
     if as_json:
-        doc = _sym_json(index, sym)
-        doc.update(
-            {
-                "language": sym.language,
-                "end_line": sym.end_line,
-                "fan_in": fan_in,
-                "fan_out": fan_out,
-            }
+        doc = _sym_card_json(
+            index,
+            sym,
+            fan_in,
+            fan_out,
+            ambig_in,
+            ambig_out,
+            referenced_by,
+            type_zero_fan,
+            notes,
         )
-        if ambig_in:
-            doc["ambiguous_in"] = ambig_in
-        if ambig_out:
-            doc["ambiguous_out"] = ambig_out
-        if referenced_by:
-            doc["referenced_by"] = referenced_by
-        if type_zero_fan:
-            doc["fan_note"] = _TYPE_ZERO_FAN_NOTE
-        if notes:
-            doc["notes"] = index.notes.get(sym.id, [])
         print(json.dumps(doc, indent=2))
         return EXIT_OK, None
-    print(signature(sym))
-    print(f"  kind: {sym.kind} ({sym.language})")
-    print(f"  at: {sym.path}:{sym.start_line}-{sym.end_line}")
-    print(_fan_line(sym, fan_in, fan_out, ambig_in, ambig_out))
-    if referenced_by:
-        # fan-in alone can read as "definitely unused" for a callback
-        # wired up by reference and never itself called (bug #2b) —
-        # this line is what stops that misread.
-        print(f"  referenced-by: {referenced_by} (not called)")
-    if type_zero_fan:
-        print(f"  note: {_TYPE_ZERO_FAN_NOTE}")
-    for text in sym_notes:
-        print(f"  note: {text}")
+    _print_sym_card_text(
+        sym,
+        fan_in,
+        fan_out,
+        ambig_in,
+        ambig_out,
+        referenced_by,
+        type_zero_fan,
+        sym_notes,
+    )
     return EXIT_OK, None
 
 

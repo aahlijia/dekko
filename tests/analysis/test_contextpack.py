@@ -280,7 +280,63 @@ def test_build_pack_import_filter_shrinks_output(
     text = contextpack.render_text(pack)
     assert "Path  (from pathlib.Path)" in text
     assert "os  (from os)" not in text
-    assert "+20 more imports (irrelevant to this pack)" in text
+    assert "+20 more imports" in text
+    assert "rerun with --all-imports to include them" in text
+
+
+def test_build_pack_all_imports_skips_relevance_filter(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # C.2: --all-imports opts out of _relevant_imports filtering
+    # entirely, so every import in the target's file survives and
+    # imports_dropped reads 0.
+    root = make_mapped_repo(MANY_IMPORTS)
+    index, helper = _resolved(root, "helper")
+    all_imports = index.imports_by_path["app.py"]
+
+    pack = contextpack.build_pack(index, helper, hops=1, all_imports=True)
+
+    assert len(pack.imports) == len(all_imports)
+    assert pack.imports_dropped == 0
+    assert {imp.name for imp in pack.imports} >= {"Path", "os"}
+
+
+def test_build_pack_default_still_filters_imports(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # C.2: default behavior (all_imports omitted) must be unchanged.
+    root = make_mapped_repo(MANY_IMPORTS)
+    index, helper = _resolved(root, "helper")
+    pack = contextpack.build_pack(index, helper, hops=1)
+    kept = {imp.name for imp in pack.imports}
+    assert kept == {"Path"}
+    assert pack.imports_dropped == 20
+
+
+def test_cli_context_all_imports_includes_dropped_import(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # C.2: end-to-end, dekko context TARGET --all-imports includes an
+    # import that plain dekko context TARGET drops.
+    root = make_mapped_repo(MANY_IMPORTS)
+    code = cli.main(["context", "app.py:helper", "--root", str(root)])
+    assert code == 0
+    default_out = capsys.readouterr().out
+    assert "os  (from os)" not in default_out
+
+    code = cli.main(
+        [
+            "context",
+            "app.py:helper",
+            "--root",
+            str(root),
+            "--all-imports",
+        ]
+    )
+    assert code == 0
+    all_out = capsys.readouterr().out
+    assert "os  (from os)" in all_out
+    assert "more imports" not in all_out
 
 
 JS_MULTI_NAME_IMPORT = {

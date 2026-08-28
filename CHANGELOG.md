@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.34] — 2026-08-28
+
+### Changed
+- **Output self-disclosure hints** — round 24 found agents missing
+  built-in disambiguation tools because nothing in the primary
+  output pointed at them:
+  - `query symbol`'s fan-in line now notes `--sites`/`sanity` when
+    fan-in is nonzero.
+  - `dekko context` gains `--all-imports` to skip the relevance
+    filter; the "+N more imports" line now names the filter
+    criterion and the flag that bypasses it.
+  - `dekko sanity` gains `--group-by-file`, rolling up grep-only
+    mismatches by file with a cause breakdown.
+  - `--min-shared`'s help text now suggests lowering it to 1 on
+    small repos.
+  See `.features/plans/round24/11-output-self-disclosure-hints.md`.
+
 ## [0.43.33] — 2026-08-28
 
 ### Changed

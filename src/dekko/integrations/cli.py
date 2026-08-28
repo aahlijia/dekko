@@ -490,7 +490,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=query.DEFAULT_MIN_SHARED,
         metavar="N",
         help="for 'peers': minimum shared callees to count as a peer "
-        f"(default: {query.DEFAULT_MIN_SHARED})",
+        f"(default: {query.DEFAULT_MIN_SHARED}) — small/sparse repos "
+        "often need to lower this to 1 to find any peers at all",
     )
     p_query.add_argument(
         "--list",
@@ -559,6 +560,15 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="inline the target's source body and hop-1 call-site "
         "lines (counts against --budget)",
+    )
+    p_ctx.add_argument(
+        "--all-imports",
+        action="store_true",
+        help="include every import in the target's file, skipping "
+        "the relevance filter that normally drops imports whose "
+        "name isn't referenced in the target's or its neighbors' "
+        "signatures (has no effect in file mode, which never "
+        "filters imports)",
     )
     p_ctx.add_argument(
         "--notes",
@@ -931,6 +941,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         metavar="TOKENS",
         help="approximate token budget, applied independently to each "
         "report bucket",
+    )
+    p_sanity.add_argument(
+        "--group-by-file",
+        action="store_true",
+        help="roll up the grep-only bucket by file (count and cause "
+        "breakdown per file) instead of listing individual match "
+        "rows — surfaces clustering that a flat, --limit-truncated "
+        "list can hide (single-target, text mode only)",
     )
     p_sanity.add_argument(
         "--root",
@@ -1787,6 +1805,7 @@ def run_context(args: argparse.Namespace) -> int:
         with_source=args.with_source,
         notes=args.notes,
         task=task,
+        all_imports=args.all_imports,
     )
 
 
@@ -2430,6 +2449,7 @@ def run_sanity(args: argparse.Namespace) -> int:
         limit=args.limit,
         budget=args.budget,
         as_json=args.as_json,
+        group_by_file=args.group_by_file,
     )
 
 

@@ -531,6 +531,43 @@ def test_symbol_card_no_zero_fan_note_for_function(
     out = capsys.readouterr().out
     assert "fan-in: 0, fan-out: 0" in out
     assert "not evidence the type is unused" not in out
+    # C.1: fan-in of 0 has nothing to disambiguate, so the
+    # distinct-callers-vs-call-sites note must not print either.
+    assert "note: fan-in counts distinct callers" not in out
+
+
+def test_symbol_card_fan_in_note_points_at_sites_and_sanity(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # C.1: a symbol with fan_in > 0 must disclose that fan-in counts
+    # distinct callers (not call sites) and point at the two other
+    # views of "how often is this used" — 'query callers --sites' and
+    # 'sanity' — so a reader doesn't mistake one number's axis for
+    # another's (round-24 claude-code.md friction #3).
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(["query", "symbol", "a.py:helper", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "fan-in: 1" in out
+    assert "note: fan-in counts distinct callers" in out
+    assert "query callers a.py::helper --sites" in out
+    assert "sanity a.py::helper" in out
+
+
+def test_symbol_card_json_omits_fan_in_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # C.1: the note is a text-mode-only disclosure — JSON consumers
+    # already get fan_in as a bare integer and can request the other
+    # views directly, so no new key is added to the JSON doc.
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(
+        ["query", "symbol", "a.py:helper", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["fan_in"] == 1
+    assert "fan_note" not in doc
 
 
 def test_symbol_card_shows_referenced_by_count(

@@ -185,13 +185,20 @@ def _relevant_imports(pack: Pack) -> list[Import]:
     return [imp for imp in pack.imports if imp.name in tokens]
 
 
-def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
+def build_pack(
+    index: MapIndex,
+    target: Symbol,
+    hops: int,
+    all_imports: bool = False,
+) -> Pack:
     """BFS the call graph around a symbol up to ``hops``.
 
     Args:
         index: Loaded map index.
         target: Resolved target symbol.
         hops: Neighborhood radius (>= 1).
+        all_imports: Skip the ``_relevant_imports`` relevance filter
+            and keep every import in the target's file.
 
     Returns:
         The assembled pack (untrimmed).
@@ -229,9 +236,12 @@ def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
                 next_frontier.append(nid)
         frontier = next_frontier
     pack.module_callers = sorted(set(pack.module_callers))
-    all_imports = pack.imports
-    pack.imports = _relevant_imports(pack)
-    pack.imports_dropped = len(all_imports) - len(pack.imports)
+    all_imports_list = pack.imports
+    if all_imports:
+        pack.imports_dropped = 0
+    else:
+        pack.imports = _relevant_imports(pack)
+        pack.imports_dropped = len(all_imports_list) - len(pack.imports)
     return pack
 
 
@@ -397,7 +407,11 @@ def render_text(pack: Pack) -> str:
         ]
         if pack.imports_dropped:
             n = pack.imports_dropped
-            lines.append(f"  +{n} more imports (irrelevant to this pack)")
+            lines.append(
+                f"  +{n} more imports (name not referenced in the "
+                "target's or its neighbors' signatures — rerun with "
+                "--all-imports to include them)"
+            )
     if pack.file_symbols:
         lines.append("symbols:")
         lines += [
@@ -583,6 +597,7 @@ def run(
     with_source: bool = False,
     notes: bool = True,
     task: TaskContext | None = None,
+    all_imports: bool = False,
 ) -> int:
     """Build, trim, and print a context pack for a target.
 
@@ -600,13 +615,16 @@ def run(
         notes: Include the target's notes (default on).
         task: Optional task context; when set, neighbors are trimmed
             least-relevant first under a tight budget.
+        all_imports: Skip the relevance filter and keep every import
+            in the target's file (no effect in file mode, which
+            never filters imports).
 
     Returns:
         Process exit code.
     """
     sym, candidates = resolve_target(index, target)
     if sym is not None:
-        pack = build_pack(index, sym, hops)
+        pack = build_pack(index, sym, hops, all_imports=all_imports)
         if not notes:
             pack.notes = []
     elif not candidates and ":" not in target:
