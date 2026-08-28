@@ -1355,3 +1355,340 @@ def test_sanity_near_own_definition_checks_every_same_named_symbol(
         if row["file"] == "renderer.py"
     }
     assert rows_by_line.get(1) == sanity.CAUSE_COMMENT_MENTION
+
+
+# --- ``sanity --unused``: classify_unused_reference (pure) -------------
+
+
+def test_classify_unused_reference_spread_object() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "return { ...TARGET, ...def };", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_SPREAD)
+
+
+def test_classify_unused_reference_spread_of_bare_name_in_call_arg() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "f(...TARGET);", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_SPREAD)
+
+
+def test_classify_unused_reference_typeof() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "type ToolDefaultsType = typeof TARGET;", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_TYPEOF)
+
+
+def test_classify_unused_reference_subscript() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "const v = TARGET[key];", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_SUBSCRIPT)
+
+
+def test_classify_unused_reference_bare_call() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "TARGET();", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_CALL)
+
+
+def test_classify_unused_reference_qualified_call() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "pkg.TARGET();", "TARGET", path="a.py"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_CALL)
+
+
+def test_classify_unused_reference_other_catch_all() -> None:
+    # A plain assignment RHS -- not one of the three named shapes, but
+    # still a real reference, so it must surface as SHAPE_OTHER rather
+    # than being dropped for not matching a known template.
+    bucket, detail = sanity.classify_unused_reference(
+        "const x = TARGET;", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_OTHER)
+
+
+def test_classify_unused_reference_import_is_noise() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "import { TARGET } from './a';", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("noise", sanity.CAUSE_IMPORT_STATEMENT)
+
+
+def test_classify_unused_reference_comment_is_noise() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "# mentions TARGET here", "TARGET", path="a.py"
+    )
+    assert (bucket, detail) == ("noise", sanity.CAUSE_COMMENT_MENTION)
+
+
+def test_classify_unused_reference_comment_noise_unconditional() -> None:
+    # Unlike classify_miss, comment detection here has no
+    # near_own_definition gate -- a comment anywhere in the repo is
+    # still just a comment, not usage evidence.
+    bucket, detail = sanity.classify_unused_reference(
+        "// TARGET is mentioned far from its own definition",
+        "TARGET",
+        path="far/away.ts",
+    )
+    assert (bucket, detail) == ("noise", sanity.CAUSE_COMMENT_MENTION)
+
+
+def test_classify_unused_reference_call_wins_over_spread_check_order() -> None:
+    # Check-order regression: "...TARGET()" spreads a call's *result*,
+    # not TARGET itself -- SHAPE_CALL must win over SHAPE_SPREAD.
+    bucket, detail = sanity.classify_unused_reference(
+        "f(...TARGET());", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_CALL)
+
+
+# --- ``sanity --unused``: end-to-end ------------------------------------
+
+
+def test_sanity_unused_excludes_own_definition_line(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    (root / "widget.dat").write_text("noise\n  ...TARGET_NAME\n")
+    code = cli.main(
+        ["sanity", "--unused", "TARGET_NAME", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    locs = {(row["file"], row["line"]) for row in doc["reference_hits"]}
+    assert ("a.py", 1) not in locs
+    assert ("widget.dat", 2) in locs
+
+
+def test_sanity_unused_catches_reference_shapes_no_reference_query_covers(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Proves the "general safety net" claim independently of any one
+    # language's reference_query fix: a reference living in a file
+    # dekko can't parse at all is invisible to calls_in/referenced_in
+    # by construction (the TS/JS spread/typeof/subscript gap this doc
+    # was originally filed against is already closed as of 0.43.19,
+    # so this stands in for "a shape no reference_query covers yet").
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    (root / "widget.dat").write_text(
+        "noise line\n"
+        "  ...TARGET_NAME\n"
+        "  typeof TARGET_NAME\n"
+        "  TARGET_NAME[0]\n"
+    )
+    code = cli.main(
+        ["sanity", "--unused", "TARGET_NAME", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["has_dekko_evidence"] is False
+    shapes = {row["shape"] for row in doc["reference_hits"]}
+    assert shapes == {
+        sanity.SHAPE_SPREAD,
+        sanity.SHAPE_TYPEOF,
+        sanity.SHAPE_SUBSCRIPT,
+    }
+
+
+def test_sanity_unused_json_reports_counts_and_meta(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    (root / "widget.dat").write_text(
+        "  ...TARGET_NAME\n  typeof TARGET_NAME\n"
+    )
+    code = cli.main(
+        ["sanity", "--unused", "TARGET_NAME", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["counts"]["reference_hits"] == 2
+    meta = doc["meta"]["reference_hits"]
+    assert meta["total"] == 2
+    assert meta["returned"] == 2
+    shapes = {row["shape"] for row in doc["reference_hits"]}
+    assert shapes == {sanity.SHAPE_SPREAD, sanity.SHAPE_TYPEOF}
+
+
+def test_sanity_unused_reports_evidence_present_when_dekko_has_callers(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # sanity --unused doesn't re-run _is_root -- it just reports
+    # calls_in/referenced_in evidence directly, so running it against
+    # a symbol dekko would never actually flag (it has a real caller)
+    # still answers correctly: has_dekko_evidence: true.
+    root = make_mapped_repo(
+        {
+            "a.py": "def target():\n    return 1\n",
+            "b.py": "def other():\n    return target()\n",
+        }
+    )
+    code = cli.main(
+        ["sanity", "--unused", "target", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["has_dekko_evidence"] is True
+
+
+def test_sanity_unused_clean_case_text(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def trulyDeadHelper():\n    return 1\n"})
+    code = cli.main(
+        ["sanity", "--unused", "trulyDeadHelper", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "reference hits found outside definition/import/comment: 0" in out
+    assert (
+        "clean: no reference evidence found outside definition "
+        "-- flagged-unused looks correct" in out
+    )
+
+
+def test_sanity_unused_clean_case_json(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def trulyDeadHelper():\n    return 1\n"})
+    code = cli.main(
+        [
+            "sanity",
+            "--unused",
+            "trulyDeadHelper",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["reference_hits"] == []
+    assert doc["has_dekko_evidence"] is False
+
+
+def test_sanity_unused_text_call_shaped_summary_wording(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    (root / "widget.dat").write_text("  TARGET_NAME()\n  typeof TARGET_NAME\n")
+    code = cli.main(["sanity", "--unused", "TARGET_NAME", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "1 call-shaped reference" in out
+    assert "possible resolver miss" in out
+    assert "1 non-call reference" in out
+    assert "verify before deleting" in out
+
+
+def test_sanity_usages_unused_mutex(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    code = cli.main(
+        [
+            "sanity",
+            "target",
+            "--usages",
+            "--unused",
+            "target",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 2
+    assert "not both" in capsys.readouterr().err
+
+
+def test_sanity_no_target_and_no_unused_is_usage_error(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    code = cli.main(["sanity", "--root", str(root)])
+    assert code == 2
+    assert "requires a target" in capsys.readouterr().err
+
+
+def test_sanity_unused_generic_name_caution(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def run():\n    return 1\n"})
+    (root / "widget.dat").write_text("  typeof run\n")
+    code = cli.main(
+        ["sanity", "--unused", "run", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["generic_name_caution"] is True
+    # Still reported, not suppressed.
+    assert doc["counts"]["reference_hits"] == 1
+
+
+def test_sanity_unused_generic_name_caution_text_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def run():\n    return 1\n"})
+    (root / "widget.dat").write_text("  typeof run\n")
+    code = cli.main(["sanity", "--unused", "run", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert sanity.CAUSE_GENERIC_NAME in out
+
+
+def test_sanity_unused_json_discloses_truncation_and_pathological_skips(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    fake_sweep = sanity.GrepSweepResult(
+        hits=[
+            sanity.GrepHit(
+                path="widget.dat", line=2, snippet="  ...TARGET_NAME"
+            )
+        ],
+        command_text="grep -rn -I -w -F -- TARGET_NAME .",
+        error=None,
+        truncated=True,
+        skipped_pathological=3,
+    )
+    monkeypatch.setattr(sanity, "_run_grep", lambda *a, **kw: fake_sweep)
+
+    code = cli.main(
+        ["sanity", "--unused", "TARGET_NAME", "--root", str(root), "--json"]
+    )
+
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["grep_truncated"] is True
+    assert doc["grep_skipped_pathological"] == 3
+    assert "reference_hits_note" in doc
+    assert "grep_skipped_pathological_note" in doc
+
+
+def test_sanity_unused_text_discloses_truncation_and_pathological_skips(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    fake_sweep = sanity.GrepSweepResult(
+        hits=[],
+        command_text="grep -rn -I -w -F -- TARGET_NAME .",
+        error=None,
+        truncated=True,
+        skipped_pathological=2,
+    )
+    monkeypatch.setattr(sanity, "_run_grep", lambda *a, **kw: fake_sweep)
+
+    code = cli.main(["sanity", "--unused", "TARGET_NAME", "--root", str(root)])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "safety cap" in out
+    assert "pathological" in out

@@ -1,5 +1,5 @@
-"""``dekko sanity <target>``: cross-check a callers/uses result against
-a targeted grep sweep.
+"""``dekko sanity <target>``: cross-check a callers/uses/unused result
+against a targeted grep sweep.
 
 Automates the ``dekko-verify`` skill
 (``integrations/claude/skills/dekko-verify/SKILL.md``), which is pure
@@ -14,6 +14,15 @@ directories ``dekko map`` already excludes — see
 ``(file, line)``, and for every line grep found that dekko's answer
 didn't, name the likely cause from ``dekko-verify``'s own documented
 blind-spot list rather than leaving the agent to re-derive it.
+
+A third mode, ``--unused <name>``, cross-checks the opposite kind of
+result: a ``dekko unused`` "flagged dead" verdict, which is built
+entirely from ``calls_in``/``referenced_in`` table lookups and never
+looks at the file's raw text. This mode runs the same grep sweep and
+reports every hit found outside the symbol's own definition, an
+import/require statement, or a comment as "reference evidence" the
+call-graph tables didn't already explain away — see
+``classify_unused_reference`` and ``_run_unused_check``.
 
 This is a spot check, not a re-verification — see the module's own
 ``EXIT_OK``-always-on-a-clean-run contract in ``run()``'s docstring.
@@ -59,6 +68,7 @@ from pathlib import Path
 from dekko.analysis import query
 from dekko.classify import is_test_path
 from dekko.core import languages
+from dekko.core.model import Symbol
 from dekko.core.walker import DEFAULT_EXCLUDE_DIRS
 from dekko.render.mapfile import MapIndex
 from dekko.storage.cache import CACHE_DIR
@@ -153,6 +163,100 @@ CAUSE_IMPORT_STATEMENT = (
     "import/require statement naming the symbol — not a call site"
 )
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
+
+# --- unused-mode reference-shape classification ------------------------
+#
+# ``classify_unused_reference`` answers a different question than
+# ``classify_miss`` above: not "why didn't dekko count this as a call,"
+# but "does this grep hit indicate a reference dekko's zero-evidence
+# claim doesn't already account for." See ``sanity --unused``'s design
+# doc (``.features/plans/round23/23-sanity-unused-variant.md``) for the
+# full rationale.
+SHAPE_CALL = "call"
+SHAPE_SPREAD = "spread"
+SHAPE_TYPEOF = "typeof"
+SHAPE_SUBSCRIPT = "subscript"
+SHAPE_OTHER = "other"
+
+# Deliberately plain regex over the raw grep line, same philosophy as
+# every other check in this module ("heuristic pattern-matches on a
+# grep-only line's syntax, not a re-derivation of the resolver's
+# actual reasoning" — see the module docstring). Not AST-aware, not
+# per-language — these four shapes are common enough across
+# curly-brace languages that one shared heuristic set covers the
+# report's three named cases plus the general "any non-call mention"
+# catch-all, without hand-rolling a query per grammar the way
+# reference_query fixes necessarily do.
+_SPREAD_TEMPLATE = r"\.\.\.\s*{name}\b"
+_TYPEOF_TEMPLATE = r"\btypeof\s+{name}\b"
+_SUBSCRIPT_TEMPLATE = r"{name}\s*\["
+_BARE_CALL_TEMPLATE = r"\b{name}\s*\("
+
+
+def classify_unused_reference(
+    snippet: str,
+    bare_name: str,
+    *,
+    path: str,
+) -> tuple[str, str | None]:
+    """Classify one grep hit for a symbol ``dekko unused`` flagged dead.
+
+    Returns ``(bucket, detail)``:
+
+    - ``("noise", CAUSE_IMPORT_STATEMENT)`` / ``("noise",
+      CAUSE_COMMENT_MENTION)`` — the hit is explained by something
+      already accounted for elsewhere (an import naming the symbol
+      doesn't call it; a comment mentioning it isn't code). Not
+      reported as reference evidence.
+    - ``("reference", SHAPE_*)`` — everything else: a real, non-noise
+      mention of the bare name outside its own definition.
+      ``SHAPE_CALL`` (bare ``name(`` or qualified ``x.name(``/
+      ``x::name(``) is checked before spread/typeof/subscript, since
+      ``...name()`` (spreading a call's *result*) is a genuine call
+      site first and a spread second — the more actionable
+      classification wins. ``SHAPE_OTHER`` is the catch-all for every
+      other bare mention (assignment RHS, argument, destructuring
+      element, array/object member, JSX prop, etc.) — this is
+      deliberately not scoped to just the three named shapes, so a
+      reference pattern no language's ``reference_query`` covers *yet*
+      still surfaces as "reference evidence found," not silently
+      dropped for not matching a known template. This is the
+      generality behind "a general safety net beyond any one
+      language-specific detection fix."
+
+    Unlike ``classify_miss``, comment detection here is unconditional
+    (no ``near_own_definition`` gate) — in this mode a comment
+    mentioning the bare name *anywhere* in the repo is still just a
+    comment, not usage evidence, regardless of where it sits relative
+    to the symbol's own definition.
+
+    Args:
+        snippet: The grep-matched line's text.
+        bare_name: The bare identifier being searched for.
+        path: The hit's repo-relative path (for comment-style lookup).
+
+    Returns:
+        ``(bucket, detail)`` where ``bucket`` is ``"noise"`` or
+        ``"reference"`` and ``detail`` is a ``CAUSE_*`` or ``SHAPE_*``
+        constant.
+    """
+    if _looks_like_import_statement(snippet, bare_name):
+        return "noise", CAUSE_IMPORT_STATEMENT
+    if _looks_like_comment_line(snippet, path):
+        return "noise", CAUSE_COMMENT_MENTION
+    name = re.escape(bare_name)
+    if _looks_qualified_call(snippet, bare_name) or re.search(
+        _BARE_CALL_TEMPLATE.format(name=name), snippet
+    ):
+        return "reference", SHAPE_CALL
+    if re.search(_SPREAD_TEMPLATE.format(name=name), snippet):
+        return "reference", SHAPE_SPREAD
+    if re.search(_TYPEOF_TEMPLATE.format(name=name), snippet):
+        return "reference", SHAPE_TYPEOF
+    if re.search(_SUBSCRIPT_TEMPLATE.format(name=name), snippet):
+        return "reference", SHAPE_SUBSCRIPT
+    return "reference", SHAPE_OTHER
+
 
 # A name this short is common enough on its own (loop variables aside,
 # real identifiers this short — "id", "map", "new" — collide constantly
@@ -991,23 +1095,247 @@ def _print_text(
         print("  clean: no grep-only misses — spot check passed")
 
 
+# --- --unused mode -------------------------------------------------
+
+
+def _build_unused_json_doc(
+    *,
+    sym: Symbol,
+    bare_name: str,
+    has_dekko_evidence: bool,
+    grep_command: str,
+    sweep: GrepSweepResult,
+    reference_hits: tuple[list[dict], Meter],
+    noise_count: int,
+    generic_name_caution: bool,
+) -> dict:
+    """Assemble ``sanity --unused``'s JSON output document.
+
+    Deliberately not the callers/uses ``matches``/``dekko_only``/
+    ``grep_only`` three-bucket shape — there is no "dekko side" hit
+    set to diff against in ``--unused`` mode, dekko's claim is just
+    "zero," so forcing that shape here would invite a consumer to
+    misread an empty ``dekko_only`` as meaningful. ``meta``/``counts``
+    still follow the ``Meter.as_dict()``-based truncation-disclosure
+    convention ``_build_json_doc`` already established.
+    """
+    rows, meter = reference_hits
+    doc = {
+        "action": "sanity",
+        "query_action": "unused",
+        "target": f"{sym.path}:{sym.qualname}:{sym.start_line}",
+        "bare_name": bare_name,
+        "has_dekko_evidence": has_dekko_evidence,
+        "grep_command": grep_command,
+        "grep_truncated": sweep.truncated,
+        "grep_skipped_pathological": sweep.skipped_pathological,
+        "reference_hits": rows,
+        "counts": {
+            "reference_hits": meter.total,
+            "filtered_noise": noise_count,
+        },
+        "meta": {"reference_hits": meter.as_dict()},
+        "generic_name_caution": generic_name_caution,
+    }
+    if sweep.truncated:
+        doc["reference_hits_note"] = _TRUNCATION_NOTE
+    if sweep.skipped_pathological:
+        doc["grep_skipped_pathological_note"] = _pathological_skip_note(
+            sweep.skipped_pathological
+        )
+    return doc
+
+
+def _print_unused_text(
+    label: str,
+    bare_name: str,
+    has_evidence: bool,
+    grep_command: str,
+    reference_hits: tuple[list[dict], Meter],
+    noise_count: int,
+    generic_name_caution: bool,
+    *,
+    grep_truncated: bool = False,
+    skipped_pathological: int = 0,
+) -> None:
+    """Render ``sanity --unused``'s text report.
+
+    ``noise_count`` isn't rendered directly (the report focuses on the
+    signal — reference hits — the same choice ``grep_skipped_
+    pathological`` already made over listing every dropped line), but
+    is accepted for signature symmetry with ``_build_unused_json_doc``.
+    """
+    del noise_count
+    rows, meter = reference_hits
+    print(f"dekko sanity --unused '{bare_name}' ({label})")
+    print(f"  grep: {grep_command}")
+    if grep_truncated:
+        print(f"  note: {_TRUNCATION_NOTE}")
+    if skipped_pathological:
+        print(f"  note: {_pathological_skip_note(skipped_pathological)}")
+    evidence = (
+        "none -- this is why it was flagged" if not has_evidence else "present"
+    )
+    print(f"  dekko evidence (calls_in/referenced_in): {evidence}")
+    print(
+        "  reference hits found outside definition/import/comment: "
+        f"{meter.total}"
+    )
+    for row in rows:
+        loc = f"{row['file']}:{row['line']}"
+        print(f"    {loc}  [{row['shape']}]")
+        print(f"      {row['snippet']}")
+    if meter.total > len(rows):
+        print(f"    ... +{meter.total - len(rows)} more")
+    if generic_name_caution:
+        print(f"  note: {CAUSE_GENERIC_NAME}")
+
+    if meter.total == 0:
+        print(
+            "  clean: no reference evidence found outside definition "
+            "-- flagged-unused looks correct"
+        )
+        return
+
+    call_count = sum(1 for r in rows if r["shape"] == SHAPE_CALL)
+    non_call_count = len(rows) - call_count
+    parts = []
+    if call_count:
+        plural = "" if call_count == 1 else "s"
+        parts.append(
+            f"{call_count} call-shaped reference{plural} found "
+            "(possible resolver miss)"
+        )
+    if non_call_count:
+        plural = "" if non_call_count == 1 else "s"
+        parts.append(f"{non_call_count} non-call reference{plural} found")
+    summary = " and ".join(parts)
+    print(f"  flagged unused, but {summary} -- verify before deleting")
+
+
+def _run_unused_check(
+    index: MapIndex,
+    target: str,
+    root: Path,
+    limit: int,
+    budget: int | None,
+    as_json: bool,
+) -> int:
+    """``dekko sanity --unused <target>`` — see module docstring.
+
+    Starts from dekko's own claim of zero ``calls_in``/``referenced_
+    in`` evidence for the resolved symbol and asks whether a targeted
+    grep sweep turns up anything outside the symbol's own definition,
+    an import/require statement, or a comment — any such hit is a
+    reference ``dekko unused`` didn't already explain away.
+
+    Resolves against the full, unfiltered ``index`` (not ``index.
+    without_tests()``) — matching ``dekko unused``'s own default,
+    where a symbol called only from a test file is still "used."
+    ``--include-tests`` is therefore a documented no-op in this mode;
+    the caller never threads it through here.
+
+    Returns:
+        ``EXIT_OK`` on a completed check (regardless of findings —
+        advisory, never a hard failure), ``EXIT_NOT_FOUND``/
+        ``EXIT_AMBIGUOUS`` when ``target`` doesn't resolve to a unique
+        symbol, ``EXIT_GREP_FAILED`` when the grep sweep itself
+        couldn't run.
+    """
+    sym, candidates = query.resolve_target(index, target)
+    if sym is None:
+        return query.report_unresolved(target, candidates, index)
+    bare_name = sym.name
+
+    own_def_locs = frozenset(
+        (s.path, s.start_line) for s in index.symbols_by_name.get(sym.name, [])
+    )
+    has_evidence = bool(index.calls_in.get(sym.id)) or bool(
+        index.referenced_in.get(sym.id)
+    )
+
+    sweep = _run_grep(root, bare_name)
+    if sweep.error is not None:
+        print(f"dekko: {sweep.error}", file=sys.stderr)
+        return EXIT_GREP_FAILED
+
+    hits = [h for h in sweep.hits if (h.path, h.line) not in own_def_locs]
+    reference_rows: list[dict] = []
+    noise_count = 0
+    for h in hits:
+        bucket, detail = classify_unused_reference(
+            h.snippet, bare_name, path=h.path
+        )
+        if bucket == "noise":
+            noise_count += 1
+            continue
+        if _looks_like_multiline_import_member(root, h, bare_name):
+            noise_count += 1
+            continue
+        row = _grep_row(h)
+        row["shape"] = detail
+        reference_rows.append(row)
+
+    kept, meter = _fit_rows(reference_rows, budget, limit)
+    generic_caution = _is_generic_name(bare_name)
+
+    if as_json:
+        doc = _build_unused_json_doc(
+            sym=sym,
+            bare_name=bare_name,
+            has_dekko_evidence=has_evidence,
+            grep_command=sweep.command_text,
+            sweep=sweep,
+            reference_hits=(kept, meter),
+            noise_count=noise_count,
+            generic_name_caution=generic_caution,
+        )
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK
+
+    _print_unused_text(
+        f"{sym.path}:{sym.start_line}",
+        bare_name,
+        has_evidence,
+        sweep.command_text,
+        (kept, meter),
+        noise_count,
+        generic_caution,
+        grep_truncated=sweep.truncated,
+        skipped_pathological=sweep.skipped_pathological,
+    )
+    return EXIT_OK
+
+
 def run(
     index: MapIndex,
     target: str,
     root: Path,
     usages: bool = False,
+    unused: bool = False,
     include_tests: bool = False,
     limit: int = DEFAULT_REPORT_LIMIT,
     budget: int | None = None,
     as_json: bool = False,
 ) -> int:
-    """Cross-check a ``callers``/``uses`` result against a grep sweep.
+    """Cross-check a ``callers``/``uses``/``unused`` result against a
+    grep sweep.
 
     Always exits ``0`` on a clean run — a nonempty ``grep_only``
-    bucket is a spot-check finding to relay, not itself an error
-    condition (mirrors ``doctor``'s "reports, doesn't judge"
-    contract). Only a genuinely broken invocation (target doesn't
-    resolve, or the grep sweep itself couldn't run) exits nonzero.
+    bucket (or, in ``--unused`` mode, a nonempty reference-hit set) is
+    a spot-check finding to relay, not itself an error condition
+    (mirrors ``doctor``'s "reports, doesn't judge" contract). Only a
+    genuinely broken invocation (target doesn't resolve, or the grep
+    sweep itself couldn't run) exits nonzero.
+
+    When ``unused`` is set, dispatches to ``_run_unused_check`` before
+    any of the callers/uses logic below runs — a separate mode with
+    its own comparison shape (dekko's claim is "zero evidence," not a
+    hit set to diff against grep's), not a branch spliced into the
+    callers/uses body. ``usages``/``include_tests`` are not consulted
+    in this mode: ``--unused`` is mutually exclusive with ``--usages``
+    (enforced by the caller), and ``--include-tests`` is a documented
+    no-op here (see ``_run_unused_check``'s own docstring).
 
     When the grep sweep itself hits its ``_MAX_GREP_LINES`` safety cap
     (round 21 Track B1 — a generic bare name on a large repo), the
@@ -1033,6 +1361,10 @@ def run(
         root: Repository root on disk, for the grep sweep.
         usages: Check ``uses <target>`` instead of ``callers
             <target>``.
+        unused: Check whether a symbol ``dekko unused`` flagged dead
+            has grep-visible reference evidence instead of running the
+            callers/uses cross-check. Mutually exclusive with
+            ``usages`` (enforced by the caller, not this function).
         include_tests: Include test files in the dekko-side query
             (default: excluded, matching the MCP ``get_callers``/
             ``find_usages`` tools' own default).
@@ -1047,10 +1379,13 @@ def run(
     Returns:
         ``0`` on a completed comparison (regardless of findings),
         ``EXIT_NOT_FOUND``/``EXIT_AMBIGUOUS`` when ``target`` doesn't
-        resolve to a unique symbol (callers mode) or matches no
+        resolve to a unique symbol (callers/unused mode) or matches no
         external reference (``uses`` mode), ``EXIT_GREP_FAILED`` when
         the grep sweep itself couldn't run.
     """
+    if unused:
+        return _run_unused_check(index, target, root, limit, budget, as_json)
+
     query_index = index if include_tests else index.without_tests()
     own_def_locs: frozenset[tuple[str, int]] = frozenset()
 

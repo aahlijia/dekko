@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.25] — 2026-08-27
+
+### Added
+- **`dekko sanity --unused NAME`** — a new sanity mode for the flip
+  side of `sanity`'s usual callers/uses cross-check: given a symbol
+  `dekko unused` flagged as dead, grep-sweep its bare name and report
+  every hit outside its own definition/import/comment as reference
+  evidence, classified (spread/typeof/subscript/call/other). Catches
+  the class of false positive where a symbol is genuinely referenced
+  but not via a shape the call-graph walk recognizes, in any language
+  — not just the TS-specific spread/typeof/subscript fix already
+  shipped for `unused` itself. Mutually exclusive with `--usages`;
+  always exits 0 (advisory). See
+  `.features/plans/round23/23-sanity-unused-variant.md`.
+
 ## [0.43.24] — 2026-08-27
 
 ### Added

@@ -775,13 +775,31 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="cross-check a callers/uses result against a targeted "
         "grep sweep before trusting a low/zero count",
     )
-    p_sanity.add_argument("target")
+    p_sanity.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="symbol target (callers mode) or bare external base "
+        "identifier (--usages mode); not required when --unused is "
+        "given",
+    )
     p_sanity.add_argument(
         "--usages",
         action="store_true",
         help="check 'uses <target>' instead of 'callers <target>' — "
         "target is the bare external base identifier (e.g. 'get' for "
         "requests.get)",
+    )
+    p_sanity.add_argument(
+        "--unused",
+        metavar="NAME",
+        default=None,
+        help="check whether a symbol 'dekko unused' flagged dead has "
+        "grep-visible reference evidence outside its own definition/"
+        "import/comment — NAME resolves the same way callers mode's "
+        "target does (bare name, qualname, path:qualname, or "
+        "#N-disambiguated). Mutually exclusive with --usages. Always "
+        "advisory (exits 0)",
     )
     p_sanity.add_argument(
         "--include-tests",
@@ -2192,16 +2210,33 @@ def run_sanity(args: argparse.Namespace) -> int:
     inclusion default rather than the generic ``--no-tests`` every
     other read command uses — see ``sanity``'s module docstring for
     why the default needed to differ here).
+
+    ``--unused NAME`` selects a query mode the same way ``--usages``
+    does, so the two are mutually exclusive; ``NAME`` stands in for
+    the positional ``target`` in that mode, which is why ``target``
+    itself is optional at the parser level (``nargs="?"``) but exactly
+    one of the two must supply the name to resolve.
     """
+    if args.usages and args.unused:
+        print("dekko: give --usages or --unused, not both", file=sys.stderr)
+        return 2
+    target = args.unused if args.unused else args.target
+    if target is None:
+        print(
+            "dekko: sanity requires a target (or --unused NAME)",
+            file=sys.stderr,
+        )
+        return 2
     root = Path(args.root).resolve()
     index, code = repo_ops.load_or_regen(root, args.no_regen)
     if index is None:
         return code
     return sanity_mod.run(
         index,
-        args.target,
+        target,
         root,
         usages=args.usages,
+        unused=bool(args.unused),
         include_tests=args.include_tests,
         limit=args.limit,
         budget=args.budget,
