@@ -9,6 +9,19 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.28] — 2026-08-28
+
+### Fixed
+- **`dekko query callers/callees --sites` footer clarifies callers vs.
+  sites** — the text footer's TOTAL used to count call *sites* while
+  plain-mode TOTAL counts distinct *callers*, and neither the text
+  footer nor `--json --sites`'s `meta.total` exposed both numbers,
+  making legitimate divergence (one caller invoking a symbol several
+  times) look like a truncation bug. The footer now reports `N
+  callers`/`N callees` alongside an explicit sites count, and JSON
+  output adds `meta.sites_total`. See
+  `.features/plans/round23/26-sites-footer.md`.
+
 ## [0.43.27] — 2026-08-28
 
 ### Added

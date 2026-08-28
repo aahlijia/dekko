@@ -293,7 +293,12 @@ def _sym_json(index: MapIndex, sym: Symbol) -> dict:
 
 
 def _emit_lines(
-    lines: list[str], budget: int | None, limit: int, prefix: str = ""
+    lines: list[str],
+    budget: int | None,
+    limit: int,
+    prefix: str = "",
+    related_total: int = 0,
+    related_label: str = "",
 ) -> Meter:
     """Print rows trimmed to the caps and return the cost meter.
 
@@ -303,8 +308,19 @@ def _emit_lines(
     omitted" row count, which must reflect data rows only. Passing a
     header inside ``lines`` instead would inflate that count by one
     (or more, for multi-line headers) whenever truncation kicks in.
+
+    ``related_total``/``related_label`` are forwarded to ``fit_to_budget``
+    unchanged — see ``Meter.related_total``/``Meter.related_label`` for
+    what they add to the footer.
     """
-    kept, meter = fit_to_budget(lines, budget, limit, prefix=prefix)
+    kept, meter = fit_to_budget(
+        lines,
+        budget,
+        limit,
+        prefix=prefix,
+        related_total=related_total,
+        related_label=related_label,
+    )
     if prefix:
         print(prefix)
     for line in kept:
@@ -758,12 +774,26 @@ def _print_relation_json(
             )
         entries.append(entry)
     kept, meter = _fit_entries(entries, budget, limit)
+    meta = meter.as_dict()
+    if sites:
+        # Total call sites across all entries/modules, pre-cap — the
+        # JSON counterpart to the text path's site-row footer total.
+        # ``or [None]`` falls back to counting 1 for an entry/module
+        # with no recorded site lines, matching ``_site_rows``'s and
+        # ``_module_rows``'s own def-line-fallback-counts-as-one
+        # convention so the two surfaces can't independently drift.
+        meta["sites_total"] = sum(
+            len(e.get("sites") or [None]) for e in entries
+        ) + sum(
+            len(_module_site_lines(index, action, sym, path) or [None])
+            for path in modules
+        )
     doc = {
         "action": action,
         "target": sym.id,
         "results": kept,
         "module_level": _module_level_entries(index, action, sym, modules),
-        "meta": meter.as_dict(),
+        "meta": meta,
     }
     if coverage:
         doc["coverage_warning"] = coverage
@@ -790,6 +820,13 @@ def _run_relation(
     """Execute callers/callees for a resolved symbol."""
     symbols, modules = _related(index, sym, action)
     symbols.sort(key=lambda s: relevance_key(s, index))
+    # Distinct related entities (callers/callees), as opposed to the
+    # call-site row count ``--sites`` explodes each entity into — the
+    # two diverge whenever a caller invokes the target more than once
+    # in its own body. Computed unconditionally (cheap) but only
+    # threaded into the footer when ``sites=True``, since plain-mode
+    # rows already equal this count 1:1.
+    caller_total = len(symbols) + len(modules)
     coverage = _coverage_note(index)
     # Ambiguous calls never become a resolved edge (see resolver.py's
     # module docstring), so a symbol's calls_in/calls_out can look
@@ -851,7 +888,17 @@ def _run_relation(
         if coverage:
             print(f"  note: {coverage}", file=sys.stderr)
         return EXIT_OK, None
-    return EXIT_OK, _emit_lines(lines, budget, limit)
+    related_total = caller_total if sites else 0
+    related_label = (
+        ("callers" if action == "callers" else "callees") if sites else ""
+    )
+    return EXIT_OK, _emit_lines(
+        lines,
+        budget,
+        limit,
+        related_total=related_total,
+        related_label=related_label,
+    )
 
 
 def _peer_relevance_key(

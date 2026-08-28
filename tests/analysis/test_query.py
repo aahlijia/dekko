@@ -1254,3 +1254,196 @@ def test_json_flag_has_no_effect_on_not_found_error_output(
     assert "no symbol matches" in err
     with pytest.raises(json.JSONDecodeError):
         json.loads(err)
+
+
+# --- plan 26: --sites footer/JSON self-reports both totals -----------
+
+MULTI_SITE_CALLERS = {
+    "target.py": ("def target(x: int) -> int:\n    return x + 1\n"),
+    "caller.py": (
+        "def caller_a() -> int:\n"
+        "    a = target(1)\n"
+        "    b = target(2)\n"
+        "    return a + b\n"
+        "\n"
+        "\n"
+        "def caller_b() -> int:\n"
+        "    return target(3)\n"
+    ),
+}
+
+
+def test_sites_footer_shows_related_total_untruncated(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # 2 distinct callers (caller_a, caller_b), 3 call sites (caller_a
+    # calls twice) — the load-bearing divergence this design closes.
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.py:target",
+            "--root",
+            str(root),
+            "--sites",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    footer = lines[-1]
+    assert "· 2 callers" in footer
+    assert "omitted" not in footer
+
+
+def test_sites_footer_truncated_shows_both_totals(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.py:target",
+            "--root",
+            str(root),
+            "--sites",
+            "--limit",
+            "2",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    footer = lines[-1]
+    assert "· 2 callers" in footer
+    assert "1 of 3 sites omitted" in footer
+
+
+def test_sites_footer_callees_uses_callees_label(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callees",
+            "caller.py:caller_a",
+            "--root",
+            str(root),
+            "--sites",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    footer = out.strip().splitlines()[-1]
+    assert "callees" in footer
+
+
+def test_plain_footer_unchanged_by_related_total(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression guard: plain mode (sites=False) footer is byte-for-
+    # byte unchanged — no related-count clause, no "sites" row noun.
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        ["query", "callers", "target.py:target", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    footer = out.strip().splitlines()[-1]
+    assert "callers" not in footer
+    assert "callees" not in footer
+    assert "sites" not in footer
+
+
+def test_json_sites_total_present_and_independent_of_truncation(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.py:target",
+            "--root",
+            str(root),
+            "--sites",
+            "--json",
+            "--limit",
+            "1",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["meta"]["sites_total"] == 3
+    assert doc["meta"]["total"] == 2
+    assert doc["meta"]["returned"] == 1
+
+
+def test_json_without_sites_has_no_sites_total_key(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.py:target",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "sites_total" not in doc["meta"]
+
+
+def test_json_sites_total_fallback_counts_missing_lines_as_one(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # A map with no recorded edge_lines (pre-v3 map semantics, or an
+    # edge dekko genuinely couldn't line-locate) must still count each
+    # entry/module toward sites_total as 1, not 0 -- otherwise JSON's
+    # sites_total and text's site-row TOTAL could quietly diverge on
+    # this specific edge, the same bug class as the off-by-one plans.
+    target = Symbol(
+        id="target.py::target",
+        name="target",
+        qualname="target",
+        kind="function",
+        path="target.py",
+        language="python",
+        start_line=1,
+        end_line=2,
+    )
+    caller = Symbol(
+        id="caller.py::caller",
+        name="caller",
+        qualname="caller",
+        kind="function",
+        path="caller.py",
+        language="python",
+        start_line=1,
+        end_line=2,
+    )
+    index = mapfile.MapIndex(root_label="root")
+    query._print_relation_json(
+        index,
+        "callers",
+        target,
+        [caller],
+        ["module.py"],
+        True,
+        None,
+        10,
+        None,
+        0,
+        0,
+    )
+    doc = json.loads(capsys.readouterr().out)
+    # 1 (caller, no recorded edge_lines) + 1 (module, no recorded
+    # edge_lines) == 2, not 0.
+    assert doc["meta"]["sites_total"] == 2

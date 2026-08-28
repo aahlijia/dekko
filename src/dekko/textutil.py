@@ -157,6 +157,13 @@ class Meter:
         limit: Count limit in effect, or ``None``.
         signals: Distinct pieces of information covered (files + symbols),
             for the FR-D3 density view; ``0`` disables the density line.
+        related_total: Distinct related entities (e.g. callers) backing
+            rows that are finer-grained than one-per-entity (e.g. call
+            sites). ``0`` disables the related-count footer clause and
+            the "sites" row noun below.
+        related_label: Plural noun for ``related_total`` (e.g.
+            "callers"/"callees"). Empty disables the clause even when
+            ``related_total`` is nonzero.
     """
 
     tokens: int
@@ -165,6 +172,8 @@ class Meter:
     budget: int | None = None
     limit: int | None = None
     signals: int = 0
+    related_total: int = 0
+    related_label: str = ""
 
     @property
     def omitted(self) -> int:
@@ -191,14 +200,25 @@ class Meter:
         """The optional ``· N signals`` density suffix (FR-D3)."""
         return f" · {self.signals} signals" if self.signals > 0 else ""
 
+    def _related_suffix(self) -> str:
+        """The optional ``· N callers``/``· N callees`` count suffix."""
+        if not self.related_label:
+            return ""
+        return f" · {self.related_total} {self.related_label}"
+
     def footer(self) -> str:
         """One-line text footer, stable enough to parse."""
+        row_noun = " sites" if self.related_label else ""
         if self.omitted == 0:
-            return f"(~{self.tokens} tokens{self._density()})"
+            return (
+                f"(~{self.tokens} tokens{self._density()}"
+                f"{self._related_suffix()})"
+            )
         raise_hint = f"raise --{self.truncated_by}"
         return (
-            f"(~{self.tokens} tokens{self._density()} · {self.omitted} of "
-            f"{self.total} omitted · {raise_hint})"
+            f"(~{self.tokens} tokens{self._density()}"
+            f"{self._related_suffix()} · {self.omitted} of "
+            f"{self.total}{row_noun} omitted · {raise_hint})"
         )
 
     def as_dict(self) -> dict:
@@ -212,11 +232,18 @@ class Meter:
             "truncated_by": self.truncated_by,
             "signals": self.signals,
             "tokens_per_signal": self.per_signal,
+            "related_total": self.related_total,
+            "related_label": self.related_label,
         }
 
 
 def fit_to_budget(
-    lines: list[str], budget: int | None, limit: int | None, prefix: str = ""
+    lines: list[str],
+    budget: int | None,
+    limit: int | None,
+    prefix: str = "",
+    related_total: int = 0,
+    related_label: str = "",
 ) -> tuple[list[str], Meter]:
     """Cap lines by count then token budget, returning kept + Meter.
 
@@ -233,6 +260,11 @@ def fit_to_budget(
         limit: Maximum row count, or ``None``.
         prefix: Non-droppable leading text (headers) counted against the
             budget and the reported token cost.
+        related_total: Distinct related-entity count to attach to the
+            returned ``Meter``, passed straight through; ``0`` leaves
+            the related-count footer clause disabled.
+        related_label: Plural noun for ``related_total``, passed
+            straight through; empty leaves the clause disabled.
 
     Returns:
         ``(kept_lines, meter)``.
@@ -253,4 +285,6 @@ def fit_to_budget(
         total=total,
         budget=budget,
         limit=limit,
+        related_total=related_total,
+        related_label=related_label,
     )
