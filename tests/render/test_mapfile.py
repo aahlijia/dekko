@@ -52,6 +52,33 @@ def test_provenance_written(make_mapped_repo: RepoFactory) -> None:
     assert prov["tool_version"]
     assert prov["spec_hash"]
     assert set(prov["files"]) == {"a.py"}
+    assert prov["ambiguous_sites"] == 0
+    assert prov["ambiguous_rate"] == 0.0
+
+
+def test_compute_provenance_ambiguous_rate(tmp_path: Path) -> None:
+    graph = CallGraph(
+        edges=[Edge(caller="a.py::f", callee="b.py::g", lines=[1])],
+        ambiguous=[("a.py::f", "h", ["c.py::h", "d.py::h"])],
+    )
+    prov = mapfile.compute_provenance(
+        tmp_path, [], None, (), 10_000_000, graph=graph
+    )
+    assert prov["ambiguous_sites"] == 1
+    assert prov["ambiguous_rate"] == 0.5
+
+
+def test_compute_provenance_ambiguous_rate_zero_edge_case(
+    tmp_path: Path,
+) -> None:
+    # No edges and no ambiguous sites at all -- must not divide by
+    # zero, and must report a plain 0.0 rate.
+    graph = CallGraph()
+    prov = mapfile.compute_provenance(
+        tmp_path, [], None, (), 10_000_000, graph=graph
+    )
+    assert prov["ambiguous_sites"] == 0
+    assert prov["ambiguous_rate"] == 0.0
 
 
 def test_freshness_transitions(make_mapped_repo: RepoFactory) -> None:

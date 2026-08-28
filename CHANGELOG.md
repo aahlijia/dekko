@@ -9,6 +9,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.22] — 2026-08-27
+
+### Added
+- **A standing "this repo's ambiguous rate is unusually high" flag** —
+  on repos where a large share of call-site resolution collapses to
+  "ambiguous" (short/generic names colliding across many candidates),
+  dekko now proactively surfaces that instead of requiring a separate
+  `dekko ambiguous` call to discover it. A shared
+  `ambiguous.cheap_rate()`/`high_rate_note()` helper feeds a line in
+  `dekko summary` (and therefore `orient` and the MCP `summary` tool),
+  a note in the Claude Code session-start hook preamble, and a new
+  advisory finding in `dekko doctor`. The rate is stamped into
+  `provenance` at `dekko map` write time so `doctor` can report it
+  without loading the full map. See
+  `.features/plans/round23/20-standing-ambiguous-rate-flag.md`.
+
 ## [0.43.21] — 2026-08-27
 
 ### Fixed

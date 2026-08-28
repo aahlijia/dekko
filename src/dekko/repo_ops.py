@@ -692,6 +692,7 @@ def _write_json_output(
         subpath=args.subpath,
         excludes=tuple(args.exclude),
         max_file_size=args.max_file_size,
+        graph=graph,
         skipped=skipped,
     )
     json_path.parent.mkdir(parents=True, exist_ok=True)

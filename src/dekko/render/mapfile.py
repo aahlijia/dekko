@@ -486,6 +486,7 @@ def compute_provenance(
     subpath: str | None,
     excludes: tuple[str, ...],
     max_file_size: int,
+    graph: CallGraph,
     skipped: list[tuple[str, str]] | None = None,
 ) -> dict:
     """Build the provenance stamp for a freshly generated map.
@@ -496,6 +497,10 @@ def compute_provenance(
         subpath: Subtree restriction used for discovery, if any.
         excludes: Extra exclude globs used for discovery.
         max_file_size: Size cap used for discovery.
+        graph: The resolved call graph, for stamping the repo-wide
+            ambiguous-call rate so ``dekko doctor`` can read it without
+            a full map load (see ``analysis/ambiguous.py``'s
+            ``HIGH_AMBIGUOUS_RATE``).
         skipped: ``(path, reason)`` pairs from the same ``walker.
             discover`` call that produced ``paths``, used to record
             coverage notes for confirmed-unsupported languages, for
@@ -506,6 +511,7 @@ def compute_provenance(
     Returns:
         JSON-serializable provenance dict.
     """
+    denom = len(graph.edges) + len(graph.ambiguous)
     return {
         "tool_version": _pkg_version("dekko"),
         "spec_hash": spec_fingerprint(),
@@ -518,6 +524,10 @@ def compute_provenance(
         "unsupported": _unsupported_summary(skipped),
         "vendored_excluded": _vendored_summary(skipped),
         "too_large": _too_large_summary(skipped),
+        "ambiguous_sites": len(graph.ambiguous),
+        "ambiguous_rate": (
+            round(len(graph.ambiguous) / denom, 4) if denom else 0.0
+        ),
     }
 
 

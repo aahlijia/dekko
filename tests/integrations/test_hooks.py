@@ -89,6 +89,53 @@ def test_session_start_ample_budget_has_no_floor_note(
     assert "path-only floor" not in ctx
 
 
+# A single unresolved bare-name collision with no other resolved calls
+# at all -- 100% ambiguous, comfortably above HIGH_AMBIGUOUS_RATE.
+_HIGH_AMBIGUOUS_FILES = {
+    "a.py": "def target() -> int:\n    return 1\n",
+    "b.py": "def target() -> int:\n    return 2\n",
+    "c.py": "def caller() -> int:\n    return target()\n",
+}
+
+
+def test_session_start_omits_ambiguous_note_below_threshold(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_FILES)
+    out = hooks.session_start({"cwd": str(root)})
+    assert out is not None
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "call resolution is" not in ctx
+
+
+def test_session_start_injects_ambiguous_note_above_threshold(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_HIGH_AMBIGUOUS_FILES)
+    out = hooks.session_start({"cwd": str(root)})
+    assert out is not None
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "note: this repo's call resolution is 100% ambiguous" in ctx
+    assert "dekko ambiguous --by name" in ctx
+
+
+def test_session_start_ambiguous_note_precedes_floor_note(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # When both notes fire, the ambiguous-rate caveat must appear
+    # before the path-only-floor disclosure -- matches the doc's
+    # documented ordering (`parts = [_PREAMBLE]`, then the ambiguous
+    # note, then the floor note).
+    monkeypatch.setattr(hooks, "SESSION_MAP_BUDGET", 1)
+    root = make_mapped_repo(_HIGH_AMBIGUOUS_FILES)
+    out = hooks.session_start({"cwd": str(root)})
+    assert out is not None
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    ambiguous_pos = ctx.index("note: this repo's call resolution is")
+    floor_pos = ctx.index("path-only floor")
+    assert ambiguous_pos < floor_pos
+
+
 # --- UserPromptSubmit ------------------------------------------------
 
 

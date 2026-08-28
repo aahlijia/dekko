@@ -6,6 +6,7 @@ broken process pool directly before this pass; see
 for the investigation and design behind it.
 """
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
@@ -16,6 +17,9 @@ import pytest
 from dekko import repo_ops
 from dekko.core import languages
 from dekko.core import resolver
+from dekko.render import mapfile
+
+from conftest import RepoFactory
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -239,3 +243,33 @@ def test_extract_misses_below_parallel_min_never_touches_pool(
     result = repo_ops._extract_misses(root, misses, workers=4)
 
     assert set(result) == set(misses)
+
+
+# --- provenance: standing ambiguous-rate stamp (round 23) -----------------
+
+
+def test_map_run_stamps_ambiguous_rate_into_provenance(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """End-to-end ``dekko map`` stamps ``provenance.ambiguous_rate`` /
+    ``ambiguous_sites`` at write time, and ``load_provenance()`` -- the
+    cheap sidecar-only path ``dekko doctor`` uses -- surfaces both
+    without needing a full ``load_map()`` (round 23's standing
+    high-ambiguous-rate flag design doc).
+    """
+    files = {
+        "a.py": "def target() -> int:\n    return 1\n",
+        "b.py": "def target() -> int:\n    return 2\n",
+        "c.py": "def caller() -> int:\n    return target()\n",
+    }
+    root = make_mapped_repo(files)
+
+    doc = json.loads((root / ".dekko" / "map.json").read_text())
+    prov = doc["provenance"]
+    assert prov["ambiguous_sites"] == 1
+    assert prov["ambiguous_rate"] == 1.0
+
+    loaded = mapfile.load_provenance(root)
+    assert loaded is not None
+    assert loaded["ambiguous_sites"] == 1
+    assert loaded["ambiguous_rate"] == 1.0

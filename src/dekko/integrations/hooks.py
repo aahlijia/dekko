@@ -41,7 +41,7 @@ from pathlib import Path
 
 from dekko import repo_ops
 from dekko.storage import ledger
-from dekko.analysis import outline, relevance, summary
+from dekko.analysis import ambiguous, outline, relevance, summary
 from dekko.render import render_lean
 from dekko.render.mapfile import MapIndex
 from dekko.integrations.orient import _PREAMBLE
@@ -118,6 +118,9 @@ def session_start(payload: dict) -> dict | None:
     if report.total_symbols == 0 and not index.languages_by_path:
         return None
     parts = [_PREAMBLE]
+    note = ambiguous.high_rate_note(index)
+    if note:
+        parts.append(note)
     if report.cap > SESSION_MAP_BUDGET:
         # round-13 tensorflow.md: on a repo whose path-only floor alone
         # exceeds SESSION_MAP_BUDGET (a large monorepo can need

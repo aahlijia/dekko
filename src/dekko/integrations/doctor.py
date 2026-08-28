@@ -35,6 +35,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
+from dekko.analysis import ambiguous
 from dekko.integrations import claude_md as claude_md_mod
 from dekko.integrations import hooks as hooks_mod
 from dekko.render import mapfile
@@ -43,8 +44,10 @@ EXIT_OK = 0
 
 # Statuses a Finding can carry. "unknown" covers both "couldn't check"
 # and "found but can't be verified further" (e.g. a live MCP server
-# whose loaded version can't be introspected from outside).
-_STATUSES = ("ok", "missing", "stale", "unknown")
+# whose loaded version can't be introspected from outside). "advisory"
+# covers a check that succeeded and found nothing broken, but has real
+# information worth a glance (e.g. a high ambiguous-call rate).
+_STATUSES = ("ok", "missing", "stale", "unknown", "advisory")
 
 # Best-effort subprocess timeouts: doctor must stay fast even when a
 # shelled-out CLI hangs or a process listing is slow.
@@ -59,11 +62,12 @@ class Finding:
     Attributes:
         name: Short machine-stable identifier for the check, e.g.
             ``"binary-resolution"`` or ``"hook:pre-bash"``.
-        status: One of ``"ok"``, ``"missing"``, ``"stale"``, or
-            ``"unknown"``.
+        status: One of ``"ok"``, ``"missing"``, ``"stale"``,
+            ``"unknown"``, or ``"advisory"``.
         detail: One-line human-readable explanation.
-        fix: The exact command to run to fix a ``"missing"``/``"stale"``
-            finding, or ``None`` (always ``None`` on ``"ok"``).
+        fix: The exact command to run to fix a ``"missing"``/``"stale"``/
+            ``"advisory"`` finding, or ``None`` (always ``None`` on
+            ``"ok"``).
     """
 
     name: str
@@ -145,13 +149,19 @@ def _check_binary_resolution() -> Finding:
     )
 
 
-def _check_map_freshness(root: Path) -> Finding:
+def _check_map_freshness(root: Path) -> tuple[Finding, dict | None]:
     """Reuse ``status``'s exact freshness signal, folded into a Finding.
 
     Same two calls ``run_status`` (``cli.py``) already makes —
     ``load_provenance`` first (the cheap sidecar-only path), falling
     back to a full ``load_map`` for maps written before the sidecar
     existed. No new freshness logic.
+
+    Returns:
+        A ``(finding, prov)`` pair — ``prov`` is whichever provenance
+        dict this check resolved (or ``None`` when no usable map/
+        provenance exists at all), so ``collect()`` can thread it
+        into ``_check_ambiguous_rate`` without a second load.
     """
     prov = mapfile.load_provenance(root)
     if prov is not None:
@@ -159,11 +169,14 @@ def _check_map_freshness(root: Path) -> Finding:
     else:
         index = mapfile.load_map(root)
         if index is None:
-            return Finding(
-                "map-freshness",
-                "missing",
-                f"no map.json under {root}",
-                "dekko map",
+            return (
+                Finding(
+                    "map-freshness",
+                    "missing",
+                    f"no map.json under {root}",
+                    "dekko map",
+                ),
+                None,
             )
         fresh = mapfile.check_freshness(root, index)
         prov = index.provenance
@@ -171,19 +184,25 @@ def _check_map_freshness(root: Path) -> Finding:
     if fresh.fresh:
         commit = ((prov or {}).get("git_commit") or "no git")[:12]
         n = len((prov or {}).get("files", {}))
-        return Finding(
-            "map-freshness",
-            "ok",
-            f"map fresh ({n} files, commit {commit})",
-            None,
+        return (
+            Finding(
+                "map-freshness",
+                "ok",
+                f"map fresh ({n} files, commit {commit})",
+                None,
+            ),
+            prov,
         )
 
     if fresh.reason == "missing":
-        return Finding(
-            "map-freshness",
-            "missing",
-            f"no usable map provenance under {root}",
-            "dekko map",
+        return (
+            Finding(
+                "map-freshness",
+                "missing",
+                f"no usable map provenance under {root}",
+                "dekko map",
+            ),
+            prov,
         )
     if fresh.reason == "version":
         # Round-23 §11: share the same signal-naming logic
@@ -195,7 +214,45 @@ def _check_map_freshness(root: Path) -> Finding:
     else:
         n_changed = len(fresh.added) + len(fresh.removed) + len(fresh.changed)
         detail = f"map stale: {n_changed} file(s) added/changed/removed"
-    return Finding("map-freshness", "stale", detail, "dekko map")
+    return Finding("map-freshness", "stale", detail, "dekko map"), prov
+
+
+def _check_ambiguous_rate(prov: dict | None) -> Finding:
+    """Standing high-ambiguous-rate flag, read from the provenance stamp.
+
+    Cheap by construction: ``prov`` is whichever provenance dict
+    ``_check_map_freshness`` already resolved, and the rate itself is a
+    plain ``dict.get()`` read of the value ``dekko map`` stamped in at
+    write time (``mapfile.compute_provenance``) — no full ``map.json``
+    parse, keeping ``doctor`` fast even on a tensorflow-scale repo.
+    """
+    if prov is None or "ambiguous_rate" not in prov:
+        return Finding(
+            "ambiguous-rate",
+            "unknown",
+            "no ambiguous-rate provenance (map predates this field, "
+            "or no map at all)",
+            "dekko map",
+        )
+    rate = prov["ambiguous_rate"]
+    sites = prov.get("ambiguous_sites", 0)
+    if rate < ambiguous.HIGH_AMBIGUOUS_RATE:
+        return Finding(
+            "ambiguous-rate",
+            "ok",
+            f"ambiguous rate {rate:.0%} ({sites:,} sites) — below the "
+            f"{ambiguous.HIGH_AMBIGUOUS_RATE:.0%} standing-flag "
+            "threshold",
+            None,
+        )
+    return Finding(
+        "ambiguous-rate",
+        "advisory",
+        f"this repo's call resolution is {rate:.0%} ambiguous "
+        f"({sites:,} sites) — treat query callers/workset fan-in "
+        "counts as a floor, not exact",
+        "dekko ambiguous --by name",
+    )
 
 
 def _claude_exe() -> str | None:
@@ -401,7 +458,15 @@ def collect(root: Path) -> list[Finding]:
     exe = _claude_exe()
     findings: list[Finding] = []
     findings += _safe("binary-resolution", _check_binary_resolution)
-    findings += _safe("map-freshness", lambda: _check_map_freshness(root))
+    try:
+        freshness_finding, prov = _check_map_freshness(root)
+    except Exception as exc:
+        freshness_finding = Finding(
+            "map-freshness", "unknown", f"check failed: {exc}", None
+        )
+        prov = None
+    findings.append(freshness_finding)
+    findings += _safe("ambiguous-rate", lambda: _check_ambiguous_rate(prov))
     findings += _safe("mcp-registered", lambda: _check_mcp_registered(exe))
     findings += _safe("mcp-server-running", _check_mcp_server_running)
     findings += _safe("plugin-installed", lambda: _check_plugin_installed(exe))

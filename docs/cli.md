@@ -322,6 +322,30 @@ matched against dozens of same-named repo-wide candidates) truncates
 the same way an unresolved-target error does, rather than dumping every
 candidate unconditionally.
 
+**Standing high-ambiguous-rate flag.** A repo whose repo-wide
+ambiguous rate is **30% or higher** doesn't stay silent until you think
+to run this command — that threshold (`ambiguous.HIGH_AMBIGUOUS_RATE`,
+calibrated against a 7-repo eval spread ranging from 0% to 57%) is
+surfaced proactively in three places so an agent can't accidentally
+trust `query callers`/`workset` fan-in numbers without knowing a large,
+invisible slice of the call graph never became a resolved edge at all:
+
+- `dekko summary` / `dekko orient` (and the `summary` MCP tool/
+  resource, which render the same digest) print a `note: this repo's
+  call resolution is N% ambiguous (M sites) — treat query
+  callers/workset fan-in counts as a floor, not exact; run \`dekko
+  ambiguous --by name\` to see what's colliding.` line right after the
+  coverage note.
+- The `session-start` hook (see `docs/claude-code.md`) injects the same
+  line into its preamble on every session where the hook is installed —
+  the one channel here that's genuinely proactive rather than
+  pull-based.
+- `dekko doctor` reports an `ambiguous-rate` finding: `ok` below the
+  threshold, an `advisory` status at/above it (`fix: dekko ambiguous
+  --by name`), or `unknown` when the map predates this field (rerun
+  `dekko map` to pick it up — the rate is stamped into `provenance` at
+  map-write time so `doctor` stays fast, no full `map.json` parse).
+
 ## Interpreting `dekko deps`
 
 `deps` reports the **module-level dependency graph**: which files

@@ -223,6 +223,51 @@ def ambiguous_rate(index: MapIndex, total_ambiguous: int) -> float:
     return total_ambiguous / denom if denom else 0.0
 
 
+# Repo-wide ambiguous-call rate at/above which a standing caveat is
+# surfaced proactively (doctor, session-start hook, summary line)
+# instead of only being visible to an agent that thinks to run
+# `dekko ambiguous` first. Calibrated against round-23's 7-repo eval
+# corpus: awesome-go 0%, claude-buddy 0.2%, claude-code 9.3%, cline
+# 23.1% all sit comfortably under this; tensorflow 44.9%, zed 44.2%,
+# spring-boot 56.6% all independently had their rate called out as
+# unusually high in the same round's reports.
+HIGH_AMBIGUOUS_RATE = 0.30
+
+
+def cheap_rate(index: MapIndex) -> tuple[int, float]:
+    """Repo-wide ambiguous-site count + rate, no triple reconstruction.
+
+    ``compute()``'s numbers are only available after ``_raw_triples()``'s
+    O(ambiguous_in) join, which the ranked top-N views need but a bare
+    rate check doesn't. Summing ``ambiguous_out``'s list lengths is
+    equivalent on any unfiltered index (every ``ambiguous_out[caller]``
+    entry has a 1:1 source row in map.json's ``"ambiguous"`` array — see
+    ``_raw_triples``'s docstring for the one documented case,
+    ``without_tests()``, where that correspondence can drop; none of
+    this function's three callers pass a filtered view).
+    """
+    total = sum(len(v) for v in index.ambiguous_out.values())
+    return total, ambiguous_rate(index, total)
+
+
+def high_rate_note(index: MapIndex) -> str | None:
+    """One-line standing caveat, or ``None`` below ``HIGH_AMBIGUOUS_RATE``.
+
+    Single source of truth for the threshold and the wording, so
+    ``summary``, ``hooks.session_start``, and ``doctor`` can't drift
+    out of sync with each other or with plain ``dekko ambiguous``.
+    """
+    total, rate = cheap_rate(index)
+    if rate < HIGH_AMBIGUOUS_RATE:
+        return None
+    return (
+        f"note: this repo's call resolution is {rate:.0%} ambiguous "
+        f"({total:,} sites) — treat query callers/workset fan-in "
+        "counts as a floor, not exact; run `dekko ambiguous --by name` "
+        "to see what's colliding."
+    )
+
+
 def compute(index: MapIndex, top: int) -> dict:
     """Build the full ambiguous-edge report document.
 
