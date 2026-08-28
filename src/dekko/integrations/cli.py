@@ -791,6 +791,36 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "requests.get)",
     )
     p_sanity.add_argument(
+        "--all",
+        action="store_true",
+        help="sweep every in-repo symbol with nonzero fan-in instead "
+        "of one target (callers mode only; incompatible with --usages/"
+        "--unused)",
+    )
+    p_sanity.add_argument(
+        "--jobs",
+        type=int,
+        default=sanity_mod._ALL_JOBS_DEFAULT,
+        metavar="N",
+        help="parallel grep sweeps for --all (1 = sequential, 0 = all "
+        f"cores; ignored without --all) (default: "
+        f"{sanity_mod._ALL_JOBS_DEFAULT})",
+    )
+    p_sanity.add_argument(
+        "--max-names",
+        type=int,
+        default=sanity_mod._MAX_SWEEP_NAMES,
+        metavar="N",
+        help="safety cap on unique bare names swept under --all "
+        f"(default: {sanity_mod._MAX_SWEEP_NAMES})",
+    )
+    p_sanity.add_argument(
+        "--fail-on-unexplained",
+        action="store_true",
+        help="with --all, exit nonzero if the sweep's aggregate "
+        "unexplained-cause count is nonzero (for CI use)",
+    )
+    p_sanity.add_argument(
         "--unused",
         metavar="NAME",
         default=None,
@@ -2215,15 +2245,56 @@ def run_sanity(args: argparse.Namespace) -> int:
     does, so the two are mutually exclusive; ``NAME`` stands in for
     the positional ``target`` in that mode, which is why ``target``
     itself is optional at the parser level (``nargs="?"``) but exactly
-    one of the two must supply the name to resolve.
+    one of ``target``/``--all``/``--unused`` must supply the name (or
+    select the sweep) to resolve.
+
+    ``--all`` selects a fourth, sweep mode (``sanity_mod.run_all``)
+    that dispenses with a single target entirely — it's validated
+    first and dispatched separately, since it's callers-mode only and
+    mutually exclusive with both ``--usages`` and ``--unused`` (see
+    ``run_all``'s own docstring / the design doc's Scope section).
     """
+    if args.all:
+        if args.usages:
+            print(
+                "dekko: --all doesn't support --usages mode; see the "
+                "design doc's Scope section",
+                file=sys.stderr,
+            )
+            return 2
+        if args.unused:
+            print(
+                "dekko: --all doesn't support --unused mode; see the "
+                "design doc's Scope section",
+                file=sys.stderr,
+            )
+            return 2
+        if args.target:
+            print("dekko: give a target or --all, not both", file=sys.stderr)
+            return 2
+        root = Path(args.root).resolve()
+        index, code = repo_ops.load_or_regen(root, args.no_regen)
+        if index is None:
+            return code
+        return sanity_mod.run_all(
+            index,
+            root,
+            include_tests=args.include_tests,
+            jobs=args.jobs,
+            max_names=args.max_names,
+            fail_on_unexplained=args.fail_on_unexplained,
+            limit=args.limit,
+            budget=args.budget,
+            as_json=args.as_json,
+        )
+
     if args.usages and args.unused:
         print("dekko: give --usages or --unused, not both", file=sys.stderr)
         return 2
     target = args.unused if args.unused else args.target
     if target is None:
         print(
-            "dekko: sanity requires a target (or --unused NAME)",
+            "dekko: sanity requires a target (or --all, or --unused NAME)",
             file=sys.stderr,
         )
         return 2

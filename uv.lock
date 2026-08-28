@@ -265,7 +265,7 @@ toml = [
 
 [[package]]
 name = "dekko"
-version = "0.43.25"
+version = "0.43.26"
 source = { editable = "." }
 dependencies = [
     { name = "pathspec" },

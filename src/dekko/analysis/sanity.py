@@ -24,6 +24,20 @@ import/require statement, or a comment as "reference evidence" the
 call-graph tables didn't already explain away — see
 ``classify_unused_reference`` and ``_run_unused_check``.
 
+A fourth mode, ``--all`` (``run_all()``), removes the human selection
+bias from the whole exercise: instead of one hand-picked ``target``,
+it runs the same callers/grep cross-check over *every* in-repo symbol
+with nonzero ``MapIndex.calls_in`` fan-in, deduping the expensive grep
+subprocess by bare name (classification depends only on
+``(root, bare_name)``, never on which symbol sharing that name is
+being checked — see ``_classify_grep_hits``, extracted so ``run()``
+and ``run_all()`` provably classify identically), and reports a triage
+summary (an aggregate cause histogram plus the symbols with an
+unexplained miss) rather than a full per-symbol dump. Callers mode
+only — see ``run_all()``'s own docstring and
+``.features/plans/round23/24-sanity-all-sweep.md`` for the full design
+and its ``--usages``-sweep-mode/MCP-exposure open questions.
+
 This is a spot check, not a re-verification — see the module's own
 ``EXIT_OK``-always-on-a-clean-run contract in ``run()``'s docstring.
 The blind-spot causes are heuristic pattern-matches on a grep-only
@@ -61,10 +75,13 @@ import json
 import re
 import subprocess
 import sys
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 
+from dekko import repo_ops
 from dekko.analysis import query
 from dekko.classify import is_test_path
 from dekko.core import languages
@@ -81,6 +98,21 @@ EXIT_OK = 0
 EXIT_GREP_FAILED = 2
 EXIT_NOT_FOUND = query.EXIT_NOT_FOUND
 EXIT_AMBIGUOUS = query.EXIT_AMBIGUOUS
+# ``--all --fail-on-unexplained``'s CI-gate exit code -- next free code
+# after EXIT_GREP_FAILED. See ``run_all()``.
+EXIT_UNEXPLAINED_FOUND = 3
+
+# Safety cap on how many unique bare names ``sanity --all`` will sweep
+# -- analogous to ``_MAX_GREP_LINES``'s "hard ceiling on work done,
+# independent of report caps" pattern. Overridable via ``--max-names``.
+_MAX_SWEEP_NAMES = 2000
+
+# ``--all``'s own default ``--jobs`` -- deliberately *not* ``map``'s
+# sequential-by-default 1 (see module docstring's ``--all`` section):
+# the sweep's whole purpose is a batch/triage run where wall-clock
+# time matters and each unit of work (one read-only grep subprocess)
+# is independent and side-effect-free.
+_ALL_JOBS_DEFAULT = 4
 
 
 # Directories the grep sweep must skip so its grep-only bucket isn't
@@ -785,6 +817,70 @@ def _run_grep(root: Path, bare_name: str) -> GrepSweepResult:
     )
 
 
+def _classify_grep_hits(
+    hits: list[GrepHit],
+    bare_name: str,
+    root: Path,
+    *,
+    own_def_locs: frozenset[tuple[str, int]],
+    tests_excluded: bool,
+) -> dict[tuple[str, int], str]:
+    """Classify every grep hit for ``bare_name`` outside
+    ``own_def_locs``, once.
+
+    Extracted from ``run()``'s own per-hit classification block so
+    ``run()`` (single target) and ``run_all()`` (the ``--all`` sweep's
+    per-bare-name pass) provably run the *same* classification code,
+    not two implementations that can drift apart — see the module
+    docstring's ``--all`` paragraph. This is the whole point of the
+    ``--all`` feature: it exists to catch a classification-logic
+    regression like the round-23 ``_looks_like_multiline_import_
+    member`` bug, and if this function's callers were allowed to
+    diverge, a sweep could pass cleanly on exactly that kind of bug.
+
+    Args:
+        hits: Raw grep hits for ``bare_name`` (``sweep.hits``, before
+            any dekko-side matching/diffing).
+        bare_name: The bare identifier being searched for.
+        root: Repo root, for ``_looks_like_multiline_import_member``'s
+            one small file re-read.
+        own_def_locs: Every same-bare-named symbol's own definition
+            line — excluded from classification entirely, matching
+            ``run()``'s existing "not a call site to explain either
+            way" treatment of a target's own definition.
+        tests_excluded: Whether the dekko-side query being compared
+            against excluded test files by default.
+
+    Returns:
+        ``(path, line) -> CAUSE_*`` for every hit not in
+        ``own_def_locs``. A caller diffs its own dekko-side hit set
+        against this map's keys to get its own matches/dekko-only/
+        grep-only split; the map's values are the pre-computed cause
+        for every location that turns out to be grep-only.
+    """
+    causes: dict[tuple[str, int], str] = {}
+    for h in hits:
+        loc = (h.path, h.line)
+        if loc in own_def_locs:
+            continue
+        causes[loc] = classify_miss(
+            h.snippet,
+            bare_name,
+            is_test_file=is_test_path(h.path),
+            unsupported_language=not languages.is_supported(h.path),
+            tests_excluded=tests_excluded,
+            near_own_definition=any(
+                h.path == p and abs(h.line - ln) <= _COMMENT_PROXIMITY_LINES
+                for p, ln in own_def_locs
+            ),
+            looks_like_comment=_looks_like_comment_line(h.snippet, h.path),
+            looks_like_import_member=_looks_like_multiline_import_member(
+                root, h, bare_name
+            ),
+        )
+    return causes
+
+
 # --- dekko-side comparison set ----------------------------------------
 
 
@@ -1451,27 +1547,15 @@ def run(
         h for h in grep_hits if (h.path, h.line) not in dekko_set
     ]
     tests_excluded = not include_tests
+    causes = _classify_grep_hits(
+        grep_hits,
+        bare_name,
+        root,
+        own_def_locs=own_def_locs,
+        tests_excluded=tests_excluded,
+    )
     grep_only_rows = [
-        _grep_row(
-            h,
-            classify_miss(
-                h.snippet,
-                bare_name,
-                is_test_file=is_test_path(h.path),
-                unsupported_language=not languages.is_supported(h.path),
-                tests_excluded=tests_excluded,
-                near_own_definition=any(
-                    h.path == p
-                    and abs(h.line - ln) <= _COMMENT_PROXIMITY_LINES
-                    for p, ln in own_def_locs
-                ),
-                looks_like_comment=_looks_like_comment_line(h.snippet, h.path),
-                looks_like_import_member=_looks_like_multiline_import_member(
-                    root, h, bare_name
-                ),
-            ),
-        )
-        for h in grep_only_hits
+        _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits
     ]
     match_rows = [_grep_row(grep_by_loc[loc]) for loc in matched_locs]
     dekko_only_rows = [_hit_row(*loc) for loc in dekko_only_locs]
@@ -1513,4 +1597,465 @@ def run(
         grep_truncated=sweep.truncated,
         skipped_pathological=sweep.skipped_pathological,
     )
+    return EXIT_OK
+
+
+# --- --all sweep --------------------------------------------------
+#
+# Round 23's own claude-buddy evaluation shows the cost of a
+# human-selected population of ``sanity <target>`` invocations: a real
+# regression in ``classify_miss``'s own classification logic sat in
+# ``develop`` for a full round undetected, caught only because the
+# tester happened to pick one symbol (out of dozens with nonzero
+# fan-in) that exercised the buggy branch. ``run_all`` removes the
+# selection bias: run the same cross-check over every in-repo symbol
+# with nonzero fan-in instead of one hand-picked target. See
+# ``.features/plans/round23/24-sanity-all-sweep.md`` for the full
+# design this section implements.
+
+
+def _group_fan_in_symbols(query_index: MapIndex) -> dict[str, list[Symbol]]:
+    """Bare name -> every symbol sharing it that has nonzero
+    ``calls_in`` fan-in of its own.
+
+    Built from ``sorted(query_index.symbols_by_name)`` so the returned
+    dict already iterates in alphabetical-by-bare-name order — the
+    stable, deterministic sweep order ``run_all``'s ``--max-names``
+    truncation and reporting both rely on (a fixed subset under the
+    cap, not a run-order-dependent one).
+    """
+    groups: dict[str, list[Symbol]] = {}
+    for name in sorted(query_index.symbols_by_name):
+        fan_in = [
+            s
+            for s in query_index.symbols_by_name[name]
+            if query_index.calls_in.get(s.id)
+        ]
+        if fan_in:
+            groups[name] = fan_in
+    return groups
+
+
+def _sweep_bare_name(
+    root: Path,
+    bare_name: str,
+    *,
+    own_def_locs: frozenset[tuple[str, int]],
+    tests_excluded: bool,
+) -> tuple[GrepSweepResult, dict[tuple[str, int], str]]:
+    """One grep + classify pass for ``bare_name``, shared across every
+    symbol in its fan-in group — the sweep's whole cost-saving
+    mechanism (see module docstring's ``--all`` paragraph): grep and
+    classification cost drops from O(symbols with fan-in) to O(unique
+    bare names among them).
+
+    Returns:
+        ``(sweep, causes)``. ``causes`` is empty when ``sweep.error``
+        is set — a caller checks ``sweep.error`` before trusting an
+        empty ``causes`` as "no grep-only hits" rather than "the sweep
+        itself failed."
+    """
+    sweep = _run_grep(root, bare_name)
+    if sweep.error is not None:
+        return sweep, {}
+    causes = _classify_grep_hits(
+        sweep.hits,
+        bare_name,
+        root,
+        own_def_locs=own_def_locs,
+        tests_excluded=tests_excluded,
+    )
+    return sweep, causes
+
+
+@dataclass(frozen=True)
+class _SymbolSweepResult:
+    """One fan-in symbol's own diff against its bare name's shared,
+    already-classified grep sweep.
+
+    Attributes:
+        target: ``path:qualname`` display label — re-runnable directly
+            as ``dekko sanity <target>`` for the full single-target
+            report.
+        bare_name: The symbol's bare name.
+        matches: Count of dekko-hit locations grep's sweep also found.
+        dekko_only: Count of dekko-hit locations grep's sweep missed.
+        grep_only_causes: One ``CAUSE_*`` string per grep-only hit
+            this symbol's own dekko-side query result didn't already
+            explain.
+    """
+
+    target: str
+    bare_name: str
+    matches: int
+    dekko_only: int
+    grep_only_causes: list[str]
+
+
+def _diff_symbol(
+    query_index: MapIndex,
+    sym: Symbol,
+    causes: dict[tuple[str, int], str],
+) -> "_SymbolSweepResult | None":
+    """Diff one symbol's own dekko-side callers hits against its bare
+    name's shared classified grep hit set (``causes``).
+
+    Mirrors ``run()``'s own matches/dekko-only/grep-only split, just
+    keyed off ``causes`` (already computed once per bare name) instead
+    of re-running ``_classify_grep_hits`` per symbol.
+
+    Returns:
+        ``None`` if the symbol's own internal query unexpectedly fails
+        to resolve (shouldn't happen for an already-enumerated fan-in
+        symbol — ``callers`` can't fail the way ``uses`` can, see
+        ``_QueryFailedError``'s own docstring — but this keeps one
+        anomalous symbol from crashing the whole sweep).
+    """
+    sym_target = f"{sym.path}:{sym.qualname}:{sym.start_line}"
+    try:
+        dekko_hits, _module_level = _dekko_hits_callers(
+            query_index, sym_target
+        )
+    except _QueryFailedError:
+        return None
+    dekko_set = set(dekko_hits)
+    grep_locs = set(causes)
+    matches = len(dekko_set & grep_locs)
+    dekko_only = len(dekko_set - grep_locs)
+    grep_only_causes = [causes[loc] for loc in grep_locs - dekko_set]
+    return _SymbolSweepResult(
+        target=f"{sym.path}:{sym.qualname}",
+        bare_name=sym.name,
+        matches=matches,
+        dekko_only=dekko_only,
+        grep_only_causes=grep_only_causes,
+    )
+
+
+def _names_truncated_note(swept: int) -> str:
+    return (
+        f"--max-names cap reached: swept only the first {swept:,} "
+        "unique bare names (alphabetical order); pass a higher "
+        "--max-names to cover the rest"
+    )
+
+
+def _unexplained_count(causes: list[str]) -> int:
+    return sum(1 for c in causes if c == CAUSE_UNEXPLAINED)
+
+
+def _build_all_json_doc(
+    *,
+    symbols_swept: int,
+    unique_names_swept: int,
+    names_truncated: bool,
+    jobs: int,
+    aggregate_causes: Counter,
+    flagged: list[_SymbolSweepResult],
+    results: list[_SymbolSweepResult],
+    limit: int,
+    budget: int | None,
+) -> dict:
+    """Assemble ``sanity --all --json``'s output document — see the
+    design doc's "Output shape" section for the schema this mirrors.
+
+    ``symbols`` carries the full per-symbol breakdown (not just the
+    flagged subset) for programmatic/CI use, same for ``flagged`` —
+    both independently capped via ``_fit_rows`` (this module's usual
+    row-count/token-budget guard) since either can grow large on a
+    real repo; a ``*_meta`` sibling discloses truncation on each,
+    matching the ``meta``-per-bucket convention ``_build_json_doc``
+    already established for the single-target report.
+    """
+    flagged_rows = [
+        {
+            "target": r.target,
+            "grep_only": len(r.grep_only_causes),
+            "unexplained": _unexplained_count(r.grep_only_causes),
+        }
+        for r in flagged
+    ]
+    symbol_rows = [
+        {
+            "target": r.target,
+            "bare_name": r.bare_name,
+            "counts": {
+                "matches": r.matches,
+                "dekko_only": r.dekko_only,
+                "grep_only": len(r.grep_only_causes),
+            },
+            "causes": dict(Counter(r.grep_only_causes)),
+        }
+        for r in results
+    ]
+    flagged_kept, flagged_meter = _fit_rows(flagged_rows, budget, limit)
+    symbols_kept, symbols_meter = _fit_rows(symbol_rows, budget, limit)
+    doc = {
+        "action": "sanity_all",
+        "symbols_swept": symbols_swept,
+        "unique_names_swept": unique_names_swept,
+        "names_truncated": names_truncated,
+        "jobs": jobs,
+        "aggregate_causes": dict(aggregate_causes),
+        "flagged": flagged_kept,
+        "symbols": symbols_kept,
+        "meta": {
+            "flagged": flagged_meter.as_dict(),
+            "symbols": symbols_meter.as_dict(),
+        },
+    }
+    if names_truncated:
+        doc["names_truncated_note"] = _names_truncated_note(unique_names_swept)
+    return doc
+
+
+def _print_all_text(
+    *,
+    symbols_swept: int,
+    unique_names_swept: int,
+    names_truncated: bool,
+    jobs: int,
+    aggregate_causes: Counter,
+    flagged: list[_SymbolSweepResult],
+    limit: int,
+) -> None:
+    """Render ``sanity --all``'s text triage summary — see the design
+    doc's "Output shape" section for the format this mirrors. Doesn't
+    dump a per-symbol report the way single-target ``sanity`` does:
+    the sweep's job is pointing at what to look at, not reproducing
+    every row (re-run ``dekko sanity <target>`` on a flagged symbol for
+    that)."""
+    print(
+        f"dekko sanity --all: swept {symbols_swept} symbols "
+        f"({unique_names_swept} unique names), jobs={jobs}"
+    )
+    if names_truncated:
+        print(f"  note: {_names_truncated_note(unique_names_swept)}")
+    print()
+
+    total_grep_only = sum(aggregate_causes.values())
+    print(f"causes across {total_grep_only:,} grep-only hits:")
+    if total_grep_only == 0:
+        print("  (none)")
+    for cause, count in aggregate_causes.most_common():
+        marker = "   <-- look here" if cause == CAUSE_UNEXPLAINED else ""
+        print(f"  {cause:<58} {count}{marker}")
+
+    print()
+    if not flagged:
+        print(
+            "clean: no unexplained grep-only misses across the sweep — "
+            "spot check passed"
+        )
+        return
+
+    print("flagged (nonzero unexplained misses), sorted by count:")
+    shown = flagged[:limit]
+    for r in shown:
+        unexplained = _unexplained_count(r.grep_only_causes)
+        print(
+            f"  {r.target:<40} grep_only={len(r.grep_only_causes)} "
+            f"(unexplained={unexplained})"
+        )
+    remaining = len(flagged) - len(shown)
+    if remaining > 0:
+        print(f"  ... ({remaining} more, --limit {len(flagged)} to see all)")
+    print()
+    print(
+        "re-run `dekko sanity <target>` on any flagged symbol above for "
+        "the full match/dekko-only/grep-only report."
+    )
+
+
+def _run_all_sweeps(
+    names: list[str],
+    root: Path,
+    query_index: MapIndex,
+    *,
+    tests_excluded: bool,
+    workers: int,
+) -> dict[str, tuple[GrepSweepResult, dict[tuple[str, int], str]]]:
+    """Run one grep+classify sweep per unique bare name in ``names``,
+    sequentially or via a thread pool sized by ``workers`` — see
+    ``run_all``'s own docstring for why threads, not processes.
+    """
+
+    def _sweep_one(
+        name: str,
+    ) -> tuple[str, GrepSweepResult, dict[tuple[str, int], str]]:
+        own_def_locs = frozenset(
+            (s.path, s.start_line)
+            for s in query_index.symbols_by_name.get(name, [])
+        )
+        sweep, causes = _sweep_bare_name(
+            root,
+            name,
+            own_def_locs=own_def_locs,
+            tests_excluded=tests_excluded,
+        )
+        return name, sweep, causes
+
+    sweeps: dict[str, tuple[GrepSweepResult, dict[tuple[str, int], str]]] = {}
+    if workers <= 1 or len(names) <= 1:
+        for name in names:
+            _, sweep, causes = _sweep_one(name)
+            sweeps[name] = (sweep, causes)
+        return sweeps
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for name, sweep, causes in pool.map(_sweep_one, names):
+            sweeps[name] = (sweep, causes)
+    return sweeps
+
+
+def _first_sweep_error(
+    names: list[str],
+    sweeps: dict[str, tuple[GrepSweepResult, dict[tuple[str, int], str]]],
+) -> str | None:
+    """The first per-name grep error encountered, in sweep order, or
+    ``None`` if every name's sweep ran cleanly."""
+    for name in names:
+        sweep, _causes = sweeps[name]
+        if sweep.error is not None:
+            return sweep.error
+    return None
+
+
+def _diff_all_symbols(
+    query_index: MapIndex,
+    groups: dict[str, list[Symbol]],
+    names: list[str],
+    sweeps: dict[str, tuple[GrepSweepResult, dict[tuple[str, int], str]]],
+) -> list[_SymbolSweepResult]:
+    """Diff every fan-in symbol across ``names`` against its bare
+    name's already-classified, shared grep sweep (see ``_diff_symbol``)."""
+    results: list[_SymbolSweepResult] = []
+    for name in names:
+        _sweep, causes = sweeps[name]
+        for sym in groups[name]:
+            diffed = _diff_symbol(query_index, sym, causes)
+            if diffed is not None:
+                results.append(diffed)
+    return results
+
+
+def run_all(
+    index: MapIndex,
+    root: Path,
+    *,
+    include_tests: bool = False,
+    jobs: int = _ALL_JOBS_DEFAULT,
+    max_names: int = _MAX_SWEEP_NAMES,
+    fail_on_unexplained: bool = False,
+    limit: int = DEFAULT_REPORT_LIMIT,
+    budget: int | None = None,
+    as_json: bool = False,
+) -> int:
+    """``dekko sanity --all`` — sweep the same callers/grep cross-check
+    ``run()`` runs for one target over every in-repo symbol with
+    nonzero ``calls_in`` fan-in, deduping the grep subprocess by bare
+    name. See the module docstring's ``--all`` paragraph and
+    ``.features/plans/round23/24-sanity-all-sweep.md`` for the full
+    design and rationale.
+
+    Callers mode only (see the design doc's Scope section) — there is
+    no ``usages``/``unused`` equivalent here; the caller (``cli.
+    run_sanity``) is responsible for rejecting ``--all`` combined with
+    ``--usages``/``--unused`` before this function is ever called.
+
+    Grep subprocess sweeps run in a thread pool sized by
+    ``repo_ops.resolve_workers(jobs)`` (``0`` = all cores) — threads,
+    not processes, since each unit of work is "wait on one grep
+    subprocess" (I/O-bound), avoiding the cost of pickling the
+    already-loaded ``MapIndex`` across a process boundary the way
+    ``dekko map --jobs`` needs to for its own (CPU-bound) parallel
+    extraction.
+
+    Args:
+        index: Loaded map index (unfiltered — this function applies
+            its own test-inclusion default, same as ``run()``).
+        root: Repository root on disk, for each name's grep sweep.
+        include_tests: Include test files in the dekko-side query and
+            in fan-in grouping (default: excluded, matching ``run()``
+            and the MCP ``get_callers`` default).
+        jobs: Thread-pool size for the per-name grep sweeps (``0`` =
+            all cores, ``1`` = sequential).
+        max_names: Safety cap on unique bare names swept — names past
+            this cap (alphabetical order) are not swept, and the
+            truncation is disclosed rather than silently sweeping a
+            partial, unlabeled subset.
+        fail_on_unexplained: Exit ``EXIT_UNEXPLAINED_FOUND`` instead of
+            ``EXIT_OK`` when the aggregate unexplained-cause count is
+            nonzero — opt-in so a first `--all` run in CI can't
+            surprise-break a pipeline.
+        limit: Max rendered rows for the ``flagged`` list (text) and
+            cap on the ``flagged``/``symbols`` arrays (JSON) — mirrors
+            ``run()``'s own per-bucket ``--limit``.
+        budget: Approximate token budget applied to the JSON
+            ``flagged``/``symbols`` arrays, or ``None`` for unbounded.
+        as_json: Emit structured JSON instead of the text triage
+            summary.
+
+    Returns:
+        ``EXIT_OK`` on a completed sweep (regardless of findings,
+        unless ``fail_on_unexplained``), ``EXIT_UNEXPLAINED_FOUND``
+        when ``fail_on_unexplained`` is set and the aggregate
+        unexplained count is nonzero, ``EXIT_GREP_FAILED`` when any
+        name's grep sweep itself couldn't run.
+    """
+    query_index = index if include_tests else index.without_tests()
+    groups = _group_fan_in_symbols(query_index)
+    all_names = sorted(groups)
+    names_truncated = len(all_names) > max_names
+    names = all_names[:max_names] if names_truncated else all_names
+
+    workers = repo_ops.resolve_workers(jobs)
+    sweeps = _run_all_sweeps(
+        names,
+        root,
+        query_index,
+        tests_excluded=not include_tests,
+        workers=workers,
+    )
+    sweep_error = _first_sweep_error(names, sweeps)
+    if sweep_error is not None:
+        print(f"dekko: {sweep_error}", file=sys.stderr)
+        return EXIT_GREP_FAILED
+
+    results = _diff_all_symbols(query_index, groups, names, sweeps)
+
+    aggregate_causes: Counter = Counter()
+    for r in results:
+        aggregate_causes.update(r.grep_only_causes)
+
+    flagged = [r for r in results if CAUSE_UNEXPLAINED in r.grep_only_causes]
+    flagged.sort(
+        key=lambda r: _unexplained_count(r.grep_only_causes), reverse=True
+    )
+
+    if as_json:
+        doc = _build_all_json_doc(
+            symbols_swept=len(results),
+            unique_names_swept=len(names),
+            names_truncated=names_truncated,
+            jobs=workers,
+            aggregate_causes=aggregate_causes,
+            flagged=flagged,
+            results=results,
+            limit=limit,
+            budget=budget,
+        )
+        print(json.dumps(doc, indent=2))
+    else:
+        _print_all_text(
+            symbols_swept=len(results),
+            unique_names_swept=len(names),
+            names_truncated=names_truncated,
+            jobs=workers,
+            aggregate_causes=aggregate_causes,
+            flagged=flagged,
+            limit=limit,
+        )
+
+    if fail_on_unexplained and aggregate_causes[CAUSE_UNEXPLAINED] > 0:
+        return EXIT_UNEXPLAINED_FOUND
     return EXIT_OK

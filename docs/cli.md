@@ -228,6 +228,59 @@ bucket is a finding to relay, not itself an error; this is a spot
 check, not a re-verification. See the Claude Code `/sanity` slash
 command: [claude-code.md](claude-code.md#the-sanity-command).
 
+### `dekko sanity --all` — sweeping every symbol instead of one target
+
+`dekko sanity <target>` only ever checks the one symbol a human or
+agent happens to pick. `dekko sanity --all` removes that selection
+bias: it runs the same callers/grep cross-check over *every* in-repo
+symbol with at least one caller (nonzero `calls_in` fan-in), so a
+classification bug in `sanity` itself (or a genuine grep-vs-dekko
+disagreement) can't hide behind whichever target nobody happened to
+try. It's callers-mode only — `--all` combined with `--usages` or
+`--unused` is a CLI error, not a silently different mode.
+
+```sh
+dekko sanity --all                        # sweep every fan-in symbol, jobs=4
+dekko sanity --all --jobs 1                # sequential (no thread pool)
+dekko sanity --all --jobs 0                # use all cores
+dekko sanity --all --max-names 500         # cap unique bare names swept
+dekko sanity --all --fail-on-unexplained   # CI gate: nonzero exit if any unexplained miss
+```
+
+The grep sweep is deduped by bare name, not by symbol: two symbols
+sharing a name (an overload set, same-named methods on different
+types) produce byte-identical grep sweeps and classifications, so
+`--all` runs one `grep -rn` per *unique* bare name among fan-in
+symbols, not one per symbol — the same expensive-subprocess-per-name
+work `sanity <target>` already does, just amortized. `--jobs N`
+(default `4`; `0` = all cores, `1` = sequential) parallelizes the
+remaining per-name sweeps across a thread pool, since each is I/O-bound
+(waiting on a `grep` subprocess), not CPU-bound.
+
+Output is a triage summary, not a full per-symbol report: an aggregate
+histogram of grep-only causes across the whole sweep, then the symbols
+with a nonzero *unexplained* miss, sorted by count. Re-run `dekko
+sanity <target>` on any flagged symbol for the full match/dekko-only/
+grep-only detail. `--json` carries the full per-symbol breakdown (not
+just the flagged subset) for programmatic/CI use.
+
+A safety cap (`--max-names`, default 2,000) bounds how many unique
+bare names get swept on a very large repo; names are swept in a fixed
+alphabetical order, and hitting the cap is disclosed (`names_truncated`
+in `--json`, a `note:` line otherwise) rather than silently covering a
+partial, unlabeled subset.
+
+Exits `0` regardless of findings by default, matching `sanity
+<target>`'s "advisory, not an error" contract. `--fail-on-unexplained`
+exits `3` when the aggregate unexplained-cause count is nonzero — opt
+in for CI, so adopting `--all` in a pipeline can't surprise-break it on
+first use.
+
+This sweep only re-checks symbols dekko already believes have callers
+— it does not find a resolver false-negative that undercounts a symbol
+to zero callers in the first place (a different, already-tracked
+class of gap).
+
 ## Excluding files
 
 `--exclude GLOB` (repeatable) skips extra files for `dekko map`,

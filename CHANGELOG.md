@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.26] — 2026-08-28
+
+### Added
+- **`dekko sanity --all`** — a repo-wide sanity sweep: runs the same
+  callers/uses cross-check `sanity <target>` does, but across every
+  symbol with nonzero fan-in in the map, not just a human-picked
+  target. Supports `--jobs` for thread-pool parallelism, `--max-names`
+  to cap sweep size, and `--fail-on-unexplained` as a CI gate that
+  exits nonzero if any grep-only miss can't be classified. Mutually
+  exclusive with `--unused`. Closes the gap where a classification
+  regression (like the multiline-import bug from round 23) could sit
+  undetected in `develop` because `sanity` only ever ran when someone
+  happened to pick the right target. See
+  `.features/plans/round23/24-sanity-all-sweep.md`.
+
 ## [0.43.25] — 2026-08-27
 
 ### Added

@@ -13,12 +13,15 @@ involved at all.
 """
 
 import json
+import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from dekko.analysis import sanity
 from dekko.integrations import cli
+from dekko.render import mapfile
 
 from conftest import RepoFactory
 
@@ -1692,3 +1695,413 @@ def test_sanity_unused_text_discloses_truncation_and_pathological_skips(
     out = capsys.readouterr().out
     assert "safety cap" in out
     assert "pathological" in out
+
+
+# --- ``sanity --all``: repo-wide sweep -----------------------------
+#
+# .features/plans/round23/24-sanity-all-sweep.md
+
+
+def test_group_fan_in_symbols_excludes_zero_fan_in(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def called():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def uncalled():\n"
+                "    return 2\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return called()\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    groups = sanity._group_fan_in_symbols(index)
+    assert "called" in groups
+    assert "uncalled" not in groups
+
+
+def test_group_fan_in_symbols_respects_include_tests(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": "def target():\n    return 1\n",
+            "tests/test_a.py": (
+                "from a import target\n"
+                "\n"
+                "\n"
+                "def test_target():\n"
+                "    assert target() == 1\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    # Excluded by default -- target's only caller is a test file.
+    assert "target" not in sanity._group_fan_in_symbols(index.without_tests())
+    # Included with the full (unfiltered) index, mirroring
+    # sanity <target>'s own --include-tests default handling.
+    assert "target" in sanity._group_fan_in_symbols(index)
+
+
+def test_classify_grep_hits_matches_single_target_path(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The extracted helper and run()'s own classification must agree
+    # byte-for-byte -- this is the invariant the whole --all feature
+    # depends on (see module docstring's --all paragraph).
+    root = make_mapped_repo(
+        {
+            "a.py": "def target():\n    return 1\n",
+            "b.py": (
+                "import pkg\n\n\ndef caller():\n    return pkg.target()\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes_from_run = {
+        (row["file"], row["line"]): row["cause"] for row in doc["grep_only"]
+    }
+    assert causes_from_run, "expected at least one grep-only hit"
+
+    index = mapfile.load_map(root)
+    assert index is not None
+    own_def_locs = frozenset(
+        (s.path, s.start_line) for s in index.symbols_by_name.get("target", [])
+    )
+    sweep = sanity._run_grep(root, "target")
+    causes_from_helper = sanity._classify_grep_hits(
+        sweep.hits,
+        "target",
+        root,
+        own_def_locs=own_def_locs,
+        tests_excluded=True,
+    )
+    # _force_no_dekko_hits means every non-own-def hit landed in
+    # grep_only above, so the two maps cover exactly the same set.
+    assert causes_from_helper == causes_from_run
+
+
+def test_sanity_all_dedupes_grep_by_bare_name(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def helper():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return helper()\n"
+            ),
+            "b.py": (
+                "def helper():\n"
+                "    return 2\n"
+                "\n"
+                "\n"
+                "def other():\n"
+                "    return helper()\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    groups = sanity._group_fan_in_symbols(index.without_tests())
+    # Two distinct symbols sharing the bare name "helper", both with
+    # their own fan-in -- the overload-set shape the dedup targets.
+    assert len(groups["helper"]) == 2
+
+    call_count = 0
+    real_run = subprocess.run
+
+    def counting_run(*args: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(sanity.subprocess, "run", counting_run)
+
+    code = sanity.run_all(index, root, jobs=1)
+
+    assert code == sanity.EXIT_OK
+    assert call_count == 1
+
+
+def test_sanity_all_aggregates_across_symbols(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def cleanhelper():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return cleanhelper()\n"
+            ),
+            "b.py": (
+                "def distinctivelyuniquename():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def other():\n"
+                "    return distinctivelyuniquename()\n"
+            ),
+        }
+    )
+    original = sanity._dekko_hits_callers
+
+    def patched(
+        index_arg: mapfile.MapIndex, sym_target: str
+    ) -> tuple[list[tuple[str, int]], list[str]]:
+        # Force only distinctivelyuniquename's own dekko-side query to
+        # report zero hits -- its one real call site becomes an
+        # unexplained grep-only miss; cleanhelper's stays a real match.
+        if "distinctivelyuniquename" in sym_target:
+            return [], []
+        return original(index_arg, sym_target)
+
+    monkeypatch.setattr(sanity, "_dekko_hits_callers", patched)
+
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED) == 1
+    flagged_targets = {f["target"] for f in doc["flagged"]}
+    assert any("distinctivelyuniquename" in t for t in flagged_targets)
+    assert not any("cleanhelper" in t for t in flagged_targets)
+
+
+def test_sanity_all_json_shape(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def helper():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return helper()\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert {
+        "action",
+        "symbols_swept",
+        "unique_names_swept",
+        "names_truncated",
+        "jobs",
+        "aggregate_causes",
+        "flagged",
+        "symbols",
+    } <= set(doc)
+    assert doc["action"] == "sanity_all"
+    assert doc["symbols_swept"] == 1
+    assert doc["unique_names_swept"] == 1
+    assert doc["names_truncated"] is False
+    for row in doc["symbols"]:
+        assert {"target", "bare_name", "counts", "causes"} <= set(row)
+        assert {"matches", "dekko_only", "grep_only"} <= set(row["counts"])
+
+
+def test_sanity_all_names_truncated_disclosed(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    files = {}
+    for i in range(3):
+        files[f"m{i}.py"] = (
+            f"def helper{i}():\n"
+            f"    return {i}\n"
+            "\n"
+            "\n"
+            f"def caller{i}():\n"
+            f"    return helper{i}()\n"
+        )
+    root = make_mapped_repo(files)
+    code = cli.main(
+        [
+            "sanity",
+            "--all",
+            "--root",
+            str(root),
+            "--json",
+            "--max-names",
+            "1",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["names_truncated"] is True
+    assert doc["unique_names_swept"] == 1
+    assert "names_truncated_note" in doc
+
+
+def test_sanity_all_fail_on_unexplained_exit_code(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": "def distinctivelyuniquename():\n    return 1\n",
+            "b.py": ("def other():\n    return distinctivelyuniquename()\n"),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == sanity.EXIT_OK
+    capsys.readouterr()
+
+    code = cli.main(
+        [
+            "sanity",
+            "--all",
+            "--root",
+            str(root),
+            "--json",
+            "--fail-on-unexplained",
+        ]
+    )
+    assert code == sanity.EXIT_UNEXPLAINED_FOUND
+
+
+def test_sanity_all_target_and_all_mutually_exclusive(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    code = cli.main(["sanity", "target", "--all", "--root", str(root)])
+    assert code == 2
+    assert "not both" in capsys.readouterr().err
+
+
+def test_sanity_all_usages_incompatible(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    code = cli.main(["sanity", "--all", "--usages", "--root", str(root)])
+    assert code == 2
+    assert "--usages" in capsys.readouterr().err
+
+
+def test_sanity_all_unused_incompatible(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    code = cli.main(
+        ["sanity", "--all", "--unused", "target", "--root", str(root)]
+    )
+    assert code == 2
+    assert "--unused" in capsys.readouterr().err
+
+
+def test_sanity_all_cli_smoke(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SIMPLE_REPO)
+    code = cli.main(["sanity", "--all", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "dekko sanity --all" in out
+
+
+def _buggy_looks_like_multiline_import_member(
+    root: Path, hit: sanity.GrepHit, bare_name: str
+) -> bool:
+    """The pre-0.43.18 flat ``any()``/``any()`` implementation this
+    module's round-23 regression fixed (commit ``b5f692f``) -- a
+    still-open multi-line destructured import block is falsely read as
+    "closed" as soon as *any* line in the lookback window contains
+    ``}``, regardless of which opener it actually belongs to."""
+    stripped = hit.snippet.strip().rstrip(",")
+    if stripped != bare_name:
+        return False
+    try:
+        lines = (
+            (root / hit.path)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+        )
+    except OSError:
+        return False
+    start = max(0, hit.line - 1 - sanity._IMPORT_WINDOW_LINES)
+    window = lines[start : hit.line - 1]
+    opened = any(sanity._IMPORT_OPEN_BRACE.match(ln) for ln in window)
+    if not opened:
+        return False
+    closed_before_hit = any("}" in ln for ln in window)
+    return not closed_before_hit
+
+
+def test_sanity_all_regression_would_have_caught_multiline_import_bug(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 23's own thesis, made concrete: sweeping every fan-in
+    # symbol with the *pre-fix* buggy classifier flags a nonzero
+    # unexplained count on the exact shape that defeated it (an
+    # unrelated single-line import sitting above the real, still-open
+    # multi-line destructured import block) -- proof `sanity --all`
+    # would have surfaced this without anyone hand-picking
+    # `buddyStateDir`. The fixed implementation (no monkeypatch) must
+    # NOT flag it.
+    root = make_mapped_repo(
+        {
+            "path.ts": (
+                "export function buddyStateDir(): string {\n"
+                "  return '/tmp';\n"
+                "}\n"
+            ),
+            "index.ts": (
+                "import { unrelated } from 'os';\n"
+                "\n"
+                "import {\n"
+                "  buddyStateDir,\n"
+                "  claudeSettingsPath,\n"
+                "} from './path';\n"
+                "\n"
+                "function main() {\n"
+                "  return buddyStateDir();\n"
+                "}\n"
+            ),
+        }
+    )
+
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED, 0) == 0
+
+    monkeypatch.setattr(
+        sanity,
+        "_looks_like_multiline_import_member",
+        _buggy_looks_like_multiline_import_member,
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED, 0) > 0
