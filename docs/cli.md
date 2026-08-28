@@ -598,7 +598,42 @@ matches, regardless of type). **This is exact-name matching only** —
 catching a *superclass* of the queried type (`except Exception:`
 catching a raised `ConfigError` that extends `Exception`) is **not**
 detected as a match in this version; a real, disclosed precision gap,
-not an assumed-away one.
+not an assumed-away one. **Default sort puts exact matches ahead of
+catch-alls** — always on, no flag needed — so a real typed match (rare
+on a JS/TS-heavy repo per the caveat above) always ranks before the
+catch-all noise instead of being interleaved with it by path
+alphabetization; within each group, rows still sort by path/line/
+caller. This matters most when `--limit`/`--budget` truncates: the
+higher-signal exact matches are now what survives the cap.
+
+**`--lang <language>` scopes `throws`/`catches` to one language** —
+cuts cross-language noise on a multi-language repo, e.g. a 99%-Java
+repo carrying a handful of vendored JS files whose untyped catch-alls
+(see the JS/TS weak-signal caveat above) would otherwise dominate a
+`catches` result for a Java-only exception type:
+
+```sh
+dekko query catches ConfigurationPropertiesBindException --lang java
+dekko query throws handleRequest --transitive --lang java
+```
+
+`--lang` accepts any language `throws`/`catches` extracts data for
+(currently `cpp`, `java`, `javascript`, `python`, `tsx`, `typescript`
+— derived from the language registry, so it stays in sync with
+coverage automatically); an unsupported value (`rust`, `go`, ...) is
+rejected by the CLI with a clear error rather than silently accepted
+and producing an always-empty result. For `catches`, filtering is by
+each catch clause's own file language; the excluded count and its
+per-language breakdown are disclosed (`note: --lang java filter
+applied — 30 catch clause(s) in another language excluded (28
+javascript, 2 typescript)`; `--json` adds `lang_filter`/
+`lang_filtered_out`). For `throws`, one-level filtering is by the
+target symbol's own language — a `--lang` that disagrees with the
+target's language necessarily empties the result, and a distinct
+`note:` calls this out as a filter mismatch rather than reading like
+"target throws nothing"; `--transitive` filtering additionally applies
+to whatever the call-graph walk reaches, with the same excluded-count
+disclosure as `catches`.
 
 `throws`/`catches` are **CLI-only** (no MCP tool) — given the scoped-
 pilot framing and the JS/TS caveat above, this doesn't yet clear the

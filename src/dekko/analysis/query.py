@@ -1071,6 +1071,22 @@ def _caller_label(index: MapIndex, caller_id: str) -> str:
     return sym.qualname if sym is not None else caller_id
 
 
+def _caller_language(index: MapIndex, caller_id: str) -> str | None:
+    """Language of a throws/calls-graph caller id.
+
+    Handles both a resolved-symbol id (looked up directly) and the
+    ``path::<module>`` pseudo-id convention used for module-level
+    call sites (module-level throws/calls have no owning symbol) —
+    see ``ExternalCall.caller``'s and ``CatchSite.caller``'s
+    docstrings for the same convention used elsewhere.
+    """
+    sym = index.symbols_by_id.get(caller_id)
+    if sym is not None:
+        return sym.language
+    path = caller_id.split("::", 1)[0]
+    return index.languages_by_path.get(path)
+
+
 def _throws_direct(
     index: MapIndex, caller_id: str
 ) -> tuple[list[tuple[Symbol, list[int]]], list[ExternalCall], int, int]:
@@ -1156,14 +1172,46 @@ def _throws_external_row(ext: ExternalCall) -> str:
     return f"  L{site}  (external) {ext.callee}"
 
 
+def _throws_lang_filter(
+    index: MapIndex,
+    resolved: list[tuple[Symbol, int, list[int]]],
+    external: list[ExternalCall],
+    lang: str,
+) -> tuple[list[tuple[Symbol, int, list[int]]], list[ExternalCall], int]:
+    """Narrow gathered throws hits to one language.
+
+    ``resolved`` is filtered by each raised type's own
+    ``Symbol.language`` (available directly); ``external`` is filtered
+    by the call site's *caller* language via ``_caller_language``,
+    since an external (stdlib/third-party) callee has no language of
+    its own to check.
+
+    Returns:
+        ``(kept_resolved, kept_external, filtered_out)``.
+    """
+    kept_resolved = [r for r in resolved if r[0].language == lang]
+    kept_external = [
+        ext for ext in external if _caller_language(index, ext.caller) == lang
+    ]
+    filtered_out = (len(resolved) - len(kept_resolved)) + (
+        len(external) - len(kept_external)
+    )
+    return kept_resolved, kept_external, filtered_out
+
+
 def _throws_gather(
-    index: MapIndex, sym: Symbol, transitive: bool, depth: int
+    index: MapIndex,
+    sym: Symbol,
+    transitive: bool,
+    depth: int,
+    lang: str | None,
 ) -> tuple[
     list[tuple[Symbol, int, list[int]]],
     list[ExternalCall],
     int,
     int,
     bool,
+    int,
 ]:
     """Compute one throws query's result set, one level or transitive.
 
@@ -1172,33 +1220,60 @@ def _throws_gather(
     this is still the same "gather, then render" split every other
     ``_run_*`` action already uses.
 
+    Args:
+        index: Loaded map index.
+        sym: Resolved target symbol.
+        transitive: Walk the call graph instead of one level.
+        depth: Hop cap for a transitive walk (ignored otherwise).
+        lang: Restrict the gathered ``resolved``/``external`` hits to
+            one language (see ``_throws_lang_filter``). ``None``
+            applies no filter.
+
     Returns:
         ``(resolved, external, bare_count, ambiguous_count,
-        truncated)`` — ``resolved`` is ``(symbol, depth, lines)``
-        triples (``depth`` always ``0`` for a one-level query);
-        ``truncated``/non-zero ``ambiguous_count`` only ever apply to
-        a transitive walk / a one-level query respectively (the design
-        doc scopes ambiguous-name disclosure to the target itself, the
-        same way ``_run_heritage`` already does for supertypes).
+        truncated, lang_filtered_out)`` — ``resolved`` is ``(symbol,
+        depth, lines)`` triples (``depth`` always ``0`` for a
+        one-level query); ``truncated``/non-zero ``ambiguous_count``
+        only ever apply to a transitive walk / a one-level query
+        respectively (the design doc scopes ambiguous-name disclosure
+        to the target itself, the same way ``_run_heritage`` already
+        does for supertypes); ``lang_filtered_out`` is the count of
+        hits ``lang`` excluded (always ``0`` when ``lang`` is
+        ``None``).
     """
     if not transitive:
         direct, external, bare_count, ambiguous_count = _throws_direct(
             index, sym.id
         )
         resolved = [(s, 0, lines) for s, lines in direct]
-        return resolved, external, bare_count, ambiguous_count, False
+        truncated = False
+    else:
+        resolved_map, external_hits, bare_count, truncated = (
+            _walk_throws_transitive(index, sym.id, depth)
+        )
+        resolved = [
+            (index.symbols_by_id[tid], d, lines)
+            for tid, (d, lines) in resolved_map.items()
+            if tid in index.symbols_by_id
+        ]
+        resolved.sort(key=lambda r: (r[1], relevance_key(r[0], index)))
+        external = [ext for _depth, ext in external_hits]
+        ambiguous_count = 0
 
-    resolved_map, external_hits, bare_count, truncated = (
-        _walk_throws_transitive(index, sym.id, depth)
+    if lang is None:
+        return resolved, external, bare_count, ambiguous_count, truncated, 0
+
+    kept_resolved, kept_external, filtered_out = _throws_lang_filter(
+        index, resolved, external, lang
     )
-    resolved = [
-        (index.symbols_by_id[tid], d, lines)
-        for tid, (d, lines) in resolved_map.items()
-        if tid in index.symbols_by_id
-    ]
-    resolved.sort(key=lambda r: (r[1], relevance_key(r[0], index)))
-    external = [ext for _depth, ext in external_hits]
-    return resolved, external, bare_count, 0, truncated
+    return (
+        kept_resolved,
+        kept_external,
+        bare_count,
+        ambiguous_count,
+        truncated,
+        filtered_out,
+    )
 
 
 def _print_throws_json(
@@ -1215,6 +1290,8 @@ def _print_throws_json(
     limit: int,
     coverage: str | None,
     language_supported: bool,
+    lang: str | None,
+    lang_filtered_out: int,
 ) -> None:
     """JSON rendering for ``_run_throws``."""
     entries = [
@@ -1245,6 +1322,9 @@ def _print_throws_json(
         doc["coverage_warning"] = coverage
     if not language_supported:
         doc["language_supported"] = False
+    if lang is not None:
+        doc["lang_filter"] = lang
+        doc["lang_filtered_out"] = lang_filtered_out
     print(json.dumps(doc, indent=2))
 
 
@@ -1281,9 +1361,29 @@ def _throws_text_lines(
 
 
 def _throws_text_notes(
-    bare_count: int, ambiguous_count: int, truncated: bool, depth: int
+    bare_count: int,
+    ambiguous_count: int,
+    truncated: bool,
+    depth: int,
+    lang: str | None,
+    sym_language: str,
+    lang_mismatch: bool,
+    lang_filtered_out: int,
 ) -> None:
     """Print ``_run_throws``' disclosure notes (stderr, unconditional)."""
+    if lang_mismatch:
+        print(
+            f"  note: target's own language ({sym_language}) doesn't "
+            f"match --lang {lang} — no results can match",
+            file=sys.stderr,
+        )
+    if lang is not None and lang_filtered_out:
+        print(
+            f"  note: --lang {lang} filter applied — "
+            f"{lang_filtered_out} throw site(s) in another language "
+            "excluded",
+            file=sys.stderr,
+        )
     if bare_count:
         print(
             f"  note: {bare_count} re-raise site(s) omitted — type "
@@ -1313,6 +1413,7 @@ def _run_throws(
     as_json: bool,
     limit: int,
     budget: int | None,
+    lang: str | None = None,
 ) -> tuple[int, Meter | None]:
     """Execute the throws action: what calling ``sym`` can raise.
 
@@ -1332,6 +1433,12 @@ def _run_throws(
         as_json: Emit structured JSON instead of text.
         limit: Cap on text result rows.
         budget: Approximate token budget for the result rows.
+        lang: Restrict results to one language (e.g. ``"java"``) —
+            cuts cross-language noise on a multi-language repo.
+            ``None`` (default) applies no filter. For a one-level
+            query, a mismatch between ``lang`` and ``sym.language``
+            necessarily empties the result (disclosed explicitly
+            rather than reading as "target throws nothing").
 
     Returns:
         ``(exit_code, meter)`` — meter is ``None`` for JSON output or
@@ -1339,17 +1446,20 @@ def _run_throws(
     """
     language_supported = languages.exception_handling_supported(sym.language)
     if language_supported:
-        resolved, external, bare_count, ambiguous_count, truncated = (
-            _throws_gather(index, sym, transitive, depth)
-        )
+        (
+            resolved,
+            external,
+            bare_count,
+            ambiguous_count,
+            truncated,
+            lang_filtered_out,
+        ) = _throws_gather(index, sym, transitive, depth, lang)
     else:
-        resolved, external, bare_count, ambiguous_count, truncated = (
-            [],
-            [],
-            0,
-            0,
-            False,
-        )
+        resolved, external, bare_count, ambiguous_count = [], [], 0, 0
+        truncated, lang_filtered_out = False, 0
+    lang_mismatch = (
+        lang is not None and not transitive and lang != sym.language
+    )
     coverage = _coverage_note(index)
     if as_json:
         _print_throws_json(
@@ -1366,11 +1476,22 @@ def _run_throws(
             limit,
             coverage,
             language_supported,
+            lang,
+            lang_filtered_out,
         )
         return EXIT_OK, None
 
     prefix, rows = _throws_text_lines(sym, resolved, external, transitive)
-    _throws_text_notes(bare_count, ambiguous_count, truncated, depth)
+    _throws_text_notes(
+        bare_count,
+        ambiguous_count,
+        truncated,
+        depth,
+        lang,
+        sym.language,
+        lang_mismatch,
+        lang_filtered_out,
+    )
     if not rows:
         if not language_supported:
             print(
@@ -1457,12 +1578,116 @@ def _catch_entry(site: CatchSite) -> dict:
     }
 
 
+def _lang_filter_catches(
+    index: MapIndex, hits: list[CatchSite], lang: str
+) -> tuple[list[CatchSite], dict[str, int]]:
+    """Narrow ``hits`` to one recorded language, tallying what was
+    removed by the excluded site's own language for disclosure.
+
+    Returns:
+        ``(kept, removed_by_lang)`` — ``removed_by_lang`` maps each
+        excluded site's language (``"unknown"`` if the path has no
+        recorded language) to how many sites of that language were
+        dropped.
+    """
+    kept: list[CatchSite] = []
+    removed_by_lang: dict[str, int] = {}
+    for site in hits:
+        site_lang = index.languages_by_path.get(site.path)
+        if site_lang == lang:
+            kept.append(site)
+        else:
+            key = site_lang or "unknown"
+            removed_by_lang[key] = removed_by_lang.get(key, 0) + 1
+    return kept, removed_by_lang
+
+
+def _lang_filter_breakdown_text(removed_by_lang: dict[str, int]) -> str:
+    """Render a ``removed_by_lang`` tally as ``"28 javascript, 2
+    typescript"`` — highest count first, alphabetical on ties."""
+    ordered = sorted(removed_by_lang.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{count} {name}" for name, count in ordered)
+
+
+def _print_catches_json(
+    target: str,
+    hits: list[CatchSite],
+    exact_count: int,
+    catch_all_count: int,
+    budget: int | None,
+    limit: int,
+    coverage: str | None,
+    has_jsts: bool,
+    excluded: int,
+    total: int,
+    lang_list: str,
+    lang: str | None,
+    lang_filtered_out: int,
+) -> None:
+    """JSON rendering for ``_run_catches``."""
+    entries = [_catch_entry(s) for s in hits]
+    kept, meter = _fit_entries(entries, budget, limit)
+    doc = {
+        "action": "catches",
+        "target": target,
+        "results": kept,
+        "exact_matches": exact_count,
+        "catch_all_matches": catch_all_count,
+        "meta": meter.as_dict(),
+    }
+    if lang is not None:
+        doc["lang_filter"] = lang
+        doc["lang_filtered_out"] = lang_filtered_out
+    if has_jsts:
+        doc["note"] = _CATCHES_CAVEAT
+    if coverage:
+        doc["coverage_warning"] = coverage
+    if excluded:
+        doc["language_coverage"] = {
+            "excluded_files": excluded,
+            "total_files": total,
+            "reason": (f"{lang_list} are not covered by throws/catches"),
+        }
+    print(json.dumps(doc, indent=2))
+
+
+def _catches_text_notes(
+    lang: str | None,
+    lang_filtered_out: int,
+    lang_breakdown: dict[str, int],
+    has_jsts: bool,
+    excluded: int,
+    total: int,
+    lang_list: str,
+) -> None:
+    """Print ``_run_catches``' disclosure notes (stderr, unconditional)."""
+    if lang is not None and lang_filtered_out:
+        breakdown = _lang_filter_breakdown_text(lang_breakdown)
+        print(
+            f"  note: --lang {lang} filter applied — "
+            f"{lang_filtered_out} catch clause(s) in another language "
+            f"excluded ({breakdown})",
+            file=sys.stderr,
+        )
+    if has_jsts:
+        print(f"  note: {_CATCHES_CAVEAT}", file=sys.stderr)
+    if excluded:
+        print(
+            f"  note: {excluded:,} of {total:,} mapped files are in a "
+            f"language ({lang_list}) this query doesn't cover; results "
+            "only reflect the other "
+            f"{total - excluded:,} files",
+            file=sys.stderr,
+        )
+
+
 def _run_catches(
     index: MapIndex,
     target: str,
     as_json: bool,
     limit: int,
     budget: int | None,
+    lang: str | None = None,
 ) -> tuple[int, Meter | None]:
     """Execute the catches action: who catches an exception of type
     ``target``.
@@ -1481,13 +1706,25 @@ def _run_catches(
         as_json: Emit structured JSON instead of text.
         limit: Cap on text result rows.
         budget: Approximate token budget for the result rows.
+        lang: Restrict results to one language (e.g. ``"java"``) —
+            cuts cross-language noise on a multi-language repo.
+            ``None`` (default) applies no filter.
 
     Returns:
         ``(exit_code, meter)`` — meter is ``None`` for JSON output or
         an empty result.
     """
     hits = [s for s in index.catches if _catch_site_matches(s, target)]
-    hits.sort(key=lambda s: (s.path, s.line, s.caller))
+    lang_filtered_out = 0
+    lang_breakdown: dict[str, int] = {}
+    if lang is not None:
+        hits, lang_breakdown = _lang_filter_catches(index, hits, lang)
+        lang_filtered_out = sum(lang_breakdown.values())
+    # Exact type-name matches sort ahead of catch-all matches (which
+    # match every query regardless of type) so the higher-signal rows
+    # survive --limit/--budget truncation first; lexical path/line/
+    # caller order is only the tiebreaker within each group.
+    hits.sort(key=lambda s: (s.bare, s.path, s.line, s.caller))
     exact_count = sum(1 for s in hits if not s.bare)
     catch_all_count = sum(1 for s in hits if s.bare)
     coverage = _coverage_note(index)
@@ -1498,31 +1735,25 @@ def _run_catches(
     # §3.1) is noise on a 100%-Go/C++/Python repo, where it can never
     # be relevant.
     has_jsts = any(
-        lang in {"javascript", "typescript", "tsx"}
-        for lang in index.languages_by_path.values()
+        site_lang in {"javascript", "typescript", "tsx"}
+        for site_lang in index.languages_by_path.values()
     )
     if as_json:
-        entries = [_catch_entry(s) for s in hits]
-        kept, meter = _fit_entries(entries, budget, limit)
-        doc = {
-            "action": "catches",
-            "target": target,
-            "results": kept,
-            "exact_matches": exact_count,
-            "catch_all_matches": catch_all_count,
-            "meta": meter.as_dict(),
-        }
-        if has_jsts:
-            doc["note"] = _CATCHES_CAVEAT
-        if coverage:
-            doc["coverage_warning"] = coverage
-        if excluded:
-            doc["language_coverage"] = {
-                "excluded_files": excluded,
-                "total_files": total,
-                "reason": (f"{lang_list} are not covered by throws/catches"),
-            }
-        print(json.dumps(doc, indent=2))
+        _print_catches_json(
+            target,
+            hits,
+            exact_count,
+            catch_all_count,
+            budget,
+            limit,
+            coverage,
+            has_jsts,
+            excluded,
+            total,
+            lang_list,
+            lang,
+            lang_filtered_out,
+        )
         return EXIT_OK, None
     header = (
         f"{len(hits)} catch clause(s) match '{target}': "
@@ -1531,16 +1762,15 @@ def _run_catches(
         else ""
     )
     rows = [_catch_row(index, s) for s in hits]
-    if has_jsts:
-        print(f"  note: {_CATCHES_CAVEAT}", file=sys.stderr)
-    if excluded:
-        print(
-            f"  note: {excluded:,} of {total:,} mapped files are in a "
-            f"language ({lang_list}) this query doesn't cover; results "
-            "only reflect the other "
-            f"{total - excluded:,} files",
-            file=sys.stderr,
-        )
+    _catches_text_notes(
+        lang,
+        lang_filtered_out,
+        lang_breakdown,
+        has_jsts,
+        excluded,
+        total,
+        lang_list,
+    )
     if not rows:
         print(f"(no catch clauses would handle '{target}')")
         if coverage:
@@ -2961,6 +3191,7 @@ def _dispatch_scan(
     budget: int | None,
     exact: bool,
     env_list: bool,
+    lang: str | None,
 ) -> tuple[int, Meter | None] | None:
     """Route the whole-repo-scan actions that never resolve a symbol
     target (``file``/``uses``/``type``/``importers``/``catches``/
@@ -2980,7 +3211,7 @@ def _dispatch_scan(
     if action == "importers":
         return _run_importers(index, target, exact, as_json, limit, budget)
     if action == "catches":
-        return _run_catches(index, target, as_json, limit, budget)
+        return _run_catches(index, target, as_json, limit, budget, lang)
     if action == "cohesion":
         return _run_cohesion(index, target, as_json, limit, budget)
     if action == "env":
@@ -3005,10 +3236,11 @@ def _dispatch(
     min_shared: int,
     depth: int,
     env_list: bool,
+    lang: str | None,
 ) -> tuple[int, Meter | None]:
     """Route one query action to its executor."""
     scanned = _dispatch_scan(
-        index, action, target, as_json, limit, budget, exact, env_list
+        index, action, target, as_json, limit, budget, exact, env_list, lang
     )
     if scanned is not None:
         return scanned
@@ -3028,7 +3260,7 @@ def _dispatch(
         return _run_peers(index, sym, min_shared, as_json, limit, budget)
     if action == "throws":
         return _run_throws(
-            index, sym, transitive, depth, as_json, limit, budget
+            index, sym, transitive, depth, as_json, limit, budget, lang
         )
     return _run_relation(index, action, sym, as_json, limit, budget, sites)
 
@@ -3048,6 +3280,7 @@ def run(
     min_shared: int = DEFAULT_MIN_SHARED,
     depth: int = DEFAULT_THROWS_DEPTH,
     env_list: bool = False,
+    lang: str | None = None,
 ) -> int:
     """Execute one query action against a loaded index.
 
@@ -3097,6 +3330,9 @@ def run(
             env-var key read anywhere (``env --list``) instead of
             looking up one ``target`` key. Ignored for every other
             action.
+        lang: For ``catches``/``throws``, restrict results to one
+            language (e.g. ``"java"``) — cuts cross-language noise on
+            a multi-language repo. Ignored for every other action.
 
     Returns:
         Process exit code.
@@ -3121,6 +3357,7 @@ def run(
             min_shared,
             depth,
             env_list,
+            lang,
         )
     text = buf.getvalue()
     sys.stdout.write(text)

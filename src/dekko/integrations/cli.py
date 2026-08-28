@@ -32,6 +32,7 @@ from dekko.render import mapfile
 from dekko.storage import notes as notes_mod
 from dekko.integrations import orient as orient_mod
 from dekko.analysis import outline as outline_mod
+from dekko.core import languages
 from dekko.analysis import query
 from dekko.analysis import relevance
 from dekko.analysis import sanity as sanity_mod
@@ -75,6 +76,16 @@ SUBCOMMANDS = (
     "note",
     "export",
     "deps",
+)
+
+# Languages 'query throws'/'query catches' extract data for -- derived
+# from the language registry (not hardcoded) so a future language
+# gaining throw_query/catch_query support automatically becomes a
+# valid --lang value with no CLI change needed.
+_THROWS_CATCHES_LANGS = sorted(
+    name
+    for name in languages.SPEC_BY_NAME
+    if languages.exception_handling_supported(name)
 )
 
 
@@ -429,6 +440,15 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="for 'env': every distinct env-var key read anywhere in "
         "the repo, ranked by read-site count, instead of looking up "
         "one TARGET key — TARGET may be omitted with this flag",
+    )
+    p_query.add_argument(
+        "--lang",
+        choices=_THROWS_CATCHES_LANGS,
+        default=None,
+        help="for 'catches'/'throws': restrict results to one language "
+        "(e.g. 'java') — cuts cross-language noise on a multi-language "
+        "repo where a small amount of incidental/vendored code in "
+        "another language would otherwise pollute the match list",
     )
     _add_read_options(p_query)
     p_query.set_defaults(func=run_query)
@@ -1642,6 +1662,7 @@ def run_query(args: argparse.Namespace) -> int:
         min_shared=args.min_shared,
         depth=args.depth,
         env_list=args.env_list,
+        lang=args.lang,
     )
 
 

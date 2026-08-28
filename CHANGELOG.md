@@ -9,6 +9,19 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.29] — 2026-08-28
+
+### Added
+- **`dekko query throws`/`catches` gain a `--lang` filter** — cuts
+  cross-language noise (e.g. JS catch-alls polluting a Java-only
+  query on a mixed-language repo like spring-boot) by restricting
+  results to a single language, derived from the same language
+  registry `outline`/`search` use. Text and JSON output both disclose
+  when results were filtered (`lang_filtered_out` / a mismatch note).
+  Also fixes `catches`' default sort to put exact-type matches before
+  catch-alls. See
+  `.features/plans/round23/28-lang-filter-throws-catches.md`.
+
 ## [0.43.28] — 2026-08-28
 
 ### Fixed
