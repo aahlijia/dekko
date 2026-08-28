@@ -9,6 +9,17 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.32] — 2026-08-28
+
+### Changed
+- **MCP tools accept `name` as an alias for `symbol`** —
+  `query_symbol`, `get_callers`, `get_callees`, `get_supertypes`,
+  `get_subtypes`, and `add_note` now accept either argument key;
+  `symbol` takes precedence if both are given. Round 24 found agents
+  guessing `name` for these tools since it's the more common MCP
+  convention. See
+  `.features/plans/round24/09-mcp-tool-arg-naming.md`.
+
 ## [0.43.31] — 2026-08-28
 
 ### Changed

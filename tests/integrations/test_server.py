@@ -245,6 +245,52 @@ def test_get_callers_tool(make_mapped_repo: RepoFactory) -> None:
     assert "g() -> int" in result["content"][0]["text"]
 
 
+@pytest.mark.parametrize(
+    ("tool", "value"),
+    [
+        ("query_symbol", "f"),
+        ("get_callers", "f"),
+        ("get_callees", "g"),
+    ],
+)
+def test_symbol_alias_matches_symbol_argument(
+    make_mapped_repo: RepoFactory, tool: str, value: str
+) -> None:
+    # Round-24: two independent evaluators guessed `name` instead of
+    # `symbol` on these tools since `find_usages` itself uses `name`.
+    # `name` must resolve to an identical result as `symbol`.
+    ctx = _ctx(make_mapped_repo(SRC))
+    by_symbol = _call(ctx, tool, {"symbol": value})
+    by_name = _call(ctx, tool, {"name": value})
+    assert by_name == by_symbol
+
+
+def test_symbol_argument_takes_precedence_over_name(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # If both are given, `symbol` (the tool's real, documented
+    # argument) wins unconditionally over the `name` fallback.
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(
+        ctx, "query_symbol", {"symbol": "f", "name": "wrong_target"}
+    )
+    assert result["isError"] is False
+    assert "f() -> int" in result["content"][0]["text"]
+
+
+def test_symbol_alias_not_applied_to_unlisted_tools(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # get_context_pack's real argument is `target`, not `symbol`, and
+    # it isn't in `_SYMBOL_ALIAS_TOOLS` — passing `name` must still
+    # raise the existing missing-argument error, not be silently
+    # reinterpreted.
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(ctx, "get_context_pack", {"name": "f"})
+    assert result["isError"] is True
+    assert "target" in result["content"][0]["text"]
+
+
 def test_find_type_usages_tool(make_mapped_repo: RepoFactory) -> None:
     files = {
         "app.py": (
@@ -305,6 +351,36 @@ def test_get_subtypes_tool(make_mapped_repo: RepoFactory) -> None:
     result = _call(ctx, "get_subtypes", {"symbol": "Animal"})
     assert result["isError"] is False
     assert "class Dog" in result["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "value"),
+    [
+        ("get_supertypes", "Dog"),
+        ("get_subtypes", "Animal"),
+    ],
+)
+def test_symbol_alias_matches_symbol_for_heritage_tools(
+    make_mapped_repo: RepoFactory, tool: str, value: str
+) -> None:
+    ctx = _ctx(make_mapped_repo(PY_HERITAGE))
+    by_symbol = _call(ctx, tool, {"symbol": value})
+    by_name = _call(ctx, tool, {"name": value})
+    assert by_name == by_symbol
+
+
+def test_symbol_alias_matches_symbol_for_add_note(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    by_symbol = _call(
+        _ctx(root), "add_note", {"symbol": "f", "text": "note one"}
+    )
+    by_name = _call(_ctx(root), "add_note", {"name": "f", "text": "note two"})
+    assert by_symbol["isError"] is False
+    assert by_name["isError"] is False
+    assert "noted" in by_symbol["content"][0]["text"]
+    assert "noted" in by_name["content"][0]["text"]
 
 
 def test_get_supertypes_transitive_passthrough(
@@ -447,6 +523,33 @@ def test_get_subtypes_tool_schema_shape() -> None:
         "root",
     }
     assert props["relation"]["enum"] == list(query.HERITAGE_RELATIONS)
+
+
+def test_symbol_alias_tools_schema_unchanged() -> None:
+    # The `name` alias is resolved at the dispatch chokepoint, not in
+    # `inputSchema` — `required` must still read exactly `["symbol"]`
+    # for every tool in `_SYMBOL_ALIAS_TOOLS`, and the shared
+    # `_SYMBOL_PROP` description should document the alias.
+    alias_tools = {
+        "query_symbol",
+        "get_callers",
+        "get_callees",
+        "get_supertypes",
+        "get_subtypes",
+        "add_note",
+    }
+    for tool in server.TOOLS:
+        if tool["name"] not in alias_tools:
+            continue
+        schema = tool["inputSchema"]
+        assert schema["required"] == ["symbol"] or schema["required"] == [
+            "symbol",
+            "text",
+        ]
+        assert (
+            "'name' is also accepted as an alias"
+            in schema["properties"]["symbol"]["description"]
+        )
 
 
 def test_get_context_pack_tool(make_mapped_repo: RepoFactory) -> None:

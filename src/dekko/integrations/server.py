@@ -163,6 +163,50 @@ def _require(args: dict, key: str) -> str:
     return value
 
 
+# Tools whose required ``symbol`` argument also accepts ``name`` as an
+# alias (see ``_resolve_symbol_alias``). Adding a new
+# ``_require(args, "symbol")`` call elsewhere? Add that tool's name
+# here too, or its ``name``-alias friction reappears silently.
+_SYMBOL_ALIAS_TOOLS = frozenset(
+    {
+        "query_symbol",
+        "get_callers",
+        "get_callees",
+        "get_supertypes",
+        "get_subtypes",
+        "add_note",
+    }
+)
+
+
+def _resolve_symbol_alias(tool_name: str, args: dict) -> dict:
+    """Accept ``name`` as an alias for ``symbol`` on tools that need it.
+
+    Two independent round-24 evaluators guessed ``name`` instead of
+    ``symbol`` on ``query_symbol``/``get_callers``/``get_supertypes``,
+    since ``find_usages`` uses ``name`` for its own equivalent
+    argument -- this closes that first-guess gap without renaming
+    anything callers already depend on.
+
+    Args:
+        tool_name: The tool being invoked.
+        args: The call's raw arguments, as received.
+
+    Returns:
+        ``args`` unchanged, unless the tool is in the alias set, the
+        caller passed ``name`` but not ``symbol``, in which case a
+        shallow copy with ``symbol`` populated from ``name`` is
+        returned instead.
+    """
+    if tool_name not in _SYMBOL_ALIAS_TOOLS:
+        return args
+    if "symbol" in args or "name" not in args:
+        return args
+    aliased = dict(args)
+    aliased["symbol"] = aliased.pop("name")
+    return aliased
+
+
 def _root_of(ctx: Context, args: dict) -> Path:
     """Resolve the target root from a tool's ``root`` argument."""
     root = args.get("root")
@@ -834,7 +878,8 @@ _SYMBOL_PROP = {
     "description": "Symbol: name, Class.method, or file.py:name. If the "
     "reply says the target is ambiguous (an overload set sharing the "
     "same file+name), append ':LINE' from one of the printed candidate "
-    "rows, e.g. file.py:Class.method:42, to pick that one",
+    "rows, e.g. file.py:Class.method:42, to pick that one. 'name' is "
+    "also accepted as an alias for this argument.",
 }
 _SITES_PROP = {
     "type": "boolean",
@@ -1455,7 +1500,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
     handler = _HANDLERS.get(name)
     if handler is None:
         return _err(req_id, INVALID_PARAMS, f"unknown tool '{name}'")
-    args = params.get("arguments") or {}
+    args = _resolve_symbol_alias(name, params.get("arguments") or {})
     try:
         text = _with_default_root_note(ctx, args, handler(ctx, args))
         is_error = False
