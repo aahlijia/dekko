@@ -33,7 +33,7 @@ def test_export_dot_file_scope(
             "export",
             "--format",
             "dot",
-            "--scope",
+            "--granularity",
             "file",
             "--root",
             str(root),
@@ -44,6 +44,31 @@ def test_export_dot_file_scope(
     assert out.startswith("digraph dekko {")
     assert 'label="b.py"' in out
     assert "->" in out and out.rstrip().endswith("}")
+
+
+def test_export_scope_alias_still_works(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """``--scope`` is a deprecated alias for ``--granularity``: it must
+    keep producing identical output and warn on stderr, not break."""
+    root = make_mapped_repo(SRC)
+    code = cli.main(
+        [
+            "export",
+            "--format",
+            "dot",
+            "--scope",
+            "file",
+            "--root",
+            str(root),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out.startswith("digraph dekko {")
+    assert 'label="b.py"' in captured.out
+    assert "--scope is deprecated" in captured.err
+    assert "--granularity" in captured.err
 
 
 def test_export_max_nodes_guard(
@@ -62,7 +87,7 @@ def test_export_max_nodes_guard(
         ]
     )
     assert code == 2
-    assert "use --scope file" in capsys.readouterr().err
+    assert "use --granularity file" in capsys.readouterr().err
 
 
 def test_export_max_nodes_guard_omits_scope_file_when_already_used(
@@ -74,7 +99,7 @@ def test_export_max_nodes_guard_omits_scope_file_when_already_used(
             "export",
             "--format",
             "mermaid",
-            "--scope",
+            "--granularity",
             "file",
             "--max-nodes",
             "1",
@@ -84,7 +109,7 @@ def test_export_max_nodes_guard_omits_scope_file_when_already_used(
     )
     assert code == 2
     err = capsys.readouterr().err
-    assert "--scope file" not in err
+    assert "--granularity file" not in err
     assert "a subtree map" in err
     assert "raise --max-nodes" in err
 
@@ -95,19 +120,25 @@ def test_export_requires_format(capsys: pytest.CaptureFixture) -> None:
     assert exc.value.code == 2
 
 
-def test_export_scope_help_clarifies_whole_graph_not_per_symbol(
+def test_export_granularity_help_clarifies_whole_graph_not_per_symbol(
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """9.1: ``--scope``'s help text used to just say "node granularity
+    """9.1: the flag's help text used to just say "node granularity
     (default: symbol)", easily misread as a per-symbol root/filter.
-    It must now make explicit that --scope controls the whole
+    It must make explicit that --granularity controls the whole
     rendered graph's node granularity and point at 'dekko context' for
-    a single symbol's neighborhood."""
+    a single symbol's neighborhood. Round 24: the flag itself was
+    renamed from --scope to --granularity (the old name is exactly
+    the wrong mental model the help text above had to work around);
+    --scope survives only as a hidden, deprecated alias, so it must
+    not appear in --help output at all."""
     with pytest.raises(SystemExit) as exc:
         cli.main(["export", "--help"])
     assert exc.value.code == 0
     # argparse wraps help text at a fixed width, so a phrase can be
     # split across lines -- normalize whitespace before checking.
     out = " ".join(capsys.readouterr().out.split())
+    assert "--granularity" in out
     assert "whole rendered graph" in out
     assert "dekko context" in out
+    assert "--scope" not in out

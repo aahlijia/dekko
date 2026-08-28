@@ -9,6 +9,18 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.31] — 2026-08-28
+
+### Changed
+- **`dekko export --scope {symbol,file}` renamed to `--granularity`**
+  — round 24's 7-repo eval found 4 of 7 sessions guessed `--scope`
+  meant "scope the graph to one symbol" (what `dekko context` does)
+  rather than its actual meaning, node granularity for the whole
+  rendered graph. `--granularity` is now the primary flag; `--scope`
+  remains a hidden, fully functional alias that still works but emits
+  a stderr deprecation notice. See
+  `.features/plans/round24/08-export-scope-rename.md`.
+
 ## [0.43.30] — 2026-08-28
 
 Fixes and small improvements from the round-24 7-repo eval

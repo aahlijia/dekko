@@ -538,8 +538,9 @@ import which files, resolved from every extracted `import`/`use`/
 `#include` statement's raw source string to the in-repo file it
 actually names (or left external when it names a stdlib/third-party
 source, or dekko can't confidently place it). This is a distinct
-question from the call-graph views `export --scope file`/`--scope
-dir` already answer ("which files call into which files" — a runtime
+question from the call-graph views `export --granularity file`/
+`--granularity symbol` already answer ("which files call into which
+files" — a runtime
 question) — the two usually roughly agree but can diverge: a file
 can import a module purely for a type annotation or a side effect
 (`import "./polyfill"`) with zero calls ever crossing that edge:

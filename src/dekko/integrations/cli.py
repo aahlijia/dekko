@@ -13,6 +13,7 @@ import sys
 from importlib.metadata import version as _pkg_version
 from importlib.resources import files as _pkg_files
 from pathlib import Path
+from typing import Any
 
 from dekko import repo_ops
 from dekko.analysis import affected
@@ -87,6 +88,34 @@ _THROWS_CATCHES_LANGS = sorted(
     for name in languages.SPEC_BY_NAME
     if languages.exception_handling_supported(name)
 )
+
+
+class _DeprecatedScopeAction(argparse.Action):
+    """``--scope``: a deprecated, hidden alias for ``--granularity``.
+
+    Sets the shared ``scope`` destination exactly like the primary
+    flag and prints a one-line stderr notice at parse time. A parse-
+    time action (rather than a ``sys.argv`` scan in ``run_export``) is
+    used because ``main`` threads an explicit ``argv`` list through
+    the parser rather than always reading ``sys.argv`` (see its
+    ``--no-daemon`` handling), so a raw ``sys.argv`` check would miss
+    both direct ``main(argv)`` callers and tests.
+    """
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        setattr(namespace, self.dest, values)
+        print(
+            "dekko: --scope is deprecated, use --granularity "
+            "instead (still works, will be removed in a future "
+            "release)",
+            file=sys.stderr,
+        )
 
 
 def build_legacy_parser() -> argparse.ArgumentParser:
@@ -1410,12 +1439,21 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="output graph format",
     )
     p_export.add_argument(
-        "--scope",
+        "--granularity",
+        dest="scope",
         choices=export.SCOPES,
         default="symbol",
         help="node granularity for the whole rendered graph -- symbol "
         "or file (default: symbol); does not scope the graph to a "
         "single symbol's neighborhood, use 'dekko context' for that",
+    )
+    p_export.add_argument(
+        "--scope",
+        dest="scope",
+        choices=export.SCOPES,
+        default=argparse.SUPPRESS,
+        action=_DeprecatedScopeAction,
+        help=argparse.SUPPRESS,  # deprecated alias for --granularity
     )
     p_export.add_argument(
         "--max-nodes",
