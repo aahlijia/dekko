@@ -20,6 +20,7 @@ dekko query subtypes Serializable --relation implements  # filter to one relatio
 dekko query throws load_config       # what load_config's own body raises (one level, not transitive)
 dekko query throws load_config --transitive --depth 3  # + everything its callees raise, depth-capped
 dekko query catches ConfigError      # every catch clause that would handle ConfigError
+dekko query catches ConfigError --lang java  # ...scoped to one language, cuts cross-language noise
 dekko query env DATABASE_URL         # every statically-known read site for this env var
 dekko query env --list               # every distinct env var read anywhere, ranked by read-site count
 dekko query cohesion src/app.py      # intra-file connected-components (weak signal, not clustering)
@@ -44,6 +45,7 @@ dekko status                         # is the map still fresh? (exit 0/1)
 dekko doctor                         # diagnose install/environment issues (PATH shadowing, hooks, MCP, ...)
 dekko sanity resolve                 # cross-check `callers resolve` against a targeted grep sweep
 dekko sanity Path --usages           # cross-check `uses Path` instead of `callers`
+dekko sanity --all                   # repo-wide sweep: every fan-in symbol, not just one target
 dekko daemon start                   # warm-cache background process (see below)
 ```
 
@@ -199,11 +201,30 @@ sets by `(file, line)` into three buckets:
   (`pkg.Func(`, `Type::method(`, `Type.method(`), a bare
   import/require statement naming the symbol (`import { X } from
   '...'`, `from x import X`, `const { X } = require('...')` — not a
-  call site), a file in a language dekko can't parse, a test-only call
+  call site), a file in a language dekko can't parse, a likely
+  unrelated external-library method sharing the target's bare name
+  (see "Receiver-mismatch detection" below), a test-only call
   site (tests are excluded from the dekko-side query by default here,
   unlike the plain `query callers` default — see `--include-tests`), a
   short/generic target name (resolver precision degrades in a dense
   repo), or "unexplained" when none of those fit.
+
+**Receiver-mismatch detection.** When the target is a method (not a
+free function) with exactly one repo-defined symbol sharing its bare
+name and its declaring type resolves unambiguously, `sanity` checks
+each grep-only hit for whether the declaring type's own simple name
+appears on the hit's line or in the first few lines of its file
+(where imports/`using` live). If neither does, the hit is classified
+`likely an unrelated external-library method sharing this bare name`
+instead of a generic/test/unexplained miss — the case where a
+same-named method from a completely different library (e.g. AssertJ's
+`isTrue()` colliding with a repo's own `isTrue()`) reads as a real
+grep-only miss when it isn't one. This is a cheap textual proxy, not
+real type inference (no alias tracking, no import resolution) — false
+positives (missing the real evidence) are the accepted failure mode,
+not false confidence. Gated to `sanity <target>`; `--all` does not
+apply this check (it has no single target to resolve a declaring type
+against).
 
 The grep sweep itself has two safety caps: it stops reading raw grep
 output past 5,000 lines, and drops any single raw line over ~10,000
@@ -311,6 +332,31 @@ Anchor a durable, committed note to a symbol — it shows up in
 dekko note add resolver.py:resolve "ambiguous calls are marked, never guessed"
 dekko note list resolver.py:resolve
 ```
+
+## Interpreting `--sites` call-site counts
+
+`query callers`/`query callees --sites` expands each caller/callee
+into one row per call site instead of one row per entity, since a
+single caller can invoke the target more than once in its own body.
+Without `--sites`, both counts agree (one row per caller); with it,
+they can legitimately diverge — a caller invoking the target three
+times contributes one caller but three call-site rows. This looked
+like a truncation bug before both numbers were disclosed together:
+
+```sh
+dekko query callers resolve --sites
+# (~340 tokens · 15 callers · 19 sites)
+```
+
+The footer's `N callers`/`N callees` clause is the distinct-entity
+count; the row/omission total (`X of Y sites omitted`, when capped)
+is the call-site count. `--json` mirrors this: `meta.related_total`/
+`meta.related_label` carry the distinct-entity count, and
+`meta.sites_total` (only present under `--sites`) carries the
+pre-cap call-site total. If `sites_total` is higher than the number
+of `results` entries, that's the same expected divergence, not a sign
+rows were dropped — check `meta.related_total`/the omission fields
+for whether anything was actually capped.
 
 ## Interpreting `dekko unused`
 

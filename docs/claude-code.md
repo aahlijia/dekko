@@ -62,11 +62,20 @@ runs the same `query callers <target>` dekko would answer with (or
 across the repo, and diffs the two hit sets into matches/dekko-only/
 grep-only buckets — every grep-only hit is labeled with a likely
 cause drawn from `dekko-verify`'s own blind-spot list (a cross-package/
-qualified call, an unparsed-language file, a test-only call site, or a
-short/generic target name), never a guess presented as certain. Always
-exits `0`; a nonempty grep-only bucket is a finding to relay, not an
-error — see [cli.md](cli.md#sanity-checking-a-lowzero-call-graph-result)
-for the full bucket/cause breakdown and every flag.
+qualified call, an unparsed-language file, a likely unrelated
+external-library method sharing the target's bare name, a test-only
+call site, or a short/generic target name), never a guess presented as
+certain. Always exits `0`; a nonempty grep-only bucket is a finding to
+relay, not an error — see
+[cli.md](cli.md#sanity-checking-a-lowzero-call-graph-result) for the
+full bucket/cause breakdown and every flag.
+
+`dekko sanity --all` (CLI only, no `/sanity`-equivalent slash-command
+flag) runs the same callers/grep cross-check across every fan-in
+symbol in the repo instead of one human-picked target — a repo-wide
+sweep for catching a classification regression or a systemic
+grep-vs-dekko disagreement, not a per-symbol spot check. See
+[cli.md](cli.md#dekko-sanity---all--sweeping-every-symbol-instead-of-one-target).
 
 ## A persistent usage policy in CLAUDE.md (opt-in)
 
