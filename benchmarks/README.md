@@ -42,21 +42,21 @@ Representative output (dekko mapping its own source):
 overall: 56003 → 4507 tokens across 5 tasks (-92%)
 ```
 
-## The live half (arrives with hooks, step 4)
+## The live half (session-start / prompt-submit hooks)
 
-The comparison above is the *strategy* cost — it exists today, before the
-hooks. The other half of G★ is the **live per-session** cost: with hooks
-on vs. off, how many tokens does an identical piece of work actually
-consume? That number is read straight from the session transcript via the
-ledger:
+The comparison above is the *strategy* cost. The other half of G★ is the
+**live per-session** cost: with the `session-start`/`prompt-submit` push
+hooks (`dekko hooks install` — see
+[docs/claude-code.md](../docs/claude-code.md#push-hooks-opt-in)) on vs.
+off, how many tokens does an identical piece of work actually consume?
+That number is read straight from the session transcript via the ledger:
 
 ```sh
 python benchmarks/measure.py --root . --session /path/to/session.jsonl
 ```
 
-Once the SessionStart / UserPromptSubmit hooks land, run the same task
-with hooks disabled and enabled, and diff the `consumed_tokens` the ledger
-reports. G★ holds only if **on < off**.
+Run the same task with hooks disabled and enabled, and diff the
+`consumed_tokens` the ledger reports. G★ holds only if **on < off**.
 
 ## Regression guard
 

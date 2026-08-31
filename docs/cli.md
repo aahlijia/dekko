@@ -401,7 +401,8 @@ framework-heavy or trait-heavy codebases.
 
 `--kinds {callables,types,all}` (default `callables`, matching the above
 unchanged) controls which symbol kinds are scanned. `types` restricts the
-scan to classes/interfaces/enums/structs/records/traits and additionally
+scan to classes/interfaces/enums/structs/records/traits/type-aliases
+(TS/TSX `type X = ...`) and additionally
 weighs heritage (`heritage_in` — implemented/extended by something else)
 and type-usage (used as a parameter/return type elsewhere, the same
 matching `query type` does) as evidence a type is alive — a called
