@@ -9,6 +9,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.41] — 2026-08-31
+
+### Fixed
+- **Daemon cold-cache timeout under-parallelized on rev-cache misses
+  (round-25 plan 04)** — on a genuine rev-cache miss for
+  `diff`/`affected`/`workset`, if the caller never explicitly chose
+  `--jobs`, the daemon now forwards `jobs=0` (all cores) via a copy
+  of the request args, leaving the caller's original choice intact
+  for any fallback-to-direct-execution path.
+  `DaemonRequestAbandonedError` now carries the `jobs` value actually
+  sent, so the abandonment message only suggests `--jobs 0` when the
+  abandoned request ran single-threaded. See
+  `.features/plans/round25/04-daemon-coldcache-timeout-parallelism.md`
+  and `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+  (Fix 3 from that plan is out of scope.)
+
 ## [0.43.40] — 2026-08-31
 
 ### Added

@@ -2498,6 +2498,28 @@ def _legacy_main(args_list: list[str]) -> int:
     return repo_ops.run_map(args)
 
 
+def _jobs_flag_explicit(args_list: list[str]) -> bool:
+    """Whether the raw CLI args explicitly named ``--jobs``.
+
+    argparse can't distinguish "the user passed --jobs 1" from "the
+    user passed nothing and got argparse's own default of 1" once
+    parsing is done, so this inspects the pre-parse argument list
+    directly. Used to gate ``daemon.try_daemon``'s round-25
+    cold-rev-cache ``--jobs 0`` override (see that function's
+    ``jobs_explicit`` parameter): the override must only kick in when
+    the sequential value came from the default, never when the caller
+    chose it on purpose (e.g. a memory-constrained CI environment).
+
+    Args:
+        args_list: The raw CLI argument list (``--no-daemon`` already
+            stripped), as passed to argparse.
+
+    Returns:
+        ``True`` if any ``--jobs``/``--jobs=N`` token is present.
+    """
+    return any(a == "--jobs" or a.startswith("--jobs=") for a in args_list)
+
+
 def _report_daemon_request_abandoned(
     exc: "daemon_mod.DaemonRequestAbandonedError",
 ) -> int:
@@ -2514,16 +2536,30 @@ def _report_daemon_request_abandoned(
     Args:
         exc: The abandoned-request exception; its message names the
             underlying cause (timeout, disconnect, malformed reply).
+            Round-25: when its ``jobs`` attribute is ``1``, the
+            abandoned request ran sequentially -- the message names
+            ``--jobs 0`` as the actual lever likely to avoid a repeat
+            timeout, rather than only apologizing.
 
     Returns:
         ``daemon_mod.EXIT_DAEMON_ABANDONED``.
     """
+    hint = ""
+    if getattr(exc, "jobs", None) == 1:
+        hint = (
+            " This request ran with --jobs 1 (sequential); a "
+            "cold-rev-cache resolve on a repo this size is "
+            "dramatically faster with --jobs 0 (all cores) -- retry "
+            "with --no-daemon --jobs 0, or pass --jobs 0 through the "
+            "daemon, rather than simply retrying the same command."
+        )
     print(
-        f"dekko: a daemon-routed request did not respond in time ({exc}). "
-        "The daemon may still be processing it in the background -- "
-        "re-running the same command here would duplicate that work "
-        "rather than speed it up. Retry with --no-daemon to force a "
-        "fresh local run, or retry normally once the daemon is done.",
+        f"dekko: a daemon-routed request did not respond in time "
+        f"({exc}).{hint} The daemon may still be processing it in the "
+        "background -- re-running the same command here would "
+        "duplicate that work rather than speed it up. Retry with "
+        "--no-daemon to force a fresh local run, or retry normally "
+        "once the daemon is done.",
         file=sys.stderr,
     )
     return daemon_mod.EXIT_DAEMON_ABANDONED
@@ -2548,7 +2584,9 @@ def main(argv: list[str] | None = None) -> int:
         args = build_subcommand_parser().parse_args(args_list)
         if not no_daemon:
             try:
-                routed = daemon_mod.try_daemon(args)
+                routed = daemon_mod.try_daemon(
+                    args, jobs_explicit=_jobs_flag_explicit(args_list)
+                )
             except daemon_mod.DaemonRequestAbandonedError as exc:
                 return _report_daemon_request_abandoned(exc)
             if routed is not None:

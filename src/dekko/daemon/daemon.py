@@ -892,7 +892,26 @@ class DaemonRequestAbandonedError(Exception):
     free," this means "the daemon *was* reached and may still be
     working, a local fallback is not free." ``cli.py``'s ``main()``
     must not treat the two the same way.
+
+    Attributes:
+        jobs: The ``--jobs`` value actually forwarded to the daemon
+            for the abandoned request, when the command has one
+            (``None`` otherwise). Round-25: lets ``cli.py``'s error
+            report name ``--jobs 0`` as the actual lever likely to
+            avoid a repeat timeout, when the abandoned request ran
+            sequentially.
     """
+
+    def __init__(self, message: str, jobs: int | None = None) -> None:
+        """Initialize with the abandoned request's own ``jobs`` value.
+
+        Args:
+            message: Human-readable description of what went wrong
+                (timeout, dropped connection, malformed reply).
+            jobs: See the class-level ``Attributes`` docstring.
+        """
+        super().__init__(message)
+        self.jobs = jobs
 
 
 def _send_daemon_request(
@@ -949,7 +968,58 @@ def _recv_daemon_response(sock: socket.socket) -> tuple[int, str, str]:
         ) from exc
 
 
-def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
+def _timeout_and_args_for_command(
+    command: str,
+    args: argparse.Namespace,
+    root: Path,
+    *,
+    jobs_explicit: bool,
+) -> tuple[float, argparse.Namespace]:
+    """Client timeout and (possibly ``--jobs``-overridden) request args.
+
+    Isolates ``try_daemon``'s rev-cache-miss-aware timeout selection
+    (round-24) and its round-25 ``--jobs 0`` default override into one
+    helper, keeping ``try_daemon`` itself readable.
+
+    Args:
+        command: The daemon-eligible command name.
+        args: The already-parsed ``argparse.Namespace``.
+        root: The resolved repo root.
+        jobs_explicit: See :func:`try_daemon`'s parameter of the same
+            name.
+
+    Returns:
+        ``(timeout, args)``. ``args`` is returned unchanged unless the
+        round-25 override applies, in which case it's a *copy* with
+        ``jobs`` set to ``0`` -- the caller's original ``Namespace``
+        is never mutated in place, so a fallback to direct execution
+        (if the daemon turns out to be unreachable) still sees the
+        caller's original, un-overridden choice.
+    """
+    if command not in _REVCACHE_TIMEOUT_COMMANDS:
+        return _scaled_client_timeout(root), args
+
+    target_rev = _target_rev_for(command, args)
+    if target_rev is None or revcache.has_entry(root, target_rev):
+        return _scaled_client_timeout(root), args
+
+    timeout = _scaled_client_timeout_for_revcache_miss(root, target_rev)
+    if not jobs_explicit and getattr(args, "jobs", None) == 1:
+        # Round-25 finding: this is the one operation shape (a
+        # cold-rev-cache resolve on a large repo, routed through an
+        # already-running daemon) where sequential is a uniquely bad
+        # default -- burning idle cores briefly on a request that's
+        # already going to take minutes either way is an easy trade
+        # for turning a guaranteed-to-time-out request into a
+        # successful one.
+        args = argparse.Namespace(**vars(args))
+        args.jobs = 0
+    return timeout, args
+
+
+def try_daemon(
+    args: argparse.Namespace, *, jobs_explicit: bool = True
+) -> tuple[int, str, str] | None:
     """Attempt to route a parsed CLI invocation through a live daemon.
 
     Returns ``None`` on every "the daemon was never actually reached
@@ -970,6 +1040,19 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
         args: The already-parsed ``argparse.Namespace`` for a
             daemon-eligible subcommand (i.e. what ``args.func(args)``
             would otherwise be called with directly).
+        jobs_explicit: Whether the caller deliberately chose ``args
+            .jobs`` (as opposed to it being argparse's own unmodified
+            default). Round-25: a daemon-routed ``diff``/``affected``/
+            ``workset`` request on a genuine rev-cache miss defaults
+            to ``--jobs 0`` (all cores) instead of inheriting the
+            CLI's own sequential default, since a request specifically
+            routed through an already-running daemon is a different
+            usage shape than a foreground invocation -- but only when
+            the caller never asked for sequential explicitly. Defaults
+            to ``True`` (preserve ``args.jobs`` exactly as given) so
+            every caller other than ``cli.py``'s ``main()`` -- which
+            computes the real signal from the raw, pre-parse argument
+            list -- keeps its previous behavior unchanged.
 
     Returns:
         ``(exit_code, stdout, stderr)`` from the daemon, or ``None``
@@ -996,13 +1079,9 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
     if not transport.exists():
         return None
 
-    timeout = _scaled_client_timeout(root)
-    if command in _REVCACHE_TIMEOUT_COMMANDS:
-        target_rev = _target_rev_for(command, args)
-        if target_rev is not None and not revcache.has_entry(root, target_rev):
-            timeout = _scaled_client_timeout_for_revcache_miss(
-                root, target_rev
-            )
+    timeout, args = _timeout_and_args_for_command(
+        command, args, root, jobs_explicit=jobs_explicit
+    )
 
     try:
         sock = transport.client_connect(timeout)
@@ -1013,6 +1092,9 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
         if not _send_daemon_request(sock, transport, command, args):
             return None
         return _recv_daemon_response(sock)
+    except DaemonRequestAbandonedError as exc:
+        exc.jobs = getattr(args, "jobs", None)
+        raise
     finally:
         sock.close()
 

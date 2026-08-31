@@ -268,9 +268,9 @@ def test_no_daemon_flag_skips_routing(
     calls: list[str] = []
     original = daemon.try_daemon
 
-    def _spy(args):  # noqa: ANN001, ANN202
+    def _spy(args, **kwargs):  # noqa: ANN001, ANN003, ANN202
         calls.append(getattr(args, "command", None))
-        return original(args)
+        return original(args, **kwargs)
 
     monkeypatch.setattr(cli.daemon_mod, "try_daemon", _spy)
 
@@ -307,7 +307,7 @@ def test_main_reports_abandoned_daemon_request_without_local_fallback(
         calls.append("run_status")
         return 0
 
-    def _raise(args: object) -> tuple[int, str, str] | None:
+    def _raise(args: object, **kwargs: object) -> tuple[int, str, str] | None:
         raise daemon.DaemonRequestAbandonedError("simulated timeout")
 
     monkeypatch.setattr(cli, "run_status", _spy_run_status)
@@ -328,7 +328,7 @@ def test_no_daemon_flag_bypasses_abandoned_request_handling(
     """``--no-daemon`` must skip ``try_daemon`` entirely, so it can
     never observe (or be blocked by) an abandoned-request signal."""
 
-    def _raise(args: object) -> tuple[int, str, str] | None:
+    def _raise(args: object, **kwargs: object) -> tuple[int, str, str] | None:
         raise daemon.DaemonRequestAbandonedError("should never be called")
 
     monkeypatch.setattr(cli.daemon_mod, "try_daemon", _raise)
@@ -1118,6 +1118,222 @@ def test_try_daemon_other_commands_never_use_revcache_miss_timeout(
     daemon.try_daemon(args)
 
     assert called is False
+
+
+# ---------------------------------------------------------------------
+# Round-25: default a daemon-routed cold-rev-cache resolve to
+# --jobs 0 (all cores) when the caller never chose --jobs explicitly
+# (`.features/plans/round25/
+# 04-daemon-coldcache-timeout-parallelism.md`).
+# ---------------------------------------------------------------------
+
+
+def test_try_daemon_defaults_jobs_to_zero_on_a_genuine_miss_when_not_explicit(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare ``dekko affected`` (no ``--jobs``, so argparse's own
+    sequential default of ``1`` applies) routed through the daemon on
+    a genuine rev-cache miss is forwarded with ``jobs=0`` once
+    ``jobs_explicit=False`` signals the caller never chose the value
+    on purpose. The caller's own ``Namespace`` must stay untouched, so
+    a fallback to direct execution (were the daemon unreachable) would
+    still see the caller's original, un-overridden choice."""
+    root = daemon_thread_root
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda r, rev: 999.0,
+    )
+
+    seen_jobs: list[int | None] = []
+    original_send = daemon._send_daemon_request
+
+    def _spy_send(sock, transport, command, args):  # noqa: ANN001, ANN202
+        seen_jobs.append(getattr(args, "jobs", None))
+        return original_send(sock, transport, command, args)
+
+    monkeypatch.setattr(daemon, "_send_daemon_request", _spy_send)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+    assert args.jobs == 1  # argparse's own default, not user-chosen
+
+    daemon.try_daemon(args, jobs_explicit=False)
+
+    assert seen_jobs == [0]
+    assert args.jobs == 1  # caller's own Namespace left unmodified
+
+
+def test_try_daemon_preserves_an_explicit_jobs_one_on_a_genuine_miss(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``dekko affected --jobs 1`` (a deliberate sequential choice, e.g.
+    a memory-constrained CI environment) is forwarded unchanged --
+    ``jobs_explicit=True`` must suppress the round-25 override even
+    though ``args.jobs`` still equals the argparse default's value."""
+    root = daemon_thread_root
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda r, rev: 999.0,
+    )
+
+    seen_jobs: list[int | None] = []
+    original_send = daemon._send_daemon_request
+
+    def _spy_send(sock, transport, command, args):  # noqa: ANN001, ANN202
+        seen_jobs.append(getattr(args, "jobs", None))
+        return original_send(sock, transport, command, args)
+
+    monkeypatch.setattr(daemon, "_send_daemon_request", _spy_send)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root), "--jobs", "1"]
+    )
+
+    daemon.try_daemon(args, jobs_explicit=True)
+
+    assert seen_jobs == [1]
+
+
+def test_try_daemon_does_not_override_jobs_on_a_revcache_hit(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rev-cache *hit* never takes the expensive cold-resolve path,
+    so the round-25 override must not apply even when the caller never
+    chose ``--jobs`` explicitly -- there's no slow work here to justify
+    burning idle cores for."""
+    root = daemon_thread_root
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: True)
+    monkeypatch.setattr(daemon, "_scaled_client_timeout", lambda r: 999.0)
+
+    seen_jobs: list[int | None] = []
+    original_send = daemon._send_daemon_request
+
+    def _spy_send(sock, transport, command, args):  # noqa: ANN001, ANN202
+        seen_jobs.append(getattr(args, "jobs", None))
+        return original_send(sock, transport, command, args)
+
+    monkeypatch.setattr(daemon, "_send_daemon_request", _spy_send)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+
+    daemon.try_daemon(args, jobs_explicit=False)
+
+    assert seen_jobs == [1]
+
+
+def test_try_daemon_abandoned_error_carries_the_jobs_actually_sent(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-25 Fix 2: ``DaemonRequestAbandonedError.jobs`` reflects
+    whatever value was actually forwarded to the daemon for the
+    abandoned request -- including the Fix 1 override -- so
+    ``cli.py``'s error message can tell an already-parallel abandoned
+    request apart from a still-sequential one."""
+    root = daemon_thread_root
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda r, rev: 999.0,
+    )
+
+    def _raise_abandoned(sock):  # noqa: ANN001, ANN202
+        raise daemon.DaemonRequestAbandonedError("simulated timeout")
+
+    monkeypatch.setattr(daemon, "_recv_daemon_response", _raise_abandoned)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+
+    with pytest.raises(daemon.DaemonRequestAbandonedError) as excinfo:
+        daemon.try_daemon(args, jobs_explicit=False)
+    assert excinfo.value.jobs == 0  # Fix 1's override was applied
+
+    with pytest.raises(daemon.DaemonRequestAbandonedError) as excinfo2:
+        daemon.try_daemon(args, jobs_explicit=True)
+    assert excinfo2.value.jobs == 1  # caller's explicit choice kept
+
+
+def test_jobs_flag_explicit_detects_bare_and_equals_forms() -> None:
+    """``cli._jobs_flag_explicit`` must catch both ``--jobs N`` and
+    ``--jobs=N`` and must not fire on args that merely contain 'jobs'
+    as a substring of something else."""
+    assert cli._jobs_flag_explicit(["diff", "--jobs", "0"]) is True
+    assert cli._jobs_flag_explicit(["diff", "--jobs=1"]) is True
+    assert cli._jobs_flag_explicit(["diff", "--root", "."]) is False
+    assert cli._jobs_flag_explicit([]) is False
+
+
+def test_main_computes_jobs_explicit_from_raw_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cli.main()`` must forward the raw-argv-derived ``jobs_explicit``
+    signal into ``try_daemon`` -- a bare ``dekko diff`` is not
+    user-explicit, ``dekko diff --jobs 1`` and ``--jobs=0`` both are."""
+    seen: list[bool | None] = []
+
+    def _spy(args, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        seen.append(kwargs.get("jobs_explicit"))
+        return None  # daemon unreachable -> falls back to direct exec
+
+    monkeypatch.setattr(cli.daemon_mod, "try_daemon", _spy)
+    monkeypatch.setattr(cli, "run_diff", lambda args: 0)
+
+    cli.main(["diff", "--root", "/nonexistent"])
+    assert seen == [False]
+
+    seen.clear()
+    cli.main(["diff", "--root", "/nonexistent", "--jobs", "1"])
+    assert seen == [True]
+
+    seen.clear()
+    cli.main(["diff", "--root", "/nonexistent", "--jobs=0"])
+    assert seen == [True]
+
+
+def test_report_daemon_request_abandoned_hints_jobs_zero_when_sequential(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Round-25 Fix 2: when the abandoned request ran with ``--jobs 1``
+    (sequential), the timeout message names ``--jobs 0`` as the actual
+    lever likely to avoid a repeat, instead of only apologizing."""
+    exc = daemon.DaemonRequestAbandonedError("timed out", jobs=1)
+
+    code = cli._report_daemon_request_abandoned(exc)
+
+    assert code == daemon.EXIT_DAEMON_ABANDONED
+    err = capsys.readouterr().err
+    assert "--jobs 0" in err
+    assert "sequential" in err
+
+
+@pytest.mark.parametrize("jobs", [0, None])
+def test_report_daemon_request_abandoned_omits_hint_when_not_sequential(
+    jobs: int | None, capsys: pytest.CaptureFixture
+) -> None:
+    """No ``--jobs`` hint when the abandoned request was already
+    parallel (``jobs=0``) or the command has no ``jobs`` attribute at
+    all (``jobs=None``, e.g. ``query``/``outline``/etc.) -- there's
+    nothing more actionable to suggest in either case."""
+    exc = daemon.DaemonRequestAbandonedError("timed out", jobs=jobs)
+
+    cli._report_daemon_request_abandoned(exc)
+
+    err = capsys.readouterr().err
+    assert "sequential" not in err
+    assert "did not respond in time" in err
 
 
 def test_status_true_positive_while_daemon_busy_on_slow_request(
