@@ -749,6 +749,9 @@ _TS_DEFINITIONS = """
 
 (enum_declaration name: (identifier) @classname) @classdef
 
+(type_alias_declaration
+  name: (type_identifier) @classname) @classdef
+
 (program
   (export_statement
     declaration: (lexical_declaration
@@ -801,21 +804,25 @@ _TS_HERITAGE = """
 """
 
 # Same-file type-alias registry (round-19 claude-code finding, bug #3):
-# TS's ``type X = {...}``/``type X = A | B``/etc. is never extracted as
-# a ``Symbol`` at all (no ``definition_query`` pattern covers it), so an
-# ``implements``/``extends`` clause naming a same-file alias had no
-# structural signal to tell it apart from a genuinely external base
-# type -- ``_heritage_external_label`` in ``query.py`` consults this
-# field's output (``FileMap.type_aliases`` -> ``MapIndex.
-# type_aliases_by_path``) as a same-file counterpart to its existing
-# same-named-relative-import check. Only the bare name is needed (not a
-# full symbol), so this is a lightweight per-file name registry, not a
-# new definition_query pattern. Confirmed against the pinned
-# tree-sitter-typescript grammar: ``type_alias_declaration``'s ``name``
-# field is a ``type_identifier``, fielded as ``name:`` -- no anchor
-# tricks needed. Not wired onto ``JAVASCRIPT``: the ``javascript``
-# tree-sitter grammar has no ``type_alias_declaration`` node type at
-# all (no ``type`` keyword in the language).
+# originally built because TS's ``type X = {...}``/``type X = A | B``/
+# etc. was never extracted as a ``Symbol`` at all, so an ``implements``/
+# ``extends`` clause naming a same-file alias had no structural signal
+# to tell it apart from a genuinely external base type --
+# ``_heritage_external_label`` in ``query.py`` consults this field's
+# output (``FileMap.type_aliases`` -> ``MapIndex.type_aliases_by_path``)
+# as a same-file counterpart to its existing same-named-relative-import
+# check. As of round 26, ``type_alias_declaration`` also has a real
+# ``@classdef`` pattern in ``_TS_DEFINITIONS`` above (kind
+# ``"type_alias"``), so this bare-name registry is now a redundant,
+# narrower parallel extraction kept only for
+# ``_heritage_external_label``'s presentation fallback -- see round-26
+# plan notes for why it wasn't merged/retired in the same change.
+# Confirmed against the pinned tree-sitter-typescript grammar:
+# ``type_alias_declaration``'s ``name`` field is a ``type_identifier``,
+# fielded as ``name:`` -- no anchor tricks needed. Not wired onto
+# ``JAVASCRIPT``: the ``javascript`` tree-sitter grammar has no
+# ``type_alias_declaration`` node type at all (no ``type`` keyword in
+# the language).
 _TS_TYPE_ALIAS_QUERY = """
 (type_alias_declaration name: (type_identifier) @name)
 """

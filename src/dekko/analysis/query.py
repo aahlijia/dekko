@@ -2680,7 +2680,7 @@ def _run_heritage_wrong_kind(sym: Symbol) -> int:
     print(
         f"dekko: '{sym.id}' is a {sym.kind}, not a type; "
         "supertypes/subtypes only apply to class/interface/enum/"
-        "struct/record/trait symbols",
+        "struct/record/trait/type_alias symbols",
         file=sys.stderr,
     )
     return EXIT_NOT_FOUND

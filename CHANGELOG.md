@@ -9,6 +9,26 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.45] — 2026-08-31
+
+### Fixed
+- **TypeScript `type X = ...` alias indexing (round-26)** —
+  `type_alias_declaration` had no extraction query pattern, so no
+  `Symbol` was ever produced for type aliases; only interfaces and
+  classes counted as "types." `query_symbol`, `find_type_usages`,
+  the heritage graph, `unused-types`, and `stats` were all blind to
+  them despite type aliases being the dominant type-declaration
+  idiom in real TS/TSX codebases. Found via round-26 fable-5 eval
+  against `test-repos/claude-code` (2,484 unindexed aliases there).
+  Fixed by adding a `type_alias_declaration` query pattern to
+  `languages.py`, wiring `Symbol.kind = "type_alias"` through
+  `extractor.py`/`model.py`, and adding it to `TYPE_KINDS` in
+  `query.py`; every downstream consumer already gated generically on
+  `TYPE_KINDS`, so the fix propagated automatically — heritage
+  resolution now resolves real edges instead of falling back to
+  `(unresolved)`, and `unused` correctly surfaces dead type aliases.
+  See `.features/plans/round26/ts-type-alias-indexing.md`.
+
 ## [0.43.44] — 2026-08-31
 
 ### Fixed

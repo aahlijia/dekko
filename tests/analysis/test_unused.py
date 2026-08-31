@@ -999,9 +999,21 @@ def test_unused_ts_round23_two_symbol_regression(
     # (Tool.ts:757, referenced via typeof + spread) and
     # TASK_ID_PREFIXES (Task.ts:79, referenced via subscript) both
     # previously read `fan-in: 0` and surfaced as unused.
+    #
+    # Round 26 gave TS `type X = ...` aliases real Symbol entries
+    # (kind "type_alias", see model.TYPE_KINDS), so the fixture's
+    # `ToolDefaultsType` -- only ever referenced via `typeof
+    # TOOL_DEFAULTS`, never in a param/return/heritage position any
+    # reference query captures -- now correctly surfaces as unused
+    # too. That's accurate, not a regression: unlike TOOL_DEFAULTS and
+    # TASK_ID_PREFIXES it genuinely has zero structural references.
+    # The two original round-23 symbols must still be clean.
     root = make_mapped_repo(TS_ROUND23_REGRESSION_FIXTURE)
-    assert cli.main(["unused", "--root", str(root)]) == 0
-    assert "no unused symbols" in capsys.readouterr().out
+    assert cli.main(["unused", "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "ToolDefaultsType" in out
+    assert "TOOL_DEFAULTS" not in out
+    assert "TASK_ID_PREFIXES" not in out
 
 
 def test_unused_top_flag_aliases_limit(

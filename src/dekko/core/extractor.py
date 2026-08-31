@@ -41,6 +41,7 @@ _CLASSDEF_KIND: dict[str, str] = {
     "struct_item": "struct",
     "struct_type": "struct",
     "trait_item": "trait",
+    "type_alias_declaration": "type_alias",
 }
 
 

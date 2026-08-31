@@ -347,6 +347,14 @@ def test_heritage_synthetic_tiebreak_omitted_from_json_when_0(
 # framework base -- even though it's first-party code sitting one
 # `query symbol` lookup away, imported from a relative path in the
 # same repo.
+#
+# Round 26 gave ``type_alias_declaration`` a real ``Symbol`` (kind
+# "type_alias", in ``TYPE_KINDS``), so the resolver's heritage
+# candidate filtering (``resolver.py``, ``c.kind in TYPE_KINDS``) now
+# resolves ``ShellCommand`` as a genuine cross-file supertype edge
+# instead of falling through to the round-18/19 ``(unresolved)``
+# presentation fallback below -- a strictly better outcome than the
+# workaround these tests originally pinned.
 TS_TYPE_ALIAS_HERITAGE = {
     "types.ts": "export type ShellCommand = {\n  run(): void;\n};\n",
     "impl.ts": (
@@ -359,7 +367,7 @@ TS_TYPE_ALIAS_HERITAGE = {
 }
 
 
-def test_type_alias_implements_target_labeled_unresolved_not_external(
+def test_type_alias_implements_target_resolves_as_real_supertype(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     root = make_mapped_repo(TS_TYPE_ALIAS_HERITAGE)
@@ -368,11 +376,13 @@ def test_type_alias_implements_target_labeled_unresolved_not_external(
     )
     assert code == 0
     out = capsys.readouterr().out
-    assert "(unresolved) ShellCommand" in out
+    assert "types.ts" in out
+    assert "type_alias ShellCommand" in out
+    assert "(unresolved)" not in out
     assert "(external)" not in out
 
 
-def test_type_alias_implements_target_json_flags_unresolved_local(
+def test_type_alias_implements_target_json_resolves_no_external_flag(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     root = make_mapped_repo(TS_TYPE_ALIAS_HERITAGE)
@@ -388,9 +398,11 @@ def test_type_alias_implements_target_json_flags_unresolved_local(
     )
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
-    ext = next(r for r in doc["results"] if r.get("external"))
-    assert ext["text"] == "ShellCommand"
-    assert ext["unresolved_local"] is True
+    assert not any(r.get("external") for r in doc["results"])
+    hit = next(
+        r for r in doc["results"] if r["id"] == "types.ts::ShellCommand"
+    )
+    assert hit["kind"] == "type_alias"
 
 
 # round-19 claude-code finding: the round-18 fix above only catches
@@ -400,6 +412,10 @@ def test_type_alias_implements_target_json_flags_unresolved_local(
 # and the resolver's terminal fallback still mislabeled it
 # ``(external)``. Same repro shape as claude-code's own
 # ``src/utils/ShellCommand.ts``, just collapsed into one file.
+#
+# Round 26 (see cross-file variant above) makes this resolve as a real
+# same-file supertype edge too, superseding the round-19
+# ``(unresolved)`` presentation fallback.
 TS_SAME_FILE_TYPE_ALIAS_HERITAGE = {
     "shell_command.ts": (
         "export type ShellCommand = {\n"
@@ -413,7 +429,7 @@ TS_SAME_FILE_TYPE_ALIAS_HERITAGE = {
 }
 
 
-def test_same_file_type_alias_implements_target_labeled_unresolved(
+def test_same_file_type_alias_implements_target_resolves_as_supertype(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     root = make_mapped_repo(TS_SAME_FILE_TYPE_ALIAS_HERITAGE)
@@ -422,11 +438,12 @@ def test_same_file_type_alias_implements_target_labeled_unresolved(
     )
     assert code == 0
     out = capsys.readouterr().out
-    assert "(unresolved) ShellCommand" in out
+    assert "type_alias ShellCommand" in out
+    assert "(unresolved)" not in out
     assert "(external)" not in out
 
 
-def test_same_file_type_alias_implements_target_json_flags_unresolved(
+def test_same_file_type_alias_implements_target_json_resolves(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     root = make_mapped_repo(TS_SAME_FILE_TYPE_ALIAS_HERITAGE)
@@ -442,9 +459,13 @@ def test_same_file_type_alias_implements_target_json_flags_unresolved(
     )
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
-    ext = next(r for r in doc["results"] if r.get("external"))
-    assert ext["text"] == "ShellCommand"
-    assert ext["unresolved_local"] is True
+    assert not any(r.get("external") for r in doc["results"])
+    hit = next(
+        r
+        for r in doc["results"]
+        if r["id"] == "shell_command.ts::ShellCommand"
+    )
+    assert hit["kind"] == "type_alias"
 
 
 def test_genuine_external_base_still_labeled_external(

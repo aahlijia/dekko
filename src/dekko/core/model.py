@@ -4,13 +4,22 @@ from dataclasses import dataclass, field
 
 # Type-container ``Symbol.kind`` values — every non-callable, non-
 # variable definition a language can produce (classes plus the
-# interface/enum/struct/record/trait shapes other languages use for
-# the same "named type" concept). Shared by every renderer/summary
-# that used to check ``kind == "class"`` alone and would otherwise
-# silently undercount once ``extractor.py`` stopped lumping all of
-# these into ``"class"`` (see ``extractor._CLASSDEF_KIND``).
+# interface/enum/struct/record/trait/type_alias shapes other
+# languages use for the same "named type" concept). Shared by every
+# renderer/summary that used to check ``kind == "class"`` alone and
+# would otherwise silently undercount once ``extractor.py`` stopped
+# lumping all of these into ``"class"`` (see
+# ``extractor._CLASSDEF_KIND``).
 TYPE_KINDS = frozenset(
-    {"class", "interface", "enum", "struct", "record", "trait"}
+    {
+        "class",
+        "interface",
+        "enum",
+        "struct",
+        "record",
+        "trait",
+        "type_alias",
+    }
 )
 
 
@@ -70,7 +79,8 @@ class Symbol:
             scope ``const``/``let`` exports in JS/TS; a plain data
             binding, not a callable), or one of ``TYPE_KINDS``
             (``class``, ``interface``, ``enum``, ``struct``,
-            ``record``, ``trait``) for named-type definitions.
+            ``record``, ``trait``, ``type_alias``) for named-type
+            definitions.
         path: Repo-relative POSIX path of the defining file.
         language: Language name from the registry.
         params: Ordered parameters with types when declared.

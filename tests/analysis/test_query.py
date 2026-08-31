@@ -1509,3 +1509,51 @@ def test_json_sites_total_fallback_counts_missing_lines_as_one(
     # 1 (caller, no recorded edge_lines) + 1 (module, no recorded
     # edge_lines) == 2, not 0.
     assert doc["meta"]["sites_total"] == 2
+
+
+# --- Round 26: TS type_alias_declaration -> real, resolvable Symbol --
+
+TS_TYPE_ALIAS_ONLY = {
+    "types.ts": (
+        'export type PermissionMode = "ask" | "allow" | "deny";\n'
+        "\n"
+        "export function checkMode(mode: PermissionMode): boolean {\n"
+        '  return mode === "allow";\n'
+        "}\n"
+    ),
+}
+
+
+def test_query_symbol_resolves_type_alias(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Before round 26 this name had no Symbol at all, so `query
+    # symbol` fell through to "not found" with fuzzy suggestions --
+    # type_alias_declaration now matches @classdef in _TS_DEFINITIONS
+    # (languages.py) same as interface/enum/class.
+    root = make_mapped_repo(TS_TYPE_ALIAS_ONLY)
+    code = cli.main(["query", "symbol", "PermissionMode", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "types.ts:1" in out
+    assert "type_alias" in out
+
+
+def test_query_symbol_json_reports_type_alias_kind(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_TYPE_ALIAS_ONLY)
+    code = cli.main(
+        [
+            "query",
+            "symbol",
+            "PermissionMode",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["kind"] == "type_alias"
+    assert doc["id"] == "types.ts::PermissionMode"
