@@ -480,6 +480,44 @@ def _load_settings(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _detect_indent(path: Path) -> int | str:
+    """Best-effort guess of an existing settings file's indent style.
+
+    Round 25 finding #17: rewriting always hard-coded 2-space indent
+    even when the file already on disk used a different width (or
+    tabs), producing unnecessary whitespace-only diff noise for anyone
+    tracking that file. Reads the first indented line above the file's
+    own content and measures its leading whitespace; falls back to the
+    2-space default (matching this module's own, unchanged, first-
+    install formatting) when the file doesn't exist yet, can't be
+    read, or has no indented line to measure.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 2
+    for line in lines[1:]:
+        if not line or line[0] not in " \t":
+            continue
+        stripped = line.lstrip(" \t")
+        if not stripped:
+            continue
+        leading = line[: len(line) - len(stripped)]
+        return "\t" if "\t" in leading else len(leading)
+    return 2
+
+
+def _write_settings(path: Path, settings: dict) -> None:
+    """Write ``settings`` back to ``path``, preserving its existing
+    on-disk indent style rather than hard-coding one (see
+    ``_detect_indent``)."""
+    indent = _detect_indent(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(settings, indent=indent) + "\n", encoding="utf-8"
+    )
+
+
 def _entry(event: str, matcher: str | None, *, strict: bool = False) -> dict:
     """One settings hooks entry invoking ``dekko hooks run <event>``.
 
@@ -534,8 +572,7 @@ def install(root: Path, events: list[str], *, strict: bool = False) -> int:
         bucket = hooks.setdefault(claude_event, [])
         if not _already_installed(bucket, event):
             bucket.append(_entry(event, matcher, strict=strict))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    _write_settings(path, settings)
     print(
         f"dekko: enabled hooks [{', '.join(events)}] in {path}. "
         "Restart Claude Code."
@@ -592,8 +629,19 @@ def uninstall(root: Path) -> int:
             del hooks[claude_event]
     if not hooks:
         settings.pop("hooks", None)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    if not settings and path.exists():
+        # Nothing left to keep -- remove the file (and the now-empty
+        # .claude/ dir it lived in, if nothing else uses it) rather
+        # than leaving a stray `{}` behind, matching --claude-md-
+        # install/uninstall's own byte-identical restoration (round 25
+        # finding #16).
+        path.unlink()
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass  # directory holds other files -- leave it
+    else:
+        _write_settings(path, settings)
     print(
         f"dekko: removed {removed} dekko hook entr"
         f"{'y' if removed == 1 else 'ies'} from {path}."

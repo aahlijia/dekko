@@ -9,6 +9,40 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.36] — 2026-08-31
+
+### Fixed
+- **Round-25 one-liner batch** — ten small correctness/UX fixes found
+  during the round-25 7-repo eval, all fixed same-day. See
+  `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md` for full
+  per-finding detail:
+  - `query --sites --json` now forwards `related_total`/`related_label`
+    into the JSON payload, matching the text path.
+  - `sanity` no longer flags a receiver as an import-mismatch when the
+    hit's file is the declaring type's own file.
+  - `query importers`'s not-found suggestions now use the same
+    bare-import-source form as successful matches, instead of raw
+    source text.
+  - `unused --kinds` help text now accurately describes evidence-based
+    dead-code detection instead of implying a functions/methods-only
+    scan.
+  - `unused --dispatch`'s `check_command` and text hint now emit a
+    disambiguated `path:qualname:line` target.
+  - `sanity` no longer misclassifies a header-only C/C++ declaration
+    (prototype) as a call.
+  - `workset`/`summary`/`orient`'s shared file-level doc extraction now
+    skips leading copyright/license boilerplate before picking a
+    description.
+  - `hooks uninstall` now removes `.claude/settings.json` (and the now-
+    empty `.claude/` dir) when nothing but dekko's own hooks remain,
+    instead of always rewriting an empty-ish file.
+  - `hooks install`/`uninstall` now detect and preserve the existing
+    indent style of `.claude/settings.json` instead of always
+    rewriting it with 2-space indentation.
+  - `query cohesion --budget` now prints a floor-exceeded note to
+    stderr when the requested budget is below the result's token
+    floor, mirroring `lean --budget`'s disclosure.
+
 ## [0.43.35] — 2026-08-28
 
 ### Fixed

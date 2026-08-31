@@ -505,6 +505,79 @@ def test_uninstall_removes_only_dekko(tmp_path: Path) -> None:
     assert commands == ["echo hi"]  # ours gone, theirs kept
 
 
+def test_uninstall_removes_settings_file_when_nothing_left(
+    tmp_path: Path,
+) -> None:
+    # Round 25 finding #16: when dekko's own hook entries were the
+    # only content, uninstall must remove the now-empty settings.json
+    # (and the now-empty .claude/ dir it lived in) rather than leaving
+    # a stray `{}` and an empty directory behind.
+    hooks.install(tmp_path, ["session-start"])
+    settings_file = tmp_path / ".claude" / "settings.json"
+    assert settings_file.is_file()
+    hooks.uninstall(tmp_path)
+    assert not settings_file.exists()
+    assert not settings_file.parent.exists()
+
+
+def test_uninstall_keeps_file_with_other_top_level_keys(
+    tmp_path: Path,
+) -> None:
+    # Settings holding an unrelated top-level key (not just other
+    # hooks) must survive removal, not be deleted just because the
+    # hooks key emptied out.
+    settings_file = tmp_path / ".claude" / "settings.json"
+    settings_file.parent.mkdir(parents=True)
+    settings_file.write_text(json.dumps({"someOtherSetting": True}))
+    hooks.install(tmp_path, ["session-start"])
+    hooks.uninstall(tmp_path)
+    assert settings_file.is_file()
+    assert _settings(tmp_path) == {"someOtherSetting": True}
+
+
+def test_uninstall_keeps_dir_with_other_files(tmp_path: Path) -> None:
+    # .claude/ holding another file besides settings.json must survive
+    # even when settings.json itself is removed.
+    dekko_dir = tmp_path / ".claude"
+    dekko_dir.mkdir()
+    (dekko_dir / "CLAUDE.md").write_text("# notes\n")
+    hooks.install(tmp_path, ["session-start"])
+    settings_file = dekko_dir / "settings.json"
+    hooks.uninstall(tmp_path)
+    assert not settings_file.exists()
+    assert dekko_dir.is_dir()
+    assert (dekko_dir / "CLAUDE.md").exists()
+
+
+def test_install_preserves_existing_indent_style(tmp_path: Path) -> None:
+    # Round 25 finding #17: install must not force 2-space indent onto
+    # a file that already used a different width, avoiding unnecessary
+    # whitespace-only diff noise.
+    settings_file = tmp_path / ".claude" / "settings.json"
+    settings_file.parent.mkdir(parents=True)
+    settings_file.write_text(
+        json.dumps({"someOtherSetting": True}, indent=4) + "\n"
+    )
+    hooks.install(tmp_path, ["session-start"])
+    lines = settings_file.read_text().splitlines()
+    setting_line = next(ln for ln in lines if '"someOtherSetting"' in ln)
+    assert setting_line.startswith("    ")  # 4 spaces, not 2
+    assert not setting_line.startswith("      ")  # not 6 either
+
+
+def test_uninstall_preserves_existing_indent_style(tmp_path: Path) -> None:
+    settings_file = tmp_path / ".claude" / "settings.json"
+    settings_file.parent.mkdir(parents=True)
+    settings_file.write_text(
+        json.dumps({"someOtherSetting": True}, indent=4) + "\n"
+    )
+    hooks.install(tmp_path, ["session-start"])
+    hooks.uninstall(tmp_path)
+    lines = settings_file.read_text().splitlines()
+    setting_line = next(ln for ln in lines if '"someOtherSetting"' in ln)
+    assert setting_line.startswith("    ")  # 4 spaces, not 2
+
+
 def test_cli_hooks_install_smoke(tmp_path: Path) -> None:
     assert cli.main(["hooks", "install", "--root", str(tmp_path)]) == 0
     assert (tmp_path / ".claude" / "settings.json").is_file()

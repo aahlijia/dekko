@@ -78,6 +78,26 @@ def test_importers_not_found_suggests_closest_sources(
     assert "no imports match 'totally_unknown'" in err
 
 
+def test_importers_not_found_suggestions_use_bare_source(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 25 finding #11: the "closest import sources" suggestion list
+    # must show the same bare form _importers_row/_importers_entry
+    # render on a match, not the raw resolver-internal
+    # "module/localName" encoding (which doesn't exist on disk and
+    # reads as a hallucinated path).
+    root = make_mapped_repo(
+        {
+            "server/index.ts": ('import { HAT_ART } from "../art";\n'),
+        }
+    )
+    code = cli.main(["query", "importers", "../art_typo", "--root", str(root)])
+    assert code == 3
+    err = capsys.readouterr().err
+    assert "../art/HAT_ART" not in err
+    assert "../art" in err
+
+
 def test_importers_not_found_hints_deps_file_for_path_shaped_needle(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

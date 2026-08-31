@@ -1597,6 +1597,39 @@ def test_classify_unused_reference_qualified_call() -> None:
     assert (bucket, detail) == ("reference", sanity.SHAPE_CALL)
 
 
+def test_classify_unused_reference_c_extern_prototype_is_declaration() -> None:
+    # Round 25 finding #14 (tensorflow.md Finding 4): a header-only
+    # extern forward declaration -- no body, ends `;` -- is
+    # syntactically indistinguishable from a bare call by the call
+    # template alone and was mistagged [call]; must classify as
+    # SHAPE_DECLARATION instead.
+    bucket, detail = sanity.classify_unused_reference(
+        "extern TF_CAPI_EXPORT void TARGET("
+        "TF_DeprecatedSession* session, TF_Status* status);",
+        "TARGET",
+        path="c_api.h",
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_DECLARATION)
+
+
+def test_classify_unused_reference_plain_prototype_is_declaration() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "void TARGET(int x);", "TARGET", path="a.h"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_DECLARATION)
+
+
+def test_classify_unused_reference_bare_call_still_call_not_declaration() -> (
+    None
+):
+    # Regression guard: a genuine call statement with no return-type
+    # prefix before the name must not be swept into SHAPE_DECLARATION.
+    bucket, detail = sanity.classify_unused_reference(
+        "TARGET(session, status);", "TARGET", path="a.c"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_CALL)
+
+
 def test_classify_unused_reference_other_catch_all() -> None:
     # A plain assignment RHS -- not one of the three named shapes, but
     # still a real reference, so it must surface as SHAPE_OTHER rather
@@ -2340,6 +2373,44 @@ def test_receiver_mismatch_unreadable_file_is_false(tmp_path: Path) -> None:
     assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is False
 
 
+def test_receiver_mismatch_same_declaring_file_is_false(
+    tmp_path: Path,
+) -> None:
+    # Round 25 finding #9: a file never imports its own class, so a
+    # same-file comment about the correct target (not close enough to
+    # its def line to trip the separate comment-proximity check) must
+    # not be flagged as a receiver mismatch just because the type name
+    # doesn't textually appear within the ``_TYPE_REFERENCE_WINDOW_
+    # LINES``-line window -- realistic on a file (like the McpHub.ts
+    # repro) with enough leading import lines to push the class
+    # declaration itself past that window.
+    padding = "# padding\n" * 65
+    body = (
+        padding
+        + "class Widget:\n"
+        + "    def isTrue(self):\n"
+        + "        return True\n"
+        + "\n\n\n\n\n\n\n\n\n\n"
+        + "# calls isTrue() somewhere below, unrelated to any import\n"
+    )
+    (tmp_path / "b.py").write_text(body)
+    comment_line = body.count("\n")
+    hit = sanity.GrepHit(
+        path="b.py",
+        line=comment_line,
+        snippet="# calls isTrue() somewhere below, unrelated to any import",
+    )
+    assert (
+        sanity._receiver_mismatch(
+            tmp_path, hit, "Widget", declaring_path="b.py"
+        )
+        is False
+    )
+    # Without declaring_path, the pre-fix behavior (spurious True) is
+    # reproduced -- confirms the new parameter is load-bearing.
+    assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is True
+
+
 def test_classify_miss_likely_unrelated_external() -> None:
     cause = sanity.classify_miss(
         "    return isTrue()",
@@ -2499,6 +2570,35 @@ def test_sanity_receiver_mismatch_flags_unrelated_collision(
     assert doc["receiver_mismatch_declaring_type"] == "Widget"
     assert doc["receiver_mismatch_count"] >= 1
     assert "Widget" in doc["receiver_mismatch_note"]
+
+
+def test_sanity_receiver_mismatch_skips_same_file_comment(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 25 finding #9 (cline.md Finding 3): a same-file comment
+    # mentioning the target's own method, far enough from its def line
+    # to not trip the comment-proximity check, must not get the
+    # misleading "likely an unrelated external-library method" message
+    # -- the file it's in *is* the declaring type's own file, which
+    # never "imports" itself.
+    padding = "# padding\n" * 65
+    a_py = (
+        padding
+        + "class Widget:\n"
+        + "    def isTrue(self):\n"
+        + "        return True\n"
+        + "\n\n\n\n\n\n\n\n\n\n"
+        + "# isTrue() is called elsewhere in this class's lifecycle\n"
+    )
+    root = make_mapped_repo({"a.py": a_py})
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "isTrue", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["file"]: row["cause"] for row in doc["grep_only"]}
+    assert causes["a.py"] != sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
 
 
 def test_sanity_receiver_mismatch_absent_when_gate_unheld(

@@ -597,8 +597,41 @@ def _clean_doc(line: str) -> str | None:
     return line or None
 
 
-def _string_first_line(raw: str) -> str | None:
-    """First non-empty content line of a string literal."""
+# A leading comment/docstring line that reads as copyright/license
+# boilerplate rather than a real file description -- round 25 finding
+# #15: on an Apache/BSD/MIT-licensed codebase, nearly every file's
+# leading comment opens with exactly this shape ("Copyright 20XX The
+# Foo Authors. All Rights Reserved.", "Licensed under the Apache
+# License, Version 2.0...", "SPDX-License-Identifier: ..."), which
+# ``workset``/``summary``/``orient`` all surfaced verbatim as the
+# file's one-line description since they share this same module-doc
+# extraction path.
+_BOILERPLATE_HEADER_RE = re.compile(
+    r"^(copyright\b|\(c\)\s*\d{4}\b|all rights reserved\b|"
+    r"licensed under\b|spdx-license-identifier\b|"
+    r"permission is hereby granted\b|redistribution and use\b|"
+    r"this (?:source|file) (?:code )?is (?:part of|subject to)\b|"
+    r"you may not use this file except in compliance\b)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_boilerplate_header(line: str) -> bool:
+    """Whether ``line`` reads as copyright/license boilerplate rather
+    than a real description -- see ``_BOILERPLATE_HEADER_RE``."""
+    return _BOILERPLATE_HEADER_RE.match(line.strip()) is not None
+
+
+def _string_first_line(
+    raw: str, *, skip_boilerplate: bool = False
+) -> str | None:
+    """First non-empty content line of a string literal.
+
+    ``skip_boilerplate`` (module-doc extraction only) additionally
+    skips any leading line matching ``_looks_like_boilerplate_header``,
+    continuing to the next non-empty line rather than surfacing legal
+    text as the description.
+    """
     text = _STR_PREFIX.sub("", raw.strip(), count=1)
     for quote in ('"""', "'''", '"', "'"):
         if text.startswith(quote):
@@ -606,8 +639,11 @@ def _string_first_line(raw: str) -> str | None:
             text = text.removesuffix(quote)
             break
     for line in text.splitlines():
-        if line.strip():
-            return _clean_doc(line)
+        if not line.strip():
+            continue
+        if skip_boilerplate and _looks_like_boilerplate_header(line):
+            continue
+        return _clean_doc(line)
     return None
 
 
@@ -625,12 +661,23 @@ def _strip_comment_markers(line: str) -> str:
     return line.removesuffix("*/").strip()
 
 
-def _comment_first_line(raw: str) -> str | None:
-    """First non-empty content line of a comment block."""
+def _comment_first_line(
+    raw: str, *, skip_boilerplate: bool = False
+) -> str | None:
+    """First non-empty content line of a comment block.
+
+    ``skip_boilerplate`` (module-doc extraction only) additionally
+    skips any leading line matching ``_looks_like_boilerplate_header``,
+    continuing to the next non-empty line rather than surfacing legal
+    text as the description.
+    """
     for line in raw.splitlines():
         content = _strip_comment_markers(line.strip())
-        if content:
-            return _clean_doc(content)
+        if not content:
+            continue
+        if skip_boilerplate and _looks_like_boilerplate_header(content):
+            continue
+        return _clean_doc(content)
     return None
 
 
@@ -713,19 +760,29 @@ def _doc_for_symbol(language: str, def_node: Node) -> str | None:
 
 
 def _module_doc(language: str, root: Node) -> str | None:
-    """Best-effort first doc line for a whole file, or ``None``."""
+    """Best-effort first doc line for a whole file, or ``None``.
+
+    Skips copyright/license boilerplate lines (see
+    ``_looks_like_boilerplate_header``) rather than surfacing them as
+    the file's description -- scans forward through the file's whole
+    leading run of comment nodes (not just the first) for the first
+    non-boilerplate line; a file whose entire leading comment run is
+    boilerplate falls back to ``None`` rather than picking legal text.
+    """
     if language == "python":
         string = _leading_string(list(root.named_children))
         if string is None:
             return None
-        return _string_first_line(_raw(string))
+        return _string_first_line(_raw(string), skip_boilerplate=True)
     for child in root.named_children:
         if child.type not in _COMMENT_TYPES:
             return None
         raw = _raw(child)
         if raw.startswith("#!"):
             continue
-        return _comment_first_line(raw)
+        line = _comment_first_line(raw, skip_boilerplate=True)
+        if line is not None:
+            return line
     return None
 
 

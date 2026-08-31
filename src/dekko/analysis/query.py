@@ -329,11 +329,21 @@ def _emit_lines(
 
 
 def _fit_entries(
-    entries: list[dict], budget: int | None, limit: int
+    entries: list[dict],
+    budget: int | None,
+    limit: int,
+    related_total: int = 0,
+    related_label: str = "",
 ) -> tuple[list[dict], Meter]:
     """Trim JSON result entries to the caps, metered on their JSON cost."""
     serialized = [json.dumps(e) for e in entries]
-    kept, meter = fit_to_budget(serialized, budget, limit)
+    kept, meter = fit_to_budget(
+        serialized,
+        budget,
+        limit,
+        related_total=related_total,
+        related_label=related_label,
+    )
     return entries[: len(kept)], meter
 
 
@@ -773,7 +783,17 @@ def _print_relation_json(
                 _edge_key(action, sym, s.id), []
             )
         entries.append(entry)
-    kept, meter = _fit_entries(entries, budget, limit)
+    related_total = (len(symbols) + len(modules)) if sites else 0
+    related_label = (
+        ("callers" if action == "callers" else "callees") if sites else ""
+    )
+    kept, meter = _fit_entries(
+        entries,
+        budget,
+        limit,
+        related_total=related_total,
+        related_label=related_label,
+    )
     meta = meter.as_dict()
     if sites:
         # Total call sites across all entries/modules, pre-cap — the
@@ -2209,8 +2229,8 @@ def _run_importers_not_found(index: MapIndex, needle: str) -> int:
         )
     sources = sorted(
         {
-            imp.source
-            for imports in index.imports_by_path.values()
+            bare_import_source(imp, index.languages_by_path.get(path, ""))
+            for path, imports in index.imports_by_path.items()
             for imp in imports
         }
     )
@@ -3308,6 +3328,22 @@ def _run_cohesion(
     for row in kept:
         print(row)
     print(_COHESION_NOTE)
+    if budget is not None and meter.tokens > budget:
+        # fit_to_budget never splits mid-row (a connected component is
+        # reported whole or not at all -- see the module's own "never
+        # split mid-row" convention), so a budget tighter than even
+        # the first kept row's own cost is silently exceeded with no
+        # visible sign the request was overridden, unlike ``lean
+        # --budget``'s own floor-exceeded disclosure (round 25 finding
+        # #18). ``meter.tokens`` is exactly what got rendered, so a
+        # mismatch against the requested ``budget`` is that floor
+        # having bent the request upward.
+        print(
+            f"  note: requested budget {budget} is below this "
+            f"result's ~{meter.tokens}-token floor (rows are never "
+            "split mid-row); using the floor instead",
+            file=sys.stderr,
+        )
     return EXIT_OK, meter
 
 

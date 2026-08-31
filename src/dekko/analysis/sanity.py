@@ -228,6 +228,7 @@ _TYPE_REFERENCE_WINDOW_LINES = 60
 # doc (``.features/plans/round23/23-sanity-unused-variant.md``) for the
 # full rationale.
 SHAPE_CALL = "call"
+SHAPE_DECLARATION = "declaration"
 SHAPE_SPREAD = "spread"
 SHAPE_TYPEOF = "typeof"
 SHAPE_SUBSCRIPT = "subscript"
@@ -247,6 +248,23 @@ _TYPEOF_TEMPLATE = r"\btypeof\s+{name}\b"
 _SUBSCRIPT_TEMPLATE = r"{name}\s*\["
 _BARE_CALL_TEMPLATE = r"\b{name}\s*\("
 
+# A C/C++ header-only forward declaration/prototype: an optional
+# ``extern``, one or more return-type-shaped tokens (a macro like
+# ``TF_CAPI_EXPORT``, the actual return type, any ``*`` pointer stars),
+# the name, a parameter list, and a bare trailing ``;`` with nothing
+# else on the line -- no body, so it's a declaration, not an
+# invocation. Checked before ``_BARE_CALL_TEMPLATE`` (round 25 finding
+# #14: ``TF_CloseDeprecatedSession``'s one grep-only hit on
+# tensorflow, a plain ``extern`` prototype in ``c_api.h``, was tagged
+# ``[call]`` -- syntactically indistinguishable from a real call by the
+# bare-call template alone). A genuine call statement on its own line
+# (``foo(a, b);``) never has a type-token prefix before the name, which
+# is the discriminator this template relies on.
+_DECLARATION_TEMPLATE = (
+    r"^(?:extern\s+)?(?:[A-Za-z_][A-Za-z0-9_]*[\s*]+)+"
+    r"{name}\s*\([^;]*\)\s*;\s*$"
+)
+
 
 def classify_unused_reference(
     snippet: str,
@@ -265,11 +283,16 @@ def classify_unused_reference(
       reported as reference evidence.
     - ``("reference", SHAPE_*)`` — everything else: a real, non-noise
       mention of the bare name outside its own definition.
-      ``SHAPE_CALL`` (bare ``name(`` or qualified ``x.name(``/
-      ``x::name(``) is checked before spread/typeof/subscript, since
-      ``...name()`` (spreading a call's *result*) is a genuine call
-      site first and a spread second — the more actionable
-      classification wins. ``SHAPE_OTHER`` is the catch-all for every
+      ``SHAPE_DECLARATION`` (a C/C++ header-only forward declaration/
+      prototype -- return type, name, params, bare trailing ``;``, no
+      body) is checked before ``SHAPE_CALL``, since a prototype is
+      syntactically indistinguishable from a bare call by the call
+      template alone (round 25 finding #14). ``SHAPE_CALL`` (bare
+      ``name(`` or qualified ``x.name(``/``x::name(``) is checked
+      before spread/typeof/subscript, since ``...name()`` (spreading a
+      call's *result*) is a genuine call site first and a spread
+      second — the more actionable classification wins. ``SHAPE_OTHER``
+      is the catch-all for every
       other bare mention (assignment RHS, argument, destructuring
       element, array/object member, JSX prop, etc.) — this is
       deliberately not scoped to just the three named shapes, so a
@@ -300,6 +323,8 @@ def classify_unused_reference(
     if _looks_like_comment_line(snippet, path):
         return "noise", CAUSE_COMMENT_MENTION
     name = re.escape(bare_name)
+    if re.search(_DECLARATION_TEMPLATE.format(name=name), snippet.strip()):
+        return "reference", SHAPE_DECLARATION
     if _looks_qualified_call(snippet, bare_name) or re.search(
         _BARE_CALL_TEMPLATE.format(name=name), snippet
     ):
@@ -922,7 +947,12 @@ def _run_grep(root: Path, bare_name: str) -> GrepSweepResult:
     )
 
 
-def _receiver_mismatch(root: Path, hit: GrepHit, declaring_type: str) -> bool:
+def _receiver_mismatch(
+    root: Path,
+    hit: GrepHit,
+    declaring_type: str,
+    declaring_path: str | None = None,
+) -> bool:
     """Whether nothing in ``hit``'s own line or its file's top-of-file
     import/using block textually mentions ``declaring_type`` — the
     cheap, no-type-inference proxy for "this call's receiver almost
@@ -946,6 +976,15 @@ def _receiver_mismatch(root: Path, hit: GrepHit, declaring_type: str) -> bool:
         hit: The grep-only candidate hit being checked.
         declaring_type: The target's declaring type's own simple name
             (the last segment of its container symbol's qualname).
+        declaring_path: The declaring type's own file, when known. A
+            file never imports its own class, so checking that file's
+            import block for ``declaring_type`` always (spuriously)
+            comes up empty — round 25 finding #9: this misfired on
+            same-file comments referring to the correct target,
+            reporting "likely an unrelated external-library method"
+            when the real candidate was declared in that exact file.
+            When ``hit.path == declaring_path``, the import-block check
+            is skipped and only the hit's own line is checked.
 
     Returns:
         ``True`` when neither the hit's own line nor the first
@@ -956,6 +995,8 @@ def _receiver_mismatch(root: Path, hit: GrepHit, declaring_type: str) -> bool:
     """
     if declaring_type in hit.snippet:
         return False  # the type name is right there on the line
+    if declaring_path is not None and hit.path == declaring_path:
+        return False  # own declaring file -- imports itself, not a mismatch
     try:
         lines = (
             (root / hit.path)
@@ -976,6 +1017,7 @@ def _classify_grep_hits(
     own_def_locs: frozenset[tuple[str, int]],
     tests_excluded: bool,
     declaring_type: str | None = None,
+    declaring_path: str | None = None,
 ) -> dict[tuple[str, int], str]:
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
@@ -1012,6 +1054,10 @@ def _classify_grep_hits(
             When set, each hit is additionally checked with
             ``_receiver_mismatch`` and the result threaded into
             ``classify_miss`` as ``likely_unrelated_external``.
+        declaring_path: The declaring type's own file, when known —
+            forwarded to ``_receiver_mismatch`` so a hit inside that
+            same file (which never imports its own class) isn't
+            misflagged as a receiver mismatch (round 25 finding #9).
 
     Returns:
         ``(path, line) -> CAUSE_*`` for every hit not in
@@ -1045,7 +1091,7 @@ def _classify_grep_hits(
             ),
             likely_unrelated_external=(
                 declaring_type is not None
-                and _receiver_mismatch(root, h, declaring_type)
+                and _receiver_mismatch(root, h, declaring_type, declaring_path)
             ),
         )
     return causes
@@ -1857,6 +1903,7 @@ def run(
         own_def_locs=own_def_locs,
         tests_excluded=tests_excluded,
         declaring_type=declaring_type,
+        declaring_path=sym.path if declaring_type is not None else None,
     )
     grep_only_rows = [
         _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits

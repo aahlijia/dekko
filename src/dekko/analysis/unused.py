@@ -500,6 +500,20 @@ def _print_suspects_text(suspects: list[Symbol]) -> None:
 _DISPATCH_LIMIT = 20
 
 
+def _dispatch_check_command(sym: Symbol) -> str:
+    """The ``dekko sanity --unused`` hint for one dispatch candidate.
+
+    Uses the full ``path:qualname:line`` target form, not the bare
+    ``qualname`` — an overloaded target (2+ symbols sharing the same
+    ``(path, qualname)``) needs the trailing ``:line`` to disambiguate,
+    matching the exact hint ``resolve_target``'s own ambiguous-target
+    error message already tells the user to append (round 25 finding
+    #13: the row already carries ``sym.start_line``, so there's no
+    reason to make the copy-pasted command hit that error at all).
+    """
+    return f"dekko sanity --unused {sym.path}:{sym.qualname}:{sym.start_line}"
+
+
 def _dispatch_json(sym: Symbol) -> dict:
     """Structured rendering of one dispatch candidate.
 
@@ -507,7 +521,7 @@ def _dispatch_json(sym: Symbol) -> dict:
     "unused" verdict for this symbol.
     """
     doc = _sym_json(sym)
-    doc["check_command"] = f"dekko sanity --unused {sym.qualname}"
+    doc["check_command"] = _dispatch_check_command(sym)
     return doc
 
 
@@ -516,7 +530,7 @@ def _dispatch_row_text(sym: Symbol) -> str:
     return (
         f"  {sym.path}:{sym.start_line}  {signature(sym)}  [{sym.kind}]"
         f"  -- possible polymorphic-dispatch target "
-        f"(dekko sanity --unused {sym.qualname})"
+        f"({_dispatch_check_command(sym)})"
     )
 
 

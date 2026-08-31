@@ -1419,6 +1419,31 @@ def test_json_sites_total_present_and_independent_of_truncation(
     assert doc["meta"]["returned"] == 1
 
 
+def test_json_sites_meta_related_total_populated(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 25 finding #7: --sites --json's meta.related_total/
+    # related_label stayed 0/"" (the Meter defaults) because the JSON
+    # path never forwarded them to _fit_entries, unlike the text-mode
+    # footer, which already got them right.
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.py:target",
+            "--root",
+            str(root),
+            "--sites",
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["meta"]["related_total"] == 2
+    assert doc["meta"]["related_label"] == "callers"
+
+
 def test_json_without_sites_has_no_sites_total_key(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

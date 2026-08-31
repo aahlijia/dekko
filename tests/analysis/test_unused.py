@@ -430,6 +430,23 @@ def test_unused_json(
 # --- --kinds: unit-level tests over hand-built MapIndex fixtures -----
 
 
+def test_kinds_help_text_does_not_claim_callables_restricts_scan(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 25 finding #12: --help described 'callables' as scanning
+    # only functions/methods, but find_unused only ever restricts the
+    # *scan* by kind for 'types' -- 'callables' (the default) and
+    # 'all' both scan every symbol kind, differing only in which
+    # evidence counts as "used". The help text must describe the real
+    # behavior, not a functions/methods-only restriction that doesn't
+    # exist.
+    with pytest.raises(SystemExit):
+        cli.main(["unused", "--help"])
+    out = capsys.readouterr().out
+    assert "functions/methods" not in out
+    assert "every symbol kind is scanned" in out
+
+
 def test_kinds_default_ignores_heritage_and_type_usage_evidence() -> None:
     # Backward-compat crux: a class with heritage_in (implemented) and
     # a type-usage match, but zero calls_in/referenced_in, must still
@@ -1332,8 +1349,15 @@ def test_unused_dispatch_flag_adds_section(
     section = out.split("dispatch candidates:")[1]
     assert "DiscordConnector.createCommand" in section
     assert "SlackConnector.createCommand" in section
-    assert "dekko sanity --unused DiscordConnector.createCommand" in section
-    assert "dekko sanity --unused SlackConnector.createCommand" in section
+    # Round 25 finding #13: the hint uses the full path:qualname:line
+    # target form so a copy-paste works even on an overloaded target,
+    # not the bare qualname alone.
+    assert (
+        "dekko sanity --unused connectors.ts:DiscordConnector.createCommand:"
+    ) in section
+    assert (
+        "dekko sanity --unused connectors.ts:SlackConnector.createCommand:"
+    ) in section
 
 
 def test_unused_dispatch_flag_no_change_to_main_list(
@@ -1372,9 +1396,9 @@ def test_unused_dispatch_json_round_trip(
         for c in doc["dispatch_candidates"]
         if c["id"] == "connectors.ts::DiscordConnector.createCommand"
     )
-    assert (
-        entry["check_command"]
-        == "dekko sanity --unused DiscordConnector.createCommand"
+    assert entry["check_command"] == (
+        f"dekko sanity --unused connectors.ts:"
+        f"DiscordConnector.createCommand:{entry['line']}"
     )
 
 

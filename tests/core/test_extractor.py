@@ -837,6 +837,88 @@ def test_js_type_query_fragment_not_wired_and_js_still_compiles(
     assert "obj" in ref_names
 
 
+# --- round 25 finding #15: module-doc skips license boilerplate ------
+
+
+def test_module_doc_skips_apache_license_header_cpp(tmp_path: Path) -> None:
+    # The exact tensorflow shape: every .cc/.h file's leading comment
+    # opens with a copyright/license block, which workset/summary/
+    # orient all surfaced verbatim as the file's description since
+    # they share this same extraction path -- the real, useful summary
+    # line further down the same comment block must win instead.
+    spec = languages.spec_for_path("c_api.cc")
+    assert spec is not None
+    (tmp_path / "c_api.cc").write_text(
+        "// Copyright 2023 The TensorFlow Authors. All Rights Reserved.\n"
+        "//\n"
+        '// Licensed under the Apache License, Version 2.0 (the "License");\n'
+        "// you may not use this file except in compliance with the "
+        "License.\n"
+        "//\n"
+        "// Implements the deprecated session C API.\n"
+        "int real_function(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "c_api.cc", spec)
+    assert fm.error is None
+    assert fm.doc == "Implements the deprecated session C API."
+
+
+def test_module_doc_all_boilerplate_falls_back_to_none(
+    tmp_path: Path,
+) -> None:
+    # No real description survives -- must fall back to None, not pick
+    # a legal-text line just because something has to be returned.
+    spec = languages.spec_for_path("c_api.cc")
+    assert spec is not None
+    (tmp_path / "c_api.cc").write_text(
+        "// Copyright 2023 The TensorFlow Authors. All Rights Reserved.\n"
+        "// SPDX-License-Identifier: Apache-2.0\n"
+        "int real_function(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "c_api.cc", spec)
+    assert fm.error is None
+    assert fm.doc is None
+
+
+def test_module_doc_non_boilerplate_comment_unaffected(
+    tmp_path: Path,
+) -> None:
+    # Regression guard: a normal leading comment with no license shape
+    # is returned unchanged.
+    spec = languages.spec_for_path("c_api.cc")
+    assert spec is not None
+    (tmp_path / "c_api.cc").write_text(
+        "// Helpers for the deprecated session C API.\n"
+        "int real_function(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "c_api.cc", spec)
+    assert fm.error is None
+    assert fm.doc == "Helpers for the deprecated session C API."
+
+
+def test_module_doc_skips_boilerplate_python_docstring(
+    tmp_path: Path,
+) -> None:
+    spec = languages.spec_for_path("licensed.py")
+    assert spec is not None
+    (tmp_path / "licensed.py").write_text(
+        '"""Copyright 2023 The Foo Authors. All Rights Reserved.\n\n'
+        "Helpers for widget configuration.\n"
+        '"""\n'
+        "def helper():\n"
+        "    pass\n"
+    )
+    fm = extract_file(tmp_path, "licensed.py", spec)
+    assert fm.error is None
+    assert fm.doc == "Helpers for widget configuration."
+
+
 def test_parse_rust_use() -> None:
     assert _parse_rust_use("a::b::c") == [("c", "a::b::c")]
     assert _parse_rust_use("a::b as d") == [("d", "a::b")]
