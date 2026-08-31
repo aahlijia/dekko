@@ -326,13 +326,23 @@ class UnixSocketTransport(DaemonTransport):
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             sock.bind(str(path))
+            # ``os.chmod``/``listen()`` right after a successful
+            # ``bind()`` normally can't fail -- but on a heavily
+            # loaded host the just-created socket special-file can
+            # transiently vanish before ``chmod`` observes it (seen
+            # once in CI as a ``FileNotFoundError`` racing this exact
+            # window). Folded into the same try/except as ``bind()``
+            # rather than left to escape uncaught, so any post-bind
+            # setup failure reaches the caller as the same clean
+            # ``TransportUnavailable`` contract instead of crashing
+            # the daemon thread with an unhandled exception.
+            os.chmod(path, 0o600)
+            sock.listen()
         except OSError as exc:
             sock.close()
             raise TransportUnavailable(
                 f"could not bind {label} at {path}: {exc}"
             ) from exc
-        os.chmod(path, 0o600)
-        sock.listen()
         return sock
 
     def bind_and_listen(self) -> socket.socket:
