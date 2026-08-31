@@ -207,10 +207,21 @@ CAUSE_COMMENT_MENTION = (
 CAUSE_IMPORT_STATEMENT = (
     "import/require statement naming the symbol — not a call site"
 )
+CAUSE_TYPE_ANNOTATION = (
+    "type annotation / generic type argument — not a call site"
+)
+CAUSE_LOCAL_BINDING_OR_LITERAL = (
+    "matches an unrelated local variable/parameter declaration, or a "
+    "string literal value — not a reference to the target"
+)
 CAUSE_LIKELY_EXTERNAL_COLLISION = (
     "likely an unrelated external-library method sharing this bare "
     "name — no other repo-defined candidate exists, and neither this "
     "line nor this file's imports mention the target's declaring type"
+)
+CAUSE_CROSS_FILE_COLLISION = (
+    "call-shaped reference to a different, same-named declaration "
+    "elsewhere in the repo — not a miss on the target"
 )
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
 
@@ -423,10 +434,28 @@ _ESM_DEFAULT_IMPORT_TEMPLATE = (
     r"^import\s+(?:\*\s+as\s+)?{name}\s+from\s+['\"]"
 )
 _PY_FROM_IMPORT_TEMPLATE = r"^from\s+\S+\s+import\s+.*\b{name}\b"
+# Round 25 spring-boot.md Finding 2: Java's ``import a.b.C;`` (and
+# ``import static a.b.C.field;``) has no equivalent among the three
+# templates above -- none of them match a semicolon-terminated,
+# dot-qualified import with no braces/``from`` keyword. Requires the
+# bare name to be the final dotted segment immediately before the
+# terminating ``;`` -- same "visible in the line itself" discipline as
+# every other template here. An optional ``static `` modifier is
+# allowed between ``import`` and the qualified path (a Java static
+# import of a field/method, not a type import) without a separate
+# template, since the shape is otherwise identical.
+_JAVA_IMPORT_TEMPLATE = r"^import\s+(?:static\s+)?[\w.]*\.{name}\s*;"
+# Kotlin shares Java's ``import a.b.C`` shape closely enough to warrant
+# its own narrow template rather than loosening the Java one (which
+# would risk false-positiving on Java's own semicolon-required style):
+# no terminating ``;``, and an optional trailing ``as Alias`` rename.
+_KOTLIN_IMPORT_TEMPLATE = r"^import\s+[\w.]*\.{name}(?:\s+as\s+\w+)?\s*$"
 _IMPORT_LINE_TEMPLATES = (
     _ESM_NAMED_IMPORT_TEMPLATE,
     _ESM_DEFAULT_IMPORT_TEMPLATE,
     _PY_FROM_IMPORT_TEMPLATE,
+    _JAVA_IMPORT_TEMPLATE,
+    _KOTLIN_IMPORT_TEMPLATE,
 )
 # CJS ``require(...)`` doesn't bind its target the way ESM/Python
 # imports do (it's an ordinary call expression, e.g. ``const { NAME }
@@ -456,6 +485,100 @@ def _looks_like_import_statement(snippet: str, bare_name: str) -> bool:
         outside_call = stripped[: match.start()] + stripped[match.end() :]
         return re.search(rf"\b{name}\b", outside_call) is not None
     return False
+
+
+# Round 25 claude-code.md Finding 1: a TS/JS type-position mention
+# (``import type Output from './output.js'``, ``output: Output``,
+# ``Foo<Output>``) is neither an import-*statement* shape (none of
+# ``_IMPORT_LINE_TEMPLATES`` match a parameter-type annotation) nor a
+# call -- it fell straight to CAUSE_UNEXPLAINED (78% of claude-code's
+# sample bucket this round). Deliberately scoped to curly-brace/
+# TS-shaped grammars only, gated via ``_grammar_for_path`` the same way
+# ``_COMMENT_PREFIXES_BY_GRAMMAR`` is -- Python's own ``x: Output``
+# annotation syntax looks identical but this round's evidence is
+# TS-specific; other languages' type-position syntax would need their
+# own follow-up evidence before extending this check there (same "ship
+# the shape that's evidenced" precedent as the Java/Kotlin import
+# template split above).
+_TYPE_ANNOTATION_GRAMMARS = frozenset({"typescript", "tsx", "javascript"})
+_TS_IMPORT_TYPE_TEMPLATE = r"^import\s+type\s+.*\b{name}\b"
+_TS_TYPE_POSITION_TEMPLATE = (
+    r":\s*{name}\b(?!\s*\()"  # `x: Output`, not `x: Output()`
+    r"|<\s*{name}\s*[,>]"  # `Foo<Output>`, `Foo<Output, Bar>`
+)
+
+
+def _looks_like_type_annotation(
+    snippet: str, bare_name: str, path: str
+) -> bool:
+    """Whether a grep-matched line uses ``bare_name`` in a TS/JS
+    type position (an ``import type`` statement, a parameter/variable
+    type annotation, or a generic type argument) rather than as a call
+    or value reference.
+
+    ``_TS_TYPE_POSITION_TEMPLATE``'s negative lookahead after the name
+    exists specifically to avoid misclassifying ``x: someFunc()`` (a
+    call whose result is being assigned/typed) as a type annotation --
+    mirrors this module's existing "accept the gap, don't guess wrong"
+    discipline. Scoped to ``_TYPE_ANNOTATION_GRAMMARS`` via
+    ``_grammar_for_path`` -- always ``False`` outside those grammars,
+    never a guess.
+    """
+    if _grammar_for_path(path) not in _TYPE_ANNOTATION_GRAMMARS:
+        return False
+    name = re.escape(bare_name)
+    stripped = snippet.strip()
+    if re.search(_TS_IMPORT_TYPE_TEMPLATE.format(name=name), stripped):
+        return True
+    return (
+        re.search(_TS_TYPE_POSITION_TEMPLATE.format(name=name), stripped)
+        is not None
+    )
+
+
+# Round 25 claude-buddy.md Finding 2: a same-bare-name local variable/
+# parameter declaration (``const warn: string[] = []``) or a bare
+# quoted string literal value (``status === "warn"``) in an unrelated
+# file share the target's bare name without referencing it at all --
+# 32% of claude-buddy's unexplained bucket this round. A full
+# declaration-vs-reference check would require real parsing (out of
+# scope for this module's pattern-match-on-the-grep-line philosophy,
+# per the module docstring) -- this is a scoped, regex-based partial
+# fix covering the two concrete shapes this round evidenced, not every
+# possible "unrelated local binding" shape (a JSX prop, a destructured
+# parameter, an object-literal key -- extend reactively if a future
+# round surfaces one of those as a concrete new bucket).
+_LOCAL_DECL_TEMPLATE = r"^(?:const|let|var)\s+{name}\s*[:=]"
+_STRING_LITERAL_TEMPLATE = r'["\']{name}["\']'
+
+
+def _looks_like_local_binding_or_literal(snippet: str, bare_name: str) -> bool:
+    """Whether a grep-matched line is an unrelated local variable/
+    parameter declaration naming ``bare_name``, or a bare quoted string
+    literal equal to it -- neither is a reference to the target.
+
+    Must only ever be consulted after ``_looks_qualified_call``/
+    ``_looks_like_import_statement`` have already run (both are checked
+    unconditionally at the top of ``classify_miss``'s ladder before
+    this function's result is ever threaded in), so a real call whose
+    string *argument* happens to equal ``bare_name`` (e.g.
+    ``someFunc("warn")`` when ``warn`` is itself the target) is never
+    reached by a qualified-call check that would have explained it
+    differently -- see this function's own test coverage for the
+    "ordering caveat" this precedence is meant to guard.
+    """
+    name = re.escape(bare_name)
+    stripped = snippet.strip()
+    if re.search(_LOCAL_DECL_TEMPLATE.format(name=name), stripped):
+        return True
+    # Only treat a bare quoted match as a literal, not a substring of a
+    # longer string -- requires the quote characters to be the
+    # immediately adjacent characters, same discipline as every other
+    # anchored template in this module.
+    return (
+        re.search(_STRING_LITERAL_TEMPLATE.format(name=name), stripped)
+        is not None
+    )
 
 
 # Round 22 claude-buddy.md §2.4: ``_looks_like_import_statement`` only
@@ -732,44 +855,63 @@ def classify_miss(
     near_own_definition: bool = False,
     looks_like_comment: bool = False,
     looks_like_import_member: bool = False,
+    looks_like_type_annotation: bool = False,
+    looks_like_local_binding_or_literal: bool = False,
     likely_unrelated_external: bool = False,
+    looks_like_cross_file_collision: bool = False,
     in_leading_header_comment: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
     A pure function over one grep-matched line plus its context — no
-    repo/grep I/O, so it's directly testable in isolation (the two
-    checks that need file I/O, ``_looks_like_multiline_import_member``
-    and the receiver-mismatch heuristic behind
-    ``likely_unrelated_external``, are computed by the caller and
-    passed in rather than given to this function directly, to keep
-    that contract). Checked in the order ``dekko-verify/SKILL.md``
-    lists its blind spots: a qualified-call syntax match is checked
-    first (it's visible in the line itself and the most specific
-    signal available), then whether the line is a bare import/require
-    statement naming the symbol (round 21 Track B3 — the dominant
-    "grep-only" shape on any import-heavy codebase, same "visible in
-    the line itself" precedence as the qualified-call check), then
-    whether the line is a bare member of a multi-line destructured
-    import block (round 22 claude-buddy.md §2.4 — the residual gap in
-    the single-line check above), then whether the hit is a
-    comment/docstring line either sitting near the symbol's own
+    repo/grep I/O, so it's directly testable in isolation (the checks
+    that need file I/O or a repo-wide symbol-table lookup --
+    ``_looks_like_multiline_import_member``, the receiver-mismatch
+    heuristic behind ``likely_unrelated_external``, and the
+    ``symbols_by_name`` lookup behind ``looks_like_cross_file_collision``
+    -- are computed by the caller and passed in rather than given to
+    this function directly, to keep that contract). Checked in the
+    order ``dekko-verify/SKILL.md`` lists its blind spots: a
+    qualified-call syntax match is checked first (it's visible in the
+    line itself and the most specific signal available), then whether
+    the line is a bare import/require statement naming the symbol
+    (round 21 Track B3 — the dominant "grep-only" shape on any
+    import-heavy codebase, same "visible in the line itself"
+    precedence as the qualified-call check), then whether the line is
+    a bare member of a multi-line destructured import block (round 22
+    claude-buddy.md §2.4 — the residual gap in the single-line check
+    above), then whether the line uses the name in a TS/JS type
+    position -- an ``import type`` statement, a parameter/variable type
+    annotation, or a generic type argument (round 25 claude-code.md
+    Finding 1 — neither an import statement nor a call, but just as
+    unambiguous once matched; see ``_looks_like_type_annotation``),
+    then whether the line is an unrelated local variable/parameter
+    declaration or a bare string literal equal to the name (round 25
+    claude-buddy.md Finding 2 — a same-bare-name local binding or
+    string value in an unrelated file references nothing; see
+    ``_looks_like_local_binding_or_literal``), then whether the hit is
+    a comment/docstring line either sitting near the symbol's own
     definition or inside its file's uninterrupted leading header
     comment block (round 24 07-sanity-comment-mention-file-header-gap.md
     — a module-header comment naming several exports can sit far from
     any one of their definitions; not a call at all either way), then
     whether the file is in a language dekko can't parse at all, then
-    whether the caller's own receiver-mismatch heuristic flagged this
-    hit as likely an unrelated external-library method sharing the
-    target's bare name (round 23 spring-boot.md §4 — a same-named
-    AssertJ/stdlib/third-party method colliding with the one
-    repo-defined candidate; see ``_receiver_mismatch``), then whether
-    it's a test file excluded by ``sanity``'s own default filtering,
-    then whether the target name is short/generic enough that dekko's
-    count should be read as directional rather than exact. A line
-    matching none of these is reported as "unexplained" rather than
-    forcing a guess that doesn't fit — matching the plan's own "false
-    confidence from the classifier itself" caution.
+    whether this hit is a call-shaped reference sitting in a file that
+    also holds a different, same-bare-named declaration (round 25
+    awesome-go.md Bug 1 — a deterministic, repo-index-backed signal,
+    stronger than the two heuristics that follow; see
+    ``looks_like_cross_file_collision``'s own caller-side computation
+    in ``run()``), then whether the caller's own receiver-mismatch
+    heuristic flagged this hit as likely an unrelated external-library
+    method sharing the target's bare name (round 23 spring-boot.md §4 —
+    a same-named AssertJ/stdlib/third-party method colliding with the
+    one repo-defined candidate; see ``_receiver_mismatch``), then
+    whether it's a test file excluded by ``sanity``'s own default
+    filtering, then whether the target name is short/generic enough
+    that dekko's count should be read as directional rather than
+    exact. A line matching none of these is reported as "unexplained"
+    rather than forcing a guess that doesn't fit — matching the plan's
+    own "false confidence from the classifier itself" caution.
 
     Args:
         snippet: The grep-matched line's text.
@@ -792,6 +934,13 @@ def classify_miss(
         looks_like_import_member: Whether the hit line is a bare
             member of a multi-line destructured import block
             (``_looks_like_multiline_import_member``).
+        looks_like_type_annotation: Whether the hit line uses the name
+            in a TS/JS type position rather than as a call or value
+            reference (``_looks_like_type_annotation``).
+        looks_like_local_binding_or_literal: Whether the hit line is an
+            unrelated local variable/parameter declaration naming the
+            symbol, or a bare quoted string literal equal to it
+            (``_looks_like_local_binding_or_literal``).
         in_leading_header_comment: Whether the hit sits inside an
             uninterrupted comment/blank-line run starting at line 1 of
             its own file (``_in_leading_header_comment``) — the
@@ -799,6 +948,13 @@ def classify_miss(
             doesn't cover. Independent of, and OR'd with,
             ``near_own_definition`` in the ``CAUSE_COMMENT_MENTION``
             check below; never a guess made from inside this function.
+        looks_like_cross_file_collision: Whether this hit is call-shaped
+            (a qualified or bare call site) and sits in a file that
+            also holds a different symbol declaration sharing the
+            target's bare name -- a deterministic collision signal, not
+            a heuristic guess; computed by the caller from
+            ``MapIndex.symbols_by_name`` (see ``run()``'s
+            ``other_candidate_files``).
         likely_unrelated_external: Whether the caller's own
             receiver-mismatch gating (single-repo-candidate method
             target, resolvable declaring type) held for this run *and*
@@ -817,12 +973,50 @@ def classify_miss(
         return CAUSE_IMPORT_STATEMENT
     if looks_like_import_member:
         return CAUSE_IMPORT_STATEMENT
+    if looks_like_type_annotation:
+        return CAUSE_TYPE_ANNOTATION
+    if looks_like_local_binding_or_literal:
+        return CAUSE_LOCAL_BINDING_OR_LITERAL
+    return _classify_miss_remaining(
+        bare_name,
+        is_test_file=is_test_file,
+        unsupported_language=unsupported_language,
+        tests_excluded=tests_excluded,
+        near_own_definition=near_own_definition,
+        looks_like_comment=looks_like_comment,
+        in_leading_header_comment=in_leading_header_comment,
+        looks_like_cross_file_collision=looks_like_cross_file_collision,
+        likely_unrelated_external=likely_unrelated_external,
+    )
+
+
+def _classify_miss_remaining(
+    bare_name: str,
+    *,
+    is_test_file: bool,
+    unsupported_language: bool,
+    tests_excluded: bool,
+    near_own_definition: bool,
+    looks_like_comment: bool,
+    in_leading_header_comment: bool,
+    looks_like_cross_file_collision: bool,
+    likely_unrelated_external: bool,
+) -> str:
+    """The back half of ``classify_miss``'s ladder -- split out purely
+    to keep ``classify_miss`` itself under this module's McCabe
+    complexity ceiling as the ladder has grown across rounds; not a
+    separately meaningful unit on its own, so it isn't independently
+    documented/tested beyond what ``classify_miss``'s own test suite
+    already exercises through the public function.
+    """
     if looks_like_comment and (
         near_own_definition or in_leading_header_comment
     ):
         return CAUSE_COMMENT_MENTION
     if unsupported_language:
         return CAUSE_UNSUPPORTED_LANGUAGE
+    if looks_like_cross_file_collision:
+        return CAUSE_CROSS_FILE_COLLISION
     if likely_unrelated_external:
         return CAUSE_LIKELY_EXTERNAL_COLLISION
     if tests_excluded and is_test_file:
@@ -1018,6 +1212,7 @@ def _classify_grep_hits(
     tests_excluded: bool,
     declaring_type: str | None = None,
     declaring_path: str | None = None,
+    other_candidate_files: frozenset[str] = frozenset(),
 ) -> dict[tuple[str, int], str]:
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
@@ -1058,6 +1253,15 @@ def _classify_grep_hits(
             forwarded to ``_receiver_mismatch`` so a hit inside that
             same file (which never imports its own class) isn't
             misflagged as a receiver mismatch (round 25 finding #9).
+        other_candidate_files: Every file (besides the target's own)
+            holding a declaration of a different symbol sharing
+            ``bare_name`` — round 25 awesome-go.md Bug 1's
+            deterministic cross-file-collision signal (see ``run()``'s
+            own computation). A hit whose file is in this set *and*
+            looks call-shaped (``_looks_qualified_call`` or
+            ``_BARE_CALL_TEMPLATE``) is threaded into ``classify_miss``
+            as ``looks_like_cross_file_collision``. Defaults to empty
+            (the existing, ungated behavior).
 
     Returns:
         ``(path, line) -> CAUSE_*`` for every hit not in
@@ -1085,9 +1289,26 @@ def _classify_grep_hits(
             looks_like_import_member=_looks_like_multiline_import_member(
                 root, h, bare_name
             ),
+            looks_like_type_annotation=_looks_like_type_annotation(
+                h.snippet, bare_name, h.path
+            ),
+            looks_like_local_binding_or_literal=(
+                _looks_like_local_binding_or_literal(h.snippet, bare_name)
+            ),
             in_leading_header_comment=(
                 _looks_like_comment_line(h.snippet, h.path)
                 and _in_leading_header_comment(root, h)
+            ),
+            looks_like_cross_file_collision=(
+                h.path in other_candidate_files
+                and (
+                    _looks_qualified_call(h.snippet, bare_name)
+                    or re.search(
+                        _BARE_CALL_TEMPLATE.format(name=re.escape(bare_name)),
+                        h.snippet,
+                    )
+                    is not None
+                )
             ),
             likely_unrelated_external=(
                 declaring_type is not None
@@ -1825,6 +2046,12 @@ def run(
 
     query_index = index if include_tests else index.without_tests()
     own_def_locs: frozenset[tuple[str, int]] = frozenset()
+    # Every file (besides the target's own) holding a declaration of a
+    # different symbol sharing the target's bare name -- round 25
+    # awesome-go.md Bug 1's cross-file-collision signal. Callers mode
+    # only, same as ``own_def_locs`` (``--usages`` mode has no in-repo
+    # declaration to collide with).
+    other_candidate_files: frozenset[str] = frozenset()
     # The receiver-mismatch heuristic's declaring-type name -- set only
     # when every gating condition below holds (callers mode, a method
     # target, exactly one repo-defined candidate for its bare name, and
@@ -1858,6 +2085,19 @@ def run(
         own_def_locs = frozenset(
             (s.path, s.start_line)
             for s in query_index.symbols_by_name.get(sym.name, [])
+        )
+        # round 25 awesome-go.md Bug 1: dekko already computes every
+        # same-bare-named symbol above (for ``own_def_locs``) -- the
+        # files holding any *other* one of them is the deterministic
+        # "genuine collision" signal ``_is_generic_name``'s
+        # length/word-list heuristic was standing in for by accident.
+        # Excludes the target's own declaration by (path, line), not
+        # just by path, so a same-file overload sharing the bare name
+        # still counts as "another candidate."
+        other_candidate_files = frozenset(
+            s.path
+            for s in query_index.symbols_by_name.get(sym.name, [])
+            if s.path != sym.path or s.start_line != sym.start_line
         )
         declaring_type = _resolve_declaring_type(query_index, sym)
         sym_target = f"{sym.path}:{sym.qualname}:{sym.start_line}"
@@ -1904,6 +2144,7 @@ def run(
         tests_excluded=tests_excluded,
         declaring_type=declaring_type,
         declaring_path=sym.path if declaring_type is not None else None,
+        other_candidate_files=other_candidate_files,
     )
     grep_only_rows = [
         _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits
@@ -2011,12 +2252,27 @@ def _sweep_bare_name(
     *,
     own_def_locs: frozenset[tuple[str, int]],
     tests_excluded: bool,
+    other_candidate_files: frozenset[str] = frozenset(),
 ) -> tuple[GrepSweepResult, dict[tuple[str, int], str]]:
     """One grep + classify pass for ``bare_name``, shared across every
     symbol in its fan-in group — the sweep's whole cost-saving
     mechanism (see module docstring's ``--all`` paragraph): grep and
     classification cost drops from O(symbols with fan-in) to O(unique
     bare names among them).
+
+    Args:
+        root: Repo root, for the grep sweep and classifier's file I/O.
+        bare_name: The bare identifier being swept.
+        own_def_locs: Every symbol's own definition line sharing
+            ``bare_name`` — excluded from classification entirely.
+        tests_excluded: Whether the dekko-side query being compared
+            against excluded test files by default.
+        other_candidate_files: Files holding a declaration of
+            ``bare_name`` — see ``_run_all_sweeps``'s own computation
+            for why this is the full declaration-file set here (not
+            "every file but one symbol's own," the way ``run()``
+            computes it), a deliberate simplification safe under the
+            ``--all`` sweep's shared-causes-per-bare-name design.
 
     Returns:
         ``(sweep, causes)``. ``causes`` is empty when ``sweep.error``
@@ -2033,6 +2289,7 @@ def _sweep_bare_name(
         root,
         own_def_locs=own_def_locs,
         tests_excluded=tests_excluded,
+        other_candidate_files=other_candidate_files,
     )
     return sweep, causes
 
@@ -2252,15 +2509,36 @@ def _run_all_sweeps(
     def _sweep_one(
         name: str,
     ) -> tuple[str, GrepSweepResult, dict[tuple[str, int], str]]:
+        symbols_for_name = query_index.symbols_by_name.get(name, [])
         own_def_locs = frozenset(
-            (s.path, s.start_line)
-            for s in query_index.symbols_by_name.get(name, [])
+            (s.path, s.start_line) for s in symbols_for_name
+        )
+        # round 25 awesome-go.md Bug 1: unlike ``run()`` (one target
+        # symbol per call, so "other than the target's own file" is
+        # well-defined), one bare-name sweep here is shared across
+        # every fan-in symbol sharing ``name`` (see ``_diff_symbol``),
+        # so there's no single "target" to exclude a file for -- using
+        # the full declaration-file set is the closest safe
+        # approximation. Only meaningful with >= 2 distinct symbols:
+        # with exactly one declaration total, that lone file is by
+        # definition every diffed symbol's *own* file, not "a
+        # different, same-named declaration elsewhere" -- flagging a
+        # genuine same-file resolver miss as a cross-file collision
+        # purely because its own declaration happens to live in a
+        # declaration file would be a real false positive (caught by
+        # this fix's own test coverage), not the narrow, accepted kind
+        # of over-classification the module's other heuristics allow.
+        other_candidate_files = (
+            frozenset(s.path for s in symbols_for_name)
+            if len(symbols_for_name) >= 2
+            else frozenset()
         )
         sweep, causes = _sweep_bare_name(
             root,
             name,
             own_def_locs=own_def_locs,
             tests_excluded=tests_excluded,
+            other_candidate_files=other_candidate_files,
         )
         return name, sweep, causes
 

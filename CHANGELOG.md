@@ -9,6 +9,18 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.37] — 2026-08-31
+
+### Fixed
+- **Sanity classifier taxonomy gaps (round-25 plan 01)** — closed four
+  gaps in `dekko sanity`'s grep-miss classification: added Java/Kotlin
+  import templates, TS/JS type-annotation detection, local-binding/
+  string-literal detection, and deterministic cross-file bare-name
+  collision detection (guarded to require 2+ distinct declaring files
+  so single-declaration names aren't flagged). See
+  `.features/plans/round25/01-sanity-classifier-taxonomy-gaps.md` and
+  `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+
 ## [0.43.36] — 2026-08-31
 
 ### Fixed

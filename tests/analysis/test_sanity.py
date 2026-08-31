@@ -1104,6 +1104,93 @@ def test_classify_miss_qualified_call_wins_over_import_shape() -> None:
     assert cause == sanity.CAUSE_QUALIFIED_CALL
 
 
+def test_classify_miss_java_import() -> None:
+    # Round 25 spring-boot.md Finding 2: a plain Java type import has
+    # no equivalent among the ESM/CJS/Python templates.
+    cause = sanity.classify_miss(
+        "import org.springframework.boot.ansi.AnsiPropertySource;",
+        "AnsiPropertySource",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_java_static_import() -> None:
+    cause = sanity.classify_miss(
+        "import static org.junit.Assert.assertTrue;",
+        "assertTrue",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_kotlin_import() -> None:
+    # Kotlin shares Java's ``import a.b.C`` shape but drops the
+    # terminating semicolon -- a dedicated template, not a loosened
+    # Java one (round 25 spring-boot.md Finding 2).
+    cause = sanity.classify_miss(
+        "import a.b.AnsiPropertySource",
+        "AnsiPropertySource",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_kotlin_import_with_alias() -> None:
+    cause = sanity.classify_miss(
+        "import a.b.AnsiPropertySource as Source",
+        "AnsiPropertySource",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_java_import_of_other_name_not_flagged() -> None:
+    cause = sanity.classify_miss(
+        "import org.springframework.boot.ansi.Other;",
+        "AnsiPropertySource",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_sanity_detects_java_import_miss(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": "def target():\n    return 1\n",
+            "B.java": (
+                "package com.example;\n\n"
+                "import a.b.target;\n\n"
+                "class B {\n"
+                "    void caller() {\n"
+                "        target();\n"
+                "    }\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["cause"] for row in doc["grep_only"]}
+    assert sanity.CAUSE_IMPORT_STATEMENT in causes
+
+
 def test_sanity_detects_import_statement_miss(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -1374,6 +1461,227 @@ def test_sanity_multiline_import_member_with_unrelated_import_above(
     assert rows_by_line[4] == sanity.CAUSE_IMPORT_STATEMENT
 
 
+# --- TS/JS type-position usage (round 25 claude-code.md Finding 1) -----
+
+
+def test_looks_like_type_annotation_import_type() -> None:
+    assert sanity._looks_like_type_annotation(
+        "import type Output from './output.js';", "Output", "a.ts"
+    )
+
+
+def test_looks_like_type_annotation_variable_annotation() -> None:
+    assert sanity._looks_like_type_annotation(
+        "function run(output: Output): void {", "Output", "a.ts"
+    )
+
+
+def test_looks_like_type_annotation_generic_argument() -> None:
+    assert sanity._looks_like_type_annotation(
+        "const results: Array<Output> = [];", "Output", "a.ts"
+    )
+
+
+def test_looks_like_type_annotation_generic_argument_multiple() -> None:
+    assert sanity._looks_like_type_annotation(
+        "const pair: Map<Output, Error> = new Map();", "Output", "a.ts"
+    )
+
+
+def test_looks_like_type_annotation_call_not_annotation() -> None:
+    # `x: someFunc()` is a call whose result is being assigned/typed --
+    # the negative lookahead must keep this off the type-annotation
+    # path.
+    assert not sanity._looks_like_type_annotation(
+        "const output: someFunc() = run();", "someFunc", "a.ts"
+    )
+
+
+def test_looks_like_type_annotation_gated_to_ts_grammars() -> None:
+    # Python's `x: Output` annotation syntax looks identical, but this
+    # check is deliberately TS/JS-scoped only -- a Python file must
+    # never trigger it.
+    assert not sanity._looks_like_type_annotation(
+        "output: Output", "Output", "a.py"
+    )
+
+
+def test_looks_like_type_annotation_javascript_generic() -> None:
+    assert sanity._looks_like_type_annotation(
+        "const results: Array<Output> = [];", "Output", "a.js"
+    )
+
+
+def test_classify_miss_type_annotation() -> None:
+    # classify_miss stays pure/I/O-free -- the caller computes
+    # looks_like_type_annotation and passes it in, same contract as
+    # looks_like_import_member.
+    cause = sanity.classify_miss(
+        "function run(output: Output): void {",
+        "Output",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_type_annotation=True,
+    )
+    assert cause == sanity.CAUSE_TYPE_ANNOTATION
+
+
+def test_classify_miss_type_annotation_absent_without_flag() -> None:
+    cause = sanity.classify_miss(
+        "function run(output: Output): void {",
+        "Output",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_TYPE_ANNOTATION
+
+
+def test_sanity_detects_ts_type_annotation_miss(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "output.ts": "export class Output {}\n",
+            "run.ts": (
+                "import type { Output } from './output';\n\n"
+                "function run(output: Output): void {\n"
+                "  return;\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "Output", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows_by_line = {row["line"]: row["cause"] for row in doc["grep_only"]}
+    assert rows_by_line.get(3) == sanity.CAUSE_TYPE_ANNOTATION
+
+
+# --- unrelated local binding / string literal (round 25 --------------
+# claude-buddy.md Finding 2) ---------------------------------------------
+
+
+def test_looks_like_local_binding_or_literal_local_decl() -> None:
+    assert sanity._looks_like_local_binding_or_literal(
+        "const warn: string[] = [];", "warn"
+    )
+
+
+def test_looks_like_local_binding_or_literal_let_decl() -> None:
+    assert sanity._looks_like_local_binding_or_literal(
+        "let warn = true;", "warn"
+    )
+
+
+def test_looks_like_local_binding_or_literal_string_literal() -> None:
+    assert sanity._looks_like_local_binding_or_literal(
+        'status === "warn"', "warn"
+    )
+
+
+def test_looks_like_local_binding_or_literal_single_quoted() -> None:
+    assert sanity._looks_like_local_binding_or_literal(
+        "status === 'warn'", "warn"
+    )
+
+
+def test_looks_like_local_binding_or_literal_false_for_bare_call() -> None:
+    # A real, unqualified call to the target itself must not be
+    # misclassified.
+    assert not sanity._looks_like_local_binding_or_literal("warn(x)", "warn")
+
+
+def test_looks_like_local_binding_or_literal_false_for_substring() -> None:
+    # Not a bare quoted match -- "warning" isn't "warn".
+    assert not sanity._looks_like_local_binding_or_literal(
+        'status === "warning"', "warn"
+    )
+
+
+def test_looks_like_local_binding_or_literal_ordering_caveat() -> None:
+    # The plan's own ordering caveat: `warn` appearing as a *string
+    # argument* to an unrelated call is genuinely a literal-value
+    # mention, not a call to `warn` -- correctly True here. Real call
+    # shapes (`logger.warn(...)`, bare `warn(...)`) are intercepted
+    # earlier in classify_miss's ladder by
+    # `_looks_qualified_call`/`_looks_like_import_statement`, which
+    # always run before this signal is even consulted.
+    assert sanity._looks_like_local_binding_or_literal(
+        'someFunc("warn")', "warn"
+    )
+
+
+def test_classify_miss_local_binding_or_literal() -> None:
+    cause = sanity.classify_miss(
+        "const warn: string[] = [];",
+        "warn",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_local_binding_or_literal=True,
+    )
+    assert cause == sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
+
+
+def test_classify_miss_local_binding_or_literal_absent_without_flag() -> None:
+    cause = sanity.classify_miss(
+        "const warn: string[] = [];",
+        "warn",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
+
+
+def test_classify_miss_qualified_call_wins_over_local_binding_flag() -> None:
+    # Precedence: even if the caller (incorrectly) set the flag, a
+    # genuine qualified call is still checked first inside
+    # classify_miss's own ladder.
+    cause = sanity.classify_miss(
+        "logger.warn(x)",
+        "warn",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_local_binding_or_literal=True,
+    )
+    assert cause == sanity.CAUSE_QUALIFIED_CALL
+
+
+def test_sanity_detects_local_binding_or_literal_miss(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.ts": "export function warn(): void {\n  return;\n}\n",
+            "unrelated.ts": (
+                "function status(): string {\n"
+                "  const warn: string[] = [];\n"
+                "  return warn.length ? 'warn' : 'ok';\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "warn", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows_by_line = {
+        row["line"]: row["cause"]
+        for row in doc["grep_only"]
+        if row["file"] == "unrelated.ts"
+    }
+    assert rows_by_line.get(2) == sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
+
+
 # --- leading-header-comment mention (round 24 plan 07) -----------------
 
 
@@ -1550,6 +1858,232 @@ def test_sanity_near_own_definition_checks_every_same_named_symbol(
         if row["file"] == "renderer.py"
     }
     assert rows_by_line.get(1) == sanity.CAUSE_COMMENT_MENTION
+
+
+# --- cross-file bare-name collision (round 25 awesome-go.md Bug 1) -----
+
+
+def test_classify_miss_cross_file_collision() -> None:
+    # classify_miss stays pure/I/O-free -- the caller computes
+    # looks_like_cross_file_collision from MapIndex.symbols_by_name and
+    # passes it in, same contract as looks_like_import_member.
+    cause = sanity.classify_miss(
+        "return icon()",
+        "icon",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_cross_file_collision=True,
+    )
+    assert cause == sanity.CAUSE_CROSS_FILE_COLLISION
+
+
+def test_classify_miss_cross_file_collision_absent_without_flag() -> None:
+    cause = sanity.classify_miss(
+        "return icon()",
+        "icon",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_CROSS_FILE_COLLISION
+
+
+def test_classify_miss_cross_file_collision_wins_over_generic_name() -> None:
+    # Round 25 awesome-go.md Bug 1's own precedence lock-in: a name
+    # that's both short/generic *and* a genuine cross-file collision
+    # must resolve to the deterministic collision cause, not the
+    # accident-prone length/word-list heuristic.
+    cause = sanity.classify_miss(
+        "return fix()",
+        "fix",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_cross_file_collision=True,
+    )
+    assert cause == sanity.CAUSE_CROSS_FILE_COLLISION
+
+
+def test_classify_miss_cross_file_collision_wins_over_test_filter() -> None:
+    cause = sanity.classify_miss(
+        "return icon()",
+        "icon",
+        is_test_file=True,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_cross_file_collision=True,
+    )
+    assert cause == sanity.CAUSE_CROSS_FILE_COLLISION
+
+
+def test_classify_miss_qualified_call_wins_over_cross_file_collision() -> None:
+    # Precedence: a genuine qualified call is still checked first
+    # inside classify_miss's own ladder, even if the caller
+    # (incorrectly) set the flag.
+    cause = sanity.classify_miss(
+        "pkg.icon(x)",
+        "icon",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_cross_file_collision=True,
+    )
+    assert cause == sanity.CAUSE_QUALIFIED_CALL
+
+
+def test_sanity_cross_file_collision_flags_call_shaped_reference(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 25 awesome-go.md Bug 1's own repro shape: two files each
+    # declare a same-bare-named function and each correctly calls its
+    # own local declaration -- dekko already resolves both correctly
+    # (no monkeypatching needed), so file B's real call to *its own*
+    # `icon` shows up as grep-only relative to file A's `icon` query
+    # target, and must be explained as a cross-file collision, not left
+    # unexplained.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def icon():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller_a():\n"
+                "    return icon()\n"
+            ),
+            "b.py": (
+                "def icon():\n"
+                "    return 2\n"
+                "\n"
+                "\n"
+                "def caller_b():\n"
+                "    return icon()\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "a.py:icon", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+
+    # File A's own real call site is a genuine match, not grep-only.
+    match_locs = {(row["file"], row["line"]) for row in doc["matches"]}
+    assert ("a.py", 6) in match_locs
+
+    grep_only_by_loc = {
+        (row["file"], row["line"]): row["cause"] for row in doc["grep_only"]
+    }
+    assert (
+        grep_only_by_loc.get(("b.py", 6)) == sanity.CAUSE_CROSS_FILE_COLLISION
+    )
+
+
+def test_sanity_cross_file_collision_absent_with_single_candidate(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Guard: with only one declaration of the bare name anywhere in the
+    # repo, there is no "other" candidate to collide with -- a genuine
+    # same-file resolver miss must stay unexplained, not be
+    # misclassified as a cross-file collision purely because its own
+    # declaration lives in a file that (trivially) contains a
+    # declaration of the name.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def target():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return target()\n"
+            )
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    index = mapfile.load_map(root)
+    assert index is not None
+    own_def_locs = frozenset(
+        (s.path, s.start_line) for s in index.symbols_by_name.get("target", [])
+    )
+    sweep = sanity._run_grep(root, "target")
+    causes = sanity._classify_grep_hits(
+        sweep.hits,
+        "target",
+        root,
+        own_def_locs=own_def_locs,
+        tests_excluded=True,
+        other_candidate_files=frozenset(),
+    )
+    assert causes.get(("a.py", 6)) != sanity.CAUSE_CROSS_FILE_COLLISION
+
+
+def test_sanity_all_cross_file_collision_single_candidate_stays_unexplained(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # ``--all`` mode's own version of the guard above: a bare name with
+    # exactly one repo-wide declaration must never have its own
+    # same-file call site flagged as a cross-file collision just
+    # because ``--all``'s shared-sweep-per-bare-name design can't
+    # exclude "this symbol's own file" the way run() can.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def distinctivelyuniquename():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return distinctivelyuniquename()\n"
+            )
+        }
+    )
+    monkeypatch.setattr(
+        sanity, "_dekko_hits_callers", lambda *_a, **_kw: ([], [])
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert (
+        doc["aggregate_causes"].get(sanity.CAUSE_CROSS_FILE_COLLISION) is None
+    )
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED) == 1
+
+
+def test_sanity_all_cross_file_collision_two_candidates_flagged(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # ``--all`` mode's positive counterpart: the awesome-go repro shape
+    # (two files, each with its own correctly-resolved same-bare-named
+    # declaration) must classify each other's call site as a cross-file
+    # collision, not unexplained, once >= 2 distinct declaration files
+    # exist for the swept bare name.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def icon():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller_a():\n"
+                "    return icon()\n"
+            ),
+            "b.py": (
+                "def icon():\n"
+                "    return 2\n"
+                "\n"
+                "\n"
+                "def caller_b():\n"
+                "    return icon()\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED) is None
+    assert doc["aggregate_causes"].get(sanity.CAUSE_CROSS_FILE_COLLISION) == 2
 
 
 # --- ``sanity --unused``: classify_unused_reference (pure) -------------
