@@ -3131,6 +3131,77 @@ def test_prefer_non_synthetic_crate_match_prefers_caller_crate() -> None:
     assert hits == [0]
 
 
+def test_prefer_non_synthetic_crate_root_resolves_sole_survivor() -> None:
+    # Round 25 (``.features/plans/round25/
+    # 02-deps-crate-decoy-tiebreak.md``): directory-level sibling of
+    # ``_prefer_non_synthetic_crate_match``, operating on plain
+    # crate-root directory strings (``_rust_crate_roots_index_all``'s
+    # own value shape) rather than ``Symbol`` candidates.
+    result = resolver_mod._prefer_non_synthetic_crate_root(
+        [
+            "crates/gpui/src",
+            "tooling/lints/test_fixture/gpui/src",
+        ],
+        "crates/editor/src/editor.rs",
+    )
+    assert result == "crates/gpui/src"
+
+
+def test_prefer_non_synthetic_crate_root_stays_ambiguous() -> None:
+    # Both or neither candidate synthetic -> no unambiguous signal,
+    # must fall through to ``None`` so the caller reports external
+    # rather than guessing -- mirrors ``_prefer_non_synthetic_crate_
+    # match``'s identical rule for heritage resolution.
+    assert (
+        resolver_mod._prefer_non_synthetic_crate_root(
+            ["crates/gpui/src", "workspace2/gpui/src"],
+            "crates/panel/src/panel.rs",
+        )
+        is None
+    )
+    assert (
+        resolver_mod._prefer_non_synthetic_crate_root(
+            [
+                "tooling/lints/test_fixture/gpui/src",
+                "vendor/gpui/src",
+            ],
+            "crates/panel/src/panel.rs",
+        )
+        is None
+    )
+
+
+def test_prefer_non_synthetic_crate_root_resolves_3_candidates() -> None:
+    # Not hardcoded to the 2-candidate case -- exactly one
+    # non-synthetic survivor among 3+ still resolves.
+    result = resolver_mod._prefer_non_synthetic_crate_root(
+        [
+            "crates/gpui/src",
+            "vendor/gpui/src",
+            "mocks/gpui/src",
+        ],
+        "crates/panel/src/panel.rs",
+    )
+    assert result == "crates/gpui/src"
+
+
+def test_prefer_non_synthetic_crate_root_prefers_importer_crate() -> None:
+    # Round 24's guard against the tiebreak overriding a legitimate
+    # self-reference, mirrored for import resolution: when the
+    # importing file's own path lives inside one of the matched
+    # candidate roots, that root wins outright -- even though it looks
+    # synthetic -- since a crate's own external name is in scope from
+    # inside itself.
+    result = resolver_mod._prefer_non_synthetic_crate_root(
+        [
+            "crates/gpui/src",
+            "tooling/lints/test_fixture/gpui/src",
+        ],
+        "tooling/lints/test_fixture/gpui/src/internal.rs",
+    )
+    assert result == "tooling/lints/test_fixture/gpui/src"
+
+
 def test_import_match_uses_receiver_as_rust_crate_hint_fallback() -> None:
     """Round 23 Fix A (``.features/plans/round23/
     09-subtypes-ambiguous-resolution-rate.md``): a fully-qualified

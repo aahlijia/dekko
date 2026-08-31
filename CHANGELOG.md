@@ -9,6 +9,20 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.38] — 2026-08-31
+
+### Fixed
+- **Rust crate-decoy tiebreak in import resolution (round-25 plan 02)**
+  — `resolve_imports()` now builds its Rust crate-root index with the
+  collision-aware `_rust_crate_roots_index_all` instead of a
+  single-winner index, and a new `_prefer_non_synthetic_crate_root`
+  (mirroring round 24's match-side fix) resolves bare-crate-name
+  imports by preferring the self-crate, then the sole non-synthetic
+  root, falling back to external rather than guessing when a genuine
+  collision remains. See
+  `.features/plans/round25/02-deps-crate-decoy-tiebreak.md` and
+  `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+
 ## [0.43.37] — 2026-08-31
 
 ### Fixed

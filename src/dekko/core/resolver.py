@@ -2742,9 +2742,9 @@ def _rust_crate_dir(candidate_path: str) -> str:
 
     Walks upward from the candidate file's own directory looking for
     the nearest ancestor directory literally named ``src`` and returns
-    *its* parent -- the same convention ``_rust_crate_roots_index``/
-    ``_all`` key their index by (a crate name maps to its ``src/``
-    directory), applied here in reverse to an arbitrary candidate file
+    *its* parent -- the same convention ``_rust_crate_roots_index_all``
+    keys its index by (a crate name maps to its ``src/`` directory),
+    applied here in reverse to an arbitrary candidate file
     that may be nested arbitrarily deep inside that ``src/`` tree
     (unlike the root-file-only shape ``_rust_crate_roots_index_all``
     itself scans for), so a candidate several submodules deep still
@@ -2871,6 +2871,54 @@ def _prefer_non_synthetic_crate_match(
     if len(non_synthetic) == 1:
         if tiebreak_hits is not None:
             tiebreak_hits[0] += 1
+        return non_synthetic[0]
+    return None
+
+
+def _prefer_non_synthetic_crate_root(
+    crate_dirs: list[str], importer_path: str
+) -> str | None:
+    """Round 25 ``dekko deps`` crate-decoy tiebreak (``.features/plans/
+    round25/02-deps-crate-decoy-tiebreak.md``): directory-level sibling
+    of ``_prefer_non_synthetic_crate_match``, for
+    ``_resolve_import_rust``'s bare-crate-name lookup.
+
+    Import resolution has no ``Symbol`` candidates the way heritage
+    resolution does at this point -- only the crate-root directory
+    strings ``_rust_crate_roots_index_all`` collected for a colliding
+    crate name -- so this mirrors ``_prefer_non_synthetic_crate_match``'s
+    two-step logic (self-crate wins outright; otherwise the sole
+    non-synthetic-looking root wins) over that different shape rather
+    than reusing it directly.
+
+    Args:
+        crate_dirs: Every crate-root ``src/`` directory registered
+            under the colliding crate name (``ctx.crate_roots``'s
+            value for that name, already known to have 2+ entries by
+            the caller).
+        importer_path: Repo-relative path of the file declaring the
+            ``use`` import being resolved -- used for the self-crate
+            check, mirroring ``_prefer_non_synthetic_crate_match``'s
+            ``caller_path``.
+
+    Returns:
+        The winning crate-root directory, or ``None`` when neither the
+        self-crate check nor the synthetic-marker filter narrows
+        ``crate_dirs`` to exactly one -- a genuine, still-ambiguous
+        collision, left for the caller to treat as unresolved.
+    """
+    importer_crate_dir = _rust_crate_dir(importer_path)
+    same_crate = [
+        d for d in crate_dirs if _rust_crate_dir(d) == importer_crate_dir
+    ]
+    if len(same_crate) == 1:
+        return same_crate[0]
+    non_synthetic = [
+        d
+        for d in crate_dirs
+        if not _looks_like_synthetic_crate_root(_rust_crate_dir(d))
+    ]
+    if len(non_synthetic) == 1:
         return non_synthetic[0]
     return None
 
@@ -3057,20 +3105,27 @@ class _ImportResolveContext:
             real path(s), scoped to C/C++-shaped extensions only (a
             same-named Python/JS file must never satisfy a ``#include``
             filename search).
-        crate_roots: Rust workspace-member crate name → that crate's
-            own root directory (its ``src/``), for every crate this
+        crate_roots: Rust workspace-member crate name → every matching
+            crate root directory (its ``src/``), for every crate this
             repo's convention-based detection can find (see
-            ``_rust_crate_roots_index``). Lets a bare, non-``crate``/
+            ``_rust_crate_roots_index_all``). Lets a bare, non-``crate``/
             ``self``/``super`` ``use`` path be recognized as a
             cross-crate, in-workspace import rather than assumed
-            external by default.
+            external by default. Collision-aware (round 25, ``.features/
+            plans/round25/02-deps-crate-decoy-tiebreak.md``): a crate
+            name matching two or more directories (e.g. a real crate
+            plus a same-named test-fixture/vendor stand-in) keeps every
+            match here rather than picking one, so
+            ``_resolve_import_rust`` can apply the same synthetic-crate
+            tiebreak round 24 already applies to heritage resolution
+            instead of silently guessing.
     """
 
     paths: frozenset[str]
     py_package_roots: dict[str, list[str]] = field(default_factory=dict)
     java_suffix_index: dict[str, list[str]] = field(default_factory=dict)
     cpp_basename_index: dict[str, list[str]] = field(default_factory=dict)
-    crate_roots: dict[str, str] = field(default_factory=dict)
+    crate_roots: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _dirname(path: str) -> str:
@@ -3392,20 +3447,19 @@ def _rust_crate_root_index_names(
     return _RUST_INDEX_NAMES
 
 
-def _rust_crate_roots_index(paths: frozenset[str]) -> dict[str, str]:
-    """Repo-wide Rust crate name → crate-root-directory index, built
-    once per ``resolve_imports()`` call.
+def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
+    """Repo-wide Rust crate name → every matching crate-root directory.
 
-    Applies the same convention-based detection ``_rust_crate_root``
-    performs reactively per importer, but proactively across every
-    ``src/`` directory in the repo: a workspace-member crate's name is
-    the name of the directory containing its ``src/lib.rs``/``src/
-    main.rs`` (or, for a custom ``[lib] path`` override, its ``src/
-    <crate-name>.rs``) -- round 19's own convention, reused rather
-    than reinvented. Lets a cross-crate ``use other_crate::X;`` import
-    in a Cargo workspace resolve against the sibling crate's real root
-    directory, without parsing ``Cargo.toml`` (out of scope; see
-    ``_rust_crate_root``'s own docstring for why).
+    Applies convention-based detection across every ``src/`` directory
+    in the repo, proactively rather than reactively (mirroring
+    ``_rust_crate_root``'s own per-importer logic): a workspace-member
+    crate's name is the name of the directory containing its ``src/
+    lib.rs``/``src/main.rs`` (or, for a custom ``[lib] path`` override,
+    its ``src/<crate-name>.rs``) -- round 19's own convention, reused
+    rather than reinvented. Lets a cross-crate ``use other_crate::X;``
+    import in a Cargo workspace resolve against the sibling crate's
+    real root directory, without parsing ``Cargo.toml`` (out of scope;
+    see ``_rust_crate_root``'s own docstring for why).
 
     Scoped to the ``<crate>/src/...`` nesting shape only -- the same
     shape confirmed dominant against zed in ``_rust_crate_root``'s own
@@ -3417,65 +3471,23 @@ def _rust_crate_roots_index(paths: frozenset[str]) -> dict[str, str]:
     ``_rust_crate_root`` itself already accepts for its own edge case
     (round 22 zed.md §3.1).
 
-    Single-root-per-name only: when two directories both convention-
-    match the same crate name (a genuine in-workspace crate plus an
-    unrelated same-named fixture/vendor crate elsewhere in the repo),
-    whichever this function encounters last silently wins. That
-    winner-take-all behavior is intentional and unchanged here since
-    ``resolve_imports()``'s cross-crate ``use`` resolution
-    (``_resolve_import_rust``) needs exactly one directory to resolve
-    against; see ``_rust_crate_roots_index_all`` for the
-    collision-aware variant used by heritage resolution instead (round
-    23, ``.features/plans/round23/
-    09-subtypes-ambiguous-resolution-rate.md`` Fix B), which is safe
-    there because its own caller (``_rust_crate_hint_matches``) already
-    requires an unambiguous single match before accepting one.
-
-    Args:
-        paths: Every known file path.
-
-    Returns:
-        Crate name → that crate's ``src/`` directory path, for every
-        crate this convention can find.
-    """
-    roots: dict[str, str] = {}
-    for p in paths:
-        if not p.endswith(".rs"):
-            continue
-        src_dir = _dirname(p)
-        if src_dir.rsplit("/", 1)[-1] != "src":
-            continue
-        crate_dir = _dirname(src_dir)
-        if not crate_dir:
-            continue
-        crate_name = crate_dir.rsplit("/", 1)[-1]
-        name = p.rsplit("/", 1)[-1]
-        if name in ("lib.rs", "main.rs") or name == f"{crate_name}.rs":
-            roots[crate_name] = src_dir
-    return roots
-
-
-def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
-    """Repo-wide Rust crate name → every matching crate-root directory.
-
-    Collision-aware sibling of ``_rust_crate_roots_index``: applies the
-    identical convention-based detection, but retains *every*
-    directory that matches a given crate name instead of letting the
-    last one encountered silently overwrite the rest. Built once per
+    Collision-aware: retains *every* directory that matches a given
+    crate name rather than letting one silently win. Built once per
     ``resolve_heritage()`` call and threaded through
     ``_pick_candidate``/``_import_match`` as that path's ``crate_roots``
-    -- ``resolve_imports()``'s ``use``-resolution path
-    (``_resolve_import_rust``) keeps using the single-root
-    ``_rust_crate_roots_index`` unchanged, since it needs exactly one
-    directory to resolve a bare crate-name import against and isn't
-    the path round 23's zed finding was about.
+    (round 23), and, as of round 25, also built once per
+    ``resolve_imports()`` call and threaded through
+    ``_ImportResolveContext.crate_roots`` for ``_resolve_import_rust``'s
+    bare-crate-name lookup -- both call sites now share this single
+    collision-aware index rather than ``resolve_imports()`` using an
+    earlier single-winner variant.
 
     Round 23 (``.features/plans/round23/
     09-subtypes-ambiguous-resolution-rate.md`` Fix B): zed's
     ``crates/gpui`` (the real crate) and
     ``tooling/lints/test_fixture/gpui`` (a same-named synthetic test
-    fixture) both convention-match crate name ``"gpui"`` --
-    ``_rust_crate_roots_index``'s single-winner behavior meant this
+    fixture) both convention-match crate name ``"gpui"`` -- a
+    since-removed single-winner predecessor of this index meant that
     collision was a genuine, measured 50/50 coin flip per process hash
     seed (see ``_rust_crate_hint_matches``'s docstring and this design
     doc's "Implemented" note for the live zed measurement): winning
@@ -3498,6 +3510,18 @@ def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
     (``_prefer_non_synthetic_crate_match``) to recover a resolution
     when exactly one matched root's path doesn't look like a
     test-fixture/vendor stand-in -- see that function's docstring.
+
+    Round 25 (``.features/plans/round25/
+    02-deps-crate-decoy-tiebreak.md``) threads this same index and an
+    analogous directory-level tiebreak
+    (``_prefer_non_synthetic_crate_root``) through
+    ``_resolve_import_rust`` too, closing the identical gap in
+    ``dekko deps``'s module-dependency-graph resolution that round 24
+    closed for heritage resolution -- the single-winner predecessor
+    this function replaced there is gone; every reader of
+    ``crate_roots`` throughout this module (heritage and import
+    resolution both) now sees the same collision-aware
+    ``dict[str, list[str]]`` shape.
 
     Args:
         paths: Every known file path.
@@ -3536,11 +3560,22 @@ def _resolve_import_rust(
     importer's own module position (``_rust_self_base``, walked up
     once per ``super``). A bare crate name recognized as another
     workspace member (looked up in ``ctx.crate_roots``, see
-    ``_rust_crate_roots_index``) resolves against *that* crate's own
-    root the same way ``crate::`` does -- a Cargo workspace's sibling
-    crates are referenced by bare crate name too, not just genuine
-    third-party dependencies (round 22 zed.md §3.1). Any other bare
-    crate name is external by construction.
+    ``_rust_crate_roots_index_all``) resolves against *that* crate's
+    own root the same way ``crate::`` does -- a Cargo workspace's
+    sibling crates are referenced by bare crate name too, not just
+    genuine third-party dependencies (round 22 zed.md §3.1). Any other
+    bare crate name is external by construction.
+
+    ``ctx.crate_roots`` is collision-aware (``dict[str, list[str]]``):
+    a crate name matching exactly one directory resolves against it
+    directly; a crate name matching two or more (a real crate plus a
+    same-named test-fixture/vendor stand-in, e.g. zed's ``gpui``) falls
+    back to ``_prefer_non_synthetic_crate_root`` -- round 25's
+    directory-level sibling of round 24's heritage-resolution tiebreak
+    (``_prefer_non_synthetic_crate_match``) -- rather than guessing;
+    a genuine, still-ambiguous collision (or no synthetic-marker signal
+    to break the tie) resolves to ``None`` here and is correctly
+    reported external below, not misattributed.
 
     Like Python, the trailing segment is ambiguous between "a
     submodule" and "an item defined in the parent module" — resolved
@@ -3565,7 +3600,13 @@ def _resolve_import_rust(
             i += 1
         rest = segs[i:]
     else:
-        base = ctx.crate_roots.get(segs[0])
+        crate_dirs = ctx.crate_roots.get(segs[0])
+        if not crate_dirs:
+            base = None
+        elif len(crate_dirs) == 1:
+            base = crate_dirs[0]
+        else:
+            base = _prefer_non_synthetic_crate_root(crate_dirs, importer_path)
         rest = segs[1:]
         at_crate_root = True
 
@@ -3860,7 +3901,7 @@ def resolve_imports(files: list[FileMap]) -> ModuleGraph:
         py_package_roots=_py_package_roots(paths),
         java_suffix_index=_java_suffix_index(paths),
         cpp_basename_index=_cpp_basename_index(paths),
-        crate_roots=_rust_crate_roots_index(paths),
+        crate_roots=_rust_crate_roots_index_all(paths),
     )
 
     edge_names: dict[tuple[str, str], set[str]] = {}

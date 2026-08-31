@@ -472,6 +472,86 @@ def test_rust_cross_crate_unknown_bare_name_stays_external() -> None:
     )
 
 
+def test_rust_crate_decoy_tiebreak_resolves_real_crate_over_fixture() -> None:
+    # Round 25 (``.features/plans/round25/
+    # 02-deps-crate-decoy-tiebreak.md``): the zed.md finding this round
+    # fixes -- a real crate (``crates/gpui``) and an unrelated
+    # same-named test-fixture stand-in
+    # (``tooling/lints/test_fixture/gpui``) both convention-match
+    # crate name "gpui", exactly the shape round 24's heritage
+    # crate-decoy tiebreak
+    # (test_rust_crate_decoy_tiebreak_resolves_real_crate_over_fixture
+    # in test_resolver_heritage.py) already fixed for heritage
+    # resolution but ``resolve_imports``'s own bare-crate-name lookup
+    # never got the equivalent fix. A ``use gpui::...`` import from a
+    # file outside either crate's own tree must resolve to the real
+    # crate, not the decoy, and the decoy's own internal
+    # self-reference (legitimate: a crate's own external name is in
+    # scope from inside itself) must resolve to *its own* root, not
+    # the real crate's.
+    files = [
+        _fm("crates/gpui/src/lib.rs", "rust", []),
+        _fm("tooling/lints/test_fixture/gpui/src/lib.rs", "rust", []),
+        _fm(
+            "tooling/lints/test_fixture/gpui/src/internal.rs",
+            "rust",
+            [
+                _imp(
+                    "tooling/lints/test_fixture/gpui/src/internal.rs",
+                    "Render",
+                    "gpui::Render",
+                )
+            ],
+        ),
+        _fm(
+            "crates/editor/src/editor.rs",
+            "rust",
+            [
+                _imp(
+                    "crates/editor/src/editor.rs",
+                    "Render",
+                    "gpui::Render",
+                )
+            ],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["crates/editor/src/editor.rs"] == [
+        "crates/gpui/src/lib.rs"
+    ]
+    assert graph.deps_out[
+        "tooling/lints/test_fixture/gpui/src/internal.rs"
+    ] == ["tooling/lints/test_fixture/gpui/src/lib.rs"]
+
+
+def test_rust_crate_hint_import_genuine_collision_stays_external() -> None:
+    # Import-resolution companion to test_rust_crate_hint_matches_
+    # genuine_collision_stays_ambiguous in test_resolver_heritage.py:
+    # a genuine 2-way crate-name collision where *neither* candidate's
+    # path looks synthetic (both are plausible real crates, no
+    # test_fixture/vendor-shaped ancestor on either side) must stay
+    # unresolved -- reported external, not guessed -- matching this
+    # module's "skip rather than guess" discipline.
+    files = [
+        _fm("crates/gpui/src/lib.rs", "rust", []),
+        _fm("workspace2/gpui/src/lib.rs", "rust", []),
+        _fm(
+            "crates/panel/src/panel.rs",
+            "rust",
+            [
+                _imp(
+                    "crates/panel/src/panel.rs",
+                    "Render",
+                    "gpui::Render",
+                )
+            ],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
+    assert "gpui::Render" in graph.external["crates/panel/src/panel.rs"]
+
+
 # ---------------------------------------------------------------------
 # Java
 
