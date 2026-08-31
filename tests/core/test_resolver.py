@@ -1388,6 +1388,86 @@ def test_receiver_qualified_js_has_not_guessed_into_repo_symbol() -> None:
     assert "seen.has" in externals
 
 
+def test_receiver_qualified_js_on_not_guessed_into_repo_symbol() -> None:
+    # Round 25 cline.md Finding 2: a debug-harness ``CdpClient.on``
+    # (fan-in 95 reported, resolver "fully confident", ``dekko
+    # ambiguous`` reporting nothing wrong) silently absorbed an
+    # unrelated plain Node.js stream ``EventEmitter.on("data",
+    # handler)`` call elsewhere in the repo, mirroring the exact
+    # ``has``/``now`` false-positive shape above for the
+    # ``on``/``once``/``off``/``emit`` event-emitter idiom family.
+    on_fn = _fn("cdp-client.ts", "on", "CdpClient.on")
+    caller = _fn("mcp-hub.ts", "connectToServer")
+    files = [
+        FileMap("cdp-client.ts", "typescript", symbols=[on_fn]),
+        FileMap(
+            "mcp-hub.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="mcp-hub.ts",
+                    text="stderrStream.on",
+                    name="on",
+                    receiver="stderrStream",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, on_fn.id) not in edges
+    assert graph.calls_in.get(on_fn.id, []) == []
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "stderrStream.on" in externals
+
+
+def test_receiver_qualified_js_once_off_emit_not_guessed() -> None:
+    # Sibling names added alongside ``on`` for the same event-emitter
+    # idiom family (``once``/``off``/``emit``) -- each must be denied
+    # the single-candidate fast path the same way, one call site per
+    # name against a same-named repo-defined candidate.
+    for method_name in ("once", "off", "emit"):
+        method_fn = _fn(
+            f"{method_name}-owner.ts",
+            method_name,
+            f"Owner.{method_name}",
+        )
+        caller = _fn(f"{method_name}-caller.ts", "run")
+        files = [
+            FileMap(
+                f"{method_name}-owner.ts",
+                "typescript",
+                symbols=[method_fn],
+            ),
+            FileMap(
+                f"{method_name}-caller.ts",
+                "typescript",
+                symbols=[caller],
+                calls=[
+                    RawCall(
+                        caller_id=caller.id,
+                        path=f"{method_name}-caller.ts",
+                        text=f"emitter.{method_name}",
+                        name=method_name,
+                        receiver="emitter",
+                        line=2,
+                    )
+                ],
+            ),
+        ]
+        graph = resolve(files)
+        edges = {(e.caller, e.callee) for e in graph.edges}
+        assert (caller.id, method_fn.id) not in edges
+        assert graph.calls_in.get(method_fn.id, []) == []
+        assert graph.ambiguous == []
+        externals = {ext.callee for ext in graph.external}
+        assert f"emitter.{method_name}" in externals
+
+
 def test_receiver_qualified_java_assertj_istrue_not_guessed() -> None:
     # Round 23 spring-boot.md §2.1: a single real
     # ``ResolvedDockerHost.isTrue`` caller had its fan-in inflated to

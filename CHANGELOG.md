@@ -9,6 +9,20 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.39] — 2026-08-31
+
+### Fixed
+- **JS/TS EventEmitter/EventTarget misattribution (round-25 plan 03,
+  fix 1)** — added `on`, `once`, `off`, `emit`, `addListener`,
+  `removeListener`, `addEventListener`, `removeEventListener`, and
+  `dispatchEvent` to the resolver's builtin-method-name set, closing
+  a false-positive call-resolution misattribution
+  (`CdpClient.on`/`stderrStream.on(...)`) reproduced from cline. See
+  `.features/plans/round25/03-single-candidate-misattribution-resolver.md`
+  and `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+  (Fix 2, structural layer-2 arity resolution, is deferred pending a
+  separate design.)
+
 ## [0.43.38] — 2026-08-31
 
 ### Fixed

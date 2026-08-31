@@ -1922,7 +1922,17 @@ _AMBIENT_GLOBAL_NAMES = frozenset(
 # the repo (404 misattributed sites), and ``Map.prototype.has``/
 # ``Set.prototype.has``/``Reflect.has`` calls through untyped
 # receivers inflated an unrelated repo-defined ``has`` to 436
-# misattributed sites vs. 0 credible.
+# misattributed sites vs. 0 credible. ``on``/``once``/``off``/
+# ``emit``/``addListener``/``removeListener`` added round 25
+# (cline.md Finding 2): a debug-harness ``CdpClient.on`` (fan-in 95
+# reported, resolver "fully confident") silently absorbed an unrelated
+# plain Node.js ``EventEmitter``/stream ``.on("data", handler)`` call
+# elsewhere in the repo -- the same false-positive shape as ``has``/
+# ``now`` above, just for Node's core ``EventEmitter`` idiom instead of
+# ``Map``/``Date``. ``addEventListener``/``removeEventListener``/
+# ``dispatchEvent`` added alongside for the browser/DOM
+# ``EventTarget`` interface, the same idiom family, common in VS Code
+# extension code (both cline and claude-code are).
 _BUILTIN_METHOD_NAMES = frozenset(
     {
         "trim", "trimStart", "trimEnd", "toString", "valueOf",
@@ -1932,6 +1942,8 @@ _BUILTIN_METHOD_NAMES = frozenset(
         "padStart", "padEnd", "repeat", "charAt", "substring",
         "replace", "replaceAll", "split", "flat", "hasOwnProperty",
         "get", "resolve", "create", "has", "now",
+        "on", "once", "off", "emit", "addListener", "removeListener",
+        "addEventListener", "removeEventListener", "dispatchEvent",
     }
 )  # fmt: skip
 
