@@ -9,6 +9,19 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.42] — 2026-08-31
+
+### Added
+- **Session-start hook hard ceiling on oversized maps (round-25 plan
+  05)** — `SESSION_MAP_HARD_CEILING` (20,000 tokens) added to
+  `session_start`: above the ceiling, the hook now emits a
+  disclosure-only note instead of a truncated map body; between the
+  ceiling and the existing round-13 `SESSION_MAP_BUDGET`, prior
+  behavior is unchanged. See
+  `.features/plans/round25/05-session-start-hook-token-cap.md` and
+  `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`. Closes
+  out round 25's plan backlog (01-06, all implemented).
+
 ## [0.43.41] — 2026-08-31
 
 ### Fixed

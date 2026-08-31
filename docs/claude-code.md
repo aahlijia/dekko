@@ -113,7 +113,15 @@ dekko hooks uninstall                      # remove all dekko hooks
 ```
 
 - **`session-start`** — a steering preamble plus a budget-capped `lean`
-  map, so the first turn already has a navigation map.
+  map, so the first turn already has a navigation map. The map targets
+  a 2,000-token budget but can render up to its path-only floor (the
+  narrowest possible per-file listing) when a repo needs more than
+  that just to list every file. On repos so large that even the floor
+  would cost more than ~20,000 tokens, the hook drops the map body
+  entirely and injects a disclosure note instead, pointing at `dekko
+  lean --budget N` or `dekko summary` for a map at a budget you choose
+  — a hard ceiling on what an automatic, zero-choice hook can cost,
+  independent of how big the repo is.
 - **`prompt-submit`** — for the new prompt, a short pointer to the most
   task-relevant files not already read, so the agent doesn't `grep` blind.
 - **`pre-read`** — a non-blocking advisory to `outline` a large file

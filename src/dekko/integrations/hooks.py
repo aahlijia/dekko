@@ -51,6 +51,17 @@ EXIT_OK = 0
 # SessionStart lean-map cap: tighter than a manual `dekko lean`, since it
 # is injected unprompted and must stay cheap.
 SESSION_MAP_BUDGET = 2000
+# Hard ceiling on SessionStart's own payload, independent of
+# `render_lean.effective_cap()`'s floor guarantee (which never returns
+# less than the path-only floor, however large that is). Round 25
+# spring-boot.md finding 1: on a 9,942-file repo, the floor itself was
+# ~113K tok -- ~56x SESSION_MAP_BUDGET -- and `session_start` rendered
+# it anyway (disclosed, per the round-13 note below, but still injected
+# unconditionally into every new session). When even the floor exceeds
+# this ceiling, `session_start` drops the map body entirely rather than
+# inject an unboundedly large payload automatically; a wider map is
+# still one `dekko lean --budget N` or `dekko summary` away.
+SESSION_MAP_HARD_CEILING = 20_000
 # Assumed session token budget the prompt-submit nudge adapts against. Not
 # a hard limit — it scales how many files we point at as context fills.
 SESSION_TOKEN_BUDGET = 180_000
@@ -121,24 +132,47 @@ def session_start(payload: dict) -> dict | None:
     note = ambiguous.high_rate_note(index)
     if note:
         parts.append(note)
-    if report.cap > SESSION_MAP_BUDGET:
-        # round-13 tensorflow.md: on a repo whose path-only floor alone
-        # exceeds SESSION_MAP_BUDGET (a large monorepo can need
-        # ~80K tokens just to list every file), `effective_cap` bends
-        # the cap upward the same way `render_lean.run()`'s `--budget`
-        # floor already does for the `lean` CLI command -- but this
-        # hook called `generate()` directly and never surfaced that,
-        # so the injected map silently cost up to ~40x its documented
-        # budget with no visible signal anywhere. Mirror the CLI
-        # wrapper's disclosure so an agent (and anyone reading the
-        # transcript) can see why the map below is larger than
-        # SESSION_MAP_BUDGET.
+    if report.cap > SESSION_MAP_HARD_CEILING:
+        # round-25 spring-boot.md finding 1: on a repo whose path-only
+        # floor exceeds even this hard ceiling (spring-boot: ~113K tok,
+        # ~56x SESSION_MAP_BUDGET), rendering the floor anyway -- the
+        # round-13 behavior below -- means a hook that fires
+        # automatically, with zero user choice, on every new session
+        # costs more than the whole session's context is worth
+        # protecting. There is currently no rung between the full
+        # path-only floor and "nothing" for `render_lean` to fall back
+        # to (see the design doc), so this drops the map body entirely
+        # rather than inject an unboundedly large payload.
         parts.append(
-            f"note: this repo's path-only floor (~{report.cap} tok) "
-            f"exceeds dekko's {SESSION_MAP_BUDGET}-token session-start "
-            "budget; the map below uses the floor instead."
+            f"note: this repo's path-only floor (~{report.cap} tok) is "
+            f"far larger than dekko's {SESSION_MAP_BUDGET}-token "
+            "session-start budget -- even the narrowest available map "
+            "rendering would cost more than this hook should inject "
+            "automatically. Run `dekko lean --budget N` or `dekko "
+            "summary` directly for a repo map at a budget you choose."
         )
-    parts.append("\n".join(lines))
+    else:
+        if report.cap > SESSION_MAP_BUDGET:
+            # round-13 tensorflow.md: on a repo whose path-only floor
+            # alone exceeds SESSION_MAP_BUDGET (a large monorepo can
+            # need ~80K tokens just to list every file), `effective_cap`
+            # bends the cap upward the same way `render_lean.run()`'s
+            # `--budget` floor already does for the `lean` CLI command
+            # -- but this hook called `generate()` directly and never
+            # surfaced that, so the injected map silently cost up to
+            # ~40x its documented budget with no visible signal
+            # anywhere. Mirror the CLI wrapper's disclosure so an agent
+            # (and anyone reading the transcript) can see why the map
+            # below is larger than SESSION_MAP_BUDGET. Only applies
+            # below SESSION_MAP_HARD_CEILING -- above it, the branch
+            # above takes over and no map body is rendered at all.
+            parts.append(
+                f"note: this repo's path-only floor (~{report.cap} tok) "
+                f"exceeds dekko's {SESSION_MAP_BUDGET}-token "
+                "session-start budget; the map below uses the floor "
+                "instead."
+            )
+        parts.append("\n".join(lines))
     text = "\n\n".join(parts)
     return _additional_context("SessionStart", text)
 

@@ -77,6 +77,9 @@ def test_session_start_discloses_when_floor_exceeds_budget(
     assert "path-only floor" in ctx
     assert "exceeds dekko's 1-token session-start budget" in ctx
     assert "src/" in ctx and "auth.py" in ctx  # the lean map still renders
+    # under the (default, much larger) hard ceiling -- only the round-13
+    # soft-overage note fires, not the hard-ceiling disclosure-only note.
+    assert "far larger than dekko's" not in ctx
 
 
 def test_session_start_ample_budget_has_no_floor_note(
@@ -87,6 +90,48 @@ def test_session_start_ample_budget_has_no_floor_note(
     assert out is not None
     ctx = out["hookSpecificOutput"]["additionalContext"]
     assert "path-only floor" not in ctx
+
+
+def test_session_start_hard_ceiling_omits_map_body(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # round-25 spring-boot.md finding 1: on a repo whose path-only floor
+    # exceeds even SESSION_MAP_HARD_CEILING (spring-boot: ~113K tok,
+    # ~56x SESSION_MAP_BUDGET), rendering the floor anyway means a hook
+    # that fires automatically, with zero user choice, on every new
+    # session can cost more than the whole session's context is worth.
+    # Shrinking the constant below any repo's real floor is the same
+    # technique the round-13 test above uses for the softer case.
+    monkeypatch.setattr(hooks, "SESSION_MAP_HARD_CEILING", 1)
+    root = make_mapped_repo(_FILES)
+    out = hooks.session_start({"cwd": str(root)})
+    assert out is not None
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "far larger than dekko's 2000-token session-start budget" in ctx
+    assert "even the narrowest available map" in ctx
+    assert "dekko lean --budget N" in ctx
+    # no map body at all -- the whole point of the disclosure-only path.
+    assert "src/" not in ctx and "auth.py" not in ctx
+    # and the softer round-13 note must not also fire alongside it.
+    assert "uses the floor instead" not in ctx
+
+
+def test_session_start_hard_ceiling_note_precedes_ambiguous_note(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Mirrors test_session_start_ambiguous_note_precedes_floor_note: the
+    # ambiguous-rate caveat must still appear before the hard-ceiling
+    # disclosure, matching the documented ordering
+    # (`parts = [_PREAMBLE]`, then the ambiguous note, then the
+    # floor/ceiling note).
+    monkeypatch.setattr(hooks, "SESSION_MAP_HARD_CEILING", 1)
+    root = make_mapped_repo(_HIGH_AMBIGUOUS_FILES)
+    out = hooks.session_start({"cwd": str(root)})
+    assert out is not None
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    ambiguous_pos = ctx.index("note: this repo's call resolution is")
+    ceiling_pos = ctx.index("far larger than dekko's")
+    assert ambiguous_pos < ceiling_pos
 
 
 # A single unresolved bare-name collision with no other resolved calls
