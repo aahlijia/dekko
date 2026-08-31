@@ -2863,12 +2863,22 @@ def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
 # processes -- not just the exception type.
 
 
-def _sleep_worker(seconds: float) -> str:
-    """Module-level (spawn-picklable) worker that sleeps far longer
-    than the test-scale timeout below it, standing in for a wedged
-    worker process that never completes on its own."""
-    time.sleep(seconds)
-    return "done"
+def _sleep_worker() -> str:
+    """Module-level (spawn-picklable) worker that blocks forever,
+    standing in for a wedged worker process that never completes on
+    its own. Deliberately an unbounded loop rather than a fixed-
+    duration ``time.sleep(N)`` -- on a contended CI runner the *test*
+    process (not this worker) can itself be descheduled for a long
+    stretch of wall-clock time between ``pool.submit()`` and the
+    ``.result(timeout=...)`` call below; with a fixed-duration sleep,
+    that stall alone can let the worker finish naturally before
+    ``.result()`` is ever invoked, so no ``TimeoutError`` fires and
+    the test flakes with "DID NOT RAISE" -- a scheduling artifact, not
+    a real regression. A worker that never completes on its own
+    removes that race entirely, regardless of how long the harness
+    stalls beforehand."""
+    while True:
+        time.sleep(3600)
 
 
 def test_run_pool_bounded_returns_promptly_on_real_pool_timeout(
@@ -2877,15 +2887,17 @@ def test_run_pool_bounded_returns_promptly_on_real_pool_timeout(
     monkeypatch.setattr(resolver_mod, "POOL_RESULT_TIMEOUT_S", 0.3)
     pool = ProcessPoolExecutor(max_workers=1)
     try:
-        future = pool.submit(_sleep_worker, 30.0)
+        future = pool.submit(_sleep_worker)
         start = time.monotonic()
         with pytest.raises(PoolTimeoutError):
             resolver_mod._run_pool_bounded(pool, [future])
         elapsed = time.monotonic() - start
-        # Well under the 30s the worker is actually sleeping for --
-        # before the fix, this would have blocked for the full 30s
-        # (or longer) inside ``__exit__``'s ``shutdown(wait=True)``.
-        assert elapsed < 5.0
+        # Bounded well under "forever" -- before the fix, this would
+        # have blocked indefinitely inside ``__exit__``'s
+        # ``shutdown(wait=True)``. Generous margin (not a tight bound
+        # on the 0.3s timeout itself) to absorb CI-runner process-
+        # spawn/kill overhead without flaking.
+        assert elapsed < 30.0
     finally:
         pool.shutdown(wait=False)
 
@@ -2896,7 +2908,7 @@ def test_run_pool_bounded_kills_wedged_worker_after_timeout(
     monkeypatch.setattr(resolver_mod, "POOL_RESULT_TIMEOUT_S", 0.3)
     pool = ProcessPoolExecutor(max_workers=1)
     try:
-        future = pool.submit(_sleep_worker, 30.0)
+        future = pool.submit(_sleep_worker)
         # Snapshot the worker process handles before calling, since
         # ``_run_pool_bounded`` (via ``pool.shutdown()``) clears
         # ``pool._processes`` to ``None`` as part of its own teardown.

@@ -2047,6 +2047,16 @@ def test_start_immediately_followed_by_status_never_false_negative(
             assert _wait_until(lambda: not transport.exists())
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "AF_UNIX-only failure mode -- default_transport_for() picks "
+        "TcpLoopbackTransport on Windows, whose preflight_check() is a "
+        "deliberate no-op (an OS-assigned ephemeral port has no "
+        "sun_path-style length limit to preflight), so a deep root "
+        "never fails here on this platform"
+    ),
+)
 def test_start_fails_fast_on_unbindable_socket_path(
     short_root: Path, capsys: pytest.CaptureFixture
 ) -> None:
