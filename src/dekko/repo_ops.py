@@ -601,7 +601,11 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
     if early_exit is not None:
         return early_exit
 
-    graph = resolve(files, workers=resolve_workers(getattr(args, "jobs", 1)))
+    graph = resolve(
+        files,
+        workers=resolve_workers(getattr(args, "jobs", 1)),
+        root=root,
+    )
     label = root.name + (f"/{args.subpath}" if args.subpath else "")
 
     md_path, json_path = resolve_outputs(root, args.output, args.json_output)

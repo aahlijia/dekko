@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko.core.walker import discover
+from dekko.core.walker import discover, find_config_files
 
 
 def _touch(path: Path, content: str = "x = 1\n") -> None:
@@ -345,3 +345,36 @@ def test_discover_minified_check_ignores_unreadable_file(
     # still maps — the point of this test is that discover() never
     # raises on it.
     assert files == ["weird.py"]
+
+
+# ---------------------------------------------------------------------
+# find_config_files (round 25 tsconfig/jsconfig path-alias resolution)
+
+
+def test_find_config_files_discovers_monorepo_configs_not_vendored(
+    tmp_path: Path,
+) -> None:
+    _touch(tmp_path / "tsconfig.json", "{}")
+    _touch(tmp_path / "packages" / "foo" / "tsconfig.json", "{}")
+    _touch(tmp_path / "packages" / "foo" / "jsconfig.json", "{}")
+    _touch(tmp_path / "node_modules" / "pkg" / "tsconfig.json", "{}")
+    # Non-canonical basenames aren't discovered in v1.
+    _touch(tmp_path / "tsconfig.build.json", "{}")
+
+    found = find_config_files(
+        tmp_path, frozenset({"tsconfig.json", "jsconfig.json"})
+    )
+    assert found == [
+        "packages/foo/jsconfig.json",
+        "packages/foo/tsconfig.json",
+        "tsconfig.json",
+    ]
+
+
+def test_find_config_files_no_matches_returns_empty(tmp_path: Path) -> None:
+    _touch(tmp_path / "src" / "app.py")
+
+    found = find_config_files(
+        tmp_path, frozenset({"tsconfig.json", "jsconfig.json"})
+    )
+    assert found == []

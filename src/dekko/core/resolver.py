@@ -97,6 +97,7 @@ receiver/arity, ``(g *IDGenerator) Generate(...)`` in ``pkg/markdown``
 tests for a change a same-package unit test directly covered.
 """
 
+import json
 import multiprocessing
 import posixpath
 import re
@@ -107,11 +108,11 @@ from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
 from dekko.classify import is_test_path
-from dekko.core import languages
+from dekko.core import languages, walker
 from dekko.core.model import (
     TYPE_KINDS,
     CallGraph,
@@ -482,7 +483,9 @@ def _init_resolve_worker(
     _worker_symbols_by_id = symbols_by_id
 
 
-def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
+def resolve(
+    files: list[FileMap], workers: int = 1, root: Path | None = None
+) -> CallGraph:
     """Resolve every raw call across the repo into a call graph.
 
     Args:
@@ -492,6 +495,12 @@ def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
             ``cli.py``'s ``run_map`` leaves this at 1, matching prior
             behavior exactly). See ``_resolve_all`` for how chunking
             and the parallelization threshold work.
+        root: Repository root, used only to discover and parse
+            ``tsconfig.json``/``jsconfig.json`` path-alias config for
+            JS/TS import resolution (see ``resolve_imports``). ``None``
+            (the default) skips that discovery entirely — every caller
+            that doesn't pass a real root sees byte-identical behavior
+            to before this parameter existed.
 
     Returns:
         The resolved ``CallGraph`` with bidirectional adjacency.
@@ -538,7 +547,7 @@ def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
         graph.heritage_external,
         graph.heritage_synthetic_tiebreak_count,
     ) = resolve_heritage(files)
-    graph.modules = resolve_imports(files)
+    graph.modules = resolve_imports(files, root=root)
     (
         graph.throws,
         graph.throws_out,
@@ -3288,6 +3297,16 @@ class _ImportResolveContext:
             ``_resolve_import_rust`` can apply the same synthetic-crate
             tiebreak round 24 already applies to heritage resolution
             instead of silently guessing.
+        ts_path_aliases: Each discovered ``tsconfig.json``/
+            ``jsconfig.json``'s own directory (its scope) → the
+            resolved ``_TsConfigAliasTable`` (``baseUrl``/``paths``,
+            with its own ``extends`` chain already merged in) that
+            governs JS/TS/TSX files under that directory. Empty when
+            ``resolve_imports`` was called with no ``root`` (see its
+            docstring) — every existing in-memory-``FileMap`` caller
+            keeps today's "bare specifier is always external" behavior
+            for ``_resolve_import_js`` exactly, since this dict never
+            gets populated without a real filesystem root to search.
     """
 
     paths: frozenset[str]
@@ -3295,6 +3314,9 @@ class _ImportResolveContext:
     java_suffix_index: dict[str, list[str]] = field(default_factory=dict)
     cpp_basename_index: dict[str, list[str]] = field(default_factory=dict)
     crate_roots: dict[str, list[str]] = field(default_factory=dict)
+    ts_path_aliases: dict[str, "_TsConfigAliasTable"] = field(
+        default_factory=dict
+    )
 
 
 def _dirname(path: str) -> str:
@@ -3462,33 +3484,488 @@ def _resolve_import_python(
 
 _JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
 
+# Only the canonical basenames are discovered for v1 -- a repo whose
+# real ``paths`` config lives only in a non-canonically-named variant
+# (``tsconfig.build.json``, TS "solution style" ``references``) keeps
+# today's external-by-default behavior for those aliases. See
+# ``.features/plans/round25/07-tsconfig-path-alias-resolution.md``
+# "Explicit non-goals".
+_TSCONFIG_BASENAMES = frozenset({"tsconfig.json", "jsconfig.json"})
 
-def _resolve_import_js(
-    imp: Import, importer_path: str, ctx: _ImportResolveContext
-) -> str | None:
-    """Resolve a JS/TS/TSX import source to a repo file.
+# Bounded recursion depth for an ``extends`` chain, paired with a
+# visited-set cycle guard (``_merge_tsconfig_scope``) -- a malformed
+# config chain must degrade to "no inherited paths", never hang or
+# blow the recursion limit.
+_TSCONFIG_EXTENDS_DEPTH_CAP = 5
 
-    ``Import.source`` is ``"{module_source}/{imported_name}"`` (see
-    ``extractor._imports_js``) — the module path is recovered by
-    dropping the last ``/``-segment, safe regardless of how many
-    slashes the real module path itself contains (the appended name is
-    always exactly the last segment). A side-effect import
-    (``imp.name == ""``, no local binding) stores ``source`` bare with
-    no appended name to strip, so the drop is skipped for that shape —
-    stripping unconditionally would truncate a real path segment (e.g.
-    ``"opentui-spinner/react"`` down to ``"opentui-spinner"``). Bare
-    specifiers (no leading ``.``/``..``) are external by construction —
-    an npm package name never collides with a relative path, so no
-    repo-root search is needed the way Python's absolute imports
-    require one.
+
+@dataclass(frozen=True)
+class _TsConfigAliasTable:
+    """One ``tsconfig.json``/``jsconfig.json`` scope's resolved
+    ``baseUrl``/``paths``, its own ``extends`` chain already merged in.
+
+    Attributes:
+        base_dir: ``compilerOptions.baseUrl``, resolved to a
+            repo-relative path. Alias targets in ``paths`` are joined
+            against this, mirroring ``_resolve_import_js``'s own
+            relative-import ``base_dir``-joining idiom rather than a
+            new path-joining convention.
+        paths: ``compilerOptions.paths``, as ``(pattern, targets)``
+            pairs in declaration order -- order matters, since a JS
+            import matches the *first* pattern that fits, not the most
+            specific one (this follows tsc's actual documented
+            first-declared-pattern-wins behavior, not
+            longest-prefix-wins).
     """
-    module_source = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
-    if not (module_source.startswith("./") or module_source.startswith("../")):
+
+    base_dir: str
+    paths: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Strip ``//`` and ``/* */`` comments from JSONC text.
+
+    String-boundary-aware: a scanner state tracks whether the cursor is
+    currently inside a ``"..."`` string literal (respecting ``\\"``
+    escapes), so a ``//`` or ``/*`` occurring *inside* a string value
+    (a URL, a path containing ``//``) is never mistaken for a comment
+    start -- the one failure mode a naive regex-based stripper would
+    get wrong on a real-world config. A block comment is replaced with
+    a single space (not deleted outright) so two tokens separated only
+    by ``/* ... */`` don't get accidentally joined; a line comment is
+    dropped along with its trailing newline-less remainder, leaving the
+    line break itself intact so line numbers in a ``json.loads`` error
+    (for a config that's still malformed after stripping) stay useful.
+
+    Trailing commas are a separate, later pass
+    (``_strip_trailing_commas``) -- kept apart so each pass has one
+    job, per this module's own single-responsibility convention.
+
+    Args:
+        text: Raw ``tsconfig.json``/``jsconfig.json`` file contents.
+
+    Returns:
+        ``text`` with every comment removed, ready for
+        ``_strip_trailing_commas`` and then ``json.loads``.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i = min(i + 2, n)
+            out.append(" ")
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """Drop a trailing comma right before a closing ``}``/``]``.
+
+    Runs after ``_strip_jsonc_comments``, so only whitespace (never a
+    comment) can separate the comma from its closer. Kept
+    string-boundary-aware for the same reason ``_strip_jsonc_comments``
+    is -- a naive ``re.sub(r",(\\s*[}\\]])", ...)`` would also fire on
+    a literal ``",}"``-shaped substring inside a JSON string *value*
+    (unlikely in a tsconfig path string, but not a risk worth taking
+    for a hand-rolled parser this module leans on for a "skip rather
+    than guess" discipline elsewhere).
+
+    Args:
+        text: JSONC text with comments already stripped.
+
+    Returns:
+        ``text`` with every trailing comma removed, safe to hand to
+        ``json.loads``.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _read_jsonc_config(root: Path, rel: str) -> dict | None:
+    """Read and parse one JSONC config file, or ``None`` on any
+    failure.
+
+    Never raises -- an unreadable file, a parse failure even after
+    comment/trailing-comma stripping, or a non-object top level all
+    cause this one config to be silently skipped (matching this
+    module's "skip rather than guess" discipline): one broken
+    ``tsconfig.json`` in a monorepo must not take down ``dekko map``.
+
+    Args:
+        root: Repository root.
+        rel: Repo-relative path to the config file.
+
+    Returns:
+        The parsed top-level object, or ``None``.
+    """
+    try:
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return None
-    base_dir = _dirname(importer_path)
+    try:
+        data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(text)))
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _normalize_ts_paths(
+    paths_raw: object,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """``compilerOptions.paths`` (a JSON object) → declaration-ordered
+    ``(pattern, targets)`` pairs, malformed entries dropped rather than
+    raising.
+    """
+    if not isinstance(paths_raw, dict):
+        return ()
+    out: list[tuple[str, tuple[str, ...]]] = []
+    for pattern, targets in paths_raw.items():
+        if not isinstance(pattern, str) or not isinstance(targets, list):
+            continue
+        cleaned = tuple(t for t in targets if isinstance(t, str))
+        if cleaned:
+            out.append((pattern, cleaned))
+    return tuple(out)
+
+
+def _resolve_ts_extends_target(
+    config_rel: str, extends_spec: str
+) -> str | None:
+    """Repo-relative path an ``extends`` entry names, or ``None``.
+
+    Only a repo-relative ``extends`` value (``"./..."``/``"../..."``)
+    is followed -- an ``extends`` target that would resolve through
+    ``node_modules`` package resolution (e.g. ``"@tsconfig/node18/
+    tsconfig.json"``) is a real, common convention this module doesn't
+    attempt to resolve (out of scope: no package resolution), and is
+    silently skipped, contributing nothing to the merge.
+
+    Args:
+        config_rel: Repo-relative path of the config declaring
+            ``extends``.
+        extends_spec: One raw ``extends`` string value.
+
+    Returns:
+        The resolved repo-relative config path (``.json`` appended when
+        missing, matching tsc's own extension-inference), or ``None``
+        when ``extends_spec`` isn't repo-relative.
+    """
+    if not (extends_spec.startswith("./") or extends_spec.startswith("../")):
+        return None
+    config_dir = _dirname(config_rel)
     joined = posixpath.normpath(
-        f"{base_dir}/{module_source}" if base_dir else module_source
+        f"{config_dir}/{extends_spec}" if config_dir else extends_spec
     )
+    if not joined.endswith(".json"):
+        joined = f"{joined}.json"
+    return joined
+
+
+_TsPathsOrNone = tuple[tuple[str, tuple[str, ...]], ...] | None
+
+
+def _inherited_tsconfig_scope(
+    root: Path, raw: dict, rel: str, depth: int, visited: frozenset[str]
+) -> tuple[str | None, _TsPathsOrNone]:
+    """Merge every ``extends`` target of one config, in array order.
+
+    Split out of ``_merge_tsconfig_scope`` to keep that function's own
+    branch count under this project's complexity cap -- a later
+    ``extends`` array entry overriding an earlier one's contribution
+    mirrors ``tsc``'s own last-wins merge order for multiple base
+    configs (TS 5+ array ``extends``).
+
+    Args:
+        root: Repository root.
+        raw: This config's already-parsed top-level object.
+        rel: Repo-relative path of the config declaring ``extends``.
+        depth: This config's own recursion depth (its targets recurse
+            at ``depth + 1``).
+        visited: Config paths already visited in this chain.
+
+    Returns:
+        ``(base_dir, paths)`` inherited from the ``extends`` chain,
+        either ``None`` when nothing in the chain declares one.
+    """
+    inherited_base_dir: str | None = None
+    inherited_paths: _TsPathsOrNone = None
+    extends = raw.get("extends")
+    extends_specs = (
+        extends
+        if isinstance(extends, list)
+        else [extends]
+        if isinstance(extends, str)
+        else []
+    )
+    for spec in extends_specs:
+        if not isinstance(spec, str):
+            continue
+        target = _resolve_ts_extends_target(rel, spec)
+        if target is None:
+            continue
+        parent_base, parent_paths = _merge_tsconfig_scope(
+            root, target, depth + 1, visited
+        )
+        if parent_base is not None:
+            inherited_base_dir = parent_base
+        if parent_paths is not None:
+            inherited_paths = parent_paths
+    return inherited_base_dir, inherited_paths
+
+
+def _own_tsconfig_scope(
+    raw: dict, config_dir: str
+) -> tuple[str | None, _TsPathsOrNone]:
+    """This config's *own* (non-inherited) ``baseUrl``/``paths``.
+
+    Args:
+        raw: This config's already-parsed top-level object.
+        config_dir: This config's own repo-relative directory, for
+            resolving a relative ``baseUrl`` against.
+
+    Returns:
+        ``(base_dir, paths)`` — ``base_dir`` is ``None`` when this
+        config declares no ``baseUrl`` of its own; ``paths`` is
+        ``None`` when this config's ``compilerOptions`` has no
+        ``paths`` key at all (as opposed to an empty ``paths: {}``,
+        which is a real declaration that must still replace an
+        inherited table — see ``_merge_tsconfig_scope``).
+    """
+    compiler_options = raw.get("compilerOptions")
+    if not isinstance(compiler_options, dict):
+        return None, None
+    base_dir = None
+    base_url_raw = compiler_options.get("baseUrl")
+    if isinstance(base_url_raw, str):
+        joined = posixpath.normpath(
+            f"{config_dir}/{base_url_raw}" if config_dir else base_url_raw
+        )
+        base_dir = "" if joined == "." else joined
+    paths = (
+        _normalize_ts_paths(compiler_options.get("paths"))
+        if "paths" in compiler_options
+        else None
+    )
+    return base_dir, paths
+
+
+def _merge_tsconfig_scope(
+    root: Path, rel: str, depth: int, visited: frozenset[str]
+) -> tuple[str | None, _TsPathsOrNone]:
+    """Resolve one config's own ``baseUrl``/``paths``, with its
+    ``extends`` chain (if any) merged in first.
+
+    Recurses into each ``extends`` target before reading this config's
+    own ``compilerOptions``, per real tsc merge semantics: ``paths``
+    inherits whole-key-replaces (a config that declares
+    ``compilerOptions.paths`` at all replaces the parent's ``paths``
+    entirely, never merged per-alias) and ``baseUrl`` inherits only
+    when this config doesn't declare its own. A depth cap plus a
+    visited-set cycle guard means a malformed chain (an ``extends``
+    cycle, a chain deeper than realistic) degrades to "no inherited
+    paths" rather than recursing forever.
+
+    Args:
+        root: Repository root.
+        rel: Repo-relative path of the config to resolve.
+        depth: Current recursion depth (0 at the entry point).
+        visited: Config paths already visited in this chain, for the
+            cycle guard.
+
+    Returns:
+        ``(base_dir, paths)`` -- either may be ``None`` when neither
+        this config nor its ``extends`` chain declares one.
+        ``base_dir`` is *not* defaulted here (see
+        ``_load_tsconfig_alias_tables`` for the "." default, applied
+        once at the scope's own leaf level).
+    """
+    if rel in visited or depth > _TSCONFIG_EXTENDS_DEPTH_CAP:
+        return None, None
+    raw = _read_jsonc_config(root, rel)
+    if raw is None:
+        return None, None
+    visited = visited | {rel}
+
+    inherited_base_dir, inherited_paths = _inherited_tsconfig_scope(
+        root, raw, rel, depth, visited
+    )
+    own_base_dir, own_paths = _own_tsconfig_scope(raw, _dirname(rel))
+
+    base_dir = own_base_dir if own_base_dir is not None else inherited_base_dir
+    paths = own_paths if own_paths is not None else inherited_paths
+    return base_dir, paths
+
+
+def _load_tsconfig_alias_tables(root: Path) -> dict[str, _TsConfigAliasTable]:
+    """Discover and parse every ``tsconfig.json``/``jsconfig.json`` in
+    the repo into a per-directory alias table, each config's own
+    ``extends`` chain already merged in.
+
+    Discovery reuses ``walker.find_config_files`` (the same
+    exclude-aware enumeration ``discover()`` uses for source files), so
+    a ``node_modules/some-pkg/tsconfig.json`` decoy is excluded the
+    same way any other vendored file already is. A config that
+    resolves to no ``paths`` anywhere in its own ``extends`` chain
+    contributes nothing (no entry in the returned dict) -- there is
+    nothing for ``_nearest_ts_config_scope`` to usefully find there.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Each discovered config's own directory (``""`` for a
+        repo-root ``tsconfig.json``) → its resolved
+        ``_TsConfigAliasTable``.
+    """
+    tables: dict[str, _TsConfigAliasTable] = {}
+    for rel in walker.find_config_files(root, _TSCONFIG_BASENAMES):
+        base_dir, paths = _merge_tsconfig_scope(root, rel, 0, frozenset())
+        if not paths:
+            continue
+        config_dir = _dirname(rel)
+        if base_dir is None:
+            base_dir = config_dir
+        tables[config_dir] = _TsConfigAliasTable(
+            base_dir=base_dir, paths=paths
+        )
+    return tables
+
+
+def _nearest_ts_config_scope(
+    importer_path: str, ts_path_aliases: dict[str, _TsConfigAliasTable]
+) -> _TsConfigAliasTable | None:
+    """Deepest ``ts_path_aliases`` scope governing ``importer_path``.
+
+    Walks from the importer's own directory upward (the same
+    repeated-ancestor-directory-walk shape ``_rust_crate_root`` already
+    uses for its own nearest-scope lookup, applied here to
+    ``ts_path_aliases``'s directory keys instead of crate-root
+    markers), so a monorepo's per-package ``tsconfig.json`` takes
+    priority over a root-level one for files under that package --
+    matching real ``tsc`` resolution order.
+
+    Args:
+        importer_path: Repo-relative path of the importing file.
+        ts_path_aliases: Every discovered scope, keyed by its own
+            directory.
+
+    Returns:
+        The nearest governing ``_TsConfigAliasTable``, or ``None`` when
+        no config governs this file at all.
+    """
+    if not ts_path_aliases:
+        return None
+    d = _dirname(importer_path)
+    while True:
+        table = ts_path_aliases.get(d)
+        if table is not None:
+            return table
+        if not d:
+            return None
+        d = _dirname(d)
+
+
+def _match_ts_path_pattern(module_source: str, pattern: str) -> str | None:
+    """Match ``module_source`` against one ``paths`` key.
+
+    Args:
+        module_source: The bare import specifier being resolved.
+        pattern: One ``compilerOptions.paths`` key -- either a literal
+            string, or a string with at most one ``*`` wildcard (per
+            the TS spec).
+
+    Returns:
+        The wildcard capture (the substring matched by ``*``) for a
+        wildcard pattern, ``""`` for a non-wildcard exact match, or
+        ``None`` when ``pattern`` doesn't apply to ``module_source``.
+    """
+    if "*" not in pattern:
+        return "" if module_source == pattern else None
+    prefix, _, suffix = pattern.partition("*")
+    if not (
+        module_source.startswith(prefix) and module_source.endswith(suffix)
+    ):
+        return None
+    if len(module_source) < len(prefix) + len(suffix):
+        return None
+    return module_source[len(prefix) : len(module_source) - len(suffix)]
+
+
+def _js_module_candidates(joined: str) -> list[str]:
+    """Extension/index-file candidate ladder for a resolved JS/TS
+    module path.
+
+    Shared by relative-import resolution (``_resolve_import_js``) and
+    tsconfig path-alias resolution (``_resolve_ts_path_alias``) so both
+    apply the exact same NodeNext/ESM specifier-extension-stripping
+    second pass, rather than a second, parallel candidate-generation
+    implementation.
+
+    Args:
+        joined: A resolved, ``posixpath.normpath``-clean module path
+            with no extension guaranteed yet.
+
+    Returns:
+        Candidate repo-relative paths, most-specific (as written)
+        first.
+    """
     candidates = [joined]
     candidates += [f"{joined}{ext}" for ext in _JS_EXTENSIONS]
     candidates += [f"{joined}/index{ext}" for ext in _JS_EXTENSIONS]
@@ -3503,7 +3980,93 @@ def _resolve_import_js(
     stem, specifier_ext = posixpath.splitext(joined)
     if specifier_ext in _JS_EXTENSIONS:
         candidates += [f"{stem}{ext}" for ext in _JS_EXTENSIONS]
-    return _first_match(ctx.paths, candidates)
+    return candidates
+
+
+def _resolve_ts_path_alias(
+    module_source: str, scope: _TsConfigAliasTable, paths: frozenset[str]
+) -> str | None:
+    """Resolve a bare specifier against one tsconfig scope's alias
+    table.
+
+    Tries each ``(pattern, targets)`` pair in the scope's own
+    declaration order (first-declared-pattern-that-matches wins, not
+    longest-prefix -- matches documented ``tsc`` behavior); within a
+    matching pattern, each target is tried in order (first real-file
+    match wins, mirroring ``_first_match``'s existing "try candidates
+    in order" convention used everywhere else in this module). Each
+    candidate target is joined against ``scope.base_dir`` and run
+    through the same extension/index-file ladder
+    (``_js_module_candidates``) relative-import resolution already
+    applies.
+
+    Args:
+        module_source: The bare import specifier being resolved.
+        scope: The governing tsconfig scope (see
+            ``_nearest_ts_config_scope``).
+        paths: Every file path known to the map.
+
+    Returns:
+        The resolved repo-relative path, or ``None`` when no pattern
+        matches, or a matching pattern's targets all miss.
+    """
+    for pattern, targets in scope.paths:
+        capture = _match_ts_path_pattern(module_source, pattern)
+        if capture is None:
+            continue
+        for target in targets:
+            resolved_target = (
+                target.replace("*", capture, 1) if "*" in target else target
+            )
+            joined = posixpath.normpath(
+                f"{scope.base_dir}/{resolved_target}"
+                if scope.base_dir
+                else resolved_target
+            )
+            match = _first_match(paths, _js_module_candidates(joined))
+            if match is not None:
+                return match
+    return None
+
+
+def _resolve_import_js(
+    imp: Import, importer_path: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a JS/TS/TSX import source to a repo file.
+
+    ``Import.source`` is ``"{module_source}/{imported_name}"`` (see
+    ``extractor._imports_js``) — the module path is recovered by
+    dropping the last ``/``-segment, safe regardless of how many
+    slashes the real module path itself contains (the appended name is
+    always exactly the last segment). A side-effect import
+    (``imp.name == ""``, no local binding) stores ``source`` bare with
+    no appended name to strip, so the drop is skipped for that shape —
+    stripping unconditionally would truncate a real path segment (e.g.
+    ``"opentui-spinner/react"`` down to ``"opentui-spinner"``).
+
+    Bare specifiers (no leading ``.``/``..``) are external by
+    construction *unless* a ``tsconfig.json``/``jsconfig.json``
+    ``compilerOptions.paths`` alias governing this importer's directory
+    resolves it to a real in-repo file (``ctx.ts_path_aliases``, empty
+    whenever ``resolve_imports`` was called with no filesystem ``root``
+    — see ``_ImportResolveContext``'s docstring) — an npm package name
+    never collides with a relative path or a configured alias pattern,
+    so an alias miss still falls through to "external", no repo-root
+    search beyond the alias table itself is needed.
+    """
+    module_source = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
+    if not (module_source.startswith("./") or module_source.startswith("../")):
+        scope = _nearest_ts_config_scope(importer_path, ctx.ts_path_aliases)
+        if scope is not None:
+            resolved = _resolve_ts_path_alias(module_source, scope, ctx.paths)
+            if resolved is not None:
+                return resolved
+        return None
+    base_dir = _dirname(importer_path)
+    joined = posixpath.normpath(
+        f"{base_dir}/{module_source}" if base_dir else module_source
+    )
+    return _first_match(ctx.paths, _js_module_candidates(joined))
 
 
 _RUST_INDEX_STEMS = ("mod", "lib", "main")
@@ -4033,7 +4596,9 @@ def _cpp_basename_index(paths: frozenset[str]) -> dict[str, list[str]]:
     return index
 
 
-def resolve_imports(files: list[FileMap]) -> ModuleGraph:
+def resolve_imports(
+    files: list[FileMap], root: Path | None = None
+) -> ModuleGraph:
     """Resolve every file's raw imports into a file-to-file dependency
     graph.
 
@@ -4060,6 +4625,16 @@ def resolve_imports(files: list[FileMap]) -> ModuleGraph:
 
     Args:
         files: Per-file extraction results.
+        root: Repository root, used only to discover and parse
+            ``tsconfig.json``/``jsconfig.json`` (see
+            ``_load_tsconfig_alias_tables``) so a JS/TS ``@/*``-style
+            path-alias import can resolve to a real in-repo file
+            instead of staying external by construction. ``None`` (the
+            default) skips that discovery entirely, matching this
+            function's own long-standing "pure function of
+            already-extracted ``FileMap``s" shape exactly for every
+            caller that doesn't opt in — including the entire
+            in-memory-``FileMap`` test suite.
 
     Returns:
         The resolved ``ModuleGraph``.
@@ -4071,6 +4646,9 @@ def resolve_imports(files: list[FileMap]) -> ModuleGraph:
         java_suffix_index=_java_suffix_index(paths),
         cpp_basename_index=_cpp_basename_index(paths),
         crate_roots=_rust_crate_roots_index_all(paths),
+        ts_path_aliases=(
+            _load_tsconfig_alias_tables(root) if root is not None else {}
+        ),
     )
 
     edge_names: dict[tuple[str, str], set[str]] = {}

@@ -9,6 +9,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.43] — 2026-08-31
+
+### Added
+- **TS/JS `tsconfig.json`/`jsconfig.json` path-alias resolution
+  (round-25 plan 07, finding #6)** — `resolve()`/`resolve_imports()`
+  gain an optional `root` param used to discover config files
+  (`walker.find_config_files`), parse them with a new dependency-free
+  JSONC-lite stripper, and build a scoped `paths`/`baseUrl` alias
+  table with `extends`-chain merging (cycle-guarded) and nearest-
+  scope monorepo precedence. `_resolve_import_js` now consults this
+  table for wildcard/exact alias matches before falling back to an
+  unresolved bare specifier. Verified against `test-repos/cline`:
+  alias-based import edges went from 0 to 2,024 resolved on
+  `apps/vscode/src`. Heritage's separate `_hint_match` alias gap is
+  left as noted future work. See
+  `.features/plans/round25/07-tsconfig-path-alias-resolution.md` and
+  `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+
 ## [0.43.42] — 2026-08-31
 
 ### Added
