@@ -109,10 +109,42 @@ class Pack:
 
 
 def _neighbors(index: MapIndex, sym_id: str) -> list[tuple[str, str]]:
-    """Adjacent symbol ids of one node, tagged with direction."""
+    """Adjacent symbol ids of one node, tagged with direction.
+
+    Used only to seed hop 1, where both directions from the target are
+    legitimately wanted (real callers *and* real callees of the target
+    itself). Hop >= 2 expansion must not use this — see
+    ``_neighbors_in_direction``.
+    """
     pairs = [(sid, "caller") for sid in index.calls_in.get(sym_id, [])]
     pairs += [(sid, "callee") for sid in index.calls_out.get(sym_id, [])]
     return pairs
+
+
+def _neighbors_in_direction(
+    index: MapIndex, sym_id: str, direction: str
+) -> list[str]:
+    """Ids one hop further from ``sym_id``, locked to ``direction``.
+
+    At hop >= 2, expanding *both* ``calls_in`` and ``calls_out`` from
+    every frontier node mislabels a node's own unrelated calls as
+    neighbors of the original target — e.g. a hop-1 caller's other,
+    unrelated callees would otherwise get tagged as hop-2 "callees" of
+    the target. Keeping expansion locked to the direction a node was
+    first reached in prevents that cross-direction contamination.
+
+    Args:
+        index: Loaded map index.
+        sym_id: Frontier node to expand.
+        direction: ``"caller"`` to keep walking ``calls_in``,
+            ``"callee"`` to keep walking ``calls_out``.
+
+    Returns:
+        Ids one hop further in ``direction`` from ``sym_id``.
+    """
+    if direction == "caller":
+        return index.calls_in.get(sym_id, [])
+    return index.calls_out.get(sym_id, [])
 
 
 def _anonymous_entries(
@@ -213,11 +245,27 @@ def build_pack(
     )
     pack.ambig_in, pack.ambig_out = ambiguous_counts(index, target)
     seen = {target.id}
-    frontier = [target.id]
+    # (sym_id, direction) — direction is a placeholder ("") on the
+    # target itself, since hop 1 legitimately wants both directions
+    # from it. Once a neighbor is reached, its direction locks in: at
+    # hop >= 2, expansion only continues down the same caller/callee
+    # chain it started on (see _neighbors_in_direction), instead of
+    # re-expanding both directions from every frontier node.
+    frontier: list[tuple[str, str]] = [(target.id, "")]
     for hop in range(1, hops + 1):
-        next_frontier: list[str] = []
-        for sym_id in frontier:
-            for nid, direction in _neighbors(index, sym_id):
+        next_frontier: list[tuple[str, str]] = []
+        for sym_id, direction in frontier:
+            neighbors = (
+                _neighbors(index, sym_id)
+                if hop == 1
+                else [
+                    (nid, direction)
+                    for nid in _neighbors_in_direction(
+                        index, sym_id, direction
+                    )
+                ]
+            )
+            for nid, ndir in neighbors:
                 if nid in seen:
                     continue
                 seen.add(nid)
@@ -232,8 +280,8 @@ def build_pack(
                 sym = index.symbols_by_id.get(nid)
                 if sym is None:
                     continue
-                pack.entries.append(PackEntry(sym, hop, direction))
-                next_frontier.append(nid)
+                pack.entries.append(PackEntry(sym, hop, ndir))
+                next_frontier.append((nid, ndir))
         frontier = next_frontier
     pack.module_callers = sorted(set(pack.module_callers))
     all_imports_list = pack.imports

@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.44] — 2026-08-31
+
+### Fixed
+- **`get_context_pack` false hop-2 callers/callees (round-26)** —
+  `build_pack`'s BFS in `contextpack.py` threaded bare symbol ids
+  through the frontier, so at hop ≥2 `_neighbors()` expanded both
+  `calls_in` and `calls_out` regardless of which direction a node
+  was reached in, pulling in a hop-1 caller's unrelated callees (or
+  a hop-1 callee's unrelated callers) as spurious hop-2 neighbors.
+  Found via round-25/26-style eval against `test-repos/zed`. Fixed
+  by threading `(sym_id, direction)` tuples through the frontier via
+  a new `_neighbors_in_direction()`, locking expansion to the
+  reached direction at hop ≥2. See
+  `.features/plans/round26/context-pack-false-callers.md`.
+
 ## [0.43.43] — 2026-08-31
 
 ### Added

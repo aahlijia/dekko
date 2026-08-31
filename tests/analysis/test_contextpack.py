@@ -50,6 +50,69 @@ def test_hops2_grows_pack(make_mapped_repo: RepoFactory) -> None:
     assert {e.hop for e in pack2.entries} == {1, 2}
 
 
+# Round 26: a hop-1 caller of the target also calls an unrelated
+# third function for its own reasons. Before the direction-lock fix,
+# _neighbors() expanded *both* calls_in and calls_out from every
+# frontier node at hop >= 2, so `side_effect` (a callee of `caller`,
+# with no relationship to `target`) leaked in mislabeled as a hop-2
+# "callee" of `target`.
+CALLER_SIDE_CONTAMINATION = {
+    "chain.py": (
+        "def target() -> int:\n"
+        "    return 1\n"
+        "\n"
+        "\n"
+        "def caller() -> int:\n"
+        "    side_effect()\n"
+        "    return target()\n"
+        "\n"
+        "\n"
+        "def side_effect() -> int:\n"
+        "    return 2\n"
+    )
+}
+
+# Symmetric case: a hop-1 callee of the target has an unrelated extra
+# caller. Before the fix, that extra caller leaked in mislabeled as a
+# hop-2 "caller" of `target`.
+CALLEE_SIDE_CONTAMINATION = {
+    "chain.py": (
+        "def target() -> int:\n"
+        "    return helper()\n"
+        "\n"
+        "\n"
+        "def helper() -> int:\n"
+        "    return 1\n"
+        "\n"
+        "\n"
+        "def other_caller() -> int:\n"
+        "    return helper()\n"
+    )
+}
+
+
+def test_hop2_excludes_hop1_callers_unrelated_callees(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CALLER_SIDE_CONTAMINATION)
+    index, target = _resolved(root, "target")
+    pack = contextpack.build_pack(index, target, hops=2)
+    names = {e.sym.qualname for e in pack.entries}
+    assert "caller" in names
+    assert "side_effect" not in names
+
+
+def test_hop2_excludes_hop1_callees_unrelated_callers(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CALLEE_SIDE_CONTAMINATION)
+    index, target = _resolved(root, "target")
+    pack = contextpack.build_pack(index, target, hops=2)
+    names = {e.sym.qualname for e in pack.entries}
+    assert "helper" in names
+    assert "other_caller" not in names
+
+
 ANON_CALLER = {
     "a.py": "def helper() -> int:\n    return 1\n",
     "b.py": "from a import helper\n\nhelper()\n",
