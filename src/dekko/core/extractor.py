@@ -806,16 +806,21 @@ def _params_python(params_node: Node) -> list[Param]:
                 Param(
                     name=_text(name_node),
                     type=_text(type_node) if type_node else None,
+                    has_default=kind == "typed_default_parameter",
                 )
             )
         elif kind == "default_parameter":
             name_node = child.child_by_field_name("name")
             if name_node is not None:
-                out.append(Param(name=_text(name_node)))
+                out.append(Param(name=_text(name_node), has_default=True))
         elif kind == "list_splat_pattern":
-            out.append(Param(name="*" + _text(child).lstrip("* ")))
+            out.append(
+                Param(name="*" + _text(child).lstrip("* "), variadic=True)
+            )
         elif kind == "dictionary_splat_pattern":
-            out.append(Param(name="**" + _text(child).lstrip("* ")))
+            out.append(
+                Param(name="**" + _text(child).lstrip("* "), variadic=True)
+            )
         elif kind in ("keyword_separator", "positional_separator"):
             out.append(Param(name=_text(child)))
     return out
@@ -837,15 +842,31 @@ def _params_rust(params_node: Node) -> list[Param]:
                 )
             )
         elif child.type == "variadic_parameter":
-            out.append(Param(name="..."))
+            out.append(Param(name="...", variadic=True))
     return out
 
 
 def _params_generic(params_node: Node) -> list[Param]:
-    """Best-effort parse: try name/type fields, else raw text."""
+    """Best-effort parse: try name/type fields, else raw text.
+
+    ``spread_parameter`` (Java's ``String... args`` varargs shape —
+    Java is the one Tier-1 language dispatched through this otherwise
+    Tier-2-only parser, via ``param_style="generic"``) has no
+    ``name``/``pattern`` field to key off, unlike every other shape
+    handled below, so it's matched by node type directly and marked
+    ``variadic=True``: without this, a Java varargs candidate's arity
+    range would be wrongly capped by ``resolver._param_arity`` instead
+    of left unbounded. Harmless for every genuinely Tier-2 grammar
+    that also reaches this parser — ``variadic`` is only ever
+    consulted when ``RawCall.arg_count`` is populated, which Tier-2
+    extraction never does (see ``extractor_generic.py``).
+    """
     out: list[Param] = []
     for child in params_node.named_children:
         if child.type == "comment":
+            continue
+        if child.type == "spread_parameter":
+            out.append(Param(name=_text(child), variadic=True))
             continue
         name_node = child.child_by_field_name(
             "name"
@@ -864,7 +885,16 @@ def _params_generic(params_node: Node) -> list[Param]:
 
 
 def _params_c(params_node: Node) -> list[Param]:
-    """Parse a C/C++ ``parameter_list`` node."""
+    """Parse a C/C++ ``parameter_list`` node.
+
+    C++'s ``optional_parameter_declaration`` (a parameter with a
+    ``= default`` value) is the language's only defaulted-parameter
+    shape; C has none. Confirmed against the pinned tree-sitter-cpp
+    grammar: it carries its own ``default_value`` field alongside the
+    ordinary ``type``/``declarator`` fields ``parameter_declaration``
+    already has, so no new query/field access is needed beyond the
+    node-type check already made here.
+    """
     out: list[Param] = []
     for child in params_node.named_children:
         if child.type not in (
@@ -872,19 +902,22 @@ def _params_c(params_node: Node) -> list[Param]:
             "optional_parameter_declaration",
         ):
             if child.type == "variadic_parameter":
-                out.append(Param(name="..."))
+                out.append(Param(name="...", variadic=True))
             continue
         type_node = child.child_by_field_name("type")
         declarator = child.child_by_field_name("declarator")
         base_type = _text(type_node) if type_node else None
+        has_default = child.type == "optional_parameter_declaration"
         if declarator is None:
-            out.append(Param(name="_", type=base_type))
+            out.append(
+                Param(name="_", type=base_type, has_default=has_default)
+            )
             continue
         decl_text = _text(declarator)
         stars = "*" * decl_text.count("*") + "&" * decl_text.count("&")
         name = _innermost_identifier(declarator) or decl_text
         full_type = f"{base_type} {stars}".strip() if base_type else None
-        out.append(Param(name=name, type=full_type))
+        out.append(Param(name=name, type=full_type, has_default=has_default))
     return out
 
 
@@ -907,16 +940,33 @@ def _params_js(params_node: Node) -> list[Param]:
             out.append(Param(name=_text(child)))
         elif child.type == "assignment_pattern":
             left = child.child_by_field_name("left")
-            out.append(Param(name=_text(left) if left else _text(child)))
+            out.append(
+                Param(
+                    name=_text(left) if left else _text(child),
+                    has_default=True,
+                )
+            )
         elif child.type == "rest_pattern":
-            out.append(Param(name="..." + _text(child).lstrip(". ")))
+            out.append(
+                Param(name="..." + _text(child).lstrip(". "), variadic=True)
+            )
         else:
             out.append(Param(name=_text(child)))
     return out
 
 
 def _params_ts(params_node: Node) -> list[Param]:
-    """Parse a TypeScript ``formal_parameters`` node."""
+    """Parse a TypeScript ``formal_parameters`` node.
+
+    Two arity-relevant shapes both surface as ``required_parameter``
+    (not a distinct node type) in the pinned tree-sitter-typescript
+    grammar, so both need their own field check rather than a
+    node-type check alone: a defaulted-but-unmarked parameter
+    (``b: number = 5``) carries a ``value`` field alongside its
+    ``pattern``/``type`` fields, and a rest parameter (``...rest:
+    T[]``) carries a ``rest_pattern`` node in its ``pattern`` field.
+    Confirmed live against the pinned grammar.
+    """
     out: list[Param] = []
     for child in params_node.named_children:
         if child.type not in ("required_parameter", "optional_parameter"):
@@ -930,7 +980,19 @@ def _params_ts(params_node: Node) -> list[Param]:
         param_type = None
         if type_node is not None:
             param_type = _text(type_node).lstrip(":").strip()
-        out.append(Param(name=name, type=param_type))
+        has_default = (
+            child.type == "optional_parameter"
+            or child.child_by_field_name("value") is not None
+        )
+        variadic = pattern is not None and pattern.type == "rest_pattern"
+        out.append(
+            Param(
+                name=name,
+                type=param_type,
+                has_default=has_default,
+                variadic=variadic,
+            )
+        )
     return out
 
 
@@ -945,14 +1007,15 @@ def _params_go(params_node: Node) -> list[Param]:
             continue
         type_node = child.child_by_field_name("type")
         param_type = _text(type_node) if type_node else None
-        if child.type == "variadic_parameter_declaration":
+        variadic = child.type == "variadic_parameter_declaration"
+        if variadic:
             param_type = f"...{param_type}" if param_type else "..."
         names = child.children_by_field_name("name")
         if not names:
-            out.append(Param(name="_", type=param_type))
+            out.append(Param(name="_", type=param_type, variadic=variadic))
             continue
         out.extend(
-            Param(name=_text(name_node), type=param_type)
+            Param(name=_text(name_node), type=param_type, variadic=variadic)
             for name_node in names
         )
     return out
@@ -993,6 +1056,10 @@ def _collect_calls(
         if not name:
             continue
         caller = _enclosing(spans, callee.start_byte)
+        args_node = _one(caps, "args")
+        arg_count = (
+            len(args_node.named_children) if args_node is not None else None
+        )
         calls.append(
             RawCall(
                 caller_id=caller.id if caller else None,
@@ -1001,6 +1068,7 @@ def _collect_calls(
                 name=name,
                 receiver=receiver,
                 line=callee.start_point[0] + 1,
+                arg_count=arg_count,
             )
         )
     return calls

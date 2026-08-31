@@ -196,7 +196,7 @@ PYTHON = LanguageSpec(
   name: (identifier) @classname) @classdef
 """,
     call_query="""
-(call function: (_) @callee) @call
+(call function: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (import_statement
@@ -296,7 +296,7 @@ RUST = LanguageSpec(
 (trait_item name: (type_identifier) @classname) @classdef
 """,
     call_query="""
-(call_expression function: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (use_declaration argument: (_) @use)
@@ -382,7 +382,7 @@ C = LanguageSpec(
     extensions=(".c", ".h"),
     definition_query=_C_DEFINITIONS,
     call_query="""
-(call_expression function: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (preproc_include path: (_) @module)
@@ -438,7 +438,7 @@ CPP = LanguageSpec(
   body: (field_declaration_list)) @classdef
 """,
     call_query="""
-(call_expression function: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (preproc_include path: (_) @module)
@@ -671,8 +671,8 @@ JAVASCRIPT = LanguageSpec(
       value: (_) @value) @vardef))
 """,
     call_query="""
-(call_expression function: (_) @callee) @call
-(new_expression constructor: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
+(new_expression constructor: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (import_statement
@@ -764,8 +764,8 @@ _TS_DEFINITIONS = """
 """
 
 _TS_CALLS = """
-(call_expression function: (_) @callee) @call
-(new_expression constructor: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
+(new_expression constructor: (_) @callee arguments: (_)? @args) @call
 """
 
 _TS_CONTAINERS = {
@@ -931,7 +931,7 @@ GO = LanguageSpec(
     type: (interface_type) @classkind)) @classdef
 """,
     call_query="""
-(call_expression function: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (import_spec
@@ -996,8 +996,8 @@ JAVA = LanguageSpec(
 (record_declaration name: (identifier) @classname) @classdef
 """,
     call_query="""
-(method_invocation) @callee @call
-(object_creation_expression) @callee @call
+(method_invocation arguments: (_)? @args) @callee @call
+(object_creation_expression arguments: (_)? @args) @callee @call
 """,
     import_query="""
 (import_declaration (scoped_identifier) @module)

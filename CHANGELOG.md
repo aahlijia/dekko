@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.40] — 2026-08-31
+
+### Added
+- **Arity-gated call resolution (round-25 plan 06, fix 2)** —
+  `Param` now records `has_default`/`variadic`; a new
+  `RawCall.arg_count`/`RawRef.arg_count` is captured across all 9
+  Tier-1 language `call_query`s (Java given its own two-pattern
+  edit); the resolver's single-candidate acceptance in
+  `_pick_candidate` now gates on arity plausibility, falling through
+  to ambiguous (with an empty candidate list, not the rejected one)
+  when a call's argument count doesn't fit any overload's parameter
+  shape. Tier-2/generic-grammar languages are out of scope. See
+  `.features/plans/round25/06-structural-layer2-arity-resolution.md`
+  and `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+
 ## [0.43.39] — 2026-08-31
 
 ### Fixed

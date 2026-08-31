@@ -123,6 +123,7 @@ from dekko.core.model import (
     Import,
     ModuleEdge,
     ModuleGraph,
+    Param,
     RawCall,
     RawHeritage,
     RawRef,
@@ -1670,6 +1671,149 @@ def _language_filtered(
     return [c for c in candidates if c.language in family]
 
 
+# Structural layer 2 (`.features/plans/round25/
+# 06-structural-layer2-arity-resolution.md`): the single-candidate
+# rung's "nothing else worked, but there's only one name in the whole
+# repo, guess it" fast path is itself only as trustworthy as its one
+# remaining piece of evidence -- the name. This adds a second,
+# structural check next to that name-based guess: does the call
+# site's own written argument count even fit the sole candidate's
+# declared parameters? A mismatch (spring-boot's `isTrue()` -- 0
+# written args -- against a repo-defined 1-required-arg `isTrue`)
+# means the "only same name in the repo" candidate can't actually be
+# the real target, regardless of how the name-based layer-1 denylist
+# (`_is_noise_call`, above) does or doesn't already cover that name.
+
+# The only two Tier-1 languages whose parser puts an implicit receiver
+# (Python `self`/`cls`, Rust `self_parameter`) inside a symbol's own
+# declared `params` list at all -- every other language either has no
+# receiver concept in its param list (Go's receiver is a separate
+# definition-query field, never part of `params`) or never implicitly
+# supplies one at the call site. A receiver-qualified call's written
+# argument count never includes the receiver itself (`obj.method(a)`
+# writes one argument, not two), so this leading param must be
+# stripped before comparing against `call.arg_count` -- see
+# `_candidate_arity`.
+_IMPLICIT_RECEIVER_LANGUAGES = frozenset({"python", "rust"})
+_PYTHON_RECEIVER_PARAM_NAMES = frozenset({"self", "cls"})
+
+# Python's bare `*`/`/` keyword-only/positional-only separators
+# (`def f(a, *, b): ...` / `def f(a, /, b): ...`) surface as ordinary
+# `Param` entries from `extractor._params_python` (kept for signature-
+# display fidelity), but name no actual parameter and must not count
+# toward a candidate's arity range -- excluded by name, since neither
+# is a syntactically valid Python parameter name a real parameter
+# could collide with.
+_ARITY_SYNTAX_MARKER_NAMES = frozenset({"*", "/"})
+
+
+def _is_receiver_param(param: Param, language: str) -> bool:
+    """Whether a candidate's leading declared param is an implicit
+    self/cls-shaped receiver for ``language``, not a real argument.
+
+    Args:
+        param: The candidate's first declared parameter.
+        language: The candidate symbol's ``Symbol.language``.
+
+    Returns:
+        True when this param is the language's own implicit-receiver
+        shape (Python ``self``/``cls``, Rust ``self_parameter`` in any
+        of its ``self``/``&self``/``&mut self``/``mut self`` textual
+        forms) and should be excluded from an arity computation for a
+        receiver-qualified call.
+    """
+    if language == "python":
+        return param.name in _PYTHON_RECEIVER_PARAM_NAMES
+    if language == "rust":
+        normalized = param.name.lstrip("&").replace("mut", "").strip()
+        return normalized == "self"
+    return False
+
+
+def _param_arity(params: list[Param]) -> tuple[int, int | None]:
+    """A declared parameter list's (min, max) plausible argument count.
+
+    Args:
+        params: A candidate's declared parameters (already stripped of
+            any implicit receiver -- see ``_candidate_arity``).
+
+    Returns:
+        ``(min_count, max_count)``. ``max_count`` is ``None`` when any
+        parameter is variadic (no upper bound on written arguments).
+        A parameter with ``has_default=True`` lowers the minimum
+        without affecting the maximum; a plain required parameter
+        raises both. Python's bare ``*``/``/`` syntax-marker params
+        are excluded entirely (see ``_ARITY_SYNTAX_MARKER_NAMES``).
+    """
+    relevant = [p for p in params if p.name not in _ARITY_SYNTAX_MARKER_NAMES]
+    min_count = sum(
+        1 for p in relevant if not p.has_default and not p.variadic
+    )
+    if any(p.variadic for p in relevant):
+        return min_count, None
+    return min_count, len(relevant)
+
+
+def _candidate_arity(
+    candidate: Symbol, call: _Referable
+) -> tuple[int, int | None]:
+    """``candidate``'s (min, max) arity range for ``call``.
+
+    Strips the candidate's own leading receiver-shaped param (Python
+    ``self``/``cls``, Rust ``self_parameter``) first whenever ``call``
+    is receiver-qualified and the candidate's language is one of the
+    two whose parser puts an implicit receiver in the declared param
+    list at all -- see ``_IMPLICIT_RECEIVER_LANGUAGES``.
+
+    Args:
+        candidate: The sole remaining candidate symbol.
+        call: The raw call/reference being resolved.
+
+    Returns:
+        The same ``(min_count, max_count)`` shape as ``_param_arity``.
+    """
+    params = candidate.params
+    if (
+        getattr(call, "receiver", None)
+        and candidate.language in _IMPLICIT_RECEIVER_LANGUAGES
+        and params
+        and _is_receiver_param(params[0], candidate.language)
+    ):
+        params = params[1:]
+    return _param_arity(params)
+
+
+def _arity_plausible(candidate: Symbol, call: _Referable) -> bool:
+    """Whether ``call``'s written argument count fits ``candidate``.
+
+    The safe default is ``True`` (never suppress) whenever
+    ``call.arg_count`` carries no signal -- either because ``call`` is
+    a ``RawHeritage`` (no such attribute at all, via ``getattr``'s
+    default), a Tier-2/generic-grammar call (``arg_count`` stays
+    ``None`` by construction -- see ``RawCall.arg_count``), or a
+    Tier-1 args-capture miss. This mirrors this module's "report
+    ambiguous rather than guess" philosophy: an uncomputable or
+    missing arity signal must never itself become a new false-positive
+    suppression.
+
+    Args:
+        candidate: The sole remaining candidate symbol.
+        call: The raw call/reference/heritage clause being resolved.
+
+    Returns:
+        True when ``call.arg_count`` is unavailable, or falls within
+        ``candidate``'s computed ``(min, max)`` arity range; False on
+        a confirmed mismatch.
+    """
+    arg_count = getattr(call, "arg_count", None)
+    if arg_count is None:
+        return True
+    min_count, max_count = _candidate_arity(candidate, call)
+    if arg_count < min_count:
+        return False
+    return max_count is None or arg_count <= max_count
+
+
 class _Noise:
     """Sentinel: ``_pick_candidate`` determined this call is noise
     (``_is_noise_call`` fired), not a genuine multi-candidate collision
@@ -1813,7 +1957,20 @@ def _pick_candidate(
         return _NOISE
 
     if len(candidates) == 1:
-        return candidates[0]
+        if _arity_plausible(candidates[0], call):
+            return candidates[0]
+        # Structural layer 2: the sole candidate's declared arity
+        # doesn't fit this call site's written argument count -- drop
+        # it before the last-resort tail below, rather than returning
+        # it anyway. Emptying `candidates` here (instead of just not
+        # returning) matters: `_last_resort_match` ->
+        # `_bare_call_non_method_match` would otherwise re-derive this
+        # same single candidate for a bare, non-method call (its own
+        # "exactly one non-method candidate left" check is a no-op
+        # when there was only ever one candidate to begin with),
+        # silently undoing this guard for exactly the bare-call shape
+        # it exists to cover.
+        candidates = []
 
     return _last_resort_match(call, candidates, by_name_path)
 

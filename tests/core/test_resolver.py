@@ -1591,6 +1591,295 @@ def test_bare_call_to_same_file_builder_named_function_still_resolves() -> (
     assert graph.ambiguous == []
 
 
+# ---------------------------------------------------------------------
+# Round 25 structural layer 2 (`.features/plans/round25/
+# 06-structural-layer2-arity-resolution.md`): arity-gated single-
+# candidate resolution. Every test below deliberately picks a call
+# name absent from every layer-1 denylist (``_is_noise_call``'s
+# ``_BUILTIN_METHOD_NAMES``/``_JAVA_ASSERTION_METHOD_NAMES``/etc.) so
+# the call genuinely reaches the single-candidate fast path under
+# test, rather than being intercepted earlier by layer 1.
+
+
+def test_single_candidate_arity_mismatch_falls_back_to_ambiguous() -> None:
+    # The general shape spring-boot's isTrue() repro illustrates: a
+    # bare call with 0 written arguments against the sole repo-defined
+    # ``check`` (1 required parameter) must not be guessed via the
+    # single-candidate fast path -- it should land in ``ambiguous``,
+    # exactly as if there had been zero candidates, not one wrong one.
+    check_fn = _fn("mod.py", "check", language="python")
+    check_fn.params = [Param(name="value")]
+    caller = _fn("main.py", "run", language="python")
+    files = [
+        FileMap("mod.py", "python", symbols=[check_fn]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="check",
+                    name="check",
+                    line=2,
+                    arg_count=0,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, check_fn.id) not in edges
+    assert graph.calls_in.get(check_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+    amb_caller, amb_name, amb_cands = graph.ambiguous[0]
+    assert amb_caller == caller.id
+    assert amb_name == "check"
+    assert amb_cands == [check_fn.id]
+
+
+def test_single_candidate_arity_mismatch_bare_call_non_method_candidate() -> (
+    None
+):
+    # The specific regression this design's own fall-through shape
+    # guards against: a *bare* call (no receiver) whose sole candidate
+    # is a non-method (``kind != "method"``) must not be silently
+    # re-derived by ``_bare_call_non_method_match`` after the arity
+    # gate has already rejected it -- that helper's own "exactly one
+    # non-method candidate" check is a no-op when there was only ever
+    # one candidate, so naively falling through with the original,
+    # unfiltered candidate list would undo the gate for exactly this
+    # shape.
+    log_fn = _fn("mod.py", "emit", language="python")
+    log_fn.params = [Param(name="a"), Param(name="b")]
+    caller = _fn("main.py", "run", language="python")
+    files = [
+        FileMap("mod.py", "python", symbols=[log_fn]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="emit",
+                    name="emit",
+                    line=2,
+                    arg_count=0,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, log_fn.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_single_candidate_arity_mismatch_receiver_qualified() -> None:
+    # Round 25's own refinement to the layer-2 sketch: the arity guard
+    # must fire for a receiver-qualified call too, not just a bare
+    # one (cline's ``stderrStream.on(...)`` shape) -- nothing in the
+    # ladder above the single-candidate rung special-cases arity by
+    # receiver presence.
+    handle_fn = _fn(
+        "handler.js", "handle", "Handler.handle", language="javascript"
+    )
+    handle_fn.params = [Param(name="a"), Param(name="b")]
+    caller = _fn("main.js", "run", language="javascript")
+    files = [
+        FileMap("handler.js", "javascript", symbols=[handle_fn]),
+        FileMap(
+            "main.js",
+            "javascript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.js",
+                    text="stream.handle",
+                    name="handle",
+                    receiver="stream",
+                    line=2,
+                    arg_count=1,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, handle_fn.id) not in edges
+    assert graph.calls_in.get(handle_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+
+
+def test_single_candidate_arity_within_variadic_range_still_resolves() -> None:
+    # No over-suppression: a call whose written argument count exceeds
+    # a candidate's plain parameter count, but fits once its
+    # ``*args``-shaped variadic tail is accounted for, must still
+    # resolve normally through the single-candidate fast path.
+    log_fn = _fn("mod.py", "log", language="python")
+    log_fn.params = [
+        Param(name="msg"),
+        Param(name="level", has_default=True),
+        Param(name="*args", variadic=True),
+    ]
+    caller = _fn("main.py", "run", language="python")
+    files = [
+        FileMap("mod.py", "python", symbols=[log_fn]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="log",
+                    name="log",
+                    line=2,
+                    arg_count=5,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, log_fn.id) in edges
+    assert graph.ambiguous == []
+
+
+def test_single_candidate_arity_within_default_param_still_resolves() -> None:
+    # A non-variadic candidate with a defaulted trailing parameter: a
+    # call omitting the optional argument (arg_count at the computed
+    # minimum) must still resolve.
+    connect_fn = _fn("mod.py", "connect", language="python")
+    connect_fn.params = [
+        Param(name="host"),
+        Param(name="port", has_default=True),
+    ]
+    caller = _fn("main.py", "run", language="python")
+    files = [
+        FileMap("mod.py", "python", symbols=[connect_fn]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="connect",
+                    name="connect",
+                    line=2,
+                    arg_count=1,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, connect_fn.id) in edges
+    assert graph.ambiguous == []
+
+
+def test_single_candidate_arity_gate_skipped_when_arg_count_missing() -> None:
+    # ``arg_count is None`` (Tier-2 language, or a synthetic
+    # args-capture miss) must leave the single-candidate fast path
+    # byte-identical to its pre-layer-2 behavior: unconditional
+    # accept, even though the candidate's own declared arity wouldn't
+    # actually fit a hypothetical written argument count.
+    check_fn = _fn("mod.py", "check", language="python")
+    check_fn.params = [Param(name="value")]
+    caller = _fn("main.py", "run", language="python")
+    files = [
+        FileMap("mod.py", "python", symbols=[check_fn]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="check",
+                    name="check",
+                    line=2,
+                    # arg_count intentionally omitted -> None.
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, check_fn.id) in edges
+    assert graph.ambiguous == []
+
+
+def test_arity_plausible_python_strips_self_for_receiver_qualified_call() -> (
+    None
+):
+    # Unit-level coverage of the implicit-receiver-stripping helper
+    # itself: a Python method's declared ``self`` must not count
+    # toward arity for a receiver-qualified call (the receiver
+    # supplies it implicitly), but must still count for a bare call
+    # reaching this same rung (which structurally can never supply an
+    # implicit receiver at all).
+    method = _fn("mod.py", "run", "Task.run", language="python")
+    method.params = [Param(name="self"), Param(name="value")]
+    call = RawCall(
+        caller_id=None,
+        path="main.py",
+        text="task.run",
+        name="run",
+        receiver="task",
+        arg_count=1,
+    )
+    assert resolver_mod._arity_plausible(method, call) is True
+
+    bare_call = RawCall(
+        caller_id=None,
+        path="main.py",
+        text="run",
+        name="run",
+        arg_count=1,
+    )
+    # Bare call: `self` is not stripped (no receiver expression could
+    # have supplied it), so the effective minimum is 2, not 1.
+    assert resolver_mod._arity_plausible(method, bare_call) is False
+
+
+def test_arity_plausible_rust_strips_self_parameter_variants() -> None:
+    for self_text in ("self", "&self", "&mut self", "mut self"):
+        method = _fn("mod.rs", "dist", "Point.dist", language="rust")
+        method.params = [Param(name=self_text), Param(name="other")]
+        call = RawCall(
+            caller_id=None,
+            path="main.rs",
+            text="p.dist",
+            name="dist",
+            receiver="p",
+            arg_count=1,
+        )
+        assert resolver_mod._arity_plausible(method, call) is True
+
+
+def test_param_arity_excludes_python_syntax_marker_params() -> None:
+    # ``def f(a, *, b, c=2)``'s bare ``*`` keyword-only separator is
+    # not a real parameter and must not inflate the computed arity
+    # range.
+    fn = _fn("mod.py", "f", language="python")
+    fn.params = [
+        Param(name="a"),
+        Param(name="*"),
+        Param(name="b"),
+        Param(name="c", has_default=True),
+    ]
+    assert resolver_mod._param_arity(fn.params) == (2, 3)
+
+
 def test_explicit_type_receiver_resolves_same_file_new_collision() -> None:
     # zed's headline finding, round-09 §2.1 part A:
     # ``BufferDiff::new(...)`` written inside ``BufferDiff``'s own
