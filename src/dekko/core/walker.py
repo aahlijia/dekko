@@ -233,6 +233,48 @@ def _vendored_dir_hit(rel: str) -> str | None:
     return None
 
 
+def find_config_files(root: Path, basenames: frozenset[str]) -> list[str]:
+    """Find repo-relative config files matching ``basenames`` anywhere
+    in the tree, reusing ``discover()``'s own exclude-aware file
+    enumeration rather than a second filesystem walk with its own
+    exclusion rules.
+
+    Built on the same ``_git_files``/``_walk_files`` pair ``discover()``
+    calls, so results already respect a root ``.gitignore`` (via ``git
+    ls-files --exclude-standard`` when the root is a git work tree, or
+    a manual ``.gitignore``-aware walk otherwise). ``_NOISE_DIRS`` (VCS
+    metadata, tool caches) and ``_VENDORED_DIRS`` (``node_modules``,
+    ``vendor``, ``third_party``, ...) matches are both dropped here --
+    unlike ``discover()``'s own ``_classify``, which records a vendored
+    hit as a skip reason for coverage reporting, a config file under
+    ``node_modules`` has no equivalent "worth flagging" use case, so it
+    is silently excluded rather than returned for the caller to filter.
+
+    Args:
+        root: Repository root.
+        basenames: Exact filenames to match (e.g. ``{"tsconfig.json",
+            "jsconfig.json"}``) -- matched against each candidate's
+            final path segment only, not a glob pattern.
+
+    Returns:
+        Sorted repo-relative POSIX paths of every matching file outside
+        a noise/vendored directory.
+    """
+    candidates = _git_files(root)
+    if candidates is None:
+        candidates = _walk_files(root)
+
+    found: list[str] = []
+    for rel in candidates:
+        name = rel.rsplit("/", 1)[-1]
+        if name not in basenames:
+            continue
+        if _in_noise_dir(rel) or _vendored_dir_hit(rel):
+            continue
+        found.append(rel)
+    return sorted(found)
+
+
 def _matches_any(rel: str, patterns: tuple[str, ...]) -> bool:
     """Match the basename against glob patterns."""
     base = rel.rsplit("/", 1)[-1]

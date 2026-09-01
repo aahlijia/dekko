@@ -8,13 +8,27 @@ disclosure, JSON output, catches' exact-match-only v1 scope (a
 superclass doesn't match — the documented limitation locked in by a
 test), multi-catch matching each listed type, and the JS/TS weak-signal
 caveat appearing in the command's own output (not just ``--help``).
+
+Also covers plan 28's ``--lang`` filter and default exact-before-
+catch-all sort: the CLI-level tests exercise real multi-language
+(Java/JS) map data through the full ``cli.main`` -> ``query.run`` ->
+``_dispatch`` -> ``_run_catches``/``_run_throws`` path; the
+``--transitive`` cross-language-BFS case is exercised directly against
+a hand-built ``MapIndex`` instead, since real cross-language call-graph
+resolution isn't something the extractor produces (there's no way to
+get a genuine repo to reproduce it) — this is still exactly what the
+plan's "small fixture index" test-plan bullets describe.
 """
 
 import json
 
 import pytest
 
+from dekko.analysis import query
+from dekko.core.model import ExternalCall, Symbol
+from dekko.core.resolver import MODULE_CALLER_SUFFIX
 from dekko.integrations import cli
+from dekko.render.mapfile import MapIndex
 
 from conftest import RepoFactory
 
@@ -539,3 +553,298 @@ def test_throws_java_instanceof_pattern_reraise_not_labeled_external(
     assert "(external)" not in result.out
     assert "1 throw site(s): 1 repo-defined, 0 external" in result.out
     assert "1 re-raise site(s) omitted" in result.err
+
+
+# ---------------------------------------------------------------------
+# Plan 28: ``--lang`` filter + default exact-before-catch-all sort.
+
+JAVA_AND_JS_CATCHES = {
+    "App.java": (
+        "class App {\n"
+        "    void handle() {\n"
+        "        try {\n"
+        "        } catch (ConfigError e) {\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    ),
+    "widget.js": (
+        "function handle() {\n    try {\n    } catch (e) {\n    }\n}\n"
+    ),
+}
+
+SORT_FIXTURE = {
+    # Paths deliberately alphabetize the catch-all ahead of the exact
+    # match, so a passing test proves Fix B's sort key (not path
+    # lexical order) decides row order.
+    "aaa_widget.js": (
+        "function handle() {\n    try {\n    } catch (e) {\n    }\n}\n"
+    ),
+    "zzz_app.py": (
+        "class ConfigError(Exception):\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "def handle():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except ConfigError:\n"
+        "        pass\n"
+    ),
+}
+
+
+def test_catches_lang_filter_excludes_other_language(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(JAVA_AND_JS_CATCHES)
+    code = cli.main(
+        [
+            "query",
+            "catches",
+            "ConfigError",
+            "--lang",
+            "java",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "App.java" in out
+    assert "widget.js" not in out
+
+
+def test_catches_lang_filter_json_fields(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(JAVA_AND_JS_CATCHES)
+    code = cli.main(
+        [
+            "query",
+            "catches",
+            "ConfigError",
+            "--lang",
+            "java",
+            "--json",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["lang_filter"] == "java"
+    assert doc["lang_filtered_out"] == 1
+    assert doc["exact_matches"] == 1
+    assert doc["catch_all_matches"] == 0
+
+
+def test_catches_lang_filter_note_disclosed(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(JAVA_AND_JS_CATCHES)
+    code = cli.main(
+        [
+            "query",
+            "catches",
+            "ConfigError",
+            "--lang",
+            "java",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "--lang java filter applied" in err
+    assert "1 catch clause(s)" in err
+    assert "1 javascript" in err
+
+
+def test_catches_default_sort_exact_before_catch_all(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SORT_FIXTURE)
+    code = cli.main(["query", "catches", "ConfigError", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    exact_idx = out.index("zzz_app.py")
+    catch_all_idx = out.index("aaa_widget.js")
+    assert exact_idx < catch_all_idx
+
+
+def test_query_lang_rejects_unsupported_language(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # 'rust' is a real language name but permanently excluded from
+    # throws/catches (exception_handling_supported() == False) -- it
+    # must never be a valid --lang choice, since accepting it would
+    # silently produce an always-empty result instead of a clear error.
+    root = make_mapped_repo(PY_THROWS)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "query",
+                "catches",
+                "ValueError",
+                "--lang",
+                "rust",
+                "--root",
+                str(root),
+            ]
+        )
+    assert exc.value.code == 2
+
+
+def test_caller_language_resolved_symbol_id() -> None:
+    index = MapIndex(root_label="test")
+    sym = Symbol(
+        id="a.py::f",
+        name="f",
+        qualname="f",
+        kind="function",
+        path="a.py",
+        language="python",
+    )
+    index.symbols_by_id[sym.id] = sym
+    assert query._caller_language(index, sym.id) == "python"
+
+
+def test_caller_language_module_pseudo_id() -> None:
+    index = MapIndex(root_label="test")
+    index.languages_by_path["b.js"] = "javascript"
+    module_id = f"b.js{MODULE_CALLER_SUFFIX}"
+    assert query._caller_language(index, module_id) == "javascript"
+
+
+def _make_transitive_throws_index() -> tuple[MapIndex, Symbol]:
+    """A hand-built ``MapIndex`` for the ``--lang`` transitive-filter
+    tests: ``entry`` (Python) calls ``helper`` (an unresolved,
+    JavaScript-recorded caller id with no owning ``Symbol``, the same
+    "module-level call site" shape ``throws``/``catches`` already
+    model elsewhere). ``entry`` directly raises a Python-defined type;
+    the BFS through ``helper`` additionally reaches a JS-defined raised
+    type and a JS external call -- real cross-language call-graph
+    resolution isn't something the extractor produces from source, so
+    this is built by hand rather than through ``make_mapped_repo``.
+    """
+    index = MapIndex(root_label="test")
+    entry = Symbol(
+        id="app.py::entry",
+        name="entry",
+        qualname="entry",
+        kind="function",
+        path="app.py",
+        language="python",
+    )
+    py_error = Symbol(
+        id="errors.py::PyError",
+        name="PyError",
+        qualname="PyError",
+        kind="class",
+        path="errors.py",
+        language="python",
+    )
+    js_error = Symbol(
+        id="errors.js::JsError",
+        name="JsError",
+        qualname="JsError",
+        kind="class",
+        path="errors.js",
+        language="javascript",
+    )
+    helper_id = "helper.js::helper"
+    index.symbols_by_id = {
+        entry.id: entry,
+        py_error.id: py_error,
+        js_error.id: js_error,
+    }
+    index.languages_by_path = {
+        "app.py": "python",
+        "errors.py": "python",
+        "errors.js": "javascript",
+        "helper.js": "javascript",
+    }
+    index.calls_out = {entry.id: [helper_id]}
+    index.throws_out = {
+        entry.id: [py_error.id],
+        helper_id: [js_error.id],
+    }
+    index.throws_lines = {
+        (entry.id, py_error.id): [5],
+        (helper_id, js_error.id): [9],
+    }
+    index.throws_external_out = {
+        helper_id: [
+            ExternalCall(caller=helper_id, callee="fetch", lines=[12])
+        ],
+    }
+    return index, entry
+
+
+def test_throws_gather_transitive_lang_filter_excludes_other_language() -> (
+    None
+):
+    index, entry = _make_transitive_throws_index()
+    resolved, external, _bare, _ambig, _trunc, filtered_out = (
+        query._throws_gather(index, entry, True, 5, "python")
+    )
+    assert [s.id for s, _d, _lines in resolved] == ["errors.py::PyError"]
+    assert external == []
+    assert filtered_out == 2
+
+
+def test_throws_gather_transitive_no_lang_filter_returns_all() -> None:
+    index, entry = _make_transitive_throws_index()
+    resolved, external, _bare, _ambig, _trunc, filtered_out = (
+        query._throws_gather(index, entry, True, 5, None)
+    )
+    assert filtered_out == 0
+    assert len(resolved) == 2
+    assert len(external) == 1
+
+
+def test_run_throws_transitive_lang_filter_disclosed(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    index, entry = _make_transitive_throws_index()
+    code, _meter = query._run_throws(
+        index, entry, True, 5, False, 50, None, "python"
+    )
+    assert code == 0
+    result = capsys.readouterr()
+    assert "PyError" in result.out
+    assert "JsError" not in result.out
+    assert "--lang python filter applied" in result.err
+    assert "2 throw site(s)" in result.err
+
+
+def test_run_throws_transitive_lang_filter_json_fields(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    index, entry = _make_transitive_throws_index()
+    code, _meter = query._run_throws(
+        index, entry, True, 5, True, 50, None, "python"
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["lang_filter"] == "python"
+    assert doc["lang_filtered_out"] == 2
+    assert doc["repo_defined"] == 1
+    assert doc["external"] == 0
+
+
+def test_run_throws_one_level_lang_mismatch_note(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    index, entry = _make_transitive_throws_index()
+    code, _meter = query._run_throws(
+        index, entry, False, 5, False, 50, None, "java"
+    )
+    assert code == 0
+    result = capsys.readouterr()
+    assert (
+        "target's own language (python) doesn't match --lang java"
+        in result.err
+    )
+    assert "no throws found" in result.out

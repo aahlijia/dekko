@@ -182,7 +182,7 @@ def snapshot(
         jobs=jobs,
         candidates=candidates,
     )
-    graph = resolve(files, workers=jobs)
+    graph = resolve(files, workers=jobs, root=root)
     snap = Snapshot()
     all_syms: list[Symbol] = []
     for fm in files:

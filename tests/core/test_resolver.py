@@ -1318,6 +1318,568 @@ def test_rust_iter_mut_not_guessed_into_unrelated_repo_symbol() -> None:
     assert "highlights.iter_mut" in externals
 
 
+def test_receiver_qualified_js_now_not_guessed_into_closure_local() -> None:
+    # Round 23 cline.md §2.1: a closure-local
+    # ``const now = () => Date.now()``-shaped repo symbol named
+    # ``now`` must not absorb every unrelated ``Date.now()``/
+    # ``performance.now()`` call in the repo just because it's the
+    # only repo-wide ``now`` symbol (404 misattributed sites live).
+    now_fn = _fn("timer.ts", "now")
+    caller = _fn("caller.ts", "run")
+    files = [
+        FileMap("timer.ts", "typescript", symbols=[now_fn]),
+        FileMap(
+            "caller.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="Date.now",
+                    name="now",
+                    receiver="Date",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, now_fn.id) not in edges
+    assert graph.calls_in.get(now_fn.id, []) == []
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "Date.now" in externals
+
+
+def test_receiver_qualified_js_has_not_guessed_into_repo_symbol() -> None:
+    # Round 23 cline.md §2.1: ``Map.prototype.has``/
+    # ``Set.prototype.has`` calls through an untyped local must not be
+    # guessed into an unrelated repo-defined ``has`` just because the
+    # name is otherwise unique repo-wide (352 -> 436 misattributed
+    # sites vs. 0 credible in the live repro).
+    has_fn = _fn("registry.ts", "has")
+    caller = _fn("caller.ts", "run")
+    files = [
+        FileMap("registry.ts", "typescript", symbols=[has_fn]),
+        FileMap(
+            "caller.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="seen.has",
+                    name="has",
+                    receiver="seen",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, has_fn.id) not in edges
+    assert graph.calls_in.get(has_fn.id, []) == []
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "seen.has" in externals
+
+
+def test_receiver_qualified_js_on_not_guessed_into_repo_symbol() -> None:
+    # Round 25 cline.md Finding 2: a debug-harness ``CdpClient.on``
+    # (fan-in 95 reported, resolver "fully confident", ``dekko
+    # ambiguous`` reporting nothing wrong) silently absorbed an
+    # unrelated plain Node.js stream ``EventEmitter.on("data",
+    # handler)`` call elsewhere in the repo, mirroring the exact
+    # ``has``/``now`` false-positive shape above for the
+    # ``on``/``once``/``off``/``emit`` event-emitter idiom family.
+    on_fn = _fn("cdp-client.ts", "on", "CdpClient.on")
+    caller = _fn("mcp-hub.ts", "connectToServer")
+    files = [
+        FileMap("cdp-client.ts", "typescript", symbols=[on_fn]),
+        FileMap(
+            "mcp-hub.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="mcp-hub.ts",
+                    text="stderrStream.on",
+                    name="on",
+                    receiver="stderrStream",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, on_fn.id) not in edges
+    assert graph.calls_in.get(on_fn.id, []) == []
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "stderrStream.on" in externals
+
+
+def test_receiver_qualified_js_once_off_emit_not_guessed() -> None:
+    # Sibling names added alongside ``on`` for the same event-emitter
+    # idiom family (``once``/``off``/``emit``) -- each must be denied
+    # the single-candidate fast path the same way, one call site per
+    # name against a same-named repo-defined candidate.
+    for method_name in ("once", "off", "emit"):
+        method_fn = _fn(
+            f"{method_name}-owner.ts",
+            method_name,
+            f"Owner.{method_name}",
+        )
+        caller = _fn(f"{method_name}-caller.ts", "run")
+        files = [
+            FileMap(
+                f"{method_name}-owner.ts",
+                "typescript",
+                symbols=[method_fn],
+            ),
+            FileMap(
+                f"{method_name}-caller.ts",
+                "typescript",
+                symbols=[caller],
+                calls=[
+                    RawCall(
+                        caller_id=caller.id,
+                        path=f"{method_name}-caller.ts",
+                        text=f"emitter.{method_name}",
+                        name=method_name,
+                        receiver="emitter",
+                        line=2,
+                    )
+                ],
+            ),
+        ]
+        graph = resolve(files)
+        edges = {(e.caller, e.callee) for e in graph.edges}
+        assert (caller.id, method_fn.id) not in edges
+        assert graph.calls_in.get(method_fn.id, []) == []
+        assert graph.ambiguous == []
+        externals = {ext.callee for ext in graph.external}
+        assert f"emitter.{method_name}" in externals
+
+
+def test_receiver_qualified_java_assertj_istrue_not_guessed() -> None:
+    # Round 23 spring-boot.md §2.1: a single real
+    # ``ResolvedDockerHost.isTrue`` caller had its fan-in inflated to
+    # 1,103 by unrelated AssertJ ``assertThat(x).isTrue()`` assertion
+    # chain calls elsewhere in the test suite -- ~1,100x inflation from
+    # a single denylist gap (no Java-idiom denylist existed at all
+    # before round 23).
+    is_true_fn = _fn(
+        "ResolvedDockerHost.java",
+        "isTrue",
+        "ResolvedDockerHost.isTrue",
+        language="java",
+    )
+    caller = _fn(
+        "SomeTest.java",
+        "verify",
+        language="java",
+    )
+    files = [
+        FileMap(
+            "ResolvedDockerHost.java",
+            "java",
+            symbols=[is_true_fn],
+        ),
+        FileMap(
+            "SomeTest.java",
+            "java",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="SomeTest.java",
+                    text="assertThat(result).isTrue",
+                    name="isTrue",
+                    receiver="assertThat(result)",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, is_true_fn.id) not in edges
+    assert graph.calls_in.get(is_true_fn.id, []) == []
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "assertThat(result).isTrue" in externals
+
+
+def test_receiver_qualified_generic_builder_build_not_guessed() -> None:
+    # Round 23 spring-boot.md §2.2: a repo-defined ``Builder.build``
+    # read 43 real callers plus 1,131 additional ambiguous-but-
+    # uncounted sites from unrelated builder types elsewhere in the
+    # codebase -- a receiver-qualified ``.build()`` on an untyped local
+    # must not be guessed into a same-named repo builder just because
+    # the bare name happens to be otherwise unique.
+    build_fn = _fn(
+        "RequestBuilder.java",
+        "build",
+        "RequestBuilder.build",
+        language="java",
+    )
+    caller = _fn("Other.java", "run", language="java")
+    files = [
+        FileMap("RequestBuilder.java", "java", symbols=[build_fn]),
+        FileMap(
+            "Other.java",
+            "java",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="Other.java",
+                    text="someOtherBuilder.build",
+                    name="build",
+                    receiver="someOtherBuilder",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, build_fn.id) not in edges
+    assert graph.calls_in.get(build_fn.id, []) == []
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "someOtherBuilder.build" in externals
+
+
+def test_bare_call_to_same_file_builder_named_function_still_resolves() -> (
+    None
+):
+    # Regression guard mirroring the existing ``trim`` regression test:
+    # the noise guard only applies to receiver-qualified calls and
+    # known ambient-global bare names -- a genuinely local bare call to
+    # a same-file function sharing a name now in
+    # ``_BUILDER_METHOD_NAMES`` (``build``/``of``/``from``/``with``)
+    # must still resolve normally.
+    build_fn = _fn("util.py", "build")
+    caller = _fn("util.py", "run", line=5)
+    files = [
+        FileMap(
+            "util.py",
+            "python",
+            symbols=[build_fn, caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="util.py",
+                    text="build",
+                    name="build",
+                    line=6,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, build_fn.id) in edges
+    assert graph.ambiguous == []
+
+
+# ---------------------------------------------------------------------
+# Round 25 structural layer 2 (`.features/plans/round25/
+# 06-structural-layer2-arity-resolution.md`): arity-gated single-
+# candidate resolution. Every test below deliberately picks a call
+# name absent from every layer-1 denylist (``_is_noise_call``'s
+# ``_BUILTIN_METHOD_NAMES``/``_JAVA_ASSERTION_METHOD_NAMES``/etc.) so
+# the call genuinely reaches the single-candidate fast path under
+# test, rather than being intercepted earlier by layer 1.
+
+
+def test_single_candidate_arity_mismatch_falls_back_to_ambiguous() -> None:
+    # The general shape spring-boot's isTrue() repro illustrates: a
+    # bare call with 0 written arguments against the sole repo-defined
+    # ``check`` (1 required parameter) must not be guessed via the
+    # single-candidate fast path -- it should land in ``ambiguous``,
+    # exactly as if there had been zero candidates, not one wrong one.
+    check_fn = _fn("mod.py", "check", language="python")
+    check_fn.params = [Param(name="value")]
+    caller = _fn("main.py", "run", language="python")
+    files = [
+        FileMap("mod.py", "python", symbols=[check_fn]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="check",
+                    name="check",
+                    line=2,
+                    arg_count=0,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, check_fn.id) not in edges
+    assert graph.calls_in.get(check_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+    amb_caller, amb_name, amb_cands = graph.ambiguous[0]
+    assert amb_caller == caller.id
+    assert amb_name == "check"
+    assert amb_cands == [check_fn.id]
+
+
+def test_single_candidate_arity_mismatch_bare_call_non_method_candidate() -> (
+    None
+):
+    # The specific regression this design's own fall-through shape
+    # guards against: a *bare* call (no receiver) whose sole candidate
+    # is a non-method (``kind != "method"``) must not be silently
+    # re-derived by ``_bare_call_non_method_match`` after the arity
+    # gate has already rejected it -- that helper's own "exactly one
+    # non-method candidate" check is a no-op when there was only ever
+    # one candidate, so naively falling through with the original,
+    # unfiltered candidate list would undo the gate for exactly this
+    # shape.
+    log_fn = _fn("mod.py", "emit", language="python")
+    log_fn.params = [Param(name="a"), Param(name="b")]
+    caller = _fn("main.py", "run", language="python")
+    files = [
+        FileMap("mod.py", "python", symbols=[log_fn]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="emit",
+                    name="emit",
+                    line=2,
+                    arg_count=0,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, log_fn.id) not in edges
+    assert len(graph.ambiguous) == 1
+
+
+def test_single_candidate_arity_mismatch_receiver_qualified() -> None:
+    # Round 25's own refinement to the layer-2 sketch: the arity guard
+    # must fire for a receiver-qualified call too, not just a bare
+    # one (cline's ``stderrStream.on(...)`` shape) -- nothing in the
+    # ladder above the single-candidate rung special-cases arity by
+    # receiver presence.
+    handle_fn = _fn(
+        "handler.js", "handle", "Handler.handle", language="javascript"
+    )
+    handle_fn.params = [Param(name="a"), Param(name="b")]
+    caller = _fn("main.js", "run", language="javascript")
+    files = [
+        FileMap("handler.js", "javascript", symbols=[handle_fn]),
+        FileMap(
+            "main.js",
+            "javascript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.js",
+                    text="stream.handle",
+                    name="handle",
+                    receiver="stream",
+                    line=2,
+                    arg_count=1,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, handle_fn.id) not in edges
+    assert graph.calls_in.get(handle_fn.id, []) == []
+    assert len(graph.ambiguous) == 1
+
+
+def test_single_candidate_arity_within_variadic_range_still_resolves() -> None:
+    # No over-suppression: a call whose written argument count exceeds
+    # a candidate's plain parameter count, but fits once its
+    # ``*args``-shaped variadic tail is accounted for, must still
+    # resolve normally through the single-candidate fast path.
+    log_fn = _fn("mod.py", "log", language="python")
+    log_fn.params = [
+        Param(name="msg"),
+        Param(name="level", has_default=True),
+        Param(name="*args", variadic=True),
+    ]
+    caller = _fn("main.py", "run", language="python")
+    files = [
+        FileMap("mod.py", "python", symbols=[log_fn]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="log",
+                    name="log",
+                    line=2,
+                    arg_count=5,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, log_fn.id) in edges
+    assert graph.ambiguous == []
+
+
+def test_single_candidate_arity_within_default_param_still_resolves() -> None:
+    # A non-variadic candidate with a defaulted trailing parameter: a
+    # call omitting the optional argument (arg_count at the computed
+    # minimum) must still resolve.
+    connect_fn = _fn("mod.py", "connect", language="python")
+    connect_fn.params = [
+        Param(name="host"),
+        Param(name="port", has_default=True),
+    ]
+    caller = _fn("main.py", "run", language="python")
+    files = [
+        FileMap("mod.py", "python", symbols=[connect_fn]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="connect",
+                    name="connect",
+                    line=2,
+                    arg_count=1,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, connect_fn.id) in edges
+    assert graph.ambiguous == []
+
+
+def test_single_candidate_arity_gate_skipped_when_arg_count_missing() -> None:
+    # ``arg_count is None`` (Tier-2 language, or a synthetic
+    # args-capture miss) must leave the single-candidate fast path
+    # byte-identical to its pre-layer-2 behavior: unconditional
+    # accept, even though the candidate's own declared arity wouldn't
+    # actually fit a hypothetical written argument count.
+    check_fn = _fn("mod.py", "check", language="python")
+    check_fn.params = [Param(name="value")]
+    caller = _fn("main.py", "run", language="python")
+    files = [
+        FileMap("mod.py", "python", symbols=[check_fn]),
+        FileMap(
+            "main.py",
+            "python",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="main.py",
+                    text="check",
+                    name="check",
+                    line=2,
+                    # arg_count intentionally omitted -> None.
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, check_fn.id) in edges
+    assert graph.ambiguous == []
+
+
+def test_arity_plausible_python_strips_self_for_receiver_qualified_call() -> (
+    None
+):
+    # Unit-level coverage of the implicit-receiver-stripping helper
+    # itself: a Python method's declared ``self`` must not count
+    # toward arity for a receiver-qualified call (the receiver
+    # supplies it implicitly), but must still count for a bare call
+    # reaching this same rung (which structurally can never supply an
+    # implicit receiver at all).
+    method = _fn("mod.py", "run", "Task.run", language="python")
+    method.params = [Param(name="self"), Param(name="value")]
+    call = RawCall(
+        caller_id=None,
+        path="main.py",
+        text="task.run",
+        name="run",
+        receiver="task",
+        arg_count=1,
+    )
+    assert resolver_mod._arity_plausible(method, call) is True
+
+    bare_call = RawCall(
+        caller_id=None,
+        path="main.py",
+        text="run",
+        name="run",
+        arg_count=1,
+    )
+    # Bare call: `self` is not stripped (no receiver expression could
+    # have supplied it), so the effective minimum is 2, not 1.
+    assert resolver_mod._arity_plausible(method, bare_call) is False
+
+
+def test_arity_plausible_rust_strips_self_parameter_variants() -> None:
+    for self_text in ("self", "&self", "&mut self", "mut self"):
+        method = _fn("mod.rs", "dist", "Point.dist", language="rust")
+        method.params = [Param(name=self_text), Param(name="other")]
+        call = RawCall(
+            caller_id=None,
+            path="main.rs",
+            text="p.dist",
+            name="dist",
+            receiver="p",
+            arg_count=1,
+        )
+        assert resolver_mod._arity_plausible(method, call) is True
+
+
+def test_param_arity_excludes_python_syntax_marker_params() -> None:
+    # ``def f(a, *, b, c=2)``'s bare ``*`` keyword-only separator is
+    # not a real parameter and must not inflate the computed arity
+    # range.
+    fn = _fn("mod.py", "f", language="python")
+    fn.params = [
+        Param(name="a"),
+        Param(name="*"),
+        Param(name="b"),
+        Param(name="c", has_default=True),
+    ]
+    assert resolver_mod._param_arity(fn.params) == (2, 3)
+
+
 def test_explicit_type_receiver_resolves_same_file_new_collision() -> None:
     # zed's headline finding, round-09 §2.1 part A:
     # ``BufferDiff::new(...)`` written inside ``BufferDiff``'s own
@@ -1391,8 +1953,14 @@ def test_explicit_type_receiver_no_unique_method_falls_through() -> None:
         path="widget.rs",
         language="rust",
     )
-    unrelated_a = _fn("a.rs", "build", "Foo.build")
-    unrelated_b = _fn("b.rs", "build", "Bar.build")
+    # Deliberately not named ``build``/``has``/``now``/etc. — those are
+    # now denylisted noise-guard names (round 23) and a
+    # receiver-qualified call to one of them is suppressed before this
+    # step's own candidate count is even reached; this test's fixture
+    # needs a name outside every denylist so it still exercises the
+    # *receiver-type-match negative-control* path it was written for.
+    unrelated_a = _fn("a.rs", "render", "Foo.render")
+    unrelated_b = _fn("b.rs", "render", "Bar.render")
     caller = _fn("widget.rs", "make", "Widget.make", line=10)
     files = [
         FileMap(
@@ -1403,8 +1971,8 @@ def test_explicit_type_receiver_no_unique_method_falls_through() -> None:
                 RawCall(
                     caller_id=caller.id,
                     path="widget.rs",
-                    text="Widget::build",
-                    name="build",
+                    text="Widget::render",
+                    name="render",
                     receiver="Widget",
                     line=11,
                 )
@@ -2030,6 +2598,23 @@ def _flaky_pool_factory(fail_times: int) -> type:
     return _FlakyPool
 
 
+@pytest.fixture(autouse=True)
+def _no_real_pool_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 23 §15 added a fixed backoff (``_POOL_RETRY_DELAY_S``)
+    before ``run_pooled_with_retry``'s bounded retry fires. Every
+    ``BrokenProcessPool``-retry test in this module (and the
+    ``_FlakyPool``-based tests further below) deliberately triggers
+    that retry path -- without this, each would pay a real multi-
+    second sleep, several times over across the suite. Autouse and
+    file-scoped since ``time.sleep`` has exactly one call site in
+    ``resolver.py`` (the retry backoff itself); the dedicated backoff
+    test below re-patches ``time.sleep`` itself to assert it fires
+    with the expected delay, superseding this no-op within that one
+    test.
+    """
+    monkeypatch.setattr(resolver_mod.time, "sleep", lambda _seconds: None)
+
+
 def test_run_pooled_with_retry_retries_once_then_succeeds() -> None:
     calls: list[int] = []
 
@@ -2070,6 +2655,39 @@ def test_run_pooled_with_retry_propagates_after_second_failure() -> None:
     with pytest.raises(BrokenProcessPool):
         resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
     assert calls == [8, 2]  # exactly one retry, no loop
+
+
+def test_run_pooled_with_retry_sleeps_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 23 §15: an immediate retry can land in the exact same
+    transient window (CPU contention, or a `uv tool install
+    --reinstall` shim relink race) that caused the first
+    ``BrokenProcessPool``. Confirms the backoff actually fires, with
+    the expected delay, between the two ``run()`` invocations -- and
+    that it fires *before* the retry attempt, not after (an
+    after-the-fact sleep would be a no-op for this bug)."""
+    events: list[str] = []
+
+    def fake_sleep(seconds: float) -> None:
+        assert seconds == resolver_mod._POOL_RETRY_DELAY_S
+        events.append("sleep")
+
+    monkeypatch.setattr(resolver_mod.time, "sleep", fake_sleep)
+
+    calls: list[int] = []
+
+    def run(w: int) -> str:
+        calls.append(w)
+        events.append(f"run-{w}")
+        if len(calls) == 1:
+            raise BrokenProcessPool("simulated: process pool broken")
+        return "ok"
+
+    result = resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+    assert result == "ok"
+    assert events == ["run-8", "sleep", "run-2"]
 
 
 def test_run_pooled_with_retry_prints_disclosure_note_on_retry(
@@ -2245,12 +2863,22 @@ def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
 # processes -- not just the exception type.
 
 
-def _sleep_worker(seconds: float) -> str:
-    """Module-level (spawn-picklable) worker that sleeps far longer
-    than the test-scale timeout below it, standing in for a wedged
-    worker process that never completes on its own."""
-    time.sleep(seconds)
-    return "done"
+def _sleep_worker() -> str:
+    """Module-level (spawn-picklable) worker that blocks forever,
+    standing in for a wedged worker process that never completes on
+    its own. Deliberately an unbounded loop rather than a fixed-
+    duration ``time.sleep(N)`` -- on a contended CI runner the *test*
+    process (not this worker) can itself be descheduled for a long
+    stretch of wall-clock time between ``pool.submit()`` and the
+    ``.result(timeout=...)`` call below; with a fixed-duration sleep,
+    that stall alone can let the worker finish naturally before
+    ``.result()`` is ever invoked, so no ``TimeoutError`` fires and
+    the test flakes with "DID NOT RAISE" -- a scheduling artifact, not
+    a real regression. A worker that never completes on its own
+    removes that race entirely, regardless of how long the harness
+    stalls beforehand."""
+    while True:
+        time.sleep(3600)
 
 
 def test_run_pool_bounded_returns_promptly_on_real_pool_timeout(
@@ -2259,15 +2887,17 @@ def test_run_pool_bounded_returns_promptly_on_real_pool_timeout(
     monkeypatch.setattr(resolver_mod, "POOL_RESULT_TIMEOUT_S", 0.3)
     pool = ProcessPoolExecutor(max_workers=1)
     try:
-        future = pool.submit(_sleep_worker, 30.0)
+        future = pool.submit(_sleep_worker)
         start = time.monotonic()
         with pytest.raises(PoolTimeoutError):
             resolver_mod._run_pool_bounded(pool, [future])
         elapsed = time.monotonic() - start
-        # Well under the 30s the worker is actually sleeping for --
-        # before the fix, this would have blocked for the full 30s
-        # (or longer) inside ``__exit__``'s ``shutdown(wait=True)``.
-        assert elapsed < 5.0
+        # Bounded well under "forever" -- before the fix, this would
+        # have blocked indefinitely inside ``__exit__``'s
+        # ``shutdown(wait=True)``. Generous margin (not a tight bound
+        # on the 0.3s timeout itself) to absorb CI-runner process-
+        # spawn/kill overhead without flaking.
+        assert elapsed < 30.0
     finally:
         pool.shutdown(wait=False)
 
@@ -2278,7 +2908,7 @@ def test_run_pool_bounded_kills_wedged_worker_after_timeout(
     monkeypatch.setattr(resolver_mod, "POOL_RESULT_TIMEOUT_S", 0.3)
     pool = ProcessPoolExecutor(max_workers=1)
     try:
-        future = pool.submit(_sleep_worker, 30.0)
+        future = pool.submit(_sleep_worker)
         # Snapshot the worker process handles before calling, since
         # ``_run_pool_bounded`` (via ``pool.shutdown()``) clears
         # ``pool._processes`` to ``None`` as part of its own teardown.
@@ -2666,8 +3296,11 @@ def test_rust_crate_hint_matches_crate_root_re_export() -> None:
     # (``crates/gpui/src/element.rs``) but only reachable elsewhere
     # via its crate-root re-export (``use gpui::Render;``) must match
     # through the crate's root directory, not the declaring file's
-    # own stem.
-    crate_roots = {"gpui": "crates/gpui/src"}
+    # own stem. Round 23 Fix B: ``crate_roots`` values are now lists
+    # (every matching root, not just one) -- see
+    # ``test_rust_crate_hint_matches_multiple_roots_for_same_name``
+    # below for the collision-aware behavior this enables.
+    crate_roots = {"gpui": ["crates/gpui/src"]}
     assert resolver_mod._rust_crate_hint_matches(
         "gpui::Render", "crates/gpui/src/element.rs", crate_roots
     )
@@ -2684,10 +3317,317 @@ def test_rust_crate_hint_matches_crate_root_re_export() -> None:
 def test_rust_crate_hint_matches_only_rust_candidates() -> None:
     # A crate-name/candidate-path coincidence must never leak into a
     # non-Rust candidate.
-    crate_roots = {"gpui": "crates/gpui/src"}
+    crate_roots = {"gpui": ["crates/gpui/src"]}
     assert not resolver_mod._rust_crate_hint_matches(
         "gpui::Render", "crates/gpui/src/element.py", crate_roots
     )
+
+
+def test_rust_crate_hint_matches_multiple_roots_for_same_name() -> None:
+    # Round 23 Fix B (``.features/plans/round23/
+    # 09-subtypes-ambiguous-resolution-rate.md``): when two directories
+    # both convention-match the same crate name (the real
+    # ``crates/gpui`` plus zed's own
+    # ``tooling/lints/test_fixture/gpui`` synthetic fixture), a
+    # candidate under *either* registered root must match -- previously
+    # ``_rust_crate_roots_index``'s single-root-per-name dict silently
+    # dropped whichever root lost the last-write-wins race, so a
+    # candidate under the dropped root never matched at all, and (live
+    # measurement against zed showed) which root won was a genuine
+    # 50/50 coin flip per process hash seed.
+    crate_roots = {
+        "gpui": [
+            "crates/gpui/src",
+            "tooling/lints/test_fixture/gpui/src",
+        ]
+    }
+    assert resolver_mod._rust_crate_hint_matches(
+        "gpui::Render", "crates/gpui/src/element.rs", crate_roots
+    )
+    assert resolver_mod._rust_crate_hint_matches(
+        "gpui::Render",
+        "tooling/lints/test_fixture/gpui/src/lib.rs",
+        crate_roots,
+    )
+    assert not resolver_mod._rust_crate_hint_matches(
+        "gpui::Render", "crates/unrelated/src/lib.rs", crate_roots
+    )
+
+
+def test_rust_crate_roots_index_all_keeps_every_matching_root() -> None:
+    # Round 23 Fix B: ``_rust_crate_roots_index_all`` must retain every
+    # directory matching a given crate name, not just the last one
+    # encountered -- the collision-aware sibling of
+    # ``_rust_crate_roots_index``, which intentionally keeps its
+    # existing single-winner behavior (see that function's own
+    # docstring) since ``resolve_imports()``'s Rust ``use``-resolution
+    # path needs exactly one directory to resolve against.
+    paths = frozenset(
+        {
+            "crates/gpui/src/lib.rs",
+            "crates/gpui/src/element.rs",
+            "tooling/lints/test_fixture/gpui/src/lib.rs",
+            "crates/other/src/lib.rs",
+        }
+    )
+    roots = resolver_mod._rust_crate_roots_index_all(paths)
+    assert sorted(roots["gpui"]) == sorted(
+        [
+            "crates/gpui/src",
+            "tooling/lints/test_fixture/gpui/src",
+        ]
+    )
+    assert roots["other"] == ["crates/other/src"]
+
+
+def test_rust_crate_roots_index_all_deduplicates_same_directory() -> None:
+    # A crate with both ``lib.rs`` and a binary ``main.rs`` in the same
+    # ``src/`` directory must register that directory once, not twice.
+    paths = frozenset(
+        {
+            "crates/app/src/lib.rs",
+            "crates/app/src/main.rs",
+        }
+    )
+    roots = resolver_mod._rust_crate_roots_index_all(paths)
+    assert roots["app"] == ["crates/app/src"]
+
+
+def test_rust_crate_dir_finds_nearest_src_ancestor() -> None:
+    # Round 24 (``.features/plans/round24/
+    # 03-heritage-crate-decoy-tiebreak.md``): a file directly inside
+    # ``src/`` finds that ``src/``'s own parent as the crate dir.
+    assert (
+        resolver_mod._rust_crate_dir("crates/gpui/src/element.rs")
+        == "crates/gpui"
+    )
+    # A file nested several submodules deep inside ``src/`` still finds
+    # the *nearest* enclosing ``src/`` ancestor, not some outer one.
+    assert (
+        resolver_mod._rust_crate_dir("crates/gpui/src/elements/text.rs")
+        == "crates/gpui"
+    )
+    # The real zed shape: a decoy crate nested several directories deep.
+    assert (
+        resolver_mod._rust_crate_dir(
+            "tooling/lints/test_fixture/gpui/src/lib.rs"
+        )
+        == "tooling/lints/test_fixture/gpui"
+    )
+    # No ``src`` ancestor at all -- falls back to the file's own parent
+    # directory rather than raising.
+    assert resolver_mod._rust_crate_dir("a.rs") == ""
+    assert resolver_mod._rust_crate_dir("crates/app/lib.rs") == "crates/app"
+
+
+def test_looks_like_synthetic_crate_root() -> None:
+    # Round 24: a real crate under an ordinary workspace path is never
+    # flagged, regardless of how many ancestor segments it has.
+    assert not resolver_mod._looks_like_synthetic_crate_root("crates/gpui")
+    assert not resolver_mod._looks_like_synthetic_crate_root("gpui")
+    # An ancestor segment matching a known marker (anywhere above the
+    # crate's own leaf directory) is the tell.
+    assert resolver_mod._looks_like_synthetic_crate_root(
+        "tooling/lints/test_fixture/gpui"
+    )
+    assert resolver_mod._looks_like_synthetic_crate_root("vendor/gpui")
+    assert resolver_mod._looks_like_synthetic_crate_root("third_party/gpui")
+
+
+def test_looks_like_synthetic_crate_root_ignores_leaf_name() -> None:
+    # The core false-positive defense: a crate whose own *leaf*
+    # directory happens to be named like a marker (a real crate
+    # legitimately named "fixtures" or "mocks", not uncommon in the
+    # wild) must not be flagged just because of its own name -- only
+    # ancestor segments above it count.
+    assert not resolver_mod._looks_like_synthetic_crate_root("crates/fixtures")
+    assert not resolver_mod._looks_like_synthetic_crate_root("libs/mocks")
+    assert not resolver_mod._looks_like_synthetic_crate_root("vendor")
+
+
+def test_prefer_non_synthetic_crate_match_resolves_sole_survivor() -> None:
+    real = _fn("crates/gpui/src/element.rs", "Render", "Render")
+    decoy = _fn(
+        "tooling/lints/test_fixture/gpui/src/lib.rs", "Render", "Render"
+    )
+    hits: list[int] = [0]
+    result = resolver_mod._prefer_non_synthetic_crate_match(
+        [real, decoy], "crates/editor/src/editor.rs", hits
+    )
+    assert result is real
+    assert hits == [1]
+
+
+def test_prefer_non_synthetic_crate_match_stays_ambiguous() -> None:
+    # Both or neither candidate synthetic -> no unambiguous signal,
+    # must fall through to ``None`` (the caller's existing "ambiguous"
+    # behavior), not guess.
+    a = _fn("crates/gpui/src/lib.rs", "Render", "Render")
+    b = _fn("workspace2/gpui/src/lib.rs", "Render", "Render")
+    assert (
+        resolver_mod._prefer_non_synthetic_crate_match(
+            [a, b], "crates/panel/src/panel.rs"
+        )
+        is None
+    )
+    c = _fn("tooling/lints/test_fixture/gpui/src/lib.rs", "Render", "Render")
+    d = _fn("vendor/gpui/src/lib.rs", "Render", "Render")
+    assert (
+        resolver_mod._prefer_non_synthetic_crate_match(
+            [c, d], "crates/panel/src/panel.rs"
+        )
+        is None
+    )
+
+
+def test_prefer_non_synthetic_crate_match_resolves_3_candidates() -> None:
+    # Not hardcoded to the 2-candidate case -- exactly one non-synthetic
+    # survivor among 3+ still resolves.
+    real = _fn("crates/gpui/src/lib.rs", "Render", "Render")
+    decoy1 = _fn("vendor/gpui/src/lib.rs", "Render", "Render")
+    decoy2 = _fn("mocks/gpui/src/lib.rs", "Render", "Render")
+    result = resolver_mod._prefer_non_synthetic_crate_match(
+        [real, decoy1, decoy2], "crates/panel/src/panel.rs"
+    )
+    assert result is real
+
+
+def test_prefer_non_synthetic_crate_match_prefers_caller_crate() -> None:
+    # Round 24's guard against the tiebreak overriding a legitimate
+    # self-reference: when the caller's own file lives inside one of
+    # the matched candidates' crate roots, that candidate wins outright
+    # -- even though its own root looks synthetic -- and this must not
+    # count toward ``tiebreak_hits`` (a structural fact, not a guess).
+    real = _fn("crates/gpui/src/lib.rs", "Render", "Render")
+    decoy = _fn(
+        "tooling/lints/test_fixture/gpui/src/lib.rs", "Render", "Render"
+    )
+    hits: list[int] = [0]
+    result = resolver_mod._prefer_non_synthetic_crate_match(
+        [real, decoy],
+        "tooling/lints/test_fixture/gpui/src/internal.rs",
+        hits,
+    )
+    assert result is decoy
+    assert hits == [0]
+
+
+def test_prefer_non_synthetic_crate_root_resolves_sole_survivor() -> None:
+    # Round 25 (``.features/plans/round25/
+    # 02-deps-crate-decoy-tiebreak.md``): directory-level sibling of
+    # ``_prefer_non_synthetic_crate_match``, operating on plain
+    # crate-root directory strings (``_rust_crate_roots_index_all``'s
+    # own value shape) rather than ``Symbol`` candidates.
+    result = resolver_mod._prefer_non_synthetic_crate_root(
+        [
+            "crates/gpui/src",
+            "tooling/lints/test_fixture/gpui/src",
+        ],
+        "crates/editor/src/editor.rs",
+    )
+    assert result == "crates/gpui/src"
+
+
+def test_prefer_non_synthetic_crate_root_stays_ambiguous() -> None:
+    # Both or neither candidate synthetic -> no unambiguous signal,
+    # must fall through to ``None`` so the caller reports external
+    # rather than guessing -- mirrors ``_prefer_non_synthetic_crate_
+    # match``'s identical rule for heritage resolution.
+    assert (
+        resolver_mod._prefer_non_synthetic_crate_root(
+            ["crates/gpui/src", "workspace2/gpui/src"],
+            "crates/panel/src/panel.rs",
+        )
+        is None
+    )
+    assert (
+        resolver_mod._prefer_non_synthetic_crate_root(
+            [
+                "tooling/lints/test_fixture/gpui/src",
+                "vendor/gpui/src",
+            ],
+            "crates/panel/src/panel.rs",
+        )
+        is None
+    )
+
+
+def test_prefer_non_synthetic_crate_root_resolves_3_candidates() -> None:
+    # Not hardcoded to the 2-candidate case -- exactly one
+    # non-synthetic survivor among 3+ still resolves.
+    result = resolver_mod._prefer_non_synthetic_crate_root(
+        [
+            "crates/gpui/src",
+            "vendor/gpui/src",
+            "mocks/gpui/src",
+        ],
+        "crates/panel/src/panel.rs",
+    )
+    assert result == "crates/gpui/src"
+
+
+def test_prefer_non_synthetic_crate_root_prefers_importer_crate() -> None:
+    # Round 24's guard against the tiebreak overriding a legitimate
+    # self-reference, mirrored for import resolution: when the
+    # importing file's own path lives inside one of the matched
+    # candidate roots, that root wins outright -- even though it looks
+    # synthetic -- since a crate's own external name is in scope from
+    # inside itself.
+    result = resolver_mod._prefer_non_synthetic_crate_root(
+        [
+            "crates/gpui/src",
+            "tooling/lints/test_fixture/gpui/src",
+        ],
+        "tooling/lints/test_fixture/gpui/src/internal.rs",
+    )
+    assert result == "tooling/lints/test_fixture/gpui/src"
+
+
+def test_import_match_uses_receiver_as_rust_crate_hint_fallback() -> None:
+    """Round 23 Fix A (``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md``): a fully-qualified
+    ``impl gpui::Render for X`` heritage clause has ``name="Render"``,
+    ``receiver="gpui"``, and (by construction of this fixture) no
+    ``file_imports`` entry for either name -- the ordinary
+    ``hints``-building step in ``_import_match`` finds nothing to loop
+    over at all. Fix A's fallback tries ``call.receiver`` itself as a
+    bare crate-name hint once the ``hints`` loop comes up empty,
+    resolving via ``crate_roots`` directly. Isolated unit test, before
+    Fix B's multi-root collision handling is layered on -- exactly one
+    matching root here.
+    """
+    render_candidate = Symbol(
+        id="crates/gpui/src/element.rs::Render",
+        name="Render",
+        qualname="Render",
+        kind="trait",
+        path="crates/gpui/src/element.rs",
+        language="rust",
+    )
+    unrelated_candidate = Symbol(
+        id="crates/other/src/lib.rs::Render",
+        name="Render",
+        qualname="Render",
+        kind="trait",
+        path="crates/other/src/lib.rs",
+        language="rust",
+    )
+    call = RawCall(
+        caller_id=None,
+        path="crates/editor/src/editor.rs",
+        text="gpui::Render",
+        name="Render",
+        receiver="gpui",
+        line=1,
+    )
+    result = resolver_mod._import_match(
+        call,
+        [render_candidate, unrelated_candidate],
+        file_imports={},
+        raw_imports=None,
+        crate_roots={"gpui": ["crates/gpui/src"]},
+    )
+    assert result is render_candidate
 
 
 def test_pick_candidate_returns_none_when_language_filtered_empty() -> None:
@@ -3143,19 +4083,27 @@ def test_same_file_two_candidates_including_caller_unaffected() -> None:
     existing ``len(same_file) == 1`` check, so it structurally cannot
     fire here. Pinned explicitly since this is the case most likely to
     be miscoded if a future edit tries to "simplify" the fix into a
-    list-filter instead of the single-candidate identity check."""
+    list-filter instead of the single-candidate identity check.
+
+    Deliberately not named ``build`` (a round-23 noise-guard denylist
+    name, see ``_BUILDER_METHOD_NAMES``) — a receiver-qualified call
+    to a denylisted name is suppressed to the ``_NOISE`` sentinel
+    before ``_pick_candidate`` ever reaches the ambiguous fallback this
+    test is pinning, which is a different code path than what this
+    test exists to guard.
+    """
     caller = Symbol(
-        id="c.py::Widget.build",
-        name="build",
-        qualname="Widget.build",
+        id="c.py::Widget.render",
+        name="render",
+        qualname="Widget.render",
         kind="method",
         path="c.py",
         language="python",
     )
     other = Symbol(
-        id="c.py::build",
-        name="build",
-        qualname="build",
+        id="c.py::render",
+        name="render",
+        qualname="render",
         kind="function",
         path="c.py",
         language="python",
@@ -3168,8 +4116,8 @@ def test_same_file_two_candidates_including_caller_unaffected() -> None:
             RawCall(
                 caller_id=caller.id,
                 path="c.py",
-                text="thing.build",
-                name="build",
+                text="thing.render",
+                name="render",
                 receiver="thing",
                 line=3,
             )
@@ -3178,4 +4126,4 @@ def test_same_file_two_candidates_including_caller_unaffected() -> None:
     graph = resolve([fm])
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert not edges
-    assert graph.ambiguous == [(caller.id, "build", [caller.id, other.id])]
+    assert graph.ambiguous == [(caller.id, "render", [caller.id, other.id])]

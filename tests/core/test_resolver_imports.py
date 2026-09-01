@@ -12,10 +12,20 @@ and Java/Python's nested-source-root layouts) against what the real
 extractor actually produces, not just an assumed shape.
 """
 
+import json
 from pathlib import Path
 
 from dekko.core.model import FileMap, Import
-from dekko.core.resolver import find_cycles, resolve_imports
+from dekko.core.resolver import (
+    _merge_tsconfig_scope,
+    _nearest_ts_config_scope,
+    _resolve_ts_path_alias,
+    _strip_jsonc_comments,
+    _strip_trailing_commas,
+    _TsConfigAliasTable,
+    find_cycles,
+    resolve_imports,
+)
 from dekko.integrations import cli
 from dekko.render import mapfile
 
@@ -28,6 +38,15 @@ def _fm(path: str, language: str, imports: list[Import]) -> FileMap:
 
 def _imp(path: str, name: str, source: str) -> Import:
     return Import(path=path, name=name, source=source)
+
+
+def _write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+
+def _write_json(path: Path, data: dict) -> None:
+    _write(path, json.dumps(data))
 
 
 # ---------------------------------------------------------------------
@@ -266,6 +285,309 @@ def test_js_multiple_named_imports_collapse_to_one_external_label() -> None:
 
 
 # ---------------------------------------------------------------------
+# tsconfig.json/jsconfig.json path-alias resolution (round 25 finding 6,
+# .features/plans/round25/07-tsconfig-path-alias-resolution.md)
+
+
+def test_js_bare_alias_specifier_stays_external_when_root_omitted() -> None:
+    # Locks in "byte-identical for root=None" -- an `@/*`-shaped bare
+    # specifier that *would* resolve via a tsconfig alias table must
+    # still stay external when no root is passed at all, the same as
+    # every in-memory-FileMap caller saw before this feature existed.
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [_imp("src/index.ts", "Button", "@/components/Button/Button")],
+        ),
+        _fm("src/components/Button.tsx", "tsx", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
+    assert graph.external["src/index.ts"] == ["@/components/Button"]
+
+
+def test_strip_jsonc_comments_line_comment() -> None:
+    text = '{\n  "a": 1, // trailing line comment\n  "b": 2\n}\n'
+    stripped = _strip_jsonc_comments(text)
+    assert "//" not in stripped
+    assert json.loads(stripped) == {"a": 1, "b": 2}
+
+
+def test_strip_jsonc_comments_block_comment() -> None:
+    text = '{\n  /* a block\n     comment */\n  "a": 1\n}\n'
+    stripped = _strip_jsonc_comments(text)
+    assert json.loads(stripped) == {"a": 1}
+
+
+def test_strip_jsonc_comments_preserves_slashes_inside_string() -> None:
+    # The case a naive regex-based stripper would get wrong: a "//"
+    # occurring inside a JSON string *value* (a URL) must survive
+    # unstripped, not be mistaken for a comment start.
+    text = '{"homepage": "https://example.com//path"}'
+    stripped = _strip_jsonc_comments(text)
+    assert json.loads(stripped) == {"homepage": "https://example.com//path"}
+
+
+def test_strip_trailing_commas() -> None:
+    text = '{"a": 1, "b": [1, 2,], "c": {"d": 3,},}'
+    stripped = _strip_trailing_commas(text)
+    assert json.loads(stripped) == {"a": 1, "b": [1, 2], "c": {"d": 3}}
+
+
+def test_strip_trailing_commas_preserves_comma_shaped_string_value() -> None:
+    # A comma immediately followed by a closer inside a genuine string
+    # value must not be treated as a trailing comma -- the scanner
+    # stays string-boundary-aware through this pass too.
+    text = '{"weird": "a,}"}'
+    stripped = _strip_trailing_commas(text)
+    assert json.loads(stripped) == {"weird": "a,}"}
+
+
+def test_ts_config_end_to_end_wildcard_alias_resolves(
+    tmp_path: Path,
+) -> None:
+    _write_json(
+        tmp_path / "tsconfig.json",
+        {"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}}},
+    )
+    files = [
+        _fm(
+            "tools/build.ts",
+            "typescript",
+            [
+                _imp(
+                    "tools/build.ts",
+                    "Button",
+                    "@/components/Button/Button",
+                )
+            ],
+        ),
+        _fm("src/components/Button.tsx", "tsx", []),
+    ]
+    graph = resolve_imports(files, root=tmp_path)
+    assert graph.deps_out["tools/build.ts"] == ["src/components/Button.tsx"]
+
+
+def test_ts_config_non_wildcard_exact_alias_resolves(
+    tmp_path: Path,
+) -> None:
+    _write_json(
+        tmp_path / "tsconfig.json",
+        {
+            "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {"@config": ["src/config/index.ts"]},
+            }
+        },
+    )
+    files = [
+        _fm(
+            "src/main.ts",
+            "typescript",
+            [_imp("src/main.ts", "", "@config")],
+        ),
+        _fm("src/config/index.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files, root=tmp_path)
+    assert graph.deps_out["src/main.ts"] == ["src/config/index.ts"]
+
+
+def test_ts_config_wildcard_first_target_miss_second_target_wins(
+    tmp_path: Path,
+) -> None:
+    _write_json(
+        tmp_path / "tsconfig.json",
+        {
+            "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {
+                    "@core/*": ["packages/core/*", "packages/core-legacy/*"]
+                },
+            }
+        },
+    )
+    files = [
+        _fm(
+            "src/main.ts",
+            "typescript",
+            [_imp("src/main.ts", "logger", "@core/logger/logger")],
+        ),
+        # No packages/core/logger.ts -- only the second target resolves.
+        _fm("packages/core-legacy/logger.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files, root=tmp_path)
+    assert graph.deps_out["src/main.ts"] == ["packages/core-legacy/logger.ts"]
+
+
+def test_ts_config_extends_child_paths_replaces_parent_paths(
+    tmp_path: Path,
+) -> None:
+    _write_json(
+        tmp_path / "tsconfig.base.json",
+        {
+            "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {"@old/*": ["legacy/*"]},
+            }
+        },
+    )
+    _write_json(
+        tmp_path / "tsconfig.json",
+        {
+            "extends": "./tsconfig.base.json",
+            "compilerOptions": {"paths": {"@/*": ["src/*"]}},
+        },
+    )
+    files = [
+        _fm(
+            "index.ts",
+            "typescript",
+            [_imp("index.ts", "helper", "@/helper/helper")],
+        ),
+        _fm("src/helper.ts", "typescript", []),
+        # A real file under the parent's alias target must NOT resolve
+        # -- the child's own `paths` entirely replaces the parent's,
+        # it isn't merged per-alias.
+        _fm("legacy/helper.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files, root=tmp_path)
+    assert graph.deps_out["index.ts"] == ["src/helper.ts"]
+
+
+def test_ts_config_extends_inherits_base_url_when_child_has_none(
+    tmp_path: Path,
+) -> None:
+    _write_json(
+        tmp_path / "tsconfig.base.json",
+        {
+            "compilerOptions": {
+                "baseUrl": "src",
+                "paths": {"@/*": ["*"]},
+            }
+        },
+    )
+    _write_json(
+        tmp_path / "tsconfig.json",
+        {"extends": "./tsconfig.base.json"},
+    )
+    files = [
+        _fm(
+            "index.ts",
+            "typescript",
+            [_imp("index.ts", "helper", "@/helper/helper")],
+        ),
+        _fm("src/helper.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files, root=tmp_path)
+    assert graph.deps_out["index.ts"] == ["src/helper.ts"]
+
+
+def test_ts_config_extends_cycle_guard_degrades_to_no_paths(
+    tmp_path: Path,
+) -> None:
+    _write_json(
+        tmp_path / "tsconfig.a.json",
+        {
+            "extends": "./tsconfig.b.json",
+            "compilerOptions": {"paths": {"@a/*": ["a/*"]}},
+        },
+    )
+    _write_json(
+        tmp_path / "tsconfig.b.json",
+        {
+            "extends": "./tsconfig.a.json",
+            "compilerOptions": {"paths": {"@b/*": ["b/*"]}},
+        },
+    )
+    # Doesn't hang or raise -- each config's own directly-declared
+    # paths still resolve fine, only the (cyclic) inherited half is
+    # dropped.
+    _base_dir_a, paths_a = _merge_tsconfig_scope(
+        tmp_path, "tsconfig.a.json", 0, frozenset()
+    )
+    assert paths_a == (("@a/*", ("a/*",)),)
+    _base_dir_b, paths_b = _merge_tsconfig_scope(
+        tmp_path, "tsconfig.b.json", 0, frozenset()
+    )
+    assert paths_b == (("@b/*", ("b/*",)),)
+
+
+def test_ts_config_extends_package_shaped_target_skipped_silently(
+    tmp_path: Path,
+) -> None:
+    _write_json(
+        tmp_path / "tsconfig.json",
+        {
+            "extends": "@tsconfig/node18/tsconfig.json",
+            "compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["src/*"]}},
+        },
+    )
+    files = [
+        _fm(
+            "index.ts",
+            "typescript",
+            [_imp("index.ts", "helper", "@/helper/helper")],
+        ),
+        _fm("src/helper.ts", "typescript", []),
+    ]
+    # Must not raise despite the unresolvable node_modules-shaped
+    # extends target -- it's simply skipped, contributing nothing.
+    graph = resolve_imports(files, root=tmp_path)
+    assert graph.deps_out["index.ts"] == ["src/helper.ts"]
+
+
+def test_ts_config_nearest_scope_wins_over_root_scope(
+    tmp_path: Path,
+) -> None:
+    _write_json(
+        tmp_path / "tsconfig.json",
+        {"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["shared/*"]}}},
+    )
+    _write_json(
+        tmp_path / "packages" / "foo" / "tsconfig.json",
+        {
+            "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {"@/*": ["src/*"]},
+            }
+        },
+    )
+    files = [
+        _fm(
+            "packages/foo/index.ts",
+            "typescript",
+            [
+                _imp(
+                    "packages/foo/index.ts",
+                    "thing",
+                    "@/thing/thing",
+                )
+            ],
+        ),
+        _fm("packages/foo/src/thing.ts", "typescript", []),
+        # The root config's own target must not win instead.
+        _fm("shared/thing.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files, root=tmp_path)
+    assert graph.deps_out["packages/foo/index.ts"] == [
+        "packages/foo/src/thing.ts"
+    ]
+
+
+def test_nearest_ts_config_scope_returns_none_with_no_configs() -> None:
+    assert _nearest_ts_config_scope("src/index.ts", {}) is None
+
+
+def test_resolve_ts_path_alias_no_pattern_match_returns_none() -> None:
+    scope = _TsConfigAliasTable(base_dir="", paths=(("@/*", ("src/*",)),))
+    assert (
+        _resolve_ts_path_alias("lodash", scope, frozenset({"src/x.ts"}))
+        is None
+    )
+
+
+# ---------------------------------------------------------------------
 # Rust
 
 
@@ -470,6 +792,86 @@ def test_rust_cross_crate_unknown_bare_name_stays_external() -> None:
         "serde::Deserialize"
         in (graph.external["crates/workspace/src/pane.rs"])
     )
+
+
+def test_rust_crate_decoy_tiebreak_resolves_real_crate_over_fixture() -> None:
+    # Round 25 (``.features/plans/round25/
+    # 02-deps-crate-decoy-tiebreak.md``): the zed.md finding this round
+    # fixes -- a real crate (``crates/gpui``) and an unrelated
+    # same-named test-fixture stand-in
+    # (``tooling/lints/test_fixture/gpui``) both convention-match
+    # crate name "gpui", exactly the shape round 24's heritage
+    # crate-decoy tiebreak
+    # (test_rust_crate_decoy_tiebreak_resolves_real_crate_over_fixture
+    # in test_resolver_heritage.py) already fixed for heritage
+    # resolution but ``resolve_imports``'s own bare-crate-name lookup
+    # never got the equivalent fix. A ``use gpui::...`` import from a
+    # file outside either crate's own tree must resolve to the real
+    # crate, not the decoy, and the decoy's own internal
+    # self-reference (legitimate: a crate's own external name is in
+    # scope from inside itself) must resolve to *its own* root, not
+    # the real crate's.
+    files = [
+        _fm("crates/gpui/src/lib.rs", "rust", []),
+        _fm("tooling/lints/test_fixture/gpui/src/lib.rs", "rust", []),
+        _fm(
+            "tooling/lints/test_fixture/gpui/src/internal.rs",
+            "rust",
+            [
+                _imp(
+                    "tooling/lints/test_fixture/gpui/src/internal.rs",
+                    "Render",
+                    "gpui::Render",
+                )
+            ],
+        ),
+        _fm(
+            "crates/editor/src/editor.rs",
+            "rust",
+            [
+                _imp(
+                    "crates/editor/src/editor.rs",
+                    "Render",
+                    "gpui::Render",
+                )
+            ],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["crates/editor/src/editor.rs"] == [
+        "crates/gpui/src/lib.rs"
+    ]
+    assert graph.deps_out[
+        "tooling/lints/test_fixture/gpui/src/internal.rs"
+    ] == ["tooling/lints/test_fixture/gpui/src/lib.rs"]
+
+
+def test_rust_crate_hint_import_genuine_collision_stays_external() -> None:
+    # Import-resolution companion to test_rust_crate_hint_matches_
+    # genuine_collision_stays_ambiguous in test_resolver_heritage.py:
+    # a genuine 2-way crate-name collision where *neither* candidate's
+    # path looks synthetic (both are plausible real crates, no
+    # test_fixture/vendor-shaped ancestor on either side) must stay
+    # unresolved -- reported external, not guessed -- matching this
+    # module's "skip rather than guess" discipline.
+    files = [
+        _fm("crates/gpui/src/lib.rs", "rust", []),
+        _fm("workspace2/gpui/src/lib.rs", "rust", []),
+        _fm(
+            "crates/panel/src/panel.rs",
+            "rust",
+            [
+                _imp(
+                    "crates/panel/src/panel.rs",
+                    "Render",
+                    "gpui::Render",
+                )
+            ],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
+    assert "gpui::Render" in graph.external["crates/panel/src/panel.rs"]
 
 
 # ---------------------------------------------------------------------
@@ -708,6 +1110,38 @@ def test_end_to_end_js_relative_import(make_mapped_repo: RepoFactory) -> None:
             ),
             "src/index.ts": (
                 'import { Button } from "./components/Button";\n'
+                'import React from "react";\n'
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.module_deps_out["src/index.ts"] == [
+        "src/components/Button.tsx"
+    ]
+    assert index.module_external["src/index.ts"] == ["react"]
+
+
+def test_end_to_end_js_tsconfig_alias_import(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Exercises the real `dekko map` CLI path -- repo_ops.run_map now
+    # threads its already-bound `root` through resolve()/
+    # resolve_imports(), so a `@/*`-style alias import resolves the
+    # same way it would in an actual `tsconfig.json`-driven repo, not
+    # just via a synthetic FileMap fixture calling resolve_imports()
+    # directly.
+    root = make_mapped_repo(
+        {
+            "tsconfig.json": (
+                '{"compilerOptions": {"baseUrl": ".", '
+                '"paths": {"@/*": ["src/*"]}}}'
+            ),
+            "src/components/Button.tsx": (
+                "export function Button() { return null; }\n"
+            ),
+            "src/index.ts": (
+                'import { Button } from "@/components/Button";\n'
                 'import React from "react";\n'
             ),
         }

@@ -245,6 +245,52 @@ def test_get_callers_tool(make_mapped_repo: RepoFactory) -> None:
     assert "g() -> int" in result["content"][0]["text"]
 
 
+@pytest.mark.parametrize(
+    ("tool", "value"),
+    [
+        ("query_symbol", "f"),
+        ("get_callers", "f"),
+        ("get_callees", "g"),
+    ],
+)
+def test_symbol_alias_matches_symbol_argument(
+    make_mapped_repo: RepoFactory, tool: str, value: str
+) -> None:
+    # Round-24: two independent evaluators guessed `name` instead of
+    # `symbol` on these tools since `find_usages` itself uses `name`.
+    # `name` must resolve to an identical result as `symbol`.
+    ctx = _ctx(make_mapped_repo(SRC))
+    by_symbol = _call(ctx, tool, {"symbol": value})
+    by_name = _call(ctx, tool, {"name": value})
+    assert by_name == by_symbol
+
+
+def test_symbol_argument_takes_precedence_over_name(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # If both are given, `symbol` (the tool's real, documented
+    # argument) wins unconditionally over the `name` fallback.
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(
+        ctx, "query_symbol", {"symbol": "f", "name": "wrong_target"}
+    )
+    assert result["isError"] is False
+    assert "f() -> int" in result["content"][0]["text"]
+
+
+def test_symbol_alias_not_applied_to_unlisted_tools(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # get_context_pack's real argument is `target`, not `symbol`, and
+    # it isn't in `_SYMBOL_ALIAS_TOOLS` — passing `name` must still
+    # raise the existing missing-argument error, not be silently
+    # reinterpreted.
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(ctx, "get_context_pack", {"name": "f"})
+    assert result["isError"] is True
+    assert "target" in result["content"][0]["text"]
+
+
 def test_find_type_usages_tool(make_mapped_repo: RepoFactory) -> None:
     files = {
         "app.py": (
@@ -305,6 +351,36 @@ def test_get_subtypes_tool(make_mapped_repo: RepoFactory) -> None:
     result = _call(ctx, "get_subtypes", {"symbol": "Animal"})
     assert result["isError"] is False
     assert "class Dog" in result["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "value"),
+    [
+        ("get_supertypes", "Dog"),
+        ("get_subtypes", "Animal"),
+    ],
+)
+def test_symbol_alias_matches_symbol_for_heritage_tools(
+    make_mapped_repo: RepoFactory, tool: str, value: str
+) -> None:
+    ctx = _ctx(make_mapped_repo(PY_HERITAGE))
+    by_symbol = _call(ctx, tool, {"symbol": value})
+    by_name = _call(ctx, tool, {"name": value})
+    assert by_name == by_symbol
+
+
+def test_symbol_alias_matches_symbol_for_add_note(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    by_symbol = _call(
+        _ctx(root), "add_note", {"symbol": "f", "text": "note one"}
+    )
+    by_name = _call(_ctx(root), "add_note", {"name": "f", "text": "note two"})
+    assert by_symbol["isError"] is False
+    assert by_name["isError"] is False
+    assert "noted" in by_symbol["content"][0]["text"]
+    assert "noted" in by_name["content"][0]["text"]
 
 
 def test_get_supertypes_transitive_passthrough(
@@ -447,6 +523,33 @@ def test_get_subtypes_tool_schema_shape() -> None:
         "root",
     }
     assert props["relation"]["enum"] == list(query.HERITAGE_RELATIONS)
+
+
+def test_symbol_alias_tools_schema_unchanged() -> None:
+    # The `name` alias is resolved at the dispatch chokepoint, not in
+    # `inputSchema` — `required` must still read exactly `["symbol"]`
+    # for every tool in `_SYMBOL_ALIAS_TOOLS`, and the shared
+    # `_SYMBOL_PROP` description should document the alias.
+    alias_tools = {
+        "query_symbol",
+        "get_callers",
+        "get_callees",
+        "get_supertypes",
+        "get_subtypes",
+        "add_note",
+    }
+    for tool in server.TOOLS:
+        if tool["name"] not in alias_tools:
+            continue
+        schema = tool["inputSchema"]
+        assert schema["required"] == ["symbol"] or schema["required"] == [
+            "symbol",
+            "text",
+        ]
+        assert (
+            "'name' is also accepted as an alias"
+            in schema["properties"]["symbol"]["description"]
+        )
 
 
 def test_get_context_pack_tool(make_mapped_repo: RepoFactory) -> None:
@@ -631,6 +734,35 @@ def test_find_unused_handler_kinds_unexposed(
     assert "g" in out
 
 
+SUSPECT_SRC = {
+    "foo.py": (
+        "class Foo:\n"
+        "    def has(self) -> bool:\n"
+        "        return True\n\n"
+        "    def check(self) -> bool:\n"
+        "        return self.has()\n"
+    ),
+    "a.py": "def has() -> bool:\n    return True\n",
+    "b.py": "def has() -> bool:\n    return False\n",
+    "c.py": "def caller() -> bool:\n    return has()\n",
+}
+
+
+def test_find_unused_handler_suspect_forwards_to_unused_run(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # round-23 design doc 21-unused-ambiguous-crossref.md: tool_find_
+    # unused gains a `suspect` arg forwarded to unused.run, alongside
+    # (but not fixing) the pre-existing --kinds omission above.
+    ctx = _ctx(make_mapped_repo(SUSPECT_SRC))
+    default_out = server.tool_find_unused(ctx, {})
+    assert "suspects:" not in default_out
+
+    suspect_out = server.tool_find_unused(ctx, {"suspect": True})
+    assert "suspects:" in suspect_out
+    assert "dekko ambiguous --name has" in suspect_out
+
+
 def test_stats_handler(make_mapped_repo: RepoFactory) -> None:
     ctx = _ctx(make_mapped_repo(SRC))
     text = server.tool_stats(ctx, {"top": 3})
@@ -706,6 +838,45 @@ def test_map_status_and_refresh(make_mapped_repo: RepoFactory) -> None:
     assert "fresh" in _call(ctx, "map_status", {})["content"][0]["text"]
 
 
+def test_refresh_map_discloses_self_staleness(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # round-23 §12: if this process's own pre-regen freshness check
+    # shows reason == "version" (this same process is the stale
+    # party), refresh_map's in-process regen re-extracts with this
+    # process's own stale extractor code and re-stamps "fresh" —
+    # self-consistent but wrong. The response must disclose that a
+    # restart, not another refresh_map call, is the real fix.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["spec_hash"] = "deadbeef"
+    map_path.write_text(json.dumps(doc))
+
+    ctx = _ctx(root)
+    refreshed = _call(ctx, "refresh_map", {})
+    assert refreshed["isError"] is False
+    text = refreshed["content"][0]["text"]
+    assert "restart the dekko MCP server process" in text
+    assert "stale extractor code" in text
+
+
+def test_refresh_map_no_caveat_when_not_self_stale(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Regression guard: the common case (reason == "content", or
+    # already fresh) must not gain the restart caveat — only a
+    # pre-regen reason == "version" verdict should trigger it.
+    root = make_mapped_repo(SRC)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\nY = 1\n")
+
+    ctx = _ctx(root)
+    refreshed = _call(ctx, "refresh_map", {})
+    assert refreshed["isError"] is False
+    text = refreshed["content"][0]["text"]
+    assert "restart the dekko MCP server process" not in text
+
+
 def test_map_status_reports_unsupported_coverage(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -735,7 +906,11 @@ def test_map_status_reports_version_stale(
     text = _call(ctx, "map_status", {})["content"][0]["text"]
     assert "stale (version)" in text
     assert "built by dekko 0.0.0-stale, running" in text
-    assert "call refresh_map" in text
+    # round-23 §12: `refresh_map` regens in-process using this same
+    # process's (possibly stale) loaded extractor code, so it cannot
+    # fix a version-stale process — only a restart can.
+    assert "restart the dekko MCP server process" in text
+    assert "call refresh_map" not in text
 
 
 def test_map_status_reports_spec_hash_stale_distinctly(
@@ -761,7 +936,8 @@ def test_map_status_reports_spec_hash_stale_distinctly(
     assert "tool_version:" not in text
     assert "deadbeef" in text
     assert "same version string" in text
-    assert "call refresh_map" in text
+    assert "restart the dekko MCP server process" in text
+    assert "call refresh_map" not in text
 
 
 def test_tool_call_reports_too_new_doc_version_clearly(

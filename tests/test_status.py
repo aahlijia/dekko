@@ -65,6 +65,58 @@ def test_status_stale_on_version_bump(
     json_doc = json.loads(capsys.readouterr().out)
     assert json_doc["status"] == "stale"
     assert json_doc["reason"] == "version"
+    # Round-23 §11: the disambiguation fields must be exposed once
+    # reason == "version" so a script can tell "genuine version bump"
+    # from "long-lived process drifted on spec_hash alone" apart.
+    assert json_doc["version_stale"] is True
+    assert json_doc["spec_stale"] is False
+    assert json_doc["built_version"] == "0.0.0-stale"
+
+
+def test_status_stale_on_spec_hash_only(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # round-09 §2.3, ported to the CLI surface in round-23 §11: a
+    # long-lived process can have an identical tool_version on both
+    # sides while spec_hash alone drifted — the old CLI message
+    # ignored spec_stale entirely and printed the self-contradictory
+    # "built by dekko X, running X" with no explanation.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["spec_hash"] = "deadbeef"
+    map_path.write_text(json.dumps(doc))
+
+    assert cli.main(["status", "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "stale (spec_hash)" in out
+    assert "tool_version:" not in out
+    assert "deadbeef" in out
+    assert "long-lived process" in out
+    assert "run `dekko map`" in out
+
+    assert cli.main(["status", "--root", str(root), "--json"]) == 1
+    json_doc = json.loads(capsys.readouterr().out)
+    assert json_doc["reason"] == "version"
+    assert json_doc["version_stale"] is False
+    assert json_doc["spec_stale"] is True
+    assert json_doc["built_spec_hash"] == "deadbeef"
+    assert json_doc["running_spec_hash"] != "deadbeef"
+
+
+def test_status_json_common_case_has_no_version_fields(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression guard: the new keys must stay gated behind
+    # reason == "version" — the far more common content/fresh cases
+    # keep their existing JSON shape unchanged.
+    root = make_mapped_repo(SRC)
+    (root / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["status", "--root", str(root), "--json"]) == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["reason"] == "content"
+    assert "version_stale" not in doc
+    assert "spec_stale" not in doc
 
 
 def test_read_command_auto_regenerates(

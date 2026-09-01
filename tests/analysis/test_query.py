@@ -193,6 +193,25 @@ def test_close_names_raised_cutoff_excludes_marginal_fuzzy_match(
     assert query._close_names("trix", ["trib"]) == ["trib"]
 
 
+def test_close_names_excludes_verbatim_self_match() -> None:
+    # Round 23 §16: a needle that's a verbatim (case-sensitive) match
+    # for a real candidate name offers nothing new as a "closest
+    # match" suggestion -- it's just echoing the input back. A
+    # case-differing match (still a real, different string) must stay
+    # eligible, as must a genuinely different prefix match. Only
+    # opt-in via exclude_verbatim=True: callers whose needle is a
+    # *derived* substring (e.g. _suggest_symbols's bare qualname) rely
+    # on a verbatim match being the useful "right name" suggestion.
+    assert query._close_names(
+        "Project",
+        ["Project", "ProjectConfig", "project"],
+        exclude_verbatim=True,
+    ) == ["project", "ProjectConfig"]
+    assert query._close_names(
+        "Project", ["Project", "ProjectConfig", "project"]
+    ) == ["Project", "project", "ProjectConfig"]
+
+
 def test_qualname_near_miss_requires_segment_boundary() -> None:
     # ``_is_qualname_near_miss`` requires a preceding ``.`` before the
     # requested qualname, not a bare substring match — a qualname that
@@ -239,6 +258,15 @@ AMBIGUOUS_CALL = {
 }
 
 
+def test_ambiguous_counts_helper_returns_incoming_and_outgoing(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SYMBOL_CARD_BOTH_DIRECTIONS_AMBIGUOUS)
+    index = mapfile.load_map(root)
+    mid = next(s for s in index.symbols_by_qualname["mid"] if s.path == "a.py")
+    assert query.ambiguous_counts(index, mid) == (2, 1)
+
+
 def test_symbol_card_shows_ambiguous_in_count(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
@@ -251,8 +279,10 @@ def test_symbol_card_shows_ambiguous_in_count(
     code = cli.main(["query", "symbol", "a.py:target", "--root", str(root)])
     assert code == 0
     out = capsys.readouterr().out
-    assert "fan-in: 0, fan-out: 0" in out
-    assert "(+1 ambiguous call sites not counted)" in out
+    assert (
+        "fan-in: 0 (+1 additional call site(s) named 'target' "
+        "resolved ambiguously — not counted), fan-out: 0" in out
+    )
 
 
 def test_symbol_card_json_ambiguous_in(
@@ -266,6 +296,50 @@ def test_symbol_card_json_ambiguous_in(
     doc = json.loads(capsys.readouterr().out)
     assert doc["fan_in"] == 0
     assert doc["ambiguous_in"] == 1
+
+
+SYMBOL_CARD_BOTH_DIRECTIONS_AMBIGUOUS = {
+    # a.py:mid's incoming side collides on the bare name "mid" (b.py
+    # defines another), and its outgoing side calls a bare "shared"
+    # that also collides (shared1.py/shared2.py) — two independent
+    # ambiguous call sites named "mid" (entry1, entry2) vs. one
+    # ambiguous outgoing call, so ambig_in (2) != ambig_out (1) and a
+    # swapped fan-in/fan-out label would be caught by asserting exact
+    # values, not just presence of a number (round23 issue 08).
+    "a.py": "def mid() -> int:\n    return shared()\n",
+    "b.py": "def mid() -> int:\n    return 1\n",
+    "shared1.py": "def shared() -> int:\n    return 1\n",
+    "shared2.py": "def shared() -> int:\n    return 2\n",
+    "caller1.py": "def entry1() -> int:\n    return mid()\n",
+    "caller2.py": "def entry2() -> int:\n    return mid()\n",
+}
+
+
+def test_symbol_card_labels_ambig_in_and_ambig_out_correctly(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SYMBOL_CARD_BOTH_DIRECTIONS_AMBIGUOUS)
+    code = cli.main(["query", "symbol", "a.py:mid", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert (
+        "fan-in: 0 (+2 additional call site(s) named 'mid' resolved "
+        "ambiguously — not counted), fan-out: 0 (+1 outgoing "
+        "call(s) resolved ambiguously — not counted)" in out
+    )
+
+
+def test_symbol_card_json_carries_both_ambiguous_directions(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SYMBOL_CARD_BOTH_DIRECTIONS_AMBIGUOUS)
+    code = cli.main(
+        ["query", "symbol", "a.py:mid", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["ambiguous_in"] == 2
+    assert doc["ambiguous_out"] == 1
 
 
 def test_get_callers_notes_ambiguous_call_sites(
@@ -457,6 +531,43 @@ def test_symbol_card_no_zero_fan_note_for_function(
     out = capsys.readouterr().out
     assert "fan-in: 0, fan-out: 0" in out
     assert "not evidence the type is unused" not in out
+    # C.1: fan-in of 0 has nothing to disambiguate, so the
+    # distinct-callers-vs-call-sites note must not print either.
+    assert "note: fan-in counts distinct callers" not in out
+
+
+def test_symbol_card_fan_in_note_points_at_sites_and_sanity(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # C.1: a symbol with fan_in > 0 must disclose that fan-in counts
+    # distinct callers (not call sites) and point at the two other
+    # views of "how often is this used" — 'query callers --sites' and
+    # 'sanity' — so a reader doesn't mistake one number's axis for
+    # another's (round-24 claude-code.md friction #3).
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(["query", "symbol", "a.py:helper", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "fan-in: 1" in out
+    assert "note: fan-in counts distinct callers" in out
+    assert "query callers a.py::helper --sites" in out
+    assert "sanity a.py::helper" in out
+
+
+def test_symbol_card_json_omits_fan_in_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # C.1: the note is a text-mode-only disclosure — JSON consumers
+    # already get fan_in as a bare integer and can request the other
+    # views directly, so no new key is added to the JSON doc.
+    root = make_mapped_repo(TWO_FILES)
+    code = cli.main(
+        ["query", "symbol", "a.py:helper", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["fan_in"] == 1
+    assert "fan_note" not in doc
 
 
 def test_symbol_card_shows_referenced_by_count(
@@ -663,6 +774,73 @@ def test_get_callers_json_sites_shows_reference_line(
     assert len(referenced) == 1
     assert referenced[0]["path"] == "wire.ts"
     assert referenced[0]["sites"] == [5]
+
+
+def test_get_callers_json_module_level_carries_lines(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 23 §10: `--json --sites` previously dropped module-level
+    # pseudo-callers to a flat list of bare paths, even though the
+    # per-site line (already recorded in edge_lines) is exactly what
+    # text output shows unconditionally. module_level entries must now
+    # be structured dicts carrying the line when one was recorded.
+    root = make_mapped_repo(TS_MODULE_LEVEL_ANONYMOUS_CALLBACK)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.ts:buddyStateDir",
+            "--root",
+            str(root),
+            "--sites",
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["module_level"] == [{"path": "index.ts", "lines": [4]}]
+
+
+def test_get_callers_json_module_level_lines_unconditional_on_sites(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Matches _module_rows's text-side convention: module-level lines
+    # are always attempted regardless of --sites, so JSON must agree
+    # rather than gating module_level on the flag the way per-symbol
+    # "sites" entries do.
+    root = make_mapped_repo(TS_MODULE_LEVEL_ANONYMOUS_CALLBACK)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.ts:buddyStateDir",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["module_level"] == [{"path": "index.ts", "lines": [4]}]
+
+
+def test_module_level_entries_pre_v3_map_omits_lines() -> None:
+    # A map written before doc version 3 has no edge_lines at all —
+    # _module_level_entries must degrade to a bare {"path": ...} entry
+    # with no "lines" key, matching _module_rows's bare-form fallback.
+    sym = Symbol(
+        id="target.py::target",
+        name="target",
+        qualname="target",
+        kind="function",
+        path="target.py",
+        language="python",
+        start_line=1,
+        end_line=2,
+    )
+    index = mapfile.MapIndex(root_label="root")
+    entries = query._module_level_entries(index, "callers", sym, ["caller.py"])
+    assert entries == [{"path": "caller.py"}]
 
 
 def test_not_found(
@@ -1113,3 +1291,269 @@ def test_json_flag_has_no_effect_on_not_found_error_output(
     assert "no symbol matches" in err
     with pytest.raises(json.JSONDecodeError):
         json.loads(err)
+
+
+# --- plan 26: --sites footer/JSON self-reports both totals -----------
+
+MULTI_SITE_CALLERS = {
+    "target.py": ("def target(x: int) -> int:\n    return x + 1\n"),
+    "caller.py": (
+        "def caller_a() -> int:\n"
+        "    a = target(1)\n"
+        "    b = target(2)\n"
+        "    return a + b\n"
+        "\n"
+        "\n"
+        "def caller_b() -> int:\n"
+        "    return target(3)\n"
+    ),
+}
+
+
+def test_sites_footer_shows_related_total_untruncated(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # 2 distinct callers (caller_a, caller_b), 3 call sites (caller_a
+    # calls twice) — the load-bearing divergence this design closes.
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.py:target",
+            "--root",
+            str(root),
+            "--sites",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    footer = lines[-1]
+    assert "· 2 callers" in footer
+    assert "omitted" not in footer
+
+
+def test_sites_footer_truncated_shows_both_totals(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.py:target",
+            "--root",
+            str(root),
+            "--sites",
+            "--limit",
+            "2",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    lines = out.strip().splitlines()
+    footer = lines[-1]
+    assert "· 2 callers" in footer
+    assert "1 of 3 sites omitted" in footer
+
+
+def test_sites_footer_callees_uses_callees_label(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callees",
+            "caller.py:caller_a",
+            "--root",
+            str(root),
+            "--sites",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    footer = out.strip().splitlines()[-1]
+    assert "callees" in footer
+
+
+def test_plain_footer_unchanged_by_related_total(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression guard: plain mode (sites=False) footer is byte-for-
+    # byte unchanged — no related-count clause, no "sites" row noun.
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        ["query", "callers", "target.py:target", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    footer = out.strip().splitlines()[-1]
+    assert "callers" not in footer
+    assert "callees" not in footer
+    assert "sites" not in footer
+
+
+def test_json_sites_total_present_and_independent_of_truncation(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.py:target",
+            "--root",
+            str(root),
+            "--sites",
+            "--json",
+            "--limit",
+            "1",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["meta"]["sites_total"] == 3
+    assert doc["meta"]["total"] == 2
+    assert doc["meta"]["returned"] == 1
+
+
+def test_json_sites_meta_related_total_populated(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 25 finding #7: --sites --json's meta.related_total/
+    # related_label stayed 0/"" (the Meter defaults) because the JSON
+    # path never forwarded them to _fit_entries, unlike the text-mode
+    # footer, which already got them right.
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.py:target",
+            "--root",
+            str(root),
+            "--sites",
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["meta"]["related_total"] == 2
+    assert doc["meta"]["related_label"] == "callers"
+
+
+def test_json_without_sites_has_no_sites_total_key(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(MULTI_SITE_CALLERS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "target.py:target",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "sites_total" not in doc["meta"]
+
+
+def test_json_sites_total_fallback_counts_missing_lines_as_one(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # A map with no recorded edge_lines (pre-v3 map semantics, or an
+    # edge dekko genuinely couldn't line-locate) must still count each
+    # entry/module toward sites_total as 1, not 0 -- otherwise JSON's
+    # sites_total and text's site-row TOTAL could quietly diverge on
+    # this specific edge, the same bug class as the off-by-one plans.
+    target = Symbol(
+        id="target.py::target",
+        name="target",
+        qualname="target",
+        kind="function",
+        path="target.py",
+        language="python",
+        start_line=1,
+        end_line=2,
+    )
+    caller = Symbol(
+        id="caller.py::caller",
+        name="caller",
+        qualname="caller",
+        kind="function",
+        path="caller.py",
+        language="python",
+        start_line=1,
+        end_line=2,
+    )
+    index = mapfile.MapIndex(root_label="root")
+    query._print_relation_json(
+        index,
+        "callers",
+        target,
+        [caller],
+        ["module.py"],
+        True,
+        None,
+        10,
+        None,
+        0,
+        0,
+    )
+    doc = json.loads(capsys.readouterr().out)
+    # 1 (caller, no recorded edge_lines) + 1 (module, no recorded
+    # edge_lines) == 2, not 0.
+    assert doc["meta"]["sites_total"] == 2
+
+
+# --- Round 26: TS type_alias_declaration -> real, resolvable Symbol --
+
+TS_TYPE_ALIAS_ONLY = {
+    "types.ts": (
+        'export type PermissionMode = "ask" | "allow" | "deny";\n'
+        "\n"
+        "export function checkMode(mode: PermissionMode): boolean {\n"
+        '  return mode === "allow";\n'
+        "}\n"
+    ),
+}
+
+
+def test_query_symbol_resolves_type_alias(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Before round 26 this name had no Symbol at all, so `query
+    # symbol` fell through to "not found" with fuzzy suggestions --
+    # type_alias_declaration now matches @classdef in _TS_DEFINITIONS
+    # (languages.py) same as interface/enum/class.
+    root = make_mapped_repo(TS_TYPE_ALIAS_ONLY)
+    code = cli.main(["query", "symbol", "PermissionMode", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "types.ts:1" in out
+    assert "type_alias" in out
+
+
+def test_query_symbol_json_reports_type_alias_kind(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_TYPE_ALIAS_ONLY)
+    code = cli.main(
+        [
+            "query",
+            "symbol",
+            "PermissionMode",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["kind"] == "type_alias"
+    assert doc["id"] == "types.ts::PermissionMode"

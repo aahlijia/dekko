@@ -13,6 +13,7 @@ import sys
 from importlib.metadata import version as _pkg_version
 from importlib.resources import files as _pkg_files
 from pathlib import Path
+from typing import Any
 
 from dekko import repo_ops
 from dekko.analysis import affected
@@ -32,6 +33,7 @@ from dekko.render import mapfile
 from dekko.storage import notes as notes_mod
 from dekko.integrations import orient as orient_mod
 from dekko.analysis import outline as outline_mod
+from dekko.core import languages
 from dekko.analysis import query
 from dekko.analysis import relevance
 from dekko.analysis import sanity as sanity_mod
@@ -76,6 +78,44 @@ SUBCOMMANDS = (
     "export",
     "deps",
 )
+
+# Languages 'query throws'/'query catches' extract data for -- derived
+# from the language registry (not hardcoded) so a future language
+# gaining throw_query/catch_query support automatically becomes a
+# valid --lang value with no CLI change needed.
+_THROWS_CATCHES_LANGS = sorted(
+    name
+    for name in languages.SPEC_BY_NAME
+    if languages.exception_handling_supported(name)
+)
+
+
+class _DeprecatedScopeAction(argparse.Action):
+    """``--scope``: a deprecated, hidden alias for ``--granularity``.
+
+    Sets the shared ``scope`` destination exactly like the primary
+    flag and prints a one-line stderr notice at parse time. A parse-
+    time action (rather than a ``sys.argv`` scan in ``run_export``) is
+    used because ``main`` threads an explicit ``argv`` list through
+    the parser rather than always reading ``sys.argv`` (see its
+    ``--no-daemon`` handling), so a raw ``sys.argv`` check would miss
+    both direct ``main(argv)`` callers and tests.
+    """
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        setattr(namespace, self.dest, values)
+        print(
+            "dekko: --scope is deprecated, use --granularity "
+            "instead (still works, will be removed in a future "
+            "release)",
+            file=sys.stderr,
+        )
 
 
 def build_legacy_parser() -> argparse.ArgumentParser:
@@ -305,6 +345,36 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         dest="command", required=True, metavar="COMMAND"
     )
 
+    # Argument-parsing shape rubric (round 24, 10-cli-verb-placement-
+    # consistency.md) -- pick deliberately when adding a new subcommand
+    # rather than copying whichever neighbor you scrolled past first:
+    #
+    #   A. Real `add_subparsers` verbs (note/hooks/daemon): use when
+    #      the verbs genuinely take different arguments -- a single
+    #      positional couldn't express "add TARGET TEXT" vs. "rm
+    #      TARGET [INDEX]" without inventing a mini-language.
+    #   B. Single bare positional, no verb (outline/context/sanity/
+    #      trace/diff/affected/workset): use when the command has
+    #      exactly one target concept and exactly one behavior --
+    #      there's nothing to dispatch on, so there's no verb to place.
+    #   C. `choices=`-constrained positional dispatching to N read-only
+    #      views sharing one large flag surface (query only): use only
+    #      when N is large enough (query: 14 actions) that N real
+    #      subparsers would mean copying the shared flag block N times
+    #      for zero behavior change. Not a pattern to reach for by
+    #      default -- it costs discoverability (the dispatch value
+    #      isn't a real subparser, so it won't tab-complete like one).
+    #   D. Flag-selected optional views, no positional (deps/ambiguous/
+    #      unused/stats): use when a command offers several mutually
+    #      exclusive optional views with a sensible zero-flag default.
+    #      If exactly one of those views is "look up this one target"
+    #      (as `deps --file` is), give it a positional alias too --
+    #      see `deps`'s `file_positional` for the pattern.
+    #
+    # This is documentation, not enforcement -- no linter checks "did
+    # you pick the right shape." Full audit: .features/plans/round24/
+    # 10-cli-verb-placement-consistency.md.
+
     p_map = sub.add_parser("map", help="generate MAP.md and map.json")
     p_map.add_argument(
         "dir",
@@ -420,7 +490,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=query.DEFAULT_MIN_SHARED,
         metavar="N",
         help="for 'peers': minimum shared callees to count as a peer "
-        f"(default: {query.DEFAULT_MIN_SHARED})",
+        f"(default: {query.DEFAULT_MIN_SHARED}) — small/sparse repos "
+        "often need to lower this to 1 to find any peers at all",
     )
     p_query.add_argument(
         "--list",
@@ -429,6 +500,15 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="for 'env': every distinct env-var key read anywhere in "
         "the repo, ranked by read-site count, instead of looking up "
         "one TARGET key — TARGET may be omitted with this flag",
+    )
+    p_query.add_argument(
+        "--lang",
+        choices=_THROWS_CATCHES_LANGS,
+        default=None,
+        help="for 'catches'/'throws': restrict results to one language "
+        "(e.g. 'java') — cuts cross-language noise on a multi-language "
+        "repo where a small amount of incidental/vendored code in "
+        "another language would otherwise pollute the match list",
     )
     _add_read_options(p_query)
     p_query.set_defaults(func=run_query)
@@ -480,6 +560,15 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="inline the target's source body and hop-1 call-site "
         "lines (counts against --budget)",
+    )
+    p_ctx.add_argument(
+        "--all-imports",
+        action="store_true",
+        help="include every import in the target's file, skipping "
+        "the relevance filter that normally drops imports whose "
+        "name isn't referenced in the target's or its neighbors' "
+        "signatures (has no effect in file mode, which never "
+        "filters imports)",
     )
     p_ctx.add_argument(
         "--notes",
@@ -775,13 +864,61 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="cross-check a callers/uses result against a targeted "
         "grep sweep before trusting a low/zero count",
     )
-    p_sanity.add_argument("target")
+    p_sanity.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="symbol target (callers mode) or bare external base "
+        "identifier (--usages mode); not required when --unused is "
+        "given",
+    )
     p_sanity.add_argument(
         "--usages",
         action="store_true",
         help="check 'uses <target>' instead of 'callers <target>' — "
         "target is the bare external base identifier (e.g. 'get' for "
         "requests.get)",
+    )
+    p_sanity.add_argument(
+        "--all",
+        action="store_true",
+        help="sweep every in-repo symbol with nonzero fan-in instead "
+        "of one target (callers mode only; incompatible with --usages/"
+        "--unused)",
+    )
+    p_sanity.add_argument(
+        "--jobs",
+        type=int,
+        default=sanity_mod._ALL_JOBS_DEFAULT,
+        metavar="N",
+        help="parallel grep sweeps for --all (1 = sequential, 0 = all "
+        f"cores; ignored without --all) (default: "
+        f"{sanity_mod._ALL_JOBS_DEFAULT})",
+    )
+    p_sanity.add_argument(
+        "--max-names",
+        type=int,
+        default=sanity_mod._MAX_SWEEP_NAMES,
+        metavar="N",
+        help="safety cap on unique bare names swept under --all "
+        f"(default: {sanity_mod._MAX_SWEEP_NAMES})",
+    )
+    p_sanity.add_argument(
+        "--fail-on-unexplained",
+        action="store_true",
+        help="with --all, exit nonzero if the sweep's aggregate "
+        "unexplained-cause count is nonzero (for CI use)",
+    )
+    p_sanity.add_argument(
+        "--unused",
+        metavar="NAME",
+        default=None,
+        help="check whether a symbol 'dekko unused' flagged dead has "
+        "grep-visible reference evidence outside its own definition/"
+        "import/comment — NAME resolves the same way callers mode's "
+        "target does (bare name, qualname, path:qualname, or "
+        "#N-disambiguated). Mutually exclusive with --usages. Always "
+        "advisory (exits 0)",
     )
     p_sanity.add_argument(
         "--include-tests",
@@ -804,6 +941,14 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         metavar="TOKENS",
         help="approximate token budget, applied independently to each "
         "report bucket",
+    )
+    p_sanity.add_argument(
+        "--group-by-file",
+        action="store_true",
+        help="roll up the grep-only bucket by file (count and cause "
+        "breakdown per file) instead of listing individual match "
+        "rows — surfaces clustering that a flat, --limit-truncated "
+        "list can hide (single-target, text mode only)",
     )
     p_sanity.add_argument(
         "--root",
@@ -1018,6 +1163,16 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="max text result lines (default: 50)",
     )
     p_unused.add_argument(
+        "--top",
+        dest="limit",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="alias for --limit, kept for cross-command habit "
+        "(stats/ambiguous/deps all use --top for a ranked-list size; "
+        "unused has no separate ranked-summary view, so --top and "
+        "--limit mean the same thing here)",
+    )
+    p_unused.add_argument(
         "--budget",
         type=int,
         default=None,
@@ -1028,11 +1183,35 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "--kinds",
         choices=unused.KINDS_CHOICES,
         default="callables",
-        help="which symbol kinds to check for dead code: 'callables' "
-        "(functions/methods, today's default and existing behavior), "
-        "'types' (classes/interfaces/enums/structs/records/traits, "
-        "using heritage + type-usage evidence in addition to call "
-        "evidence), or 'all' (both, unioned)",
+        help="which evidence to use for dead-code detection: "
+        "'callables' (today's default and existing behavior -- every "
+        "symbol kind is scanned, using only call/reference evidence), "
+        "'types' (scan restricted to classes/interfaces/enums/structs/"
+        "records/traits, using heritage + type-usage evidence in "
+        "addition to call evidence), or 'all' (every symbol kind "
+        "scanned with every evidence source unioned in)",
+    )
+    p_unused.add_argument(
+        "--suspect",
+        action="store_true",
+        help="also flag excluded symbols whose bare name is a proven "
+        "collider in `dekko ambiguous` (2+ repo-defined candidates "
+        "elsewhere in the repo) -- a lead that their inbound fan-in "
+        "may be misattributed, not a verdict. Off by default; adds a "
+        "'suspects' section (text) or key (JSON) without changing the "
+        "existing unused-list output",
+    )
+    p_unused.add_argument(
+        "--dispatch",
+        action="store_true",
+        help="also flag unused-flagged symbols whose own id is an "
+        "unresolved ambiguous-call candidate elsewhere in the repo -- a "
+        "lead that this symbol is reached via this.method()/self.method() "
+        "polymorphic dispatch the resolver can't attribute, not a verdict "
+        "that it's dead. Off by default; adds a 'dispatch_candidates' "
+        "section (text) or key (JSON) without changing the existing "
+        "unused-list output. An always-on advisory count is printed "
+        "regardless of this flag whenever such candidates exist",
     )
     _add_read_options(p_unused)
     p_unused.set_defaults(func=run_unused)
@@ -1094,6 +1273,15 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "deps",
         help="module-level dependency graph: file-to-file resolved "
         "imports, plus circular-import detection",
+    )
+    p_deps.add_argument(
+        "file_positional",
+        nargs="?",
+        default=None,
+        metavar="FILE",
+        help="alias for --file: one file's resolved imports/importers/"
+        "external sources instead of the default repo-wide summary "
+        "(mutually exclusive with --file/--cycles/--export)",
     )
     p_deps.add_argument(
         "--file",
@@ -1310,12 +1498,21 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         help="output graph format",
     )
     p_export.add_argument(
-        "--scope",
+        "--granularity",
+        dest="scope",
         choices=export.SCOPES,
         default="symbol",
         help="node granularity for the whole rendered graph -- symbol "
         "or file (default: symbol); does not scope the graph to a "
         "single symbol's neighborhood, use 'dekko context' for that",
+    )
+    p_export.add_argument(
+        "--scope",
+        dest="scope",
+        choices=export.SCOPES,
+        default=argparse.SUPPRESS,
+        action=_DeprecatedScopeAction,
+        help=argparse.SUPPRESS,  # deprecated alias for --granularity
     )
     p_export.add_argument(
         "--max-nodes",
@@ -1574,6 +1771,7 @@ def run_query(args: argparse.Namespace) -> int:
         min_shared=args.min_shared,
         depth=args.depth,
         env_list=args.env_list,
+        lang=args.lang,
     )
 
 
@@ -1609,6 +1807,7 @@ def run_context(args: argparse.Namespace) -> int:
         with_source=args.with_source,
         notes=args.notes,
         task=task,
+        all_imports=args.all_imports,
     )
 
 
@@ -1728,6 +1927,8 @@ def run_unused(args: argparse.Namespace) -> int:
         limit=args.limit,
         budget=args.budget,
         kinds=args.kinds,
+        suspect=args.suspect,
+        dispatch=args.dispatch,
     )
 
 
@@ -1760,16 +1961,23 @@ def run_ambiguous(args: argparse.Namespace) -> int:
 
 def run_deps(args: argparse.Namespace) -> int:
     """Handle ``dekko deps``."""
+    if args.file_positional is not None and args.file is not None:
+        print(
+            "dekko: give FILE or --file, not both",
+            file=sys.stderr,
+        )
+        return deps.EXIT_ERROR
+    file_arg = args.file if args.file is not None else args.file_positional
     given = sum(
         (
-            args.file is not None,
+            file_arg is not None,
             bool(args.cycles),
             args.export_fmt is not None,
         )
     )
     if given > 1:
         print(
-            "dekko: give one of --file, --cycles, --export, not several",
+            "dekko: give one of FILE, --cycles, --export, not several",
             file=sys.stderr,
         )
         return deps.EXIT_ERROR
@@ -1779,7 +1987,7 @@ def run_deps(args: argparse.Namespace) -> int:
     out = Path(args.output) if args.output else None
     return deps.run(
         index,
-        file=args.file,
+        file=file_arg,
         cycles=args.cycles,
         top=args.top,
         limit=args.limit,
@@ -2065,6 +2273,19 @@ def run_status(args: argparse.Namespace) -> int:
             "unsupported": unsupported,
             "too_large": too_large,
         }
+        if fresh.reason == "version":
+            # Round-23 §11: distinguish a genuine tool_version bump
+            # (reinstall fixes it) from a spec_hash-only drift on a
+            # long-lived process (only a restart fixes it) — gated
+            # behind reason == "version" so the common-case JSON shape
+            # (content/missing/fresh) is unchanged for existing
+            # consumers.
+            doc["version_stale"] = fresh.version_stale
+            doc["spec_stale"] = fresh.spec_stale
+            doc["built_version"] = fresh.built_version
+            doc["running_version"] = fresh.running_version
+            doc["built_spec_hash"] = fresh.built_spec_hash
+            doc["running_spec_hash"] = fresh.running_spec_hash
         print(json.dumps(doc, indent=2))
         return 0 if fresh.fresh else 1
 
@@ -2099,7 +2320,7 @@ def _print_stale_status(
     """
     print("dekko: map is stale")
     if fresh.reason == "version":
-        print(f"  {_version_stale_note(provenance)}")
+        print(f"  {_version_stale_note(fresh)}")
         return
     note = mapfile.format_unsupported(provenance)
     if note:
@@ -2115,11 +2336,20 @@ def _print_stale_status(
             print(f"  ... and {len(items) - 10} more {title}")
 
 
-def _version_stale_note(provenance: dict | None) -> str:
-    """One-line explanation for a ``reason="version"`` freshness verdict."""
-    built = (provenance or {}).get("tool_version", "unknown")
-    running = _pkg_version("dekko")
-    return f"built by dekko {built}, running {running} — run `dekko map`"
+def _version_stale_note(fresh: mapfile.Freshness) -> str:
+    """One-line explanation for a ``reason="version"`` freshness verdict.
+
+    Round-23 §11: ``dekko status``/``dekko doctor`` used to build this
+    string straight from raw ``provenance``/``_pkg_version`` values,
+    which only ever named a ``tool_version`` mismatch — a long-lived
+    process stale on ``spec_hash`` alone (identical ``tool_version`` on
+    both sides) read as a self-contradictory "built by dekko X,
+    running X" with no explanation. This now shares the same
+    signal-naming logic the MCP ``map_status`` tool already used
+    (``mapfile.describe_version_stale``), so both surfaces name the
+    same differentiator the same way.
+    """
+    return f"{mapfile.describe_version_stale(fresh)} — run `dekko map`"
 
 
 def run_doctor(args: argparse.Namespace) -> int:
@@ -2149,20 +2379,79 @@ def run_sanity(args: argparse.Namespace) -> int:
     inclusion default rather than the generic ``--no-tests`` every
     other read command uses — see ``sanity``'s module docstring for
     why the default needed to differ here).
+
+    ``--unused NAME`` selects a query mode the same way ``--usages``
+    does, so the two are mutually exclusive; ``NAME`` stands in for
+    the positional ``target`` in that mode, which is why ``target``
+    itself is optional at the parser level (``nargs="?"``) but exactly
+    one of ``target``/``--all``/``--unused`` must supply the name (or
+    select the sweep) to resolve.
+
+    ``--all`` selects a fourth, sweep mode (``sanity_mod.run_all``)
+    that dispenses with a single target entirely — it's validated
+    first and dispatched separately, since it's callers-mode only and
+    mutually exclusive with both ``--usages`` and ``--unused`` (see
+    ``run_all``'s own docstring / the design doc's Scope section).
     """
+    if args.all:
+        if args.usages:
+            print(
+                "dekko: --all doesn't support --usages mode; see the "
+                "design doc's Scope section",
+                file=sys.stderr,
+            )
+            return 2
+        if args.unused:
+            print(
+                "dekko: --all doesn't support --unused mode; see the "
+                "design doc's Scope section",
+                file=sys.stderr,
+            )
+            return 2
+        if args.target:
+            print("dekko: give a target or --all, not both", file=sys.stderr)
+            return 2
+        root = Path(args.root).resolve()
+        index, code = repo_ops.load_or_regen(root, args.no_regen)
+        if index is None:
+            return code
+        return sanity_mod.run_all(
+            index,
+            root,
+            include_tests=args.include_tests,
+            jobs=args.jobs,
+            max_names=args.max_names,
+            fail_on_unexplained=args.fail_on_unexplained,
+            limit=args.limit,
+            budget=args.budget,
+            as_json=args.as_json,
+        )
+
+    if args.usages and args.unused:
+        print("dekko: give --usages or --unused, not both", file=sys.stderr)
+        return 2
+    target = args.unused if args.unused else args.target
+    if target is None:
+        print(
+            "dekko: sanity requires a target (or --all, or --unused NAME)",
+            file=sys.stderr,
+        )
+        return 2
     root = Path(args.root).resolve()
     index, code = repo_ops.load_or_regen(root, args.no_regen)
     if index is None:
         return code
     return sanity_mod.run(
         index,
-        args.target,
+        target,
         root,
         usages=args.usages,
+        unused=bool(args.unused),
         include_tests=args.include_tests,
         limit=args.limit,
         budget=args.budget,
         as_json=args.as_json,
+        group_by_file=args.group_by_file,
     )
 
 
@@ -2209,6 +2498,28 @@ def _legacy_main(args_list: list[str]) -> int:
     return repo_ops.run_map(args)
 
 
+def _jobs_flag_explicit(args_list: list[str]) -> bool:
+    """Whether the raw CLI args explicitly named ``--jobs``.
+
+    argparse can't distinguish "the user passed --jobs 1" from "the
+    user passed nothing and got argparse's own default of 1" once
+    parsing is done, so this inspects the pre-parse argument list
+    directly. Used to gate ``daemon.try_daemon``'s round-25
+    cold-rev-cache ``--jobs 0`` override (see that function's
+    ``jobs_explicit`` parameter): the override must only kick in when
+    the sequential value came from the default, never when the caller
+    chose it on purpose (e.g. a memory-constrained CI environment).
+
+    Args:
+        args_list: The raw CLI argument list (``--no-daemon`` already
+            stripped), as passed to argparse.
+
+    Returns:
+        ``True`` if any ``--jobs``/``--jobs=N`` token is present.
+    """
+    return any(a == "--jobs" or a.startswith("--jobs=") for a in args_list)
+
+
 def _report_daemon_request_abandoned(
     exc: "daemon_mod.DaemonRequestAbandonedError",
 ) -> int:
@@ -2225,16 +2536,30 @@ def _report_daemon_request_abandoned(
     Args:
         exc: The abandoned-request exception; its message names the
             underlying cause (timeout, disconnect, malformed reply).
+            Round-25: when its ``jobs`` attribute is ``1``, the
+            abandoned request ran sequentially -- the message names
+            ``--jobs 0`` as the actual lever likely to avoid a repeat
+            timeout, rather than only apologizing.
 
     Returns:
         ``daemon_mod.EXIT_DAEMON_ABANDONED``.
     """
+    hint = ""
+    if getattr(exc, "jobs", None) == 1:
+        hint = (
+            " This request ran with --jobs 1 (sequential); a "
+            "cold-rev-cache resolve on a repo this size is "
+            "dramatically faster with --jobs 0 (all cores) -- retry "
+            "with --no-daemon --jobs 0, or pass --jobs 0 through the "
+            "daemon, rather than simply retrying the same command."
+        )
     print(
-        f"dekko: a daemon-routed request did not respond in time ({exc}). "
-        "The daemon may still be processing it in the background -- "
-        "re-running the same command here would duplicate that work "
-        "rather than speed it up. Retry with --no-daemon to force a "
-        "fresh local run, or retry normally once the daemon is done.",
+        f"dekko: a daemon-routed request did not respond in time "
+        f"({exc}).{hint} The daemon may still be processing it in the "
+        "background -- re-running the same command here would "
+        "duplicate that work rather than speed it up. Retry with "
+        "--no-daemon to force a fresh local run, or retry normally "
+        "once the daemon is done.",
         file=sys.stderr,
     )
     return daemon_mod.EXIT_DAEMON_ABANDONED
@@ -2259,7 +2584,9 @@ def main(argv: list[str] | None = None) -> int:
         args = build_subcommand_parser().parse_args(args_list)
         if not no_daemon:
             try:
-                routed = daemon_mod.try_daemon(args)
+                routed = daemon_mod.try_daemon(
+                    args, jobs_explicit=_jobs_flag_explicit(args_list)
+                )
             except daemon_mod.DaemonRequestAbandonedError as exc:
                 return _report_daemon_request_abandoned(exc)
             if routed is not None:

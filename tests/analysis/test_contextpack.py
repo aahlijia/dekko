@@ -50,6 +50,69 @@ def test_hops2_grows_pack(make_mapped_repo: RepoFactory) -> None:
     assert {e.hop for e in pack2.entries} == {1, 2}
 
 
+# Round 26: a hop-1 caller of the target also calls an unrelated
+# third function for its own reasons. Before the direction-lock fix,
+# _neighbors() expanded *both* calls_in and calls_out from every
+# frontier node at hop >= 2, so `side_effect` (a callee of `caller`,
+# with no relationship to `target`) leaked in mislabeled as a hop-2
+# "callee" of `target`.
+CALLER_SIDE_CONTAMINATION = {
+    "chain.py": (
+        "def target() -> int:\n"
+        "    return 1\n"
+        "\n"
+        "\n"
+        "def caller() -> int:\n"
+        "    side_effect()\n"
+        "    return target()\n"
+        "\n"
+        "\n"
+        "def side_effect() -> int:\n"
+        "    return 2\n"
+    )
+}
+
+# Symmetric case: a hop-1 callee of the target has an unrelated extra
+# caller. Before the fix, that extra caller leaked in mislabeled as a
+# hop-2 "caller" of `target`.
+CALLEE_SIDE_CONTAMINATION = {
+    "chain.py": (
+        "def target() -> int:\n"
+        "    return helper()\n"
+        "\n"
+        "\n"
+        "def helper() -> int:\n"
+        "    return 1\n"
+        "\n"
+        "\n"
+        "def other_caller() -> int:\n"
+        "    return helper()\n"
+    )
+}
+
+
+def test_hop2_excludes_hop1_callers_unrelated_callees(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CALLER_SIDE_CONTAMINATION)
+    index, target = _resolved(root, "target")
+    pack = contextpack.build_pack(index, target, hops=2)
+    names = {e.sym.qualname for e in pack.entries}
+    assert "caller" in names
+    assert "side_effect" not in names
+
+
+def test_hop2_excludes_hop1_callees_unrelated_callers(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CALLEE_SIDE_CONTAMINATION)
+    index, target = _resolved(root, "target")
+    pack = contextpack.build_pack(index, target, hops=2)
+    names = {e.sym.qualname for e in pack.entries}
+    assert "helper" in names
+    assert "other_caller" not in names
+
+
 ANON_CALLER = {
     "a.py": "def helper() -> int:\n    return 1\n",
     "b.py": "from a import helper\n\nhelper()\n",
@@ -280,7 +343,63 @@ def test_build_pack_import_filter_shrinks_output(
     text = contextpack.render_text(pack)
     assert "Path  (from pathlib.Path)" in text
     assert "os  (from os)" not in text
-    assert "+20 more imports (irrelevant to this pack)" in text
+    assert "+20 more imports" in text
+    assert "rerun with --all-imports to include them" in text
+
+
+def test_build_pack_all_imports_skips_relevance_filter(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # C.2: --all-imports opts out of _relevant_imports filtering
+    # entirely, so every import in the target's file survives and
+    # imports_dropped reads 0.
+    root = make_mapped_repo(MANY_IMPORTS)
+    index, helper = _resolved(root, "helper")
+    all_imports = index.imports_by_path["app.py"]
+
+    pack = contextpack.build_pack(index, helper, hops=1, all_imports=True)
+
+    assert len(pack.imports) == len(all_imports)
+    assert pack.imports_dropped == 0
+    assert {imp.name for imp in pack.imports} >= {"Path", "os"}
+
+
+def test_build_pack_default_still_filters_imports(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # C.2: default behavior (all_imports omitted) must be unchanged.
+    root = make_mapped_repo(MANY_IMPORTS)
+    index, helper = _resolved(root, "helper")
+    pack = contextpack.build_pack(index, helper, hops=1)
+    kept = {imp.name for imp in pack.imports}
+    assert kept == {"Path"}
+    assert pack.imports_dropped == 20
+
+
+def test_cli_context_all_imports_includes_dropped_import(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # C.2: end-to-end, dekko context TARGET --all-imports includes an
+    # import that plain dekko context TARGET drops.
+    root = make_mapped_repo(MANY_IMPORTS)
+    code = cli.main(["context", "app.py:helper", "--root", str(root)])
+    assert code == 0
+    default_out = capsys.readouterr().out
+    assert "os  (from os)" not in default_out
+
+    code = cli.main(
+        [
+            "context",
+            "app.py:helper",
+            "--root",
+            str(root),
+            "--all-imports",
+        ]
+    )
+    assert code == 0
+    all_out = capsys.readouterr().out
+    assert "os  (from os)" in all_out
+    assert "more imports" not in all_out
 
 
 JS_MULTI_NAME_IMPORT = {
@@ -314,6 +433,22 @@ def test_render_text_strips_js_named_import_suffix(
     assert "(from ./engine)" in text
     assert "(from ./engine/generateBones)" not in text
     assert "(from ./engine/generatePersonality)" not in text
+
+
+JS_MULTI_NAME_IMPORT = {
+    "server/index.ts": (
+        "import { generateBones, generatePersonality } "
+        'from "./engine";\n\n'
+        "export function ensureCompanion(): void {\n"
+        "  generateBones();\n"
+        "  generatePersonality();\n"
+        "}\n"
+    ),
+    "server/engine.ts": (
+        "export function generateBones(): void {}\n\n"
+        "export function generatePersonality(): void {}\n"
+    ),
+}
 
 
 def test_trim_to_budget_drops_imports_before_source(
@@ -388,3 +523,85 @@ def test_run_applies_default_pack_budget(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["meta"]["budget"] == contextpack.DEFAULT_PACK_BUDGET
+
+
+# round23 issue 07: get_context_pack silently dropped the "N
+# ambiguous, not counted" disclosure that query callers/callees and
+# the CLI both show — a.py:target's fan-in looks exhaustive (no
+# calls_in edge) even though c.py's call to the bare name "target"
+# exists but resolved ambiguously against a.py/b.py's same-named
+# definitions.
+AMBIGUOUS_CALL = {
+    "a.py": "def target() -> int:\n    return 1\n",
+    "b.py": "def target() -> int:\n    return 2\n",
+    "c.py": "def caller() -> int:\n    return target()\n",
+}
+
+
+def test_build_pack_carries_ambiguous_in_count(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    index, target = _resolved(root, "target")
+    pack = contextpack.build_pack(index, target, hops=1)
+    assert pack.ambig_in == 1
+    assert pack.ambig_out == 0
+
+
+def test_render_text_notes_ambiguous_in(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    index, target = _resolved(root, "target")
+    pack = contextpack.build_pack(index, target, hops=1)
+    text = contextpack.render_text(pack)
+    assert (
+        "note: 1 additional call site(s) named 'target' resolved "
+        "ambiguously — not counted here" in text
+    )
+
+
+def test_render_text_notes_ambiguous_out(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    index, caller = _resolved(root, "caller")
+    pack = contextpack.build_pack(index, caller, hops=1)
+    text = contextpack.render_text(pack)
+    assert (
+        "note: 1 outgoing call(s) from this symbol resolved "
+        "ambiguously (name matched 2+ candidates) — not counted here" in text
+    )
+
+
+def test_render_text_no_ambiguous_note_when_zero(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN3)
+    index, mid = _resolved(root, "mid")
+    pack = contextpack.build_pack(index, mid, hops=1)
+    assert pack.ambig_in == 0
+    assert pack.ambig_out == 0
+    assert "resolved ambiguously" not in contextpack.render_text(pack)
+
+
+def test_context_pack_json_carries_ambiguous_in(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    code = cli.main(["context", "a.py:target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["ambiguous_in"] == 1
+    assert "ambiguous_out" not in doc
+
+
+def test_context_pack_json_no_ambiguous_key_when_zero(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CHAIN3)
+    code = cli.main(["context", "mid", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "ambiguous_in" not in doc
+    assert "ambiguous_out" not in doc

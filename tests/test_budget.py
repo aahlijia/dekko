@@ -81,4 +81,6 @@ def test_as_dict_shape() -> None:
         "truncated_by": "budget",
         "signals": 0,
         "tokens_per_signal": None,
+        "related_total": 0,
+        "related_label": "",
     }

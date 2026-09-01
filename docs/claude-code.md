@@ -62,11 +62,20 @@ runs the same `query callers <target>` dekko would answer with (or
 across the repo, and diffs the two hit sets into matches/dekko-only/
 grep-only buckets — every grep-only hit is labeled with a likely
 cause drawn from `dekko-verify`'s own blind-spot list (a cross-package/
-qualified call, an unparsed-language file, a test-only call site, or a
-short/generic target name), never a guess presented as certain. Always
-exits `0`; a nonempty grep-only bucket is a finding to relay, not an
-error — see [cli.md](cli.md#sanity-checking-a-lowzero-call-graph-result)
-for the full bucket/cause breakdown and every flag.
+qualified call, an unparsed-language file, a likely unrelated
+external-library method sharing the target's bare name, a test-only
+call site, or a short/generic target name), never a guess presented as
+certain. Always exits `0`; a nonempty grep-only bucket is a finding to
+relay, not an error — see
+[cli.md](cli.md#sanity-checking-a-lowzero-call-graph-result) for the
+full bucket/cause breakdown and every flag.
+
+`dekko sanity --all` (CLI only, no `/sanity`-equivalent slash-command
+flag) runs the same callers/grep cross-check across every fan-in
+symbol in the repo instead of one human-picked target — a repo-wide
+sweep for catching a classification regression or a systemic
+grep-vs-dekko disagreement, not a per-symbol spot check. See
+[cli.md](cli.md#dekko-sanity---all--sweeping-every-symbol-instead-of-one-target).
 
 ## A persistent usage policy in CLAUDE.md (opt-in)
 
@@ -104,7 +113,15 @@ dekko hooks uninstall                      # remove all dekko hooks
 ```
 
 - **`session-start`** — a steering preamble plus a budget-capped `lean`
-  map, so the first turn already has a navigation map.
+  map, so the first turn already has a navigation map. The map targets
+  a 2,000-token budget but can render up to its path-only floor (the
+  narrowest possible per-file listing) when a repo needs more than
+  that just to list every file. On repos so large that even the floor
+  would cost more than ~20,000 tokens, the hook drops the map body
+  entirely and injects a disclosure note instead, pointing at `dekko
+  lean --budget N` or `dekko summary` for a map at a budget you choose
+  — a hard ceiling on what an automatic, zero-choice hook can cost,
+  independent of how big the repo is.
 - **`prompt-submit`** — for the new prompt, a short pointer to the most
   task-relevant files not already read, so the agent doesn't `grep` blind.
 - **`pre-read`** — a non-blocking advisory to `outline` a large file

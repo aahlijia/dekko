@@ -20,6 +20,7 @@ dekko query subtypes Serializable --relation implements  # filter to one relatio
 dekko query throws load_config       # what load_config's own body raises (one level, not transitive)
 dekko query throws load_config --transitive --depth 3  # + everything its callees raise, depth-capped
 dekko query catches ConfigError      # every catch clause that would handle ConfigError
+dekko query catches ConfigError --lang java  # ...scoped to one language, cuts cross-language noise
 dekko query env DATABASE_URL         # every statically-known read site for this env var
 dekko query env --list               # every distinct env var read anywhere, ranked by read-site count
 dekko query cohesion src/app.py      # intra-file connected-components (weak signal, not clustering)
@@ -34,15 +35,18 @@ dekko diff                           # symbols changed since the map's commit (e
 dekko unused                         # symbols nothing calls (dead-code leads)
 dekko unused --kinds types           # unused types only (heritage + type-usage aware)
 dekko unused --kinds all             # callables + types, unioned
+dekko unused --suspect               # + flag excluded symbols whose name is a proven collider
+dekko unused --dispatch              # + list flagged symbols that are unresolved dispatch candidates
 dekko ambiguous                      # resolver-trust report: where resolution was ambiguous
 dekko deps                           # module-level dependency graph: edge/file counts, cycle count
-dekko deps --file src/app.py         # one file's resolved imports/importers/external sources
+dekko deps src/app.py                # one file's resolved imports/importers/external sources
 dekko deps --cycles                  # every detected circular-import cluster
 dekko export --format html           # interactive single-file browser
 dekko status                         # is the map still fresh? (exit 0/1)
 dekko doctor                         # diagnose install/environment issues (PATH shadowing, hooks, MCP, ...)
 dekko sanity resolve                 # cross-check `callers resolve` against a targeted grep sweep
 dekko sanity Path --usages           # cross-check `uses Path` instead of `callers`
+dekko sanity --all                   # repo-wide sweep: every fan-in symbol, not just one target
 dekko daemon start                   # warm-cache background process (see below)
 ```
 
@@ -101,7 +105,8 @@ count, and each row lists the shared callee names so it's clear *why*
 two symbols are peers without a second lookup. A symbol with zero
 callees has no peers by construction (a clean empty result, not an
 error); a symbol with fewer callees than `--min-shared` gets a hint to
-lower the threshold.
+lower the threshold. Small/sparse repos often need `--min-shared 1`
+to find any peers at all under the default threshold of 2.
 
 `query supertypes`/`subtypes` cover declared heritage — `extends`/
 `implements` for Python, JavaScript, TypeScript, and Java; `impl`
@@ -134,7 +139,18 @@ hiding. Rust's `impl` heritage resolves the `Type` side by same-file
 name lookup (an `impl` block's own file, not cross-file) — an `impl`
 block for a type defined in a different file, or a same-named type
 appearing twice in one file (two `mod` blocks), produces no heritage
-edge rather than a guess.
+edge rather than a guess. When a Rust trait/type name collides across
+two same-named crates in the workspace (e.g. a real crate plus a
+same-named `test_fixture`/`vendor`-shaped directory used to test
+tooling), dekko resolves the collision only when exactly one crate's
+own path avoids that synthetic-looking marker — a narrow,
+convention-based tiebreak, not a guess between two equally plausible
+real crates, which still resolves ambiguous. A `note: N heritage
+edge(s) repo-wide resolved by preferring a non-test-fixture/vendor
+crate root...` on `supertypes`/`subtypes` output (repo-wide, not
+scoped to that one query) discloses when this tiebreak fired anywhere
+in the map, so a caller can double-check results against the real
+source if the repo genuinely has two workspace crates sharing a name.
 
 `workset --symbol NAME --type-impact` widens the touched set beyond
 the target symbol's own direct callers: when the target is a
@@ -198,11 +214,30 @@ sets by `(file, line)` into three buckets:
   (`pkg.Func(`, `Type::method(`, `Type.method(`), a bare
   import/require statement naming the symbol (`import { X } from
   '...'`, `from x import X`, `const { X } = require('...')` — not a
-  call site), a file in a language dekko can't parse, a test-only call
+  call site), a file in a language dekko can't parse, a likely
+  unrelated external-library method sharing the target's bare name
+  (see "Receiver-mismatch detection" below), a test-only call
   site (tests are excluded from the dekko-side query by default here,
   unlike the plain `query callers` default — see `--include-tests`), a
   short/generic target name (resolver precision degrades in a dense
   repo), or "unexplained" when none of those fit.
+
+**Receiver-mismatch detection.** When the target is a method (not a
+free function) with exactly one repo-defined symbol sharing its bare
+name and its declaring type resolves unambiguously, `sanity` checks
+each grep-only hit for whether the declaring type's own simple name
+appears on the hit's line or in the first few lines of its file
+(where imports/`using` live). If neither does, the hit is classified
+`likely an unrelated external-library method sharing this bare name`
+instead of a generic/test/unexplained miss — the case where a
+same-named method from a completely different library (e.g. AssertJ's
+`isTrue()` colliding with a repo's own `isTrue()`) reads as a real
+grep-only miss when it isn't one. This is a cheap textual proxy, not
+real type inference (no alias tracking, no import resolution) — false
+positives (missing the real evidence) are the accepted failure mode,
+not false confidence. Gated to `sanity <target>`; `--all` does not
+apply this check (it has no single target to resolve a declaring type
+against).
 
 The grep sweep itself has two safety caps: it stops reading raw grep
 output past 5,000 lines, and drops any single raw line over ~10,000
@@ -220,12 +255,79 @@ confidence, not a finding.
 dekko sanity resolve                 # cross-check `callers resolve`
 dekko sanity Path --usages           # cross-check `uses Path` instead
 dekko sanity resolve --include-tests # include test files in the dekko-side query
+dekko sanity resolve --group-by-file # roll up grep-only rows by file
 ```
+
+`--group-by-file` rolls up the **grep-only** bucket by file (count and
+cause breakdown per file, largest cluster first) instead of listing
+individual match rows — useful for spotting a single file that
+accounts for a large share of a big "unexplained" count instead of
+reading past `--limit`'s default truncation or reaching for `--json`
+and aggregating by hand. Grouping happens over whatever rows already
+survived `--limit`/`--budget` fitting, not the pre-truncation total —
+pair it with a raised `--limit`/`--budget` when chasing a suspected
+large cluster, or the rollup only reflects a truncated sample. Scoped
+to the grep-only bucket in single-target text mode; has no effect
+under `--json` (already fully groupable by an external consumer) or
+`--all` (which rolls up by symbol, not by file).
 
 Always exits `0` on a completed comparison — a nonempty `grep-only`
 bucket is a finding to relay, not itself an error; this is a spot
 check, not a re-verification. See the Claude Code `/sanity` slash
 command: [claude-code.md](claude-code.md#the-sanity-command).
+
+### `dekko sanity --all` — sweeping every symbol instead of one target
+
+`dekko sanity <target>` only ever checks the one symbol a human or
+agent happens to pick. `dekko sanity --all` removes that selection
+bias: it runs the same callers/grep cross-check over *every* in-repo
+symbol with at least one caller (nonzero `calls_in` fan-in), so a
+classification bug in `sanity` itself (or a genuine grep-vs-dekko
+disagreement) can't hide behind whichever target nobody happened to
+try. It's callers-mode only — `--all` combined with `--usages` or
+`--unused` is a CLI error, not a silently different mode.
+
+```sh
+dekko sanity --all                        # sweep every fan-in symbol, jobs=4
+dekko sanity --all --jobs 1                # sequential (no thread pool)
+dekko sanity --all --jobs 0                # use all cores
+dekko sanity --all --max-names 500         # cap unique bare names swept
+dekko sanity --all --fail-on-unexplained   # CI gate: nonzero exit if any unexplained miss
+```
+
+The grep sweep is deduped by bare name, not by symbol: two symbols
+sharing a name (an overload set, same-named methods on different
+types) produce byte-identical grep sweeps and classifications, so
+`--all` runs one `grep -rn` per *unique* bare name among fan-in
+symbols, not one per symbol — the same expensive-subprocess-per-name
+work `sanity <target>` already does, just amortized. `--jobs N`
+(default `4`; `0` = all cores, `1` = sequential) parallelizes the
+remaining per-name sweeps across a thread pool, since each is I/O-bound
+(waiting on a `grep` subprocess), not CPU-bound.
+
+Output is a triage summary, not a full per-symbol report: an aggregate
+histogram of grep-only causes across the whole sweep, then the symbols
+with a nonzero *unexplained* miss, sorted by count. Re-run `dekko
+sanity <target>` on any flagged symbol for the full match/dekko-only/
+grep-only detail. `--json` carries the full per-symbol breakdown (not
+just the flagged subset) for programmatic/CI use.
+
+A safety cap (`--max-names`, default 2,000) bounds how many unique
+bare names get swept on a very large repo; names are swept in a fixed
+alphabetical order, and hitting the cap is disclosed (`names_truncated`
+in `--json`, a `note:` line otherwise) rather than silently covering a
+partial, unlabeled subset.
+
+Exits `0` regardless of findings by default, matching `sanity
+<target>`'s "advisory, not an error" contract. `--fail-on-unexplained`
+exits `3` when the aggregate unexplained-cause count is nonzero — opt
+in for CI, so adopting `--all` in a pipeline can't surprise-break it on
+first use.
+
+This sweep only re-checks symbols dekko already believes have callers
+— it does not find a resolver false-negative that undercounts a symbol
+to zero callers in the first place (a different, already-tracked
+class of gap).
 
 ## Excluding files
 
@@ -258,6 +360,31 @@ dekko note add resolver.py:resolve "ambiguous calls are marked, never guessed"
 dekko note list resolver.py:resolve
 ```
 
+## Interpreting `--sites` call-site counts
+
+`query callers`/`query callees --sites` expands each caller/callee
+into one row per call site instead of one row per entity, since a
+single caller can invoke the target more than once in its own body.
+Without `--sites`, both counts agree (one row per caller); with it,
+they can legitimately diverge — a caller invoking the target three
+times contributes one caller but three call-site rows. This looked
+like a truncation bug before both numbers were disclosed together:
+
+```sh
+dekko query callers resolve --sites
+# (~340 tokens · 15 callers · 19 sites)
+```
+
+The footer's `N callers`/`N callees` clause is the distinct-entity
+count; the row/omission total (`X of Y sites omitted`, when capped)
+is the call-site count. `--json` mirrors this: `meta.related_total`/
+`meta.related_label` carry the distinct-entity count, and
+`meta.sites_total` (only present under `--sites`) carries the
+pre-cap call-site total. If `sites_total` is higher than the number
+of `results` entries, that's the same expected divergence, not a sign
+rows were dropped — check `meta.related_total`/the omission fields
+for whether anything was actually capped.
+
 ## Interpreting `dekko unused`
 
 `unused` finds symbols with no *statically resolvable* inbound call — it
@@ -274,7 +401,8 @@ framework-heavy or trait-heavy codebases.
 
 `--kinds {callables,types,all}` (default `callables`, matching the above
 unchanged) controls which symbol kinds are scanned. `types` restricts the
-scan to classes/interfaces/enums/structs/records/traits and additionally
+scan to classes/interfaces/enums/structs/records/traits/type-aliases
+(TS/TSX `type X = ...`) and additionally
 weighs heritage (`heritage_in` — implemented/extended by something else)
 and type-usage (used as a parameter/return type elsewhere, the same
 matching `query type` does) as evidence a type is alive — a called
@@ -293,6 +421,79 @@ type with zero in-repo implementors or usages (a plausible public library
 surface) is still excluded via the same root check every other symbol
 kind already gets, not flagged as dead just because `--kinds` widened
 the scan.
+
+**C/C++ caveat.** When results include at least one C or C++ symbol,
+`unused` prints an extra advisory line after the summary footer (text
+mode) or a non-empty `"caveats"` list (JSON mode, `[]` otherwise):
+`note: exported/extern "C" symbols may be consumed outside this repo's
+call graph — treat top hits on a public C API skeptically`. A C/C++
+codebase commonly exports a public ABI (`extern "C"` functions called
+from Go/Swift/pip bindings through a compiled `.so`) that no in-repo
+call graph can see, so a top hit on a `TF_*`-shaped or similarly
+ABI-flavored name deserves more scrutiny than a same-shaped internal
+helper. This is advisory only — it does not change which symbols are
+reported, and it's gated on the actual results (not just "this repo
+has a `.c` file somewhere"), so a repo whose C/C++ files happen to
+produce zero unused hits stays silent.
+
+**`--suspect` (off by default).** `unused` trusts inbound call-graph
+fan-in as proof a symbol is alive — but that fan-in can itself be a
+resolver misattribution: a bare-name call site resolves to *some*
+repo-defined symbol whenever exactly one shares that name, with no
+arity or receiver-type check (see "Interpreting `dekko ambiguous`"
+below). `--suspect` cross-references every symbol `unused` excluded
+via direct fan-in against `dekko ambiguous`'s collision list — names
+`ambiguous` independently proved collide across 2+ repo-defined
+candidates somewhere else in the repo. A hit means the name is a
+proven collider *somewhere*, not that this specific symbol's credited
+calls are wrong; treat it as a lead worth a `dekko ambiguous --name
+<name>` glance, not a verdict. Coverage is inherently partial: a name
+colliding with exactly one non-repo builtin/library method and nothing
+else repo-wide never produces an `ambiguous` triple, so it never
+becomes a suspect either — this closes the loop only for names that
+also collide 2+ ways somewhere else in the repo. `--suspect` adds a
+`"suspects"` JSON key / text section without changing the existing
+unused-list output at all when omitted.
+
+**Dispatch-candidate caveat (always on) and `--dispatch` (off by
+default).** The mirror-image case of `--suspect`: a symbol *is*
+reported unused, but its own id is one of the unresolved candidates of
+some ambiguous call site elsewhere in the repo (`MapIndex.ambiguous_in`
+keyed by candidate id, the same table `--suspect`/`dekko ambiguous`
+already read). This is exactly the shape an OOP hierarchy produces
+when an abstract base calls its own virtual method (`this.method()`/
+`self.method()`) and 2+ concrete subclasses override it: the base
+never defines the method itself, every override is a same-named
+candidate, none can be picked over the others, and the resolver can
+never attribute the base's call to any single override — each
+override then shows up in `unused` with zero direct fan-in, even
+though every one of them is genuinely called through the base class.
+Unlike `--suspect`'s bare-name collision check, this is a
+same-symbol-id match, not a same-name match, so it's meaningfully more
+precise (though not perfectly so — a symbol's id can land in
+`ambiguous_in` for an unrelated collision that has nothing to do with
+polymorphic dispatch; the recommended check is still correct
+regardless of the exact reason). Because the check is cheap (one
+`dict.get()` per already-computed result row, no extra resolver pass),
+an advisory count is always printed the moment any exist — no flag
+needed — mirroring the C/C++ ABI caveat's "silent unless relevant"
+behavior:
+
+```
+note: 2 of these are unresolved-ambiguous-call candidates elsewhere in
+the repo -- may be reached via this.method()/self.method()
+polymorphic dispatch the resolver can't attribute. Run `dekko sanity
+--unused <name>` before deleting any of them (see --dispatch for
+which ones).
+```
+
+`--dispatch` additionally lists which flagged symbols these are, one
+row per candidate with the exact `dekko sanity --unused <qualname>`
+command to run before deleting it — `"dispatch_candidates"` JSON key /
+text section, independent of and composable with `--suspect`. As with
+`--suspect`, this is a lead, not a verdict: cross-check with `dekko
+sanity --unused` before deleting any flagged symbol this catches,
+especially on inheritance-heavy OOP codebases.
 
 ## Interpreting `dekko ambiguous`
 
@@ -322,6 +523,30 @@ matched against dozens of same-named repo-wide candidates) truncates
 the same way an unresolved-target error does, rather than dumping every
 candidate unconditionally.
 
+**Standing high-ambiguous-rate flag.** A repo whose repo-wide
+ambiguous rate is **30% or higher** doesn't stay silent until you think
+to run this command — that threshold (`ambiguous.HIGH_AMBIGUOUS_RATE`,
+calibrated against a 7-repo eval spread ranging from 0% to 57%) is
+surfaced proactively in three places so an agent can't accidentally
+trust `query callers`/`workset` fan-in numbers without knowing a large,
+invisible slice of the call graph never became a resolved edge at all:
+
+- `dekko summary` / `dekko orient` (and the `summary` MCP tool/
+  resource, which render the same digest) print a `note: this repo's
+  call resolution is N% ambiguous (M sites) — treat query
+  callers/workset fan-in counts as a floor, not exact; run \`dekko
+  ambiguous --by name\` to see what's colliding.` line right after the
+  coverage note.
+- The `session-start` hook (see `docs/claude-code.md`) injects the same
+  line into its preamble on every session where the hook is installed —
+  the one channel here that's genuinely proactive rather than
+  pull-based.
+- `dekko doctor` reports an `ambiguous-rate` finding: `ok` below the
+  threshold, an `advisory` status at/above it (`fix: dekko ambiguous
+  --by name`), or `unknown` when the map predates this field (rerun
+  `dekko map` to pick it up — the rate is stamped into `provenance` at
+  map-write time so `doctor` stays fast, no full `map.json` parse).
+
 ## Interpreting `dekko deps`
 
 `deps` reports the **module-level dependency graph**: which files
@@ -329,24 +554,29 @@ import which files, resolved from every extracted `import`/`use`/
 `#include` statement's raw source string to the in-repo file it
 actually names (or left external when it names a stdlib/third-party
 source, or dekko can't confidently place it). This is a distinct
-question from the call-graph views `export --scope file`/`--scope
-dir` already answer ("which files call into which files" — a runtime
+question from the call-graph views `export --granularity file`/
+`--granularity symbol` already answer ("which files call into which
+files" — a runtime
 question) — the two usually roughly agree but can diverge: a file
 can import a module purely for a type annotation or a side effect
 (`import "./polyfill"`) with zero calls ever crossing that edge:
 
 ```sh
 dekko deps                           # summary: file/edge counts, cycle count, top-N most-depended-on
-dekko deps --file src/app.py         # this file's resolved imports/importers + external sources
+dekko deps src/app.py                # this file's resolved imports/importers + external sources
+dekko deps --file src/app.py         # same as above -- explicit/scriptable spelling of FILE
 dekko deps --cycles                  # every detected circular-import cluster, one block per cycle
 dekko deps --top 20                  # widen the most-depended-on ranking in the default summary
 dekko deps --export mermaid          # emit the module graph via `export`'s existing renderers
 dekko deps --export dot --output deps.dot
 ```
 
-`--file`, `--cycles`, and `--export` are mutually exclusive — give at
-most one, the same "one, not several" rule `ambiguous`'s `--by`/
-`--name` already follows.
+`dekko deps FILE` and `dekko deps --file FILE` are equivalent — the
+bare positional is a convenience alias for interactive use, `--file`
+remains the explicit spelling for scripts. `FILE`/`--file`,
+`--cycles`, and `--export` are mutually exclusive — give at most one,
+the same "one, not several" rule `ambiguous`'s `--by`/`--name` already
+follows.
 
 Cycle detection groups files into strongly-connected components
 (Tarjan's SCC): a reported cycle is every file mutually reachable from
@@ -487,7 +717,42 @@ matches, regardless of type). **This is exact-name matching only** —
 catching a *superclass* of the queried type (`except Exception:`
 catching a raised `ConfigError` that extends `Exception`) is **not**
 detected as a match in this version; a real, disclosed precision gap,
-not an assumed-away one.
+not an assumed-away one. **Default sort puts exact matches ahead of
+catch-alls** — always on, no flag needed — so a real typed match (rare
+on a JS/TS-heavy repo per the caveat above) always ranks before the
+catch-all noise instead of being interleaved with it by path
+alphabetization; within each group, rows still sort by path/line/
+caller. This matters most when `--limit`/`--budget` truncates: the
+higher-signal exact matches are now what survives the cap.
+
+**`--lang <language>` scopes `throws`/`catches` to one language** —
+cuts cross-language noise on a multi-language repo, e.g. a 99%-Java
+repo carrying a handful of vendored JS files whose untyped catch-alls
+(see the JS/TS weak-signal caveat above) would otherwise dominate a
+`catches` result for a Java-only exception type:
+
+```sh
+dekko query catches ConfigurationPropertiesBindException --lang java
+dekko query throws handleRequest --transitive --lang java
+```
+
+`--lang` accepts any language `throws`/`catches` extracts data for
+(currently `cpp`, `java`, `javascript`, `python`, `tsx`, `typescript`
+— derived from the language registry, so it stays in sync with
+coverage automatically); an unsupported value (`rust`, `go`, ...) is
+rejected by the CLI with a clear error rather than silently accepted
+and producing an always-empty result. For `catches`, filtering is by
+each catch clause's own file language; the excluded count and its
+per-language breakdown are disclosed (`note: --lang java filter
+applied — 30 catch clause(s) in another language excluded (28
+javascript, 2 typescript)`; `--json` adds `lang_filter`/
+`lang_filtered_out`). For `throws`, one-level filtering is by the
+target symbol's own language — a `--lang` that disagrees with the
+target's language necessarily empties the result, and a distinct
+`note:` calls this out as a filter mismatch rather than reading like
+"target throws nothing"; `--transitive` filtering additionally applies
+to whatever the call-graph walk reaches, with the same excluded-count
+disclosure as `catches`.
 
 `throws`/`catches` are **CLI-only** (no MCP tool) — given the scoped-
 pilot framing and the JS/TS caveat above, this doesn't yet clear the

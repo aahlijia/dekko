@@ -9,6 +9,668 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.45] — 2026-08-31
+
+### Fixed
+- **TypeScript `type X = ...` alias indexing (round-26)** —
+  `type_alias_declaration` had no extraction query pattern, so no
+  `Symbol` was ever produced for type aliases; only interfaces and
+  classes counted as "types." `query_symbol`, `find_type_usages`,
+  the heritage graph, `unused-types`, and `stats` were all blind to
+  them despite type aliases being the dominant type-declaration
+  idiom in real TS/TSX codebases. Found via round-26 fable-5 eval
+  against `test-repos/claude-code` (2,484 unindexed aliases there).
+  Fixed by adding a `type_alias_declaration` query pattern to
+  `languages.py`, wiring `Symbol.kind = "type_alias"` through
+  `extractor.py`/`model.py`, and adding it to `TYPE_KINDS` in
+  `query.py`; every downstream consumer already gated generically on
+  `TYPE_KINDS`, so the fix propagated automatically — heritage
+  resolution now resolves real edges instead of falling back to
+  `(unresolved)`, and `unused` correctly surfaces dead type aliases.
+  See `.features/plans/round26/ts-type-alias-indexing.md`.
+
+## [0.43.44] — 2026-08-31
+
+### Fixed
+- **`get_context_pack` false hop-2 callers/callees (round-26)** —
+  `build_pack`'s BFS in `contextpack.py` threaded bare symbol ids
+  through the frontier, so at hop ≥2 `_neighbors()` expanded both
+  `calls_in` and `calls_out` regardless of which direction a node
+  was reached in, pulling in a hop-1 caller's unrelated callees (or
+  a hop-1 callee's unrelated callers) as spurious hop-2 neighbors.
+  Found via round-25/26-style eval against `test-repos/zed`. Fixed
+  by threading `(sym_id, direction)` tuples through the frontier via
+  a new `_neighbors_in_direction()`, locking expansion to the
+  reached direction at hop ≥2. See
+  `.features/plans/round26/context-pack-false-callers.md`.
+
+## [0.43.43] — 2026-08-31
+
+### Added
+- **TS/JS `tsconfig.json`/`jsconfig.json` path-alias resolution
+  (round-25 plan 07, finding #6)** — `resolve()`/`resolve_imports()`
+  gain an optional `root` param used to discover config files
+  (`walker.find_config_files`), parse them with a new dependency-free
+  JSONC-lite stripper, and build a scoped `paths`/`baseUrl` alias
+  table with `extends`-chain merging (cycle-guarded) and nearest-
+  scope monorepo precedence. `_resolve_import_js` now consults this
+  table for wildcard/exact alias matches before falling back to an
+  unresolved bare specifier. Verified against `test-repos/cline`:
+  alias-based import edges went from 0 to 2,024 resolved on
+  `apps/vscode/src`. Heritage's separate `_hint_match` alias gap is
+  left as noted future work. See
+  `.features/plans/round25/07-tsconfig-path-alias-resolution.md` and
+  `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+
+## [0.43.42] — 2026-08-31
+
+### Added
+- **Session-start hook hard ceiling on oversized maps (round-25 plan
+  05)** — `SESSION_MAP_HARD_CEILING` (20,000 tokens) added to
+  `session_start`: above the ceiling, the hook now emits a
+  disclosure-only note instead of a truncated map body; between the
+  ceiling and the existing round-13 `SESSION_MAP_BUDGET`, prior
+  behavior is unchanged. See
+  `.features/plans/round25/05-session-start-hook-token-cap.md` and
+  `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`. Closes
+  out round 25's plan backlog (01-06, all implemented).
+
+## [0.43.41] — 2026-08-31
+
+### Fixed
+- **Daemon cold-cache timeout under-parallelized on rev-cache misses
+  (round-25 plan 04)** — on a genuine rev-cache miss for
+  `diff`/`affected`/`workset`, if the caller never explicitly chose
+  `--jobs`, the daemon now forwards `jobs=0` (all cores) via a copy
+  of the request args, leaving the caller's original choice intact
+  for any fallback-to-direct-execution path.
+  `DaemonRequestAbandonedError` now carries the `jobs` value actually
+  sent, so the abandonment message only suggests `--jobs 0` when the
+  abandoned request ran single-threaded. See
+  `.features/plans/round25/04-daemon-coldcache-timeout-parallelism.md`
+  and `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+  (Fix 3 from that plan is out of scope.)
+
+## [0.43.40] — 2026-08-31
+
+### Added
+- **Arity-gated call resolution (round-25 plan 06, fix 2)** —
+  `Param` now records `has_default`/`variadic`; a new
+  `RawCall.arg_count`/`RawRef.arg_count` is captured across all 9
+  Tier-1 language `call_query`s (Java given its own two-pattern
+  edit); the resolver's single-candidate acceptance in
+  `_pick_candidate` now gates on arity plausibility, falling through
+  to ambiguous (with an empty candidate list, not the rejected one)
+  when a call's argument count doesn't fit any overload's parameter
+  shape. Tier-2/generic-grammar languages are out of scope. See
+  `.features/plans/round25/06-structural-layer2-arity-resolution.md`
+  and `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+
+## [0.43.39] — 2026-08-31
+
+### Fixed
+- **JS/TS EventEmitter/EventTarget misattribution (round-25 plan 03,
+  fix 1)** — added `on`, `once`, `off`, `emit`, `addListener`,
+  `removeListener`, `addEventListener`, `removeEventListener`, and
+  `dispatchEvent` to the resolver's builtin-method-name set, closing
+  a false-positive call-resolution misattribution
+  (`CdpClient.on`/`stderrStream.on(...)`) reproduced from cline. See
+  `.features/plans/round25/03-single-candidate-misattribution-resolver.md`
+  and `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+  (Fix 2, structural layer-2 arity resolution, is deferred pending a
+  separate design.)
+
+## [0.43.38] — 2026-08-31
+
+### Fixed
+- **Rust crate-decoy tiebreak in import resolution (round-25 plan 02)**
+  — `resolve_imports()` now builds its Rust crate-root index with the
+  collision-aware `_rust_crate_roots_index_all` instead of a
+  single-winner index, and a new `_prefer_non_synthetic_crate_root`
+  (mirroring round 24's match-side fix) resolves bare-crate-name
+  imports by preferring the self-crate, then the sole non-synthetic
+  root, falling back to external rather than guessing when a genuine
+  collision remains. See
+  `.features/plans/round25/02-deps-crate-decoy-tiebreak.md` and
+  `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+
+## [0.43.37] — 2026-08-31
+
+### Fixed
+- **Sanity classifier taxonomy gaps (round-25 plan 01)** — closed four
+  gaps in `dekko sanity`'s grep-miss classification: added Java/Kotlin
+  import templates, TS/JS type-annotation detection, local-binding/
+  string-literal detection, and deterministic cross-file bare-name
+  collision detection (guarded to require 2+ distinct declaring files
+  so single-declaration names aren't flagged). See
+  `.features/plans/round25/01-sanity-classifier-taxonomy-gaps.md` and
+  `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md`.
+
+## [0.43.36] — 2026-08-31
+
+### Fixed
+- **Round-25 one-liner batch** — ten small correctness/UX fixes found
+  during the round-25 7-repo eval, all fixed same-day. See
+  `test-repos/reports/25-fable5-7repo-eval/MASTER-REPORT.md` for full
+  per-finding detail:
+  - `query --sites --json` now forwards `related_total`/`related_label`
+    into the JSON payload, matching the text path.
+  - `sanity` no longer flags a receiver as an import-mismatch when the
+    hit's file is the declaring type's own file.
+  - `query importers`'s not-found suggestions now use the same
+    bare-import-source form as successful matches, instead of raw
+    source text.
+  - `unused --kinds` help text now accurately describes evidence-based
+    dead-code detection instead of implying a functions/methods-only
+    scan.
+  - `unused --dispatch`'s `check_command` and text hint now emit a
+    disambiguated `path:qualname:line` target.
+  - `sanity` no longer misclassifies a header-only C/C++ declaration
+    (prototype) as a call.
+  - `workset`/`summary`/`orient`'s shared file-level doc extraction now
+    skips leading copyright/license boilerplate before picking a
+    description.
+  - `hooks uninstall` now removes `.claude/settings.json` (and the now-
+    empty `.claude/` dir) when nothing but dekko's own hooks remain,
+    instead of always rewriting an empty-ish file.
+  - `hooks install`/`uninstall` now detect and preserve the existing
+    indent style of `.claude/settings.json` instead of always
+    rewriting it with 2-space indentation.
+  - `query cohesion --budget` now prints a floor-exceeded note to
+    stderr when the requested budget is below the result's token
+    floor, mirroring `lean --budget`'s disclosure.
+
+## [0.43.35] — 2026-08-28
+
+### Fixed
+- **Daemon-routed command timeouts under-provisioned on large repos**
+  — `_TIMEOUT_BYTES_PER_SECOND` in the daemon's cold-cache timeout
+  scaling was recalibrated from 5.5M to 1.1M bytes/sec, based on
+  round-24's tensorflow measurement, so large repos get realistic
+  timeout budgets instead of premature failures. See
+  `.features/plans/round24/12-daemon-timeout-messaging-followup.md`.
+
+## [0.43.34] — 2026-08-28
+
+### Changed
+- **Output self-disclosure hints** — round 24 found agents missing
+  built-in disambiguation tools because nothing in the primary
+  output pointed at them:
+  - `query symbol`'s fan-in line now notes `--sites`/`sanity` when
+    fan-in is nonzero.
+  - `dekko context` gains `--all-imports` to skip the relevance
+    filter; the "+N more imports" line now names the filter
+    criterion and the flag that bypasses it.
+  - `dekko sanity` gains `--group-by-file`, rolling up grep-only
+    mismatches by file with a cause breakdown.
+  - `--min-shared`'s help text now suggests lowering it to 1 on
+    small repos.
+  See `.features/plans/round24/11-output-self-disclosure-hints.md`.
+
+## [0.43.33] — 2026-08-28
+
+### Changed
+- **`dekko deps` accepts a `FILE` positional as an alias for
+  `--file`** — matches the verb-placement convention used elsewhere
+  in the CLI; giving both `FILE` and `--file` is a usage error. See
+  `.features/plans/round24/10-cli-verb-placement-consistency.md`.
+
+## [0.43.32] — 2026-08-28
+
+### Changed
+- **MCP tools accept `name` as an alias for `symbol`** —
+  `query_symbol`, `get_callers`, `get_callees`, `get_supertypes`,
+  `get_subtypes`, and `add_note` now accept either argument key;
+  `symbol` takes precedence if both are given. Round 24 found agents
+  guessing `name` for these tools since it's the more common MCP
+  convention. See
+  `.features/plans/round24/09-mcp-tool-arg-naming.md`.
+
+## [0.43.31] — 2026-08-28
+
+### Changed
+- **`dekko export --scope {symbol,file}` renamed to `--granularity`**
+  — round 24's 7-repo eval found 4 of 7 sessions guessed `--scope`
+  meant "scope the graph to one symbol" (what `dekko context` does)
+  rather than its actual meaning, node granularity for the whole
+  rendered graph. `--granularity` is now the primary flag; `--scope`
+  remains a hidden, fully functional alias that still works but emits
+  a stderr deprecation notice. See
+  `.features/plans/round24/08-export-scope-rename.md`.
+
+## [0.43.30] — 2026-08-28
+
+Fixes and small improvements from the round-24 7-repo eval
+(`test-repos/reports/24-tokentest-7repo-post04328/MASTER-REPORT.md`);
+see `.features/plans/round24/` for the design docs behind each item.
+
+### Fixed
+- **C++ "most vexing parse" constructor-argument calls were dropped**
+  — `Type name(Ctor(), deleter);` (idiomatic RAII construction, e.g.
+  `std::unique_ptr<TF_Status, D> s(TF_NewStatus(), del);`) misparses
+  under tree-sitter-cpp's most-vexing-parse ambiguity as a local
+  function declaration, silently dropping the constructor call from
+  the call graph. A second extraction pass recovers these calls for
+  `c`/`cpp` files. See
+  `.features/plans/round24/01-cpp-vexing-parse-ctor-calls-dropped.md`.
+- **Daemon-routed `diff`/`affected`/`workset` timeouts under-provision
+  on a cold rev-cache build** — the client timeout was scaled off
+  `map.json`'s byte size, a proxy that's stale and wrong for a
+  rev-cache miss, whose cost tracks the target rev's git-tracked file
+  count instead. On tensorflow this under-provisioned the timeout
+  ~5.3x, making the daemon path strictly worse than `--no-daemon`.
+  The timeout is now scaled by the target rev's tracked-file count
+  on a genuine rev-cache miss; hits and all other commands are
+  unchanged. See
+  `.features/plans/round24/02-daemon-cold-revcache-timeout-miscalibration.md`.
+- **Heritage resolver misattributed a Rust trait to a decoy
+  fixture/vendor crate** — `query subtypes`/`supertypes` couldn't
+  distinguish a real workspace crate root from a same-named
+  fixture/vendor crate, causing near-total under-resolution on
+  repos like zed (`gpui::Render`, 1/383 implementors found). A
+  crate-root collision now resolves to the non-fixture/vendor
+  candidate when exactly one side qualifies, and discloses when the
+  tiebreak fired via a new `heritage_synthetic_tiebreak_count` note
+  on `query subtypes`/`supertypes` output (bumps the map schema to
+  v11). See
+  `.features/plans/round24/03-heritage-crate-decoy-tiebreak.md`.
+- **`dekko sanity`'s comment-mention check missed file-header
+  mentions far from the symbol's definition** — a module-header
+  comment naming a symbol tens of lines before its definition fell
+  outside the existing 3-line adjacent-comment proximity gate,
+  producing a false "unexplained miss" (confirmed on
+  claude-buddy's `path.ts`/`buddyStateDir`). A new
+  `_in_leading_header_comment()` check recognizes an uninterrupted
+  comment run from line 1 through the hit line as a legitimate
+  module-header mention, alongside the existing adjacent-comment
+  check. See
+  `.features/plans/round24/07-sanity-comment-mention-file-header-gap.md`.
+
+### Added
+- **`dekko unused --dispatch`** — `dekko unused` false-positives on
+  polymorphic `this.method()`/`self.method()` dispatch, since the
+  static resolver can't always bind a dynamic-dispatch call to its
+  implementation. `sanity --unused` already caught these, but agents
+  skip that step. `unused` now surfaces an always-on advisory caveat
+  count for flagged symbols that are also unresolved dispatch
+  candidates (reusing the existing `ambiguous_in` table `--suspect`
+  is built on), plus an opt-in `--dispatch` section listing them. See
+  `.features/plans/round24/04-unused-dispatch-shaped-candidate-flag.md`.
+
+### Docs
+- Clarified in `test-repos/TESTING-GUIDE.md`: `query importers`
+  footer-arithmetic spot-checks must exclude the footer line itself
+  (`Meter`'s counters are algebraically tied and can't drift; the
+  apparent mismatch came from a bare `wc -l`), and `--json` on
+  ambiguous/not-found error paths intentionally stays plain-text on
+  stderr project-wide (documented in `docs/cli.md` and
+  `report_unresolved`'s docstring, not a bug). Both were re-filed
+  non-bugs from round 23; the notes should stop the re-filing. See
+  `.features/plans/round24/05-query-importers-footer-arithmetic-recheck.md`
+  and `.features/plans/round24/06-ambiguous-json-error-contract-recheck.md`.
+
+## [0.43.29] — 2026-08-28
+
+### Added
+- **`dekko query throws`/`catches` gain a `--lang` filter** — cuts
+  cross-language noise (e.g. JS catch-alls polluting a Java-only
+  query on a mixed-language repo like spring-boot) by restricting
+  results to a single language, derived from the same language
+  registry `outline`/`search` use. Text and JSON output both disclose
+  when results were filtered (`lang_filtered_out` / a mismatch note).
+  Also fixes `catches`' default sort to put exact-type matches before
+  catch-alls. See
+  `.features/plans/round23/28-lang-filter-throws-catches.md`.
+
+## [0.43.28] — 2026-08-28
+
+### Fixed
+- **`dekko query callers/callees --sites` footer clarifies callers vs.
+  sites** — the text footer's TOTAL used to count call *sites* while
+  plain-mode TOTAL counts distinct *callers*, and neither the text
+  footer nor `--json --sites`'s `meta.total` exposed both numbers,
+  making legitimate divergence (one caller invoking a symbol several
+  times) look like a truncation bug. The footer now reports `N
+  callers`/`N callees` alongside an explicit sites count, and JSON
+  output adds `meta.sites_total`. See
+  `.features/plans/round23/26-sites-footer.md`.
+
+## [0.43.27] — 2026-08-28
+
+### Added
+- **`dekko sanity` flags receiver-mismatch false confidence** — a
+  grep-only hit for a single-repo-candidate method target is now
+  classified `likely_unrelated_external` (instead of the misleading
+  `CAUSE_TEST_FILTER`/`CAUSE_GENERIC_NAME`) when neither the hit's
+  line nor its file's imports mention the target's declaring type,
+  fixing the false-confidence case where an unrelated same-name method
+  from another library (e.g. spring-boot's `isTrue`/AssertJ) reads as
+  a real reference. Scoped to `sanity <target>`; `--all` does not
+  apply this cue. See
+  `.features/plans/round23/25-sanity-receiver-mismatch-cue.md`.
+
+## [0.43.26] — 2026-08-28
+
+### Added
+- **`dekko sanity --all`** — a repo-wide sanity sweep: runs the same
+  callers/uses cross-check `sanity <target>` does, but across every
+  symbol with nonzero fan-in in the map, not just a human-picked
+  target. Supports `--jobs` for thread-pool parallelism, `--max-names`
+  to cap sweep size, and `--fail-on-unexplained` as a CI gate that
+  exits nonzero if any grep-only miss can't be classified. Mutually
+  exclusive with `--unused`. Closes the gap where a classification
+  regression (like the multiline-import bug from round 23) could sit
+  undetected in `develop` because `sanity` only ever ran when someone
+  happened to pick the right target. See
+  `.features/plans/round23/24-sanity-all-sweep.md`.
+
+## [0.43.25] — 2026-08-27
+
+### Added
+- **`dekko sanity --unused NAME`** — a new sanity mode for the flip
+  side of `sanity`'s usual callers/uses cross-check: given a symbol
+  `dekko unused` flagged as dead, grep-sweep its bare name and report
+  every hit outside its own definition/import/comment as reference
+  evidence, classified (spread/typeof/subscript/call/other). Catches
+  the class of false positive where a symbol is genuinely referenced
+  but not via a shape the call-graph walk recognizes, in any language
+  — not just the TS-specific spread/typeof/subscript fix already
+  shipped for `unused` itself. Mutually exclusive with `--usages`;
+  always exits 0 (advisory). See
+  `.features/plans/round23/23-sanity-unused-variant.md`.
+
+## [0.43.24] — 2026-08-27
+
+### Added
+- **`dekko unused` now caveats C/C++ results with a note that exported/
+  `extern "C"` symbols may be consumed outside this repo's call graph**
+  (e.g. via Go/Swift/Python bindings calling through a compiled `.so`)
+  and top hits on a public C API should be treated skeptically. Text
+  and `--json` (`caveats` field) both carry it. This is layer 1 of a
+  two-layer design; a deferred `--exclude-c-abi` flag that actually
+  correlates `extern "C"` header declarations to `.cc` definitions is
+  not yet implemented. See
+  `.features/plans/round23/22-unused-extern-c-caveat.md`.
+
+## [0.43.23] — 2026-08-27
+
+### Added
+- **`dekko unused --suspect`** — flags "unused" results that are kept
+  alive only by fan-in from a call-graph edge whose bare name also
+  collides ambiguously elsewhere in the repo, the exact shape that can
+  hide a genuinely dead symbol behind a misattributed call (see the
+  round-23 n=1-candidate resolver-confidence findings). Built on a new
+  `ambiguous.collision_names()` helper and `unused.find_suspects()`,
+  CLI-only for now. See
+  `.features/plans/round23/21-unused-ambiguous-crossref.md`.
+
+## [0.43.22] — 2026-08-27
+
+### Added
+- **A standing "this repo's ambiguous rate is unusually high" flag** —
+  on repos where a large share of call-site resolution collapses to
+  "ambiguous" (short/generic names colliding across many candidates),
+  dekko now proactively surfaces that instead of requiring a separate
+  `dekko ambiguous` call to discover it. A shared
+  `ambiguous.cheap_rate()`/`high_rate_note()` helper feeds a line in
+  `dekko summary` (and therefore `orient` and the MCP `summary` tool),
+  a note in the Claude Code session-start hook preamble, and a new
+  advisory finding in `dekko doctor`. The rate is stamped into
+  `provenance` at `dekko map` write time so `doctor` can report it
+  without loading the full map. See
+  `.features/plans/round23/20-standing-ambiguous-rate-flag.md`.
+
+## [0.43.21] — 2026-08-27
+
+### Fixed
+- **`dekko status`/`dekko status --json`/`dekko doctor` collapsed
+  `tool_version` and `spec_hash` staleness into one generic "stale"
+  message**, printing a self-contradictory `built by dekko X, running
+  X` when only `spec_hash` had drifted (e.g. a long-lived MCP server
+  reinstalled underneath it mid-session) — the MCP `map_status` tool
+  already disambiguated this in round 09, but the fix was never
+  ported to the CLI surface. All three now share
+  `mapfile.describe_version_stale()`, and `dekko status --json` gains
+  `version_stale`/`spec_stale`/`built_spec_hash`/`running_spec_hash`
+  fields (gated behind `reason == "version"`, so the common-case JSON
+  shape is unchanged). See
+  `.features/plans/round23/11-cli-status-doctor-staleness-disambiguation.md`.
+- **MCP `refresh_map` re-synced a stale server process to its own old
+  code, not to what's on disk** — calling `refresh_map` from inside a
+  long-lived `dekko serve` process that's stale on `spec_hash` and/or
+  `tool_version` re-extracts using that same process's stale
+  in-memory extractor code and self-consistently re-stamps "fresh,"
+  silently corrupting a map that a fresh CLI `dekko map` may have
+  already built correctly. `map_status`'s suggested next step for a
+  `reason == "version"` verdict now says "restart the dekko MCP
+  server process" instead of "call refresh_map" (which can't fix
+  this from inside the same process either way), and `refresh_map`'s
+  response now discloses a restart caveat whenever this process's own
+  pre-regen freshness check showed it was already the stale party.
+  See `.features/plans/round23/12-refresh-map-stale-process-resync.md`.
+- **`dekko daemon status` could intermittently (~1/6) report "not
+  running" immediately after `dekko daemon start` printed "started"**
+  — `start()` returned the instant the child process was spawned,
+  before the child had necessarily finished binding its listening
+  socket, letting an immediately-following `status` call race
+  `transport.exists()` into a false negative. `start()` now polls
+  (bounded, ~3s cap) for confirmation the child has actually bound
+  before returning; on the rare case the cap is hit, it prints a
+  distinct "spawned but unconfirmed" message instead of falsely
+  claiming "started," and still returns exit `0`. See
+  `.features/plans/round23/13-daemon-status-false-negative.md`.
+- **`run_pooled_with_retry`'s one bounded `BrokenProcessPool` retry
+  fired with zero delay**, giving it a real chance of landing in the
+  same transient window (CPU contention, or a `uv tool install
+  --reinstall` shim relink race) that caused the first failure — a
+  `dekko map --full --jobs 0` run immediately after a reinstall could
+  see the retry itself also fail. Added a fixed 1.5s backoff before
+  the retry attempt. See
+  `.features/plans/round23/15-brokenprocesspool-transient-crash.md`.
+- **Concurrent bare-CLI commands against the same repo silently
+  serialized with zero feedback** — a command waiting on another
+  process's advisory regen lock (`.dekko/regen.lock`), and the
+  fallback path that launches an independent regen after the wait cap
+  is hit, both printed nothing, reading as indistinguishable from a
+  hang on a large repo. Both paths now print a one-line `note:` to
+  stderr (mirroring round 15's `_maybe_warn_sequential` pattern) —
+  pure disclosure, no behavior change. The exact tensorflow-scale
+  timing this was found against involves an unconfirmed, separately
+  unlocked cold-rev-cache path (`diff.py::old_snapshot`) that this fix
+  does not change; see
+  `.features/plans/round23/14-concurrent-cli-silent-serialization.md`
+  for what's confirmed vs. deferred.
+
+## [0.43.20] — 2026-08-27
+
+### Fixed
+- **`dekko unused` false-flagged Rust trait-dispatched methods
+  (`Display::fmt`, `From::from`, `Iterator::next`, operator overloads,
+  etc.) as dead code** — implicit trait dispatch (`{}`/`.to_string()`,
+  `.into()`/`?`, `for`, `+`/`==`/indexing) never produces a
+  `call_expression` node, so these methods always had zero explicit
+  callers. `unused.py` now consults the already-resolved
+  `heritage_external_out` evidence: a Rust method whose enclosing type
+  implements a curated standard-trait allowlist (`_RUST_STD_TRAIT_
+  NAMES`) is treated as a root. Type-level, not per-impl-block —
+  a genuinely dead inherent method sharing a type with a std-trait
+  impl can still be missed; see
+  `.features/plans/round23/03-rust-trait-dispatch-unused-false-
+  positive.md`.
+- **`dekko unused` false-flagged TypeScript `const`s referenced only
+  via object-spread (`{...x}`), a `typeof` type query
+  (`type X = typeof y`), or bracket subscript (`obj[x]`)** — none of
+  the three shapes were covered by `_JS_REFERENCE_BASE`. Added
+  `(spread_element (identifier) @ref)` and `(subscript_expression
+  object: (identifier) @ref)` to the shared JS/TS/TSX base, and a
+  TypeScript/TSX-only `(type_query (identifier) @ref)` fragment (kept
+  separate since `type_query` doesn't exist in the plain JS grammar).
+  See `.features/plans/round23/06-ts-unused-spread-typeof-subscript.md`.
+
+## [0.43.19] — 2026-08-27
+
+### Fixed
+- **Resolver's single-repo-wide-candidate fast path guessed a
+  builtin/stdlib/third-party method call into a same-named repo
+  symbol's fan-in with no arity/receiver check** — confirmed live as
+  ~1,100x fan-in inflation on spring-boot's AssertJ `.isTrue()` calls
+  (1,103 reported vs. 1 real) and cline's `Date.now()`/`Map.has()`
+  calls (404/436 misattributed sites vs. 0 credible). Extended
+  `_is_noise_call`'s denylist mechanism: added `has`/`now` to
+  `_BUILTIN_METHOD_NAMES`, added a new `_JAVA_ASSERTION_METHOD_NAMES`
+  set (AssertJ/JUnit/Hamcrest chain terminals: `isTrue`, `isEqualTo`,
+  `hasSize`, `contains`, ...), and a new `_BUILDER_METHOD_NAMES` set
+  scoped to just `build` (the confirmed spring-boot repro) rather than
+  the originally proposed broader `of`/`from`/`with` set, dropped
+  after finding real collisions in this repo's own test fixtures and
+  because `from` in particular is Rust's own `impl From<X> for Y`
+  convention name, too common a legitimate repo-defined method to
+  safely denylist repo-wide. A structural arity-aware layer (comparing
+  candidate parameter count against call-site argument count) remains
+  a documented follow-up — the extractor doesn't capture argument
+  counts yet, which is a larger, separate change (round23 issue 01,
+  see `.features/plans/round23/
+  01-resolver-single-candidate-false-confidence.md`).
+- **`dekko subtypes` left ~41% of Rust `impl Trait for X` clauses
+  stuck in "ambiguous," and a same-crate-named collision (a real
+  in-workspace crate plus an unrelated same-named vendor/fixture
+  directory elsewhere in the repo) resolved a coin flip's worth of the
+  time to the *wrong* crate's same-named symbol, silently** —
+  confirmed live against zed's `Render` trait: `crates/gpui` and a
+  synthetic lint-test-fixture directory both named `gpui` collide on
+  the crate-name convention `_rust_crate_roots_index` uses, and which
+  one won was a genuine 50/50 split across process hash seeds (167
+  vs. ~1 correctly-resolved `Render` impls depending purely on
+  `PYTHONHASHSEED`). Two fixes: (a) `_import_match` now also tries a
+  Rust heritage clause's bare `receiver` segment directly as a
+  crate-name hint when the ordinary `file_imports`-derived hint list
+  comes up empty, covering the fully-qualified `impl gpui::Render for
+  X` spelling (no `use` statement to build a hint from, previously
+  never reaching the crate-root fallback at all); (b) a new
+  collision-aware `_rust_crate_roots_index_all` (crate name → every
+  matching root directory, not just the last one indexed) used only
+  by heritage resolution, converting the previous silent coin flip
+  into a deterministic, honest `heritage_ambiguous` for a genuine
+  same-named-crate collision — trading the coin flip's lucky-draw
+  resolved count for eliminating its unlucky draw's silent wrong
+  answers, matching the resolver's own "report as ambiguous rather
+  than guessed" design philosophy.
+  `resolve_imports()`'s unrelated `use`-resolution path keeps the
+  original single-root `_rust_crate_roots_index` unchanged (round23
+  issue 09, see `.features/plans/round23/
+  09-subtypes-ambiguous-resolution-rate.md`).
+
+## [0.43.18] — 2026-08-27
+
+### Fixed
+- **`dekko sanity`'s multi-line destructured-import detection defeated
+  by any earlier import statement in the 20-line lookback window** —
+  `_looks_like_multiline_import_member`'s flat `any()`/`any()` scan
+  for an "opener anywhere" and a "closer anywhere" let an unrelated,
+  already-closed earlier import's `}` falsely "close" a genuinely
+  still-open block sitting directly above the hit, as soon as the
+  window contained both — the common case on any real, import-heavy
+  file, not the edge case (13 of 21 grep-only rows misclassified as
+  `CAUSE_UNEXPLAINED` on claude-buddy). Replaced with a single
+  backward walk from the hit toward the top of the window that
+  answers based on the *nearest* brace-relevant line only, checking a
+  `}` before an opener match on the same line so a complete
+  single-line import isn't misread as a dangling opener (round23
+  issue 04).
+- **`dekko sanity --json` silently truncated its `matches`/
+  `dekko_only`/`grep_only` row arrays at `DEFAULT_REPORT_LIMIT` (200)
+  with no disclosure anywhere in the output** — unlike `query --json`,
+  which already surfaces a `meta` block (`Meter.as_dict()`) whenever a
+  budget/limit cap trims a result set. `_fit_rows()` now returns the
+  `Meter` it was already discarding instead of a bare `int`, threaded
+  through into a new top-level `meta` object (one `Meter.as_dict()`
+  per bucket, same shape `query --json` already uses). `counts` is
+  unchanged and still present for back-compat; `meta` is purely
+  additive (round23 issue 05).
+
+## [0.43.17] — 2026-08-27
+
+### Fixed
+- **`dekko query type --exact`'s not-found path echoed the query
+  itself back as its own "closest match" suggestion** — a verbatim
+  (case-sensitive) self-match offered nothing new, since it's exactly
+  the string that already failed to match. `_close_names()` gained an
+  opt-in `exclude_verbatim` guard, now used by the four not-found
+  paths (`type`, `env`, `uses`/`external`, `importers`) whose needle
+  is the literal failed query string; the general symbol-not-found
+  suggester (`_suggest_symbols`) keeps the old behavior, since its
+  needle is a *derived* bare qualname where a verbatim match is the
+  intended "right name, wrong path" suggestion, not an echo (round23
+  issue 16).
+- **`dekko query env --list`'s text footer TOTAL was off by one**
+  when results were truncated — the summary header line was folded
+  into the counted/droppable row list instead of passed through
+  `_emit_lines()`'s `prefix` parameter, inflating `Meter.total` by
+  one. Routed through `prefix=header` like every other call site in
+  `query.py` already does; JSON output was already correct and is
+  unchanged (round23 issue 17).
+- **`dekko query callers/callees --json --sites` dropped per-site
+  line numbers for module-level pseudo-callers** that text output
+  already shows — `module_level` was a flat `list[str]` of bare
+  paths, never consulting the recorded `edge_lines` the text renderer
+  (`_module_rows`) already used. `module_level` is now a `list[dict]`
+  (`{"path": ..., "lines": [...]}`, `"lines"` omitted when no site
+  line was recorded), built via new shared helpers
+  `_module_site_lines()`/`_module_level_entries()`. This is a
+  breaking JSON schema change for any external consumer of
+  `module_level`. `sanity.py`'s `_dekko_hits_callers()` was updated
+  to fold lined module-level entries into its `hits` set instead of
+  leaving them in the line-less "no line info" bucket, fixing the
+  cascading false "unexplained miss" this caused in `dekko sanity`
+  (round23 issue 10).
+
+## [0.43.16] — 2026-08-27
+
+### Fixed
+- **MCP `get_context_pack` silently dropped the "N ambiguous, not
+  counted" disclosure** that `get_callers`/CLI `query callers` both
+  show — `contextpack.py` never read `index.ambiguous_in`/
+  `ambiguous_out`, so a caller list could look fully resolved when
+  hundreds of same-named call sites were actually dropped (round23
+  issue 07).
+- **`dekko query symbol` mislabeled its ambiguous-call note as
+  outgoing when it was incoming, and never showed the real outgoing
+  count** — the fan-line's `(+N ambiguous call sites not counted)`
+  note was always the *incoming* ambiguous count but read as
+  qualifying `fan-out`; it now attaches to `fan-in`, and the real
+  `fan-out`-qualifying outgoing-ambiguous count is computed and shown
+  alongside it, in both text and JSON (round23 issue 08). Both fixes
+  share a new `ambiguous_counts()` helper in `query.py` so the
+  incoming/outgoing counts are computed identically everywhere.
+
+## [0.43.15] — 2026-08-25
+
+### Added
+- **`dekko unused --top`** — alias for `--limit`, matching the
+  `--top` flag `stats`/`ambiguous`/`deps` already use for a
+  ranked-list size, so the habit carries over to `unused` too.
+
+### Changed
+- **`dekko query importers`'s not-found message now hints at `deps
+  --file`** when the needle looks like a file path rather than an
+  import-source string (`org.foo.Bar`, `./utils`) — `importers`
+  matches the latter, not the former, and the two commands were easy
+  to reach for interchangeably.
+
+## [0.43.14] — 2026-08-25
+
+### Fixed
+- **`dekko unused` false-flagged Python callback/dispatch-table
+  values as dead code** — Python had no `reference_query`, so a
+  function passed by bare name and never itself called at that site
+  (a keyword-argument value, positional call argument, dict/list/
+  tuple/set element, assignment/default-parameter right-hand side, or
+  bare `return` value — e.g. `check_success=valid_ndk_path`) was
+  structurally invisible to the call-expression-only `call_query`
+  (round 22 tensorflow.md §6). A new `_PY_REFERENCE_QUERY`, mirroring
+  `_JS_REFERENCE_BASE`'s identical JS/TS shape, is now wired into
+  `PYTHON`'s `LanguageSpec`.
+
 ## [0.43.13] — 2026-08-25
 
 ### Fixed

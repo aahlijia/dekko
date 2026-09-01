@@ -89,6 +89,53 @@ def test_cohesion_note_is_the_verbatim_weak_signal_disclosure(
     assert "not implemented" in out
 
 
+def test_cohesion_budget_below_floor_discloses_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 25 finding #18: a --budget tighter than even the first
+    # kept connected-component row (rows are never split mid-row) was
+    # silently exceeded with no visible sign, unlike `lean --budget`'s
+    # own floor-exceeded disclosure.
+    root = make_mapped_repo(TWO_GROUPS)
+    code = cli.main(
+        [
+            "query",
+            "cohesion",
+            "app.py",
+            "--root",
+            str(root),
+            "--budget",
+            "1",
+        ]
+    )
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "requested budget 1 is below this result's" in err
+    assert "using the floor instead" in err
+
+
+def test_cohesion_budget_above_floor_no_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Regression guard: a generous budget that never bends must not
+    # print the floor-exceeded note.
+    root = make_mapped_repo(TWO_GROUPS)
+    code = cli.main(
+        [
+            "query",
+            "cohesion",
+            "app.py",
+            "--root",
+            str(root),
+            "--budget",
+            "5000",
+        ]
+    )
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "using the floor instead" not in err
+
+
 def test_cohesion_all_isolated_when_no_intra_file_edges(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

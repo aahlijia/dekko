@@ -41,6 +41,7 @@ _CLASSDEF_KIND: dict[str, str] = {
     "struct_item": "struct",
     "struct_type": "struct",
     "trait_item": "trait",
+    "type_alias_declaration": "type_alias",
 }
 
 
@@ -92,6 +93,8 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     calls = _collect_calls(spec, tree.root_node, rel, defs)
     if spec.name == "rust":
         calls.extend(_collect_rust_macro_calls(tree.root_node, rel, defs))
+    if spec.name in ("c", "cpp"):
+        calls.extend(_collect_cpp_ctor_arg_calls(tree.root_node, rel, defs))
     refs = _collect_refs(spec, tree.root_node, rel, defs)
     heritage = _collect_heritage(spec, tree.root_node, rel, defs)
     throws = _collect_throws(spec, tree.root_node, rel, defs)
@@ -595,8 +598,41 @@ def _clean_doc(line: str) -> str | None:
     return line or None
 
 
-def _string_first_line(raw: str) -> str | None:
-    """First non-empty content line of a string literal."""
+# A leading comment/docstring line that reads as copyright/license
+# boilerplate rather than a real file description -- round 25 finding
+# #15: on an Apache/BSD/MIT-licensed codebase, nearly every file's
+# leading comment opens with exactly this shape ("Copyright 20XX The
+# Foo Authors. All Rights Reserved.", "Licensed under the Apache
+# License, Version 2.0...", "SPDX-License-Identifier: ..."), which
+# ``workset``/``summary``/``orient`` all surfaced verbatim as the
+# file's one-line description since they share this same module-doc
+# extraction path.
+_BOILERPLATE_HEADER_RE = re.compile(
+    r"^(copyright\b|\(c\)\s*\d{4}\b|all rights reserved\b|"
+    r"licensed under\b|spdx-license-identifier\b|"
+    r"permission is hereby granted\b|redistribution and use\b|"
+    r"this (?:source|file) (?:code )?is (?:part of|subject to)\b|"
+    r"you may not use this file except in compliance\b)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_boilerplate_header(line: str) -> bool:
+    """Whether ``line`` reads as copyright/license boilerplate rather
+    than a real description -- see ``_BOILERPLATE_HEADER_RE``."""
+    return _BOILERPLATE_HEADER_RE.match(line.strip()) is not None
+
+
+def _string_first_line(
+    raw: str, *, skip_boilerplate: bool = False
+) -> str | None:
+    """First non-empty content line of a string literal.
+
+    ``skip_boilerplate`` (module-doc extraction only) additionally
+    skips any leading line matching ``_looks_like_boilerplate_header``,
+    continuing to the next non-empty line rather than surfacing legal
+    text as the description.
+    """
     text = _STR_PREFIX.sub("", raw.strip(), count=1)
     for quote in ('"""', "'''", '"', "'"):
         if text.startswith(quote):
@@ -604,8 +640,11 @@ def _string_first_line(raw: str) -> str | None:
             text = text.removesuffix(quote)
             break
     for line in text.splitlines():
-        if line.strip():
-            return _clean_doc(line)
+        if not line.strip():
+            continue
+        if skip_boilerplate and _looks_like_boilerplate_header(line):
+            continue
+        return _clean_doc(line)
     return None
 
 
@@ -623,12 +662,23 @@ def _strip_comment_markers(line: str) -> str:
     return line.removesuffix("*/").strip()
 
 
-def _comment_first_line(raw: str) -> str | None:
-    """First non-empty content line of a comment block."""
+def _comment_first_line(
+    raw: str, *, skip_boilerplate: bool = False
+) -> str | None:
+    """First non-empty content line of a comment block.
+
+    ``skip_boilerplate`` (module-doc extraction only) additionally
+    skips any leading line matching ``_looks_like_boilerplate_header``,
+    continuing to the next non-empty line rather than surfacing legal
+    text as the description.
+    """
     for line in raw.splitlines():
         content = _strip_comment_markers(line.strip())
-        if content:
-            return _clean_doc(content)
+        if not content:
+            continue
+        if skip_boilerplate and _looks_like_boilerplate_header(content):
+            continue
+        return _clean_doc(content)
     return None
 
 
@@ -711,19 +761,29 @@ def _doc_for_symbol(language: str, def_node: Node) -> str | None:
 
 
 def _module_doc(language: str, root: Node) -> str | None:
-    """Best-effort first doc line for a whole file, or ``None``."""
+    """Best-effort first doc line for a whole file, or ``None``.
+
+    Skips copyright/license boilerplate lines (see
+    ``_looks_like_boilerplate_header``) rather than surfacing them as
+    the file's description -- scans forward through the file's whole
+    leading run of comment nodes (not just the first) for the first
+    non-boilerplate line; a file whose entire leading comment run is
+    boilerplate falls back to ``None`` rather than picking legal text.
+    """
     if language == "python":
         string = _leading_string(list(root.named_children))
         if string is None:
             return None
-        return _string_first_line(_raw(string))
+        return _string_first_line(_raw(string), skip_boilerplate=True)
     for child in root.named_children:
         if child.type not in _COMMENT_TYPES:
             return None
         raw = _raw(child)
         if raw.startswith("#!"):
             continue
-        return _comment_first_line(raw)
+        line = _comment_first_line(raw, skip_boilerplate=True)
+        if line is not None:
+            return line
     return None
 
 
@@ -747,16 +807,21 @@ def _params_python(params_node: Node) -> list[Param]:
                 Param(
                     name=_text(name_node),
                     type=_text(type_node) if type_node else None,
+                    has_default=kind == "typed_default_parameter",
                 )
             )
         elif kind == "default_parameter":
             name_node = child.child_by_field_name("name")
             if name_node is not None:
-                out.append(Param(name=_text(name_node)))
+                out.append(Param(name=_text(name_node), has_default=True))
         elif kind == "list_splat_pattern":
-            out.append(Param(name="*" + _text(child).lstrip("* ")))
+            out.append(
+                Param(name="*" + _text(child).lstrip("* "), variadic=True)
+            )
         elif kind == "dictionary_splat_pattern":
-            out.append(Param(name="**" + _text(child).lstrip("* ")))
+            out.append(
+                Param(name="**" + _text(child).lstrip("* "), variadic=True)
+            )
         elif kind in ("keyword_separator", "positional_separator"):
             out.append(Param(name=_text(child)))
     return out
@@ -778,15 +843,31 @@ def _params_rust(params_node: Node) -> list[Param]:
                 )
             )
         elif child.type == "variadic_parameter":
-            out.append(Param(name="..."))
+            out.append(Param(name="...", variadic=True))
     return out
 
 
 def _params_generic(params_node: Node) -> list[Param]:
-    """Best-effort parse: try name/type fields, else raw text."""
+    """Best-effort parse: try name/type fields, else raw text.
+
+    ``spread_parameter`` (Java's ``String... args`` varargs shape —
+    Java is the one Tier-1 language dispatched through this otherwise
+    Tier-2-only parser, via ``param_style="generic"``) has no
+    ``name``/``pattern`` field to key off, unlike every other shape
+    handled below, so it's matched by node type directly and marked
+    ``variadic=True``: without this, a Java varargs candidate's arity
+    range would be wrongly capped by ``resolver._param_arity`` instead
+    of left unbounded. Harmless for every genuinely Tier-2 grammar
+    that also reaches this parser — ``variadic`` is only ever
+    consulted when ``RawCall.arg_count`` is populated, which Tier-2
+    extraction never does (see ``extractor_generic.py``).
+    """
     out: list[Param] = []
     for child in params_node.named_children:
         if child.type == "comment":
+            continue
+        if child.type == "spread_parameter":
+            out.append(Param(name=_text(child), variadic=True))
             continue
         name_node = child.child_by_field_name(
             "name"
@@ -805,7 +886,16 @@ def _params_generic(params_node: Node) -> list[Param]:
 
 
 def _params_c(params_node: Node) -> list[Param]:
-    """Parse a C/C++ ``parameter_list`` node."""
+    """Parse a C/C++ ``parameter_list`` node.
+
+    C++'s ``optional_parameter_declaration`` (a parameter with a
+    ``= default`` value) is the language's only defaulted-parameter
+    shape; C has none. Confirmed against the pinned tree-sitter-cpp
+    grammar: it carries its own ``default_value`` field alongside the
+    ordinary ``type``/``declarator`` fields ``parameter_declaration``
+    already has, so no new query/field access is needed beyond the
+    node-type check already made here.
+    """
     out: list[Param] = []
     for child in params_node.named_children:
         if child.type not in (
@@ -813,19 +903,22 @@ def _params_c(params_node: Node) -> list[Param]:
             "optional_parameter_declaration",
         ):
             if child.type == "variadic_parameter":
-                out.append(Param(name="..."))
+                out.append(Param(name="...", variadic=True))
             continue
         type_node = child.child_by_field_name("type")
         declarator = child.child_by_field_name("declarator")
         base_type = _text(type_node) if type_node else None
+        has_default = child.type == "optional_parameter_declaration"
         if declarator is None:
-            out.append(Param(name="_", type=base_type))
+            out.append(
+                Param(name="_", type=base_type, has_default=has_default)
+            )
             continue
         decl_text = _text(declarator)
         stars = "*" * decl_text.count("*") + "&" * decl_text.count("&")
         name = _innermost_identifier(declarator) or decl_text
         full_type = f"{base_type} {stars}".strip() if base_type else None
-        out.append(Param(name=name, type=full_type))
+        out.append(Param(name=name, type=full_type, has_default=has_default))
     return out
 
 
@@ -848,16 +941,33 @@ def _params_js(params_node: Node) -> list[Param]:
             out.append(Param(name=_text(child)))
         elif child.type == "assignment_pattern":
             left = child.child_by_field_name("left")
-            out.append(Param(name=_text(left) if left else _text(child)))
+            out.append(
+                Param(
+                    name=_text(left) if left else _text(child),
+                    has_default=True,
+                )
+            )
         elif child.type == "rest_pattern":
-            out.append(Param(name="..." + _text(child).lstrip(". ")))
+            out.append(
+                Param(name="..." + _text(child).lstrip(". "), variadic=True)
+            )
         else:
             out.append(Param(name=_text(child)))
     return out
 
 
 def _params_ts(params_node: Node) -> list[Param]:
-    """Parse a TypeScript ``formal_parameters`` node."""
+    """Parse a TypeScript ``formal_parameters`` node.
+
+    Two arity-relevant shapes both surface as ``required_parameter``
+    (not a distinct node type) in the pinned tree-sitter-typescript
+    grammar, so both need their own field check rather than a
+    node-type check alone: a defaulted-but-unmarked parameter
+    (``b: number = 5``) carries a ``value`` field alongside its
+    ``pattern``/``type`` fields, and a rest parameter (``...rest:
+    T[]``) carries a ``rest_pattern`` node in its ``pattern`` field.
+    Confirmed live against the pinned grammar.
+    """
     out: list[Param] = []
     for child in params_node.named_children:
         if child.type not in ("required_parameter", "optional_parameter"):
@@ -871,7 +981,19 @@ def _params_ts(params_node: Node) -> list[Param]:
         param_type = None
         if type_node is not None:
             param_type = _text(type_node).lstrip(":").strip()
-        out.append(Param(name=name, type=param_type))
+        has_default = (
+            child.type == "optional_parameter"
+            or child.child_by_field_name("value") is not None
+        )
+        variadic = pattern is not None and pattern.type == "rest_pattern"
+        out.append(
+            Param(
+                name=name,
+                type=param_type,
+                has_default=has_default,
+                variadic=variadic,
+            )
+        )
     return out
 
 
@@ -886,14 +1008,15 @@ def _params_go(params_node: Node) -> list[Param]:
             continue
         type_node = child.child_by_field_name("type")
         param_type = _text(type_node) if type_node else None
-        if child.type == "variadic_parameter_declaration":
+        variadic = child.type == "variadic_parameter_declaration"
+        if variadic:
             param_type = f"...{param_type}" if param_type else "..."
         names = child.children_by_field_name("name")
         if not names:
-            out.append(Param(name="_", type=param_type))
+            out.append(Param(name="_", type=param_type, variadic=variadic))
             continue
         out.extend(
-            Param(name=_text(name_node), type=param_type)
+            Param(name=_text(name_node), type=param_type, variadic=variadic)
             for name_node in names
         )
     return out
@@ -934,6 +1057,10 @@ def _collect_calls(
         if not name:
             continue
         caller = _enclosing(spans, callee.start_byte)
+        args_node = _one(caps, "args")
+        arg_count = (
+            len(args_node.named_children) if args_node is not None else None
+        )
         calls.append(
             RawCall(
                 caller_id=caller.id if caller else None,
@@ -942,6 +1069,7 @@ def _collect_calls(
                 name=name,
                 receiver=receiver,
                 line=callee.start_point[0] + 1,
+                arg_count=arg_count,
             )
         )
     return calls
@@ -1090,6 +1218,133 @@ def _scan_rust_token_tree(
                 found.append((child, _text(child), receiver))
         elif child.type == "token_tree":
             _scan_rust_token_tree(child, found)
+
+
+def _collect_cpp_ctor_arg_calls(
+    root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawCall]:
+    """Recover constructor calls dropped by C/C++'s "most vexing parse".
+
+    ``Type name(Ctor(), deleter);`` at statement position is
+    grammatically indistinguishable from a local function declaration
+    (``Ctor``'s trailing ``()`` reads as "a parameter named ``Ctor`` of
+    function-returning-T type with no arguments," legal if archaic C++
+    parameter syntax). Real compilers resolve this with full semantic
+    analysis; tree-sitter-c/tree-sitter-cpp have no type information
+    and structurally cannot resolve it — they commit to the
+    declaration parse every time. ``Ctor()`` becomes a
+    ``parameter_declaration`` wrapping an ``abstract_function_declarator``
+    rather than a ``call_expression``, so ``_collect_calls``'s
+    ``call_query`` has no node to match: the call is silently dropped,
+    not misattributed. This is a common idiom in RAII-heavy C++
+    (``std::unique_ptr<T, D> p(Ctor(), deleter);``), not a rare edge
+    case (round 24's tensorflow eval found 100+ dropped sites).
+
+    Scans block-scoped ``declaration`` nodes shaped like the ambiguity
+    and synthesizes the call each ``abstract_function_declarator``
+    parameter represents. Deliberately narrow, matching
+    ``_collect_rust_macro_calls``'s precedent for a structurally
+    unreachable call shape:
+
+    - Only ``declaration`` nodes whose direct parent is a
+      ``compound_statement`` (block/local scope) are considered. A
+      genuine forward-declared local function prototype is legal C++
+      but vanishingly rare next to this construction idiom, and real
+      top-level/header prototypes (whose parameters are always types,
+      never call-shaped) are excluded outright by this check.
+    - Only single-level recovery: a call-shaped argument nested inside
+      another call-shaped argument (``Foo bar(Baz(Qux()), other);``)
+      recovers ``Baz`` but not ``Qux``. Documented, narrower residual
+      gap rather than a silent one.
+
+    Args:
+        root: Parsed file's root node.
+        rel: Repo-relative POSIX path of the file.
+        defs: Definitions found in this file, used to attribute each
+            recovered call to its enclosing function.
+
+    Returns:
+        Recovered ``RawCall``s, one per call-shaped constructor
+        argument found.
+    """
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    calls: list[RawCall] = []
+    _find_cpp_ctor_arg_declarations(root, rel, spans, calls)
+    return calls
+
+
+def _find_cpp_ctor_arg_declarations(
+    node: Node,
+    rel: str,
+    spans: list[tuple[int, int, Symbol]],
+    calls: list[RawCall],
+) -> None:
+    """Recurse the tree for block-scoped vexing-parse declarations."""
+    if node.type == "declaration" and _is_block_scoped(node):
+        declarator = node.child_by_field_name("declarator")
+        if declarator is not None and declarator.type == "function_declarator":
+            _collect_cpp_ctor_arg_params(declarator, rel, spans, calls)
+
+    for child in node.children:
+        _find_cpp_ctor_arg_declarations(child, rel, spans, calls)
+
+
+def _is_block_scoped(node: Node) -> bool:
+    """Whether a node's direct parent is a ``compound_statement``."""
+    return node.parent is not None and node.parent.type == "compound_statement"
+
+
+def _collect_cpp_ctor_arg_params(
+    declarator: Node,
+    rel: str,
+    spans: list[tuple[int, int, Symbol]],
+    calls: list[RawCall],
+) -> None:
+    """Synthesize a ``RawCall`` for each call-shaped constructor arg."""
+    params = declarator.child_by_field_name("parameters")
+    if params is None:
+        return
+    for param in params.named_children:
+        callee = _cpp_ctor_arg_callee(param)
+        if callee is None:
+            continue
+        text, name, receiver = _callee_parts(callee)
+        if not name:
+            continue
+        caller = _enclosing(spans, callee.start_byte)
+        calls.append(
+            RawCall(
+                caller_id=caller.id if caller else None,
+                path=rel,
+                text=text,
+                name=name,
+                receiver=receiver,
+                line=callee.start_point[0] + 1,
+            )
+        )
+
+
+def _cpp_ctor_arg_callee(param: Node) -> Node | None:
+    """Callee node for a call-shaped ``parameter_declaration``, if any.
+
+    A vexing-parse constructor argument surfaces as a
+    ``parameter_declaration`` whose ``declarator`` field is an
+    ``abstract_function_declarator`` (the "type name with an empty/
+    call-shaped parameter list" shape) — its ``type`` field is the
+    misparsed callee name. A bare-value argument (no nested call, e.g.
+    the plain ``deleter`` in ``p(Ctor(), deleter)``) has no declarator
+    at all and is left alone; it isn't call-shaped and recovering it is
+    out of scope for this pass.
+    """
+    if param.type != "parameter_declaration":
+        return None
+    param_declarator = param.child_by_field_name("declarator")
+    if (
+        param_declarator is None
+        or param_declarator.type != "abstract_function_declarator"
+    ):
+        return None
+    return param.child_by_field_name("type")
 
 
 def _collect_refs(

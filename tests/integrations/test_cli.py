@@ -688,11 +688,18 @@ def test_claude_invoked_by_resolved_path_not_bare_name(
 def test_load_or_regen_waits_for_other_process_regen_instead_of_redoing_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
 ) -> None:
     """When ``filelock.try_regen_lock`` reports another process already
     holds the lock, ``load_or_regen`` must wait for that process's
     regen to land and reuse it, rather than redundantly regenerating
-    itself."""
+    itself.
+
+    Round-23 §14: this wait used to be entirely silent -- on a large
+    repo, blocking here for up to the wait cap with zero output read
+    as indistinguishable from a hang. Also confirms the disclosure
+    note is printed exactly once, not once per poll iteration (a
+    common bug when adding a "print before a loop" note)."""
     (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
     assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
     # Invalidate the map so load_or_regen takes the regen branch.
@@ -736,14 +743,25 @@ def test_load_or_regen_waits_for_other_process_regen_instead_of_redoing_it(
     # process's regen was reused once it became fresh.
     assert regen_calls == []
 
+    err = capsys.readouterr().err
+    assert err.count("note:") == 1
+    assert "already regenerating this repo's map" in err
+    assert "waiting up to" in err
+
 
 def test_load_or_regen_fails_open_after_lock_wait_cap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
 ) -> None:
     """If the lock-wait cap is hit without the other holder's regen
     ever landing, ``load_or_regen`` must fail open and regen locally
-    rather than blocking indefinitely."""
+    rather than blocking indefinitely.
+
+    Round-23 §14: the fall-through to an uncoordinated local regen
+    used to also be silent -- a caller watching stderr saw nothing
+    explaining why a second, redundant regen was about to run. Both
+    the entry-wait note and the fall-through note must appear."""
     (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
     assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
     (tmp_path / "b.py").write_text("def g() -> int:\n    return 2\n")
@@ -761,6 +779,11 @@ def test_load_or_regen_fails_open_after_lock_wait_cap(
     index, code = repo_ops.load_or_regen(tmp_path, no_regen=False)
     assert code == 0
     assert index is not None
+
+    err = capsys.readouterr().err
+    assert "already regenerating this repo's map" in err
+    assert "gave up waiting" in err
+    assert "running an independent regen" in err
 
 
 def test_load_or_regen_concurrent_callers_regen_exactly_once(

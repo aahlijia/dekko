@@ -42,7 +42,7 @@ try:
 except ImportError:  # pragma: no cover - exercised in stdlib-only envs
     orjson = None  # type: ignore[assignment]
 
-MAP_DOC_VERSION = 10
+MAP_DOC_VERSION = 11
 _MAP_DIR = ".dekko"
 
 
@@ -486,6 +486,7 @@ def compute_provenance(
     subpath: str | None,
     excludes: tuple[str, ...],
     max_file_size: int,
+    graph: CallGraph,
     skipped: list[tuple[str, str]] | None = None,
 ) -> dict:
     """Build the provenance stamp for a freshly generated map.
@@ -496,6 +497,10 @@ def compute_provenance(
         subpath: Subtree restriction used for discovery, if any.
         excludes: Extra exclude globs used for discovery.
         max_file_size: Size cap used for discovery.
+        graph: The resolved call graph, for stamping the repo-wide
+            ambiguous-call rate so ``dekko doctor`` can read it without
+            a full map load (see ``analysis/ambiguous.py``'s
+            ``HIGH_AMBIGUOUS_RATE``).
         skipped: ``(path, reason)`` pairs from the same ``walker.
             discover`` call that produced ``paths``, used to record
             coverage notes for confirmed-unsupported languages, for
@@ -506,6 +511,7 @@ def compute_provenance(
     Returns:
         JSON-serializable provenance dict.
     """
+    denom = len(graph.edges) + len(graph.ambiguous)
     return {
         "tool_version": _pkg_version("dekko"),
         "spec_hash": spec_fingerprint(),
@@ -518,6 +524,10 @@ def compute_provenance(
         "unsupported": _unsupported_summary(skipped),
         "vendored_excluded": _vendored_summary(skipped),
         "too_large": _too_large_summary(skipped),
+        "ambiguous_sites": len(graph.ambiguous),
+        "ambiguous_rate": (
+            round(len(graph.ambiguous) / denom, 4) if denom else 0.0
+        ),
     }
 
 
@@ -648,6 +658,13 @@ class MapIndex:
             caller-indexed table is what ``supertypes`` rendering
             actually requires; see the design doc's "Implementation
             notes" for the rationale.
+        heritage_synthetic_tiebreak_count: Repo-wide count of resolved
+            heritage edges that rest on the round-24 heritage
+            crate-decoy tiebreak (``.features/plans/round24/
+            03-heritage-crate-decoy-tiebreak.md``) rather than an
+            unambiguous structural match — see
+            ``model.CallGraph.heritage_synthetic_tiebreak_count``.
+            ``0`` for maps written before doc version 11.
         module_deps_out: File path → sorted paths it imports (empty
             for maps written before doc version 7) — see
             ``resolver.resolve_imports``/``model.ModuleGraph``. Keyed
@@ -752,6 +769,7 @@ class MapIndex:
     heritage_external_out: dict[str, list[ExternalCall]] = field(
         default_factory=dict
     )
+    heritage_synthetic_tiebreak_count: int = 0
     module_deps_out: dict[str, list[str]] = field(default_factory=dict)
     module_deps_in: dict[str, list[str]] = field(default_factory=dict)
     module_edge_names: dict[tuple[str, str], list[str]] = field(
@@ -954,6 +972,11 @@ def _filter_heritage(
     for subtype, exts in src.heritage_external_out.items():
         if _prod_id(subtype, by_id):
             out.heritage_external_out[subtype] = exts
+    # Repo-wide scalar, not per-symbol -- carried over unfiltered,
+    # same as every other whole-repo count this view doesn't narrow.
+    out.heritage_synthetic_tiebreak_count = (
+        src.heritage_synthetic_tiebreak_count
+    )
 
 
 def _filter_module_graph(src: "MapIndex", out: "MapIndex") -> None:
@@ -1087,6 +1110,62 @@ class Freshness:
     running_version: str | None = None
     built_spec_hash: str | None = None
     running_spec_hash: str | None = None
+
+
+def describe_version_stale(fresh: Freshness) -> str:
+    """Name which staleness signal(s) fired for a "version" verdict.
+
+    ``Freshness.reason == "version"`` collapses two independent
+    signals (``tool_version`` mismatch, ``spec_hash`` mismatch) into
+    one string. A long-lived ``dekko serve`` process can have an
+    identical ``tool_version`` on both sides — Python doesn't hot-
+    reload already-imported modules, so a ``uv tool install
+    --reinstall`` after the server started has no effect on that
+    process's own ``spec_fingerprint()`` output until it restarts —
+    which used to read as a self-contradictory "built by dekko 0.21.3,
+    running 0.21.3" with no explanation of what was actually stale
+    (round-09 §2.3). This names the differentiator explicitly using
+    the raw values already carried on ``fresh``, with no
+    surface-specific actionable suffix — callers (CLI, MCP, doctor)
+    each append their own suggested next step.
+
+    Args:
+        fresh: A freshness verdict with ``reason == "version"``.
+
+    Returns:
+        A one-line ``"stale (...)"`` prefix naming which signal(s)
+        fired and their built-vs-running values.
+    """
+    which = "+".join(
+        name
+        for name, stale in (
+            ("version", fresh.version_stale),
+            ("spec_hash", fresh.spec_stale),
+        )
+        if stale
+    )
+    parts: list[str] = []
+    if fresh.version_stale:
+        parts.append(
+            f"tool_version: built by dekko {fresh.built_version}, "
+            f"running {fresh.running_version}"
+        )
+    if fresh.spec_stale:
+        built_hash = (fresh.built_spec_hash or "unknown")[:12]
+        running_hash = (fresh.running_spec_hash or "unknown")[:12]
+        spec_detail = (
+            f"spec_hash: map built with extractor spec {built_hash}, "
+            f"this process is running spec {running_hash}"
+        )
+        if not fresh.version_stale:
+            spec_detail += (
+                f" (same version string {fresh.running_version} on "
+                "both sides — this is a long-lived process running "
+                "older/different extractor code than what's on disk; "
+                "restart it)"
+            )
+        parts.append(spec_detail)
+    return f"stale ({which}): " + "; ".join(parts)
 
 
 def _symbol_from_dict(d: dict) -> Symbol:
@@ -1322,6 +1401,9 @@ def _load_heritage(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
             lines=d.get("lines", []),
         )
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
+    index.heritage_synthetic_tiebreak_count = doc.get(
+        "heritage_synthetic_tiebreak_count", 0
+    )
 
 
 def _load_module_graph(
@@ -1521,6 +1603,9 @@ def index_from_maps(
     )
     for ext in graph.heritage_external:
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
+    index.heritage_synthetic_tiebreak_count = (
+        graph.heritage_synthetic_tiebreak_count
+    )
     _index_module_graph(index, graph)
     _index_throws_catches(index, graph)
     _index_env_reads(index, graph)

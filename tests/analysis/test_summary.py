@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 
 from dekko.integrations import cli
-from dekko.analysis import summary
+from dekko.analysis import ambiguous, summary
 from dekko.integrations import server
+from dekko.render import mapfile
 from dekko.render.mapfile import MapIndex
 
 from conftest import RepoFactory
@@ -27,6 +28,14 @@ SRC = {
     "src/util/__init__.py": '"""Utility helpers."""\n',
     "src/util/io.py": "def read():\n    return 2\n",
     "tests/test_app.py": "def test_main():\n    pass\n",
+}
+
+# A single unresolved bare-name collision with no other resolved calls
+# at all -- 100% ambiguous, comfortably above HIGH_AMBIGUOUS_RATE.
+HIGH_AMBIGUOUS_SRC = {
+    "a.py": "def target() -> int:\n    return 1\n",
+    "b.py": "def target() -> int:\n    return 2\n",
+    "c.py": "def caller() -> int:\n    return target()\n",
 }
 
 
@@ -84,6 +93,44 @@ def test_digest_omits_coverage_when_fully_covered(
     root = make_mapped_repo(SRC)
     assert _summary(root) == 0
     assert "coverage:" not in capsys.readouterr().out
+
+
+def test_compute_includes_ambiguous_fields_on_low_rate_repo(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    index = mapfile.load_map(root)
+    doc = summary.compute(index)
+    assert "ambiguous_rate" in doc
+    assert "ambiguous_sites" in doc
+    assert doc["ambiguous_sites"] == 0
+    assert doc["ambiguous_rate"] == 0.0
+
+
+def test_render_text_omits_ambiguous_note_below_threshold(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    index = mapfile.load_map(root)
+    text = summary.render_text(index)
+    assert "ambiguous" not in text
+
+
+def test_render_text_shows_ambiguous_note_above_threshold(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(HIGH_AMBIGUOUS_SRC)
+    index = mapfile.load_map(root)
+    doc = summary.compute(index)
+    assert doc["ambiguous_rate"] >= ambiguous.HIGH_AMBIGUOUS_RATE
+    text = summary.render_text(index)
+    lines = text.splitlines()
+    note_idx = next(i for i, ln in enumerate(lines) if ln.startswith("note:"))
+    dirs_idx = next(
+        i for i, ln in enumerate(lines) if ln.startswith("directories (")
+    )
+    assert note_idx < dirs_idx
+    assert "call resolution is 100% ambiguous" in lines[note_idx]
 
 
 def test_directory_purpose_prefers_index_file(

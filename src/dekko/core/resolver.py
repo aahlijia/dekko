@@ -97,20 +97,22 @@ receiver/arity, ``(g *IDGenerator) Generate(...)`` in ``pkg/markdown``
 tests for a change a same-package unit test directly covered.
 """
 
+import json
 import multiprocessing
 import posixpath
 import re
 import sys
+import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
 from dekko.classify import is_test_path
-from dekko.core import languages
+from dekko.core import languages, walker
 from dekko.core.model import (
     TYPE_KINDS,
     CallGraph,
@@ -122,6 +124,7 @@ from dekko.core.model import (
     Import,
     ModuleEdge,
     ModuleGraph,
+    Param,
     RawCall,
     RawHeritage,
     RawRef,
@@ -209,6 +212,22 @@ _RESOLVE_CHUNK_OVERSUBSCRIPTION = 4
 # -- see ``run_pooled_with_retry``'s docstring for why.
 _POOL_RETRY_WORKERS = 2
 
+# Delay before the one bounded retry fires (round 23 §15: a
+# ``BrokenProcessPool`` right after `uv tool install --reinstall`
+# resolving `/…/bin/dekko`'s `FileNotFoundError` -- the reinstall's
+# shim delete-then-relink is a brief filesystem race, not just CPU
+# contention; firing the retry immediately gives it a real chance of
+# landing in the same still-unsettled window and failing identically,
+# which is consistent with the retry itself visibly failing in that
+# report despite this function's existing bounded-retry mechanism).
+# Cheap and harmless regardless of the exact transient cause -- CPU
+# contention (round 17's original motivating case) also benefits from
+# not immediately retrying into the same conditions. 1.5s is an
+# estimate (the report's own "30s later, worked cleanly" data point
+# suggests the window closes well under 30s), not empirically tuned;
+# revisit if a tighter repro becomes available.
+_POOL_RETRY_DELAY_S = 1.5
+
 # Per-future result-retrieval bound (round 21 Track A: cline's
 # ``dekko map --jobs 0`` hung 6+ minutes at 0% CPU across every
 # worker, later revealed via a manual kill to be a worker that
@@ -276,10 +295,14 @@ def run_pooled_with_retry(
 
     Not a retry loop: exactly one bounded second attempt at
     ``_POOL_RETRY_WORKERS`` (or fewer, if ``workers`` was already
-    smaller). If that attempt also raises ``BrokenProcessPool``, it
-    propagates unchanged -- a genuinely wedged or resource-exhausted
-    machine should surface a clear error, not hang retrying
-    indefinitely.
+    smaller), after a fixed ``_POOL_RETRY_DELAY_S`` backoff. If that
+    attempt also raises ``BrokenProcessPool``, it propagates unchanged
+    -- a genuinely wedged or resource-exhausted machine should surface
+    a clear error, not hang retrying indefinitely. The delay exists
+    because an immediate retry can land in the exact same transient
+    window that caused the first failure (round 23 §15: observed right
+    after ``uv tool install --reinstall``, where the retry itself also
+    failed -- see ``_POOL_RETRY_DELAY_S``'s comment).
 
     Before every attempt, pins ``multiprocessing``'s spawn executable
     to this process's own ``sys.executable`` (round 21 Track A: cline
@@ -324,6 +347,7 @@ def run_pooled_with_retry(
         except BrokenProcessPool:
             retry_workers = min(workers, _POOL_RETRY_WORKERS)
             _pool_retry_note(what, retry_workers)
+            time.sleep(_POOL_RETRY_DELAY_S)
             multiprocessing.set_executable(sys.executable)
             return run(retry_workers)
     except PoolTimeoutError as exc:
@@ -459,7 +483,9 @@ def _init_resolve_worker(
     _worker_symbols_by_id = symbols_by_id
 
 
-def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
+def resolve(
+    files: list[FileMap], workers: int = 1, root: Path | None = None
+) -> CallGraph:
     """Resolve every raw call across the repo into a call graph.
 
     Args:
@@ -469,6 +495,12 @@ def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
             ``cli.py``'s ``run_map`` leaves this at 1, matching prior
             behavior exactly). See ``_resolve_all`` for how chunking
             and the parallelization threshold work.
+        root: Repository root, used only to discover and parse
+            ``tsconfig.json``/``jsconfig.json`` path-alias config for
+            JS/TS import resolution (see ``resolve_imports``). ``None``
+            (the default) skips that discovery entirely — every caller
+            that doesn't pass a real root sees byte-identical behavior
+            to before this parameter existed.
 
     Returns:
         The resolved ``CallGraph`` with bidirectional adjacency.
@@ -513,8 +545,9 @@ def resolve(files: list[FileMap], workers: int = 1) -> CallGraph:
         graph.heritage_in,
         graph.heritage_ambiguous,
         graph.heritage_external,
+        graph.heritage_synthetic_tiebreak_count,
     ) = resolve_heritage(files)
-    graph.modules = resolve_imports(files)
+    graph.modules = resolve_imports(files, root=root)
     (
         graph.throws,
         graph.throws_out,
@@ -891,6 +924,7 @@ def resolve_heritage(
     dict[str, list[str]],
     list[tuple[str, str, list[str]]],
     list[ExternalCall],
+    int,
 ]:
     """Resolve every heritage clause across the repo into a heritage graph.
 
@@ -914,7 +948,7 @@ def resolve_heritage(
     same-file, import hints, the noise guard, and the fallbacks) run
     unmodified.
 
-    Also builds ``crate_roots`` (``_rust_crate_roots_index``) once,
+    Also builds ``crate_roots`` (``_rust_crate_roots_index_all``) once,
     repo-wide, and threads it through every ``_resolve_one_heritage``
     call so ``_import_match``'s Rust crate-aware fallback step (see
     ``_rust_crate_hint_matches``) can resolve a heritage clause naming
@@ -922,27 +956,55 @@ def resolve_heritage(
     repo-wide collision — round 22 zed.md §3.2 (``impl Render for
     Editor`` previously fell through to ``heritage_ambiguous`` because
     ``Render``'s own declaring file, ``element.rs``, is never a
-    segment of its ``use gpui::Render;`` import source).
+    segment of its ``use gpui::Render;`` import source). Round 23
+    (``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md``) added two things: Fix
+    A, a ``call.receiver``-as-crate-hint step in ``_import_match`` for
+    the fully-qualified ``impl gpui::Render for X`` spelling, which has
+    no ``use`` binding for either ``Render`` or ``gpui`` to build a
+    hint from otherwise (see ``_rust_receiver_crate_match``); and Fix
+    B, switching this from the single-root ``_rust_crate_roots_index``
+    to the collision-aware ``_rust_crate_roots_index_all`` (one crate
+    name can map to multiple root directories, e.g. a real crate plus
+    a same-named test-fixture directory) after live measurement
+    against zed showed the single-root version was a genuine 50/50
+    coin flip between "every affected clause resolves correctly" and
+    "every affected clause silently resolves to the wrong crate's
+    same-named symbol" -- see ``_rust_crate_hint_matches``'s docstring
+    and the design doc's "Implemented" note for the numbers.
 
     Args:
         files: Per-file extraction results.
 
     Returns:
         ``(heritage_edges, heritage_out, heritage_in,
-        heritage_ambiguous, heritage_external)`` — the same shapes
-        ``resolve()`` assigns onto ``CallGraph.heritage``/
+        heritage_ambiguous, heritage_external,
+        synthetic_tiebreak_count)`` — the first five are the same
+        shapes ``resolve()`` assigns onto ``CallGraph.heritage``/
         ``heritage_out``/``heritage_in``/``heritage_ambiguous``/
         ``heritage_external``. Built as a plain tuple return (mirroring
         ``resolve_refs()``'s own return shape) rather than a
         ``CallGraph`` method, since ``resolve()`` just assigns the
         pieces onto the graph it already built, exactly as it already
-        does for ``resolve_refs()``'s result.
+        does for ``resolve_refs()``'s result. ``synthetic_tiebreak_count``
+        (round 24, ``.features/plans/round24/
+        03-heritage-crate-decoy-tiebreak.md``) is how many of the
+        resolved edges above were resolved via
+        ``_prefer_non_synthetic_crate_match`` rather than an
+        unambiguous structural match — a convention-based guess about
+        which of two same-named crates is "the real one," surfaced to
+        ``CallGraph.heritage_synthetic_tiebreak_count`` so ``query
+        subtypes``/``supertypes`` can disclose it rather than blending
+        it silently into every other, more certain resolution.
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
     imports_by_file = _imports_by_file(files)
     repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
-    crate_roots = _rust_crate_roots_index(frozenset(fm.path for fm in files))
+    crate_roots = _rust_crate_roots_index_all(
+        frozenset(fm.path for fm in files)
+    )
+    tiebreak_hits = [0]
 
     edges: dict[tuple[str, str], set[int]] = {}
     relations: dict[tuple[str, str], str] = {}
@@ -966,6 +1028,7 @@ def resolve_heritage(
                 external,
                 raw_imports=raw_imports,
                 crate_roots=crate_roots,
+                tiebreak_hits=tiebreak_hits,
             )
 
     heritage_edges = [
@@ -999,6 +1062,7 @@ def resolve_heritage(
         heritage_in,
         heritage_ambiguous,
         heritage_external,
+        tiebreak_hits[0],
     )
 
 
@@ -1013,7 +1077,8 @@ def _resolve_one_heritage(
     ambiguous: dict[tuple[str, str], list[str]],
     external: dict[tuple[str, str], set[int]],
     raw_imports: list[Import] | None = None,
-    crate_roots: dict[str, str] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
 ) -> None:
     """Resolve one heritage clause; mirrors ``_resolve_call``'s shape.
 
@@ -1033,12 +1098,19 @@ def _resolve_one_heritage(
     ``OpKernel`` subtype edges to ``ambiguous``).
 
     ``crate_roots``, when given, is the repo-wide Rust crate-name to
-    crate-root-directory index (``_rust_crate_roots_index``, built
-    once by ``resolve_heritage()``), passed straight through to
+    every matching crate-root-directory index
+    (``_rust_crate_roots_index_all``, built once by
+    ``resolve_heritage()``), passed straight through to
     ``_pick_candidate``'s own ``crate_roots`` parameter -- see that
     docstring and ``_rust_crate_hint_matches`` for what it fixes
     (round 22 zed.md §3.2: a crate-root re-exported Rust trait
     colliding with a same-named type elsewhere in the repo).
+
+    ``tiebreak_hits``, when given, is passed straight through to
+    ``_pick_candidate``'s own parameter of the same name (round 24
+    heritage crate-decoy tiebreak) so ``resolve_heritage()`` can count
+    how many resolved edges in this repo rest on that convention-based
+    guess.
     """
     if _receiver_is_external(h, file_imports, repo_stems):
         external.setdefault((h.subtype_id, h.text), set()).add(h.line)
@@ -1076,6 +1148,7 @@ def _resolve_one_heritage(
         repo_stems,
         raw_imports,
         crate_roots,
+        tiebreak_hits,
     )
     if target is _NOISE:
         external.setdefault((h.subtype_id, h.text), set()).add(h.line)
@@ -1607,6 +1680,149 @@ def _language_filtered(
     return [c for c in candidates if c.language in family]
 
 
+# Structural layer 2 (`.features/plans/round25/
+# 06-structural-layer2-arity-resolution.md`): the single-candidate
+# rung's "nothing else worked, but there's only one name in the whole
+# repo, guess it" fast path is itself only as trustworthy as its one
+# remaining piece of evidence -- the name. This adds a second,
+# structural check next to that name-based guess: does the call
+# site's own written argument count even fit the sole candidate's
+# declared parameters? A mismatch (spring-boot's `isTrue()` -- 0
+# written args -- against a repo-defined 1-required-arg `isTrue`)
+# means the "only same name in the repo" candidate can't actually be
+# the real target, regardless of how the name-based layer-1 denylist
+# (`_is_noise_call`, above) does or doesn't already cover that name.
+
+# The only two Tier-1 languages whose parser puts an implicit receiver
+# (Python `self`/`cls`, Rust `self_parameter`) inside a symbol's own
+# declared `params` list at all -- every other language either has no
+# receiver concept in its param list (Go's receiver is a separate
+# definition-query field, never part of `params`) or never implicitly
+# supplies one at the call site. A receiver-qualified call's written
+# argument count never includes the receiver itself (`obj.method(a)`
+# writes one argument, not two), so this leading param must be
+# stripped before comparing against `call.arg_count` -- see
+# `_candidate_arity`.
+_IMPLICIT_RECEIVER_LANGUAGES = frozenset({"python", "rust"})
+_PYTHON_RECEIVER_PARAM_NAMES = frozenset({"self", "cls"})
+
+# Python's bare `*`/`/` keyword-only/positional-only separators
+# (`def f(a, *, b): ...` / `def f(a, /, b): ...`) surface as ordinary
+# `Param` entries from `extractor._params_python` (kept for signature-
+# display fidelity), but name no actual parameter and must not count
+# toward a candidate's arity range -- excluded by name, since neither
+# is a syntactically valid Python parameter name a real parameter
+# could collide with.
+_ARITY_SYNTAX_MARKER_NAMES = frozenset({"*", "/"})
+
+
+def _is_receiver_param(param: Param, language: str) -> bool:
+    """Whether a candidate's leading declared param is an implicit
+    self/cls-shaped receiver for ``language``, not a real argument.
+
+    Args:
+        param: The candidate's first declared parameter.
+        language: The candidate symbol's ``Symbol.language``.
+
+    Returns:
+        True when this param is the language's own implicit-receiver
+        shape (Python ``self``/``cls``, Rust ``self_parameter`` in any
+        of its ``self``/``&self``/``&mut self``/``mut self`` textual
+        forms) and should be excluded from an arity computation for a
+        receiver-qualified call.
+    """
+    if language == "python":
+        return param.name in _PYTHON_RECEIVER_PARAM_NAMES
+    if language == "rust":
+        normalized = param.name.lstrip("&").replace("mut", "").strip()
+        return normalized == "self"
+    return False
+
+
+def _param_arity(params: list[Param]) -> tuple[int, int | None]:
+    """A declared parameter list's (min, max) plausible argument count.
+
+    Args:
+        params: A candidate's declared parameters (already stripped of
+            any implicit receiver -- see ``_candidate_arity``).
+
+    Returns:
+        ``(min_count, max_count)``. ``max_count`` is ``None`` when any
+        parameter is variadic (no upper bound on written arguments).
+        A parameter with ``has_default=True`` lowers the minimum
+        without affecting the maximum; a plain required parameter
+        raises both. Python's bare ``*``/``/`` syntax-marker params
+        are excluded entirely (see ``_ARITY_SYNTAX_MARKER_NAMES``).
+    """
+    relevant = [p for p in params if p.name not in _ARITY_SYNTAX_MARKER_NAMES]
+    min_count = sum(
+        1 for p in relevant if not p.has_default and not p.variadic
+    )
+    if any(p.variadic for p in relevant):
+        return min_count, None
+    return min_count, len(relevant)
+
+
+def _candidate_arity(
+    candidate: Symbol, call: _Referable
+) -> tuple[int, int | None]:
+    """``candidate``'s (min, max) arity range for ``call``.
+
+    Strips the candidate's own leading receiver-shaped param (Python
+    ``self``/``cls``, Rust ``self_parameter``) first whenever ``call``
+    is receiver-qualified and the candidate's language is one of the
+    two whose parser puts an implicit receiver in the declared param
+    list at all -- see ``_IMPLICIT_RECEIVER_LANGUAGES``.
+
+    Args:
+        candidate: The sole remaining candidate symbol.
+        call: The raw call/reference being resolved.
+
+    Returns:
+        The same ``(min_count, max_count)`` shape as ``_param_arity``.
+    """
+    params = candidate.params
+    if (
+        getattr(call, "receiver", None)
+        and candidate.language in _IMPLICIT_RECEIVER_LANGUAGES
+        and params
+        and _is_receiver_param(params[0], candidate.language)
+    ):
+        params = params[1:]
+    return _param_arity(params)
+
+
+def _arity_plausible(candidate: Symbol, call: _Referable) -> bool:
+    """Whether ``call``'s written argument count fits ``candidate``.
+
+    The safe default is ``True`` (never suppress) whenever
+    ``call.arg_count`` carries no signal -- either because ``call`` is
+    a ``RawHeritage`` (no such attribute at all, via ``getattr``'s
+    default), a Tier-2/generic-grammar call (``arg_count`` stays
+    ``None`` by construction -- see ``RawCall.arg_count``), or a
+    Tier-1 args-capture miss. This mirrors this module's "report
+    ambiguous rather than guess" philosophy: an uncomputable or
+    missing arity signal must never itself become a new false-positive
+    suppression.
+
+    Args:
+        candidate: The sole remaining candidate symbol.
+        call: The raw call/reference/heritage clause being resolved.
+
+    Returns:
+        True when ``call.arg_count`` is unavailable, or falls within
+        ``candidate``'s computed ``(min, max)`` arity range; False on
+        a confirmed mismatch.
+    """
+    arg_count = getattr(call, "arg_count", None)
+    if arg_count is None:
+        return True
+    min_count, max_count = _candidate_arity(candidate, call)
+    if arg_count < min_count:
+        return False
+    return max_count is None or arg_count <= max_count
+
+
 class _Noise:
     """Sentinel: ``_pick_candidate`` determined this call is noise
     (``_is_noise_call`` fired), not a genuine multi-candidate collision
@@ -1630,7 +1846,8 @@ def _pick_candidate(
     index: dict[str, list[Symbol]],
     repo_stems: set[str] | None = None,
     raw_imports: list[Import] | None = None,
-    crate_roots: dict[str, str] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
 ) -> Symbol | _Noise | None:
     """Apply the resolution ladder; ``None`` means ambiguous.
 
@@ -1673,14 +1890,22 @@ def _pick_candidate(
     ``_WHOLE_FILE_IMPORT_LANGUAGES``.
 
     ``crate_roots``, when given, is the repo-wide Rust crate-name to
-    crate-root-directory index (``_rust_crate_roots_index``), used by
-    ``_import_match``'s crate-aware fallback step (see
-    ``_rust_crate_hint_matches``) to resolve a crate-root re-exported
-    Rust trait/type against a same-named repo-wide collision that its
-    own file-stem can't reach. Currently only threaded in by
-    ``resolve_heritage()`` (round 22 zed.md §3.2, the ``query
-    subtypes``/heritage-resolution path); ``resolve()``'s call/ref
-    resolution path leaves this ``None``.
+    every matching crate-root-directory index
+    (``_rust_crate_roots_index_all``), used by ``_import_match``'s
+    crate-aware fallback step (see ``_rust_crate_hint_matches``) to
+    resolve a crate-root re-exported Rust trait/type against a
+    same-named repo-wide collision that its own file-stem can't reach.
+    Currently only threaded in by ``resolve_heritage()`` (round 22
+    zed.md §3.2, the ``query subtypes``/heritage-resolution path);
+    ``resolve()``'s call/ref resolution path leaves this ``None``.
+
+    ``tiebreak_hits``, when given, is a mutable single-element counter
+    passed straight through to ``_import_match`` (round 24, ``.features/
+    plans/round24/03-heritage-crate-decoy-tiebreak.md``) -- incremented
+    whenever a crate-root collision is broken by preferring the one
+    candidate whose crate root doesn't look like a test-fixture/vendor
+    stand-in. Same threading scope as ``crate_roots``: only
+    ``resolve_heritage()`` ever passes a live counter.
 
     Before any of the above runs, ``candidates`` is narrowed to those
     matching the call site's own language, or failing that its
@@ -1730,7 +1955,7 @@ def _pick_candidate(
         # the real target.
 
     hinted = _import_match(
-        call, candidates, file_imports, raw_imports, crate_roots
+        call, candidates, file_imports, raw_imports, crate_roots, tiebreak_hits
     )
     if hinted is not None:
         return hinted
@@ -1741,7 +1966,20 @@ def _pick_candidate(
         return _NOISE
 
     if len(candidates) == 1:
-        return candidates[0]
+        if _arity_plausible(candidates[0], call):
+            return candidates[0]
+        # Structural layer 2: the sole candidate's declared arity
+        # doesn't fit this call site's written argument count -- drop
+        # it before the last-resort tail below, rather than returning
+        # it anyway. Emptying `candidates` here (instead of just not
+        # returning) matters: `_last_resort_match` ->
+        # `_bare_call_non_method_match` would otherwise re-derive this
+        # same single candidate for a bare, non-method call (its own
+        # "exactly one non-method candidate left" check is a no-op
+        # when there was only ever one candidate to begin with),
+        # silently undoing this guard for exactly the bare-call shape
+        # it exists to cover.
+        candidates = []
 
     return _last_resort_match(call, candidates, by_name_path)
 
@@ -1844,7 +2082,23 @@ _AMBIENT_GLOBAL_NAMES = frozenset(
 # leaking through with inflated ``avg_candidates`` in cline's own report
 # (``get`` averaged 32.0 candidates -- almost certainly
 # ``Map.get()``/``Promise.resolve()``/``Object.create()`` noise, not real
-# repo-symbol collisions).
+# repo-symbol collisions). ``has``/``now`` added round 23
+# (cline.md §2.1): a closure-local ``const now = () => Date.now()``
+# was credited with every ``Date.now()``/``performance.now()`` call in
+# the repo (404 misattributed sites), and ``Map.prototype.has``/
+# ``Set.prototype.has``/``Reflect.has`` calls through untyped
+# receivers inflated an unrelated repo-defined ``has`` to 436
+# misattributed sites vs. 0 credible. ``on``/``once``/``off``/
+# ``emit``/``addListener``/``removeListener`` added round 25
+# (cline.md Finding 2): a debug-harness ``CdpClient.on`` (fan-in 95
+# reported, resolver "fully confident") silently absorbed an unrelated
+# plain Node.js ``EventEmitter``/stream ``.on("data", handler)`` call
+# elsewhere in the repo -- the same false-positive shape as ``has``/
+# ``now`` above, just for Node's core ``EventEmitter`` idiom instead of
+# ``Map``/``Date``. ``addEventListener``/``removeEventListener``/
+# ``dispatchEvent`` added alongside for the browser/DOM
+# ``EventTarget`` interface, the same idiom family, common in VS Code
+# extension code (both cline and claude-code are).
 _BUILTIN_METHOD_NAMES = frozenset(
     {
         "trim", "trimStart", "trimEnd", "toString", "valueOf",
@@ -1853,7 +2107,9 @@ _BUILTIN_METHOD_NAMES = frozenset(
         "forEach", "map", "filter", "reduce", "startsWith", "endsWith",
         "padStart", "padEnd", "repeat", "charAt", "substring",
         "replace", "replaceAll", "split", "flat", "hasOwnProperty",
-        "get", "resolve", "create",
+        "get", "resolve", "create", "has", "now",
+        "on", "once", "off", "emit", "addListener", "removeListener",
+        "addEventListener", "removeEventListener", "dispatchEvent",
     }
 )  # fmt: skip
 
@@ -1917,6 +2173,56 @@ _RUST_STD_METHOD_NAMES = frozenset(
         "is_none", "is_ok", "is_err", "ok", "err", "take", "replace",
     }
 )  # fmt: skip
+
+# AssertJ/JUnit/Hamcrest fluent-assertion chain terminals
+# (``assertThat(x).isTrue()``, ``assertThat(list).hasSize(3)``). Same
+# false-positive shape as the three sets above, just for Java's
+# dominant assertion-library idiom: a receiver-qualified call whose
+# receiver is an untyped ``assertThat(...)`` chain result reaches this
+# guard, and these names are called constantly across test suites
+# rather than naming an in-repo type sharing the name. Confirmed live
+# against spring-boot round 23 (§2.1): a single real
+# ``ResolvedDockerHost.isTrue`` caller had its fan-in inflated to 1,103
+# by unrelated AssertJ ``.isTrue()`` chain calls (~1,100x inflation).
+_JAVA_ASSERTION_METHOD_NAMES = frozenset(
+    {
+        "isTrue", "isFalse", "isEqualTo", "isNotEqualTo", "isNotNull",
+        "isNull", "isEmpty", "isNotEmpty", "isPresent", "isAbsent",
+        "hasSize", "contains", "containsExactly", "doesNotContain",
+        "isInstanceOf", "isSameAs", "isNotSameAs",
+    }
+)  # fmt: skip
+
+# Generic builder-pattern terminal method name, shared across
+# Java/Kotlin/Go/Rust builder idioms alike (``SomeBuilder.build()``)
+# -- not JS-flavored like ``_CHAIN_BUILDER_METHOD_NAMES`` above, which
+# only covers Zod/Commander's specific fluent APIs. Same false-positive
+# shape: a receiver-qualified call whose receiver isn't provably typed
+# as the repo's own like-named builder reaches this guard purely on
+# "otherwise unique repo-wide" name evidence. Confirmed live against
+# spring-boot round 23 (§2.2): a repo-defined ``Builder.build`` read 43
+# real callers plus 1,131 additional ambiguous-but-uncounted sites from
+# unrelated builder types across the codebase.
+#
+# Deliberately narrower than the design doc's original proposal, which
+# also suggested ``of``/``from``/``with``: dropped after finding real
+# collisions during implementation, not merely speculative risk --
+# this repo's own resolver test fixtures already use a same-file
+# ``build`` method as an incidental placeholder name in two unrelated
+# ladder-step tests, and ``from`` in particular is Rust's own trait
+# convention name (``impl From<X> for Y { fn from(x: X) -> Y }`) --
+# virtually every Rust repo defines many legitimate, resolvable
+# same-named ``from`` methods, so denylisting it repo-wide (this guard
+# is not language-gated) would trade a modest inflation fix for a much
+# larger true-resolution loss on a language dekko already invests
+# heavily in getting right. See the "Implemented" note in
+# ``.features/plans/round23/
+# 01-resolver-single-candidate-false-confidence.md`` for the full
+# reasoning; ``of``/``with`` were dropped alongside ``from`` for
+# consistency (no repro evidence backs them individually either) with
+# nothing lost, since the confirmed spring-boot repro is specifically
+# ``Builder.build()``.
+_BUILDER_METHOD_NAMES = frozenset({"build"})
 
 # Node's core module names -- a bare (non-relative) JS/TS import source
 # exactly matching one of these is never a same-named local file,
@@ -1986,6 +2292,8 @@ def _is_noise_call(
         call.name in _BUILTIN_METHOD_NAMES
         or call.name in _CHAIN_BUILDER_METHOD_NAMES
         or call.name in _RUST_STD_METHOD_NAMES
+        or call.name in _JAVA_ASSERTION_METHOD_NAMES
+        or call.name in _BUILDER_METHOD_NAMES
     )
 
 
@@ -2255,7 +2563,8 @@ def _import_match(
     candidates: list[Symbol],
     file_imports: dict[str, Import],
     raw_imports: list[Import] | None = None,
-    crate_roots: dict[str, str] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
 ) -> Symbol | None:
     """Match candidates against import hints for this file.
 
@@ -2276,15 +2585,34 @@ def _import_match(
     ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md`` and
     ``tests/test_resolver.py::test_cpp_call_disambiguated_via_whole_file_include``.
 
-    ``crate_roots`` (Rust only, see ``_rust_crate_roots_index``) is
+    ``crate_roots`` (Rust only, see ``_rust_crate_roots_index_all``) is
     tried, per hint, right after that hint's own ``_module_matches``
     attempt comes up empty: a Rust trait/type re-exported at its
     crate root (``pub use submodule::*;``) is imported elsewhere by
     crate-qualified path (``use gpui::Render;``), which
     ``_module_matches``'s file-stem check can never match against the
     symbol's *actual* declaring file — round 22 zed.md §3.2. See
-    ``_rust_crate_hint_matches`` for the matching rule and its one
-    documented residual gap (two same-named crates in the repo).
+    ``_rust_crate_hint_matches`` for the matching rule.
+
+    Round 23 Fix A (``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md``): when the ``hints``
+    loop above finds nothing at all -- because neither the callee name
+    nor the receiver's leading segment has a local ``use`` binding to
+    build a hint from in the first place -- a Rust heritage clause's
+    own ``call.receiver`` is tried directly as a bare crate-name hint.
+    This covers Rust's fully-qualified impl spelling
+    (``impl gpui::Render for X``, no ``use gpui::Render;`` anywhere in
+    the file), which previously produced an empty ``hints`` list and
+    never even reached ``_rust_crate_hint_matches`` -- the crate-root
+    fallback existed but had nothing to loop over.
+
+    ``tiebreak_hits`` (round 24, ``.features/plans/round24/
+    03-heritage-crate-decoy-tiebreak.md``) is an optional mutable
+    single-element counter, incremented whenever
+    ``_prefer_non_synthetic_crate_match`` fires inside either of the
+    two crate-hint steps below -- lets ``resolve_heritage()`` disclose
+    how many resolved edges rest on that convention-based tiebreak
+    rather than a structural match.
     """
     hints: list[str] = []
     imp = file_imports.get(call.name)
@@ -2295,6 +2623,50 @@ def _import_match(
         rec_imp = file_imports.get(first)
         if rec_imp is not None:
             hints.append(rec_imp.source)
+    hinted = _hint_match(
+        hints, candidates, crate_roots, call.path, tiebreak_hits
+    )
+    if hinted is not None:
+        return hinted
+    receiver_hint = _rust_receiver_crate_match(
+        call, candidates, crate_roots, tiebreak_hits
+    )
+    if receiver_hint is not None:
+        return receiver_hint
+    if raw_imports:
+        matched = [
+            c
+            for c in candidates
+            if any(_module_matches(i.source, c.path) for i in raw_imports)
+        ]
+        if len(matched) == 1:
+            return matched[0]
+    return None
+
+
+def _hint_match(
+    hints: list[str],
+    candidates: list[Symbol],
+    crate_roots: dict[str, list[str]] | None,
+    caller_path: str,
+    tiebreak_hits: list[int] | None = None,
+) -> Symbol | None:
+    """Try each ``file_imports``-derived hint against ``candidates``.
+
+    Split out of ``_import_match`` purely to keep that function's
+    cyclomatic complexity under the project's Ruff limit -- the
+    per-hint ``_module_matches``-then-``_rust_crate_hint_matches``
+    loop that function has run unmodified since before round 23.
+
+    Round 24 (``.features/plans/round24/
+    03-heritage-crate-decoy-tiebreak.md``): when a hint matches 2+
+    crate roots, ``_prefer_non_synthetic_crate_match`` gets one more
+    try before this hint gives up -- see that function's own
+    docstring for why this can only ever resolve, never misresolve,
+    relative to the unmodified ``len(crate_matched) == 1`` check above
+    it. ``caller_path`` (``call.path``) is threaded through purely so
+    that function can apply its self-crate guard.
+    """
     for hint in hints:
         matched = [c for c in candidates if _module_matches(hint, c.path)]
         if len(matched) == 1:
@@ -2307,15 +2679,51 @@ def _import_match(
             ]
             if len(crate_matched) == 1:
                 return crate_matched[0]
-    if raw_imports:
-        matched = [
-            c
-            for c in candidates
-            if any(_module_matches(i.source, c.path) for i in raw_imports)
-        ]
-        if len(matched) == 1:
-            return matched[0]
+            tiebroken = _prefer_non_synthetic_crate_match(
+                crate_matched, caller_path, tiebreak_hits
+            )
+            if tiebroken is not None:
+                return tiebroken
     return None
+
+
+def _rust_receiver_crate_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    crate_roots: dict[str, list[str]] | None,
+    tiebreak_hits: list[int] | None = None,
+) -> Symbol | None:
+    """Round 23 Fix A: try a heritage clause's bare receiver as a
+    crate-name hint directly, split out of ``_import_match`` purely to
+    keep that function's cyclomatic complexity under the project's
+    Ruff limit.
+
+    Rust's fully-qualified impl spelling (``impl gpui::Render for X``)
+    binds no ``use`` for either ``Render`` or ``gpui``, so
+    ``_import_match``'s ordinary ``hints`` list (built only from
+    ``file_imports`` lookups) stays empty and its crate-aware loop
+    never runs. ``call.receiver`` (``"gpui"`` here) is itself a
+    directly usable crate-name hint in that case -- reuses
+    ``_rust_crate_hint_matches`` unchanged, just fed a hint sourced
+    from the call site rather than a ``file_imports`` entry.
+
+    Round 24: the same ``_prefer_non_synthetic_crate_match`` fallback
+    ``_hint_match`` gained also applies here, since this is the other
+    call site that can produce a 2+-candidate ``crate_matched`` list.
+    """
+    if not crate_roots or not call.receiver:
+        return None
+    first = _PATH_SPLIT.split(call.receiver)[0]
+    crate_matched = [
+        c
+        for c in candidates
+        if _rust_crate_hint_matches(first, c.path, crate_roots)
+    ]
+    if len(crate_matched) == 1:
+        return crate_matched[0]
+    return _prefer_non_synthetic_crate_match(
+        crate_matched, call.path, tiebreak_hits
+    )
 
 
 def _alias_candidates(
@@ -2491,8 +2899,210 @@ def _module_matches(source: str, candidate_path: str) -> bool:
     return stem in _import_segments(source)
 
 
+_SYNTHETIC_CRATE_DIR_MARKERS = frozenset(
+    {
+        "test_fixture",
+        "test_fixtures",
+        "fixture",
+        "fixtures",
+        "testdata",
+        "mock",
+        "mocks",
+        "vendor",
+        "third_party",
+    }
+)
+
+
+def _rust_crate_dir(candidate_path: str) -> str:
+    """Best-effort crate-root directory (``src/``'s own parent) for a
+    candidate's own file path, derived purely from path shape.
+
+    Walks upward from the candidate file's own directory looking for
+    the nearest ancestor directory literally named ``src`` and returns
+    *its* parent -- the same convention ``_rust_crate_roots_index_all``
+    keys its index by (a crate name maps to its ``src/`` directory),
+    applied here in reverse to an arbitrary candidate file
+    that may be nested arbitrarily deep inside that ``src/`` tree
+    (unlike the root-file-only shape ``_rust_crate_roots_index_all``
+    itself scans for), so a candidate several submodules deep still
+    resolves to its crate's own root directory, not some intermediate
+    submodule directory.
+
+    Args:
+        candidate_path: Repo-relative path of a candidate symbol
+            (e.g. ``"tooling/lints/test_fixture/gpui/src/lib.rs"``).
+
+    Returns:
+        The crate directory (``src/``'s parent), e.g.
+        ``"tooling/lints/test_fixture/gpui"``. Falls back to the
+        candidate's own parent directory when no ``src`` ancestor is
+        found -- a path shape this heuristic can't classify either
+        way, which ``_looks_like_synthetic_crate_root`` will then
+        correctly find no markers in.
+    """
+    d = _dirname(candidate_path)
+    while d:
+        if d.rsplit("/", 1)[-1] == "src":
+            return _dirname(d)
+        d = _dirname(d)
+    return _dirname(candidate_path)
+
+
+def _looks_like_synthetic_crate_root(crate_dir: str) -> bool:
+    """Whether a Rust crate root's own *ancestor* path segments look
+    like a lint-testing/vendor stand-in rather than a real workspace
+    member.
+
+    Deliberately checks every path segment *above* the crate's own
+    leaf directory name (``crate_dir.rsplit("/", 1)[-1]``), never the
+    leaf itself -- a real, published crate can legitimately be named
+    ``test-utils``/``fixtures``/``mock-server`` (common package names
+    in the wild); it is the *containing* directory trail
+    (``tooling/lints/test_fixture/gpui`` -- the ``gpui`` leaf is fine,
+    ``test_fixture`` one level up is the tell) that signals "this
+    crate exists to test something else," per the exact zed shape this
+    is scoped against (round 23 design doc's own "preferring a root
+    that looks more like a real Cargo workspace member over one nested
+    under a `test_fixture`/`vendor`-shaped path" suggestion).
+
+    Args:
+        crate_dir: A crate root's ``src/``-parent directory (see
+            ``_rust_crate_dir``), e.g.
+            ``"tooling/lints/test_fixture/gpui"``.
+
+    Returns:
+        True when any ancestor segment (excluding the crate's own leaf
+        directory) matches a known synthetic/vendor marker.
+    """
+    segments = crate_dir.split("/")[:-1]
+    return any(seg in _SYNTHETIC_CRATE_DIR_MARKERS for seg in segments)
+
+
+def _prefer_non_synthetic_crate_match(
+    crate_matched: list[Symbol],
+    caller_path: str,
+    tiebreak_hits: list[int] | None = None,
+) -> Symbol | None:
+    """Round 24 heritage crate-decoy tiebreak (``.features/plans/
+    round24/03-heritage-crate-decoy-tiebreak.md``): break a 2+-way
+    crate-root collision when exactly one candidate's crate root
+    doesn't look synthetic (test-fixture/vendor-shaped).
+
+    Only ever returns non-``None`` when a step below leaves *exactly*
+    one survivor -- a genuine collision between two real, non-synthetic
+    crates (or two synthetic ones) stays correctly ambiguous, matching
+    this module's existing "resolve only on an unambiguous signal"
+    contract throughout (see ``_pick_candidate``'s own docstring and
+    round 23's "report as ambiguous rather than guessed" philosophy).
+    This is a strictly additive fallback tried only *after*
+    ``_rust_crate_hint_matches``'s own ``len(crate_matched) == 1``
+    check has already failed -- it can only ever turn a previously-
+    ambiguous edge into a resolved one, never the reverse.
+
+    Checked *before* the synthetic-path filter: if the clause's own
+    caller file lives inside one of ``crate_matched``'s own crate
+    roots, that candidate wins outright, synthetic-looking or not. A
+    decoy crate's own test code legitimately writing
+    ``impl gpui::Render for Y`` from *inside*
+    ``tooling/lints/test_fixture/gpui`` itself (the crate's own
+    external name is always in scope for self-reference, Rust 2018+)
+    must resolve to the decoy's own ``Render``, not get silently
+    redirected to a different, unrelated real crate just because that
+    other crate's path looks more legitimate -- the design doc's own
+    test plan calls this out explicitly: "the tiebreak must not
+    blindly prefer 'not synthetic' when the caller itself lives inside
+    the synthetic crate's own tree." This self-crate check does not
+    increment ``tiebreak_hits`` -- unlike the marker-based guess below,
+    "the caller's own file lives in this exact candidate's crate" is a
+    structural fact, not a convention-based guess.
+
+    Args:
+        crate_matched: Every candidate whose path matched the crate
+            name hint across 2+ registered crate roots (round 23 Fix
+            B) -- the set this tiebreak narrows.
+        caller_path: Repo-relative path of the file declaring the
+            heritage clause being resolved (``call.path``) -- used
+            only for the self-crate check above.
+        tiebreak_hits: When given, incremented by one each time the
+            synthetic-marker tiebreak actually fires (returns
+            non-``None`` via that path) -- lets ``resolve_heritage()``
+            count how many resolved edges rest on this convention-based
+            guess rather than a structural match, for disclosure to
+            callers (``query subtypes``/``supertypes``).
+
+    Returns:
+        The winning candidate, or ``None`` when neither step above
+        narrows ``crate_matched`` to exactly one.
+    """
+    caller_crate_dir = _rust_crate_dir(caller_path)
+    same_crate = [
+        c for c in crate_matched if _rust_crate_dir(c.path) == caller_crate_dir
+    ]
+    if len(same_crate) == 1:
+        return same_crate[0]
+    non_synthetic = [
+        c
+        for c in crate_matched
+        if not _looks_like_synthetic_crate_root(_rust_crate_dir(c.path))
+    ]
+    if len(non_synthetic) == 1:
+        if tiebreak_hits is not None:
+            tiebreak_hits[0] += 1
+        return non_synthetic[0]
+    return None
+
+
+def _prefer_non_synthetic_crate_root(
+    crate_dirs: list[str], importer_path: str
+) -> str | None:
+    """Round 25 ``dekko deps`` crate-decoy tiebreak (``.features/plans/
+    round25/02-deps-crate-decoy-tiebreak.md``): directory-level sibling
+    of ``_prefer_non_synthetic_crate_match``, for
+    ``_resolve_import_rust``'s bare-crate-name lookup.
+
+    Import resolution has no ``Symbol`` candidates the way heritage
+    resolution does at this point -- only the crate-root directory
+    strings ``_rust_crate_roots_index_all`` collected for a colliding
+    crate name -- so this mirrors ``_prefer_non_synthetic_crate_match``'s
+    two-step logic (self-crate wins outright; otherwise the sole
+    non-synthetic-looking root wins) over that different shape rather
+    than reusing it directly.
+
+    Args:
+        crate_dirs: Every crate-root ``src/`` directory registered
+            under the colliding crate name (``ctx.crate_roots``'s
+            value for that name, already known to have 2+ entries by
+            the caller).
+        importer_path: Repo-relative path of the file declaring the
+            ``use`` import being resolved -- used for the self-crate
+            check, mirroring ``_prefer_non_synthetic_crate_match``'s
+            ``caller_path``.
+
+    Returns:
+        The winning crate-root directory, or ``None`` when neither the
+        self-crate check nor the synthetic-marker filter narrows
+        ``crate_dirs`` to exactly one -- a genuine, still-ambiguous
+        collision, left for the caller to treat as unresolved.
+    """
+    importer_crate_dir = _rust_crate_dir(importer_path)
+    same_crate = [
+        d for d in crate_dirs if _rust_crate_dir(d) == importer_crate_dir
+    ]
+    if len(same_crate) == 1:
+        return same_crate[0]
+    non_synthetic = [
+        d
+        for d in crate_dirs
+        if not _looks_like_synthetic_crate_root(_rust_crate_dir(d))
+    ]
+    if len(non_synthetic) == 1:
+        return non_synthetic[0]
+    return None
+
+
 def _rust_crate_hint_matches(
-    hint: str, candidate_path: str, crate_roots: dict[str, str]
+    hint: str, candidate_path: str, crate_roots: dict[str, list[str]]
 ) -> bool:
     """Check a Rust import hint against a candidate via its crate root.
 
@@ -2509,47 +3119,76 @@ def _rust_crate_hint_matches(
     to ambiguous even though the import hint, read correctly, points
     unambiguously at the real trait.
 
-    This reuses ``_rust_crate_roots_index`` (built once per
-    ``resolve_heritage()`` call, the same repo-wide crate-name ->
-    crate-root-``src/``-directory index ``resolve_imports()`` already
-    relies on for cross-crate ``use`` resolution) to check the
+    This reuses ``_rust_crate_roots_index_all`` (built once per
+    ``resolve_heritage()`` call, a repo-wide crate-name -> *every*
+    matching crate-root-``src/``-directory index) to check the
     *crate*, not just the file: does the hint's leading path segment
     name a known crate, and does the candidate's own file live under
-    that crate's root directory.
+    any of that crate name's root directories.
 
     Args:
         hint: One import source string from ``_import_match``'s hint
-            list (e.g. ``"gpui::Render"``).
+            list (e.g. ``"gpui::Render"``), or (round 23 Fix A) a bare
+            heritage-clause receiver segment used directly as a
+            crate-name hint.
         candidate_path: Repo-relative path of a candidate symbol.
-        crate_roots: Crate name to that crate's ``src/`` directory,
-            as built by ``_rust_crate_roots_index``.
+        crate_roots: Crate name to every matching crate's ``src/``
+            directory, as built by ``_rust_crate_roots_index_all``.
 
     Returns:
-        True when ``candidate_path`` is a Rust file living under the
-        crate root named by ``hint``'s leading segment.
+        True when ``candidate_path`` is a Rust file living under any
+        root registered for the crate name in ``hint``'s leading
+        segment.
 
-    Known residual gap (documented, not fixed here): ``crate_roots``
-    holds one root per crate *name*, so two same-named crates (an
+    Round 23 Fix B (``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md``) -- see that design
+    doc's "Implemented" note for the live measurement this decision
+    is based on. Before Fix B, ``crate_roots`` held one root per crate
+    *name* (``dict[str, str]``), so two same-named crates (an
     in-workspace one and an unrelated same-named fixture/vendor crate
-    elsewhere in the repo — the exact zed shape this was verified
+    elsewhere in the repo -- the exact zed shape this was verified
     against, ``tooling/lints/test_fixture/gpui`` shadowing the real
-    ``gpui`` crate) collapse onto whichever one
-    ``_rust_crate_roots_index`` happens to index last; this can still
-    pick the wrong one of the two in that specific adversarial case.
-    Every other shape (a re-exported trait colliding with an
-    unrelated, differently-named type elsewhere in the repo — the far
-    more common case) resolves correctly.
+    ``gpui`` crate) silently collapsed onto whichever one
+    ``_rust_crate_roots_index`` happened to index last, which measured
+    live as a genuine 50/50 coin flip across process hash seeds: about
+    half the time every affected clause resolved correctly (the real
+    crate won), the other half every one of them silently resolved to
+    the *wrong* (fixture) crate's same-named symbol -- confidently
+    wrong data, not merely missing data. Matching *any* registered
+    root instead removes the coin flip entirely: a genuine collision
+    (both roots match, ``len(crate_matched) > 1``) now deterministically
+    falls through to ``heritage_ambiguous`` instead of a 50%-chance
+    silent misattribution, matching this module's own stated
+    philosophy ("report as ambiguous rather than guessed" -- see the
+    module docstring). This trades away the "lucky half" of the old
+    coin flip's resolved-count along with the "unlucky half"'s silent
+    wrong answers -- an intentional, examined tradeoff, not an
+    oversight; see the design doc for the exact numbers.
+
+    Round 24 (``.features/plans/round24/
+    03-heritage-crate-decoy-tiebreak.md``) narrows the residual gap
+    Fix B's "genuine collision -> ambiguous" left unattempted: when
+    ``len(crate_matched) > 1`` here, this function's own caller
+    (``_hint_match``/``_rust_receiver_crate_match``) now tries
+    ``_prefer_non_synthetic_crate_match`` before giving up -- if
+    exactly one matched candidate's crate root avoids a test-fixture/
+    vendor-shaped ancestor path (``_looks_like_synthetic_crate_root``),
+    that one wins instead of falling through to ambiguous. A genuine
+    collision between two equally-plausible-looking real crates (round
+    23's own regression fixture) is untouched by this and still
+    resolves ambiguous, exactly as before -- the narrowing only ever
+    fires on the specific, narrower shape of "one candidate's path
+    looks like a lint-testing/vendor stand-in, the other doesn't."
     """
     if not candidate_path.endswith(".rs"):
         return False
     segments = _PATH_SPLIT.split(hint)
     if not segments or not segments[0]:
         return False
-    crate_root = crate_roots.get(segments[0])
-    if crate_root is None:
-        return False
-    return candidate_path == crate_root or candidate_path.startswith(
-        f"{crate_root}/"
+    crate_dirs = crate_roots.get(segments[0], [])
+    return any(
+        candidate_path == d or candidate_path.startswith(f"{d}/")
+        for d in crate_dirs
     )
 
 
@@ -2644,20 +3283,40 @@ class _ImportResolveContext:
             real path(s), scoped to C/C++-shaped extensions only (a
             same-named Python/JS file must never satisfy a ``#include``
             filename search).
-        crate_roots: Rust workspace-member crate name → that crate's
-            own root directory (its ``src/``), for every crate this
+        crate_roots: Rust workspace-member crate name → every matching
+            crate root directory (its ``src/``), for every crate this
             repo's convention-based detection can find (see
-            ``_rust_crate_roots_index``). Lets a bare, non-``crate``/
+            ``_rust_crate_roots_index_all``). Lets a bare, non-``crate``/
             ``self``/``super`` ``use`` path be recognized as a
             cross-crate, in-workspace import rather than assumed
-            external by default.
+            external by default. Collision-aware (round 25, ``.features/
+            plans/round25/02-deps-crate-decoy-tiebreak.md``): a crate
+            name matching two or more directories (e.g. a real crate
+            plus a same-named test-fixture/vendor stand-in) keeps every
+            match here rather than picking one, so
+            ``_resolve_import_rust`` can apply the same synthetic-crate
+            tiebreak round 24 already applies to heritage resolution
+            instead of silently guessing.
+        ts_path_aliases: Each discovered ``tsconfig.json``/
+            ``jsconfig.json``'s own directory (its scope) → the
+            resolved ``_TsConfigAliasTable`` (``baseUrl``/``paths``,
+            with its own ``extends`` chain already merged in) that
+            governs JS/TS/TSX files under that directory. Empty when
+            ``resolve_imports`` was called with no ``root`` (see its
+            docstring) — every existing in-memory-``FileMap`` caller
+            keeps today's "bare specifier is always external" behavior
+            for ``_resolve_import_js`` exactly, since this dict never
+            gets populated without a real filesystem root to search.
     """
 
     paths: frozenset[str]
     py_package_roots: dict[str, list[str]] = field(default_factory=dict)
     java_suffix_index: dict[str, list[str]] = field(default_factory=dict)
     cpp_basename_index: dict[str, list[str]] = field(default_factory=dict)
-    crate_roots: dict[str, str] = field(default_factory=dict)
+    crate_roots: dict[str, list[str]] = field(default_factory=dict)
+    ts_path_aliases: dict[str, "_TsConfigAliasTable"] = field(
+        default_factory=dict
+    )
 
 
 def _dirname(path: str) -> str:
@@ -2825,33 +3484,488 @@ def _resolve_import_python(
 
 _JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
 
+# Only the canonical basenames are discovered for v1 -- a repo whose
+# real ``paths`` config lives only in a non-canonically-named variant
+# (``tsconfig.build.json``, TS "solution style" ``references``) keeps
+# today's external-by-default behavior for those aliases. See
+# ``.features/plans/round25/07-tsconfig-path-alias-resolution.md``
+# "Explicit non-goals".
+_TSCONFIG_BASENAMES = frozenset({"tsconfig.json", "jsconfig.json"})
 
-def _resolve_import_js(
-    imp: Import, importer_path: str, ctx: _ImportResolveContext
-) -> str | None:
-    """Resolve a JS/TS/TSX import source to a repo file.
+# Bounded recursion depth for an ``extends`` chain, paired with a
+# visited-set cycle guard (``_merge_tsconfig_scope``) -- a malformed
+# config chain must degrade to "no inherited paths", never hang or
+# blow the recursion limit.
+_TSCONFIG_EXTENDS_DEPTH_CAP = 5
 
-    ``Import.source`` is ``"{module_source}/{imported_name}"`` (see
-    ``extractor._imports_js``) — the module path is recovered by
-    dropping the last ``/``-segment, safe regardless of how many
-    slashes the real module path itself contains (the appended name is
-    always exactly the last segment). A side-effect import
-    (``imp.name == ""``, no local binding) stores ``source`` bare with
-    no appended name to strip, so the drop is skipped for that shape —
-    stripping unconditionally would truncate a real path segment (e.g.
-    ``"opentui-spinner/react"`` down to ``"opentui-spinner"``). Bare
-    specifiers (no leading ``.``/``..``) are external by construction —
-    an npm package name never collides with a relative path, so no
-    repo-root search is needed the way Python's absolute imports
-    require one.
+
+@dataclass(frozen=True)
+class _TsConfigAliasTable:
+    """One ``tsconfig.json``/``jsconfig.json`` scope's resolved
+    ``baseUrl``/``paths``, its own ``extends`` chain already merged in.
+
+    Attributes:
+        base_dir: ``compilerOptions.baseUrl``, resolved to a
+            repo-relative path. Alias targets in ``paths`` are joined
+            against this, mirroring ``_resolve_import_js``'s own
+            relative-import ``base_dir``-joining idiom rather than a
+            new path-joining convention.
+        paths: ``compilerOptions.paths``, as ``(pattern, targets)``
+            pairs in declaration order -- order matters, since a JS
+            import matches the *first* pattern that fits, not the most
+            specific one (this follows tsc's actual documented
+            first-declared-pattern-wins behavior, not
+            longest-prefix-wins).
     """
-    module_source = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
-    if not (module_source.startswith("./") or module_source.startswith("../")):
+
+    base_dir: str
+    paths: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Strip ``//`` and ``/* */`` comments from JSONC text.
+
+    String-boundary-aware: a scanner state tracks whether the cursor is
+    currently inside a ``"..."`` string literal (respecting ``\\"``
+    escapes), so a ``//`` or ``/*`` occurring *inside* a string value
+    (a URL, a path containing ``//``) is never mistaken for a comment
+    start -- the one failure mode a naive regex-based stripper would
+    get wrong on a real-world config. A block comment is replaced with
+    a single space (not deleted outright) so two tokens separated only
+    by ``/* ... */`` don't get accidentally joined; a line comment is
+    dropped along with its trailing newline-less remainder, leaving the
+    line break itself intact so line numbers in a ``json.loads`` error
+    (for a config that's still malformed after stripping) stay useful.
+
+    Trailing commas are a separate, later pass
+    (``_strip_trailing_commas``) -- kept apart so each pass has one
+    job, per this module's own single-responsibility convention.
+
+    Args:
+        text: Raw ``tsconfig.json``/``jsconfig.json`` file contents.
+
+    Returns:
+        ``text`` with every comment removed, ready for
+        ``_strip_trailing_commas`` and then ``json.loads``.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i = min(i + 2, n)
+            out.append(" ")
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """Drop a trailing comma right before a closing ``}``/``]``.
+
+    Runs after ``_strip_jsonc_comments``, so only whitespace (never a
+    comment) can separate the comma from its closer. Kept
+    string-boundary-aware for the same reason ``_strip_jsonc_comments``
+    is -- a naive ``re.sub(r",(\\s*[}\\]])", ...)`` would also fire on
+    a literal ``",}"``-shaped substring inside a JSON string *value*
+    (unlikely in a tsconfig path string, but not a risk worth taking
+    for a hand-rolled parser this module leans on for a "skip rather
+    than guess" discipline elsewhere).
+
+    Args:
+        text: JSONC text with comments already stripped.
+
+    Returns:
+        ``text`` with every trailing comma removed, safe to hand to
+        ``json.loads``.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _read_jsonc_config(root: Path, rel: str) -> dict | None:
+    """Read and parse one JSONC config file, or ``None`` on any
+    failure.
+
+    Never raises -- an unreadable file, a parse failure even after
+    comment/trailing-comma stripping, or a non-object top level all
+    cause this one config to be silently skipped (matching this
+    module's "skip rather than guess" discipline): one broken
+    ``tsconfig.json`` in a monorepo must not take down ``dekko map``.
+
+    Args:
+        root: Repository root.
+        rel: Repo-relative path to the config file.
+
+    Returns:
+        The parsed top-level object, or ``None``.
+    """
+    try:
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return None
-    base_dir = _dirname(importer_path)
+    try:
+        data = json.loads(_strip_trailing_commas(_strip_jsonc_comments(text)))
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _normalize_ts_paths(
+    paths_raw: object,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """``compilerOptions.paths`` (a JSON object) → declaration-ordered
+    ``(pattern, targets)`` pairs, malformed entries dropped rather than
+    raising.
+    """
+    if not isinstance(paths_raw, dict):
+        return ()
+    out: list[tuple[str, tuple[str, ...]]] = []
+    for pattern, targets in paths_raw.items():
+        if not isinstance(pattern, str) or not isinstance(targets, list):
+            continue
+        cleaned = tuple(t for t in targets if isinstance(t, str))
+        if cleaned:
+            out.append((pattern, cleaned))
+    return tuple(out)
+
+
+def _resolve_ts_extends_target(
+    config_rel: str, extends_spec: str
+) -> str | None:
+    """Repo-relative path an ``extends`` entry names, or ``None``.
+
+    Only a repo-relative ``extends`` value (``"./..."``/``"../..."``)
+    is followed -- an ``extends`` target that would resolve through
+    ``node_modules`` package resolution (e.g. ``"@tsconfig/node18/
+    tsconfig.json"``) is a real, common convention this module doesn't
+    attempt to resolve (out of scope: no package resolution), and is
+    silently skipped, contributing nothing to the merge.
+
+    Args:
+        config_rel: Repo-relative path of the config declaring
+            ``extends``.
+        extends_spec: One raw ``extends`` string value.
+
+    Returns:
+        The resolved repo-relative config path (``.json`` appended when
+        missing, matching tsc's own extension-inference), or ``None``
+        when ``extends_spec`` isn't repo-relative.
+    """
+    if not (extends_spec.startswith("./") or extends_spec.startswith("../")):
+        return None
+    config_dir = _dirname(config_rel)
     joined = posixpath.normpath(
-        f"{base_dir}/{module_source}" if base_dir else module_source
+        f"{config_dir}/{extends_spec}" if config_dir else extends_spec
     )
+    if not joined.endswith(".json"):
+        joined = f"{joined}.json"
+    return joined
+
+
+_TsPathsOrNone = tuple[tuple[str, tuple[str, ...]], ...] | None
+
+
+def _inherited_tsconfig_scope(
+    root: Path, raw: dict, rel: str, depth: int, visited: frozenset[str]
+) -> tuple[str | None, _TsPathsOrNone]:
+    """Merge every ``extends`` target of one config, in array order.
+
+    Split out of ``_merge_tsconfig_scope`` to keep that function's own
+    branch count under this project's complexity cap -- a later
+    ``extends`` array entry overriding an earlier one's contribution
+    mirrors ``tsc``'s own last-wins merge order for multiple base
+    configs (TS 5+ array ``extends``).
+
+    Args:
+        root: Repository root.
+        raw: This config's already-parsed top-level object.
+        rel: Repo-relative path of the config declaring ``extends``.
+        depth: This config's own recursion depth (its targets recurse
+            at ``depth + 1``).
+        visited: Config paths already visited in this chain.
+
+    Returns:
+        ``(base_dir, paths)`` inherited from the ``extends`` chain,
+        either ``None`` when nothing in the chain declares one.
+    """
+    inherited_base_dir: str | None = None
+    inherited_paths: _TsPathsOrNone = None
+    extends = raw.get("extends")
+    extends_specs = (
+        extends
+        if isinstance(extends, list)
+        else [extends]
+        if isinstance(extends, str)
+        else []
+    )
+    for spec in extends_specs:
+        if not isinstance(spec, str):
+            continue
+        target = _resolve_ts_extends_target(rel, spec)
+        if target is None:
+            continue
+        parent_base, parent_paths = _merge_tsconfig_scope(
+            root, target, depth + 1, visited
+        )
+        if parent_base is not None:
+            inherited_base_dir = parent_base
+        if parent_paths is not None:
+            inherited_paths = parent_paths
+    return inherited_base_dir, inherited_paths
+
+
+def _own_tsconfig_scope(
+    raw: dict, config_dir: str
+) -> tuple[str | None, _TsPathsOrNone]:
+    """This config's *own* (non-inherited) ``baseUrl``/``paths``.
+
+    Args:
+        raw: This config's already-parsed top-level object.
+        config_dir: This config's own repo-relative directory, for
+            resolving a relative ``baseUrl`` against.
+
+    Returns:
+        ``(base_dir, paths)`` — ``base_dir`` is ``None`` when this
+        config declares no ``baseUrl`` of its own; ``paths`` is
+        ``None`` when this config's ``compilerOptions`` has no
+        ``paths`` key at all (as opposed to an empty ``paths: {}``,
+        which is a real declaration that must still replace an
+        inherited table — see ``_merge_tsconfig_scope``).
+    """
+    compiler_options = raw.get("compilerOptions")
+    if not isinstance(compiler_options, dict):
+        return None, None
+    base_dir = None
+    base_url_raw = compiler_options.get("baseUrl")
+    if isinstance(base_url_raw, str):
+        joined = posixpath.normpath(
+            f"{config_dir}/{base_url_raw}" if config_dir else base_url_raw
+        )
+        base_dir = "" if joined == "." else joined
+    paths = (
+        _normalize_ts_paths(compiler_options.get("paths"))
+        if "paths" in compiler_options
+        else None
+    )
+    return base_dir, paths
+
+
+def _merge_tsconfig_scope(
+    root: Path, rel: str, depth: int, visited: frozenset[str]
+) -> tuple[str | None, _TsPathsOrNone]:
+    """Resolve one config's own ``baseUrl``/``paths``, with its
+    ``extends`` chain (if any) merged in first.
+
+    Recurses into each ``extends`` target before reading this config's
+    own ``compilerOptions``, per real tsc merge semantics: ``paths``
+    inherits whole-key-replaces (a config that declares
+    ``compilerOptions.paths`` at all replaces the parent's ``paths``
+    entirely, never merged per-alias) and ``baseUrl`` inherits only
+    when this config doesn't declare its own. A depth cap plus a
+    visited-set cycle guard means a malformed chain (an ``extends``
+    cycle, a chain deeper than realistic) degrades to "no inherited
+    paths" rather than recursing forever.
+
+    Args:
+        root: Repository root.
+        rel: Repo-relative path of the config to resolve.
+        depth: Current recursion depth (0 at the entry point).
+        visited: Config paths already visited in this chain, for the
+            cycle guard.
+
+    Returns:
+        ``(base_dir, paths)`` -- either may be ``None`` when neither
+        this config nor its ``extends`` chain declares one.
+        ``base_dir`` is *not* defaulted here (see
+        ``_load_tsconfig_alias_tables`` for the "." default, applied
+        once at the scope's own leaf level).
+    """
+    if rel in visited or depth > _TSCONFIG_EXTENDS_DEPTH_CAP:
+        return None, None
+    raw = _read_jsonc_config(root, rel)
+    if raw is None:
+        return None, None
+    visited = visited | {rel}
+
+    inherited_base_dir, inherited_paths = _inherited_tsconfig_scope(
+        root, raw, rel, depth, visited
+    )
+    own_base_dir, own_paths = _own_tsconfig_scope(raw, _dirname(rel))
+
+    base_dir = own_base_dir if own_base_dir is not None else inherited_base_dir
+    paths = own_paths if own_paths is not None else inherited_paths
+    return base_dir, paths
+
+
+def _load_tsconfig_alias_tables(root: Path) -> dict[str, _TsConfigAliasTable]:
+    """Discover and parse every ``tsconfig.json``/``jsconfig.json`` in
+    the repo into a per-directory alias table, each config's own
+    ``extends`` chain already merged in.
+
+    Discovery reuses ``walker.find_config_files`` (the same
+    exclude-aware enumeration ``discover()`` uses for source files), so
+    a ``node_modules/some-pkg/tsconfig.json`` decoy is excluded the
+    same way any other vendored file already is. A config that
+    resolves to no ``paths`` anywhere in its own ``extends`` chain
+    contributes nothing (no entry in the returned dict) -- there is
+    nothing for ``_nearest_ts_config_scope`` to usefully find there.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Each discovered config's own directory (``""`` for a
+        repo-root ``tsconfig.json``) → its resolved
+        ``_TsConfigAliasTable``.
+    """
+    tables: dict[str, _TsConfigAliasTable] = {}
+    for rel in walker.find_config_files(root, _TSCONFIG_BASENAMES):
+        base_dir, paths = _merge_tsconfig_scope(root, rel, 0, frozenset())
+        if not paths:
+            continue
+        config_dir = _dirname(rel)
+        if base_dir is None:
+            base_dir = config_dir
+        tables[config_dir] = _TsConfigAliasTable(
+            base_dir=base_dir, paths=paths
+        )
+    return tables
+
+
+def _nearest_ts_config_scope(
+    importer_path: str, ts_path_aliases: dict[str, _TsConfigAliasTable]
+) -> _TsConfigAliasTable | None:
+    """Deepest ``ts_path_aliases`` scope governing ``importer_path``.
+
+    Walks from the importer's own directory upward (the same
+    repeated-ancestor-directory-walk shape ``_rust_crate_root`` already
+    uses for its own nearest-scope lookup, applied here to
+    ``ts_path_aliases``'s directory keys instead of crate-root
+    markers), so a monorepo's per-package ``tsconfig.json`` takes
+    priority over a root-level one for files under that package --
+    matching real ``tsc`` resolution order.
+
+    Args:
+        importer_path: Repo-relative path of the importing file.
+        ts_path_aliases: Every discovered scope, keyed by its own
+            directory.
+
+    Returns:
+        The nearest governing ``_TsConfigAliasTable``, or ``None`` when
+        no config governs this file at all.
+    """
+    if not ts_path_aliases:
+        return None
+    d = _dirname(importer_path)
+    while True:
+        table = ts_path_aliases.get(d)
+        if table is not None:
+            return table
+        if not d:
+            return None
+        d = _dirname(d)
+
+
+def _match_ts_path_pattern(module_source: str, pattern: str) -> str | None:
+    """Match ``module_source`` against one ``paths`` key.
+
+    Args:
+        module_source: The bare import specifier being resolved.
+        pattern: One ``compilerOptions.paths`` key -- either a literal
+            string, or a string with at most one ``*`` wildcard (per
+            the TS spec).
+
+    Returns:
+        The wildcard capture (the substring matched by ``*``) for a
+        wildcard pattern, ``""`` for a non-wildcard exact match, or
+        ``None`` when ``pattern`` doesn't apply to ``module_source``.
+    """
+    if "*" not in pattern:
+        return "" if module_source == pattern else None
+    prefix, _, suffix = pattern.partition("*")
+    if not (
+        module_source.startswith(prefix) and module_source.endswith(suffix)
+    ):
+        return None
+    if len(module_source) < len(prefix) + len(suffix):
+        return None
+    return module_source[len(prefix) : len(module_source) - len(suffix)]
+
+
+def _js_module_candidates(joined: str) -> list[str]:
+    """Extension/index-file candidate ladder for a resolved JS/TS
+    module path.
+
+    Shared by relative-import resolution (``_resolve_import_js``) and
+    tsconfig path-alias resolution (``_resolve_ts_path_alias``) so both
+    apply the exact same NodeNext/ESM specifier-extension-stripping
+    second pass, rather than a second, parallel candidate-generation
+    implementation.
+
+    Args:
+        joined: A resolved, ``posixpath.normpath``-clean module path
+            with no extension guaranteed yet.
+
+    Returns:
+        Candidate repo-relative paths, most-specific (as written)
+        first.
+    """
     candidates = [joined]
     candidates += [f"{joined}{ext}" for ext in _JS_EXTENSIONS]
     candidates += [f"{joined}/index{ext}" for ext in _JS_EXTENSIONS]
@@ -2866,7 +3980,93 @@ def _resolve_import_js(
     stem, specifier_ext = posixpath.splitext(joined)
     if specifier_ext in _JS_EXTENSIONS:
         candidates += [f"{stem}{ext}" for ext in _JS_EXTENSIONS]
-    return _first_match(ctx.paths, candidates)
+    return candidates
+
+
+def _resolve_ts_path_alias(
+    module_source: str, scope: _TsConfigAliasTable, paths: frozenset[str]
+) -> str | None:
+    """Resolve a bare specifier against one tsconfig scope's alias
+    table.
+
+    Tries each ``(pattern, targets)`` pair in the scope's own
+    declaration order (first-declared-pattern-that-matches wins, not
+    longest-prefix -- matches documented ``tsc`` behavior); within a
+    matching pattern, each target is tried in order (first real-file
+    match wins, mirroring ``_first_match``'s existing "try candidates
+    in order" convention used everywhere else in this module). Each
+    candidate target is joined against ``scope.base_dir`` and run
+    through the same extension/index-file ladder
+    (``_js_module_candidates``) relative-import resolution already
+    applies.
+
+    Args:
+        module_source: The bare import specifier being resolved.
+        scope: The governing tsconfig scope (see
+            ``_nearest_ts_config_scope``).
+        paths: Every file path known to the map.
+
+    Returns:
+        The resolved repo-relative path, or ``None`` when no pattern
+        matches, or a matching pattern's targets all miss.
+    """
+    for pattern, targets in scope.paths:
+        capture = _match_ts_path_pattern(module_source, pattern)
+        if capture is None:
+            continue
+        for target in targets:
+            resolved_target = (
+                target.replace("*", capture, 1) if "*" in target else target
+            )
+            joined = posixpath.normpath(
+                f"{scope.base_dir}/{resolved_target}"
+                if scope.base_dir
+                else resolved_target
+            )
+            match = _first_match(paths, _js_module_candidates(joined))
+            if match is not None:
+                return match
+    return None
+
+
+def _resolve_import_js(
+    imp: Import, importer_path: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a JS/TS/TSX import source to a repo file.
+
+    ``Import.source`` is ``"{module_source}/{imported_name}"`` (see
+    ``extractor._imports_js``) — the module path is recovered by
+    dropping the last ``/``-segment, safe regardless of how many
+    slashes the real module path itself contains (the appended name is
+    always exactly the last segment). A side-effect import
+    (``imp.name == ""``, no local binding) stores ``source`` bare with
+    no appended name to strip, so the drop is skipped for that shape —
+    stripping unconditionally would truncate a real path segment (e.g.
+    ``"opentui-spinner/react"`` down to ``"opentui-spinner"``).
+
+    Bare specifiers (no leading ``.``/``..``) are external by
+    construction *unless* a ``tsconfig.json``/``jsconfig.json``
+    ``compilerOptions.paths`` alias governing this importer's directory
+    resolves it to a real in-repo file (``ctx.ts_path_aliases``, empty
+    whenever ``resolve_imports`` was called with no filesystem ``root``
+    — see ``_ImportResolveContext``'s docstring) — an npm package name
+    never collides with a relative path or a configured alias pattern,
+    so an alias miss still falls through to "external", no repo-root
+    search beyond the alias table itself is needed.
+    """
+    module_source = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
+    if not (module_source.startswith("./") or module_source.startswith("../")):
+        scope = _nearest_ts_config_scope(importer_path, ctx.ts_path_aliases)
+        if scope is not None:
+            resolved = _resolve_ts_path_alias(module_source, scope, ctx.paths)
+            if resolved is not None:
+                return resolved
+        return None
+    base_dir = _dirname(importer_path)
+    joined = posixpath.normpath(
+        f"{base_dir}/{module_source}" if base_dir else module_source
+    )
+    return _first_match(ctx.paths, _js_module_candidates(joined))
 
 
 _RUST_INDEX_STEMS = ("mod", "lib", "main")
@@ -2979,20 +4179,19 @@ def _rust_crate_root_index_names(
     return _RUST_INDEX_NAMES
 
 
-def _rust_crate_roots_index(paths: frozenset[str]) -> dict[str, str]:
-    """Repo-wide Rust crate name → crate-root-directory index, built
-    once per ``resolve_imports()`` call.
+def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
+    """Repo-wide Rust crate name → every matching crate-root directory.
 
-    Applies the same convention-based detection ``_rust_crate_root``
-    performs reactively per importer, but proactively across every
-    ``src/`` directory in the repo: a workspace-member crate's name is
-    the name of the directory containing its ``src/lib.rs``/``src/
-    main.rs`` (or, for a custom ``[lib] path`` override, its ``src/
-    <crate-name>.rs``) -- round 19's own convention, reused rather
-    than reinvented. Lets a cross-crate ``use other_crate::X;`` import
-    in a Cargo workspace resolve against the sibling crate's real root
-    directory, without parsing ``Cargo.toml`` (out of scope; see
-    ``_rust_crate_root``'s own docstring for why).
+    Applies convention-based detection across every ``src/`` directory
+    in the repo, proactively rather than reactively (mirroring
+    ``_rust_crate_root``'s own per-importer logic): a workspace-member
+    crate's name is the name of the directory containing its ``src/
+    lib.rs``/``src/main.rs`` (or, for a custom ``[lib] path`` override,
+    its ``src/<crate-name>.rs``) -- round 19's own convention, reused
+    rather than reinvented. Lets a cross-crate ``use other_crate::X;``
+    import in a Cargo workspace resolve against the sibling crate's
+    real root directory, without parsing ``Cargo.toml`` (out of scope;
+    see ``_rust_crate_root``'s own docstring for why).
 
     Scoped to the ``<crate>/src/...`` nesting shape only -- the same
     shape confirmed dominant against zed in ``_rust_crate_root``'s own
@@ -3004,14 +4203,66 @@ def _rust_crate_roots_index(paths: frozenset[str]) -> dict[str, str]:
     ``_rust_crate_root`` itself already accepts for its own edge case
     (round 22 zed.md §3.1).
 
+    Collision-aware: retains *every* directory that matches a given
+    crate name rather than letting one silently win. Built once per
+    ``resolve_heritage()`` call and threaded through
+    ``_pick_candidate``/``_import_match`` as that path's ``crate_roots``
+    (round 23), and, as of round 25, also built once per
+    ``resolve_imports()`` call and threaded through
+    ``_ImportResolveContext.crate_roots`` for ``_resolve_import_rust``'s
+    bare-crate-name lookup -- both call sites now share this single
+    collision-aware index rather than ``resolve_imports()`` using an
+    earlier single-winner variant.
+
+    Round 23 (``.features/plans/round23/
+    09-subtypes-ambiguous-resolution-rate.md`` Fix B): zed's
+    ``crates/gpui`` (the real crate) and
+    ``tooling/lints/test_fixture/gpui`` (a same-named synthetic test
+    fixture) both convention-match crate name ``"gpui"`` -- a
+    since-removed single-winner predecessor of this index meant that
+    collision was a genuine, measured 50/50 coin flip per process hash
+    seed (see ``_rust_crate_hint_matches``'s docstring and this design
+    doc's "Implemented" note for the live zed measurement): winning
+    half the time resolved every affected clause correctly, losing the
+    other half silently misattributed every one of them to the wrong
+    (fixture) crate's same-named symbol. Kept as every candidate
+    (``_rust_crate_hint_matches``) rather than resolved to one here,
+    since only that function's caller has the full candidate-symbol
+    list needed to tell "matches one real root" apart from "matches
+    two, still genuinely ambiguous" -- converting the coin flip into a
+    deterministic, honest "ambiguous" for the genuinely unresolvable
+    case, at the cost of the coin flip's lucky-draw resolved count.
+
+    Round 24 (``.features/plans/round24/
+    03-heritage-crate-decoy-tiebreak.md``) narrows that residual gap
+    without touching this index's own shape: a genuine 2+-root
+    collision here still deterministically falls through to
+    ``_rust_crate_hint_matches``'s ``len(crate_matched) > 1`` branch
+    unchanged, but that branch's own caller now gets one more chance
+    (``_prefer_non_synthetic_crate_match``) to recover a resolution
+    when exactly one matched root's path doesn't look like a
+    test-fixture/vendor stand-in -- see that function's docstring.
+
+    Round 25 (``.features/plans/round25/
+    02-deps-crate-decoy-tiebreak.md``) threads this same index and an
+    analogous directory-level tiebreak
+    (``_prefer_non_synthetic_crate_root``) through
+    ``_resolve_import_rust`` too, closing the identical gap in
+    ``dekko deps``'s module-dependency-graph resolution that round 24
+    closed for heritage resolution -- the single-winner predecessor
+    this function replaced there is gone; every reader of
+    ``crate_roots`` throughout this module (heritage and import
+    resolution both) now sees the same collision-aware
+    ``dict[str, list[str]]`` shape.
+
     Args:
         paths: Every known file path.
 
     Returns:
-        Crate name → that crate's ``src/`` directory path, for every
-        crate this convention can find.
+        Crate name → every ``src/`` directory this convention finds
+        matching that name, in path-iteration order (deduplicated).
     """
-    roots: dict[str, str] = {}
+    roots: dict[str, list[str]] = {}
     for p in paths:
         if not p.endswith(".rs"):
             continue
@@ -3024,7 +4275,9 @@ def _rust_crate_roots_index(paths: frozenset[str]) -> dict[str, str]:
         crate_name = crate_dir.rsplit("/", 1)[-1]
         name = p.rsplit("/", 1)[-1]
         if name in ("lib.rs", "main.rs") or name == f"{crate_name}.rs":
-            roots[crate_name] = src_dir
+            dirs = roots.setdefault(crate_name, [])
+            if src_dir not in dirs:
+                dirs.append(src_dir)
     return roots
 
 
@@ -3039,11 +4292,22 @@ def _resolve_import_rust(
     importer's own module position (``_rust_self_base``, walked up
     once per ``super``). A bare crate name recognized as another
     workspace member (looked up in ``ctx.crate_roots``, see
-    ``_rust_crate_roots_index``) resolves against *that* crate's own
-    root the same way ``crate::`` does -- a Cargo workspace's sibling
-    crates are referenced by bare crate name too, not just genuine
-    third-party dependencies (round 22 zed.md §3.1). Any other bare
-    crate name is external by construction.
+    ``_rust_crate_roots_index_all``) resolves against *that* crate's
+    own root the same way ``crate::`` does -- a Cargo workspace's
+    sibling crates are referenced by bare crate name too, not just
+    genuine third-party dependencies (round 22 zed.md §3.1). Any other
+    bare crate name is external by construction.
+
+    ``ctx.crate_roots`` is collision-aware (``dict[str, list[str]]``):
+    a crate name matching exactly one directory resolves against it
+    directly; a crate name matching two or more (a real crate plus a
+    same-named test-fixture/vendor stand-in, e.g. zed's ``gpui``) falls
+    back to ``_prefer_non_synthetic_crate_root`` -- round 25's
+    directory-level sibling of round 24's heritage-resolution tiebreak
+    (``_prefer_non_synthetic_crate_match``) -- rather than guessing;
+    a genuine, still-ambiguous collision (or no synthetic-marker signal
+    to break the tie) resolves to ``None`` here and is correctly
+    reported external below, not misattributed.
 
     Like Python, the trailing segment is ambiguous between "a
     submodule" and "an item defined in the parent module" — resolved
@@ -3068,7 +4332,13 @@ def _resolve_import_rust(
             i += 1
         rest = segs[i:]
     else:
-        base = ctx.crate_roots.get(segs[0])
+        crate_dirs = ctx.crate_roots.get(segs[0])
+        if not crate_dirs:
+            base = None
+        elif len(crate_dirs) == 1:
+            base = crate_dirs[0]
+        else:
+            base = _prefer_non_synthetic_crate_root(crate_dirs, importer_path)
         rest = segs[1:]
         at_crate_root = True
 
@@ -3326,7 +4596,9 @@ def _cpp_basename_index(paths: frozenset[str]) -> dict[str, list[str]]:
     return index
 
 
-def resolve_imports(files: list[FileMap]) -> ModuleGraph:
+def resolve_imports(
+    files: list[FileMap], root: Path | None = None
+) -> ModuleGraph:
     """Resolve every file's raw imports into a file-to-file dependency
     graph.
 
@@ -3353,6 +4625,16 @@ def resolve_imports(files: list[FileMap]) -> ModuleGraph:
 
     Args:
         files: Per-file extraction results.
+        root: Repository root, used only to discover and parse
+            ``tsconfig.json``/``jsconfig.json`` (see
+            ``_load_tsconfig_alias_tables``) so a JS/TS ``@/*``-style
+            path-alias import can resolve to a real in-repo file
+            instead of staying external by construction. ``None`` (the
+            default) skips that discovery entirely, matching this
+            function's own long-standing "pure function of
+            already-extracted ``FileMap``s" shape exactly for every
+            caller that doesn't opt in — including the entire
+            in-memory-``FileMap`` test suite.
 
     Returns:
         The resolved ``ModuleGraph``.
@@ -3363,7 +4645,10 @@ def resolve_imports(files: list[FileMap]) -> ModuleGraph:
         py_package_roots=_py_package_roots(paths),
         java_suffix_index=_java_suffix_index(paths),
         cpp_basename_index=_cpp_basename_index(paths),
-        crate_roots=_rust_crate_roots_index(paths),
+        crate_roots=_rust_crate_roots_index_all(paths),
+        ts_path_aliases=(
+            _load_tsconfig_alias_tables(root) if root is not None else {}
+        ),
     )
 
     edge_names: dict[tuple[str, str], set[str]] = {}

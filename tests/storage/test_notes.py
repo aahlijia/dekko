@@ -51,7 +51,11 @@ def test_notes_render_in_context_and_respect_flag(
     assert "note:" not in capsys.readouterr().out
 
     assert _cli(root, "query", "symbol", "helper", "--no-notes") == 0
-    assert "note:" not in capsys.readouterr().out
+    # C.1: query symbol's own unconditional fan-in disambiguation
+    # note also starts with "note:" and is unrelated to anchored
+    # notes/--no-notes, so this must check the anchored note's text
+    # specifically rather than a blanket "note:" absence.
+    assert "note: a caveat" not in capsys.readouterr().out
 
 
 def test_rm_by_index_and_all(

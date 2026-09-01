@@ -665,6 +665,260 @@ def test_ts_array_destructuring_not_captured_as_ref(
     assert "b" not in ref_names
 
 
+def test_python_keyword_argument_value_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """Round-22 (tensorflow) finding: a function passed by name as a
+    call's keyword-argument value.
+
+    ``configure.py``'s exact shape: ``check_success=valid_ndk_path``
+    passes ``valid_ndk_path`` as a callback *value*, never invoking it
+    at that site (``valid_ndk_path(...)``). Before
+    ``_PY_REFERENCE_QUERY``, Python had no ``reference_query`` at all
+    -- a function wired up only this way was indistinguishable from
+    dead code to ``dekko unused``.
+    """
+    spec = languages.spec_for_path("configure.py")
+    assert spec is not None
+    (tmp_path / "configure.py").write_text(
+        "def valid_ndk_path(path):\n"
+        "    return path\n\n"
+        "def get_var(name, check_success=None):\n"
+        "    return name\n\n"
+        "def setup_android():\n"
+        "    get_var('ANDROID_NDK_HOME',"
+        " check_success=valid_ndk_path)\n"
+    )
+    fm = extract_file(tmp_path, "configure.py", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "valid_ndk_path" in ref_names
+
+
+def test_python_dict_value_and_default_parameter_captured_as_refs(
+    tmp_path: Path,
+) -> None:
+    """Two more ``_PY_REFERENCE_QUERY`` value-position shapes.
+
+    A dict literal's value (``{"cb": handler}``) and a function
+    parameter's default value (``def f(cb=handler):``) are both bare-
+    identifier value reads a plain call-expression query cannot see --
+    covered in one fixture rather than one test per query line, matching
+    this test file's existing economy for multi-shape reference queries
+    (the JS ``reference_query`` isn't unit-tested shape-by-shape
+    either).
+    """
+    spec = languages.spec_for_path("data.py")
+    assert spec is not None
+    (tmp_path / "data.py").write_text(
+        "def handler():\n"
+        "    return None\n\n"
+        "def default_handler():\n"
+        "    return None\n\n"
+        "registry = {'cb': handler}\n\n"
+        "def run(cb=default_handler):\n"
+        "    return cb\n"
+    )
+    fm = extract_file(tmp_path, "data.py", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "handler" in ref_names
+    assert "default_handler" in ref_names
+
+
+def test_ts_spread_element_object_captured_as_ref(tmp_path: Path) -> None:
+    """Round-23 (claude-code) finding: object-spread of a symbol.
+
+    ``{...TOOL_DEFAULTS, ...def}`` never reaches
+    ``(object (shorthand_property_identifier) @ref)`` or ``(pair
+    value: (identifier) @ref)`` -- ``spread_element`` is a distinct
+    wrapper node those patterns don't match. Before
+    ``(spread_element (identifier) @ref)``, a const referenced only
+    this way read as dead code.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const x = { foo: 1 };\n"
+        "function useIt(def: object) {\n"
+        "  return { ...x, ...def };\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "x" in ref_names
+    assert "def" in ref_names
+
+
+def test_ts_spread_element_call_argument_captured_as_ref(
+    tmp_path: Path,
+) -> None:
+    """Call-argument spread (``f(...x)``) is the same wrapper node."""
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const x = [1, 2];\nfunction f(...args: number[]) {}\nf(...x);\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "x" in ref_names
+
+
+def test_ts_subscript_object_captured_as_ref(tmp_path: Path) -> None:
+    """Round-23 (claude-code) finding: bracket-subscript access.
+
+    ``TASK_ID_PREFIXES[type]`` never reached any existing
+    ``_JS_REFERENCE_BASE`` pattern -- nothing read a
+    ``subscript_expression``'s ``object:`` field. The new pattern is
+    deliberately scoped to ``object:``, not ``index:`` (the container
+    being subscripted, not the key) -- confirmed here as a negative
+    check too.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const obj: Record<string, string> = { x: 'y' };\n"
+        "function useIt(key: string) {\n"
+        "  return obj[key];\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "obj" in ref_names
+    assert "key" not in ref_names
+
+
+def test_ts_typeof_type_query_captured_as_ref(tmp_path: Path) -> None:
+    """Round-23 (claude-code) finding: ``typeof T`` as a *type*.
+
+    Both ``type X = typeof T;`` and ``const w: typeof T = y;`` parse
+    as ``type_query``, a TS-only node type no existing pattern read.
+    """
+    spec = languages.spec_for_path("data.ts")
+    assert spec is not None
+    (tmp_path / "data.ts").write_text(
+        "const TOOL_DEFAULTS = { foo: 1 };\n"
+        "type ToolDefaultsType = typeof TOOL_DEFAULTS;\n"
+        "const OTHER = { bar: 2 };\n"
+        "const w: typeof OTHER = OTHER;\n"
+    )
+    fm = extract_file(tmp_path, "data.ts", spec)
+    ref_names = {ref.name for ref in fm.refs}
+    assert "TOOL_DEFAULTS" in ref_names
+    assert "OTHER" in ref_names
+
+
+def test_js_type_query_fragment_not_wired_and_js_still_compiles(
+    tmp_path: Path,
+) -> None:
+    """Grammar-compile guard: ``type_query`` must stay TS/TSX-only.
+
+    ``type_query`` is a TS-grammar-only node type; merging
+    ``_TS_TYPE_REFERENCE_EXTRA`` into the shared ``_JS_REFERENCE_BASE``
+    would fail to *compile* against plain ``tree-sitter-javascript``,
+    breaking every ``.js``/``.jsx`` file's extraction. Confirms plain
+    JS's ``reference_query`` doesn't carry the fragment, and that base
+    spread/subscript syntax still extracts normally after the shared-
+    base edit (a compile-time regression here would be silent, hard
+    breakage, not a subtle bug).
+    """
+    assert "type_query" not in languages.JAVASCRIPT.reference_query
+    spec = languages.spec_for_path("data.js")
+    assert spec is not None
+    (tmp_path / "data.js").write_text(
+        "const x = { foo: 1 };\n"
+        "const obj = { x: 'y' };\n"
+        "function useIt(def, key) {\n"
+        "  return { ...x, ...def, y: obj[key] };\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "data.js", spec)
+    assert fm.error is None
+    ref_names = {ref.name for ref in fm.refs}
+    assert "x" in ref_names
+    assert "obj" in ref_names
+
+
+# --- round 25 finding #15: module-doc skips license boilerplate ------
+
+
+def test_module_doc_skips_apache_license_header_cpp(tmp_path: Path) -> None:
+    # The exact tensorflow shape: every .cc/.h file's leading comment
+    # opens with a copyright/license block, which workset/summary/
+    # orient all surfaced verbatim as the file's description since
+    # they share this same extraction path -- the real, useful summary
+    # line further down the same comment block must win instead.
+    spec = languages.spec_for_path("c_api.cc")
+    assert spec is not None
+    (tmp_path / "c_api.cc").write_text(
+        "// Copyright 2023 The TensorFlow Authors. All Rights Reserved.\n"
+        "//\n"
+        '// Licensed under the Apache License, Version 2.0 (the "License");\n'
+        "// you may not use this file except in compliance with the "
+        "License.\n"
+        "//\n"
+        "// Implements the deprecated session C API.\n"
+        "int real_function(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "c_api.cc", spec)
+    assert fm.error is None
+    assert fm.doc == "Implements the deprecated session C API."
+
+
+def test_module_doc_all_boilerplate_falls_back_to_none(
+    tmp_path: Path,
+) -> None:
+    # No real description survives -- must fall back to None, not pick
+    # a legal-text line just because something has to be returned.
+    spec = languages.spec_for_path("c_api.cc")
+    assert spec is not None
+    (tmp_path / "c_api.cc").write_text(
+        "// Copyright 2023 The TensorFlow Authors. All Rights Reserved.\n"
+        "// SPDX-License-Identifier: Apache-2.0\n"
+        "int real_function(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "c_api.cc", spec)
+    assert fm.error is None
+    assert fm.doc is None
+
+
+def test_module_doc_non_boilerplate_comment_unaffected(
+    tmp_path: Path,
+) -> None:
+    # Regression guard: a normal leading comment with no license shape
+    # is returned unchanged.
+    spec = languages.spec_for_path("c_api.cc")
+    assert spec is not None
+    (tmp_path / "c_api.cc").write_text(
+        "// Helpers for the deprecated session C API.\n"
+        "int real_function(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "c_api.cc", spec)
+    assert fm.error is None
+    assert fm.doc == "Helpers for the deprecated session C API."
+
+
+def test_module_doc_skips_boilerplate_python_docstring(
+    tmp_path: Path,
+) -> None:
+    spec = languages.spec_for_path("licensed.py")
+    assert spec is not None
+    (tmp_path / "licensed.py").write_text(
+        '"""Copyright 2023 The Foo Authors. All Rights Reserved.\n\n'
+        "Helpers for widget configuration.\n"
+        '"""\n'
+        "def helper():\n"
+        "    pass\n"
+    )
+    fm = extract_file(tmp_path, "licensed.py", spec)
+    assert fm.error is None
+    assert fm.doc == "Helpers for widget configuration."
+
+
 def test_parse_rust_use() -> None:
     assert _parse_rust_use("a::b::c") == [("c", "a::b::c")]
     assert _parse_rust_use("a::b as d") == [("d", "a::b")]

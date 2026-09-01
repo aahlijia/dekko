@@ -13,12 +13,15 @@ involved at all.
 """
 
 import json
+import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from dekko.analysis import sanity
 from dekko.integrations import cli
+from dekko.render import mapfile
 
 from conftest import RepoFactory
 
@@ -175,6 +178,56 @@ def test_classify_miss_python_docstring_opening_line() -> None:
     assert cause == sanity.CAUSE_COMMENT_MENTION
 
 
+def test_classify_miss_header_comment_far_from_definition() -> None:
+    # Round 24 07-sanity-comment-mention-file-header-gap.md: a
+    # module-header comment naming the symbol, far outside
+    # near_own_definition's proximity window, must still classify as
+    # a comment mention via the new independent qualifying path.
+    cause = sanity.classify_miss(
+        "//      claudeConfigDir, buddyStateDir.",
+        "buddyStateDir",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=False,
+        looks_like_comment=True,
+        in_leading_header_comment=True,
+    )
+    assert cause == sanity.CAUSE_COMMENT_MENTION
+
+
+def test_classify_miss_header_flag_alone_not_enough() -> None:
+    # Comment-shape stays a hard requirement -- only the proximity
+    # side of the AND became an OR, not the comment-shape side.
+    cause = sanity.classify_miss(
+        "return buddyStateDir(x)",
+        "buddyStateDir",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=False,
+        looks_like_comment=False,
+        in_leading_header_comment=True,
+    )
+    assert cause != sanity.CAUSE_COMMENT_MENTION
+
+
+def test_classify_miss_near_definition_unchanged_without_header_flag() -> None:
+    # Existing adjacent-doc-comment path stays correct and unaffected
+    # when the new flag simply isn't set.
+    cause = sanity.classify_miss(
+        "// Helper is a small utility function.",
+        "Helper",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        near_own_definition=True,
+        looks_like_comment=True,
+        in_leading_header_comment=False,
+    )
+    assert cause == sanity.CAUSE_COMMENT_MENTION
+
+
 # --- _looks_like_comment_line: pure, grammar-scoped ---------------------
 
 
@@ -272,6 +325,33 @@ def test_looks_like_comment_line_unsupported_language() -> None:
 
 
 # --- full pipeline: grep sweep + classification -------------------------
+
+
+def test_dekko_hits_callers_folds_lined_module_level_into_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round 23 §10: query.py's module_level entries now carry a
+    # "lines" key when a site line was recorded. _dekko_hits_callers
+    # must fold those (path, line) pairs into hits alongside
+    # named-caller sites, matching grep like any other hit, rather
+    # than stranding a known-line module-level call site in the
+    # line-less bucket where it was previously misclassified as an
+    # "unexplained miss" (the exact claude-buddy `server/index.ts:709`
+    # shape this fix closes). Only entries with no "lines" key remain
+    # in module_level_bare.
+    doc = {
+        "results": [],
+        "module_level": [
+            {"path": "server/index.ts", "lines": [709]},
+            {"path": "server/path.test.ts"},
+        ],
+    }
+    monkeypatch.setattr(sanity, "_run_query_json", lambda *_a, **_kw: doc)
+    hits, module_level_bare = sanity._dekko_hits_callers(
+        None, "server/index.ts:buddyStateDir:1"
+    )
+    assert hits == [("server/index.ts", 709)]
+    assert module_level_bare == ["server/path.test.ts"]
 
 
 def test_sanity_all_matches_reports_clean(
@@ -414,6 +494,52 @@ def test_sanity_detects_comment_mention_miss(
     assert 2 not in grep_only_lines
 
 
+def test_sanity_detects_header_comment_mention_far_from_definition(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Mirrors the real gap confirmed against claude-buddy's
+    # server/path.ts (round 24
+    # 07-sanity-comment-mention-file-header-gap.md): a module-header
+    # comment block naming several exports sits well outside
+    # _COMMENT_PROXIMITY_LINES of any one definition, so only the new
+    # in_leading_header_comment path -- not near_own_definition --
+    # can explain the miss.
+    root = make_mapped_repo(
+        {
+            "path.ts": (
+                "// Path utilities and helpers\n"
+                "//\n"
+                "// Two related concerns live here:\n"
+                "//   1. Path normalization (Windows compat).\n"
+                "//   2. Resolution of Claude Code config / state "
+                "paths --\n"
+                "//      claudeConfigDir, buddyStateDir.\n"
+                "//      These honor CLAUDE_CONFIG_DIR.\n"
+                "//\n"
+                "// The shell counterpart lives in scripts/paths.sh.\n"
+                "\n"
+                "import { join } from 'path';\n"
+                "\n"
+                "export function toUnixPath(p: string): string {\n"
+                "  return p;\n"
+                "}\n"
+                "\n"
+                "export function buddyStateDir(): string {\n"
+                "  return join('state');\n"
+                "}\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "buddyStateDir", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows_by_line = {row["line"]: row["cause"] for row in doc["grep_only"]}
+    # Line 6 is 11 lines from buddyStateDir's own definition (line
+    # 17) -- well past _COMMENT_PROXIMITY_LINES -- yet must still
+    # classify as a comment mention, not fall through to unexplained.
+    assert rows_by_line.get(6) == sanity.CAUSE_COMMENT_MENTION
+
+
 def test_sanity_wrapped_recursive_call_not_comment_mention(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -478,12 +604,124 @@ def test_sanity_json_shape(
         "dekko_only",
         "grep_only",
         "counts",
+        "meta",
     } <= set(doc)
     assert doc["grep_only"], "expected at least one grep-only hit"
     for row in doc["grep_only"]:
         assert {"file", "line", "snippet", "cause"} <= set(row)
     for row in doc["matches"]:
         assert {"file", "line"} <= set(row)
+    # Round 23 claude-code.md §2.1: every bucket's meta mirrors
+    # ``query --json``'s own Meter.as_dict() shape, and under no
+    # truncation reports truncated_by as None.
+    for bucket in ("matches", "dekko_only", "grep_only"):
+        assert {
+            "tokens",
+            "returned",
+            "total",
+            "budget",
+            "limit",
+            "truncated_by",
+        } <= set(doc["meta"][bucket])
+        assert doc["meta"][bucket]["truncated_by"] is None
+        assert doc["meta"][bucket]["total"] == doc["counts"][bucket]
+
+
+# --- Round 23 claude-code.md §2.1: report-row truncation disclosure ----
+
+
+def _make_many_grep_only_hits_repo(
+    make_mapped_repo: RepoFactory, n: int
+) -> Path:
+    """A repo whose ``target`` symbol has ``n`` grep-only call sites,
+    one per file -- cheap-to-construct stand-in for the round-23
+    report's 379-row ``grep_only`` bucket, small enough to drive
+    through an explicit ``--limit``/``--budget`` rather than the real
+    ``DEFAULT_REPORT_LIMIT`` (200)."""
+    files = {"a.py": "def target():\n    return 1\n"}
+    for i in range(n):
+        files[f"caller{i}.py"] = f"def other{i}():\n    return target()\n"
+    return make_mapped_repo(files)
+
+
+def test_sanity_json_meta_discloses_limit_truncation(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 23 claude-code.md §2.1: ``sanity --json`` used to cap its
+    # row arrays with zero disclosure anywhere in the JSON. Drive the
+    # same code path DEFAULT_REPORT_LIMIT (200) exercises, via a small
+    # explicit --limit on a 5-hit fixture (cheaper than constructing
+    # 200+ real hits).
+    root = _make_many_grep_only_hits_repo(make_mapped_repo, 5)
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "target",
+            "--root",
+            str(root),
+            "--json",
+            "--limit",
+            "2",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    meta = doc["meta"]["grep_only"]
+    assert meta["truncated_by"] == "limit"
+    assert meta["total"] == 5
+    assert meta["returned"] == 2
+    assert meta["returned"] == len(doc["grep_only"])
+    # counts stays exactly as-is -- purely additive schema change.
+    assert doc["counts"]["grep_only"] == 5
+
+
+def test_sanity_json_meta_no_truncation_under_every_cap(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = _make_many_grep_only_hits_repo(make_mapped_repo, 2)
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["meta"]["matches"]["truncated_by"] is None
+    assert doc["meta"]["grep_only"]["truncated_by"] is None
+
+
+def test_sanity_json_meta_discloses_budget_truncation(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Distinguishes budget-driven truncation from limit-driven: a
+    # generous --limit that never binds, but a --budget small enough
+    # that only the first row or two fit.
+    root = _make_many_grep_only_hits_repo(make_mapped_repo, 10)
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "target",
+            "--root",
+            str(root),
+            "--json",
+            "--limit",
+            "1000",
+            "--budget",
+            "20",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    meta = doc["meta"]["grep_only"]
+    assert meta["truncated_by"] == "budget"
+    assert meta["total"] == 10
+    assert meta["returned"] < 10
+    assert meta["returned"] == len(doc["grep_only"])
 
 
 # --- Round 21 Track B1: silent 5,000-line grep truncation ---------------
@@ -570,6 +808,11 @@ def test_sanity_json_suppresses_dekko_only_when_grep_truncated(
     assert doc["dekko_only"] == []
     assert doc["counts"]["dekko_only"] is None
     assert "dekko_only_note" in doc
+    # Round 23 claude-code.md §2.1: the suppressed dekko-only bucket
+    # carries no Meter either -- a real count for data explicitly
+    # being suppressed as inconclusive would be false confidence,
+    # mirroring counts.dekko_only's own None.
+    assert doc["meta"]["dekko_only"] is None
 
 
 def test_sanity_text_reports_truncation_and_inconclusive_dekko_only(
@@ -861,6 +1104,93 @@ def test_classify_miss_qualified_call_wins_over_import_shape() -> None:
     assert cause == sanity.CAUSE_QUALIFIED_CALL
 
 
+def test_classify_miss_java_import() -> None:
+    # Round 25 spring-boot.md Finding 2: a plain Java type import has
+    # no equivalent among the ESM/CJS/Python templates.
+    cause = sanity.classify_miss(
+        "import org.springframework.boot.ansi.AnsiPropertySource;",
+        "AnsiPropertySource",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_java_static_import() -> None:
+    cause = sanity.classify_miss(
+        "import static org.junit.Assert.assertTrue;",
+        "assertTrue",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_kotlin_import() -> None:
+    # Kotlin shares Java's ``import a.b.C`` shape but drops the
+    # terminating semicolon -- a dedicated template, not a loosened
+    # Java one (round 25 spring-boot.md Finding 2).
+    cause = sanity.classify_miss(
+        "import a.b.AnsiPropertySource",
+        "AnsiPropertySource",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_kotlin_import_with_alias() -> None:
+    cause = sanity.classify_miss(
+        "import a.b.AnsiPropertySource as Source",
+        "AnsiPropertySource",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_classify_miss_java_import_of_other_name_not_flagged() -> None:
+    cause = sanity.classify_miss(
+        "import org.springframework.boot.ansi.Other;",
+        "AnsiPropertySource",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_sanity_detects_java_import_miss(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": "def target():\n    return 1\n",
+            "B.java": (
+                "package com.example;\n\n"
+                "import a.b.target;\n\n"
+                "class B {\n"
+                "    void caller() {\n"
+                "        target();\n"
+                "    }\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["cause"] for row in doc["grep_only"]}
+    assert sanity.CAUSE_IMPORT_STATEMENT in causes
+
+
 def test_sanity_detects_import_statement_miss(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -984,6 +1314,80 @@ def test_looks_like_multiline_import_member_false_without_bare_line(
     )
 
 
+def test_looks_like_multiline_import_member_nearest_opener_wins(
+    tmp_path: Path,
+) -> None:
+    # Round 23 claude-buddy.md §2.1: the prior any()/any() scan let an
+    # unrelated, already-closed earlier import's "}" falsely "close" a
+    # genuinely still-open block sitting directly above the hit, as
+    # soon as the window contained *any* opener and *any* closer
+    # anywhere, regardless of which opener each closer actually
+    # belonged to. Here an unrelated single-line import (self-closing)
+    # and an unrelated multi-line import (opens and closes fully
+    # within the window) both sit above the real, still-open block
+    # whose member is the hit -- the old code saw an opener (any of
+    # the three "import {"s) and a closer (either unrelated close) and
+    # returned False; the fix must find the *nearest* opener (the real
+    # block's own) has no intervening close and return True.
+    (tmp_path / "state.ts").write_text(
+        "import { unrelated } from 'os';\n"
+        "import {\n"
+        "  other,\n"
+        "} from 'fs';\n"
+        "\n"
+        "import {\n"
+        "  buddyStateDir,\n"
+        "  claudeSettingsPath,\n"
+        "} from './path';\n"
+    )
+    hit = sanity.GrepHit(path="state.ts", line=7, snippet="  buddyStateDir,")
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "buddyStateDir"
+    )
+
+
+def test_looks_like_multiline_import_member_many_unrelated_imports_stacked(
+    tmp_path: Path,
+) -> None:
+    # Same shape as above, but with three unrelated imports stacked
+    # above the real block (mixing single-line and already-closed
+    # multi-line) -- confirms the fix is genuinely nearest-opener
+    # based, not just "handle one extra import".
+    (tmp_path / "state.ts").write_text(
+        "import { a } from 'os';\n"
+        "import {\n"
+        "  b,\n"
+        "} from 'fs';\n"
+        "import { c } from 'path';\n"
+        "\n"
+        "import {\n"
+        "  buddyStateDir,\n"
+        "} from './path';\n"
+    )
+    hit = sanity.GrepHit(path="state.ts", line=8, snippet="  buddyStateDir,")
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "buddyStateDir"
+    )
+
+
+def test_looks_like_multiline_import_member_single_line_not_dangling(
+    tmp_path: Path,
+) -> None:
+    # Check-order case: a complete single-line import immediately
+    # above the hit matches both the opener pattern (starts with
+    # "import {") and contains "}" -- it must be read as closed, not
+    # misread as a dangling opener that would otherwise cause a
+    # completely unrelated bare "name," line below it to be
+    # misclassified as an import member.
+    (tmp_path / "a.ts").write_text(
+        "import { unrelated } from 'os';\ntarget,\n"
+    )
+    hit = sanity.GrepHit(path="a.ts", line=2, snippet="target,")
+    assert not sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "target"
+    )
+
+
 def test_sanity_detects_multiline_destructured_import_member_miss(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -1017,6 +1421,361 @@ def test_sanity_detects_multiline_destructured_import_member_miss(
     # The destructured-import line itself (index.ts:2) must classify
     # as an import statement, not fall through to unexplained.
     assert rows_by_line[2] == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_sanity_multiline_import_member_with_unrelated_import_above(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 23 claude-buddy.md §2.1 end-to-end regression: an unrelated
+    # single-line import sits above the real, still-open multi-line
+    # import block whose member is the hit -- the exact shape that
+    # defeated the flat any()/any() scan on any file with more than
+    # one import statement above the target block (the common case on
+    # a real codebase, per the round-23 repro).
+    root = make_mapped_repo(
+        {
+            "path.ts": "export function buddyStateDir(): string {\n"
+            "  return '/tmp';\n"
+            "}\n",
+            "index.ts": (
+                "import { unrelated } from 'os';\n"
+                "\n"
+                "import {\n"
+                "  buddyStateDir,\n"
+                "  claudeSettingsPath,\n"
+                "} from './path';\n"
+                "\n"
+                "function main() {\n"
+                "  return buddyStateDir();\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "buddyStateDir", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows_by_line = {row["line"]: row["cause"] for row in doc["grep_only"]}
+    assert rows_by_line[4] == sanity.CAUSE_IMPORT_STATEMENT
+
+
+# --- TS/JS type-position usage (round 25 claude-code.md Finding 1) -----
+
+
+def test_looks_like_type_annotation_import_type() -> None:
+    assert sanity._looks_like_type_annotation(
+        "import type Output from './output.js';", "Output", "a.ts"
+    )
+
+
+def test_looks_like_type_annotation_variable_annotation() -> None:
+    assert sanity._looks_like_type_annotation(
+        "function run(output: Output): void {", "Output", "a.ts"
+    )
+
+
+def test_looks_like_type_annotation_generic_argument() -> None:
+    assert sanity._looks_like_type_annotation(
+        "const results: Array<Output> = [];", "Output", "a.ts"
+    )
+
+
+def test_looks_like_type_annotation_generic_argument_multiple() -> None:
+    assert sanity._looks_like_type_annotation(
+        "const pair: Map<Output, Error> = new Map();", "Output", "a.ts"
+    )
+
+
+def test_looks_like_type_annotation_call_not_annotation() -> None:
+    # `x: someFunc()` is a call whose result is being assigned/typed --
+    # the negative lookahead must keep this off the type-annotation
+    # path.
+    assert not sanity._looks_like_type_annotation(
+        "const output: someFunc() = run();", "someFunc", "a.ts"
+    )
+
+
+def test_looks_like_type_annotation_gated_to_ts_grammars() -> None:
+    # Python's `x: Output` annotation syntax looks identical, but this
+    # check is deliberately TS/JS-scoped only -- a Python file must
+    # never trigger it.
+    assert not sanity._looks_like_type_annotation(
+        "output: Output", "Output", "a.py"
+    )
+
+
+def test_looks_like_type_annotation_javascript_generic() -> None:
+    assert sanity._looks_like_type_annotation(
+        "const results: Array<Output> = [];", "Output", "a.js"
+    )
+
+
+def test_classify_miss_type_annotation() -> None:
+    # classify_miss stays pure/I/O-free -- the caller computes
+    # looks_like_type_annotation and passes it in, same contract as
+    # looks_like_import_member.
+    cause = sanity.classify_miss(
+        "function run(output: Output): void {",
+        "Output",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_type_annotation=True,
+    )
+    assert cause == sanity.CAUSE_TYPE_ANNOTATION
+
+
+def test_classify_miss_type_annotation_absent_without_flag() -> None:
+    cause = sanity.classify_miss(
+        "function run(output: Output): void {",
+        "Output",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_TYPE_ANNOTATION
+
+
+def test_sanity_detects_ts_type_annotation_miss(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "output.ts": "export class Output {}\n",
+            "run.ts": (
+                "import type { Output } from './output';\n\n"
+                "function run(output: Output): void {\n"
+                "  return;\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "Output", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows_by_line = {row["line"]: row["cause"] for row in doc["grep_only"]}
+    assert rows_by_line.get(3) == sanity.CAUSE_TYPE_ANNOTATION
+
+
+# --- unrelated local binding / string literal (round 25 --------------
+# claude-buddy.md Finding 2) ---------------------------------------------
+
+
+def test_looks_like_local_binding_or_literal_local_decl() -> None:
+    assert sanity._looks_like_local_binding_or_literal(
+        "const warn: string[] = [];", "warn"
+    )
+
+
+def test_looks_like_local_binding_or_literal_let_decl() -> None:
+    assert sanity._looks_like_local_binding_or_literal(
+        "let warn = true;", "warn"
+    )
+
+
+def test_looks_like_local_binding_or_literal_string_literal() -> None:
+    assert sanity._looks_like_local_binding_or_literal(
+        'status === "warn"', "warn"
+    )
+
+
+def test_looks_like_local_binding_or_literal_single_quoted() -> None:
+    assert sanity._looks_like_local_binding_or_literal(
+        "status === 'warn'", "warn"
+    )
+
+
+def test_looks_like_local_binding_or_literal_false_for_bare_call() -> None:
+    # A real, unqualified call to the target itself must not be
+    # misclassified.
+    assert not sanity._looks_like_local_binding_or_literal("warn(x)", "warn")
+
+
+def test_looks_like_local_binding_or_literal_false_for_substring() -> None:
+    # Not a bare quoted match -- "warning" isn't "warn".
+    assert not sanity._looks_like_local_binding_or_literal(
+        'status === "warning"', "warn"
+    )
+
+
+def test_looks_like_local_binding_or_literal_ordering_caveat() -> None:
+    # The plan's own ordering caveat: `warn` appearing as a *string
+    # argument* to an unrelated call is genuinely a literal-value
+    # mention, not a call to `warn` -- correctly True here. Real call
+    # shapes (`logger.warn(...)`, bare `warn(...)`) are intercepted
+    # earlier in classify_miss's ladder by
+    # `_looks_qualified_call`/`_looks_like_import_statement`, which
+    # always run before this signal is even consulted.
+    assert sanity._looks_like_local_binding_or_literal(
+        'someFunc("warn")', "warn"
+    )
+
+
+def test_classify_miss_local_binding_or_literal() -> None:
+    cause = sanity.classify_miss(
+        "const warn: string[] = [];",
+        "warn",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_local_binding_or_literal=True,
+    )
+    assert cause == sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
+
+
+def test_classify_miss_local_binding_or_literal_absent_without_flag() -> None:
+    cause = sanity.classify_miss(
+        "const warn: string[] = [];",
+        "warn",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
+
+
+def test_classify_miss_qualified_call_wins_over_local_binding_flag() -> None:
+    # Precedence: even if the caller (incorrectly) set the flag, a
+    # genuine qualified call is still checked first inside
+    # classify_miss's own ladder.
+    cause = sanity.classify_miss(
+        "logger.warn(x)",
+        "warn",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_local_binding_or_literal=True,
+    )
+    assert cause == sanity.CAUSE_QUALIFIED_CALL
+
+
+def test_sanity_detects_local_binding_or_literal_miss(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.ts": "export function warn(): void {\n  return;\n}\n",
+            "unrelated.ts": (
+                "function status(): string {\n"
+                "  const warn: string[] = [];\n"
+                "  return warn.length ? 'warn' : 'ok';\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "warn", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows_by_line = {
+        row["line"]: row["cause"]
+        for row in doc["grep_only"]
+        if row["file"] == "unrelated.ts"
+    }
+    assert rows_by_line.get(2) == sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
+
+
+# --- leading-header-comment mention (round 24 plan 07) -----------------
+
+
+def test_in_leading_header_comment_true_for_module_header_shape(
+    tmp_path: Path,
+) -> None:
+    # Mirrors claude-buddy's server/path.ts: an uninterrupted comment
+    # run from line 1 through the hit line, well before the file's
+    # first real code.
+    (tmp_path / "path.ts").write_text(
+        "// Path utilities and helpers\n"
+        "//\n"
+        "// Two related concerns live here:\n"
+        "//   1. Path normalization (Windows compat) -- toUnixPath().\n"
+        "//   2. Resolution of Claude Code config / state paths --\n"
+        "//      claudeConfigDir, buddyStateDir.\n"
+        "//      These honor CLAUDE_CONFIG_DIR.\n"
+        "//\n"
+        "// The shell counterpart lives in scripts/paths.sh.\n"
+        "\n"
+        "import { join } from 'path';\n"
+    )
+    hit = sanity.GrepHit(
+        path="path.ts",
+        line=6,
+        snippet="//      claudeConfigDir, buddyStateDir.",
+    )
+    assert sanity._in_leading_header_comment(tmp_path, hit)
+
+
+def test_in_leading_header_comment_false_past_scan_cap(
+    tmp_path: Path,
+) -> None:
+    # Even an uninterrupted comment run for its first
+    # _HEADER_SCAN_LINES + 1 lines is deliberately not read past the
+    # cap -- a hit this far into the file is never treated as part of
+    # a "module header" mention.
+    lines = ["// header line naming target\n"] * (
+        sanity._HEADER_SCAN_LINES + 1
+    )
+    (tmp_path / "big.ts").write_text("".join(lines))
+    hit = sanity.GrepHit(
+        path="big.ts",
+        line=sanity._HEADER_SCAN_LINES + 1,
+        snippet="// header line naming target",
+    )
+    assert not sanity._in_leading_header_comment(tmp_path, hit)
+
+
+def test_in_leading_header_comment_false_when_no_header_at_all(
+    tmp_path: Path,
+) -> None:
+    # Line 1 is real code -- this shape stays correctly gated by
+    # near_own_definition alone, unchanged.
+    (tmp_path / "code.ts").write_text(
+        "import { join } from 'path';\n"
+        "\n"
+        "// mentions target here, but not from line 1\n"
+        "export function other() {}\n"
+    )
+    hit = sanity.GrepHit(
+        path="code.ts",
+        line=3,
+        snippet="// mentions target here, but not from line 1",
+    )
+    assert not sanity._in_leading_header_comment(tmp_path, hit)
+
+
+def test_in_leading_header_comment_false_when_interrupted_by_code(
+    tmp_path: Path,
+) -> None:
+    # A header block interrupted by one blank-then-code line before
+    # the hit -- confirms the all-comment-or-blank requirement is
+    # enforced line-by-line, not just at the hit line.
+    (tmp_path / "mixed.ts").write_text(
+        "// header line 1\n"
+        "// header line 2\n"
+        "\n"
+        "const x = 1;\n"
+        "// target mentioned here, after real code broke the run\n"
+    )
+    hit = sanity.GrepHit(
+        path="mixed.ts",
+        line=5,
+        snippet="// target mentioned here, after real code broke the run",
+    )
+    assert not sanity._in_leading_header_comment(tmp_path, hit)
+
+
+def test_in_leading_header_comment_unreadable_file_is_false(
+    tmp_path: Path,
+) -> None:
+    hit = sanity.GrepHit(path="missing.ts", line=1, snippet="// x")
+    assert not sanity._in_leading_header_comment(tmp_path, hit)
 
 
 # --- other same-named symbols' own def lines (round 22 §10) -------------
@@ -1099,3 +1858,1410 @@ def test_sanity_near_own_definition_checks_every_same_named_symbol(
         if row["file"] == "renderer.py"
     }
     assert rows_by_line.get(1) == sanity.CAUSE_COMMENT_MENTION
+
+
+# --- cross-file bare-name collision (round 25 awesome-go.md Bug 1) -----
+
+
+def test_classify_miss_cross_file_collision() -> None:
+    # classify_miss stays pure/I/O-free -- the caller computes
+    # looks_like_cross_file_collision from MapIndex.symbols_by_name and
+    # passes it in, same contract as looks_like_import_member.
+    cause = sanity.classify_miss(
+        "return icon()",
+        "icon",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_cross_file_collision=True,
+    )
+    assert cause == sanity.CAUSE_CROSS_FILE_COLLISION
+
+
+def test_classify_miss_cross_file_collision_absent_without_flag() -> None:
+    cause = sanity.classify_miss(
+        "return icon()",
+        "icon",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+    )
+    assert cause != sanity.CAUSE_CROSS_FILE_COLLISION
+
+
+def test_classify_miss_cross_file_collision_wins_over_generic_name() -> None:
+    # Round 25 awesome-go.md Bug 1's own precedence lock-in: a name
+    # that's both short/generic *and* a genuine cross-file collision
+    # must resolve to the deterministic collision cause, not the
+    # accident-prone length/word-list heuristic.
+    cause = sanity.classify_miss(
+        "return fix()",
+        "fix",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_cross_file_collision=True,
+    )
+    assert cause == sanity.CAUSE_CROSS_FILE_COLLISION
+
+
+def test_classify_miss_cross_file_collision_wins_over_test_filter() -> None:
+    cause = sanity.classify_miss(
+        "return icon()",
+        "icon",
+        is_test_file=True,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_cross_file_collision=True,
+    )
+    assert cause == sanity.CAUSE_CROSS_FILE_COLLISION
+
+
+def test_classify_miss_qualified_call_wins_over_cross_file_collision() -> None:
+    # Precedence: a genuine qualified call is still checked first
+    # inside classify_miss's own ladder, even if the caller
+    # (incorrectly) set the flag.
+    cause = sanity.classify_miss(
+        "pkg.icon(x)",
+        "icon",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_cross_file_collision=True,
+    )
+    assert cause == sanity.CAUSE_QUALIFIED_CALL
+
+
+def test_sanity_cross_file_collision_flags_call_shaped_reference(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round 25 awesome-go.md Bug 1's own repro shape: two files each
+    # declare a same-bare-named function and each correctly calls its
+    # own local declaration -- dekko already resolves both correctly
+    # (no monkeypatching needed), so file B's real call to *its own*
+    # `icon` shows up as grep-only relative to file A's `icon` query
+    # target, and must be explained as a cross-file collision, not left
+    # unexplained.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def icon():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller_a():\n"
+                "    return icon()\n"
+            ),
+            "b.py": (
+                "def icon():\n"
+                "    return 2\n"
+                "\n"
+                "\n"
+                "def caller_b():\n"
+                "    return icon()\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "a.py:icon", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+
+    # File A's own real call site is a genuine match, not grep-only.
+    match_locs = {(row["file"], row["line"]) for row in doc["matches"]}
+    assert ("a.py", 6) in match_locs
+
+    grep_only_by_loc = {
+        (row["file"], row["line"]): row["cause"] for row in doc["grep_only"]
+    }
+    assert (
+        grep_only_by_loc.get(("b.py", 6)) == sanity.CAUSE_CROSS_FILE_COLLISION
+    )
+
+
+def test_sanity_cross_file_collision_absent_with_single_candidate(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Guard: with only one declaration of the bare name anywhere in the
+    # repo, there is no "other" candidate to collide with -- a genuine
+    # same-file resolver miss must stay unexplained, not be
+    # misclassified as a cross-file collision purely because its own
+    # declaration lives in a file that (trivially) contains a
+    # declaration of the name.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def target():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return target()\n"
+            )
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    index = mapfile.load_map(root)
+    assert index is not None
+    own_def_locs = frozenset(
+        (s.path, s.start_line) for s in index.symbols_by_name.get("target", [])
+    )
+    sweep = sanity._run_grep(root, "target")
+    causes = sanity._classify_grep_hits(
+        sweep.hits,
+        "target",
+        root,
+        own_def_locs=own_def_locs,
+        tests_excluded=True,
+        other_candidate_files=frozenset(),
+    )
+    assert causes.get(("a.py", 6)) != sanity.CAUSE_CROSS_FILE_COLLISION
+
+
+def test_sanity_all_cross_file_collision_single_candidate_stays_unexplained(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # ``--all`` mode's own version of the guard above: a bare name with
+    # exactly one repo-wide declaration must never have its own
+    # same-file call site flagged as a cross-file collision just
+    # because ``--all``'s shared-sweep-per-bare-name design can't
+    # exclude "this symbol's own file" the way run() can.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def distinctivelyuniquename():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return distinctivelyuniquename()\n"
+            )
+        }
+    )
+    monkeypatch.setattr(
+        sanity, "_dekko_hits_callers", lambda *_a, **_kw: ([], [])
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert (
+        doc["aggregate_causes"].get(sanity.CAUSE_CROSS_FILE_COLLISION) is None
+    )
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED) == 1
+
+
+def test_sanity_all_cross_file_collision_two_candidates_flagged(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # ``--all`` mode's positive counterpart: the awesome-go repro shape
+    # (two files, each with its own correctly-resolved same-bare-named
+    # declaration) must classify each other's call site as a cross-file
+    # collision, not unexplained, once >= 2 distinct declaration files
+    # exist for the swept bare name.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def icon():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller_a():\n"
+                "    return icon()\n"
+            ),
+            "b.py": (
+                "def icon():\n"
+                "    return 2\n"
+                "\n"
+                "\n"
+                "def caller_b():\n"
+                "    return icon()\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED) is None
+    assert doc["aggregate_causes"].get(sanity.CAUSE_CROSS_FILE_COLLISION) == 2
+
+
+# --- ``sanity --unused``: classify_unused_reference (pure) -------------
+
+
+def test_classify_unused_reference_spread_object() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "return { ...TARGET, ...def };", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_SPREAD)
+
+
+def test_classify_unused_reference_spread_of_bare_name_in_call_arg() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "f(...TARGET);", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_SPREAD)
+
+
+def test_classify_unused_reference_typeof() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "type ToolDefaultsType = typeof TARGET;", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_TYPEOF)
+
+
+def test_classify_unused_reference_subscript() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "const v = TARGET[key];", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_SUBSCRIPT)
+
+
+def test_classify_unused_reference_bare_call() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "TARGET();", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_CALL)
+
+
+def test_classify_unused_reference_qualified_call() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "pkg.TARGET();", "TARGET", path="a.py"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_CALL)
+
+
+def test_classify_unused_reference_c_extern_prototype_is_declaration() -> None:
+    # Round 25 finding #14 (tensorflow.md Finding 4): a header-only
+    # extern forward declaration -- no body, ends `;` -- is
+    # syntactically indistinguishable from a bare call by the call
+    # template alone and was mistagged [call]; must classify as
+    # SHAPE_DECLARATION instead.
+    bucket, detail = sanity.classify_unused_reference(
+        "extern TF_CAPI_EXPORT void TARGET("
+        "TF_DeprecatedSession* session, TF_Status* status);",
+        "TARGET",
+        path="c_api.h",
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_DECLARATION)
+
+
+def test_classify_unused_reference_plain_prototype_is_declaration() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "void TARGET(int x);", "TARGET", path="a.h"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_DECLARATION)
+
+
+def test_classify_unused_reference_bare_call_still_call_not_declaration() -> (
+    None
+):
+    # Regression guard: a genuine call statement with no return-type
+    # prefix before the name must not be swept into SHAPE_DECLARATION.
+    bucket, detail = sanity.classify_unused_reference(
+        "TARGET(session, status);", "TARGET", path="a.c"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_CALL)
+
+
+def test_classify_unused_reference_other_catch_all() -> None:
+    # A plain assignment RHS -- not one of the three named shapes, but
+    # still a real reference, so it must surface as SHAPE_OTHER rather
+    # than being dropped for not matching a known template.
+    bucket, detail = sanity.classify_unused_reference(
+        "const x = TARGET;", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_OTHER)
+
+
+def test_classify_unused_reference_import_is_noise() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "import { TARGET } from './a';", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("noise", sanity.CAUSE_IMPORT_STATEMENT)
+
+
+def test_classify_unused_reference_comment_is_noise() -> None:
+    bucket, detail = sanity.classify_unused_reference(
+        "# mentions TARGET here", "TARGET", path="a.py"
+    )
+    assert (bucket, detail) == ("noise", sanity.CAUSE_COMMENT_MENTION)
+
+
+def test_classify_unused_reference_comment_noise_unconditional() -> None:
+    # Unlike classify_miss, comment detection here has no
+    # near_own_definition gate -- a comment anywhere in the repo is
+    # still just a comment, not usage evidence.
+    bucket, detail = sanity.classify_unused_reference(
+        "// TARGET is mentioned far from its own definition",
+        "TARGET",
+        path="far/away.ts",
+    )
+    assert (bucket, detail) == ("noise", sanity.CAUSE_COMMENT_MENTION)
+
+
+def test_classify_unused_reference_call_wins_over_spread_check_order() -> None:
+    # Check-order regression: "...TARGET()" spreads a call's *result*,
+    # not TARGET itself -- SHAPE_CALL must win over SHAPE_SPREAD.
+    bucket, detail = sanity.classify_unused_reference(
+        "f(...TARGET());", "TARGET", path="a.ts"
+    )
+    assert (bucket, detail) == ("reference", sanity.SHAPE_CALL)
+
+
+# --- ``sanity --unused``: end-to-end ------------------------------------
+
+
+def test_sanity_unused_excludes_own_definition_line(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    (root / "widget.dat").write_text("noise\n  ...TARGET_NAME\n")
+    code = cli.main(
+        ["sanity", "--unused", "TARGET_NAME", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    locs = {(row["file"], row["line"]) for row in doc["reference_hits"]}
+    assert ("a.py", 1) not in locs
+    assert ("widget.dat", 2) in locs
+
+
+def test_sanity_unused_catches_reference_shapes_no_reference_query_covers(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Proves the "general safety net" claim independently of any one
+    # language's reference_query fix: a reference living in a file
+    # dekko can't parse at all is invisible to calls_in/referenced_in
+    # by construction (the TS/JS spread/typeof/subscript gap this doc
+    # was originally filed against is already closed as of 0.43.19,
+    # so this stands in for "a shape no reference_query covers yet").
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    (root / "widget.dat").write_text(
+        "noise line\n"
+        "  ...TARGET_NAME\n"
+        "  typeof TARGET_NAME\n"
+        "  TARGET_NAME[0]\n"
+    )
+    code = cli.main(
+        ["sanity", "--unused", "TARGET_NAME", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["has_dekko_evidence"] is False
+    shapes = {row["shape"] for row in doc["reference_hits"]}
+    assert shapes == {
+        sanity.SHAPE_SPREAD,
+        sanity.SHAPE_TYPEOF,
+        sanity.SHAPE_SUBSCRIPT,
+    }
+
+
+def test_sanity_unused_json_reports_counts_and_meta(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    (root / "widget.dat").write_text(
+        "  ...TARGET_NAME\n  typeof TARGET_NAME\n"
+    )
+    code = cli.main(
+        ["sanity", "--unused", "TARGET_NAME", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["counts"]["reference_hits"] == 2
+    meta = doc["meta"]["reference_hits"]
+    assert meta["total"] == 2
+    assert meta["returned"] == 2
+    shapes = {row["shape"] for row in doc["reference_hits"]}
+    assert shapes == {sanity.SHAPE_SPREAD, sanity.SHAPE_TYPEOF}
+
+
+def test_sanity_unused_reports_evidence_present_when_dekko_has_callers(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # sanity --unused doesn't re-run _is_root -- it just reports
+    # calls_in/referenced_in evidence directly, so running it against
+    # a symbol dekko would never actually flag (it has a real caller)
+    # still answers correctly: has_dekko_evidence: true.
+    root = make_mapped_repo(
+        {
+            "a.py": "def target():\n    return 1\n",
+            "b.py": "def other():\n    return target()\n",
+        }
+    )
+    code = cli.main(
+        ["sanity", "--unused", "target", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["has_dekko_evidence"] is True
+
+
+def test_sanity_unused_clean_case_text(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def trulyDeadHelper():\n    return 1\n"})
+    code = cli.main(
+        ["sanity", "--unused", "trulyDeadHelper", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "reference hits found outside definition/import/comment: 0" in out
+    assert (
+        "clean: no reference evidence found outside definition "
+        "-- flagged-unused looks correct" in out
+    )
+
+
+def test_sanity_unused_clean_case_json(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def trulyDeadHelper():\n    return 1\n"})
+    code = cli.main(
+        [
+            "sanity",
+            "--unused",
+            "trulyDeadHelper",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["reference_hits"] == []
+    assert doc["has_dekko_evidence"] is False
+
+
+def test_sanity_unused_text_call_shaped_summary_wording(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    (root / "widget.dat").write_text("  TARGET_NAME()\n  typeof TARGET_NAME\n")
+    code = cli.main(["sanity", "--unused", "TARGET_NAME", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "1 call-shaped reference" in out
+    assert "possible resolver miss" in out
+    assert "1 non-call reference" in out
+    assert "verify before deleting" in out
+
+
+def test_sanity_usages_unused_mutex(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    code = cli.main(
+        [
+            "sanity",
+            "target",
+            "--usages",
+            "--unused",
+            "target",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 2
+    assert "not both" in capsys.readouterr().err
+
+
+def test_sanity_no_target_and_no_unused_is_usage_error(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    code = cli.main(["sanity", "--root", str(root)])
+    assert code == 2
+    assert "requires a target" in capsys.readouterr().err
+
+
+def test_sanity_unused_generic_name_caution(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def run():\n    return 1\n"})
+    (root / "widget.dat").write_text("  typeof run\n")
+    code = cli.main(
+        ["sanity", "--unused", "run", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["generic_name_caution"] is True
+    # Still reported, not suppressed.
+    assert doc["counts"]["reference_hits"] == 1
+
+
+def test_sanity_unused_generic_name_caution_text_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def run():\n    return 1\n"})
+    (root / "widget.dat").write_text("  typeof run\n")
+    code = cli.main(["sanity", "--unused", "run", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert sanity.CAUSE_GENERIC_NAME in out
+
+
+def test_sanity_unused_json_discloses_truncation_and_pathological_skips(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    fake_sweep = sanity.GrepSweepResult(
+        hits=[
+            sanity.GrepHit(
+                path="widget.dat", line=2, snippet="  ...TARGET_NAME"
+            )
+        ],
+        command_text="grep -rn -I -w -F -- TARGET_NAME .",
+        error=None,
+        truncated=True,
+        skipped_pathological=3,
+    )
+    monkeypatch.setattr(sanity, "_run_grep", lambda *a, **kw: fake_sweep)
+
+    code = cli.main(
+        ["sanity", "--unused", "TARGET_NAME", "--root", str(root), "--json"]
+    )
+
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["grep_truncated"] is True
+    assert doc["grep_skipped_pathological"] == 3
+    assert "reference_hits_note" in doc
+    assert "grep_skipped_pathological_note" in doc
+
+
+def test_sanity_unused_text_discloses_truncation_and_pathological_skips(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    fake_sweep = sanity.GrepSweepResult(
+        hits=[],
+        command_text="grep -rn -I -w -F -- TARGET_NAME .",
+        error=None,
+        truncated=True,
+        skipped_pathological=2,
+    )
+    monkeypatch.setattr(sanity, "_run_grep", lambda *a, **kw: fake_sweep)
+
+    code = cli.main(["sanity", "--unused", "TARGET_NAME", "--root", str(root)])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "safety cap" in out
+    assert "pathological" in out
+
+
+# --- ``sanity --all``: repo-wide sweep -----------------------------
+#
+# .features/plans/round23/24-sanity-all-sweep.md
+
+
+def test_group_fan_in_symbols_excludes_zero_fan_in(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def called():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def uncalled():\n"
+                "    return 2\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return called()\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    groups = sanity._group_fan_in_symbols(index)
+    assert "called" in groups
+    assert "uncalled" not in groups
+
+
+def test_group_fan_in_symbols_respects_include_tests(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": "def target():\n    return 1\n",
+            "tests/test_a.py": (
+                "from a import target\n"
+                "\n"
+                "\n"
+                "def test_target():\n"
+                "    assert target() == 1\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    # Excluded by default -- target's only caller is a test file.
+    assert "target" not in sanity._group_fan_in_symbols(index.without_tests())
+    # Included with the full (unfiltered) index, mirroring
+    # sanity <target>'s own --include-tests default handling.
+    assert "target" in sanity._group_fan_in_symbols(index)
+
+
+def test_classify_grep_hits_matches_single_target_path(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The extracted helper and run()'s own classification must agree
+    # byte-for-byte -- this is the invariant the whole --all feature
+    # depends on (see module docstring's --all paragraph).
+    root = make_mapped_repo(
+        {
+            "a.py": "def target():\n    return 1\n",
+            "b.py": (
+                "import pkg\n\n\ndef caller():\n    return pkg.target()\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes_from_run = {
+        (row["file"], row["line"]): row["cause"] for row in doc["grep_only"]
+    }
+    assert causes_from_run, "expected at least one grep-only hit"
+
+    index = mapfile.load_map(root)
+    assert index is not None
+    own_def_locs = frozenset(
+        (s.path, s.start_line) for s in index.symbols_by_name.get("target", [])
+    )
+    sweep = sanity._run_grep(root, "target")
+    causes_from_helper = sanity._classify_grep_hits(
+        sweep.hits,
+        "target",
+        root,
+        own_def_locs=own_def_locs,
+        tests_excluded=True,
+    )
+    # _force_no_dekko_hits means every non-own-def hit landed in
+    # grep_only above, so the two maps cover exactly the same set.
+    assert causes_from_helper == causes_from_run
+
+
+def test_sanity_all_dedupes_grep_by_bare_name(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def helper():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return helper()\n"
+            ),
+            "b.py": (
+                "def helper():\n"
+                "    return 2\n"
+                "\n"
+                "\n"
+                "def other():\n"
+                "    return helper()\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    groups = sanity._group_fan_in_symbols(index.without_tests())
+    # Two distinct symbols sharing the bare name "helper", both with
+    # their own fan-in -- the overload-set shape the dedup targets.
+    assert len(groups["helper"]) == 2
+
+    call_count = 0
+    real_run = subprocess.run
+
+    def counting_run(*args: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(sanity.subprocess, "run", counting_run)
+
+    code = sanity.run_all(index, root, jobs=1)
+
+    assert code == sanity.EXIT_OK
+    assert call_count == 1
+
+
+def test_sanity_all_aggregates_across_symbols(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def cleanhelper():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return cleanhelper()\n"
+            ),
+            "b.py": (
+                "def distinctivelyuniquename():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def other():\n"
+                "    return distinctivelyuniquename()\n"
+            ),
+        }
+    )
+    original = sanity._dekko_hits_callers
+
+    def patched(
+        index_arg: mapfile.MapIndex, sym_target: str
+    ) -> tuple[list[tuple[str, int]], list[str]]:
+        # Force only distinctivelyuniquename's own dekko-side query to
+        # report zero hits -- its one real call site becomes an
+        # unexplained grep-only miss; cleanhelper's stays a real match.
+        if "distinctivelyuniquename" in sym_target:
+            return [], []
+        return original(index_arg, sym_target)
+
+    monkeypatch.setattr(sanity, "_dekko_hits_callers", patched)
+
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED) == 1
+    flagged_targets = {f["target"] for f in doc["flagged"]}
+    assert any("distinctivelyuniquename" in t for t in flagged_targets)
+    assert not any("cleanhelper" in t for t in flagged_targets)
+
+
+def test_sanity_all_json_shape(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "def helper():\n"
+                "    return 1\n"
+                "\n"
+                "\n"
+                "def caller():\n"
+                "    return helper()\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert {
+        "action",
+        "symbols_swept",
+        "unique_names_swept",
+        "names_truncated",
+        "jobs",
+        "aggregate_causes",
+        "flagged",
+        "symbols",
+    } <= set(doc)
+    assert doc["action"] == "sanity_all"
+    assert doc["symbols_swept"] == 1
+    assert doc["unique_names_swept"] == 1
+    assert doc["names_truncated"] is False
+    for row in doc["symbols"]:
+        assert {"target", "bare_name", "counts", "causes"} <= set(row)
+        assert {"matches", "dekko_only", "grep_only"} <= set(row["counts"])
+
+
+def test_sanity_all_names_truncated_disclosed(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    files = {}
+    for i in range(3):
+        files[f"m{i}.py"] = (
+            f"def helper{i}():\n"
+            f"    return {i}\n"
+            "\n"
+            "\n"
+            f"def caller{i}():\n"
+            f"    return helper{i}()\n"
+        )
+    root = make_mapped_repo(files)
+    code = cli.main(
+        [
+            "sanity",
+            "--all",
+            "--root",
+            str(root),
+            "--json",
+            "--max-names",
+            "1",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["names_truncated"] is True
+    assert doc["unique_names_swept"] == 1
+    assert "names_truncated_note" in doc
+
+
+def test_sanity_all_fail_on_unexplained_exit_code(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": "def distinctivelyuniquename():\n    return 1\n",
+            "b.py": ("def other():\n    return distinctivelyuniquename()\n"),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == sanity.EXIT_OK
+    capsys.readouterr()
+
+    code = cli.main(
+        [
+            "sanity",
+            "--all",
+            "--root",
+            str(root),
+            "--json",
+            "--fail-on-unexplained",
+        ]
+    )
+    assert code == sanity.EXIT_UNEXPLAINED_FOUND
+
+
+def test_sanity_all_target_and_all_mutually_exclusive(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    code = cli.main(["sanity", "target", "--all", "--root", str(root)])
+    assert code == 2
+    assert "not both" in capsys.readouterr().err
+
+
+def test_sanity_all_usages_incompatible(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    code = cli.main(["sanity", "--all", "--usages", "--root", str(root)])
+    assert code == 2
+    assert "--usages" in capsys.readouterr().err
+
+
+def test_sanity_all_unused_incompatible(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def target():\n    return 1\n"})
+    code = cli.main(
+        ["sanity", "--all", "--unused", "target", "--root", str(root)]
+    )
+    assert code == 2
+    assert "--unused" in capsys.readouterr().err
+
+
+def test_sanity_all_cli_smoke(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SIMPLE_REPO)
+    code = cli.main(["sanity", "--all", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "dekko sanity --all" in out
+
+
+def _buggy_looks_like_multiline_import_member(
+    root: Path, hit: sanity.GrepHit, bare_name: str
+) -> bool:
+    """The pre-0.43.18 flat ``any()``/``any()`` implementation this
+    module's round-23 regression fixed (commit ``b5f692f``) -- a
+    still-open multi-line destructured import block is falsely read as
+    "closed" as soon as *any* line in the lookback window contains
+    ``}``, regardless of which opener it actually belongs to."""
+    stripped = hit.snippet.strip().rstrip(",")
+    if stripped != bare_name:
+        return False
+    try:
+        lines = (
+            (root / hit.path)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+        )
+    except OSError:
+        return False
+    start = max(0, hit.line - 1 - sanity._IMPORT_WINDOW_LINES)
+    window = lines[start : hit.line - 1]
+    opened = any(sanity._IMPORT_OPEN_BRACE.match(ln) for ln in window)
+    if not opened:
+        return False
+    closed_before_hit = any("}" in ln for ln in window)
+    return not closed_before_hit
+
+
+def test_sanity_all_regression_would_have_caught_multiline_import_bug(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 23's own thesis, made concrete: sweeping every fan-in
+    # symbol with the *pre-fix* buggy classifier flags a nonzero
+    # unexplained count on the exact shape that defeated it (an
+    # unrelated single-line import sitting above the real, still-open
+    # multi-line destructured import block) -- proof `sanity --all`
+    # would have surfaced this without anyone hand-picking
+    # `buddyStateDir`. The fixed implementation (no monkeypatch) must
+    # NOT flag it.
+    root = make_mapped_repo(
+        {
+            "path.ts": (
+                "export function buddyStateDir(): string {\n"
+                "  return '/tmp';\n"
+                "}\n"
+            ),
+            "index.ts": (
+                "import { unrelated } from 'os';\n"
+                "\n"
+                "import {\n"
+                "  buddyStateDir,\n"
+                "  claudeSettingsPath,\n"
+                "} from './path';\n"
+                "\n"
+                "function main() {\n"
+                "  return buddyStateDir();\n"
+                "}\n"
+            ),
+        }
+    )
+
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED, 0) == 0
+
+    monkeypatch.setattr(
+        sanity,
+        "_looks_like_multiline_import_member",
+        _buggy_looks_like_multiline_import_member,
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED, 0) > 0
+
+
+# --- receiver-mismatch cue (round 23 plan 25) --------------------------
+#
+# See .features/plans/round23/25-sanity-receiver-mismatch-cue.md. A
+# grep-only hit for a single-repo-candidate *method* target can be
+# flagged CAUSE_LIKELY_EXTERNAL_COLLISION when neither the hit's own
+# line nor its file's top-of-file imports mention the target's
+# declaring type -- the cheap textual proxy for "this is almost
+# certainly an unrelated external-library method sharing the bare
+# name" (the spring-boot ``isTrue``/AssertJ repro this design closes).
+
+
+def test_receiver_mismatch_type_on_own_line_is_false(tmp_path: Path) -> None:
+    hit = sanity.GrepHit(
+        path="b.py", line=3, snippet="    return Widget.isTrue()"
+    )
+    assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is False
+
+
+def test_receiver_mismatch_type_in_file_imports_is_false(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "b.py").write_text(
+        "from a import Widget\n\n\ndef unrelated():\n    return isTrue()\n"
+    )
+    hit = sanity.GrepHit(path="b.py", line=5, snippet="    return isTrue()")
+    assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is False
+
+
+def test_receiver_mismatch_type_absent_is_true(tmp_path: Path) -> None:
+    (tmp_path / "b.py").write_text("def unrelated():\n    return isTrue()\n")
+    hit = sanity.GrepHit(path="b.py", line=2, snippet="    return isTrue()")
+    assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is True
+
+
+def test_receiver_mismatch_unreadable_file_is_false(tmp_path: Path) -> None:
+    hit = sanity.GrepHit(
+        path="missing.py", line=1, snippet="    return isTrue()"
+    )
+    assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is False
+
+
+def test_receiver_mismatch_same_declaring_file_is_false(
+    tmp_path: Path,
+) -> None:
+    # Round 25 finding #9: a file never imports its own class, so a
+    # same-file comment about the correct target (not close enough to
+    # its def line to trip the separate comment-proximity check) must
+    # not be flagged as a receiver mismatch just because the type name
+    # doesn't textually appear within the ``_TYPE_REFERENCE_WINDOW_
+    # LINES``-line window -- realistic on a file (like the McpHub.ts
+    # repro) with enough leading import lines to push the class
+    # declaration itself past that window.
+    padding = "# padding\n" * 65
+    body = (
+        padding
+        + "class Widget:\n"
+        + "    def isTrue(self):\n"
+        + "        return True\n"
+        + "\n\n\n\n\n\n\n\n\n\n"
+        + "# calls isTrue() somewhere below, unrelated to any import\n"
+    )
+    (tmp_path / "b.py").write_text(body)
+    comment_line = body.count("\n")
+    hit = sanity.GrepHit(
+        path="b.py",
+        line=comment_line,
+        snippet="# calls isTrue() somewhere below, unrelated to any import",
+    )
+    assert (
+        sanity._receiver_mismatch(
+            tmp_path, hit, "Widget", declaring_path="b.py"
+        )
+        is False
+    )
+    # Without declaring_path, the pre-fix behavior (spurious True) is
+    # reproduced -- confirms the new parameter is load-bearing.
+    assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is True
+
+
+def test_classify_miss_likely_unrelated_external() -> None:
+    cause = sanity.classify_miss(
+        "    return isTrue()",
+        "isTrue",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        likely_unrelated_external=True,
+    )
+    assert cause == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+
+
+def test_classify_miss_likely_unrelated_external_preempts_test_filter() -> (
+    None
+):
+    # Without the new flag this line would land on CAUSE_TEST_FILTER --
+    # the exact regression this design targets (round 23
+    # spring-boot.md §4: a grep-only AssertJ-style hit in a test file
+    # read as "re-run with --include-tests" when it was never a real
+    # caller to begin with).
+    cause = sanity.classify_miss(
+        "    return isTrue()",
+        "isTrue",
+        is_test_file=True,
+        unsupported_language=False,
+        tests_excluded=True,
+        likely_unrelated_external=True,
+    )
+    assert cause == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+
+
+def test_classify_miss_likely_unrelated_external_preempts_generic_name() -> (
+    None
+):
+    cause = sanity.classify_miss(
+        "    return map()",
+        "map",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        likely_unrelated_external=True,
+    )
+    assert cause == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+
+
+def test_classify_miss_unsupported_language_wins_over_receiver_cue() -> None:
+    # Precedence unchanged: a hard "dekko can't parse this file at
+    # all" fact still outranks a heuristic guess.
+    cause = sanity.classify_miss(
+        "    return isTrue()",
+        "isTrue",
+        is_test_file=False,
+        unsupported_language=True,
+        tests_excluded=True,
+        likely_unrelated_external=True,
+    )
+    assert cause == sanity.CAUSE_UNSUPPORTED_LANGUAGE
+
+
+def test_resolve_declaring_type_method_single_candidate(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "class Widget:\n    def isTrue(self):\n        return True\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    sym = next(
+        s for s in index.symbols_by_name["isTrue"] if s.kind == "method"
+    )
+    assert sanity._resolve_declaring_type(index, sym) == "Widget"
+
+
+def test_resolve_declaring_type_none_for_free_function(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Gating condition #2/#1: a free function has no "." in its
+    # qualname (no container) -- layer 1's denylist domain, not this
+    # heuristic's.
+    root = make_mapped_repo(
+        {"a.py": "def isTrue():\n    return True\n"},
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    sym = index.symbols_by_name["isTrue"][0]
+    assert sym.kind == "function"
+    assert sanity._resolve_declaring_type(index, sym) is None
+
+
+def test_resolve_declaring_type_none_when_multiple_candidates(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Gating condition #4: two repo-defined symbols share the bare
+    # name (the multi-candidate case `dekko ambiguous` already
+    # handles) -- don't guess.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "class Widget:\n    def isTrue(self):\n        return True\n"
+            ),
+            "b.py": (
+                "class Gadget:\n    def isTrue(self):\n        return False\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    sym = next(
+        s
+        for s in index.symbols_by_name["isTrue"]
+        if s.path == "a.py" and s.kind == "method"
+    )
+    assert sanity._resolve_declaring_type(index, sym) is None
+
+
+def test_sanity_receiver_mismatch_flags_unrelated_collision(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The isTrue/AssertJ shape as a synthetic, language-agnostic
+    # fixture: a class defining the target method, plus an unrelated
+    # same-named zero-arg call in a different file with no import of
+    # the defining class and no receiver identifier on the same line
+    # (so it doesn't already match the higher-precedence
+    # CAUSE_QUALIFIED_CALL check -- see _QUALIFIED_CALL_TEMPLATE).
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "class Widget:\n"
+                "    def isTrue(self):\n"
+                "        return True\n"
+                "\n\n"
+                "def caller():\n"
+                "    w = Widget()\n"
+                "    return w.isTrue()\n"
+            ),
+            "b.py": ("def unrelated():\n    return isTrue()\n"),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "isTrue", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert sanity.CAUSE_LIKELY_EXTERNAL_COLLISION in out
+    assert "declaring type ('Widget')" in out
+
+    code = cli.main(["sanity", "isTrue", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["file"]: row["cause"] for row in doc["grep_only"]}
+    assert causes["b.py"] == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+    assert doc["receiver_mismatch_declaring_type"] == "Widget"
+    assert doc["receiver_mismatch_count"] >= 1
+    assert "Widget" in doc["receiver_mismatch_note"]
+
+
+def test_sanity_receiver_mismatch_skips_same_file_comment(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 25 finding #9 (cline.md Finding 3): a same-file comment
+    # mentioning the target's own method, far enough from its def line
+    # to not trip the comment-proximity check, must not get the
+    # misleading "likely an unrelated external-library method" message
+    # -- the file it's in *is* the declaring type's own file, which
+    # never "imports" itself.
+    padding = "# padding\n" * 65
+    a_py = (
+        padding
+        + "class Widget:\n"
+        + "    def isTrue(self):\n"
+        + "        return True\n"
+        + "\n\n\n\n\n\n\n\n\n\n"
+        + "# isTrue() is called elsewhere in this class's lifecycle\n"
+    )
+    root = make_mapped_repo({"a.py": a_py})
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "isTrue", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["file"]: row["cause"] for row in doc["grep_only"]}
+    assert causes["a.py"] != sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
+
+
+def test_sanity_receiver_mismatch_absent_when_gate_unheld(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # A free function shares a bare name with something external, but
+    # kind != "method" -- gating condition #1 fails, falls through
+    # unchanged (layer 1's domain, not this design's).
+    root = make_mapped_repo(
+        {
+            "a.py": "def isTrue():\n    return True\n",
+            "b.py": ("def unrelated():\n    return isTrue()\n"),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "isTrue", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["cause"] for row in doc["grep_only"]}
+    assert sanity.CAUSE_LIKELY_EXTERNAL_COLLISION not in causes
+    assert "receiver_mismatch_note" not in doc
+
+
+# --- C.1/round-24 11-output-self-disclosure-hints.md: C.3
+# --group-by-file --------------------------------------------------
+
+
+def test_sanity_group_by_file_rolls_up_grep_only(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # C.3: two unexplained-cause hits clustered in b.py and one
+    # qualified-call hit in c.py must roll up into a per-file count
+    # with a per-cause breakdown, largest cluster first.
+    root = make_mapped_repo(
+        {
+            "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
+            "b.py": (
+                "value = totally_unrelated_wrapper(x)\n"
+                "value = totally_unrelated_wrapper(y)\n"
+            ),
+            "c.py": (
+                "import pkg\n\n\n"
+                "def caller():\n"
+                "    return pkg.totally_unrelated_wrapper()\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "totally_unrelated_wrapper",
+            "--root",
+            str(root),
+            "--group-by-file",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "grep-only: 3 (grouped by file)" in out
+    assert "b.py: 2" in out
+    assert "c.py: 1" in out
+    # b.py (2 hits) must sort before c.py (1 hit).
+    assert out.index("b.py: 2") < out.index("c.py: 1")
+    assert f"{sanity.CAUSE_UNEXPLAINED}   <-- look here" in out
+    assert sanity.CAUSE_QUALIFIED_CALL in out
+    assert f"{sanity.CAUSE_QUALIFIED_CALL}   <-- look here" not in out
+
+
+def test_sanity_group_by_file_omitted_keeps_flat_listing(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # C.3: default behavior (--group-by-file omitted) is unchanged —
+    # the existing flat _print_bucket_text rendering still applies.
+    root = make_mapped_repo(
+        {
+            "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
+            "b.py": (
+                "value = totally_unrelated_wrapper(x)\n"
+                "value = totally_unrelated_wrapper(y)\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        ["sanity", "totally_unrelated_wrapper", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "grep-only: 2" in out
+    assert "(grouped by file)" not in out
+    assert f"[{sanity.CAUSE_UNEXPLAINED}]" in out
+
+
+def test_sanity_group_by_file_respects_limit_truncation(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # C.3: grouping happens over whatever rows survived --limit
+    # fitting, not the pre-truncation total — the trailer must report
+    # against the already-truncated row count.
+    root = make_mapped_repo(
+        {
+            "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
+            "b.py": "value = totally_unrelated_wrapper(x)\n",
+            "c.py": "value = totally_unrelated_wrapper(x)\n",
+            "d.py": "value = totally_unrelated_wrapper(x)\n",
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "totally_unrelated_wrapper",
+            "--root",
+            str(root),
+            "--group-by-file",
+            "--limit",
+            "1",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "grep-only: 3 (grouped by file)" in out
+    assert "... +2 more (outside --limit/budget)" in out

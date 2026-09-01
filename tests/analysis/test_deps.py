@@ -306,7 +306,50 @@ def test_deps_mutually_exclusive_flags(
         ["deps", "--root", str(root), "--file", "a.py", "--cycles"]
     )
     assert code == deps.EXIT_ERROR
-    assert "give one of --file, --cycles, --export" in capsys.readouterr().err
+    assert "give one of FILE, --cycles, --export" in capsys.readouterr().err
+
+
+def test_deps_positional_file_matches_flag_output(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CYCLE_REPO)
+    code = cli.main(["deps", "--root", str(root), "a.py"])
+    assert code == 0
+    positional_out = capsys.readouterr().out
+
+    code = cli.main(["deps", "--root", str(root), "--file", "a.py"])
+    assert code == 0
+    flag_out = capsys.readouterr().out
+
+    assert positional_out == flag_out
+
+
+def test_deps_positional_and_flag_both_given_is_an_error(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CYCLE_REPO)
+    code = cli.main(["deps", "--root", str(root), "a.py", "--file", "b.py"])
+    assert code == deps.EXIT_ERROR
+    assert "give FILE or --file, not both" in capsys.readouterr().err
+
+
+def test_deps_positional_file_with_cycles_is_mutually_exclusive(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CYCLE_REPO)
+    code = cli.main(["deps", "--root", str(root), "a.py", "--cycles"])
+    assert code == deps.EXIT_ERROR
+    assert "give one of FILE, --cycles, --export" in capsys.readouterr().err
+
+
+def test_deps_no_target_still_defaults_to_summary(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CYCLE_REPO)
+    code = cli.main(["deps", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "most-depended-on files:" in out
 
 
 def test_deps_no_tests_excludes_test_file_edges(

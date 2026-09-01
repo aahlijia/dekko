@@ -28,6 +28,30 @@ accumulator on ``(caller_id, name)``, not ``(caller_id, name, line)``
 same caller collapse into one triple here. Counts in this report are
 "distinct (caller, name) collisions," not "physical ambiguous
 call-site count."
+
+Methodology limit -- this report is structurally blind to
+single-candidate false confidence (round 23
+``test-repos/reports/23-tokentest-7repo-fable5eval/cline.md`` §2.1,
+``spring-boot.md`` §2.1/§2.2): ``CallGraph.ambiguous`` is only ever
+populated when a bare call name matches 2+ repo-defined candidates
+with no disambiguating signal. When exactly *one* repo-defined
+candidate shares a call's bare name, ``resolver.py``'s
+``_pick_candidate`` accepts it via its ``len(candidates) == 1`` fast
+path — even when many call sites sharing that name are really calls to
+a same-named builtin/stdlib/third-party method (JS's
+``Date.now()``/``Map.has()``, Java's AssertJ ``.isTrue()``, ...), not
+the repo symbol. Such calls resolve "successfully" and never appear
+here at all, however inflated the resulting fan-in — this report's
+"0 ambiguous sites" cannot be read as "resolution is trustworthy" on
+its own; cross-check a suspiciously high fan-in with ``dekko sanity``.
+``_is_noise_call``'s denylists (``_BUILTIN_METHOD_NAMES``,
+``_CHAIN_BUILDER_METHOD_NAMES``, ``_RUST_STD_METHOD_NAMES``,
+``_JAVA_ASSERTION_METHOD_NAMES``, ``_BUILDER_METHOD_NAMES``) catch
+known instances of this shape by routing them to ``external`` instead,
+but the denylist approach is reactive by construction — see
+``.features/plans/round23/01-resolver-single-candidate-false-confidence.md``
+for the full analysis and the deferred structural (arity-aware)
+follow-up.
 """
 
 import json
@@ -86,6 +110,27 @@ def _raw_triples(index: MapIndex) -> list[_Triple]:
             if candidates:
                 triples.append((caller, name, candidates))
     return triples
+
+
+def collision_names(index: MapIndex) -> frozenset[str]:
+    """Bare names that `dekko ambiguous` has proven collision-prone.
+
+    A name appears here when at least one call site, somewhere in the
+    repo, matched 2+ repo-defined candidates and could not be resolved
+    (i.e. it appears in ``_raw_triples``). Built from the same triples
+    ``dekko ambiguous --name X`` itself drills into, so every name this
+    returns is guaranteed to have a non-empty ``ambiguous --name``
+    result -- callers should never see a name flagged here that then
+    reports "no ambiguous calls to X".
+
+    Args:
+        index: Loaded map index.
+
+    Returns:
+        Every distinct bare name that appears in at least one
+        surviving ambiguous ``(caller, name, candidates)`` triple.
+    """
+    return frozenset(name for _, name, _ in _raw_triples(index))
 
 
 def _caller_path(index: MapIndex, caller_id: str) -> str:
@@ -197,6 +242,51 @@ def ambiguous_rate(index: MapIndex, total_ambiguous: int) -> float:
     resolved = sum(len(v) for v in index.calls_out.values())
     denom = resolved + total_ambiguous
     return total_ambiguous / denom if denom else 0.0
+
+
+# Repo-wide ambiguous-call rate at/above which a standing caveat is
+# surfaced proactively (doctor, session-start hook, summary line)
+# instead of only being visible to an agent that thinks to run
+# `dekko ambiguous` first. Calibrated against round-23's 7-repo eval
+# corpus: awesome-go 0%, claude-buddy 0.2%, claude-code 9.3%, cline
+# 23.1% all sit comfortably under this; tensorflow 44.9%, zed 44.2%,
+# spring-boot 56.6% all independently had their rate called out as
+# unusually high in the same round's reports.
+HIGH_AMBIGUOUS_RATE = 0.30
+
+
+def cheap_rate(index: MapIndex) -> tuple[int, float]:
+    """Repo-wide ambiguous-site count + rate, no triple reconstruction.
+
+    ``compute()``'s numbers are only available after ``_raw_triples()``'s
+    O(ambiguous_in) join, which the ranked top-N views need but a bare
+    rate check doesn't. Summing ``ambiguous_out``'s list lengths is
+    equivalent on any unfiltered index (every ``ambiguous_out[caller]``
+    entry has a 1:1 source row in map.json's ``"ambiguous"`` array — see
+    ``_raw_triples``'s docstring for the one documented case,
+    ``without_tests()``, where that correspondence can drop; none of
+    this function's three callers pass a filtered view).
+    """
+    total = sum(len(v) for v in index.ambiguous_out.values())
+    return total, ambiguous_rate(index, total)
+
+
+def high_rate_note(index: MapIndex) -> str | None:
+    """One-line standing caveat, or ``None`` below ``HIGH_AMBIGUOUS_RATE``.
+
+    Single source of truth for the threshold and the wording, so
+    ``summary``, ``hooks.session_start``, and ``doctor`` can't drift
+    out of sync with each other or with plain ``dekko ambiguous``.
+    """
+    total, rate = cheap_rate(index)
+    if rate < HIGH_AMBIGUOUS_RATE:
+        return None
+    return (
+        f"note: this repo's call resolution is {rate:.0%} ambiguous "
+        f"({total:,} sites) — treat query callers/workset fan-in "
+        "counts as a floor, not exact; run `dekko ambiguous --by name` "
+        "to see what's colliding."
+    )
 
 
 def compute(index: MapIndex, top: int) -> dict:

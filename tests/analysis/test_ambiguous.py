@@ -8,6 +8,7 @@ from dekko.analysis import ambiguous
 from dekko.core.model import Symbol
 from dekko.core.resolver import MODULE_CALLER_SUFFIX
 from dekko.integrations import cli
+from dekko.render import mapfile
 from dekko.render.mapfile import MapIndex
 
 from conftest import RepoFactory
@@ -116,6 +117,28 @@ def test_raw_triples_drops_zero_candidate_pair() -> None:
     assert ambiguous._raw_triples(idx) == []
 
 
+def test_collision_names_returns_proven_colliders() -> None:
+    # "has" has 2 surviving candidates (a genuine collision) --
+    # "single" never appears in ambiguous_in/ambiguous_out at all,
+    # mirroring reality: the resolver only ever records a triple for a
+    # 2+-candidate collision, so a single-candidate name is
+    # structurally absent here, never present-but-filtered.
+    idx = MapIndex(root_label="t")
+    idx.ambiguous_in = {
+        "cand1": [("caller1", "has")],
+        "cand2": [("caller1", "has")],
+    }
+    idx.ambiguous_out = {"caller1": ["has"]}
+    names = ambiguous.collision_names(idx)
+    assert names == frozenset({"has"})
+    assert "single" not in names
+
+
+def test_collision_names_empty_when_no_ambiguity() -> None:
+    idx = MapIndex(root_label="t")
+    assert ambiguous.collision_names(idx) == frozenset()
+
+
 def test_by_name_ranking_and_stats() -> None:
     idx = MapIndex(root_label="t")
     idx.symbols_by_id = {
@@ -180,6 +203,107 @@ def test_compute_shape() -> None:
     assert doc["top_by_name"][0]["name"] == "target"
     assert doc["top_by_name"][0]["count"] == 1
     assert doc["top_by_file"][0] == {"path": "a.py", "count": 1}
+
+
+# --- standing high-ambiguous-rate flag ----------------------------------
+
+
+def test_cheap_rate_matches_compute_on_ambiguous_call(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    index = mapfile.load_map(root)
+    total, rate = ambiguous.cheap_rate(index)
+    doc = ambiguous.compute(index, top=10)
+    assert total == doc["total_ambiguous_sites"]
+    assert rate == doc["ambiguous_rate"]
+
+
+def test_cheap_rate_matches_compute_module_level(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(MODULE_LEVEL_AMBIGUOUS)
+    index = mapfile.load_map(root)
+    total, rate = ambiguous.cheap_rate(index)
+    doc = ambiguous.compute(index, top=10)
+    assert total == doc["total_ambiguous_sites"]
+    assert rate == doc["ambiguous_rate"]
+
+
+def test_cheap_rate_matches_compute_test_caller(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(TEST_CALLER_AMBIGUOUS)
+    index = mapfile.load_map(root)
+    total, rate = ambiguous.cheap_rate(index)
+    doc = ambiguous.compute(index, top=10)
+    assert total == doc["total_ambiguous_sites"]
+    assert rate == doc["ambiguous_rate"]
+
+
+_LOW_RATE_FILES = {
+    "a.py": "def target() -> int:\n    return 1\n",
+    "b.py": "def target() -> int:\n    return 2\n",
+    "helper.py": (
+        "def r0() -> int:\n    return 1\n\n\ndef r1() -> int:\n"
+        "    return 1\n\n\ndef r2() -> int:\n    return 1\n\n\n"
+        "def r3() -> int:\n    return 1\n\n\ndef r4() -> int:\n"
+        "    return 1\n\n\ndef r5() -> int:\n    return 1\n\n\n"
+        "def r6() -> int:\n    return 1\n\n\ndef r7() -> int:\n"
+        "    return 1\n\n\ndef r8() -> int:\n    return 1\n\n\n"
+        "def r9() -> int:\n    return 1\n"
+    ),
+    "c.py": (
+        "from helper import (\n"
+        "    r0, r1, r2, r3, r4, r5, r6, r7, r8, r9,\n"
+        ")\n\n\n"
+        "def caller() -> int:\n"
+        "    total = target()\n"
+        "    total += r0() + r1() + r2() + r3() + r4()\n"
+        "    total += r5() + r6() + r7() + r8() + r9()\n"
+        "    return total\n"
+    ),
+}
+
+
+def test_high_rate_note_none_below_threshold(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # 1 ambiguous collision diluted by 10 unambiguous resolved calls
+    # (1 / 11 ≈ 9%) is nowhere near the 30% threshold.
+    root = make_mapped_repo(_LOW_RATE_FILES)
+    index = mapfile.load_map(root)
+    _total, rate = ambiguous.cheap_rate(index)
+    assert rate < ambiguous.HIGH_AMBIGUOUS_RATE
+    assert ambiguous.high_rate_note(index) is None
+
+
+def test_high_rate_note_none_just_below_threshold() -> None:
+    idx = MapIndex(root_label="t")
+    idx.ambiguous_out = {"c1": [f"n{i}" for i in range(29)]}
+    idx.calls_out = {"c1": [f"r{i}" for i in range(71)]}
+    assert ambiguous.high_rate_note(idx) is None
+
+
+def test_high_rate_note_present_at_threshold_boundary() -> None:
+    idx = MapIndex(root_label="t")
+    idx.ambiguous_out = {"c1": ["a", "b", "c"]}
+    idx.calls_out = {"c1": [f"r{i}" for i in range(7)]}
+    _total, rate = ambiguous.cheap_rate(idx)
+    assert rate == ambiguous.HIGH_AMBIGUOUS_RATE
+    assert ambiguous.high_rate_note(idx) is not None
+
+
+def test_high_rate_note_present_above_threshold() -> None:
+    idx = MapIndex(root_label="t")
+    idx.ambiguous_out = {"c1": ["a", "b", "c"]}
+    idx.calls_out = {"c1": ["x"]}
+    note = ambiguous.high_rate_note(idx)
+    assert note is not None
+    assert "75%" in note
+    assert "3 sites" in note
+    assert "query callers/workset fan-in" in note
+    assert "dekko ambiguous --by name" in note
 
 
 # --- integration tests: CLI end-to-end ---------------------------------

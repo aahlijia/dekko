@@ -21,6 +21,7 @@ from dekko.analysis.relevance import TaskContext
 from dekko.analysis.query import (
     EXIT_AMBIGUOUS,
     EXIT_OK,
+    ambiguous_counts,
     paths_matching,
     report_unresolved,
     resolve_target,
@@ -81,6 +82,13 @@ class Pack:
             ``None``.
         source_truncated: Whether budget trimming dropped source lines.
         notes: Note texts anchored to the target symbol.
+        ambig_in: Additional call sites named after the target that
+            resolved ambiguously and so never became a ``calls_in``
+            edge (symbol mode only; always 0 in file mode — see
+            ``build_file_pack``).
+        ambig_out: Names the target itself called that resolved
+            ambiguously and so never became a ``calls_out`` edge
+            (symbol mode only; always 0 in file mode).
     """
 
     label: str
@@ -96,13 +104,47 @@ class Pack:
     source_lines: list[str] | None = None
     source_truncated: bool = False
     notes: list[str] = field(default_factory=list)
+    ambig_in: int = 0
+    ambig_out: int = 0
 
 
 def _neighbors(index: MapIndex, sym_id: str) -> list[tuple[str, str]]:
-    """Adjacent symbol ids of one node, tagged with direction."""
+    """Adjacent symbol ids of one node, tagged with direction.
+
+    Used only to seed hop 1, where both directions from the target are
+    legitimately wanted (real callers *and* real callees of the target
+    itself). Hop >= 2 expansion must not use this — see
+    ``_neighbors_in_direction``.
+    """
     pairs = [(sid, "caller") for sid in index.calls_in.get(sym_id, [])]
     pairs += [(sid, "callee") for sid in index.calls_out.get(sym_id, [])]
     return pairs
+
+
+def _neighbors_in_direction(
+    index: MapIndex, sym_id: str, direction: str
+) -> list[str]:
+    """Ids one hop further from ``sym_id``, locked to ``direction``.
+
+    At hop >= 2, expanding *both* ``calls_in`` and ``calls_out`` from
+    every frontier node mislabels a node's own unrelated calls as
+    neighbors of the original target — e.g. a hop-1 caller's other,
+    unrelated callees would otherwise get tagged as hop-2 "callees" of
+    the target. Keeping expansion locked to the direction a node was
+    first reached in prevents that cross-direction contamination.
+
+    Args:
+        index: Loaded map index.
+        sym_id: Frontier node to expand.
+        direction: ``"caller"`` to keep walking ``calls_in``,
+            ``"callee"`` to keep walking ``calls_out``.
+
+    Returns:
+        Ids one hop further in ``direction`` from ``sym_id``.
+    """
+    if direction == "caller":
+        return index.calls_in.get(sym_id, [])
+    return index.calls_out.get(sym_id, [])
 
 
 def _anonymous_entries(
@@ -175,13 +217,20 @@ def _relevant_imports(pack: Pack) -> list[Import]:
     return [imp for imp in pack.imports if imp.name in tokens]
 
 
-def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
+def build_pack(
+    index: MapIndex,
+    target: Symbol,
+    hops: int,
+    all_imports: bool = False,
+) -> Pack:
     """BFS the call graph around a symbol up to ``hops``.
 
     Args:
         index: Loaded map index.
         target: Resolved target symbol.
         hops: Neighborhood radius (>= 1).
+        all_imports: Skip the ``_relevant_imports`` relevance filter
+            and keep every import in the target's file.
 
     Returns:
         The assembled pack (untrimmed).
@@ -194,12 +243,29 @@ def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
         imports=index.imports_by_path.get(target.path, []),
         notes=list(index.notes.get(target.id, [])),
     )
+    pack.ambig_in, pack.ambig_out = ambiguous_counts(index, target)
     seen = {target.id}
-    frontier = [target.id]
+    # (sym_id, direction) — direction is a placeholder ("") on the
+    # target itself, since hop 1 legitimately wants both directions
+    # from it. Once a neighbor is reached, its direction locks in: at
+    # hop >= 2, expansion only continues down the same caller/callee
+    # chain it started on (see _neighbors_in_direction), instead of
+    # re-expanding both directions from every frontier node.
+    frontier: list[tuple[str, str]] = [(target.id, "")]
     for hop in range(1, hops + 1):
-        next_frontier: list[str] = []
-        for sym_id in frontier:
-            for nid, direction in _neighbors(index, sym_id):
+        next_frontier: list[tuple[str, str]] = []
+        for sym_id, direction in frontier:
+            neighbors = (
+                _neighbors(index, sym_id)
+                if hop == 1
+                else [
+                    (nid, direction)
+                    for nid in _neighbors_in_direction(
+                        index, sym_id, direction
+                    )
+                ]
+            )
+            for nid, ndir in neighbors:
                 if nid in seen:
                     continue
                 seen.add(nid)
@@ -214,13 +280,16 @@ def build_pack(index: MapIndex, target: Symbol, hops: int) -> Pack:
                 sym = index.symbols_by_id.get(nid)
                 if sym is None:
                     continue
-                pack.entries.append(PackEntry(sym, hop, direction))
-                next_frontier.append(nid)
+                pack.entries.append(PackEntry(sym, hop, ndir))
+                next_frontier.append((nid, ndir))
         frontier = next_frontier
     pack.module_callers = sorted(set(pack.module_callers))
-    all_imports = pack.imports
-    pack.imports = _relevant_imports(pack)
-    pack.imports_dropped = len(all_imports) - len(pack.imports)
+    all_imports_list = pack.imports
+    if all_imports:
+        pack.imports_dropped = 0
+    else:
+        pack.imports = _relevant_imports(pack)
+        pack.imports_dropped = len(all_imports_list) - len(pack.imports)
     return pack
 
 
@@ -365,6 +434,18 @@ def render_text(pack: Pack) -> str:
     """Render a pack as compact text."""
     lines = [f"context: {pack.label}"]
     lines += _target_lines(pack)
+    if pack.ambig_in:
+        lines.append(
+            f"  note: {pack.ambig_in} additional call site(s) named "
+            f"'{pack.target.name}' resolved ambiguously — not "
+            "counted here"
+        )
+    if pack.ambig_out:
+        lines.append(
+            f"  note: {pack.ambig_out} outgoing call(s) from this "
+            "symbol resolved ambiguously (name matched 2+ "
+            "candidates) — not counted here"
+        )
     lines += _source_lines(pack)
     if pack.imports or pack.imports_dropped:
         lines.append(f"imports ({pack.file_path}):")
@@ -374,7 +455,11 @@ def render_text(pack: Pack) -> str:
         ]
         if pack.imports_dropped:
             n = pack.imports_dropped
-            lines.append(f"  +{n} more imports (irrelevant to this pack)")
+            lines.append(
+                f"  +{n} more imports (name not referenced in the "
+                "target's or its neighbors' signatures — rerun with "
+                "--all-imports to include them)"
+            )
     if pack.file_symbols:
         lines.append("symbols:")
         lines += [
@@ -540,6 +625,10 @@ def _render_json(pack: Pack, meter: Meter) -> str:
     }
     if pack.notes:
         doc["notes"] = pack.notes
+    if pack.ambig_in:
+        doc["ambiguous_in"] = pack.ambig_in
+    if pack.ambig_out:
+        doc["ambiguous_out"] = pack.ambig_out
     if pack.source_lines is not None:
         doc["source"] = "\n".join(pack.source_lines)
         doc["source_truncated"] = pack.source_truncated
@@ -556,6 +645,7 @@ def run(
     with_source: bool = False,
     notes: bool = True,
     task: TaskContext | None = None,
+    all_imports: bool = False,
 ) -> int:
     """Build, trim, and print a context pack for a target.
 
@@ -573,13 +663,16 @@ def run(
         notes: Include the target's notes (default on).
         task: Optional task context; when set, neighbors are trimmed
             least-relevant first under a tight budget.
+        all_imports: Skip the relevance filter and keep every import
+            in the target's file (no effect in file mode, which
+            never filters imports).
 
     Returns:
         Process exit code.
     """
     sym, candidates = resolve_target(index, target)
     if sym is not None:
-        pack = build_pack(index, sym, hops)
+        pack = build_pack(index, sym, hops, all_imports=all_imports)
         if not notes:
             pack.notes = []
     elif not candidates and ":" not in target:

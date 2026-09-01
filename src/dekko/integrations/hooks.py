@@ -41,7 +41,7 @@ from pathlib import Path
 
 from dekko import repo_ops
 from dekko.storage import ledger
-from dekko.analysis import outline, relevance, summary
+from dekko.analysis import ambiguous, outline, relevance, summary
 from dekko.render import render_lean
 from dekko.render.mapfile import MapIndex
 from dekko.integrations.orient import _PREAMBLE
@@ -51,6 +51,17 @@ EXIT_OK = 0
 # SessionStart lean-map cap: tighter than a manual `dekko lean`, since it
 # is injected unprompted and must stay cheap.
 SESSION_MAP_BUDGET = 2000
+# Hard ceiling on SessionStart's own payload, independent of
+# `render_lean.effective_cap()`'s floor guarantee (which never returns
+# less than the path-only floor, however large that is). Round 25
+# spring-boot.md finding 1: on a 9,942-file repo, the floor itself was
+# ~113K tok -- ~56x SESSION_MAP_BUDGET -- and `session_start` rendered
+# it anyway (disclosed, per the round-13 note below, but still injected
+# unconditionally into every new session). When even the floor exceeds
+# this ceiling, `session_start` drops the map body entirely rather than
+# inject an unboundedly large payload automatically; a wider map is
+# still one `dekko lean --budget N` or `dekko summary` away.
+SESSION_MAP_HARD_CEILING = 20_000
 # Assumed session token budget the prompt-submit nudge adapts against. Not
 # a hard limit — it scales how many files we point at as context fills.
 SESSION_TOKEN_BUDGET = 180_000
@@ -118,24 +129,50 @@ def session_start(payload: dict) -> dict | None:
     if report.total_symbols == 0 and not index.languages_by_path:
         return None
     parts = [_PREAMBLE]
-    if report.cap > SESSION_MAP_BUDGET:
-        # round-13 tensorflow.md: on a repo whose path-only floor alone
-        # exceeds SESSION_MAP_BUDGET (a large monorepo can need
-        # ~80K tokens just to list every file), `effective_cap` bends
-        # the cap upward the same way `render_lean.run()`'s `--budget`
-        # floor already does for the `lean` CLI command -- but this
-        # hook called `generate()` directly and never surfaced that,
-        # so the injected map silently cost up to ~40x its documented
-        # budget with no visible signal anywhere. Mirror the CLI
-        # wrapper's disclosure so an agent (and anyone reading the
-        # transcript) can see why the map below is larger than
-        # SESSION_MAP_BUDGET.
+    note = ambiguous.high_rate_note(index)
+    if note:
+        parts.append(note)
+    if report.cap > SESSION_MAP_HARD_CEILING:
+        # round-25 spring-boot.md finding 1: on a repo whose path-only
+        # floor exceeds even this hard ceiling (spring-boot: ~113K tok,
+        # ~56x SESSION_MAP_BUDGET), rendering the floor anyway -- the
+        # round-13 behavior below -- means a hook that fires
+        # automatically, with zero user choice, on every new session
+        # costs more than the whole session's context is worth
+        # protecting. There is currently no rung between the full
+        # path-only floor and "nothing" for `render_lean` to fall back
+        # to (see the design doc), so this drops the map body entirely
+        # rather than inject an unboundedly large payload.
         parts.append(
-            f"note: this repo's path-only floor (~{report.cap} tok) "
-            f"exceeds dekko's {SESSION_MAP_BUDGET}-token session-start "
-            "budget; the map below uses the floor instead."
+            f"note: this repo's path-only floor (~{report.cap} tok) is "
+            f"far larger than dekko's {SESSION_MAP_BUDGET}-token "
+            "session-start budget -- even the narrowest available map "
+            "rendering would cost more than this hook should inject "
+            "automatically. Run `dekko lean --budget N` or `dekko "
+            "summary` directly for a repo map at a budget you choose."
         )
-    parts.append("\n".join(lines))
+    else:
+        if report.cap > SESSION_MAP_BUDGET:
+            # round-13 tensorflow.md: on a repo whose path-only floor
+            # alone exceeds SESSION_MAP_BUDGET (a large monorepo can
+            # need ~80K tokens just to list every file), `effective_cap`
+            # bends the cap upward the same way `render_lean.run()`'s
+            # `--budget` floor already does for the `lean` CLI command
+            # -- but this hook called `generate()` directly and never
+            # surfaced that, so the injected map silently cost up to
+            # ~40x its documented budget with no visible signal
+            # anywhere. Mirror the CLI wrapper's disclosure so an agent
+            # (and anyone reading the transcript) can see why the map
+            # below is larger than SESSION_MAP_BUDGET. Only applies
+            # below SESSION_MAP_HARD_CEILING -- above it, the branch
+            # above takes over and no map body is rendered at all.
+            parts.append(
+                f"note: this repo's path-only floor (~{report.cap} tok) "
+                f"exceeds dekko's {SESSION_MAP_BUDGET}-token "
+                "session-start budget; the map below uses the floor "
+                "instead."
+            )
+        parts.append("\n".join(lines))
     text = "\n\n".join(parts)
     return _additional_context("SessionStart", text)
 
@@ -477,6 +514,44 @@ def _load_settings(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _detect_indent(path: Path) -> int | str:
+    """Best-effort guess of an existing settings file's indent style.
+
+    Round 25 finding #17: rewriting always hard-coded 2-space indent
+    even when the file already on disk used a different width (or
+    tabs), producing unnecessary whitespace-only diff noise for anyone
+    tracking that file. Reads the first indented line above the file's
+    own content and measures its leading whitespace; falls back to the
+    2-space default (matching this module's own, unchanged, first-
+    install formatting) when the file doesn't exist yet, can't be
+    read, or has no indented line to measure.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 2
+    for line in lines[1:]:
+        if not line or line[0] not in " \t":
+            continue
+        stripped = line.lstrip(" \t")
+        if not stripped:
+            continue
+        leading = line[: len(line) - len(stripped)]
+        return "\t" if "\t" in leading else len(leading)
+    return 2
+
+
+def _write_settings(path: Path, settings: dict) -> None:
+    """Write ``settings`` back to ``path``, preserving its existing
+    on-disk indent style rather than hard-coding one (see
+    ``_detect_indent``)."""
+    indent = _detect_indent(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(settings, indent=indent) + "\n", encoding="utf-8"
+    )
+
+
 def _entry(event: str, matcher: str | None, *, strict: bool = False) -> dict:
     """One settings hooks entry invoking ``dekko hooks run <event>``.
 
@@ -531,8 +606,7 @@ def install(root: Path, events: list[str], *, strict: bool = False) -> int:
         bucket = hooks.setdefault(claude_event, [])
         if not _already_installed(bucket, event):
             bucket.append(_entry(event, matcher, strict=strict))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    _write_settings(path, settings)
     print(
         f"dekko: enabled hooks [{', '.join(events)}] in {path}. "
         "Restart Claude Code."
@@ -589,8 +663,19 @@ def uninstall(root: Path) -> int:
             del hooks[claude_event]
     if not hooks:
         settings.pop("hooks", None)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    if not settings and path.exists():
+        # Nothing left to keep -- remove the file (and the now-empty
+        # .claude/ dir it lived in, if nothing else uses it) rather
+        # than leaving a stray `{}` behind, matching --claude-md-
+        # install/uninstall's own byte-identical restoration (round 25
+        # finding #16).
+        path.unlink()
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass  # directory holds other files -- leave it
+    else:
+        _write_settings(path, settings)
     print(
         f"dekko: removed {removed} dekko hook entr"
         f"{'y' if removed == 1 else 'ies'} from {path}."

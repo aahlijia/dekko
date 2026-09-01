@@ -43,8 +43,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from dekko import repo_ops
+from dekko.analysis import diff as diff_mod
 from dekko.render import mapfile
 from dekko.storage import cache as cache_mod
+from dekko.storage import revcache
 from dekko.daemon.daemon_transport import (
     DaemonTransport,
     DaemonUnavailableError,
@@ -82,6 +84,14 @@ _DAEMON_ELIGIBLE = frozenset(
         "deps",
     }
 )
+
+# Commands whose client-side timeout needs the rev-cache-miss-aware
+# calculation (see ``_scaled_client_timeout_for_revcache_miss``)
+# instead of the default ``map.json``-size-scaled one -- the only
+# three commands whose daemon-side handler can take
+# ``diff.old_snapshot``'s expensive export/re-parse/resolve path on a
+# rev-cache miss (round-24 §2).
+_REVCACHE_TIMEOUT_COMMANDS = frozenset({"diff", "affected", "workset"})
 
 # Reserved protocol verbs, distinct from any real subcommand name (no
 # entry in SUBCOMMANDS starts with "_") so they can never collide with
@@ -154,11 +164,22 @@ _CLIENT_TIMEOUT = _REQUEST_TIMEOUT
 # cost scales with the graph's size, not just file count/bytes. A
 # straight-line fit through both points would either badly
 # under-provision tensorflow-scale repos or badly over-provision
-# spring-boot-scale ones, so this is fit to the slower (tensorflow)
-# measurement alone -- 1,212,389,046 bytes in 209.08s, rounded down
-# to ~5.5 MB/s for margin -- so every smaller repo gets *more*
-# headroom than it measured needing, never less.
-_TIMEOUT_BYTES_PER_SECOND = 5_500_000
+# spring-boot-scale ones, so this was originally fit to the slower
+# (tensorflow) measurement alone -- 1,212,389,046 bytes in 209.08s,
+# rounded down to ~5.5 MB/s for margin.
+#
+# Round-24 recalibration (daemon-timeout-messaging-followup.md): that
+# 5.5 MB/s fit was measured against a pre-symbol-interning map.json.
+# ``1f06c44e`` ("intern symbol ids in map.json, drop pretty-printing")
+# landed three hours after the original calibration commit and shrank
+# map.json's on-disk size ~5.15x without changing how long a full/
+# auto-regen actually takes -- confirmed unchanged again this round:
+# tensorflow's `dekko map --full --jobs 0` wall time was 209.46s,
+# essentially identical to the original 209.08s calibration run,
+# against a map.json now measuring 235.6 MB, not the original ~1.16
+# GB. 235,600,000 / 209.46 =~ 1.12 MB/s; rounded down for margin, same
+# convention as the original fit, to ~1.1 MB/s.
+_TIMEOUT_BYTES_PER_SECOND = 1_100_000
 
 # Upper bound on the size-scaled client timeout: keeps a hypothetical
 # multi-GB map.json from making a routed request's client wait
@@ -166,6 +187,26 @@ _TIMEOUT_BYTES_PER_SECOND = 5_500_000
 # bounded" convention elsewhere (_STOP_TEARDOWN_TIMEOUT,
 # repo_ops._REGEN_LOCK_WAIT_CAP).
 _SCALED_CLIENT_TIMEOUT_CAP = 300.0
+
+# Round-24 §2 finding: ``diff``/``affected``/``workset``'s rev-cache-
+# *miss* path (``diff.old_snapshot``) never touches ``map.json`` or
+# the daemon's warm ``_WarmCache`` at all -- it exports the *historical*
+# rev via ``git archive`` and re-parses/resolves it from scratch, the
+# same cost as a cold ``dekko map``. That cost tracks the target rev's
+# own git-tracked file count (``diff.tracked_at_rev()``), not the
+# current working tree's serialized ``map.json`` size -- the two only
+# looked correlated on a single-repo-at-a-nearby-revision measurement.
+# Only one real data point exists so far: tensorflow's 232.34s
+# (confirmed live, round-24 verification: a fresh cold-rev-cache
+# ``affected`` call's daemon-side ``busy`` flag genuinely stayed
+# ``True`` for ~230s server-side, matching this) against
+# ``tracked_at_rev()``'s 36,518-file count for that commit -- 232.34 /
+# 36,518 ~= 6.4ms/file, rounded down for margin (same convention as
+# ``_TIMEOUT_BYTES_PER_SECOND``'s own comment) to ~8ms/tracked-file.
+# Single-repo fit, same limitation that constant shipped with
+# originally -- a second large-repo data point (e.g. spring-boot) is a
+# follow-up validation, not a v1 blocker.
+_TIMEOUT_SECONDS_PER_TRACKED_FILE = 0.008
 
 
 def _scaled_client_timeout(root: Path) -> float:
@@ -208,6 +249,79 @@ def _scaled_client_timeout(root: Path) -> float:
     return min(max(_CLIENT_TIMEOUT, scaled), _SCALED_CLIENT_TIMEOUT_CAP)
 
 
+def _scaled_client_timeout_for_revcache_miss(root: Path, rev: str) -> float:
+    """Client timeout for a ``diff``/``affected``/``workset`` rev-cache
+    *miss*, scaled by the target rev's tracked-file count instead of
+    ``map.json`` size.
+
+    Sibling to :func:`_scaled_client_timeout`, used only when
+    :func:`try_daemon` has already determined (via
+    ``revcache.has_entry``) that the routed request will take the
+    expensive ``diff.old_snapshot`` export/re-parse/resolve path rather
+    than a fast rev-cache disk read -- see
+    :data:`_TIMEOUT_SECONDS_PER_TRACKED_FILE` for why ``map.json`` size
+    is the wrong proxy for that specific cost.
+
+    Args:
+        root: Repo root (the real repository, with ``.git/``).
+        rev: The target rev :func:`_target_rev_for` resolved -- passed
+            through to ``diff.tracked_at_rev`` unchanged.
+
+    Returns:
+        ``_CLIENT_TIMEOUT`` when the tracked-file count can't be
+        determined (unresolvable rev, ``git`` unavailable) or is small
+        enough that the scaled value wouldn't exceed it; otherwise a
+        larger budget, capped at the same
+        :data:`_SCALED_CLIENT_TIMEOUT_CAP` used by
+        :func:`_scaled_client_timeout`.
+    """
+    candidates = diff_mod.tracked_at_rev(root, rev)
+    if not candidates:
+        return _CLIENT_TIMEOUT
+    scaled = len(candidates) * _TIMEOUT_SECONDS_PER_TRACKED_FILE
+    return min(max(_CLIENT_TIMEOUT, scaled), _SCALED_CLIENT_TIMEOUT_CAP)
+
+
+def _target_rev_for(command: str, args: argparse.Namespace) -> str | None:
+    """Best-effort resolution of the rev a routed ``diff``/``affected``/
+    ``workset`` call will actually target, before connecting.
+
+    Replicates the rev-default logic each of those commands' own
+    ``run()`` already applies (``diff.run``, ``affected.run``,
+    ``workset.seed_from_rev`` via ``affected.changes``): an explicit
+    positional ``REV`` wins outright; otherwise the map's own recorded
+    ``git_commit`` provenance; otherwise ``"HEAD"``. Reads only the
+    small ``.dekko/provenance.json`` sidecar (``mapfile.
+    load_provenance``, a few KB) rather than the full ``map.json`` --
+    consistent with :func:`_scaled_client_timeout`'s own "cheap,
+    client-side-computable" bar for anything checked before connecting.
+
+    Args:
+        command: The daemon-eligible command name.
+        args: The already-parsed ``argparse.Namespace`` for it.
+
+    Returns:
+        The rev this request will target, or ``None`` when there is
+        nothing to scale by: a ``workset --symbol`` invocation (its
+        seed path never touches ``old_snapshot``), or ``root`` isn't
+        available to read a provenance sidecar from. A caller getting
+        ``None`` back falls to :func:`_scaled_client_timeout` instead
+        of guessing -- a wrong-but-safe fallback that only costs
+        provisioning accuracy, not correctness.
+    """
+    if command == "workset" and getattr(args, "symbol", None) is not None:
+        return None
+    rev = getattr(args, "rev", None)
+    if rev:
+        return rev
+    root_value = getattr(args, "root", None)
+    if not root_value:
+        return None
+    root = Path(root_value).resolve()
+    prov = mapfile.load_provenance(root) or {}
+    return prov.get("git_commit") or "HEAD"
+
+
 # Round-14 master report §"Daemon-lifecycle investigation": bound on
 # how long stop() will poll for the daemon's transport artifacts to
 # actually disappear before giving up and reporting success anyway
@@ -234,6 +348,22 @@ _STOP_TEARDOWN_POLL_INTERVAL = 0.02
 # reachable's own existing default (daemon_transport.py) for
 # consistency between the two liveness checks.
 _STATUS_PROBE_TIMEOUT = 2.0
+
+# Round-23 §13: bound on how long start() will poll for confirmation
+# that the just-spawned child has actually bound its listening socket
+# before returning "started". Without this, a `daemon status` issued
+# immediately after `daemon start` prints could race the child's own
+# interpreter-startup + bind_and_listen() and see `transport.exists()
+# == False` -- an honest-but-wrong "not running" (observed ~1/6 in
+# testing, round-23's awesome-go.md §2.2). Binding is normally
+# near-instant once the interpreter is up (the same report's `status
+# --json` moments later showed `uptime_seconds: 0.089`) -- a wait
+# anywhere near this cap would itself indicate a real problem worth
+# surfacing via the "unconfirmed" branch, not silently swallowing.
+# Mirrors _STOP_TEARDOWN_TIMEOUT/_STOP_TEARDOWN_POLL_INTERVAL's
+# symmetric pattern on the stop() side of the daemon lifecycle.
+_START_CONFIRM_TIMEOUT = 3.0
+_START_CONFIRM_POLL_INTERVAL = 0.02
 
 # Bootstrap script used to spawn the detached daemon process. There is
 # no ``src/dekko/__main__.py`` (the packaged entry point is the
@@ -762,7 +892,26 @@ class DaemonRequestAbandonedError(Exception):
     free," this means "the daemon *was* reached and may still be
     working, a local fallback is not free." ``cli.py``'s ``main()``
     must not treat the two the same way.
+
+    Attributes:
+        jobs: The ``--jobs`` value actually forwarded to the daemon
+            for the abandoned request, when the command has one
+            (``None`` otherwise). Round-25: lets ``cli.py``'s error
+            report name ``--jobs 0`` as the actual lever likely to
+            avoid a repeat timeout, when the abandoned request ran
+            sequentially.
     """
+
+    def __init__(self, message: str, jobs: int | None = None) -> None:
+        """Initialize with the abandoned request's own ``jobs`` value.
+
+        Args:
+            message: Human-readable description of what went wrong
+                (timeout, dropped connection, malformed reply).
+            jobs: See the class-level ``Attributes`` docstring.
+        """
+        super().__init__(message)
+        self.jobs = jobs
 
 
 def _send_daemon_request(
@@ -819,7 +968,58 @@ def _recv_daemon_response(sock: socket.socket) -> tuple[int, str, str]:
         ) from exc
 
 
-def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
+def _timeout_and_args_for_command(
+    command: str,
+    args: argparse.Namespace,
+    root: Path,
+    *,
+    jobs_explicit: bool,
+) -> tuple[float, argparse.Namespace]:
+    """Client timeout and (possibly ``--jobs``-overridden) request args.
+
+    Isolates ``try_daemon``'s rev-cache-miss-aware timeout selection
+    (round-24) and its round-25 ``--jobs 0`` default override into one
+    helper, keeping ``try_daemon`` itself readable.
+
+    Args:
+        command: The daemon-eligible command name.
+        args: The already-parsed ``argparse.Namespace``.
+        root: The resolved repo root.
+        jobs_explicit: See :func:`try_daemon`'s parameter of the same
+            name.
+
+    Returns:
+        ``(timeout, args)``. ``args`` is returned unchanged unless the
+        round-25 override applies, in which case it's a *copy* with
+        ``jobs`` set to ``0`` -- the caller's original ``Namespace``
+        is never mutated in place, so a fallback to direct execution
+        (if the daemon turns out to be unreachable) still sees the
+        caller's original, un-overridden choice.
+    """
+    if command not in _REVCACHE_TIMEOUT_COMMANDS:
+        return _scaled_client_timeout(root), args
+
+    target_rev = _target_rev_for(command, args)
+    if target_rev is None or revcache.has_entry(root, target_rev):
+        return _scaled_client_timeout(root), args
+
+    timeout = _scaled_client_timeout_for_revcache_miss(root, target_rev)
+    if not jobs_explicit and getattr(args, "jobs", None) == 1:
+        # Round-25 finding: this is the one operation shape (a
+        # cold-rev-cache resolve on a large repo, routed through an
+        # already-running daemon) where sequential is a uniquely bad
+        # default -- burning idle cores briefly on a request that's
+        # already going to take minutes either way is an easy trade
+        # for turning a guaranteed-to-time-out request into a
+        # successful one.
+        args = argparse.Namespace(**vars(args))
+        args.jobs = 0
+    return timeout, args
+
+
+def try_daemon(
+    args: argparse.Namespace, *, jobs_explicit: bool = True
+) -> tuple[int, str, str] | None:
     """Attempt to route a parsed CLI invocation through a live daemon.
 
     Returns ``None`` on every "the daemon was never actually reached
@@ -840,6 +1040,19 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
         args: The already-parsed ``argparse.Namespace`` for a
             daemon-eligible subcommand (i.e. what ``args.func(args)``
             would otherwise be called with directly).
+        jobs_explicit: Whether the caller deliberately chose ``args
+            .jobs`` (as opposed to it being argparse's own unmodified
+            default). Round-25: a daemon-routed ``diff``/``affected``/
+            ``workset`` request on a genuine rev-cache miss defaults
+            to ``--jobs 0`` (all cores) instead of inheriting the
+            CLI's own sequential default, since a request specifically
+            routed through an already-running daemon is a different
+            usage shape than a foreground invocation -- but only when
+            the caller never asked for sequential explicitly. Defaults
+            to ``True`` (preserve ``args.jobs`` exactly as given) so
+            every caller other than ``cli.py``'s ``main()`` -- which
+            computes the real signal from the raw, pre-parse argument
+            list -- keeps its previous behavior unchanged.
 
     Returns:
         ``(exit_code, stdout, stderr)`` from the daemon, or ``None``
@@ -866,8 +1079,12 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
     if not transport.exists():
         return None
 
+    timeout, args = _timeout_and_args_for_command(
+        command, args, root, jobs_explicit=jobs_explicit
+    )
+
     try:
-        sock = transport.client_connect(_scaled_client_timeout(root))
+        sock = transport.client_connect(timeout)
     except DaemonUnavailableError:
         return None
 
@@ -875,6 +1092,9 @@ def try_daemon(args: argparse.Namespace) -> tuple[int, str, str] | None:
         if not _send_daemon_request(sock, transport, command, args):
             return None
         return _recv_daemon_response(sock)
+    except DaemonRequestAbandonedError as exc:
+        exc.jobs = getattr(args, "jobs", None)
+        raise
     finally:
         sock.close()
 
@@ -914,13 +1134,46 @@ def _query_pid(transport: DaemonTransport) -> int | None:
         sock.close()
 
 
+def _wait_for_bind(
+    transport: DaemonTransport, timeout: float = _START_CONFIRM_TIMEOUT
+) -> bool:
+    """Poll until the just-spawned daemon's transport artifact exists.
+
+    Round-23 §13: closes the race where `start()` used to return the
+    instant `spawn_detached` launched the child, before the child had
+    necessarily finished interpreter startup + `bind_and_listen()` --
+    a `status` call issued in that window would see `transport.exists()
+    == False` and report an honest-but-wrong "not running". Mirrors
+    `_wait_for_teardown`'s symmetric poll on the stop() side.
+
+    Args:
+        transport: The transport whose artifact to poll for.
+        timeout: Maximum time to wait before giving up.
+
+    Returns:
+        ``True`` once the artifact appears, ``False`` if the timeout
+        elapses first -- the child may still come up a moment later;
+        this is not treated as a failure, only as "couldn't confirm
+        in time."
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if transport.exists():
+            return True
+        time.sleep(_START_CONFIRM_POLL_INTERVAL)
+    return transport.exists()
+
+
 def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
     """Handle ``dekko daemon start``.
 
     No-op (not an error) if a live daemon is already reachable for
-    this root. Spawns a detached background process and returns
-    immediately -- it does not wait for the daemon to finish binding
-    (design doc §2.1: "returns immediately, does not block").
+    this root. Spawns a detached background process, then polls
+    (bounded by ``_START_CONFIRM_TIMEOUT``) for confirmation the child
+    has actually bound its listening socket before returning -- round-23
+    §13: an unconfirmed return here used to let an immediate ``daemon
+    status`` call race the child's own startup and report a false
+    "not running".
 
     Before spawning, runs ``transport.preflight_check()`` in the
     foreground and fails fast with a non-zero exit code if it raises.
@@ -945,8 +1198,13 @@ def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
         idle_timeout: Self-shutdown window to pass to the daemon.
 
     Returns:
-        ``0`` on a successful spawn (or an already-running daemon),
-        ``1`` if the preflight check or the spawn itself failed.
+        ``0`` on a successful spawn (or an already-running daemon) --
+        including the case where the bind-confirmation poll times out
+        (the spawn itself genuinely succeeded; slow-to-bind is not the
+        same as failed, and a distinct exit code here would be a
+        breaking change for scripts that already gate on this
+        command's exit code). ``1`` if the preflight check or the
+        spawn itself failed.
     """
     transport = default_transport_for(root)
     if is_daemon_reachable(transport):
@@ -989,7 +1247,19 @@ def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
         print(f"dekko daemon: failed to start: {exc}", file=sys.stderr)
         return 1
 
-    print(f"dekko daemon: started for {root}")
+    if _wait_for_bind(transport):
+        print(f"dekko daemon: started for {root}")
+        return 0
+
+    # Cap hit without confirmation -- the spawn may still come up a
+    # moment later (heavy machine load, slow interpreter startup), so
+    # this is neither "started" (implies confirmed) nor a failure;
+    # say so honestly rather than picking one.
+    print(
+        f"dekko daemon: spawned for {root}, but didn't confirm it's "
+        f"listening within {_START_CONFIRM_TIMEOUT:.0f}s -- check "
+        "`dekko daemon status` shortly"
+    )
     return 0
 
 

@@ -195,7 +195,7 @@ def run(
     if len(labels) > max_nodes:
         suggestions = []
         if scope != "file":
-            suggestions.append("--scope file")
+            suggestions.append("--granularity file")
         suggestions += ["a subtree map", "raise --max-nodes"]
         print(
             f"dekko: graph has {len(labels)} nodes (limit {max_nodes}); "

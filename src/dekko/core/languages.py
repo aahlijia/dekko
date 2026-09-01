@@ -57,8 +57,8 @@ class LanguageSpec:
             references (``this::method``/``Class::method``, bug
             #2/round-19), which are call-shaped nowhere in the syntax
             tree (no argument list) and so are invisible to
-            ``call_query`` too. ``None`` for languages without one yet
-            (JS, TS, TSX, Go, Java as of this writing).
+            ``call_query`` too. ``None`` for languages still lacking
+            one (Rust, C, C++ as of this writing).
         heritage_query: Query capturing a type definition's own
             ``extends``/``implements`` clause(s) — one ``@classdef``
             match per type, with the clause(s) attached as sibling
@@ -160,6 +160,28 @@ class LanguageSpec:
     type_alias_query: str | None = None
 
 
+# Bare identifiers used as *values* rather than invoked -- keyword-
+# argument values, positional call arguments, dict/list/tuple/set
+# literal elements, assignment/default-parameter right-hand sides, and
+# bare `return` values. Closes the dispatch-table/callback-wiring
+# shape a plain call-expression query structurally cannot see (a
+# function passed by name and never itself called at that site is not
+# a call site) -- mirrors _JS_REFERENCE_BASE's identical shape for
+# JS/TS (round 22 tensorflow.md §6: `check_success=valid_ndk_path` is
+# a call *keyword argument*, not a call). Verified against the pinned
+# tree-sitter-python grammar.
+_PY_REFERENCE_QUERY = """
+(keyword_argument value: (identifier) @ref)
+(argument_list (identifier) @ref)
+(pair value: (identifier) @ref)
+(list (identifier) @ref)
+(tuple (identifier) @ref)
+(set (identifier) @ref)
+(assignment right: (identifier) @ref)
+(default_parameter value: (identifier) @ref)
+(return_statement (identifier) @ref)
+"""
+
 PYTHON = LanguageSpec(
     name="python",
     grammar="python",
@@ -174,7 +196,7 @@ PYTHON = LanguageSpec(
   name: (identifier) @classname) @classdef
 """,
     call_query="""
-(call function: (_) @callee) @call
+(call function: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (import_statement
@@ -198,6 +220,7 @@ PYTHON = LanguageSpec(
     container_types={"class_definition": "name"},
     method_containers=("class_definition",),
     param_style="python",
+    reference_query=_PY_REFERENCE_QUERY,
     heritage_query="""
 (class_definition
   name: (identifier) @classname
@@ -273,7 +296,7 @@ RUST = LanguageSpec(
 (trait_item name: (type_identifier) @classname) @classdef
 """,
     call_query="""
-(call_expression function: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (use_declaration argument: (_) @use)
@@ -359,7 +382,7 @@ C = LanguageSpec(
     extensions=(".c", ".h"),
     definition_query=_C_DEFINITIONS,
     call_query="""
-(call_expression function: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (preproc_include path: (_) @module)
@@ -415,7 +438,7 @@ CPP = LanguageSpec(
   body: (field_declaration_list)) @classdef
 """,
     call_query="""
-(call_expression function: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (preproc_include path: (_) @module)
@@ -526,6 +549,21 @@ _JS_REFERENCE_BASE = """
 (ternary_expression condition: (identifier) @ref)
 (ternary_expression consequence: (identifier) @ref)
 (ternary_expression alternative: (identifier) @ref)
+(spread_element (identifier) @ref)
+(subscript_expression object: (identifier) @ref)
+"""
+
+# TypeScript-only: ``typeof T`` as a *type* (a ``type_query`` node),
+# e.g. ``type X = typeof TOOL_DEFAULTS;`` or ``const w: typeof T = y;``.
+# ``type_query`` is a TS-grammar-only node type -- plain JS has no type
+# syntax at all, so this stays a separate fragment appended only to
+# TypeScript/TSX's reference_query, never merged into
+# ``_JS_REFERENCE_BASE`` (compiling a query containing ``type_query``
+# against tree-sitter-javascript raises "Invalid node type"). Mirrors
+# ``_JSX_REFERENCE_EXTRA``'s identical "grammar lacks this node type"
+# scoping discipline.
+_TS_TYPE_REFERENCE_EXTRA = """
+(type_query (identifier) @ref)
 """
 
 # JSX attribute/expression values (``<Button onClick={handleClick}
@@ -633,8 +671,8 @@ JAVASCRIPT = LanguageSpec(
       value: (_) @value) @vardef))
 """,
     call_query="""
-(call_expression function: (_) @callee) @call
-(new_expression constructor: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
+(new_expression constructor: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (import_statement
@@ -711,6 +749,9 @@ _TS_DEFINITIONS = """
 
 (enum_declaration name: (identifier) @classname) @classdef
 
+(type_alias_declaration
+  name: (type_identifier) @classname) @classdef
+
 (program
   (export_statement
     declaration: (lexical_declaration
@@ -726,8 +767,8 @@ _TS_DEFINITIONS = """
 """
 
 _TS_CALLS = """
-(call_expression function: (_) @callee) @call
-(new_expression constructor: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
+(new_expression constructor: (_) @callee arguments: (_)? @args) @call
 """
 
 _TS_CONTAINERS = {
@@ -763,21 +804,25 @@ _TS_HERITAGE = """
 """
 
 # Same-file type-alias registry (round-19 claude-code finding, bug #3):
-# TS's ``type X = {...}``/``type X = A | B``/etc. is never extracted as
-# a ``Symbol`` at all (no ``definition_query`` pattern covers it), so an
-# ``implements``/``extends`` clause naming a same-file alias had no
-# structural signal to tell it apart from a genuinely external base
-# type -- ``_heritage_external_label`` in ``query.py`` consults this
-# field's output (``FileMap.type_aliases`` -> ``MapIndex.
-# type_aliases_by_path``) as a same-file counterpart to its existing
-# same-named-relative-import check. Only the bare name is needed (not a
-# full symbol), so this is a lightweight per-file name registry, not a
-# new definition_query pattern. Confirmed against the pinned
-# tree-sitter-typescript grammar: ``type_alias_declaration``'s ``name``
-# field is a ``type_identifier``, fielded as ``name:`` -- no anchor
-# tricks needed. Not wired onto ``JAVASCRIPT``: the ``javascript``
-# tree-sitter grammar has no ``type_alias_declaration`` node type at
-# all (no ``type`` keyword in the language).
+# originally built because TS's ``type X = {...}``/``type X = A | B``/
+# etc. was never extracted as a ``Symbol`` at all, so an ``implements``/
+# ``extends`` clause naming a same-file alias had no structural signal
+# to tell it apart from a genuinely external base type --
+# ``_heritage_external_label`` in ``query.py`` consults this field's
+# output (``FileMap.type_aliases`` -> ``MapIndex.type_aliases_by_path``)
+# as a same-file counterpart to its existing same-named-relative-import
+# check. As of round 26, ``type_alias_declaration`` also has a real
+# ``@classdef`` pattern in ``_TS_DEFINITIONS`` above (kind
+# ``"type_alias"``), so this bare-name registry is now a redundant,
+# narrower parallel extraction kept only for
+# ``_heritage_external_label``'s presentation fallback -- see round-26
+# plan notes for why it wasn't merged/retired in the same change.
+# Confirmed against the pinned tree-sitter-typescript grammar:
+# ``type_alias_declaration``'s ``name`` field is a ``type_identifier``,
+# fielded as ``name:`` -- no anchor tricks needed. Not wired onto
+# ``JAVASCRIPT``: the ``javascript`` tree-sitter grammar has no
+# ``type_alias_declaration`` node type at all (no ``type`` keyword in
+# the language).
 _TS_TYPE_ALIAS_QUERY = """
 (type_alias_declaration name: (type_identifier) @name)
 """
@@ -794,7 +839,7 @@ TYPESCRIPT = LanguageSpec(
     param_style="ts",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     # Plain (non-JSX) TypeScript has no jsx_expression node type.
-    reference_query=_JS_REFERENCE_BASE,
+    reference_query=_JS_REFERENCE_BASE + _TS_TYPE_REFERENCE_EXTRA,
     heritage_query=_TS_HERITAGE,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
@@ -813,7 +858,7 @@ TSX = LanguageSpec(
     method_containers=tuple(_TS_CONTAINERS),
     param_style="ts",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
-    reference_query=_JS_REFERENCE_QUERY,
+    reference_query=_JS_REFERENCE_QUERY + _TS_TYPE_REFERENCE_EXTRA,
     heritage_query=_TS_HERITAGE,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
@@ -893,7 +938,7 @@ GO = LanguageSpec(
     type: (interface_type) @classkind)) @classdef
 """,
     call_query="""
-(call_expression function: (_) @callee) @call
+(call_expression function: (_) @callee arguments: (_)? @args) @call
 """,
     import_query="""
 (import_spec
@@ -958,8 +1003,8 @@ JAVA = LanguageSpec(
 (record_declaration name: (identifier) @classname) @classdef
 """,
     call_query="""
-(method_invocation) @callee @call
-(object_creation_expression) @callee @call
+(method_invocation arguments: (_)? @args) @callee @call
+(object_creation_expression arguments: (_)? @args) @callee @call
 """,
     import_query="""
 (import_declaration (scoped_identifier) @module)

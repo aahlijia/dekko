@@ -117,6 +117,13 @@ def render_json(
             }
             for ext in graph.heritage_external
         ],
+        # Round 24 heritage crate-decoy tiebreak (``.features/plans/
+        # round24/03-heritage-crate-decoy-tiebreak.md``): a scalar
+        # count, not id-interned like the sections above, since it
+        # names no symbol ids of its own.
+        "heritage_synthetic_tiebreak_count": (
+            graph.heritage_synthetic_tiebreak_count
+        ),
         "module_graph": {
             "edges": [
                 {

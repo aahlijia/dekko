@@ -91,3 +91,10 @@ blanket "always grep after dekko."
   comparison, same blind-spot causes, run deterministically instead of
   by hand. It doesn't cover heritage/throws-provenance mislabeling yet;
   the `query symbol <name>` check above is still manual for that case.
+- Before deleting/renaming based on `dekko unused`'s dead-code list,
+  `dekko sanity --unused <name>` automates that check too — it starts
+  from `unused`'s own zero-evidence claim and reports every grep hit
+  outside the symbol's own definition/import/comment as reference
+  evidence, tagged by shape (`spread`/`typeof`/`subscript`/`call`/
+  `other`), so a resolver blind spot in *any* language surfaces
+  without hand-rolling the grep yourself.

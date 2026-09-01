@@ -72,20 +72,23 @@ def test_map_freshness_delegates_to_status_signal(
     make_mapped_repo: RepoFactory,
 ) -> None:
     root = make_mapped_repo(SRC)
-    fresh_finding = doctor._check_map_freshness(root)
+    fresh_finding, prov = doctor._check_map_freshness(root)
     assert fresh_finding.status == "ok"
     assert fresh_finding.fix is None
+    assert prov is not None
 
     (root / "a.py").write_text(SRC["a.py"] + "\nX = 2\n")
-    stale_finding = doctor._check_map_freshness(root)
+    stale_finding, prov = doctor._check_map_freshness(root)
     assert stale_finding.status == "stale"
     assert stale_finding.fix == "dekko map"
+    assert prov is not None
 
 
 def test_map_freshness_missing_map(tmp_path: Path) -> None:
-    finding = doctor._check_map_freshness(tmp_path)
+    finding, prov = doctor._check_map_freshness(tmp_path)
     assert finding.status == "missing"
     assert finding.fix == "dekko map"
+    assert prov is None
 
 
 def test_map_freshness_version_stale(
@@ -97,10 +100,70 @@ def test_map_freshness_version_stale(
     doc["provenance"]["tool_version"] = "0.0.0-stale"
     map_path.write_text(json.dumps(doc))
 
-    finding = doctor._check_map_freshness(root)
+    finding, prov = doctor._check_map_freshness(root)
     assert finding.status == "stale"
     assert "0.0.0-stale" in finding.detail
     assert finding.fix == "dekko map"
+    assert prov is not None
+
+
+def test_map_freshness_spec_hash_stale_distinctly(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # Round-23 §11: doctor independently built its own bare
+    # "built by dekko X, running X" string, never touching
+    # spec_stale/built_spec_hash/running_spec_hash even though the
+    # full Freshness was already in scope — a spec_hash-only drift on
+    # a long-lived process read as self-contradictory. It must now
+    # name spec_hash explicitly, sharing the same logic status/
+    # map_status use.
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["spec_hash"] = "deadbeef"
+    map_path.write_text(json.dumps(doc))
+
+    finding, prov = doctor._check_map_freshness(root)
+    assert finding.status == "stale"
+    assert "stale (spec_hash)" in finding.detail
+    assert "tool_version:" not in finding.detail
+    assert "deadbeef" in finding.detail
+    assert finding.fix == "dekko map"
+    assert prov is not None
+
+
+# --- ambiguous rate -------------------------------------------------------
+
+
+def test_ambiguous_rate_unknown_when_prov_missing_field() -> None:
+    finding = doctor._check_ambiguous_rate({"tool_version": "0.1.0"})
+    assert finding.status == "unknown"
+    assert finding.fix == "dekko map"
+
+
+def test_ambiguous_rate_unknown_when_prov_none() -> None:
+    finding = doctor._check_ambiguous_rate(None)
+    assert finding.status == "unknown"
+    assert finding.fix == "dekko map"
+
+
+def test_ambiguous_rate_ok_below_threshold() -> None:
+    finding = doctor._check_ambiguous_rate(
+        {"ambiguous_rate": 0.093, "ambiguous_sites": 42}
+    )
+    assert finding.status == "ok"
+    assert finding.fix is None
+    assert "9%" in finding.detail
+
+
+def test_ambiguous_rate_advisory_at_or_above_threshold() -> None:
+    finding = doctor._check_ambiguous_rate(
+        {"ambiguous_rate": 0.449, "ambiguous_sites": 12345}
+    )
+    assert finding.status == "advisory"
+    assert finding.fix == "dekko ambiguous --by name"
+    assert "45%" in finding.detail
+    assert "12,345" in finding.detail
 
 
 # --- MCP/plugin registration --------------------------------------------
@@ -269,11 +332,17 @@ def test_collect_json_shape_ok_rows_have_no_fix(
     findings = doctor.collect(root)
     assert findings, "expected at least one finding"
     for f in findings:
-        assert f.name and f.status in {"ok", "missing", "stale", "unknown"}
+        assert f.name and f.status in {
+            "ok",
+            "missing",
+            "stale",
+            "unknown",
+            "advisory",
+        }
         assert isinstance(f.detail, str) and f.detail
         if f.status == "ok":
             assert f.fix is None
-        if f.status in {"missing", "stale"}:
+        if f.status in {"missing", "stale", "advisory"}:
             assert f.fix is not None
 
 
@@ -283,9 +352,53 @@ def test_collect_reports_gaps_on_bare_repo(
     monkeypatch.setattr(doctor, "_claude_exe", lambda: None)
     findings = {f.name: f for f in doctor.collect(tmp_path)}
     assert findings["map-freshness"].status == "missing"
+    assert findings["ambiguous-rate"].status == "unknown"
     assert findings["claude-md-policy"].status == "missing"
     assert findings["mcp-registered"].status == "unknown"
     assert findings["plugin-installed"].status == "unknown"
+
+
+def test_collect_ambiguous_rate_follows_map_freshness(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(SRC)
+    monkeypatch.setattr(doctor, "_claude_exe", lambda: None)
+    findings = doctor.collect(root)
+    names = [f.name for f in findings]
+    assert names.index("ambiguous-rate") == names.index("map-freshness") + 1
+    assert findings[names.index("ambiguous-rate")].status in {"ok", "unknown"}
+
+
+def test_collect_ambiguous_rate_advisory_from_provenance(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["ambiguous_rate"] = 0.449
+    doc["provenance"]["ambiguous_sites"] = 12345
+    map_path.write_text(json.dumps(doc))
+
+    monkeypatch.setattr(doctor, "_claude_exe", lambda: None)
+    findings = {f.name: f for f in doctor.collect(root)}
+    assert findings["ambiguous-rate"].status == "advisory"
+    assert findings["ambiguous-rate"].fix == "dekko ambiguous --by name"
+
+
+def test_cli_doctor_json_round_trips_advisory_status(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["ambiguous_rate"] = 0.449
+    doc["provenance"]["ambiguous_sites"] = 12345
+    map_path.write_text(json.dumps(doc))
+
+    assert cli.main(["doctor", "--root", str(root), "--json"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    by_name = {row["name"]: row for row in rows}
+    assert by_name["ambiguous-rate"]["status"] == "advisory"
 
 
 def test_check_failure_degrades_to_unknown_not_a_crash(

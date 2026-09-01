@@ -8,7 +8,7 @@ import pytest
 from dekko.integrations import cli
 from dekko.analysis import unused
 from dekko.render.mapfile import MapIndex
-from dekko.core.model import Import, Param, Symbol
+from dekko.core.model import ExternalCall, Import, Param, Symbol
 
 from conftest import RepoFactory
 
@@ -41,6 +41,15 @@ def _index(symbols: list[Symbol], **kw: object) -> MapIndex:
     idx.imports_by_path = dict(kw.get("imports", {}))  # type: ignore
     idx.heritage_in = dict(  # type: ignore[arg-type]
         kw.get("heritage_in", {})
+    )
+    idx.heritage_external_out = dict(  # type: ignore[arg-type]
+        kw.get("heritage_external_out", {})
+    )
+    idx.ambiguous_in = dict(  # type: ignore[arg-type]
+        kw.get("ambiguous_in", {})
+    )
+    idx.ambiguous_out = dict(  # type: ignore[arg-type]
+        kw.get("ambiguous_out", {})
     )
     return idx
 
@@ -112,6 +121,69 @@ def test_roots_glob() -> None:
     idx = _index([_sym("keep", "gen/x.py"), _sym("drop", "src/y.py")])
     names = {s.name for s in unused.find_unused(idx, ("gen/*",))}
     assert names == {"drop"}
+
+
+# --- find_suspects: unit-level tests over hand-built MapIndex fixtures ---
+
+
+def test_find_suspects_flags_colliding_name_with_direct_fan_in() -> None:
+    # `has` is excluded from find_unused via one resolved call -- but
+    # `has` is also a proven collider (2 candidates) at an unrelated
+    # call site elsewhere in the repo, so its exclusion is a suspect.
+    has_target = _sym("has", "bar.py", qualname="Bar.has", kind="method")
+    idx = _index(
+        [has_target],
+        calls_in={has_target.id: ["caller.py::caller"]},
+        ambiguous_in={
+            "cand1": [("elsewhere.py::c", "has")],
+            "cand2": [("elsewhere.py::c", "has")],
+        },
+        ambiguous_out={"elsewhere.py::c": ["has"]},
+    )
+    suspects = unused.find_suspects(idx, ())
+    assert [s.name for s in suspects] == ["has"]
+
+
+def test_find_suspects_excludes_name_never_seen_by_ambiguous() -> None:
+    # Genuine, unambiguous fan-in whose name never collides anywhere
+    # -- not a suspect.
+    clean = _sym("clean_helper", "bar.py")
+    idx = _index([clean], calls_in={clean.id: ["caller.py::caller"]})
+    assert unused.find_suspects(idx, ()) == []
+
+
+def test_find_suspects_excludes_root_even_if_name_collides() -> None:
+    # A symbol that would otherwise qualify (name collides, has direct
+    # fan-in) but is excluded from `unused` purely via `_is_root`
+    # (here: exported) is not a call-graph-trust suspect at all.
+    exported = _sym(
+        "has", "bar.py", qualname="Bar.has", kind="method", exported=True
+    )
+    idx = _index(
+        [exported],
+        calls_in={exported.id: ["caller.py::caller"]},
+        ambiguous_in={"cand1": [("elsewhere.py::c", "has")]},
+        ambiguous_out={"elsewhere.py::c": ["has"]},
+    )
+    assert unused.find_suspects(idx, ()) == []
+
+
+def test_find_suspects_excludes_container_marked_only() -> None:
+    # Worker is kept alive only because its method `run` was called
+    # (container-marking) -- Worker's own id has no direct calls_in/
+    # referenced_in entry, so even though "Worker" happens to also be
+    # a proven collider, it must not be flagged: this is a different,
+    # unrelated exclusion mechanism from "this exact symbol's own name
+    # is a proven collider."
+    method = _sym("run", "a.py", qualname="Worker.run", kind="method")
+    klass = _sym("Worker", "a.py", qualname="Worker", kind="class")
+    idx = _index(
+        [method, klass],
+        calls_in={method.id: ["b.py::caller"]},
+        ambiguous_in={"cand1": [("elsewhere.py::c", "Worker")]},
+        ambiguous_out={"elsewhere.py::c": ["Worker"]},
+    )
+    assert unused.find_suspects(idx, ()) == []
 
 
 PY = {
@@ -206,6 +278,31 @@ def test_unused_does_not_flag_const_read_as_binary_or_ternary_operand(
     # operand (never called, never a value in one of the previously
     # covered reference shapes) were false-flagged as unused.
     root = make_mapped_repo(TS_GUARD_AND_CONCAT_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
+PY_KEYWORD_ARGUMENT_CALLBACK = {
+    "handlers.py": ("def valid_ndk_path(path):\n    return path\n"),
+    "configure.py": (
+        "from handlers import valid_ndk_path\n\n\n"
+        "def get_var(name, check_success=None):\n"
+        "    return name\n\n\n"
+        "def main():\n"
+        "    get_var('ANDROID_NDK_HOME',"
+        " check_success=valid_ndk_path)\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_python_keyword_argument_callback(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round-22 (tensorflow) finding: valid_ndk_path is never *called*
+    # anywhere, only wired up as a call's keyword-argument value in
+    # configure.py — before Python's reference_query, this was
+    # indistinguishable from genuinely dead code.
+    root = make_mapped_repo(PY_KEYWORD_ARGUMENT_CALLBACK)
     assert cli.main(["unused", "--root", str(root)]) == 0
     assert "no unused symbols" in capsys.readouterr().out
 
@@ -331,6 +428,23 @@ def test_unused_json(
 
 
 # --- --kinds: unit-level tests over hand-built MapIndex fixtures -----
+
+
+def test_kinds_help_text_does_not_claim_callables_restricts_scan(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 25 finding #12: --help described 'callables' as scanning
+    # only functions/methods, but find_unused only ever restricts the
+    # *scan* by kind for 'types' -- 'callables' (the default) and
+    # 'all' both scan every symbol kind, differing only in which
+    # evidence counts as "used". The help text must describe the real
+    # behavior, not a functions/methods-only restriction that doesn't
+    # exist.
+    with pytest.raises(SystemExit):
+        cli.main(["unused", "--help"])
+    out = capsys.readouterr().out
+    assert "functions/methods" not in out
+    assert "every symbol kind is scanned" in out
 
 
 def test_kinds_default_ignores_heritage_and_type_usage_evidence() -> None:
@@ -611,3 +725,716 @@ def test_kinds_types_at_scale_stays_fast() -> None:
     elapsed = time.monotonic() - start
     assert found == []  # every type is used by exactly one function
     assert elapsed < 5.0
+
+
+DEAD_FUNCS = {
+    "a.py": (
+        "def main() -> int:\n"
+        "    return 0\n\n\n"
+        "def dead_one() -> int:\n"
+        "    return 1\n\n\n"
+        "def dead_two() -> int:\n"
+        "    return 2\n\n\n"
+        "def dead_three() -> int:\n"
+        "    return 3\n\n\n"
+        "def dead_four() -> int:\n"
+        "    return 4\n"
+    ),
+}
+
+
+# --- Rust trait-dispatched methods: unit-level fixtures -------------
+
+
+def _rust_method(container: str, method: str) -> Symbol:
+    return _sym(
+        method,
+        "m.rs",
+        qualname=f"{container}.{method}",
+        kind="method",
+        language="rust",
+    )
+
+
+def test_rust_trait_dispatch_std_trait_keeps_method_alive() -> None:
+    # Round-23 (zed) finding: impl Display for MyError { fn fmt ... }
+    # has no explicit callers -- Display::fmt is invoked implicitly
+    # via `{}`/`.to_string()`, invisible to a call-expression walk.
+    struct = _sym("MyError", "m.rs", kind="struct", language="rust")
+    method = _rust_method("MyError", "fmt")
+    idx = _index(
+        [struct, method],
+        heritage_external_out={
+            struct.id: [
+                ExternalCall(caller=struct.id, callee="Display", lines=[5])
+            ]
+        },
+    )
+    # Only the method's root-ness is under test here; the struct
+    # itself has no usage evidence in this minimal fixture and is
+    # flagged independently -- irrelevant to this check.
+    assert "fmt" not in {s.name for s in unused.find_unused(idx, ())}
+
+
+def test_rust_trait_dispatch_strips_module_prefix_and_generics() -> None:
+    # `use std::fmt; impl fmt::Display for X` and `impl From<String>
+    # for X` both carry the clause exactly as written in
+    # heritage_external_out -- module-qualified and/or generic.
+    struct = _sym("X", "m.rs", kind="struct", language="rust")
+    fmt_method = _rust_method("X", "fmt")
+    from_method = _rust_method("X", "from")
+    idx = _index(
+        [struct, fmt_method, from_method],
+        heritage_external_out={
+            struct.id: [
+                ExternalCall(
+                    caller=struct.id, callee="fmt::Display", lines=[5]
+                ),
+                ExternalCall(
+                    caller=struct.id, callee="From<String>", lines=[9]
+                ),
+            ]
+        },
+    )
+    found_names = {s.name for s in unused.find_unused(idx, ())}
+    assert "fmt" not in found_names
+    assert "from" not in found_names
+
+
+def test_rust_trait_dispatch_inherent_method_still_flagged() -> None:
+    # Negative control: an inherent method (no trait impl at all) with
+    # zero callers is still genuinely dead code.
+    struct = _sym("Inherent", "m.rs", kind="struct", language="rust")
+    method = _rust_method("Inherent", "fmt")
+    idx = _index([struct, method])
+    assert "fmt" in {s.name for s in unused.find_unused(idx, ())}
+
+
+def test_rust_trait_dispatch_custom_trait_still_flagged() -> None:
+    # A custom, non-std trait must not be exempted -- the fix is
+    # scoped to _RUST_STD_TRAIT_NAMES, not "any trait impl."
+    struct = _sym("Custom", "m.rs", kind="struct", language="rust")
+    method = _rust_method("Custom", "do_thing")
+    idx = _index(
+        [struct, method],
+        heritage_external_out={
+            struct.id: [
+                ExternalCall(caller=struct.id, callee="MyTrait", lines=[3])
+            ]
+        },
+    )
+    assert "do_thing" in {s.name for s in unused.find_unused(idx, ())}
+
+
+# --- Rust trait-dispatched methods: end-to-end fixtures --------------
+
+RUST_TRAIT_DISPATCH_FIXTURE = {
+    "lib.rs": (
+        "use std::fmt;\n\n"
+        "pub struct MyError;\n\n"
+        "impl fmt::Display for MyError {\n"
+        "    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {\n"
+        '        write!(f, "error")\n'
+        "    }\n"
+        "}\n\n"
+        "struct Inherent;\n\n"
+        "impl Inherent {\n"
+        "    fn fmt(&self) -> String {\n"
+        '        String::from("x")\n'
+        "    }\n"
+        "}\n\n"
+        "trait MyTrait {\n"
+        "    fn do_thing(&self);\n"
+        "}\n\n"
+        "struct Custom;\n\n"
+        "impl MyTrait for Custom {\n"
+        "    fn do_thing(&self) {}\n"
+        "}\n\n"
+        "fn main() {\n"
+        "    let e = MyError;\n"
+        '    println!("{}", e);\n'
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_rust_std_trait_dispatched_method(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(RUST_TRAIT_DISPATCH_FIXTURE)
+    code = cli.main(["unused", "--root", str(root)])
+    out = capsys.readouterr().out
+    # MyError.fmt is implicitly dispatched via Display -- not flagged.
+    assert "MyError.fmt" not in out
+    # Negative controls: still flagged.
+    assert code == 1
+    assert "Inherent.fmt" in out  # inherent method, no trait impl
+    assert "Custom.do_thing" in out  # custom, non-std trait
+
+
+RUST_TRAIT_DISPATCH_KNOWN_LIMITATION_FIXTURE = {
+    "lib.rs": (
+        "use std::fmt;\n\n"
+        "pub struct Widget;\n\n"
+        "impl fmt::Display for Widget {\n"
+        "    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {\n"
+        '        write!(f, "widget")\n'
+        "    }\n"
+        "}\n\n"
+        "impl Widget {\n"
+        "    fn dead_helper(&self) -> i32 {\n"
+        "        1\n"
+        "    }\n"
+        "}\n\n"
+        "fn main() {\n"
+        "    let w = Widget;\n"
+        '    println!("{}", w);\n'
+        "}\n"
+    ),
+}
+
+
+def test_unused_rust_trait_dispatch_known_limitation(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Documented, accepted false negative (see round-23 design doc
+    # 03-rust-trait-dispatch-unused-false-positive.md): the fix is
+    # type-level, not per-impl-block. Widget::dead_helper is a
+    # genuinely dead inherent method unrelated to Display, but because
+    # Widget implements a std trait somewhere, every method on Widget
+    # -- not just fmt -- reads as a plausible root. Broader than the
+    # design doc's own "same-name collision" framing of this risk;
+    # noted explicitly here so it's visible, not silently uncovered.
+    root = make_mapped_repo(RUST_TRAIT_DISPATCH_KNOWN_LIMITATION_FIXTURE)
+    code = cli.main(["unused", "--root", str(root)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "dead_helper" not in out
+
+
+# --- TS reference shapes: spread/typeof/subscript --------------------
+
+TS_SPREAD_ONLY = {
+    "consts.ts": "export const TOOL_DEFAULTS = { foo: 1 };\n",
+    "use.ts": (
+        "import { TOOL_DEFAULTS } from './consts';\n\n"
+        "export function useIt(def: Record<string, unknown>) {\n"
+        "  return { ...TOOL_DEFAULTS, ...def };\n"
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_ts_const_referenced_via_spread(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_SPREAD_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
+TS_TYPEOF_ONLY = {
+    "consts.ts": "export const TOOL_DEFAULTS = { foo: 1 };\n",
+    "use.ts": (
+        "import { TOOL_DEFAULTS } from './consts';\n\n"
+        "export type ToolDefaultsType = typeof TOOL_DEFAULTS;\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_ts_const_referenced_via_typeof(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_TYPEOF_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
+TS_SUBSCRIPT_ONLY = {
+    "consts.ts": (
+        "export const TASK_ID_PREFIXES: Record<string, string> = {\n"
+        "  x: 'y',\n"
+        "};\n"
+    ),
+    "use.ts": (
+        "import { TASK_ID_PREFIXES } from './consts';\n\n"
+        "export function useIt(type: string) {\n"
+        "  return TASK_ID_PREFIXES[type];\n"
+        "}\n"
+    ),
+}
+
+
+def test_unused_does_not_flag_ts_const_referenced_via_subscript(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_SUBSCRIPT_ONLY)
+    assert cli.main(["unused", "--root", str(root)]) == 0
+    assert "no unused symbols" in capsys.readouterr().out
+
+
+TS_ROUND23_REGRESSION_FIXTURE = {
+    "Tool.ts": (
+        "export const TOOL_DEFAULTS = { foo: 1 };\n\n"
+        "type ToolDefaultsType = typeof TOOL_DEFAULTS;\n\n"
+        "export function useDefaults(def: Record<string, unknown>) {\n"
+        "  return { ...TOOL_DEFAULTS, ...def };\n"
+        "}\n"
+    ),
+    "Task.ts": (
+        "export const TASK_ID_PREFIXES: Record<string, string> = {\n"
+        "  x: 'y',\n"
+        "};\n\n"
+        "export function idFor(type: string) {\n"
+        "  return TASK_ID_PREFIXES[type];\n"
+        "}\n"
+    ),
+}
+
+
+def test_unused_ts_round23_two_symbol_regression(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Literal repro of round-23 claude-code.md §2.3: TOOL_DEFAULTS
+    # (Tool.ts:757, referenced via typeof + spread) and
+    # TASK_ID_PREFIXES (Task.ts:79, referenced via subscript) both
+    # previously read `fan-in: 0` and surfaced as unused.
+    #
+    # Round 26 gave TS `type X = ...` aliases real Symbol entries
+    # (kind "type_alias", see model.TYPE_KINDS), so the fixture's
+    # `ToolDefaultsType` -- only ever referenced via `typeof
+    # TOOL_DEFAULTS`, never in a param/return/heritage position any
+    # reference query captures -- now correctly surfaces as unused
+    # too. That's accurate, not a regression: unlike TOOL_DEFAULTS and
+    # TASK_ID_PREFIXES it genuinely has zero structural references.
+    # The two original round-23 symbols must still be clean.
+    root = make_mapped_repo(TS_ROUND23_REGRESSION_FIXTURE)
+    assert cli.main(["unused", "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "ToolDefaultsType" in out
+    assert "TOOL_DEFAULTS" not in out
+    assert "TASK_ID_PREFIXES" not in out
+
+
+def test_unused_top_flag_aliases_limit(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # --top is a same-dest alias for --limit (round 22 item B): unused
+    # has no separate ranked-summary view, so the two flags are
+    # interchangeable here, unlike stats/ambiguous where they differ.
+    root = make_mapped_repo(DEAD_FUNCS)
+    assert cli.main(["unused", "--root", str(root), "--top", "3"]) == 1
+    top_out = capsys.readouterr().out
+    assert cli.main(["unused", "--root", str(root), "--limit", "3"]) == 1
+    limit_out = capsys.readouterr().out
+    assert top_out == limit_out
+    assert "dead_one" in top_out
+    assert "dead_four" not in top_out  # beyond the cap of 3
+
+
+# --- --suspect: end-to-end fixtures through the real parse pipeline --
+
+# Foo.has is excluded from `unused` by a genuine, resolved call
+# (self.has() inside Foo.check, resolved via same-class dispatch) --
+# but the bare name "has" also collides across 3 repo-wide candidates
+# (a.has, b.has, Foo.has) at the unrelated bare call in c.py, so
+# `ambiguous` independently proves "has" collision-prone. Foo.has's
+# exclusion is exactly the shape `--suspect` exists to flag.
+SUSPECT_FIXTURE = {
+    "foo.py": (
+        "class Foo:\n"
+        "    def has(self) -> bool:\n"
+        "        return True\n\n"
+        "    def check(self) -> bool:\n"
+        "        return self.has()\n"
+    ),
+    "a.py": "def has() -> bool:\n    return True\n",
+    "b.py": "def has() -> bool:\n    return False\n",
+    "c.py": "def caller() -> bool:\n    return has()\n",
+}
+
+
+def test_unused_suspect_off_by_default_no_section(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SUSPECT_FIXTURE)
+    code = cli.main(["unused", "--root", str(root)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "suspects:" not in out
+    assert "Foo.has" not in out  # excluded by genuine fan-in, as today
+
+
+def test_unused_suspect_flag_adds_section(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SUSPECT_FIXTURE)
+    code = cli.main(["unused", "--root", str(root), "--suspect"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "Foo.has" not in out.split("suspects:")[0]  # not in main list
+    assert "suspects:" in out
+    assert "Foo.has" in out.split("suspects:")[1]
+    assert "dekko ambiguous --name has" in out
+
+
+def test_unused_suspect_flag_no_change_to_main_list(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # --suspect must not change the primary unused list's own output.
+    root = make_mapped_repo(SUSPECT_FIXTURE)
+    cli.main(["unused", "--root", str(root)])
+    without = capsys.readouterr().out
+    cli.main(["unused", "--root", str(root), "--suspect"])
+    with_suspect = capsys.readouterr().out
+    assert with_suspect[: len(without)] == without
+
+
+def test_unused_suspect_json_round_trip(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SUSPECT_FIXTURE)
+    code = cli.main(["unused", "--root", str(root), "--suspect", "--json"])
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert "suspects" in doc
+    entry = next(s for s in doc["suspects"] if s["collides_with"] == "has")
+    assert entry["id"] == "foo.py::Foo.has"
+    assert entry["check_command"] == "dekko ambiguous --name has"
+
+
+def test_unused_no_suspect_json_omits_key(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SUSPECT_FIXTURE)
+    code = cli.main(["unused", "--root", str(root), "--json"])
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert "suspects" not in doc
+
+
+# --- C/C++ ABI caveat (round-23 design doc 22, layer 1) --------------
+
+
+def test_c_abi_caveat_none_when_no_c_cpp_symbols() -> None:
+    found = [_sym("dead", "a.py", language="python")]
+    assert unused._c_abi_caveat(found) is None
+
+
+def test_c_abi_caveat_none_for_empty_results() -> None:
+    assert unused._c_abi_caveat([]) is None
+
+
+def test_c_abi_caveat_present_for_c_symbol() -> None:
+    found = [_sym("TF_GraphVersions", "c_api.c", language="c")]
+    caveat = unused._c_abi_caveat(found)
+    assert caveat is not None
+    assert 'extern "C"' in caveat
+    assert "skeptically" in caveat
+
+
+def test_c_abi_caveat_present_for_cpp_symbol() -> None:
+    found = [_sym("TF_GraphVersions", "c_api.cc", language="cpp")]
+    assert unused._c_abi_caveat(found) is not None
+
+
+def test_c_abi_caveat_present_when_mixed_with_other_languages() -> None:
+    found = [
+        _sym("dead_py", "a.py", language="python"),
+        _sym("TF_GraphVersions", "c_api.cc", language="cpp"),
+    ]
+    assert unused._c_abi_caveat(found) is not None
+
+
+def test_unused_text_mode_caveat_absent_for_python_only(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    dead = _sym("dead", "a.py", language="python")
+    idx = _index([dead])
+    unused.run(idx, (), as_json=False, limit=50)
+    out = capsys.readouterr().out
+    assert "dead()" in out
+    assert "note:" not in out
+
+
+def test_unused_text_mode_caveat_present_for_c_symbol(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    dead = _sym("TF_GraphVersions", "c_api.c", language="c")
+    idx = _index([dead])
+    unused.run(idx, (), as_json=False, limit=50)
+    out = capsys.readouterr().out
+    assert out.rstrip("\n").endswith(unused._C_ABI_CAVEAT)
+
+
+def test_unused_json_mode_caveats_empty_for_python_only(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    dead = _sym("dead", "a.py", language="python")
+    idx = _index([dead])
+    unused.run(idx, (), as_json=True, limit=50)
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["caveats"] == []
+
+
+def test_unused_json_mode_caveats_present_for_c_symbol(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    dead = _sym("TF_GraphVersions", "c_api.c", language="c")
+    idx = _index([dead])
+    unused.run(idx, (), as_json=True, limit=50)
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["caveats"] == [unused._C_ABI_CAVEAT]
+
+
+def test_unused_caveat_absent_when_no_unused_symbols_found(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # A repo whose C/C++ files happen to produce zero unused hits stays
+    # silent -- the gate is on `found`, not "this repo has a .c file".
+    # 'main' is always a root, so this C symbol never lands in `found`.
+    main_fn = _sym("main", "a.c", language="c")
+    idx = _index([main_fn])
+    unused.run(idx, (), as_json=False, limit=50)
+    out = capsys.readouterr().out
+    assert "no unused symbols" in out
+    assert "note:" not in out
+
+
+# --- find_dispatch_candidates: unit-level tests over hand-built
+# MapIndex fixtures (round-24 design doc
+# 04-unused-dispatch-shaped-candidate-flag.md) ------------------------
+
+
+def test_find_dispatch_candidates_flags_own_id_ambiguous_candidate() -> None:
+    # DiscordConnector.createCommand has no direct fan-in (genuinely
+    # unused by call-graph evidence) but its own id is one of the
+    # unresolved candidates for an ambiguous `createCommand` call
+    # elsewhere (the `this.createCommand()` shape through an abstract
+    # base with 2+ concrete overrides) -- a dispatch candidate.
+    discord = _sym(
+        "createCommand",
+        "discord.ts",
+        qualname="DiscordConnector.createCommand",
+        kind="method",
+        language="typescript",
+    )
+    idx = _index(
+        [discord],
+        ambiguous_in={
+            discord.id: [("base.ts::ConnectorBase.dispatch", "createCommand")]
+        },
+    )
+    candidates = unused.find_dispatch_candidates(idx, ())
+    assert [s.id for s in candidates] == [discord.id]
+
+
+def test_find_dispatch_candidates_excludes_symbol_with_no_ambiguous_evidence() -> (  # noqa: E501
+    None
+):
+    # Genuinely dead method: in `find_unused`'s result, but its id
+    # never appears in `ambiguous_in` at all -- not a dispatch
+    # candidate.
+    dead = _sym("dead_helper", "a.py")
+    idx = _index([dead])
+    assert unused.find_unused(idx, ()) == [dead]
+    assert unused.find_dispatch_candidates(idx, ()) == []
+
+
+def test_find_dispatch_candidates_excludes_used_symbol() -> None:
+    # A symbol with direct fan-in is excluded from `find_unused`
+    # entirely -- `find_dispatch_candidates` only ever narrows
+    # `find_unused`'s own output, so it must not appear here either,
+    # even though its id happens to also sit in `ambiguous_in`.
+    used = _sym(
+        "createCommand",
+        "discord.ts",
+        qualname="DiscordConnector.createCommand",
+        kind="method",
+    )
+    idx = _index(
+        [used],
+        calls_in={used.id: ["caller.py::caller"]},
+        ambiguous_in={
+            used.id: [("base.ts::ConnectorBase.dispatch", "createCommand")]
+        },
+    )
+    assert unused.find_unused(idx, ()) == []
+    assert unused.find_dispatch_candidates(idx, ()) == []
+
+
+def test_find_dispatch_candidates_excludes_root_even_with_ambiguous_entry() -> (  # noqa: E501
+    None
+):
+    # Excluded from `find_unused` via `_is_root` (exported) -- root
+    # exclusion is unrelated to dispatch-candidate evidence, so this
+    # must not appear even though its id is ambiguous-associated.
+    exported = _sym(
+        "createCommand",
+        "discord.ts",
+        qualname="DiscordConnector.createCommand",
+        kind="method",
+        exported=True,
+    )
+    idx = _index(
+        [exported],
+        ambiguous_in={
+            exported.id: [("base.ts::ConnectorBase.dispatch", "createCommand")]
+        },
+    )
+    assert unused.find_unused(idx, ()) == []
+    assert unused.find_dispatch_candidates(idx, ()) == []
+
+
+# --- _dispatch_caveat -------------------------------------------------
+
+
+def test_dispatch_caveat_none_for_empty_list() -> None:
+    assert unused._dispatch_caveat([]) is None
+
+
+def test_dispatch_caveat_present_with_expected_count() -> None:
+    sym = _sym("createCommand", "discord.ts")
+    caveat = unused._dispatch_caveat([sym])
+    assert caveat is not None
+    assert "1 of these are unresolved-ambiguous-call candidates" in caveat
+    assert "dekko sanity --unused <name>" in caveat
+    assert "--dispatch" in caveat
+
+
+# --- --dispatch: end-to-end fixtures through the real parse pipeline -
+#
+# Mirrors the cline `ConnectorBase`/`DiscordConnector`/`SlackConnector`
+# shape from round-24's report: an abstract base whose own method body
+# calls `this.createCommand()`, never itself defining `createCommand`,
+# overridden by 2 concrete subclasses. Neither override has any direct
+# fan-in (the resolver can't attribute the base's call to either), so
+# both are flagged unused *and* both ids are recorded as candidates of
+# the one ambiguous `createCommand` call site.
+DISPATCH_FIXTURE = {
+    "connectors.ts": (
+        "abstract class ConnectorBase {\n"
+        "    dispatch(): void {\n"
+        "        this.createCommand();\n"
+        "    }\n"
+        "}\n\n"
+        "class DiscordConnector extends ConnectorBase {\n"
+        "    createCommand(): void {\n"
+        '        console.log("discord");\n'
+        "    }\n"
+        "}\n\n"
+        "class SlackConnector extends ConnectorBase {\n"
+        "    createCommand(): void {\n"
+        '        console.log("slack");\n'
+        "    }\n"
+        "}\n\n"
+        "function main(): void {\n"
+        "    new DiscordConnector().dispatch();\n"
+        "    new SlackConnector().dispatch();\n"
+        "}\n\n"
+        "main();\n"
+    ),
+}
+
+
+def test_unused_dispatch_caveat_always_on_without_flag(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DISPATCH_FIXTURE)
+    code = cli.main(["unused", "--root", str(root), "--kinds", "all"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "note: 2 of these are unresolved-ambiguous-call candidates" in out
+    assert "dispatch candidates:" not in out  # --dispatch not passed
+
+
+def test_unused_dispatch_flag_adds_section(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DISPATCH_FIXTURE)
+    code = cli.main(
+        ["unused", "--root", str(root), "--kinds", "all", "--dispatch"]
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "dispatch candidates:" in out
+    section = out.split("dispatch candidates:")[1]
+    assert "DiscordConnector.createCommand" in section
+    assert "SlackConnector.createCommand" in section
+    # Round 25 finding #13: the hint uses the full path:qualname:line
+    # target form so a copy-paste works even on an overloaded target,
+    # not the bare qualname alone.
+    assert (
+        "dekko sanity --unused connectors.ts:DiscordConnector.createCommand:"
+    ) in section
+    assert (
+        "dekko sanity --unused connectors.ts:SlackConnector.createCommand:"
+    ) in section
+
+
+def test_unused_dispatch_flag_no_change_to_main_list(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # --dispatch must not change the primary unused list's own output.
+    root = make_mapped_repo(DISPATCH_FIXTURE)
+    cli.main(["unused", "--root", str(root), "--kinds", "all"])
+    without = capsys.readouterr().out
+    cli.main(["unused", "--root", str(root), "--kinds", "all", "--dispatch"])
+    with_dispatch = capsys.readouterr().out
+    assert with_dispatch[: len(without)] == without
+
+
+def test_unused_dispatch_json_round_trip(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DISPATCH_FIXTURE)
+    code = cli.main(
+        [
+            "unused",
+            "--root",
+            str(root),
+            "--kinds",
+            "all",
+            "--dispatch",
+            "--json",
+        ]
+    )
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["dispatch_caveat"] is not None
+    assert len(doc["dispatch_candidates"]) == 2
+    entry = next(
+        c
+        for c in doc["dispatch_candidates"]
+        if c["id"] == "connectors.ts::DiscordConnector.createCommand"
+    )
+    assert entry["check_command"] == (
+        f"dekko sanity --unused connectors.ts:"
+        f"DiscordConnector.createCommand:{entry['line']}"
+    )
+
+
+def test_unused_no_dispatch_json_omits_key_but_keeps_caveat(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DISPATCH_FIXTURE)
+    code = cli.main(
+        ["unused", "--root", str(root), "--kinds", "all", "--json"]
+    )
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert "dispatch_candidates" not in doc
+    assert doc["dispatch_caveat"] is not None
+
+
+def test_unused_dispatch_caveat_absent_for_unrelated_dead_code(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A repo with no ambiguous-call evidence at all stays silent -- the
+    # gate is on actual dispatch-candidate hits, not "this repo has an
+    # unused list".
+    root = make_mapped_repo(PY)
+    code = cli.main(["unused", "--root", str(root), "--json"])
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["dispatch_caveat"] is None

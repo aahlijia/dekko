@@ -252,6 +252,30 @@ def _related(
     return symbols, modules
 
 
+def ambiguous_counts(index: MapIndex, sym: Symbol) -> tuple[int, int]:
+    """(incoming, outgoing) ambiguous-call counts for ``sym``.
+
+    Incoming: additional call sites named ``sym.name`` that could have
+    targeted ``sym`` but resolved ambiguously (2+ same-name repo
+    candidates), so never became a ``calls_in`` edge. Outgoing: names
+    ``sym`` itself called that resolved ambiguously, so never became a
+    ``calls_out`` edge. Shared by every read-side surface that reports
+    fan-in/fan-out or a caller/callee list, so "N ambiguous, not
+    counted" is computed and worded identically everywhere.
+
+    Args:
+        index: Loaded map index.
+        sym: Resolved symbol to look up.
+
+    Returns:
+        ``(ambig_in, ambig_out)`` counts.
+    """
+    return (
+        len(index.ambiguous_in.get(sym.id, [])),
+        len(index.ambiguous_out.get(sym.id, [])),
+    )
+
+
 def _sym_line(sym: Symbol) -> str:
     """One-line text rendering of a symbol."""
     return f"{sym.path}:{sym.start_line}  {signature(sym)}"
@@ -269,7 +293,12 @@ def _sym_json(index: MapIndex, sym: Symbol) -> dict:
 
 
 def _emit_lines(
-    lines: list[str], budget: int | None, limit: int, prefix: str = ""
+    lines: list[str],
+    budget: int | None,
+    limit: int,
+    prefix: str = "",
+    related_total: int = 0,
+    related_label: str = "",
 ) -> Meter:
     """Print rows trimmed to the caps and return the cost meter.
 
@@ -279,8 +308,19 @@ def _emit_lines(
     omitted" row count, which must reflect data rows only. Passing a
     header inside ``lines`` instead would inflate that count by one
     (or more, for multi-line headers) whenever truncation kicks in.
+
+    ``related_total``/``related_label`` are forwarded to ``fit_to_budget``
+    unchanged — see ``Meter.related_total``/``Meter.related_label`` for
+    what they add to the footer.
     """
-    kept, meter = fit_to_budget(lines, budget, limit, prefix=prefix)
+    kept, meter = fit_to_budget(
+        lines,
+        budget,
+        limit,
+        prefix=prefix,
+        related_total=related_total,
+        related_label=related_label,
+    )
     if prefix:
         print(prefix)
     for line in kept:
@@ -289,11 +329,21 @@ def _emit_lines(
 
 
 def _fit_entries(
-    entries: list[dict], budget: int | None, limit: int
+    entries: list[dict],
+    budget: int | None,
+    limit: int,
+    related_total: int = 0,
+    related_label: str = "",
 ) -> tuple[list[dict], Meter]:
     """Trim JSON result entries to the caps, metered on their JSON cost."""
     serialized = [json.dumps(e) for e in entries]
-    kept, meter = fit_to_budget(serialized, budget, limit)
+    kept, meter = fit_to_budget(
+        serialized,
+        budget,
+        limit,
+        related_total=related_total,
+        related_label=related_label,
+    )
     return entries[: len(kept)], meter
 
 
@@ -329,16 +379,34 @@ _MIN_SUBSTRING_CANDIDATE_LEN = 2
 _MAX_AMBIGUOUS_CANDIDATES = 20
 
 
-def _close_names(needle: str, names: list[str]) -> list[str]:
+def _close_names(
+    needle: str, names: list[str], *, exclude_verbatim: bool = False
+) -> list[str]:
     """Names close to ``needle``: exact (case-insensitive) first, then
     prefix, then substring either way, then edit-distance for typos.
-    Deterministic, capped."""
+    Deterministic, capped.
+
+    ``exclude_verbatim`` drops any candidate that is character-for-
+    character identical to ``needle`` — useful only when ``needle`` is
+    itself the literal string a lookup already failed on, so a
+    verbatim candidate would just echo the input back with no new
+    information (round 23 §16: ``query type --exact``'s not-found
+    path). It defaults to ``False`` because not every caller's
+    ``needle`` has that shape: ``_suggest_symbols`` passes a *derived*
+    bare qualname (stripped of a wrong/stale path qualifier), where a
+    verbatim match in ``names`` is precisely the useful "right name,
+    wrong path" suggestion, not an echo — excluding it there would
+    silently drop the single most common case the suggester exists
+    to catch.
+    """
     low = needle.lower()
     if not low:
         return []
     scored: list[tuple[int, str]] = []
     rest: list[str] = []
     for name in names:
+        if exclude_verbatim and name == needle:
+            continue  # verbatim self-match: never a useful suggestion
         cand = name.lower()
         if cand == low:
             scored.append((0, name))
@@ -547,6 +615,22 @@ def _site_rows(
     return [f"{site_path}:{line}  {signature(other)}" for line in lines]
 
 
+def _module_site_lines(
+    index: MapIndex, action: str, sym: Symbol, path: str
+) -> list[int]:
+    """Recorded call-site line numbers for one module-level pseudo-caller.
+
+    Empty when the map predates per-site line tracking (doc version <
+    3) or this specific edge has no recorded site line — callers fall
+    back to a bare path/no-lines representation in that case. Shared
+    by both the text (``_module_rows``) and JSON
+    (``_module_level_entries``) renderers so they can't drift apart on
+    where module-level line numbers come from.
+    """
+    module_id = f"{path}{MODULE_CALLER_SUFFIX}"
+    return index.edge_lines.get(_edge_key(action, sym, module_id), [])
+
+
 def _module_rows(
     index: MapIndex, action: str, sym: Symbol, path: str, sites: bool
 ) -> list[str]:
@@ -562,11 +646,33 @@ def _module_rows(
     back to the bare form only when the map predates per-site line
     tracking, or this specific edge has no recorded site line.
     """
-    module_id = f"{path}{MODULE_CALLER_SUFFIX}"
-    lines = index.edge_lines.get(_edge_key(action, sym, module_id), [])
+    lines = _module_site_lines(index, action, sym, path)
     if lines:
         return [f"{path}:{line}  (module level)" for line in lines]
     return [f"{path}  (module level)"]
+
+
+def _module_level_entries(
+    index: MapIndex,
+    action: str,
+    sym: Symbol,
+    modules: list[str],
+) -> list[dict]:
+    """JSON entries for module-level pseudo-callers, one per path.
+
+    Mirrors ``_module_rows``'s "always attempt the per-site line
+    lookup, regardless of ``sites``" convention so text and JSON agree
+    on when lines are available — only omitted when the map predates
+    per-site line tracking or this edge has no recorded site line.
+    """
+    entries = []
+    for path in modules:
+        entry: dict = {"path": path}
+        lines = _module_site_lines(index, action, sym, path)
+        if lines:
+            entry["lines"] = lines
+        entries.append(entry)
+    return entries
 
 
 def _coverage_note(index: MapIndex) -> str | None:
@@ -677,13 +783,37 @@ def _print_relation_json(
                 _edge_key(action, sym, s.id), []
             )
         entries.append(entry)
-    kept, meter = _fit_entries(entries, budget, limit)
+    related_total = (len(symbols) + len(modules)) if sites else 0
+    related_label = (
+        ("callers" if action == "callers" else "callees") if sites else ""
+    )
+    kept, meter = _fit_entries(
+        entries,
+        budget,
+        limit,
+        related_total=related_total,
+        related_label=related_label,
+    )
+    meta = meter.as_dict()
+    if sites:
+        # Total call sites across all entries/modules, pre-cap — the
+        # JSON counterpart to the text path's site-row footer total.
+        # ``or [None]`` falls back to counting 1 for an entry/module
+        # with no recorded site lines, matching ``_site_rows``'s and
+        # ``_module_rows``'s own def-line-fallback-counts-as-one
+        # convention so the two surfaces can't independently drift.
+        meta["sites_total"] = sum(
+            len(e.get("sites") or [None]) for e in entries
+        ) + sum(
+            len(_module_site_lines(index, action, sym, path) or [None])
+            for path in modules
+        )
     doc = {
         "action": action,
         "target": sym.id,
         "results": kept,
-        "module_level": modules,
-        "meta": meter.as_dict(),
+        "module_level": _module_level_entries(index, action, sym, modules),
+        "meta": meta,
     }
     if coverage:
         doc["coverage_warning"] = coverage
@@ -710,6 +840,13 @@ def _run_relation(
     """Execute callers/callees for a resolved symbol."""
     symbols, modules = _related(index, sym, action)
     symbols.sort(key=lambda s: relevance_key(s, index))
+    # Distinct related entities (callers/callees), as opposed to the
+    # call-site row count ``--sites`` explodes each entity into — the
+    # two diverge whenever a caller invokes the target more than once
+    # in its own body. Computed unconditionally (cheap) but only
+    # threaded into the footer when ``sites=True``, since plain-mode
+    # rows already equal this count 1:1.
+    caller_total = len(symbols) + len(modules)
     coverage = _coverage_note(index)
     # Ambiguous calls never become a resolved edge (see resolver.py's
     # module docstring), so a symbol's calls_in/calls_out can look
@@ -719,12 +856,9 @@ def _run_relation(
     # outgoing-side counterpart for "what does this call" (names this
     # symbol itself called ambiguously) — round-09 §2.1 part A flagged
     # that only the callers direction disclosed this gap.
-    ambig_in = (
-        len(index.ambiguous_in.get(sym.id, [])) if action == "callers" else 0
-    )
-    ambig_out = (
-        len(index.ambiguous_out.get(sym.id, [])) if action == "callees" else 0
-    )
+    raw_ambig_in, raw_ambig_out = ambiguous_counts(index, sym)
+    ambig_in = raw_ambig_in if action == "callers" else 0
+    ambig_out = raw_ambig_out if action == "callees" else 0
     if as_json:
         _print_relation_json(
             index,
@@ -774,7 +908,17 @@ def _run_relation(
         if coverage:
             print(f"  note: {coverage}", file=sys.stderr)
         return EXIT_OK, None
-    return EXIT_OK, _emit_lines(lines, budget, limit)
+    related_total = caller_total if sites else 0
+    related_label = (
+        ("callers" if action == "callers" else "callees") if sites else ""
+    )
+    return EXIT_OK, _emit_lines(
+        lines,
+        budget,
+        limit,
+        related_total=related_total,
+        related_label=related_label,
+    )
 
 
 def _peer_relevance_key(
@@ -947,6 +1091,22 @@ def _caller_label(index: MapIndex, caller_id: str) -> str:
     return sym.qualname if sym is not None else caller_id
 
 
+def _caller_language(index: MapIndex, caller_id: str) -> str | None:
+    """Language of a throws/calls-graph caller id.
+
+    Handles both a resolved-symbol id (looked up directly) and the
+    ``path::<module>`` pseudo-id convention used for module-level
+    call sites (module-level throws/calls have no owning symbol) —
+    see ``ExternalCall.caller``'s and ``CatchSite.caller``'s
+    docstrings for the same convention used elsewhere.
+    """
+    sym = index.symbols_by_id.get(caller_id)
+    if sym is not None:
+        return sym.language
+    path = caller_id.split("::", 1)[0]
+    return index.languages_by_path.get(path)
+
+
 def _throws_direct(
     index: MapIndex, caller_id: str
 ) -> tuple[list[tuple[Symbol, list[int]]], list[ExternalCall], int, int]:
@@ -1032,14 +1192,46 @@ def _throws_external_row(ext: ExternalCall) -> str:
     return f"  L{site}  (external) {ext.callee}"
 
 
+def _throws_lang_filter(
+    index: MapIndex,
+    resolved: list[tuple[Symbol, int, list[int]]],
+    external: list[ExternalCall],
+    lang: str,
+) -> tuple[list[tuple[Symbol, int, list[int]]], list[ExternalCall], int]:
+    """Narrow gathered throws hits to one language.
+
+    ``resolved`` is filtered by each raised type's own
+    ``Symbol.language`` (available directly); ``external`` is filtered
+    by the call site's *caller* language via ``_caller_language``,
+    since an external (stdlib/third-party) callee has no language of
+    its own to check.
+
+    Returns:
+        ``(kept_resolved, kept_external, filtered_out)``.
+    """
+    kept_resolved = [r for r in resolved if r[0].language == lang]
+    kept_external = [
+        ext for ext in external if _caller_language(index, ext.caller) == lang
+    ]
+    filtered_out = (len(resolved) - len(kept_resolved)) + (
+        len(external) - len(kept_external)
+    )
+    return kept_resolved, kept_external, filtered_out
+
+
 def _throws_gather(
-    index: MapIndex, sym: Symbol, transitive: bool, depth: int
+    index: MapIndex,
+    sym: Symbol,
+    transitive: bool,
+    depth: int,
+    lang: str | None,
 ) -> tuple[
     list[tuple[Symbol, int, list[int]]],
     list[ExternalCall],
     int,
     int,
     bool,
+    int,
 ]:
     """Compute one throws query's result set, one level or transitive.
 
@@ -1048,33 +1240,60 @@ def _throws_gather(
     this is still the same "gather, then render" split every other
     ``_run_*`` action already uses.
 
+    Args:
+        index: Loaded map index.
+        sym: Resolved target symbol.
+        transitive: Walk the call graph instead of one level.
+        depth: Hop cap for a transitive walk (ignored otherwise).
+        lang: Restrict the gathered ``resolved``/``external`` hits to
+            one language (see ``_throws_lang_filter``). ``None``
+            applies no filter.
+
     Returns:
         ``(resolved, external, bare_count, ambiguous_count,
-        truncated)`` — ``resolved`` is ``(symbol, depth, lines)``
-        triples (``depth`` always ``0`` for a one-level query);
-        ``truncated``/non-zero ``ambiguous_count`` only ever apply to
-        a transitive walk / a one-level query respectively (the design
-        doc scopes ambiguous-name disclosure to the target itself, the
-        same way ``_run_heritage`` already does for supertypes).
+        truncated, lang_filtered_out)`` — ``resolved`` is ``(symbol,
+        depth, lines)`` triples (``depth`` always ``0`` for a
+        one-level query); ``truncated``/non-zero ``ambiguous_count``
+        only ever apply to a transitive walk / a one-level query
+        respectively (the design doc scopes ambiguous-name disclosure
+        to the target itself, the same way ``_run_heritage`` already
+        does for supertypes); ``lang_filtered_out`` is the count of
+        hits ``lang`` excluded (always ``0`` when ``lang`` is
+        ``None``).
     """
     if not transitive:
         direct, external, bare_count, ambiguous_count = _throws_direct(
             index, sym.id
         )
         resolved = [(s, 0, lines) for s, lines in direct]
-        return resolved, external, bare_count, ambiguous_count, False
+        truncated = False
+    else:
+        resolved_map, external_hits, bare_count, truncated = (
+            _walk_throws_transitive(index, sym.id, depth)
+        )
+        resolved = [
+            (index.symbols_by_id[tid], d, lines)
+            for tid, (d, lines) in resolved_map.items()
+            if tid in index.symbols_by_id
+        ]
+        resolved.sort(key=lambda r: (r[1], relevance_key(r[0], index)))
+        external = [ext for _depth, ext in external_hits]
+        ambiguous_count = 0
 
-    resolved_map, external_hits, bare_count, truncated = (
-        _walk_throws_transitive(index, sym.id, depth)
+    if lang is None:
+        return resolved, external, bare_count, ambiguous_count, truncated, 0
+
+    kept_resolved, kept_external, filtered_out = _throws_lang_filter(
+        index, resolved, external, lang
     )
-    resolved = [
-        (index.symbols_by_id[tid], d, lines)
-        for tid, (d, lines) in resolved_map.items()
-        if tid in index.symbols_by_id
-    ]
-    resolved.sort(key=lambda r: (r[1], relevance_key(r[0], index)))
-    external = [ext for _depth, ext in external_hits]
-    return resolved, external, bare_count, 0, truncated
+    return (
+        kept_resolved,
+        kept_external,
+        bare_count,
+        ambiguous_count,
+        truncated,
+        filtered_out,
+    )
 
 
 def _print_throws_json(
@@ -1091,6 +1310,8 @@ def _print_throws_json(
     limit: int,
     coverage: str | None,
     language_supported: bool,
+    lang: str | None,
+    lang_filtered_out: int,
 ) -> None:
     """JSON rendering for ``_run_throws``."""
     entries = [
@@ -1121,6 +1342,9 @@ def _print_throws_json(
         doc["coverage_warning"] = coverage
     if not language_supported:
         doc["language_supported"] = False
+    if lang is not None:
+        doc["lang_filter"] = lang
+        doc["lang_filtered_out"] = lang_filtered_out
     print(json.dumps(doc, indent=2))
 
 
@@ -1157,9 +1381,29 @@ def _throws_text_lines(
 
 
 def _throws_text_notes(
-    bare_count: int, ambiguous_count: int, truncated: bool, depth: int
+    bare_count: int,
+    ambiguous_count: int,
+    truncated: bool,
+    depth: int,
+    lang: str | None,
+    sym_language: str,
+    lang_mismatch: bool,
+    lang_filtered_out: int,
 ) -> None:
     """Print ``_run_throws``' disclosure notes (stderr, unconditional)."""
+    if lang_mismatch:
+        print(
+            f"  note: target's own language ({sym_language}) doesn't "
+            f"match --lang {lang} — no results can match",
+            file=sys.stderr,
+        )
+    if lang is not None and lang_filtered_out:
+        print(
+            f"  note: --lang {lang} filter applied — "
+            f"{lang_filtered_out} throw site(s) in another language "
+            "excluded",
+            file=sys.stderr,
+        )
     if bare_count:
         print(
             f"  note: {bare_count} re-raise site(s) omitted — type "
@@ -1189,6 +1433,7 @@ def _run_throws(
     as_json: bool,
     limit: int,
     budget: int | None,
+    lang: str | None = None,
 ) -> tuple[int, Meter | None]:
     """Execute the throws action: what calling ``sym`` can raise.
 
@@ -1208,6 +1453,12 @@ def _run_throws(
         as_json: Emit structured JSON instead of text.
         limit: Cap on text result rows.
         budget: Approximate token budget for the result rows.
+        lang: Restrict results to one language (e.g. ``"java"``) —
+            cuts cross-language noise on a multi-language repo.
+            ``None`` (default) applies no filter. For a one-level
+            query, a mismatch between ``lang`` and ``sym.language``
+            necessarily empties the result (disclosed explicitly
+            rather than reading as "target throws nothing").
 
     Returns:
         ``(exit_code, meter)`` — meter is ``None`` for JSON output or
@@ -1215,17 +1466,20 @@ def _run_throws(
     """
     language_supported = languages.exception_handling_supported(sym.language)
     if language_supported:
-        resolved, external, bare_count, ambiguous_count, truncated = (
-            _throws_gather(index, sym, transitive, depth)
-        )
+        (
+            resolved,
+            external,
+            bare_count,
+            ambiguous_count,
+            truncated,
+            lang_filtered_out,
+        ) = _throws_gather(index, sym, transitive, depth, lang)
     else:
-        resolved, external, bare_count, ambiguous_count, truncated = (
-            [],
-            [],
-            0,
-            0,
-            False,
-        )
+        resolved, external, bare_count, ambiguous_count = [], [], 0, 0
+        truncated, lang_filtered_out = False, 0
+    lang_mismatch = (
+        lang is not None and not transitive and lang != sym.language
+    )
     coverage = _coverage_note(index)
     if as_json:
         _print_throws_json(
@@ -1242,11 +1496,22 @@ def _run_throws(
             limit,
             coverage,
             language_supported,
+            lang,
+            lang_filtered_out,
         )
         return EXIT_OK, None
 
     prefix, rows = _throws_text_lines(sym, resolved, external, transitive)
-    _throws_text_notes(bare_count, ambiguous_count, truncated, depth)
+    _throws_text_notes(
+        bare_count,
+        ambiguous_count,
+        truncated,
+        depth,
+        lang,
+        sym.language,
+        lang_mismatch,
+        lang_filtered_out,
+    )
     if not rows:
         if not language_supported:
             print(
@@ -1333,12 +1598,116 @@ def _catch_entry(site: CatchSite) -> dict:
     }
 
 
+def _lang_filter_catches(
+    index: MapIndex, hits: list[CatchSite], lang: str
+) -> tuple[list[CatchSite], dict[str, int]]:
+    """Narrow ``hits`` to one recorded language, tallying what was
+    removed by the excluded site's own language for disclosure.
+
+    Returns:
+        ``(kept, removed_by_lang)`` — ``removed_by_lang`` maps each
+        excluded site's language (``"unknown"`` if the path has no
+        recorded language) to how many sites of that language were
+        dropped.
+    """
+    kept: list[CatchSite] = []
+    removed_by_lang: dict[str, int] = {}
+    for site in hits:
+        site_lang = index.languages_by_path.get(site.path)
+        if site_lang == lang:
+            kept.append(site)
+        else:
+            key = site_lang or "unknown"
+            removed_by_lang[key] = removed_by_lang.get(key, 0) + 1
+    return kept, removed_by_lang
+
+
+def _lang_filter_breakdown_text(removed_by_lang: dict[str, int]) -> str:
+    """Render a ``removed_by_lang`` tally as ``"28 javascript, 2
+    typescript"`` — highest count first, alphabetical on ties."""
+    ordered = sorted(removed_by_lang.items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{count} {name}" for name, count in ordered)
+
+
+def _print_catches_json(
+    target: str,
+    hits: list[CatchSite],
+    exact_count: int,
+    catch_all_count: int,
+    budget: int | None,
+    limit: int,
+    coverage: str | None,
+    has_jsts: bool,
+    excluded: int,
+    total: int,
+    lang_list: str,
+    lang: str | None,
+    lang_filtered_out: int,
+) -> None:
+    """JSON rendering for ``_run_catches``."""
+    entries = [_catch_entry(s) for s in hits]
+    kept, meter = _fit_entries(entries, budget, limit)
+    doc = {
+        "action": "catches",
+        "target": target,
+        "results": kept,
+        "exact_matches": exact_count,
+        "catch_all_matches": catch_all_count,
+        "meta": meter.as_dict(),
+    }
+    if lang is not None:
+        doc["lang_filter"] = lang
+        doc["lang_filtered_out"] = lang_filtered_out
+    if has_jsts:
+        doc["note"] = _CATCHES_CAVEAT
+    if coverage:
+        doc["coverage_warning"] = coverage
+    if excluded:
+        doc["language_coverage"] = {
+            "excluded_files": excluded,
+            "total_files": total,
+            "reason": (f"{lang_list} are not covered by throws/catches"),
+        }
+    print(json.dumps(doc, indent=2))
+
+
+def _catches_text_notes(
+    lang: str | None,
+    lang_filtered_out: int,
+    lang_breakdown: dict[str, int],
+    has_jsts: bool,
+    excluded: int,
+    total: int,
+    lang_list: str,
+) -> None:
+    """Print ``_run_catches``' disclosure notes (stderr, unconditional)."""
+    if lang is not None and lang_filtered_out:
+        breakdown = _lang_filter_breakdown_text(lang_breakdown)
+        print(
+            f"  note: --lang {lang} filter applied — "
+            f"{lang_filtered_out} catch clause(s) in another language "
+            f"excluded ({breakdown})",
+            file=sys.stderr,
+        )
+    if has_jsts:
+        print(f"  note: {_CATCHES_CAVEAT}", file=sys.stderr)
+    if excluded:
+        print(
+            f"  note: {excluded:,} of {total:,} mapped files are in a "
+            f"language ({lang_list}) this query doesn't cover; results "
+            "only reflect the other "
+            f"{total - excluded:,} files",
+            file=sys.stderr,
+        )
+
+
 def _run_catches(
     index: MapIndex,
     target: str,
     as_json: bool,
     limit: int,
     budget: int | None,
+    lang: str | None = None,
 ) -> tuple[int, Meter | None]:
     """Execute the catches action: who catches an exception of type
     ``target``.
@@ -1357,13 +1726,25 @@ def _run_catches(
         as_json: Emit structured JSON instead of text.
         limit: Cap on text result rows.
         budget: Approximate token budget for the result rows.
+        lang: Restrict results to one language (e.g. ``"java"``) —
+            cuts cross-language noise on a multi-language repo.
+            ``None`` (default) applies no filter.
 
     Returns:
         ``(exit_code, meter)`` — meter is ``None`` for JSON output or
         an empty result.
     """
     hits = [s for s in index.catches if _catch_site_matches(s, target)]
-    hits.sort(key=lambda s: (s.path, s.line, s.caller))
+    lang_filtered_out = 0
+    lang_breakdown: dict[str, int] = {}
+    if lang is not None:
+        hits, lang_breakdown = _lang_filter_catches(index, hits, lang)
+        lang_filtered_out = sum(lang_breakdown.values())
+    # Exact type-name matches sort ahead of catch-all matches (which
+    # match every query regardless of type) so the higher-signal rows
+    # survive --limit/--budget truncation first; lexical path/line/
+    # caller order is only the tiebreaker within each group.
+    hits.sort(key=lambda s: (s.bare, s.path, s.line, s.caller))
     exact_count = sum(1 for s in hits if not s.bare)
     catch_all_count = sum(1 for s in hits if s.bare)
     coverage = _coverage_note(index)
@@ -1374,31 +1755,25 @@ def _run_catches(
     # §3.1) is noise on a 100%-Go/C++/Python repo, where it can never
     # be relevant.
     has_jsts = any(
-        lang in {"javascript", "typescript", "tsx"}
-        for lang in index.languages_by_path.values()
+        site_lang in {"javascript", "typescript", "tsx"}
+        for site_lang in index.languages_by_path.values()
     )
     if as_json:
-        entries = [_catch_entry(s) for s in hits]
-        kept, meter = _fit_entries(entries, budget, limit)
-        doc = {
-            "action": "catches",
-            "target": target,
-            "results": kept,
-            "exact_matches": exact_count,
-            "catch_all_matches": catch_all_count,
-            "meta": meter.as_dict(),
-        }
-        if has_jsts:
-            doc["note"] = _CATCHES_CAVEAT
-        if coverage:
-            doc["coverage_warning"] = coverage
-        if excluded:
-            doc["language_coverage"] = {
-                "excluded_files": excluded,
-                "total_files": total,
-                "reason": (f"{lang_list} are not covered by throws/catches"),
-            }
-        print(json.dumps(doc, indent=2))
+        _print_catches_json(
+            target,
+            hits,
+            exact_count,
+            catch_all_count,
+            budget,
+            limit,
+            coverage,
+            has_jsts,
+            excluded,
+            total,
+            lang_list,
+            lang,
+            lang_filtered_out,
+        )
         return EXIT_OK, None
     header = (
         f"{len(hits)} catch clause(s) match '{target}': "
@@ -1407,16 +1782,15 @@ def _run_catches(
         else ""
     )
     rows = [_catch_row(index, s) for s in hits]
-    if has_jsts:
-        print(f"  note: {_CATCHES_CAVEAT}", file=sys.stderr)
-    if excluded:
-        print(
-            f"  note: {excluded:,} of {total:,} mapped files are in a "
-            f"language ({lang_list}) this query doesn't cover; results "
-            "only reflect the other "
-            f"{total - excluded:,} files",
-            file=sys.stderr,
-        )
+    _catches_text_notes(
+        lang,
+        lang_filtered_out,
+        lang_breakdown,
+        has_jsts,
+        excluded,
+        total,
+        lang_list,
+    )
     if not rows:
         print(f"(no catch clauses would handle '{target}')")
         if coverage:
@@ -1495,7 +1869,9 @@ def _env_entry(index: MapIndex, read: EnvRead) -> dict:
 def _run_env_not_found(index: MapIndex, needle: str) -> int:
     """Report an ``env`` target with zero matching read sites."""
     print(f"dekko: no env-var reads found for '{needle}'", file=sys.stderr)
-    close = _close_names(needle, sorted(index.env_reads_by_key))
+    close = _close_names(
+        needle, sorted(index.env_reads_by_key), exclude_verbatim=True
+    )
     if close:
         print("closest env vars: " + ", ".join(close), file=sys.stderr)
     coverage = _coverage_note(index)
@@ -1635,8 +2011,8 @@ def _run_env_list(
         f"{len(files)} files"
     )
     print(f"  note: {_ENV_CAVEAT}", file=sys.stderr)
-    lines_out = [header] + [_env_list_row(k, c) for k, c in counts]
-    return EXIT_OK, _emit_lines(lines_out, budget, limit)
+    lines_out = [_env_list_row(k, c) for k, c in counts]
+    return EXIT_OK, _emit_lines(lines_out, budget, limit, prefix=header)
 
 
 def _shadow_note(index: MapIndex, target: str) -> str | None:
@@ -1691,7 +2067,9 @@ def _run_uses_not_found(index: MapIndex, target: str) -> int:
         )
         return EXIT_NOT_FOUND
     print(f"dekko: no external reference matches '{target}'", file=sys.stderr)
-    close = _close_names(target, list(index.externals_by_name))
+    close = _close_names(
+        target, list(index.externals_by_name), exclude_verbatim=True
+    )
     if close:
         print("closest external names: " + ", ".join(close), file=sys.stderr)
     coverage = _coverage_note(index)
@@ -1841,14 +2219,22 @@ def _importers_entry(path: str, imp: Import, language: str) -> dict:
 def _run_importers_not_found(index: MapIndex, needle: str) -> int:
     """Report an ``importers`` target with zero matching imports."""
     print(f"dekko: no imports match '{needle}'", file=sys.stderr)
+    if languages.is_supported(needle):
+        print(
+            "  note: this looks like a file path -- 'importers' "
+            "matches an import string (e.g. 'org.foo.Bar', "
+            "'./utils'), not a path; for a file's own importers, "
+            f"try 'deps --file {needle}'",
+            file=sys.stderr,
+        )
     sources = sorted(
         {
-            imp.source
-            for imports in index.imports_by_path.values()
+            bare_import_source(imp, index.languages_by_path.get(path, ""))
+            for path, imports in index.imports_by_path.items()
             for imp in imports
         }
     )
-    close = _close_names(needle, sources)
+    close = _close_names(needle, sources, exclude_verbatim=True)
     if close:
         print("closest import sources: " + ", ".join(close), file=sys.stderr)
     coverage = _coverage_note(index)
@@ -1978,7 +2364,7 @@ def _run_type_not_found(index: MapIndex, needle: str) -> int:
     type_names = [
         s.name for s in index.symbols_by_id.values() if s.kind in TYPE_KINDS
     ]
-    close = _close_names(needle, type_names)
+    close = _close_names(needle, type_names, exclude_verbatim=True)
     if close:
         print("closest type names: " + ", ".join(close), file=sys.stderr)
     coverage = _coverage_note(index)
@@ -2294,7 +2680,7 @@ def _run_heritage_wrong_kind(sym: Symbol) -> int:
     print(
         f"dekko: '{sym.id}' is a {sym.kind}, not a type; "
         "supertypes/subtypes only apply to class/interface/enum/"
-        "struct/record/trait symbols",
+        "struct/record/trait/type_alias symbols",
         file=sys.stderr,
     )
     return EXIT_NOT_FOUND
@@ -2313,6 +2699,7 @@ def _print_heritage_json(
     coverage: str | None,
     ambig_in: int,
     ambig_out: int,
+    tiebreak_count: int,
 ) -> None:
     """JSON rendering for ``_run_heritage`` (supertypes/subtypes)."""
     entries = [_heritage_entry(index, s, rel, depth) for s, rel, depth in hits]
@@ -2344,6 +2731,8 @@ def _print_heritage_json(
         doc["ambiguous_in"] = ambig_in
     if ambig_out:
         doc["ambiguous_out"] = ambig_out
+    if tiebreak_count:
+        doc["heritage_synthetic_tiebreak_count"] = tiebreak_count
     print(json.dumps(doc, indent=2))
 
 
@@ -2379,6 +2768,20 @@ def _run_heritage(
     how ``_run_relation`` already scopes ``ambig_in``/``ambig_out`` to
     the target alone rather than every hop of a (non-existent, for
     calls) multi-hop traversal.
+
+    Unlike ``ambig_in``/``ambig_out``, the round-24 heritage
+    crate-decoy tiebreak note (``index.
+    heritage_synthetic_tiebreak_count``) is deliberately *not* scoped
+    to ``sym`` — it is a repo-wide count of how many heritage edges,
+    anywhere, rest on ``resolver._prefer_non_synthetic_crate_match``'s
+    convention-based guess rather than a structural match (see
+    ``.features/plans/round24/03-heritage-crate-decoy-tiebreak.md``).
+    Per-edge attribution would require threading a flag through every
+    resolved ``HeritageEdge``, a materially larger change than this
+    disclosure warrants; a nonzero repo-wide count is still actionable
+    signal ("this repo has at least one same-named-crate collision,
+    verify low-confidence-looking results") even without pinpointing
+    which specific edges in *this* query's own results it affected.
     """
     direction = _heritage_direction(action)
     hits = (
@@ -2401,6 +2804,7 @@ def _run_heritage(
         if action == "subtypes"
         else 0
     )
+    tiebreak_count = index.heritage_synthetic_tiebreak_count
     coverage = _coverage_note(index)
     if as_json:
         _print_heritage_json(
@@ -2416,6 +2820,7 @@ def _run_heritage(
             coverage,
             ambig_in,
             ambig_out,
+            tiebreak_count,
         )
         return EXIT_OK, None
     lines: list[str] = []
@@ -2438,6 +2843,14 @@ def _run_heritage(
             "type ambiguously — not counted here",
             file=sys.stderr,
         )
+    if tiebreak_count:
+        print(
+            f"  note: {tiebreak_count} heritage edge(s) repo-wide "
+            "resolved by preferring a non-test-fixture/vendor crate "
+            "root over a same-named one — verify if this repo's "
+            "workspace intentionally has two crates sharing a name",
+            file=sys.stderr,
+        )
     if not lines:
         print(f"(no {action} of {sym.id})")
         if coverage:
@@ -2453,13 +2866,162 @@ _TYPE_ZERO_FAN_NOTE = (
 )
 
 
+def _fan_line(
+    sym: Symbol, fan_in: int, fan_out: int, ambig_in: int, ambig_out: int
+) -> str:
+    """Build the ``fan-in: N, fan-out: M`` line with ambiguity notes.
+
+    Each ambiguous count is attached to the fan- value it qualifies:
+    ``ambig_in`` (additional same-named call sites the resolver
+    couldn't confidently attribute to this symbol) sits next to
+    ``fan-in``, ``ambig_out`` (this symbol's own ambiguously-resolved
+    outgoing calls) sits next to ``fan-out`` — see round23 issue 08.
+
+    Args:
+        sym: The symbol the card is for.
+        fan_in: Resolved incoming call count.
+        fan_out: Resolved outgoing call count.
+        ambig_in: Additional ambiguous incoming call sites.
+        ambig_out: Additional ambiguous outgoing calls.
+
+    Returns:
+        The formatted fan-in/fan-out line, without a trailing newline.
+    """
+    line = f"  fan-in: {fan_in}"
+    if ambig_in:
+        line += (
+            f" (+{ambig_in} additional call site(s) named "
+            f"'{sym.name}' resolved ambiguously — not counted)"
+        )
+    line += f", fan-out: {fan_out}"
+    if ambig_out:
+        line += (
+            f" (+{ambig_out} outgoing call(s) resolved ambiguously "
+            "— not counted)"
+        )
+    return line
+
+
+def _fan_in_note(sym_id: str) -> str:
+    """Build the fan-in axis-disambiguation note line.
+
+    Disclosed once a symbol has at least one caller, at the point a
+    reader might otherwise mistake fan-in for a total call-site count
+    (round-24 claude-code.md friction #3): fan-in is deduplicated by
+    caller (an ``Edge`` is built once per caller/callee pair), which
+    is a different axis from ``query callers --sites`` (one row per
+    call site) and ``sanity`` (a grep sweep that can also pick up
+    non-call textual mentions).
+
+    Args:
+        sym_id: The symbol's id, interpolated into the two pointers.
+
+    Returns:
+        The formatted note line, without a trailing newline.
+    """
+    return (
+        "  note: fan-in counts distinct callers (a caller invoking "
+        "this more than once still counts once) — use 'query "
+        f"callers {sym_id} --sites' for one row per call site, or "
+        f"'sanity {sym_id}' to cross-check against a grep sweep"
+    )
+
+
+def _sym_card_json(
+    index: MapIndex,
+    sym: Symbol,
+    fan_in: int,
+    fan_out: int,
+    ambig_in: int,
+    ambig_out: int,
+    referenced_by: int,
+    type_zero_fan: bool,
+    notes: bool,
+) -> dict:
+    """Build the ``query symbol --json`` doc.
+
+    Args:
+        index: Loaded map index.
+        sym: The symbol the card is for.
+        fan_in: Resolved incoming call count.
+        fan_out: Resolved outgoing call count.
+        ambig_in: Additional ambiguous incoming call sites.
+        ambig_out: Additional ambiguous outgoing calls.
+        referenced_by: Non-call reference count.
+        type_zero_fan: Whether the zero-fan type caveat applies.
+        notes: Whether to include anchored notes.
+
+    Returns:
+        The JSON-serializable doc.
+    """
+    doc = _sym_json(index, sym)
+    doc.update(
+        {
+            "language": sym.language,
+            "end_line": sym.end_line,
+            "fan_in": fan_in,
+            "fan_out": fan_out,
+        }
+    )
+    if ambig_in:
+        doc["ambiguous_in"] = ambig_in
+    if ambig_out:
+        doc["ambiguous_out"] = ambig_out
+    if referenced_by:
+        doc["referenced_by"] = referenced_by
+    if type_zero_fan:
+        doc["fan_note"] = _TYPE_ZERO_FAN_NOTE
+    if notes:
+        doc["notes"] = index.notes.get(sym.id, [])
+    return doc
+
+
+def _print_sym_card_text(
+    sym: Symbol,
+    fan_in: int,
+    fan_out: int,
+    ambig_in: int,
+    ambig_out: int,
+    referenced_by: int,
+    type_zero_fan: bool,
+    sym_notes: list[str],
+) -> None:
+    """Print the ``query symbol`` text-mode card.
+
+    Args:
+        sym: The symbol the card is for.
+        fan_in: Resolved incoming call count.
+        fan_out: Resolved outgoing call count.
+        ambig_in: Additional ambiguous incoming call sites.
+        ambig_out: Additional ambiguous outgoing calls.
+        referenced_by: Non-call reference count.
+        type_zero_fan: Whether the zero-fan type caveat applies.
+        sym_notes: Anchored notes to print, if any.
+    """
+    print(signature(sym))
+    print(f"  kind: {sym.kind} ({sym.language})")
+    print(f"  at: {sym.path}:{sym.start_line}-{sym.end_line}")
+    print(_fan_line(sym, fan_in, fan_out, ambig_in, ambig_out))
+    if fan_in:
+        print(_fan_in_note(sym.id))
+    if referenced_by:
+        # fan-in alone can read as "definitely unused" for a callback
+        # wired up by reference and never itself called (bug #2b) —
+        # this line is what stops that misread.
+        print(f"  referenced-by: {referenced_by} (not called)")
+    if type_zero_fan:
+        print(f"  note: {_TYPE_ZERO_FAN_NOTE}")
+    for text in sym_notes:
+        print(f"  note: {text}")
+
+
 def _run_symbol(
     index: MapIndex, sym: Symbol, as_json: bool, notes: bool
 ) -> tuple[int, Meter | None]:
     """Execute the symbol card action."""
     fan_in = len(index.calls_in.get(sym.id, []))
     fan_out = len(index.calls_out.get(sym.id, []))
-    ambig_in = len(index.ambiguous_in.get(sym.id, []))
+    ambig_in, ambig_out = ambiguous_counts(index, sym)
     referenced_by = len(index.referenced_in.get(sym.id, []))
     sym_notes = index.notes.get(sym.id, []) if notes else []
     # A struct/class/interface/... only ever gets call/reference edges
@@ -2473,41 +3035,29 @@ def _run_symbol(
         and not referenced_by
     )
     if as_json:
-        doc = _sym_json(index, sym)
-        doc.update(
-            {
-                "language": sym.language,
-                "end_line": sym.end_line,
-                "fan_in": fan_in,
-                "fan_out": fan_out,
-            }
+        doc = _sym_card_json(
+            index,
+            sym,
+            fan_in,
+            fan_out,
+            ambig_in,
+            ambig_out,
+            referenced_by,
+            type_zero_fan,
+            notes,
         )
-        if ambig_in:
-            doc["ambiguous_in"] = ambig_in
-        if referenced_by:
-            doc["referenced_by"] = referenced_by
-        if type_zero_fan:
-            doc["fan_note"] = _TYPE_ZERO_FAN_NOTE
-        if notes:
-            doc["notes"] = index.notes.get(sym.id, [])
         print(json.dumps(doc, indent=2))
         return EXIT_OK, None
-    print(signature(sym))
-    print(f"  kind: {sym.kind} ({sym.language})")
-    print(f"  at: {sym.path}:{sym.start_line}-{sym.end_line}")
-    fan_line = f"  fan-in: {fan_in}, fan-out: {fan_out}"
-    if ambig_in:
-        fan_line += f" (+{ambig_in} ambiguous call sites not counted)"
-    print(fan_line)
-    if referenced_by:
-        # fan-in alone can read as "definitely unused" for a callback
-        # wired up by reference and never itself called (bug #2b) —
-        # this line is what stops that misread.
-        print(f"  referenced-by: {referenced_by} (not called)")
-    if type_zero_fan:
-        print(f"  note: {_TYPE_ZERO_FAN_NOTE}")
-    for text in sym_notes:
-        print(f"  note: {text}")
+    _print_sym_card_text(
+        sym,
+        fan_in,
+        fan_out,
+        ambig_in,
+        ambig_out,
+        referenced_by,
+        type_zero_fan,
+        sym_notes,
+    )
     return EXIT_OK, None
 
 
@@ -2778,6 +3328,22 @@ def _run_cohesion(
     for row in kept:
         print(row)
     print(_COHESION_NOTE)
+    if budget is not None and meter.tokens > budget:
+        # fit_to_budget never splits mid-row (a connected component is
+        # reported whole or not at all -- see the module's own "never
+        # split mid-row" convention), so a budget tighter than even
+        # the first kept row's own cost is silently exceeded with no
+        # visible sign the request was overridden, unlike ``lean
+        # --budget``'s own floor-exceeded disclosure (round 25 finding
+        # #18). ``meter.tokens`` is exactly what got rendered, so a
+        # mismatch against the requested ``budget`` is that floor
+        # having bent the request upward.
+        print(
+            f"  note: requested budget {budget} is below this "
+            f"result's ~{meter.tokens}-token floor (rows are never "
+            "split mid-row); using the floor instead",
+            file=sys.stderr,
+        )
     return EXIT_OK, meter
 
 
@@ -2790,6 +3356,7 @@ def _dispatch_scan(
     budget: int | None,
     exact: bool,
     env_list: bool,
+    lang: str | None,
 ) -> tuple[int, Meter | None] | None:
     """Route the whole-repo-scan actions that never resolve a symbol
     target (``file``/``uses``/``type``/``importers``/``catches``/
@@ -2809,7 +3376,7 @@ def _dispatch_scan(
     if action == "importers":
         return _run_importers(index, target, exact, as_json, limit, budget)
     if action == "catches":
-        return _run_catches(index, target, as_json, limit, budget)
+        return _run_catches(index, target, as_json, limit, budget, lang)
     if action == "cohesion":
         return _run_cohesion(index, target, as_json, limit, budget)
     if action == "env":
@@ -2834,10 +3401,11 @@ def _dispatch(
     min_shared: int,
     depth: int,
     env_list: bool,
+    lang: str | None,
 ) -> tuple[int, Meter | None]:
     """Route one query action to its executor."""
     scanned = _dispatch_scan(
-        index, action, target, as_json, limit, budget, exact, env_list
+        index, action, target, as_json, limit, budget, exact, env_list, lang
     )
     if scanned is not None:
         return scanned
@@ -2857,7 +3425,7 @@ def _dispatch(
         return _run_peers(index, sym, min_shared, as_json, limit, budget)
     if action == "throws":
         return _run_throws(
-            index, sym, transitive, depth, as_json, limit, budget
+            index, sym, transitive, depth, as_json, limit, budget, lang
         )
     return _run_relation(index, action, sym, as_json, limit, budget, sites)
 
@@ -2877,6 +3445,7 @@ def run(
     min_shared: int = DEFAULT_MIN_SHARED,
     depth: int = DEFAULT_THROWS_DEPTH,
     env_list: bool = False,
+    lang: str | None = None,
 ) -> int:
     """Execute one query action against a loaded index.
 
@@ -2926,6 +3495,9 @@ def run(
             env-var key read anywhere (``env --list``) instead of
             looking up one ``target`` key. Ignored for every other
             action.
+        lang: For ``catches``/``throws``, restrict results to one
+            language (e.g. ``"java"``) — cuts cross-language noise on
+            a multi-language repo. Ignored for every other action.
 
     Returns:
         Process exit code.
@@ -2950,6 +3522,7 @@ def run(
             min_shared,
             depth,
             env_list,
+            lang,
         )
     text = buf.getvalue()
     sys.stdout.write(text)

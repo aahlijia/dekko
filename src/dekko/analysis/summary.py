@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from dekko.core import grammars
-from dekko.analysis import stats
+from dekko.analysis import ambiguous, stats
 from dekko.render.mapfile import MapIndex, format_unsupported
 from dekko.core.model import TYPE_KINDS
 from dekko.core.resolver import MODULE_CALLER_SUFFIX
@@ -130,11 +130,14 @@ def compute(index: MapIndex) -> dict:
     """Build the summary document."""
     base = stats.compute(index, _TOP)
     real_errors, no_grammar_errors = _split_errors(index)
+    ambiguous_sites, ambiguous_rate = ambiguous.cheap_rate(index)
     return {
         "root": index.root_label,
         "files": base["files"],
         "symbols": base["symbols"],
         "edges": base["edges"],
+        "ambiguous_sites": ambiguous_sites,
+        "ambiguous_rate": round(ambiguous_rate, 4),
         "languages": base["languages"],
         "directories": _directories(index)[:_MAX_DIRS],
         "top_fan_in": base["top_fan_in"],
@@ -300,6 +303,9 @@ def render_text(index: MapIndex) -> str:
     note = format_unsupported(index.provenance)
     if note:
         lines.append(f"coverage: {note} — results below may be incomplete")
+    ambiguous_note = ambiguous.high_rate_note(index)
+    if ambiguous_note:
+        lines.append(ambiguous_note)
     lines.append("directories (files/symbols, int+cross edges):")
     for d in doc["directories"]:
         suffix = f"  — {d['purpose']}" if d["purpose"] else ""

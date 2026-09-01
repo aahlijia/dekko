@@ -4,22 +4,56 @@ from dataclasses import dataclass, field
 
 # Type-container ``Symbol.kind`` values — every non-callable, non-
 # variable definition a language can produce (classes plus the
-# interface/enum/struct/record/trait shapes other languages use for
-# the same "named type" concept). Shared by every renderer/summary
-# that used to check ``kind == "class"`` alone and would otherwise
-# silently undercount once ``extractor.py`` stopped lumping all of
-# these into ``"class"`` (see ``extractor._CLASSDEF_KIND``).
+# interface/enum/struct/record/trait/type_alias shapes other
+# languages use for the same "named type" concept). Shared by every
+# renderer/summary that used to check ``kind == "class"`` alone and
+# would otherwise silently undercount once ``extractor.py`` stopped
+# lumping all of these into ``"class"`` (see
+# ``extractor._CLASSDEF_KIND``).
 TYPE_KINDS = frozenset(
-    {"class", "interface", "enum", "struct", "record", "trait"}
+    {
+        "class",
+        "interface",
+        "enum",
+        "struct",
+        "record",
+        "trait",
+        "type_alias",
+    }
 )
 
 
 @dataclass
 class Param:
-    """A single function parameter."""
+    """A single function parameter.
+
+    Attributes:
+        name: Parameter name as written (display-oriented — carries a
+            ``*``/``**``/``...`` prefix for a splat/rest/variadic
+            parameter, a trailing ``?`` for a TS optional parameter,
+            and the raw ``self``/``&self``/``&mut self`` text for a
+            Rust ``self_parameter``; not a normalized identifier).
+        type: Declared type, or ``None``.
+        has_default: Whether the parameter carries a default value
+            (Python ``default_parameter``/``typed_default_parameter``,
+            JS ``assignment_pattern``, TS ``optional_parameter`` or a
+            ``required_parameter`` with a ``value`` field) — makes it
+            optional at the call site without being variadic. Used by
+            ``resolver._param_arity`` to compute a candidate's minimum
+            required-argument count; ``False`` (required) for every
+            parameter shape that doesn't set it, including languages
+            with no default-parameter syntax at all (Rust, Go, C/C++).
+        variadic: Whether the parameter collects zero or more
+            arguments (Python ``*args``/``**kwargs``, JS ``...rest``,
+            TS ``...rest``, Rust/Go/C/C++ ``...``) — makes the
+            candidate's maximum arity unbounded. ``False`` for every
+            ordinary parameter.
+    """
 
     name: str
     type: str | None = None
+    has_default: bool = False
+    variadic: bool = False
 
 
 @dataclass
@@ -45,7 +79,8 @@ class Symbol:
             scope ``const``/``let`` exports in JS/TS; a plain data
             binding, not a callable), or one of ``TYPE_KINDS``
             (``class``, ``interface``, ``enum``, ``struct``,
-            ``record``, ``trait``) for named-type definitions.
+            ``record``, ``trait``, ``type_alias``) for named-type
+            definitions.
         path: Repo-relative POSIX path of the defining file.
         language: Language name from the registry.
         params: Ordered parameters with types when declared.
@@ -102,6 +137,15 @@ class RawCall:
         receiver: Leading segment when present (``self``, ``obj``,
             module alias), else ``None``.
         line: 1-based line of the call.
+        arg_count: Number of arguments written at this call site
+            (``argument_list``/``arguments`` node's named-child
+            count), or ``None`` when the call's language doesn't
+            capture an ``@args`` node at all (every Tier-2/generic-
+            grammar language — see ``extractor_generic.py`` — or an
+            args-capture miss on a Tier-1 language). Read by
+            ``resolver._arity_plausible`` to gate the single-candidate
+            resolution rung; ``None`` is the safe "no signal" value,
+            never treated as "zero arguments written."
     """
 
     caller_id: str | None
@@ -110,6 +154,7 @@ class RawCall:
     name: str
     receiver: str | None = None
     line: int = 0
+    arg_count: int | None = None
 
 
 @dataclass
@@ -137,6 +182,10 @@ class RawRef:
             identifier, never a ``.`` accessor. Present only so the
             call-resolution ladder's shared helpers work unmodified.
         line: 1-based line of the reference.
+        arg_count: Always ``None`` — a bare reference has no argument
+            list. Present only for shape parity with ``RawCall`` so
+            the resolver's shared ``_pick_candidate`` ladder (see
+            ``RawCall.arg_count``) works unmodified across both types.
     """
 
     caller_id: str | None
@@ -144,6 +193,7 @@ class RawRef:
     name: str
     receiver: str | None = None
     line: int = 0
+    arg_count: int | None = None
 
 
 @dataclass
@@ -577,6 +627,19 @@ class CallGraph:
             straight from each file's ``FileMap.env_reads``, no
             resolver pass involved (the literal key text is already
             the fully-resolved fact).
+        heritage_synthetic_tiebreak_count: How many entries in
+            ``heritage`` were resolved via the round-24 heritage
+            crate-decoy tiebreak (``.features/plans/round24/
+            03-heritage-crate-decoy-tiebreak.md``,
+            ``resolver._prefer_non_synthetic_crate_match``) rather than
+            an unambiguous structural match — a convention-based guess
+            about which of two same-named Rust crates is "the real
+            one" when a crate-name hint collides across 2+ registered
+            crate roots and exactly one candidate's ancestor path
+            avoids a test-fixture/vendor marker. Surfaced so ``query
+            subtypes``/``supertypes`` can disclose this lower-certainty
+            resolution rather than blending it silently into every
+            other, structurally-resolved edge.
     """
 
     edges: list[Edge] = field(default_factory=list)
@@ -604,3 +667,4 @@ class CallGraph:
     throws_bare: list[tuple[str, str, int]] = field(default_factory=list)
     catches: list[CatchSite] = field(default_factory=list)
     env_reads: list[EnvRead] = field(default_factory=list)
+    heritage_synthetic_tiebreak_count: int = 0

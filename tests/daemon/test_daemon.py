@@ -268,9 +268,9 @@ def test_no_daemon_flag_skips_routing(
     calls: list[str] = []
     original = daemon.try_daemon
 
-    def _spy(args):  # noqa: ANN001, ANN202
+    def _spy(args, **kwargs):  # noqa: ANN001, ANN003, ANN202
         calls.append(getattr(args, "command", None))
-        return original(args)
+        return original(args, **kwargs)
 
     monkeypatch.setattr(cli.daemon_mod, "try_daemon", _spy)
 
@@ -307,7 +307,7 @@ def test_main_reports_abandoned_daemon_request_without_local_fallback(
         calls.append("run_status")
         return 0
 
-    def _raise(args: object) -> tuple[int, str, str] | None:
+    def _raise(args: object, **kwargs: object) -> tuple[int, str, str] | None:
         raise daemon.DaemonRequestAbandonedError("simulated timeout")
 
     monkeypatch.setattr(cli, "run_status", _spy_run_status)
@@ -328,7 +328,7 @@ def test_no_daemon_flag_bypasses_abandoned_request_handling(
     """``--no-daemon`` must skip ``try_daemon`` entirely, so it can
     never observe (or be blocked by) an abandoned-request signal."""
 
-    def _raise(args: object) -> tuple[int, str, str] | None:
+    def _raise(args: object, **kwargs: object) -> tuple[int, str, str] | None:
         raise daemon.DaemonRequestAbandonedError("should never be called")
 
     monkeypatch.setattr(cli.daemon_mod, "try_daemon", _raise)
@@ -408,7 +408,15 @@ def test_stop_blocks_until_artifacts_are_gone_before_returning(
     thread.start()
     try:
         assert _wait_until(transport.exists)
-        assert dt.is_daemon_reachable(transport)
+        # transport.exists() only checks the main socket's file --
+        # bind_status_listener()/status_thread.start() run afterward
+        # in serve_daemon(), so there's a real (if usually brief) gap
+        # where the main socket file exists but the status-only
+        # listener is_daemon_reachable() actually probes isn't
+        # accepting yet. Poll like every other reachability check in
+        # this file (see line ~615/~2112) instead of a single
+        # immediate assertion.
+        assert _wait_until(lambda: dt.is_daemon_reachable(transport))
 
         assert daemon.stop(short_root) == 0
         assert not transport.exists()
@@ -833,6 +841,21 @@ def test_scaled_client_timeout_is_capped(
     )
 
 
+def test_timeout_bytes_per_second_reflects_round24_recalibration() -> None:
+    """Round-24 finding: the pre-recalibration 5.5 MB/s fit was made
+    against a pre-symbol-interning map.json and stayed stale after
+    ``1f06c44e`` shrank map.json's on-disk size ~5.15x without
+    changing build cost, under-provisioning every non-rev-cache-miss
+    daemon-routed command on large repos by roughly that same factor.
+    Asserts bounds, not an exact pin -- this is explicitly a
+    single-repo fit (tensorflow) per the constant's own comment and
+    may reasonably move again with a second large-repo data point, but
+    it must never silently regress back toward the old, stale value.
+    """
+    assert daemon._TIMEOUT_BYTES_PER_SECOND < 5_500_000
+    assert 900_000 <= daemon._TIMEOUT_BYTES_PER_SECOND <= 1_500_000
+
+
 def test_try_daemon_uses_scaled_client_timeout(
     daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -874,6 +897,451 @@ def test_try_daemon_uses_scaled_client_timeout(
     assert result is not None
     assert seen == [root.resolve()]
     assert seen_timeouts == [sentinel]
+
+
+# ---------------------------------------------------------------------
+# Round-24 §2 fix: rev-cache-miss-aware timeout for diff/affected/
+# workset, scaled by tracked-file count instead of map.json size.
+# ---------------------------------------------------------------------
+
+
+def test_scaled_client_timeout_for_revcache_miss_floors_when_untrackable(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unresolvable rev (``tracked_at_rev`` returns ``None``) -- the
+    floor, same failure-mode contract as ``_scaled_client_timeout``
+    with no ``map.json``."""
+    monkeypatch.setattr(daemon.diff_mod, "tracked_at_rev", lambda r, rev: None)
+    assert (
+        daemon._scaled_client_timeout_for_revcache_miss(short_root, "HEAD")
+        == daemon._CLIENT_TIMEOUT
+    )
+
+
+def test_scaled_client_timeout_for_revcache_miss_floors_for_few_files(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A small tracked-file count never drops the budget below the
+    floor."""
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: ["a.py", "b.py"]
+    )
+    assert (
+        daemon._scaled_client_timeout_for_revcache_miss(short_root, "HEAD")
+        == daemon._CLIENT_TIMEOUT
+    )
+
+
+def test_scaled_client_timeout_for_revcache_miss_scales_past_the_floor(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-24 §2 fix: a large tracked-file count widens the budget,
+    scaled by ``_TIMEOUT_SECONDS_PER_TRACKED_FILE`` rather than
+    ``map.json`` size -- the tensorflow repro this fix targets never
+    even reaches a ``map.json`` read on this path.
+
+    Uses a tiny ``_TIMEOUT_SECONDS_PER_TRACKED_FILE`` rather than a
+    genuinely large file list, matching
+    ``test_scaled_client_timeout_scales_past_the_floor_for_a_large_map``'s
+    own convention for its byte-size sibling.
+    """
+    monkeypatch.setattr(daemon, "_TIMEOUT_SECONDS_PER_TRACKED_FILE", 1.0)
+    candidates = [f"f{i}.py" for i in range(100)]
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
+    )
+    scaled = daemon._scaled_client_timeout_for_revcache_miss(
+        short_root, "HEAD"
+    )
+    assert scaled == pytest.approx(100.0)
+    assert scaled > daemon._CLIENT_TIMEOUT
+
+
+def test_scaled_client_timeout_for_revcache_miss_is_capped(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pathologically large tracked-file count is capped, not
+    unbounded -- same cap ``_scaled_client_timeout`` shares."""
+    monkeypatch.setattr(daemon, "_TIMEOUT_SECONDS_PER_TRACKED_FILE", 1.0)
+    candidates = [f"f{i}.py" for i in range(10_000)]
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
+    )
+    assert (
+        daemon._scaled_client_timeout_for_revcache_miss(short_root, "HEAD")
+        == daemon._SCALED_CLIENT_TIMEOUT_CAP
+    )
+
+
+def test_target_rev_for_workset_symbol_seed_is_none(
+    short_root: Path,
+) -> None:
+    """A ``workset --symbol`` seed never reaches ``old_snapshot`` -- no
+    rev exists to scale a timeout by."""
+    args = cli.build_subcommand_parser().parse_args(
+        ["workset", "--symbol", "foo", "--root", str(short_root)]
+    )
+    assert daemon._target_rev_for("workset", args) is None
+
+
+def test_target_rev_for_explicit_rev_wins(short_root: Path) -> None:
+    """An explicit positional ``REV`` is used as-is -- no provenance
+    sidecar read needed (and none exists here)."""
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "deadbeef", "--root", str(short_root)]
+    )
+    assert daemon._target_rev_for("affected", args) == "deadbeef"
+
+
+def test_target_rev_for_defaults_to_provenance_git_commit(
+    short_root: Path,
+) -> None:
+    """No ``REV`` given -- falls back to the map's own recorded
+    ``git_commit`` provenance, matching ``diff.run``'s default chain
+    (``rev or prov.get("git_commit") or "HEAD"``)."""
+    dekko_dir = short_root / ".dekko"
+    dekko_dir.mkdir()
+    (dekko_dir / "map.json").write_bytes(
+        _json.dumps({"provenance": {"git_commit": "c" * 40}}).encode()
+    )
+    args = cli.build_subcommand_parser().parse_args(
+        ["diff", "--root", str(short_root)]
+    )
+    assert daemon._target_rev_for("diff", args) == "c" * 40
+
+
+def test_target_rev_for_defaults_to_head_with_no_provenance(
+    short_root: Path,
+) -> None:
+    """Neither a ``REV`` nor a recorded ``git_commit`` -- falls back to
+    ``"HEAD"``, matching ``diff.run``'s own final default."""
+    args = cli.build_subcommand_parser().parse_args(
+        ["diff", "--root", str(short_root)]
+    )
+    assert daemon._target_rev_for("diff", args) == "HEAD"
+
+
+def test_try_daemon_uses_revcache_miss_timeout_for_a_genuine_miss(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``affected``/``diff``/``workset`` route through the tracked-
+    file-count-scaled timeout, not the ``map.json``-size-scaled one,
+    when the target rev has no rev-cache entry yet."""
+    root = daemon_thread_root
+    sentinel = 54321.0
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda r, rev: sentinel,
+    )
+    # A wrong value here would mean the test passed for the wrong
+    # reason (the miss-aware path never actually got picked).
+    monkeypatch.setattr(daemon, "_scaled_client_timeout", lambda r: 999999.0)
+
+    transport_cls = type(dt.default_transport_for(root))
+    original_connect = transport_cls.client_connect
+    seen_timeouts: list[float] = []
+
+    def _spy_connect(
+        self: dt.DaemonTransport, timeout: float
+    ) -> socket.socket:
+        seen_timeouts.append(timeout)
+        return original_connect(self, timeout)
+
+    monkeypatch.setattr(transport_cls, "client_connect", _spy_connect)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+    daemon.try_daemon(args)
+
+    assert seen_timeouts == [sentinel]
+
+
+def test_try_daemon_uses_ordinary_timeout_on_a_revcache_hit(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rev-cache *hit* is a fast disk read regardless of repo size --
+    ``affected``/``diff``/``workset`` keep using the ordinary
+    ``map.json``-size-scaled budget, unchanged, exactly as they did
+    before this fix."""
+    root = daemon_thread_root
+    sentinel = 13579.0
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: True)
+    monkeypatch.setattr(daemon, "_scaled_client_timeout", lambda r: sentinel)
+    # A wrong value here would mean the test passed for the wrong
+    # reason (the miss-aware path got picked despite the hit).
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda r, rev: 999999.0,
+    )
+
+    transport_cls = type(dt.default_transport_for(root))
+    original_connect = transport_cls.client_connect
+    seen_timeouts: list[float] = []
+
+    def _spy_connect(
+        self: dt.DaemonTransport, timeout: float
+    ) -> socket.socket:
+        seen_timeouts.append(timeout)
+        return original_connect(self, timeout)
+
+    monkeypatch.setattr(transport_cls, "client_connect", _spy_connect)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+    daemon.try_daemon(args)
+
+    assert seen_timeouts == [sentinel]
+
+
+def test_try_daemon_other_commands_never_use_revcache_miss_timeout(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression check: this fix must not touch behavior for every
+    daemon-routed command outside ``diff``/``affected``/``workset`` --
+    ``query``/``search``/``outline``/etc. keep using
+    ``_scaled_client_timeout(root)`` exactly as before, never the new
+    rev-cache-miss branch at all."""
+    root = daemon_thread_root
+    called = False
+
+    def _fail_if_called(r: Path, rev: str) -> float:
+        nonlocal called
+        called = True
+        return 1.0
+
+    monkeypatch.setattr(
+        daemon, "_scaled_client_timeout_for_revcache_miss", _fail_if_called
+    )
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["status", "--root", str(root), "--json"]
+    )
+    daemon.try_daemon(args)
+
+    assert called is False
+
+
+# ---------------------------------------------------------------------
+# Round-25: default a daemon-routed cold-rev-cache resolve to
+# --jobs 0 (all cores) when the caller never chose --jobs explicitly
+# (`.features/plans/round25/
+# 04-daemon-coldcache-timeout-parallelism.md`).
+# ---------------------------------------------------------------------
+
+
+def test_try_daemon_defaults_jobs_to_zero_on_a_genuine_miss_when_not_explicit(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare ``dekko affected`` (no ``--jobs``, so argparse's own
+    sequential default of ``1`` applies) routed through the daemon on
+    a genuine rev-cache miss is forwarded with ``jobs=0`` once
+    ``jobs_explicit=False`` signals the caller never chose the value
+    on purpose. The caller's own ``Namespace`` must stay untouched, so
+    a fallback to direct execution (were the daemon unreachable) would
+    still see the caller's original, un-overridden choice."""
+    root = daemon_thread_root
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda r, rev: 999.0,
+    )
+
+    seen_jobs: list[int | None] = []
+    original_send = daemon._send_daemon_request
+
+    def _spy_send(sock, transport, command, args):  # noqa: ANN001, ANN202
+        seen_jobs.append(getattr(args, "jobs", None))
+        return original_send(sock, transport, command, args)
+
+    monkeypatch.setattr(daemon, "_send_daemon_request", _spy_send)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+    assert args.jobs == 1  # argparse's own default, not user-chosen
+
+    daemon.try_daemon(args, jobs_explicit=False)
+
+    assert seen_jobs == [0]
+    assert args.jobs == 1  # caller's own Namespace left unmodified
+
+
+def test_try_daemon_preserves_an_explicit_jobs_one_on_a_genuine_miss(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``dekko affected --jobs 1`` (a deliberate sequential choice, e.g.
+    a memory-constrained CI environment) is forwarded unchanged --
+    ``jobs_explicit=True`` must suppress the round-25 override even
+    though ``args.jobs`` still equals the argparse default's value."""
+    root = daemon_thread_root
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda r, rev: 999.0,
+    )
+
+    seen_jobs: list[int | None] = []
+    original_send = daemon._send_daemon_request
+
+    def _spy_send(sock, transport, command, args):  # noqa: ANN001, ANN202
+        seen_jobs.append(getattr(args, "jobs", None))
+        return original_send(sock, transport, command, args)
+
+    monkeypatch.setattr(daemon, "_send_daemon_request", _spy_send)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root), "--jobs", "1"]
+    )
+
+    daemon.try_daemon(args, jobs_explicit=True)
+
+    assert seen_jobs == [1]
+
+
+def test_try_daemon_does_not_override_jobs_on_a_revcache_hit(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rev-cache *hit* never takes the expensive cold-resolve path,
+    so the round-25 override must not apply even when the caller never
+    chose ``--jobs`` explicitly -- there's no slow work here to justify
+    burning idle cores for."""
+    root = daemon_thread_root
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: True)
+    monkeypatch.setattr(daemon, "_scaled_client_timeout", lambda r: 999.0)
+
+    seen_jobs: list[int | None] = []
+    original_send = daemon._send_daemon_request
+
+    def _spy_send(sock, transport, command, args):  # noqa: ANN001, ANN202
+        seen_jobs.append(getattr(args, "jobs", None))
+        return original_send(sock, transport, command, args)
+
+    monkeypatch.setattr(daemon, "_send_daemon_request", _spy_send)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+
+    daemon.try_daemon(args, jobs_explicit=False)
+
+    assert seen_jobs == [1]
+
+
+def test_try_daemon_abandoned_error_carries_the_jobs_actually_sent(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-25 Fix 2: ``DaemonRequestAbandonedError.jobs`` reflects
+    whatever value was actually forwarded to the daemon for the
+    abandoned request -- including the Fix 1 override -- so
+    ``cli.py``'s error message can tell an already-parallel abandoned
+    request apart from a still-sequential one."""
+    root = daemon_thread_root
+
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda r, rev: 999.0,
+    )
+
+    def _raise_abandoned(sock):  # noqa: ANN001, ANN202
+        raise daemon.DaemonRequestAbandonedError("simulated timeout")
+
+    monkeypatch.setattr(daemon, "_recv_daemon_response", _raise_abandoned)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+
+    with pytest.raises(daemon.DaemonRequestAbandonedError) as excinfo:
+        daemon.try_daemon(args, jobs_explicit=False)
+    assert excinfo.value.jobs == 0  # Fix 1's override was applied
+
+    with pytest.raises(daemon.DaemonRequestAbandonedError) as excinfo2:
+        daemon.try_daemon(args, jobs_explicit=True)
+    assert excinfo2.value.jobs == 1  # caller's explicit choice kept
+
+
+def test_jobs_flag_explicit_detects_bare_and_equals_forms() -> None:
+    """``cli._jobs_flag_explicit`` must catch both ``--jobs N`` and
+    ``--jobs=N`` and must not fire on args that merely contain 'jobs'
+    as a substring of something else."""
+    assert cli._jobs_flag_explicit(["diff", "--jobs", "0"]) is True
+    assert cli._jobs_flag_explicit(["diff", "--jobs=1"]) is True
+    assert cli._jobs_flag_explicit(["diff", "--root", "."]) is False
+    assert cli._jobs_flag_explicit([]) is False
+
+
+def test_main_computes_jobs_explicit_from_raw_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``cli.main()`` must forward the raw-argv-derived ``jobs_explicit``
+    signal into ``try_daemon`` -- a bare ``dekko diff`` is not
+    user-explicit, ``dekko diff --jobs 1`` and ``--jobs=0`` both are."""
+    seen: list[bool | None] = []
+
+    def _spy(args, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        seen.append(kwargs.get("jobs_explicit"))
+        return None  # daemon unreachable -> falls back to direct exec
+
+    monkeypatch.setattr(cli.daemon_mod, "try_daemon", _spy)
+    monkeypatch.setattr(cli, "run_diff", lambda args: 0)
+
+    cli.main(["diff", "--root", "/nonexistent"])
+    assert seen == [False]
+
+    seen.clear()
+    cli.main(["diff", "--root", "/nonexistent", "--jobs", "1"])
+    assert seen == [True]
+
+    seen.clear()
+    cli.main(["diff", "--root", "/nonexistent", "--jobs=0"])
+    assert seen == [True]
+
+
+def test_report_daemon_request_abandoned_hints_jobs_zero_when_sequential(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Round-25 Fix 2: when the abandoned request ran with ``--jobs 1``
+    (sequential), the timeout message names ``--jobs 0`` as the actual
+    lever likely to avoid a repeat, instead of only apologizing."""
+    exc = daemon.DaemonRequestAbandonedError("timed out", jobs=1)
+
+    code = cli._report_daemon_request_abandoned(exc)
+
+    assert code == daemon.EXIT_DAEMON_ABANDONED
+    err = capsys.readouterr().err
+    assert "--jobs 0" in err
+    assert "sequential" in err
+
+
+@pytest.mark.parametrize("jobs", [0, None])
+def test_report_daemon_request_abandoned_omits_hint_when_not_sequential(
+    jobs: int | None, capsys: pytest.CaptureFixture
+) -> None:
+    """No ``--jobs`` hint when the abandoned request was already
+    parallel (``jobs=0``) or the command has no ``jobs`` attribute at
+    all (``jobs=None``, e.g. ``query``/``outline``/etc.) -- there's
+    nothing more actionable to suggest in either case."""
+    exc = daemon.DaemonRequestAbandonedError("timed out", jobs=jobs)
+
+    cli._report_daemon_request_abandoned(exc)
+
+    err = capsys.readouterr().err
+    assert "sequential" not in err
+    assert "did not respond in time" in err
 
 
 def test_status_true_positive_while_daemon_busy_on_slow_request(
@@ -1470,6 +1938,133 @@ def _deep_root(short_root: Path) -> Path:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is POSIX-only")
+class _FakeStartTransport:
+    """Minimal stub for exercising ``start()``'s bind-confirmation poll.
+
+    ``exists_after`` is the number of ``exists()`` calls that return
+    ``False`` before the transition to ``True`` (``None`` means it
+    never confirms, simulating a child that never finishes binding
+    within the poll cap).
+    """
+
+    def __init__(self, exists_after: int | None) -> None:
+        self._calls = 0
+        self._exists_after = exists_after
+
+    def preflight_check(self) -> None:
+        return None
+
+    def cleanup(self) -> None:
+        return None
+
+    def describe(self) -> str:
+        return "fake transport"
+
+    def exists(self) -> bool:
+        self._calls += 1
+        if self._exists_after is None:
+            return False
+        return self._calls > self._exists_after
+
+
+def test_start_waits_for_bind_confirmation_before_reporting_started(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Round-23 §13: ``start()`` used to return (and print "started")
+    the instant ``spawn_detached`` launched the child, before the
+    child had necessarily finished binding -- an immediate ``daemon
+    status`` call could race that and see ``transport.exists() ==
+    False``, an honest-but-wrong "not running" (observed ~1/6 in
+    testing). Confirms ``start()`` now polls
+    ``transport.exists()`` and only reports "started" once it
+    transitions to ``True``, not before."""
+    transport = _FakeStartTransport(exists_after=3)
+    monkeypatch.setattr(
+        daemon, "default_transport_for", lambda root: transport
+    )
+    monkeypatch.setattr(daemon, "is_daemon_reachable", lambda t: False)
+    monkeypatch.setattr(daemon, "_START_CONFIRM_POLL_INTERVAL", 0.001)
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(
+        daemon, "spawn_detached", lambda cmd: spawned.append(cmd)
+    )
+
+    code = daemon.start(short_root)
+
+    assert code == 0
+    assert spawned  # the spawn itself happened
+    assert transport._calls > 3  # polled past the False->True transition
+    out = capsys.readouterr().out
+    assert f"dekko daemon: started for {short_root}" in out
+    assert "didn't confirm" not in out
+
+
+def test_start_reports_unconfirmed_when_bind_poll_times_out(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Complements the confirmation test above: when the poll cap is
+    hit without ``transport.exists()`` ever going ``True``, ``start()``
+    must not lie and print "started" -- it prints a distinct,
+    honest "spawned but unconfirmed" message and still returns ``0``
+    (the spawn genuinely succeeded; slow-to-bind is not the same as
+    failed -- a new non-zero exit code here would be a breaking change
+    for scripts already gating on this command's exit code)."""
+    transport = _FakeStartTransport(exists_after=None)
+    monkeypatch.setattr(
+        daemon, "default_transport_for", lambda root: transport
+    )
+    monkeypatch.setattr(daemon, "is_daemon_reachable", lambda t: False)
+    monkeypatch.setattr(daemon, "_START_CONFIRM_TIMEOUT", 0.05)
+    monkeypatch.setattr(daemon, "_START_CONFIRM_POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(daemon, "spawn_detached", lambda cmd: None)
+
+    code = daemon.start(short_root)
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert f"dekko daemon: started for {short_root}" not in out
+    assert "didn't confirm" in out
+    assert "dekko daemon status" in out
+
+
+def test_start_immediately_followed_by_status_never_false_negative(
+    short_root: Path,
+) -> None:
+    """The actual regression test for the reported bug (round-23 §13,
+    awesome-go.md §2.2): a real ``daemon start`` followed *immediately*
+    (no artificial wait) by ``daemon status`` must never report "not
+    running" once ``start()`` itself has returned -- run several
+    real start/stop cycles for a reasonable chance of statistically
+    catching the pre-fix ~1/6 failure rate if this fix were reverted."""
+    transport = dt.default_transport_for(short_root)
+    for _ in range(6):
+        try:
+            code = daemon.start(short_root)
+            assert code == 0
+            # No _wait_until here on purpose -- start() itself is now
+            # responsible for not returning until confirmed (or having
+            # honestly said it couldn't confirm).
+            assert transport.exists()
+            assert dt.is_daemon_reachable(transport)
+        finally:
+            daemon.stop(short_root)
+            assert _wait_until(lambda: not transport.exists())
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "AF_UNIX-only failure mode -- default_transport_for() picks "
+        "TcpLoopbackTransport on Windows, whose preflight_check() is a "
+        "deliberate no-op (an OS-assigned ephemeral port has no "
+        "sun_path-style length limit to preflight), so a deep root "
+        "never fails here on this platform"
+    ),
+)
 def test_start_fails_fast_on_unbindable_socket_path(
     short_root: Path, capsys: pytest.CaptureFixture
 ) -> None:

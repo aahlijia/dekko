@@ -163,6 +163,50 @@ def _require(args: dict, key: str) -> str:
     return value
 
 
+# Tools whose required ``symbol`` argument also accepts ``name`` as an
+# alias (see ``_resolve_symbol_alias``). Adding a new
+# ``_require(args, "symbol")`` call elsewhere? Add that tool's name
+# here too, or its ``name``-alias friction reappears silently.
+_SYMBOL_ALIAS_TOOLS = frozenset(
+    {
+        "query_symbol",
+        "get_callers",
+        "get_callees",
+        "get_supertypes",
+        "get_subtypes",
+        "add_note",
+    }
+)
+
+
+def _resolve_symbol_alias(tool_name: str, args: dict) -> dict:
+    """Accept ``name`` as an alias for ``symbol`` on tools that need it.
+
+    Two independent round-24 evaluators guessed ``name`` instead of
+    ``symbol`` on ``query_symbol``/``get_callers``/``get_supertypes``,
+    since ``find_usages`` uses ``name`` for its own equivalent
+    argument -- this closes that first-guess gap without renaming
+    anything callers already depend on.
+
+    Args:
+        tool_name: The tool being invoked.
+        args: The call's raw arguments, as received.
+
+    Returns:
+        ``args`` unchanged, unless the tool is in the alias set, the
+        caller passed ``name`` but not ``symbol``, in which case a
+        shallow copy with ``symbol`` populated from ``name`` is
+        returned instead.
+    """
+    if tool_name not in _SYMBOL_ALIAS_TOOLS:
+        return args
+    if "symbol" in args or "name" not in args:
+        return args
+    aliased = dict(args)
+    aliased["symbol"] = aliased.pop("name")
+    return aliased
+
+
 def _root_of(ctx: Context, args: dict) -> Path:
     """Resolve the target root from a tool's ``root`` argument."""
     root = args.get("root")
@@ -464,9 +508,15 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     limit = int(args.get("limit", 50))
     budget = args.get("budget")
     budget = int(budget) if budget is not None else None
+    suspect = bool(args.get("suspect", False))
     code, out, err = _capture(
         lambda: unused.run(
-            index, tuple(roots), as_json=False, limit=limit, budget=budget
+            index,
+            tuple(roots),
+            as_json=False,
+            limit=limit,
+            budget=budget,
+            suspect=suspect,
         )
     )
     if code not in (0, 1):
@@ -711,18 +761,11 @@ def tool_ledger(ctx: Context, args: dict) -> str:
 def _version_stale_detail(fresh: mapfile.Freshness) -> str:
     """Explain *which* staleness signal fired for a "version" verdict.
 
-    ``Freshness.reason == "version"`` collapses two independent
-    signals (``tool_version`` mismatch, ``spec_hash`` mismatch) into
-    one string. A long-lived ``dekko serve`` process can have an
-    identical ``tool_version`` on both sides — Python doesn't hot-
-    reload already-imported modules, so a ``uv tool install
-    --reinstall`` after the server started has no effect on that
-    process's own ``spec_fingerprint()`` output until it restarts —
-    which used to read as a self-contradictory "built by dekko 0.21.3,
-    running 0.21.3" with no explanation of what was actually stale
-    (round-09 §2.3). This names the differentiator explicitly using
-    the raw values ``mapfile._freshness_from_provenance`` already
-    computed.
+    Thin MCP-surface wrapper around the shared signal-naming logic in
+    ``mapfile.describe_version_stale`` — kept here so callers in this
+    module don't need to import the parts-builder directly, and so the
+    MCP surface can grow its own wording later without touching
+    ``mapfile.py`` again.
 
     Args:
         fresh: A freshness verdict with ``reason == "version"``.
@@ -731,36 +774,32 @@ def _version_stale_detail(fresh: mapfile.Freshness) -> str:
         A one-line ``"stale (...)"`` prefix naming which signal(s)
         fired and their built-vs-running values.
     """
-    which = "+".join(
-        name
-        for name, stale in (
-            ("version", fresh.version_stale),
-            ("spec_hash", fresh.spec_stale),
-        )
-        if stale
-    )
-    parts: list[str] = []
-    if fresh.version_stale:
-        parts.append(
-            f"tool_version: built by dekko {fresh.built_version}, "
-            f"running {fresh.running_version}"
-        )
-    if fresh.spec_stale:
-        built_hash = (fresh.built_spec_hash or "unknown")[:12]
-        running_hash = (fresh.running_spec_hash or "unknown")[:12]
-        spec_detail = (
-            f"spec_hash: map built with extractor spec {built_hash}, "
-            f"this process is running spec {running_hash}"
-        )
-        if not fresh.version_stale:
-            spec_detail += (
-                f" (same version string {fresh.running_version} on "
-                "both sides — this is a long-lived process running "
-                "older/different extractor code than what's on disk; "
-                "restart it)"
-            )
-        parts.append(spec_detail)
-    return f"stale ({which}): " + "; ".join(parts)
+    return mapfile.describe_version_stale(fresh)
+
+
+def _version_stale_action(fresh: mapfile.Freshness) -> str:
+    """Suggested next step for a ``reason == "version"`` verdict.
+
+    ``refresh_map`` regenerates *in-process*, using whatever extractor
+    code this same MCP server process already has loaded — Python
+    doesn't hot-reload imported modules, so if *this* process is the
+    stale party (``spec_stale``, or even just ``version_stale`` — a
+    reinstall doesn't change what code this process is running
+    either), calling ``refresh_map`` from inside it cannot pick up the
+    newer code. It would silently re-stamp the map "fresh" using the
+    same stale logic that made it stale in the first place (round-23
+    §12: zed.md/cline.md). Restarting the server is the only fix for
+    either sub-signal here; ``refresh_map`` remains correct only for
+    ``reason == "content"`` (genuine source drift, handled elsewhere).
+
+    Args:
+        fresh: A freshness verdict with ``reason == "version"``.
+
+    Returns:
+        A short "next step" suffix, no leading punctuation.
+    """
+    del fresh  # Same advice regardless of which sub-signal fired.
+    return "restart the dekko MCP server process"
 
 
 def tool_map_status(ctx: Context, args: dict) -> str:
@@ -778,7 +817,9 @@ def tool_map_status(ctx: Context, args: dict) -> str:
         status = f"fresh ({n} files, commit {commit})"
         return f"{status}\n{note}" if note else status
     if fresh.reason == "version":
-        return f"{_version_stale_detail(fresh)} — call refresh_map"
+        return (
+            f"{_version_stale_detail(fresh)} — {_version_stale_action(fresh)}"
+        )
     parts = [f"stale: {len(fresh.changed)} changed"]
     parts.append(f"{len(fresh.added)} added")
     parts.append(f"{len(fresh.removed)} removed")
@@ -790,15 +831,42 @@ def tool_map_status(ctx: Context, args: dict) -> str:
 
 
 def tool_refresh_map(ctx: Context, args: dict) -> str:
-    """Regenerate the map (optionally a full, uncached rebuild)."""
+    """Regenerate the map (optionally a full, uncached rebuild).
+
+    Captures this process's own freshness verdict *before* the regen
+    runs. If it shows ``reason == "version"`` (this same process is
+    already known-stale relative to its own map), the regen that's
+    about to happen will re-extract using this process's stale
+    in-memory extractor code and re-stamp the result "fresh" —
+    self-consistent but wrong (round-23 §12). This doesn't block the
+    regen (a hard refusal risks false positives — see the design doc);
+    it discloses the caveat in the response so the caller knows a
+    restart, not another ``refresh_map`` call, is the real fix.
+    """
     root = _root_of(ctx, args)
+    pre_index = mapfile.load_map(root)
+    pre_fresh = (
+        mapfile.check_freshness(root, pre_index)
+        if pre_index is not None
+        else None
+    )
+    self_stale = bool(pre_fresh and pre_fresh.reason == "version")
     full = bool(args.get("full", False))
     code, out, err = _capture(
         lambda: repo_ops.regen_map(root, full=full, quiet=False)
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return _with_notes(out, err, fallback="map refreshed")
+    result = _with_notes(out, err, fallback="map refreshed")
+    if self_stale:
+        result += (
+            "\nnote: this server process was itself running stale "
+            "extractor code (spec/version drift) before this regen — "
+            "the map was rebuilt with that same stale code and will "
+            "self-report fresh; restart the dekko MCP server process "
+            "to pick up current code"
+        )
+    return result
 
 
 _ROOT_PROP = {
@@ -810,7 +878,8 @@ _SYMBOL_PROP = {
     "description": "Symbol: name, Class.method, or file.py:name. If the "
     "reply says the target is ambiguous (an overload set sharing the "
     "same file+name), append ':LINE' from one of the printed candidate "
-    "rows, e.g. file.py:Class.method:42, to pick that one",
+    "rows, e.g. file.py:Class.method:42, to pick that one. 'name' is "
+    "also accepted as an alias for this argument.",
 }
 _SITES_PROP = {
     "type": "boolean",
@@ -1431,7 +1500,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
     handler = _HANDLERS.get(name)
     if handler is None:
         return _err(req_id, INVALID_PARAMS, f"unknown tool '{name}'")
-    args = params.get("arguments") or {}
+    args = _resolve_symbol_alias(name, params.get("arguments") or {})
     try:
         text = _with_default_root_note(ctx, args, handler(ctx, args))
         is_error = False
