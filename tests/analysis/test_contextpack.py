@@ -435,6 +435,22 @@ def test_render_text_strips_js_named_import_suffix(
     assert "(from ./engine/generatePersonality)" not in text
 
 
+JS_MULTI_NAME_IMPORT = {
+    "server/index.ts": (
+        "import { generateBones, generatePersonality } "
+        'from "./engine";\n\n'
+        "export function ensureCompanion(): void {\n"
+        "  generateBones();\n"
+        "  generatePersonality();\n"
+        "}\n"
+    ),
+    "server/engine.ts": (
+        "export function generateBones(): void {}\n\n"
+        "export function generatePersonality(): void {}\n"
+    ),
+}
+
+
 def test_trim_to_budget_drops_imports_before_source(
     make_mapped_repo: RepoFactory,
 ) -> None:
