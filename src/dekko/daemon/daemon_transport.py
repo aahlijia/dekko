@@ -312,38 +312,53 @@ class UnixSocketTransport(DaemonTransport):
     def _bind(self, path: Path, label: str) -> socket.socket:
         """Shared bind logic for the main and status-only sockets."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        # A stale socket file left behind by an ungracefully-killed
-        # daemon (kill -9, crash, reboot without a cleanup hook)
-        # blocks bind() with "address already in use". Best-effort
-        # remove it first -- whether an existing daemon is actually
-        # still live is the caller's responsibility to check before
-        # calling bind_and_listen()/bind_status_listener() at all.
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
 
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            sock.bind(str(path))
-            # ``os.chmod``/``listen()`` right after a successful
-            # ``bind()`` normally can't fail -- but on a heavily
-            # loaded host the just-created socket special-file can
-            # transiently vanish before ``chmod`` observes it (seen
-            # once in CI as a ``FileNotFoundError`` racing this exact
-            # window). Folded into the same try/except as ``bind()``
-            # rather than left to escape uncaught, so any post-bind
-            # setup failure reaches the caller as the same clean
-            # ``TransportUnavailable`` contract instead of crashing
-            # the daemon thread with an unhandled exception.
-            os.chmod(path, 0o600)
-            sock.listen()
-        except OSError as exc:
-            sock.close()
-            raise TransportUnavailable(
-                f"could not bind {label} at {path}: {exc}"
-            ) from exc
-        return sock
+        # ``os.chmod``/``listen()`` right after a successful ``bind()``
+        # normally can't fail -- but on a heavily loaded host (seen
+        # twice in CI, on independent tests, both ubuntu) the
+        # just-created socket special-file can transiently vanish
+        # before ``chmod`` observes it, raising ``FileNotFoundError``.
+        # A fresh bind attempt closes that race window outright (a new
+        # ``bind()`` recreates the file), so this retries the whole
+        # sequence a bounded number of times on that specific error
+        # before giving up -- any other ``OSError`` (address already
+        # in use by a genuinely live daemon, permission denied, ...)
+        # is not a transient condition a retry would fix, so it's
+        # raised immediately on the first attempt.
+        last_exc: OSError | None = None
+        for _attempt in range(3):
+            # A stale socket file left behind by an ungracefully-
+            # killed daemon (kill -9, crash, reboot without a cleanup
+            # hook) blocks bind() with "address already in use".
+            # Best-effort remove it first -- whether an existing
+            # daemon is actually still live is the caller's
+            # responsibility to check before calling
+            # bind_and_listen()/bind_status_listener() at all.
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.bind(str(path))
+                os.chmod(path, 0o600)
+                sock.listen()
+                return sock
+            except FileNotFoundError as exc:
+                sock.close()
+                last_exc = exc
+                continue
+            except OSError as exc:
+                sock.close()
+                raise TransportUnavailable(
+                    f"could not bind {label} at {path}: {exc}"
+                ) from exc
+
+        assert last_exc is not None
+        raise TransportUnavailable(
+            f"could not bind {label} at {path}: {last_exc}"
+        ) from last_exc
 
     def bind_and_listen(self) -> socket.socket:
         self.preflight_check()
