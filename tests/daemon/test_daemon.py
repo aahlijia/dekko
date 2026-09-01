@@ -408,7 +408,15 @@ def test_stop_blocks_until_artifacts_are_gone_before_returning(
     thread.start()
     try:
         assert _wait_until(transport.exists)
-        assert dt.is_daemon_reachable(transport)
+        # transport.exists() only checks the main socket's file --
+        # bind_status_listener()/status_thread.start() run afterward
+        # in serve_daemon(), so there's a real (if usually brief) gap
+        # where the main socket file exists but the status-only
+        # listener is_daemon_reachable() actually probes isn't
+        # accepting yet. Poll like every other reachability check in
+        # this file (see line ~615/~2112) instead of a single
+        # immediate assertion.
+        assert _wait_until(lambda: dt.is_daemon_reachable(transport))
 
         assert daemon.stop(short_root) == 0
         assert not transport.exists()
