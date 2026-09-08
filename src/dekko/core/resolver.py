@@ -2246,6 +2246,28 @@ _NODE_BUILTIN_MODULE_NAMES = frozenset(
 
 _JS_TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 
+# Well-known ambient/global receiver objects -- the receiver-side
+# counterpart to ``_AMBIENT_GLOBAL_NAMES`` above, which only covers
+# *receiverless* bare calls. None of the five method-name denylists
+# above check the call's *receiver*, only its method name, so a
+# receiver-qualified call to a well-known global object (``console``,
+# ``process``, ``window``, ...) whose method name isn't itself in one
+# of those sets still reaches the bare-name ambiguous/single-candidate
+# fallback. Confirmed live against claude-buddy round 27 (finding M1):
+# ``console.warn("...")`` in ``cli/validate-species.ts`` was reported
+# ambiguous against 7 unrelated same-named free-function ``warn()``
+# definitions, since ``warn`` is in none of the five method-name sets.
+# A receiver-object match is a stronger, name-independent signal than
+# any single method name -- every method on ``console`` is noise, not
+# just ``warn`` -- so this is checked before the method-name sets, not
+# folded into them.
+_AMBIENT_GLOBAL_RECEIVERS = frozenset(
+    {
+        "console", "process", "window", "document", "global",
+        "globalThis", "localStorage", "sessionStorage", "navigator",
+    }
+)  # fmt: skip
+
 
 def _is_noise_call(
     call: _Referable,
@@ -2288,6 +2310,9 @@ def _is_noise_call(
     # itself checks.
     if call.receiver in _SELF_RECEIVERS:
         return False
+    first = _PATH_SPLIT.split(call.receiver)[0]
+    if first in _AMBIENT_GLOBAL_RECEIVERS:
+        return True
     return (
         call.name in _BUILTIN_METHOD_NAMES
         or call.name in _CHAIN_BUILDER_METHOD_NAMES
@@ -2767,6 +2792,25 @@ def _alias_candidates(
     ]
 
 
+# Rust std/core/alloc namespace roots -- a fully-qualified inline path
+# (``impl std::fmt::Display for X``, ``core::mem::swap(...)``) binds no
+# ``use std;`` anywhere in the file, since Rust doesn't require one to
+# use a fully-qualified path. ``_receiver_is_external``'s ordinary
+# check (first segment has a local ``use``-bound import) always misses
+# this shape, so a same-bare-name in-repo collision (e.g. an in-repo
+# ``enum Display``) silently wins instead of the receiver being
+# recognized as external. Confirmed live against zed round 27 (finding
+# M3): ``impl std::fmt::Display for SharedUri`` resolved to an
+# unrelated in-repo ``Display`` enum rather than ``(external)``, while
+# the sibling ``impl std::fmt::Debug for SharedUri`` on the same line
+# happened to show ``(external)`` correctly only because it has no
+# in-repo collision to begin with (a different code path, not this
+# check). Not gated by language (matching ``_RUST_STD_METHOD_NAMES``'s
+# own precedent) since these three roots as multi-segment path
+# prefixes are Rust-specific enough not to collide elsewhere.
+_RUST_STD_NAMESPACE_ROOTS = frozenset({"std", "core", "alloc"})
+
+
 def _receiver_is_external(
     call: _Referable,
     file_imports: dict[str, Import],
@@ -2794,13 +2838,19 @@ def _receiver_is_external(
 
     Returns:
         True when the receiver resolves to an import whose source
-        matches no file in the repo. False when there is no receiver,
+        matches no file in the repo, or when the receiver is a
+        multi-segment path rooted at a well-known Rust std/core/alloc
+        namespace (see ``_RUST_STD_NAMESPACE_ROOTS``) regardless of
+        any local ``use`` binding. False when there is no receiver,
         the receiver isn't an import (local variable, ``self``, ...),
         or the import does plausibly point into the repo.
     """
     if not call.receiver:
         return False
-    first = _PATH_SPLIT.split(call.receiver)[0]
+    segments = _PATH_SPLIT.split(call.receiver)
+    first = segments[0]
+    if len(segments) > 1 and first in _RUST_STD_NAMESPACE_ROOTS:
+        return True
     imp = file_imports.get(first)
     if imp is None:
         return False

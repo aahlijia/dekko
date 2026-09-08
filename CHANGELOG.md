@@ -9,6 +9,45 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.46] — 2026-09-08
+
+### Fixed
+- **License-boilerplate leak into extracted file purpose (round-27)** —
+  `_BOILERPLATE_HEADER_RE` in `extractor.py` only recognized the first
+  three lines of a standard Apache-2.0 header, so later header lines
+  (the "obtain a copy," "AS IS," and "limitations under the license"
+  lines) leaked through as the file's extracted "purpose," corrupting
+  `outline`, `summary`'s directory rollup, and `workset`'s file
+  listings. Confirmed on spring-boot (100% of 8,659 files) and
+  tensorflow (10,733 occurrences). Regex extended to cover the full
+  Apache-2.0 header plus the equivalent MIT and BSD-2/3-Clause
+  boilerplate lines pre-emptively. See
+  `test-repos/reports/27-round27-tokentest-7repo/`.
+- **Stale rev-cache entries silently reported as phantom diffs
+  (round-27)** — rev-cache entries in `revcache.py` carried no
+  extractor-spec version stamp, so an entry built by an older dekko
+  binary was served forever afterward, with `diff`/`workset`/`affected`
+  comparing the live map against it and reporting schema drift as a
+  genuine code change. Fixed by stamping entries with `spec_hash` (the
+  same `spec_fingerprint()` mechanism `mapfile.py` already uses for
+  `map.json` itself) and treating a mismatch as a cache miss.
+- **`console.warn(...)`-style ambient-global calls misattributed as
+  ambiguous (round-27)** — `_is_noise_call()` in `resolver.py` checked
+  a call's method name against five existing denylists but never
+  checked whether the receiver itself was a well-known ambient/global
+  object (`console`, `process`, `window`, `document`, etc.), so
+  `console.warn(...)` resolved against unrelated same-named free
+  functions instead of being recognized as noise. Added an
+  `_AMBIENT_GLOBAL_RECEIVERS` short-circuit.
+- **Fully-qualified `std::`/`core::`/`alloc::` Rust paths not
+  recognized as external without a local `use` binding (round-27)** —
+  `_receiver_is_external()` only recognized a receiver as external via
+  a local `use`-bound import, so a fully-qualified inline path like
+  `impl std::fmt::Display for X` (which binds no `use std;`) fell
+  through and silently resolved against an unrelated in-repo
+  same-named symbol. Added a `_RUST_STD_NAMESPACE_ROOTS` short-circuit
+  for `std`/`core`/`alloc` path roots.
+
 ## [0.43.45] — 2026-08-31
 
 ### Fixed

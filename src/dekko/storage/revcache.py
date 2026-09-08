@@ -32,6 +32,7 @@ from dekko.render.mapfile import (
     _symbol_from_dict,
     atomic_write_bytes,
 )
+from dekko.core.languages import spec_fingerprint
 from dekko.core.model import Import
 
 if TYPE_CHECKING:
@@ -117,9 +118,19 @@ def load(root: Path, sha: str) -> "Snapshot | None":
         sha: Full commit SHA, as returned by :func:`resolve_sha`.
 
     Returns:
-        The cached ``Snapshot``, or ``None`` on a cache miss or a
-        corrupt/unreadable entry (treated as a miss, never an error —
-        the caller falls back to a fresh export + re-map).
+        The cached ``Snapshot``, or ``None`` on a cache miss, a
+        corrupt/unreadable entry, or an entry stamped with a
+        ``spec_hash`` that no longer matches this process's own
+        ``spec_fingerprint()`` (all treated as a miss, never an error —
+        the caller falls back to a fresh export + re-map). The
+        spec-hash check catches an entry built by a different
+        extractor version (a new symbol kind, a heritage-relation
+        change, a resolver fix that changes what counts as
+        "resolved") — round 27 finding H2: previously such an entry
+        was served forever, and ``diff``/``workset``/``affected``
+        reported the schema drift as a genuine code change. Mirrors
+        ``mapfile.py``'s own ``built_spec_hash``/``running_spec_hash``
+        check for ``map.json``, the precedented mechanism this reuses.
     """
     path = _entry_path(root, sha)
     try:
@@ -131,6 +142,9 @@ def load(root: Path, sha: str) -> "Snapshot | None":
     except ValueError:
         return None
     if not isinstance(doc, dict):
+        return None
+    if doc.get("spec_hash") != spec_fingerprint():
+        path.unlink(missing_ok=True)
         return None
     snap = _snapshot_from_dict(doc)
     _touch(path)
@@ -173,6 +187,7 @@ def _evict(cache_dir: Path) -> None:
 def _snapshot_to_dict(snap: "Snapshot") -> dict:
     """Serialize a ``Snapshot`` to a JSON-able dict."""
     return {
+        "spec_hash": spec_fingerprint(),
         "symbols": [asdict(s) for s in snap.symbols.values()],
         "callers": snap.callers,
         "body": snap.body,

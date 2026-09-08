@@ -919,6 +919,108 @@ def test_module_doc_skips_boilerplate_python_docstring(
     assert fm.doc == "Helpers for widget configuration."
 
 
+def test_module_doc_skips_full_apache_license_header(
+    tmp_path: Path,
+) -> None:
+    # Round 27 finding H1: the pre-fix regex only covered the first
+    # three lines of a standard Apache-2.0 header, so the fourth line
+    # onward ("You may obtain a copy of the License at" -- the line
+    # actually hit by both live repros -- plus the "AS IS" disclaimer
+    # and the license URL) leaked through as the file's "purpose".
+    # This is the full, real standard header text, not a trimmed
+    # fixture, to pin the exact repro shape.
+    spec = languages.spec_for_path("c_api.cc")
+    assert spec is not None
+    (tmp_path / "c_api.cc").write_text(
+        "// Copyright 2023 The TensorFlow Authors. All Rights Reserved.\n"
+        "//\n"
+        '// Licensed under the Apache License, Version 2.0 (the "License");\n'
+        "// you may not use this file except in compliance with the "
+        "License.\n"
+        "// You may obtain a copy of the License at\n"
+        "//\n"
+        "//     http://www.apache.org/licenses/LICENSE-2.0\n"
+        "//\n"
+        "// Unless required by applicable law or agreed to in writing, "
+        "software\n"
+        '// distributed under the License is distributed on an "AS IS" '
+        "BASIS,\n"
+        "// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express "
+        "or implied.\n"
+        "// See the License for the specific language governing "
+        "permissions and\n"
+        "// limitations under the License.\n"
+        "//\n"
+        "// Implements the deprecated session C API.\n"
+        "int real_function(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "c_api.cc", spec)
+    assert fm.error is None
+    assert fm.doc == "Implements the deprecated session C API."
+
+
+def test_module_doc_skips_mit_license_header(tmp_path: Path) -> None:
+    # Preemptive MIT coverage added alongside the Apache extension --
+    # the same failure shape, just not yet reproduced live. Only lines
+    # the extended regex actually covers appear here (each on its own
+    # comment line, mirroring the other headers' minimal-fixture
+    # style) -- a non-covered prose line would surface as ``fm.doc``
+    # instead of the real content line below it.
+    spec = languages.spec_for_path("widget.js")
+    assert spec is not None
+    (tmp_path / "widget.js").write_text(
+        "// Copyright (c) 2023 Some Author\n"
+        "//\n"
+        "// Permission is hereby granted, free of charge, to any "
+        "person obtaining a copy\n"
+        "//\n"
+        "// The above copyright notice and this permission notice "
+        "shall be included\n"
+        "//\n"
+        '// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY '
+        "KIND\n"
+        "//\n"
+        "// Widget configuration helpers.\n"
+        "function realFunction(x) {\n"
+        "  return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "widget.js", spec)
+    assert fm.error is None
+    assert fm.doc == "Widget configuration helpers."
+
+
+def test_module_doc_skips_bsd_license_header(tmp_path: Path) -> None:
+    # Preemptive BSD-3-Clause coverage added alongside the Apache
+    # extension -- the same failure shape, just not yet reproduced
+    # live. Only lines the extended regex actually covers appear here
+    # (see the MIT test above for why).
+    spec = languages.spec_for_path("widget.js")
+    assert spec is not None
+    (tmp_path / "widget.js").write_text(
+        "// Copyright (c) 2023, Some Author\n"
+        "// All rights reserved.\n"
+        "//\n"
+        "// Redistribution and use in source and binary forms, with or "
+        "without\n"
+        "//\n"
+        "// list of conditions and the following disclaimer.\n"
+        "//\n"
+        "// Neither the name of the copyright holder nor the names "
+        "of its\n"
+        "//\n"
+        "// Widget configuration helpers.\n"
+        "function realFunction(x) {\n"
+        "  return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "widget.js", spec)
+    assert fm.error is None
+    assert fm.doc == "Widget configuration helpers."
+
+
 def test_parse_rust_use() -> None:
     assert _parse_rust_use("a::b::c") == [("c", "a::b::c")]
     assert _parse_rust_use("a::b as d") == [("d", "a::b")]

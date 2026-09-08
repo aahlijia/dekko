@@ -17,6 +17,7 @@ from dekko.core.model import (
     Param,
     RawCall,
     RawCatch,
+    RawHeritage,
     RawRef,
     RawThrow,
     Symbol,
@@ -24,6 +25,7 @@ from dekko.core.model import (
 from dekko.core.resolver import (
     resolve,
     resolve_catches,
+    resolve_heritage,
     resolve_refs,
     resolve_throws,
 )
@@ -2193,6 +2195,48 @@ def test_receiver_qualified_get_resolve_create_not_guessed() -> None:
     assert {"cache.get", "Promise.resolve", "Object.create"} <= externals
 
 
+def test_receiver_qualified_console_warn_not_guessed() -> None:
+    # Round 27 finding M1: none of the five method-name denylists
+    # ``_is_noise_call`` checks cover ``warn`` (or any other
+    # ``console``/``process``/``window`` method), so a receiver-
+    # qualified ``console.warn(...)`` call used to fall through to the
+    # bare-name candidate ladder and get credited to an unrelated
+    # same-named free function -- confirmed live against claude-buddy's
+    # ``cli/validate-species.ts``, misattributed against 7 unrelated
+    # ``warn()`` definitions. ``_AMBIENT_GLOBAL_RECEIVERS`` recognizes
+    # the receiver itself as ambient/global, independent of the method
+    # name.
+    warn_a = _fn("logging_a.ts", "warn", language="typescript")
+    warn_b = _fn("logging_b.ts", "warn", language="typescript")
+    caller = _fn("caller.ts", "run", language="typescript")
+    files = [
+        FileMap("logging_a.ts", "typescript", symbols=[warn_a]),
+        FileMap("logging_b.ts", "typescript", symbols=[warn_b]),
+        FileMap(
+            "caller.ts",
+            "typescript",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="caller.ts",
+                    text="console.warn",
+                    name="warn",
+                    receiver="console",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    edges = {(e.caller, e.callee) for e in graph.edges}
+    assert (caller.id, warn_a.id) not in edges
+    assert (caller.id, warn_b.id) not in edges
+    assert graph.ambiguous == []
+    externals = {ext.callee for ext in graph.external}
+    assert "console.warn" in externals
+
+
 def test_reference_resolution_unaffected_by_noise_guard() -> None:
     # ``_pick_candidate``'s ``repo_stems`` gate is only threaded from
     # ``_resolve_call`` — ``resolve_refs()``/``_resolve_ref`` never
@@ -3628,6 +3672,147 @@ def test_import_match_uses_receiver_as_rust_crate_hint_fallback() -> None:
         crate_roots={"gpui": ["crates/gpui/src"]},
     )
     assert result is render_candidate
+
+
+def test_rust_std_namespace_root_external_no_use_binding() -> None:
+    """Round 27 finding M3: a fully-qualified inline path like
+    ``std::fmt::Display`` binds no ``use std;`` anywhere in the file
+    (Rust doesn't require one), so ``_receiver_is_external``'s ordinary
+    check (first segment has a local ``use``-bound import) always
+    missed this shape and returned ``False`` regardless of the
+    receiver text. Direct unit test of the new short-circuit, isolated
+    from the heritage/candidate machinery below.
+    """
+    call = RawCall(
+        caller_id=None,
+        path="src/lib.rs",
+        text="std::fmt::Display",
+        name="Display",
+        receiver="std::fmt",
+        line=1,
+    )
+    assert (
+        resolver_mod._receiver_is_external(
+            call, file_imports={}, repo_stems=set()
+        )
+        is True
+    )
+
+
+def test_bare_std_local_variable_not_treated_external() -> None:
+    """A bare (single-segment) receiver that happens to be named
+    ``std``/``core``/``alloc`` (a local variable, not a namespace path)
+    must not be treated as external -- the short-circuit requires a
+    genuinely multi-segment receiver (``len(segments) > 1``)."""
+    call = RawCall(
+        caller_id=None,
+        path="src/lib.rs",
+        text="std.run",
+        name="run",
+        receiver="std",
+        line=1,
+    )
+    assert (
+        resolver_mod._receiver_is_external(
+            call, file_imports={}, repo_stems=set()
+        )
+        is False
+    )
+
+
+def test_heritage_qualified_std_display_external_despite_collision() -> None:
+    """End-to-end ``resolve_heritage`` pin for the zed shape:
+    ``impl std::fmt::Display for SharedUri`` must resolve
+    ``(external)`` even though the repo defines its own in-repo
+    ``Display`` symbol elsewhere -- before this fix, ``candidates`` was
+    non-empty (the in-repo ``Display`` collided), so
+    ``_receiver_is_external`` never fired (per the gap above) and the
+    single-candidate fallback silently returned the wrong, unrelated
+    in-repo ``Display``.
+    """
+    display_collision = Symbol(
+        id="crates/style/src/style.rs::Display",
+        name="Display",
+        qualname="Display",
+        kind="enum",
+        path="crates/style/src/style.rs",
+        language="rust",
+    )
+    shared_uri = Symbol(
+        id="crates/util/src/uri.rs::SharedUri",
+        name="SharedUri",
+        qualname="SharedUri",
+        kind="struct",
+        path="crates/util/src/uri.rs",
+        language="rust",
+    )
+    files = [
+        FileMap(
+            "crates/style/src/style.rs",
+            "rust",
+            symbols=[display_collision],
+        ),
+        FileMap(
+            "crates/util/src/uri.rs",
+            "rust",
+            symbols=[shared_uri],
+            heritage=[
+                RawHeritage(
+                    subtype_id=shared_uri.id,
+                    path="crates/util/src/uri.rs",
+                    text="std::fmt::Display",
+                    name="Display",
+                    receiver="std::fmt",
+                    relation="impl",
+                    line=15,
+                )
+            ],
+        ),
+    ]
+    _, _, _, heritage_ambiguous, heritage_external, _ = resolve_heritage(files)
+    assert heritage_ambiguous == []
+    externals = {(ext.caller, ext.callee) for ext in heritage_external}
+    assert (shared_uri.id, "std::fmt::Display") in externals
+
+
+def test_heritage_qualified_std_debug_still_resolves_external() -> None:
+    """Companion sanity check: the "no in-repo collision" shape
+    (``impl std::fmt::Debug for SharedUri`` where the repo defines no
+    ``Debug`` symbol at all) must keep resolving ``(external)`` --
+    previously via the empty-``candidates`` fallback branch, now via
+    the new short-circuit firing first; either way the outcome must
+    not regress.
+    """
+    shared_uri = Symbol(
+        id="crates/util/src/uri.rs::SharedUri",
+        name="SharedUri",
+        qualname="SharedUri",
+        kind="struct",
+        path="crates/util/src/uri.rs",
+        language="rust",
+    )
+    files = [
+        FileMap(
+            "crates/util/src/uri.rs",
+            "rust",
+            symbols=[shared_uri],
+            heritage=[
+                RawHeritage(
+                    subtype_id=shared_uri.id,
+                    path="crates/util/src/uri.rs",
+                    text="std::fmt::Debug",
+                    name="Debug",
+                    receiver="std::fmt",
+                    relation="impl",
+                    line=9,
+                )
+            ],
+        ),
+    ]
+    _, _, _, heritage_ambiguous, heritage_external, _ = resolve_heritage(files)
+    assert heritage_ambiguous == []
+    externals = {(ext.caller, ext.callee) for ext in heritage_external}
+    assert (shared_uri.id, "std::fmt::Debug") in externals
 
 
 def test_pick_candidate_returns_none_when_language_filtered_empty() -> None:
