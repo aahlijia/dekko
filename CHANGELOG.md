@@ -9,6 +9,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.47] — 2026-09-08
+
+### Fixed
+- **`dekko unused` false positives on type-kind symbols used only in
+  type position (round-27, Track 4)** — the default scan
+  (`kinds="callables"`) evaluated every symbol kind, including
+  interfaces/type aliases/enums/structs, against call-based evidence
+  only; since types are never "called," a type-kind symbol used
+  constantly as a field/param/return type but never invoked was
+  reported unused unless `--kinds types` was passed explicitly.
+  `_used_keys()` now always unions `_used_keys_types()`'s
+  heritage/type-usage evidence into the default scan regardless of
+  `kinds` (Option B from the round-27 design doc: same scan
+  population, better evidence, no breaking change to `--kinds`
+  scoping). `--kinds` help text and `TESTING-GUIDE.md` updated to
+  match. See
+  `test-repos/reports/27-round27-tokentest-7repo/TRACK4-OPTION-B-DESIGN.md`.
+
 ## [0.43.46] — 2026-09-08
 
 ### Fixed
