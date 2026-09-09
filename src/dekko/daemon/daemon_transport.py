@@ -31,6 +31,8 @@ import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from dekko.render.mapfile import atomic_write_bytes
+
 # Socket file name inside a repo's ``.dekko/`` directory (POSIX).
 _SOCKET_NAME = "daemon.sock"
 # Second, status-only socket file (round-13 master report §2): a
@@ -498,7 +500,21 @@ class TcpLoopbackTransport(DaemonTransport):
         so far, plus the shared auth token -- called once per bind, so
         a second ``bind_status_listener()`` call after
         ``bind_and_listen()`` (or vice versa) merges in rather than
-        clobbering the first port's entry."""
+        clobbering the first port's entry.
+
+        Written via ``atomic_write_bytes`` (temp file + ``os.replace``)
+        rather than ``Path.write_text`` -- an in-place write briefly
+        exposes an empty-then-partial file to any concurrent reader
+        between the truncate and the final flush. A client racing the
+        daemon's startup (``exists()`` polling loop observes the file
+        the instant it's created, then reads it) could previously see
+        that half-written state and fail with a JSON decode error, or,
+        worse, trip ``client_connect()``'s "corrupt port file" cleanup
+        path and delete the daemon's still-valid artifact out from
+        under it. Atomic replacement means the file transitions
+        directly from "absent" to "fully valid JSON" with no
+        observable state in between.
+        """
         payload: dict[str, int | str] = {}
         if self._port is not None:
             payload["port"] = self._port
@@ -506,7 +522,7 @@ class TcpLoopbackTransport(DaemonTransport):
             payload["status_port"] = self._status_port
         if self._token is not None:
             payload["token"] = self._token
-        self.port_file.write_text(json.dumps(payload))
+        atomic_write_bytes(self.port_file, json.dumps(payload).encode("utf-8"))
 
     def bind_and_listen(self) -> socket.socket:
         self.port_file.parent.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.49] — 2026-09-09
+
+### Fixed
+- **`TcpLoopbackTransport` port-file read race (CI flake)** — the port
+  file was written with `Path.write_text()` (truncate-then-write, not
+  atomic), so a reader could observe the file mid-write as empty or
+  partial JSON, hit a `JSONDecodeError`, tear down, and then see "no
+  port file at all" on a subsequent read — surfaced intermittently as
+  `test_tcp_loopback_transport_accept_loop_parity` failing in CI
+  (macOS/py3.10 leg). Fixed by writing the port file through the
+  existing `atomic_write_bytes` helper (temp file + `os.replace()`,
+  already used by `render/mapfile.py`), so a reader only ever sees
+  "absent" or "fully valid," never partial. Verified with 30
+  consecutive runs of the previously-flaky test.
+
 ## [0.43.48] — 2026-09-09
 
 ### Fixed
