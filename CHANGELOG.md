@@ -9,6 +9,108 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.49] — 2026-09-09
+
+### Fixed
+- **`TcpLoopbackTransport` port-file read race (CI flake)** — the port
+  file was written with `Path.write_text()` (truncate-then-write, not
+  atomic), so a reader could observe the file mid-write as empty or
+  partial JSON, hit a `JSONDecodeError`, tear down, and then see "no
+  port file at all" on a subsequent read — surfaced intermittently as
+  `test_tcp_loopback_transport_accept_loop_parity` failing in CI
+  (macOS/py3.10 leg). Fixed by writing the port file through the
+  existing `atomic_write_bytes` helper (temp file + `os.replace()`,
+  already used by `render/mapfile.py`), so a reader only ever sees
+  "absent" or "fully valid," never partial. Verified with 30
+  consecutive runs of the previously-flaky test.
+
+## [0.43.48] — 2026-09-09
+
+### Fixed
+- **License-boilerplate divider lines still leaking into extracted
+  purpose (round-27, Track 1 follow-up)** — the round-27 boilerplate
+  regex fix closed the gap on spring-boot's header text but not on
+  tensorflow's, whose header ends in a 78-character `=` divider line
+  inside the same `/* ... */` comment block. A divider is pure
+  punctuation, so no text regex can match it; `_comment_first_line`
+  stopped there and surfaced the divider itself as the file's
+  "purpose." Fixed structurally: `extractor.py` now recognizes and
+  skips divider-only lines (repeated punctuation with no alphanumeric
+  content) alongside the existing boilerplate-text regex, in both
+  `_string_first_line` and `_comment_first_line`. See
+  `test-repos/reports/27-round27-tokentest-7repo/TRACK1-TRACK5-REDESIGN.md`.
+- **Fully-qualified Rust `std::`/`core::`/`alloc::` paths still not
+  recognized as external (round-27, Track 5 follow-up)** — the
+  round-27 fix added a multi-segment check to
+  `_receiver_is_external()` in `resolver.py`, but it was dead code:
+  `_heritage_rust_impl`/`_split_callee_text` in `extractor.py` already
+  flattens a receiver like `std::fmt::Display` down to just `"std"`
+  before the resolver ever sees it, so no `::` survives to split on.
+  Fixed by reading the unflattened `call.text` instead (which still
+  carries the full qualified path on `RawCall`/`RawHeritage`),
+  splitting on the literal `::` separator and gating the check to
+  Rust via `languages.spec_for_path` to avoid cross-language false
+  positives. Confirmed on zed: `impl std::fmt::Display for SharedUri`
+  now resolves `(external)` instead of colliding with an unrelated
+  in-repo `Display` enum.
+
+## [0.43.47] — 2026-09-08
+
+### Fixed
+- **`dekko unused` false positives on type-kind symbols used only in
+  type position (round-27, Track 4)** — the default scan
+  (`kinds="callables"`) evaluated every symbol kind, including
+  interfaces/type aliases/enums/structs, against call-based evidence
+  only; since types are never "called," a type-kind symbol used
+  constantly as a field/param/return type but never invoked was
+  reported unused unless `--kinds types` was passed explicitly.
+  `_used_keys()` now always unions `_used_keys_types()`'s
+  heritage/type-usage evidence into the default scan regardless of
+  `kinds` (Option B from the round-27 design doc: same scan
+  population, better evidence, no breaking change to `--kinds`
+  scoping). `--kinds` help text and `TESTING-GUIDE.md` updated to
+  match. See
+  `test-repos/reports/27-round27-tokentest-7repo/TRACK4-OPTION-B-DESIGN.md`.
+
+## [0.43.46] — 2026-09-08
+
+### Fixed
+- **License-boilerplate leak into extracted file purpose (round-27)** —
+  `_BOILERPLATE_HEADER_RE` in `extractor.py` only recognized the first
+  three lines of a standard Apache-2.0 header, so later header lines
+  (the "obtain a copy," "AS IS," and "limitations under the license"
+  lines) leaked through as the file's extracted "purpose," corrupting
+  `outline`, `summary`'s directory rollup, and `workset`'s file
+  listings. Confirmed on spring-boot (100% of 8,659 files) and
+  tensorflow (10,733 occurrences). Regex extended to cover the full
+  Apache-2.0 header plus the equivalent MIT and BSD-2/3-Clause
+  boilerplate lines pre-emptively. See
+  `test-repos/reports/27-round27-tokentest-7repo/`.
+- **Stale rev-cache entries silently reported as phantom diffs
+  (round-27)** — rev-cache entries in `revcache.py` carried no
+  extractor-spec version stamp, so an entry built by an older dekko
+  binary was served forever afterward, with `diff`/`workset`/`affected`
+  comparing the live map against it and reporting schema drift as a
+  genuine code change. Fixed by stamping entries with `spec_hash` (the
+  same `spec_fingerprint()` mechanism `mapfile.py` already uses for
+  `map.json` itself) and treating a mismatch as a cache miss.
+- **`console.warn(...)`-style ambient-global calls misattributed as
+  ambiguous (round-27)** — `_is_noise_call()` in `resolver.py` checked
+  a call's method name against five existing denylists but never
+  checked whether the receiver itself was a well-known ambient/global
+  object (`console`, `process`, `window`, `document`, etc.), so
+  `console.warn(...)` resolved against unrelated same-named free
+  functions instead of being recognized as noise. Added an
+  `_AMBIENT_GLOBAL_RECEIVERS` short-circuit.
+- **Fully-qualified `std::`/`core::`/`alloc::` Rust paths not
+  recognized as external without a local `use` binding (round-27)** —
+  `_receiver_is_external()` only recognized a receiver as external via
+  a local `use`-bound import, so a fully-qualified inline path like
+  `impl std::fmt::Display for X` (which binds no `use std;`) fell
+  through and silently resolved against an unrelated in-repo
+  same-named symbol. Added a `_RUST_STD_NAMESPACE_ROOTS` short-circuit
+  for `std`/`core`/`alloc` path roots.
+
 ## [0.43.45] — 2026-08-31
 
 ### Fixed

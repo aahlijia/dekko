@@ -607,12 +607,35 @@ def _clean_doc(line: str) -> str | None:
 # ``workset``/``summary``/``orient`` all surfaced verbatim as the
 # file's one-line description since they share this same module-doc
 # extraction path.
+#
+# Round 27 finding H1: the original set only covered the first three
+# lines of a standard Apache-2.0 header, so the fourth line onward
+# ("You may obtain a copy of the License at", the "AS IS" disclaimer,
+# ...) leaked through as the file's "purpose" on every file carrying
+# one -- confirmed on spring-boot (100% of 8,659 files) and tensorflow
+# (10,733 occurrences). Extended here with the rest of the standard
+# Apache-2.0 header, plus the standard MIT and BSD-2/3-Clause header
+# lines preemptively (same failure shape, just not yet reproduced
+# live), since this is the second round a gap in this exact regex has
+# been found.
 _BOILERPLATE_HEADER_RE = re.compile(
     r"^(copyright\b|\(c\)\s*\d{4}\b|all rights reserved\b|"
     r"licensed under\b|spdx-license-identifier\b|"
     r"permission is hereby granted\b|redistribution and use\b|"
     r"this (?:source|file) (?:code )?is (?:part of|subject to)\b|"
-    r"you may not use this file except in compliance\b)",
+    r"you may not use this file except in compliance\b|"
+    r"you may obtain a copy of the license\b|"
+    r"unless required by applicable law\b|"
+    r"distributed under the license is distributed on an\b|"
+    r"without warrant(?:ies or conditions of any kind|y of any kind)\b|"
+    r"see the license for the specific language governing permissions\b|"
+    r"limitations under the license\b|"
+    r"https?://www\.apache\.org/licenses\b|"
+    r"the above copyright notice and this permission notice shall be "
+    r"included\b|"
+    r'the software is provided "as is"|'
+    r"list of conditions and the following disclaimer\b|"
+    r"neither the name of\b)",
     re.IGNORECASE,
 )
 
@@ -621,6 +644,27 @@ def _looks_like_boilerplate_header(line: str) -> bool:
     """Whether ``line`` reads as copyright/license boilerplate rather
     than a real description -- see ``_BOILERPLATE_HEADER_RE``."""
     return _BOILERPLATE_HEADER_RE.match(line.strip()) is not None
+
+
+# A bare visual-rule line (a row of repeated punctuation used to visually
+# close a header block, independent of license family -- TensorFlow's
+# header convention appends one of these right before the closing `*/`
+# on effectively every .h/.cc file in the repo) is never real "purpose"
+# content either. Round 27 finding H1's fix (``_BOILERPLATE_HEADER_RE``
+# above) closed the license-*text* gap but not this sibling shape: none
+# of that regex's alternatives match a bare row of `=` signs, so the
+# skip loop stopped here and surfaced the divider itself as the file's
+# "purpose" -- same symptom, new root cause. Kept as a separate check
+# (not folded into ``_BOILERPLATE_HEADER_RE``) since it's a structural
+# line-shape test, not a text match, and applies uniformly regardless of
+# which license header (or no header at all) precedes it.
+_DIVIDER_LINE_RE = re.compile(r"^[=\-*#~]{10,}$")
+
+
+def _looks_like_divider_line(line: str) -> bool:
+    """Whether ``line`` is a bare row of one repeated divider character
+    rather than real content -- see ``_DIVIDER_LINE_RE``."""
+    return _DIVIDER_LINE_RE.match(line.strip()) is not None
 
 
 def _string_first_line(
@@ -642,7 +686,10 @@ def _string_first_line(
     for line in text.splitlines():
         if not line.strip():
             continue
-        if skip_boilerplate and _looks_like_boilerplate_header(line):
+        if skip_boilerplate and (
+            _looks_like_boilerplate_header(line)
+            or _looks_like_divider_line(line)
+        ):
             continue
         return _clean_doc(line)
     return None
@@ -676,7 +723,10 @@ def _comment_first_line(
         content = _strip_comment_markers(line.strip())
         if not content:
             continue
-        if skip_boilerplate and _looks_like_boilerplate_header(content):
+        if skip_boilerplate and (
+            _looks_like_boilerplate_header(content)
+            or _looks_like_divider_line(content)
+        ):
             continue
         return _clean_doc(content)
     return None

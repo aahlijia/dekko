@@ -447,11 +447,14 @@ def test_kinds_help_text_does_not_claim_callables_restricts_scan(
     assert "every symbol kind is scanned" in out
 
 
-def test_kinds_default_ignores_heritage_and_type_usage_evidence() -> None:
-    # Backward-compat crux: a class with heritage_in (implemented) and
-    # a type-usage match, but zero calls_in/referenced_in, must still
-    # be flagged under the default ("callables") kind — heritage/
-    # type-usage evidence must never leak into the unchanged default.
+def test_kinds_default_now_honors_heritage_and_type_usage_evidence() -> None:
+    # Round-27 Track 4 (Option B): heritage/type-usage evidence is no
+    # longer gated behind --kinds types/all -- it's always folded into
+    # _used_keys(), so a type-kind symbol kept alive only by heritage
+    # or type-usage is excluded under the default ("callables") kind
+    # too. Sub and use_base have no evidence of their own (Sub has no
+    # recorded subtype; use_base is a function with no callers) and
+    # are still flagged -- only Base's own heritage_in entry saves it.
     base = _sym("Base", "a.py", kind="class")
     sub = _sym("Sub", "a.py", kind="class")
     user = _sym(
@@ -461,7 +464,27 @@ def test_kinds_default_ignores_heritage_and_type_usage_evidence() -> None:
     )
     idx = _index([base, sub, user], heritage_in={base.id: [sub.id]})
     names = {s.name for s in unused.find_unused(idx, ())}
-    assert "Base" in names
+    assert "Base" not in names
+    assert {"Sub", "use_base"} <= names
+
+
+def test_kinds_default_kept_alive_by_type_usage() -> None:
+    # Round-27 Track 4 (Option B): the exact false-positive class the
+    # claude-buddy eval found -- a type used only in type position
+    # (never subclassed, never called) must not be flagged under the
+    # default kind just because it has no calls_in/referenced_in.
+    config = _sym("Config", "a.py", kind="class")
+    user = _sym(
+        "start",
+        "a.py",
+        params=[Param(name="cfg", type="Config")],
+    )
+    idx = _index([config, user])
+    names = {s.name for s in unused.find_unused(idx, ())}
+    assert "Config" not in names
+    # `start` itself has no callers and isn't a root -- still flagged,
+    # unaffected by Config's type-usage evidence.
+    assert "start" in names
 
 
 def test_kinds_types_kept_alive_by_heritage() -> None:
@@ -556,6 +579,23 @@ def test_unused_kinds_types_keeps_heritage_implemented_class(
 ) -> None:
     root = make_mapped_repo(HERITAGE_FIXTURE)
     code = cli.main(["unused", "--root", str(root), "--kinds", "types"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "class Base" not in out
+    assert "class NeverUsed" in out
+    # Sub itself has no subtypes/usage/calls of its own — genuinely
+    # unused despite extending something else.
+    assert "class Sub" in out
+
+
+def test_unused_default_keeps_heritage_implemented_class(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round-27 Track 4 (Option B): the same heritage evidence that
+    # --kinds types already honored is now credited under the default
+    # ("callables") kind too -- no --kinds flag needed.
+    root = make_mapped_repo(HERITAGE_FIXTURE)
+    code = cli.main(["unused", "--root", str(root)])
     out = capsys.readouterr().out
     assert code == 1
     assert "class Base" not in out
@@ -724,6 +764,35 @@ def test_kinds_types_at_scale_stays_fast() -> None:
     found = unused.find_unused(idx, (), kinds="types")
     elapsed = time.monotonic() - start
     assert found == []  # every type is used by exactly one function
+    assert elapsed < 5.0
+
+
+def test_kinds_default_at_scale_stays_fast() -> None:
+    # Round-27 Track 4 (Option B): the default kind now always pays
+    # _used_keys_types()'s cost too (previously only types/all did) --
+    # confirm the common-path default invocation doesn't regress at
+    # the same scale test_kinds_types_at_scale_stays_fast covers.
+    n = 3000
+    types = [_sym(f"Type{i}", "a.py", kind="class") for i in range(n)]
+    funcs = [
+        _sym(
+            f"use_{i}",
+            "a.py",
+            params=[Param(name="x", type=f"Type{i}")],
+        )
+        for i in range(n)
+    ]
+    idx = _index(types + funcs)
+    start = time.monotonic()
+    found = unused.find_unused(idx, ())
+    elapsed = time.monotonic() - start
+    # Unlike --kinds types (which restricts the *population* to
+    # TYPE_KINDS only), the default scans every symbol kind: each
+    # Type{i} is kept alive by type-usage evidence, but each use_{i}
+    # function has no callers and isn't a root, so it's still flagged.
+    found_names = {s.name for s in found}
+    assert not any(name.startswith("Type") for name in found_names)
+    assert len(found) == n
     assert elapsed < 5.0
 
 

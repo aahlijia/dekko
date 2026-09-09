@@ -12,10 +12,13 @@ Because detection is call-graph based, a class used only via subclassing
 or type annotations, or a symbol reached through dynamic dispatch, can
 still surface — treat the output as a lead, not a verdict.
 
-``--kinds`` (``"callables"`` by default, matching the above unchanged)
-also accepts ``"types"`` (scan restricted to classes/interfaces/enums/
-structs/records/traits, additionally weighing heritage and type-usage
-evidence) and ``"all"`` (both, unioned) — see ``find_unused``.
+``--kinds`` (``"callables"`` by default, same scanned population as
+before) also accepts ``"types"`` (scan restricted to classes/
+interfaces/enums/structs/records/traits) and ``"all"`` (every symbol
+kind is scanned, same as ``"callables"``) — see ``find_unused``.
+Heritage/type-usage evidence for any type-kind symbol is credited
+under every ``--kinds`` value, not just ``"types"``/``"all"``; only
+the *scanned population* differs by kind.
 
 ``--suspect`` (opt-in, off by default) cross-references excluded
 symbols against ``dekko ambiguous``'s collision list: a symbol kept
@@ -276,36 +279,32 @@ def _used_keys_types(index: MapIndex) -> set[tuple[str, str]]:
     return used
 
 
-def _used_keys(index: MapIndex, kinds: str) -> set[tuple[str, str]]:
-    """``(path, qualname)`` keys kept alive, scoped by ``--kinds``.
+def _used_keys(index: MapIndex) -> set[tuple[str, str]]:
+    """``(path, qualname)`` keys kept alive by any evidence source.
 
-    Callables evidence (``calls_in``/``referenced_in``) is always
-    included, regardless of ``kinds`` — a deliberate divergence from
-    the design doc's original sketch (which gated it behind
-    ``kinds in ("callables", "all")``, i.e. excluded it entirely for
-    ``kinds="types"``). Excluding it turned out to false-positive on
-    the common case of a type that's only ever *constructed*
-    (``Config()``) and never subclassed or type-annotated elsewhere:
-    construction already resolves a call edge (usually to ``__init__``
-    or the bare type symbol) that ``_used_keys_callables``'s
-    container-marking already treats as "used" today, so dropping that
-    evidence for ``--kinds types`` would flag plainly-alive types as
-    dead. Always including it costs nothing extra for ``kinds="all"``
-    (identical either way) and only strictly reduces false positives
-    for ``kinds="types"``.
+    Both callables evidence (``calls_in``/``referenced_in``) and type
+    evidence (heritage/type-usage) are always included, regardless of
+    ``--kinds``. ``--kinds`` only ever narrows ``find_unused``'s
+    scanned *population* (which symbol kinds are even considered); it
+    never narrows which evidence counts as "used" for whatever
+    population is being scanned. Previously, type evidence
+    (``_used_keys_types``) was gated behind ``kinds in ("types",
+    "all")``, so a type-kind symbol used only in type position (never
+    called or subclassed) was false-positive-flagged as unused under
+    the default ``"callables"`` kind — see round-27 Track 4 design doc
+    ``test-repos/reports/27-round27-tokentest-7repo/
+    TRACK4-OPTION-B-DESIGN.md``. Since ``_used_keys_types`` only ever
+    adds evidence, never removes candidates, always including it can
+    only shrink ``find_unused``'s result, never grow it, for any
+    ``kinds`` value.
 
     Args:
         index: Loaded map index.
-        kinds: One of ``KINDS_CHOICES`` — which additional (beyond
-            callables, always included) evidence to consult.
 
     Returns:
-        The union of used keys implied by ``kinds``.
+        The union of every used key implied by any evidence source.
     """
-    used = _used_keys_callables(index)
-    if kinds in ("types", "all"):
-        used |= _used_keys_types(index)
-    return used
+    return _used_keys_callables(index) | _used_keys_types(index)
 
 
 def find_unused(
@@ -318,19 +317,21 @@ def find_unused(
     Args:
         index: Loaded map index.
         root_globs: Extra path globs whose symbols are always roots.
-        kinds: ``"callables"`` (default, today's unchanged behavior —
-            every symbol kind is scanned, using only
-            calls_in/referenced_in evidence), ``"types"`` (scan is
-            restricted to ``TYPE_KINDS`` symbols, using heritage +
-            type-usage evidence in addition to calls_in/referenced_in),
-            or ``"all"`` (every symbol kind is scanned, using every
-            evidence source).
+        kinds: ``"callables"`` (default — every symbol kind is
+            scanned; call/reference evidence always applies, and any
+            type-kind symbol encountered is also credited with
+            heritage/type-usage evidence, same as under
+            ``"types"``/``"all"``), ``"types"`` (scan is restricted to
+            ``TYPE_KINDS`` symbols), or ``"all"`` (every symbol kind is
+            scanned, same population as ``"callables"``). Evidence
+            sources no longer vary by ``kinds`` — only the scanned
+            population does.
 
     Returns:
         Unused symbols sorted by path then line.
     """
     reexports = reexported_names(index)
-    used = _used_keys(index, kinds)
+    used = _used_keys(index)
     container_index = _container_type_index(index)
     found = [
         sym
@@ -385,7 +386,7 @@ def find_suspects(
         Suspect symbols sorted by path then line.
     """
     reexports = reexported_names(index)
-    used = _used_keys(index, kinds)
+    used = _used_keys(index)
     container_index = _container_type_index(index)
     collision_names = ambiguous.collision_names(index)
     found = [

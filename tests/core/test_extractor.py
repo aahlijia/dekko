@@ -233,6 +233,39 @@ def test_rust_non_test_mod_named_something_else_stays_untested(
     assert syms["helpers.util"].test is False
 
 
+def test_rust_impl_std_path_receiver_flattened_to_bare_token(
+    tmp_path: Path,
+) -> None:
+    # Round 27 finding M3 / post-fix finding POST-3: pins the exact
+    # extraction-side behavior that made the resolver's std-namespace
+    # check unreachable -- `.receiver` for a fully-qualified `impl`
+    # trait path is flattened to a single bare token (the first
+    # segment only), never a joined multi-segment string, while
+    # `.text` keeps the full original path. A fix to the resolver
+    # alone (without this pin) could regress silently if a future
+    # change to ``_split_callee_text`` changed this shape again.
+    spec = languages.spec_for_path("shared_uri.rs")
+    assert spec is not None
+    (tmp_path / "shared_uri.rs").write_text(
+        "pub struct SharedUri;\n"
+        "\n"
+        "impl std::fmt::Display for SharedUri {\n"
+        "    fn fmt(&self, f: &mut std::fmt::Formatter) "
+        "-> std::fmt::Result {\n"
+        "        Ok(())\n"
+        "    }\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "shared_uri.rs", spec)
+    assert fm.error is None
+    assert len(fm.heritage) == 1
+    h = fm.heritage[0]
+    assert h.text == "std::fmt::Display"
+    assert h.name == "Display"
+    # Flattened -- the middle "fmt" segment is lost.
+    assert h.receiver == "std"
+
+
 def test_typescript_variable_export_indexed_as_symbol(
     tmp_path: Path,
 ) -> None:
@@ -917,6 +950,178 @@ def test_module_doc_skips_boilerplate_python_docstring(
     fm = extract_file(tmp_path, "licensed.py", spec)
     assert fm.error is None
     assert fm.doc == "Helpers for widget configuration."
+
+
+def test_module_doc_skips_full_apache_license_header(
+    tmp_path: Path,
+) -> None:
+    # Round 27 finding H1: the pre-fix regex only covered the first
+    # three lines of a standard Apache-2.0 header, so the fourth line
+    # onward ("You may obtain a copy of the License at" -- the line
+    # actually hit by both live repros -- plus the "AS IS" disclaimer
+    # and the license URL) leaked through as the file's "purpose".
+    # This is the full, real standard header text, not a trimmed
+    # fixture, to pin the exact repro shape.
+    spec = languages.spec_for_path("c_api.cc")
+    assert spec is not None
+    (tmp_path / "c_api.cc").write_text(
+        "// Copyright 2023 The TensorFlow Authors. All Rights Reserved.\n"
+        "//\n"
+        '// Licensed under the Apache License, Version 2.0 (the "License");\n'
+        "// you may not use this file except in compliance with the "
+        "License.\n"
+        "// You may obtain a copy of the License at\n"
+        "//\n"
+        "//     http://www.apache.org/licenses/LICENSE-2.0\n"
+        "//\n"
+        "// Unless required by applicable law or agreed to in writing, "
+        "software\n"
+        '// distributed under the License is distributed on an "AS IS" '
+        "BASIS,\n"
+        "// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express "
+        "or implied.\n"
+        "// See the License for the specific language governing "
+        "permissions and\n"
+        "// limitations under the License.\n"
+        "//\n"
+        "// Implements the deprecated session C API.\n"
+        "int real_function(int x) {\n"
+        "    return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "c_api.cc", spec)
+    assert fm.error is None
+    assert fm.doc == "Implements the deprecated session C API."
+
+
+def test_module_doc_skips_apache_header_with_divider_close(
+    tmp_path: Path,
+) -> None:
+    # Round 27 finding H1 (post-fix regression, POST-2): TensorFlow's
+    # actual header convention -- a single `/* ... */` block comment,
+    # not per-line `//` comments -- appends a bare row of `=` characters
+    # right before the closing `*/`. None of Track 1's added
+    # ``_BOILERPLATE_HEADER_RE`` alternatives match a punctuation-only
+    # divider (correctly so -- it isn't license text), so the old skip
+    # loop stopped there and surfaced the divider itself as the file's
+    # "purpose". Verbatim text from
+    # test-repos/tensorflow/tensorflow/core/kernels/gpu_device_array.h.
+    spec = languages.spec_for_path("gpu_device_array.h")
+    assert spec is not None
+    (tmp_path / "gpu_device_array.h").write_text(
+        "/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.\n"
+        "\n"
+        'Licensed under the Apache License, Version 2.0 (the "License");\n'
+        "you may not use this file except in compliance with the "
+        "License.\n"
+        "You may obtain a copy of the License at\n"
+        "\n"
+        "    http://www.apache.org/licenses/LICENSE-2.0\n"
+        "\n"
+        "Unless required by applicable law or agreed to in writing, "
+        "software\n"
+        'distributed under the License is distributed on an "AS IS" '
+        "BASIS,\n"
+        "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express "
+        "or implied.\n"
+        "See the License for the specific language governing "
+        "permissions and\n"
+        "limitations under the License.\n"
+        "==============================================================="
+        "===============*/\n"
+        "#ifndef TENSORFLOW_CORE_KERNELS_GPU_DEVICE_ARRAY_H_\n"
+        "#define TENSORFLOW_CORE_KERNELS_GPU_DEVICE_ARRAY_H_\n"
+    )
+    fm = extract_file(tmp_path, "gpu_device_array.h", spec)
+    assert fm.error is None
+    # The real file has no descriptive comment after the header at all
+    # -- nothing survives, so this must fall back to None (matching
+    # test_module_doc_all_boilerplate_falls_back_to_none's contract),
+    # never the divider line.
+    assert fm.doc is None
+
+
+def test_module_doc_divider_close_with_real_purpose_after(
+    tmp_path: Path,
+) -> None:
+    # Companion case: a repo whose header happens to be followed by a
+    # real descriptive comment (a separate node) must still surface
+    # that real content -- the divider check must not over-trigger and
+    # swallow genuine content further down the file.
+    spec = languages.spec_for_path("gpu_device_array.h")
+    assert spec is not None
+    (tmp_path / "gpu_device_array.h").write_text(
+        "/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.\n"
+        "\n"
+        'Licensed under the Apache License, Version 2.0 (the "License");\n'
+        "=============================================================="
+        "================*/\n"
+        "// Device-side array helpers for GPU kernels.\n"
+        "#ifndef TENSORFLOW_CORE_KERNELS_GPU_DEVICE_ARRAY_H_\n"
+    )
+    fm = extract_file(tmp_path, "gpu_device_array.h", spec)
+    assert fm.error is None
+    assert fm.doc == "Device-side array helpers for GPU kernels."
+
+
+def test_module_doc_skips_mit_license_header(tmp_path: Path) -> None:
+    # Preemptive MIT coverage added alongside the Apache extension --
+    # the same failure shape, just not yet reproduced live. Only lines
+    # the extended regex actually covers appear here (each on its own
+    # comment line, mirroring the other headers' minimal-fixture
+    # style) -- a non-covered prose line would surface as ``fm.doc``
+    # instead of the real content line below it.
+    spec = languages.spec_for_path("widget.js")
+    assert spec is not None
+    (tmp_path / "widget.js").write_text(
+        "// Copyright (c) 2023 Some Author\n"
+        "//\n"
+        "// Permission is hereby granted, free of charge, to any "
+        "person obtaining a copy\n"
+        "//\n"
+        "// The above copyright notice and this permission notice "
+        "shall be included\n"
+        "//\n"
+        '// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY '
+        "KIND\n"
+        "//\n"
+        "// Widget configuration helpers.\n"
+        "function realFunction(x) {\n"
+        "  return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "widget.js", spec)
+    assert fm.error is None
+    assert fm.doc == "Widget configuration helpers."
+
+
+def test_module_doc_skips_bsd_license_header(tmp_path: Path) -> None:
+    # Preemptive BSD-3-Clause coverage added alongside the Apache
+    # extension -- the same failure shape, just not yet reproduced
+    # live. Only lines the extended regex actually covers appear here
+    # (see the MIT test above for why).
+    spec = languages.spec_for_path("widget.js")
+    assert spec is not None
+    (tmp_path / "widget.js").write_text(
+        "// Copyright (c) 2023, Some Author\n"
+        "// All rights reserved.\n"
+        "//\n"
+        "// Redistribution and use in source and binary forms, with or "
+        "without\n"
+        "//\n"
+        "// list of conditions and the following disclaimer.\n"
+        "//\n"
+        "// Neither the name of the copyright holder nor the names "
+        "of its\n"
+        "//\n"
+        "// Widget configuration helpers.\n"
+        "function realFunction(x) {\n"
+        "  return x + 1;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "widget.js", spec)
+    assert fm.error is None
+    assert fm.doc == "Widget configuration helpers."
 
 
 def test_parse_rust_use() -> None:

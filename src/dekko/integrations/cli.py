@@ -1183,13 +1183,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "--kinds",
         choices=unused.KINDS_CHOICES,
         default="callables",
-        help="which evidence to use for dead-code detection: "
-        "'callables' (today's default and existing behavior -- every "
-        "symbol kind is scanned, using only call/reference evidence), "
+        help="which symbols to scan for dead-code detection: "
+        "'callables' (default -- every symbol kind is scanned; call/"
+        "reference evidence always applies, and any type-kind symbol "
+        "found is also credited with heritage + type-usage evidence), "
         "'types' (scan restricted to classes/interfaces/enums/structs/"
-        "records/traits, using heritage + type-usage evidence in "
-        "addition to call evidence), or 'all' (every symbol kind "
-        "scanned with every evidence source unioned in)",
+        "records/traits), or 'all' (every symbol kind scanned, same as "
+        "'callables')",
     )
     p_unused.add_argument(
         "--suspect",

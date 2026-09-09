@@ -3,6 +3,8 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from dekko.storage import revcache
 from dekko.analysis.diff import Snapshot
 from dekko.core.model import Import, Param, Symbol
@@ -116,6 +118,53 @@ def test_eviction_caps_entries_and_drops_oldest_accessed(
 
 def test_resolve_sha_unknown_rev_returns_none(tmp_path: Path) -> None:
     assert revcache.resolve_sha(tmp_path, "not-a-real-rev") is None
+
+
+# ---------------------------------------------------------------------
+# Round 27 finding H2: entries are stamped with the extractor's
+# ``spec_fingerprint()`` and invalidated on mismatch, so a cache entry
+# built by a different dekko binary is never served forever as if it
+# were still valid.
+# ---------------------------------------------------------------------
+
+
+def test_load_returns_none_when_spec_hash_does_not_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sha = "d" * 40
+    revcache.save(tmp_path, sha, _snapshot("f"))
+
+    monkeypatch.setattr(
+        revcache, "spec_fingerprint", lambda: "a-different-spec-hash"
+    )
+    assert revcache.load(tmp_path, sha) is None
+
+
+def test_load_evicts_the_stale_entry_on_spec_hash_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sha = "e" * 40
+    revcache.save(tmp_path, sha, _snapshot("f"))
+    entry_path = tmp_path / ".dekko" / "rev-cache" / f"{sha}.json"
+    assert entry_path.exists()
+
+    monkeypatch.setattr(
+        revcache, "spec_fingerprint", lambda: "a-different-spec-hash"
+    )
+    assert revcache.load(tmp_path, sha) is None
+    assert not entry_path.exists()
+
+
+def test_load_returns_snapshot_when_spec_hash_matches(
+    tmp_path: Path,
+) -> None:
+    sha = "f" * 40
+    snap = _snapshot("f")
+    revcache.save(tmp_path, sha, snap)
+
+    loaded = revcache.load(tmp_path, sha)
+    assert loaded is not None
+    assert set(loaded.symbols) == {"a.py::f"}
 
 
 # ---------------------------------------------------------------------
