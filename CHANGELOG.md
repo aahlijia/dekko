@@ -9,6 +9,36 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.48] — 2026-09-09
+
+### Fixed
+- **License-boilerplate divider lines still leaking into extracted
+  purpose (round-27, Track 1 follow-up)** — the round-27 boilerplate
+  regex fix closed the gap on spring-boot's header text but not on
+  tensorflow's, whose header ends in a 78-character `=` divider line
+  inside the same `/* ... */` comment block. A divider is pure
+  punctuation, so no text regex can match it; `_comment_first_line`
+  stopped there and surfaced the divider itself as the file's
+  "purpose." Fixed structurally: `extractor.py` now recognizes and
+  skips divider-only lines (repeated punctuation with no alphanumeric
+  content) alongside the existing boilerplate-text regex, in both
+  `_string_first_line` and `_comment_first_line`. See
+  `test-repos/reports/27-round27-tokentest-7repo/TRACK1-TRACK5-REDESIGN.md`.
+- **Fully-qualified Rust `std::`/`core::`/`alloc::` paths still not
+  recognized as external (round-27, Track 5 follow-up)** — the
+  round-27 fix added a multi-segment check to
+  `_receiver_is_external()` in `resolver.py`, but it was dead code:
+  `_heritage_rust_impl`/`_split_callee_text` in `extractor.py` already
+  flattens a receiver like `std::fmt::Display` down to just `"std"`
+  before the resolver ever sees it, so no `::` survives to split on.
+  Fixed by reading the unflattened `call.text` instead (which still
+  carries the full qualified path on `RawCall`/`RawHeritage`),
+  splitting on the literal `::` separator and gating the check to
+  Rust via `languages.spec_for_path` to avoid cross-language false
+  positives. Confirmed on zed: `impl std::fmt::Display for SharedUri`
+  now resolves `(external)` instead of colliding with an unrelated
+  in-repo `Display` enum.
+
 ## [0.43.47] — 2026-09-08
 
 ### Fixed

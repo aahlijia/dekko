@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from dekko.core import languages
 from dekko.core import resolver as resolver_mod
+from dekko.core.extractor import extract_file
 from dekko.repo_ops import map_repository
 from dekko.core.model import (
     FileMap,
@@ -3682,13 +3684,20 @@ def test_rust_std_namespace_root_external_no_use_binding() -> None:
     missed this shape and returned ``False`` regardless of the
     receiver text. Direct unit test of the new short-circuit, isolated
     from the heritage/candidate machinery below.
+
+    ``receiver="std"`` (not ``"std::fmt"``) matches what the real
+    extractor actually produces for this shape (post-fix finding
+    POST-3: ``_split_callee_text`` flattens a multi-segment path down
+    to first+last segments only, so ``.receiver`` is always a single
+    bare token) -- the short-circuit now reads ``.text`` instead, so
+    this hand-built fixture must use a realistic ``.receiver`` too.
     """
     call = RawCall(
         caller_id=None,
         path="src/lib.rs",
         text="std::fmt::Display",
         name="Display",
-        receiver="std::fmt",
+        receiver="std",
         line=1,
     )
     assert (
@@ -3729,6 +3738,11 @@ def test_heritage_qualified_std_display_external_despite_collision() -> None:
     ``_receiver_is_external`` never fired (per the gap above) and the
     single-candidate fallback silently returned the wrong, unrelated
     in-repo ``Display``.
+
+    ``receiver="std"`` (not ``"std::fmt"``) matches what the real
+    extractor produces (see
+    ``test_rust_std_namespace_root_external_no_use_binding``'s
+    docstring); the fix under test now reads ``.text`` instead.
     """
     display_collision = Symbol(
         id="crates/style/src/style.rs::Display",
@@ -3762,7 +3776,7 @@ def test_heritage_qualified_std_display_external_despite_collision() -> None:
                     path="crates/util/src/uri.rs",
                     text="std::fmt::Display",
                     name="Display",
-                    receiver="std::fmt",
+                    receiver="std",
                     relation="impl",
                     line=15,
                 )
@@ -3782,6 +3796,10 @@ def test_heritage_qualified_std_debug_still_resolves_external() -> None:
     previously via the empty-``candidates`` fallback branch, now via
     the new short-circuit firing first; either way the outcome must
     not regress.
+
+    ``receiver="std"`` matches what the real extractor produces (see
+    ``test_rust_std_namespace_root_external_no_use_binding``'s
+    docstring).
     """
     shared_uri = Symbol(
         id="crates/util/src/uri.rs::SharedUri",
@@ -3802,7 +3820,7 @@ def test_heritage_qualified_std_debug_still_resolves_external() -> None:
                     path="crates/util/src/uri.rs",
                     text="std::fmt::Debug",
                     name="Debug",
-                    receiver="std::fmt",
+                    receiver="std",
                     relation="impl",
                     line=9,
                 )
@@ -3813,6 +3831,57 @@ def test_heritage_qualified_std_debug_still_resolves_external() -> None:
     assert heritage_ambiguous == []
     externals = {(ext.caller, ext.callee) for ext in heritage_external}
     assert (shared_uri.id, "std::fmt::Debug") in externals
+
+
+def test_rust_impl_std_display_external_via_real_extraction(
+    tmp_path: Path,
+) -> None:
+    """End-to-end version of the zed repro, through the real extractor
+    (not a hand-built ``RawHeritage``) -- this is the test shape that
+    would have caught finding POST-3: the hand-built fixtures above
+    used to set ``receiver="std::fmt"``, a value the real extractor
+    never produces (see
+    ``test_rust_impl_std_path_receiver_flattened_to_bare_token`` in
+    ``test_extractor.py``, which pins ``receiver="std"`` instead).
+    """
+    spec = languages.spec_for_path("shared_uri.rs")
+    assert spec is not None
+    (tmp_path / "shared_uri.rs").write_text(
+        "pub struct SharedUri;\n"
+        "\n"
+        "impl std::fmt::Display for SharedUri {\n"
+        "    fn fmt(&self, f: &mut std::fmt::Formatter) "
+        "-> std::fmt::Result {\n"
+        "        Ok(())\n"
+        "    }\n"
+        "}\n"
+    )
+    shared_uri_fm = extract_file(tmp_path, "shared_uri.rs", spec)
+    assert shared_uri_fm.error is None
+
+    display_collision = Symbol(
+        id="crates/style/src/style.rs::Display",
+        name="Display",
+        qualname="Display",
+        kind="enum",
+        path="crates/style/src/style.rs",
+        language="rust",
+    )
+    files = [
+        FileMap(
+            "crates/style/src/style.rs",
+            "rust",
+            symbols=[display_collision],
+        ),
+        shared_uri_fm,
+    ]
+    _, _, _, heritage_ambiguous, heritage_external, _ = resolve_heritage(files)
+    assert heritage_ambiguous == []
+    externals = {(ext.caller, ext.callee) for ext in heritage_external}
+    shared_uri_id = next(
+        s.id for s in shared_uri_fm.symbols if s.name == "SharedUri"
+    )
+    assert (shared_uri_id, "std::fmt::Display") in externals
 
 
 def test_pick_candidate_returns_none_when_language_filtered_empty() -> None:
