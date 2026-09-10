@@ -17,6 +17,17 @@
 
 <!-- mcp-name: io.github.aahlijia/dekko -->
 
+Ever watched your coding agent grep blind through a repo, open three
+files it didn't need, and burn fifteen thousand tokens just to answer
+"who calls this function"? That's the problem dekko exists to fix.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/aahlijia/dekko/main/assets/demo.gif" alt="dekko demo: mapping a repo and querying a symbol in seconds" width="720">
+</p>
+<p align="center">
+  <sub>This demo runs on dekko's own repo (commit <code>835733c</code>) — clone it and run the same three commands yourself.</sub>
+</p>
+
 **dekko** is a fast, offline, dependency-free **static code map
 generator** and **codebase indexer for LLM coding agents**. It scans a
 repository with [tree-sitter](https://tree-sitter.github.io/) (no model
@@ -34,6 +45,10 @@ and "what do I need to safely change this" — without reading whole files.
 It ships as a **CLI**, a **Claude Code `/map` plugin + MCP server**
 ([Model Context Protocol](https://modelcontextprotocol.io/)), and
 works with **Cline** too.
+
+**The result: 3x-200x fewer tokens** than a plain Read/Grep workflow
+for the same task, measured across 7 real, unmodified open-source
+repos. The full breakdown is right below.
 
 ## Why dekko?
 
@@ -59,7 +74,10 @@ large file, tracing a symbol's callers/callees).
 | Bundled context (`workset`) | awesome-go | 617 tok | ~6,136 tok | ~10x |
 
 dekko's cost stays roughly flat per query while `Read`/`Grep` scales
-with file/repo size, so the ratio grows with scale. The win isn't
+with file/repo size, so the ratio grows with scale. It's fast in wall-clock
+terms too: mapping dekko's own ~3,500-symbol codebase from a cold
+cache takes about 1.8 seconds; queries against the resulting map
+return instantly. The win isn't
 universal — small,
 self-contained files and already-grep-friendly local symbols see
 little to no benefit, and a few cases in the raw data are void because
@@ -92,7 +110,10 @@ dekko summary               # ~40-line digest: dirs, hotspots, entry points
 ```
 
 `.dekko/` is git-ignored by default; the map regenerates on demand, so
-you rarely need to run `dekko map` again by hand.
+you rarely need to run `dekko map` again by hand. If your repo has
+languages outside the default Tier-1 set (Python, C, C++, JS/TS, Go,
+Java, Rust), `dekko map` will say so per file; install `dekko[all]` for
+~55 more languages (see [Install](#install)) and re-run.
 
 ## Documentation
 
