@@ -4133,15 +4133,23 @@ def _resolve_import_js(
     stripping unconditionally would truncate a real path segment (e.g.
     ``"opentui-spinner/react"`` down to ``"opentui-spinner"``).
 
-    Bare specifiers (no leading ``.``/``..``) are external by
-    construction *unless* a ``tsconfig.json``/``jsconfig.json``
+    Bare specifiers (no leading ``.``/``..``) are resolved first
+    against a ``tsconfig.json``/``jsconfig.json``
     ``compilerOptions.paths`` alias governing this importer's directory
-    resolves it to a real in-repo file (``ctx.ts_path_aliases``, empty
-    whenever ``resolve_imports`` was called with no filesystem ``root``
-    — see ``_ImportResolveContext``'s docstring) — an npm package name
-    never collides with a relative path or a configured alias pattern,
-    so an alias miss still falls through to "external", no repo-root
-    search beyond the alias table itself is needed.
+    (``ctx.ts_path_aliases``, empty whenever ``resolve_imports`` was
+    called with no filesystem ``root`` — see
+    ``_ImportResolveContext``'s docstring), then, failing that, as a
+    path relative to the repo root (round 28 claude-code.md §3.3: a
+    bare, repo-root-relative specifier with no leading ``./`` and no
+    governing tsconfig alias, e.g. ``import { x } from
+    'src/bootstrap/state.js'``, is a real third convention seen in the
+    wild, not just "relative" or "alias-configured"). The root-relative
+    attempt is gated on the specifier containing at least one ``/`` — a
+    single-segment bare specifier (``"react"``, ``"lodash"``) is
+    overwhelmingly a real npm package name in practice, so leaving it
+    external bounds the false-positive risk of an npm package name
+    coincidentally matching an in-repo path. Only once both attempts
+    miss does the specifier fall through to "external".
     """
     module_source = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
     if not (module_source.startswith("./") or module_source.startswith("../")):
@@ -4150,6 +4158,13 @@ def _resolve_import_js(
             resolved = _resolve_ts_path_alias(module_source, scope, ctx.paths)
             if resolved is not None:
                 return resolved
+        if "/" in module_source:
+            joined = posixpath.normpath(module_source)
+            root_relative = _first_match(
+                ctx.paths, _js_module_candidates(joined)
+            )
+            if root_relative is not None:
+                return root_relative
         return None
     base_dir = _dirname(importer_path)
     joined = posixpath.normpath(

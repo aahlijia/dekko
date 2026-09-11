@@ -3,6 +3,8 @@
 import json
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,8 @@ import pytest
 from dekko.integrations import cli
 from dekko.analysis import diff
 from dekko.render import mapfile
+from dekko.storage import cache as cache_mod
+from dekko.core.model import Param, Symbol
 
 BASE = {
     "a.py": "def f() -> int:\n    return 1\n",
@@ -418,3 +422,188 @@ def test_diff_rev_cache_is_correct_not_just_fast(
     assert first == second
     assert [d["id"] for d in first["changed"]] == ["a.py::f"]
     assert [d["id"] for d in first["added"]] == ["c.py::h"]
+
+
+# ---------------------------------------------------------------------
+# Round 28 layer 3: compare() warns when 100% of a large-enough shared
+# symbol set reports as "changed" with nothing added/removed -- the
+# known corrupted-rev-cache signature (tensorflow finding: 171706
+# changed, 0 added, 0 removed).
+# ---------------------------------------------------------------------
+
+
+def _sym(sym_id: str, name: str) -> Symbol:
+    return Symbol(
+        id=sym_id,
+        name=name,
+        qualname=name,
+        kind="function",
+        path="a.py",
+        language="python",
+        params=[Param(name="x", type="int")],
+        returns="int",
+        start_line=1,
+        end_line=2,
+    )
+
+
+def _snap(names: list[str], body_suffix: str) -> diff.Snapshot:
+    syms = {f"a.py::{n}": _sym(f"a.py::{n}", n) for n in names}
+    body = {sid: f"{sid}{body_suffix}" for sid in syms}
+    return diff.Snapshot(symbols=syms, callers={}, body=body, imports={})
+
+
+def test_compare_warns_when_everything_changed_and_large_enough(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    names = [f"f{i}" for i in range(diff._SUSPICIOUS_CHANGE_RATIO_MIN_SYMBOLS)]
+    old = _snap(names, "-old")
+    new = _snap(names, "-new")
+
+    diff.compare("HEAD", old, new)
+
+    err = capsys.readouterr().err
+    assert "corrupted-rev-cache signature" in err
+
+
+def test_compare_silent_below_threshold(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    names = ["f1", "f2"]
+    old = _snap(names, "-old")
+    new = _snap(names, "-new")
+
+    diff.compare("HEAD", old, new)
+
+    assert capsys.readouterr().err == ""
+
+
+def test_compare_silent_when_something_added(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    names = [f"f{i}" for i in range(diff._SUSPICIOUS_CHANGE_RATIO_MIN_SYMBOLS)]
+    old = _snap(names, "-old")
+    new = _snap([*names, "extra"], "-new")
+
+    diff.compare("HEAD", old, new)
+
+    assert capsys.readouterr().err == ""
+
+
+# ---------------------------------------------------------------------
+# Round 28 layer 2: concurrent old_snapshot() calls for the same SHA
+# serialize on a per-SHA lock instead of racing an uncoordinated,
+# duplicate export/re-parse/resolve against the same rev.
+# ---------------------------------------------------------------------
+
+
+def test_old_snapshot_concurrent_calls_serialize_and_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+    _commit_all(root, "change f")
+
+    real_snapshot = diff.snapshot
+    call_count = 0
+    lock = threading.Lock()
+
+    def slow_snapshot(*args: object, **kwargs: object) -> diff.Snapshot:
+        nonlocal call_count
+        with lock:
+            call_count += 1
+        time.sleep(0.5)
+        return real_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(diff, "snapshot", slow_snapshot)
+
+    results: list[diff.Snapshot | None] = [None, None]
+
+    def build(index: int) -> None:
+        results[index] = diff.old_snapshot(
+            root,
+            "HEAD~1",
+            None,
+            (),
+            10_000_000,
+            cache_mod.IncrementalCache({}),
+        )
+
+    t1 = threading.Thread(target=build, args=(0,))
+    t2 = threading.Thread(target=build, args=(1,))
+    t1.start()
+    time.sleep(0.1)  # give t1 a head start acquiring the lock first
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert call_count == 1  # serialized: only one real build happened
+    assert results[0] is not None and results[1] is not None
+    assert set(results[0].symbols) == set(results[1].symbols)
+    assert results[0].body == results[1].body
+
+
+def test_old_snapshot_wait_cap_timeout_still_produces_correct_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+    _commit_all(root, "change f")
+
+    monkeypatch.setattr(diff, "_REV_CACHE_LOCK_WAIT_CAP", 0.2)
+    monkeypatch.setattr(diff, "_REV_CACHE_LOCK_POLL_INTERVAL", 0.05)
+
+    real_snapshot = diff.snapshot
+    call_count = 0
+    lock = threading.Lock()
+
+    def slow_snapshot(*args: object, **kwargs: object) -> diff.Snapshot:
+        nonlocal call_count
+        with lock:
+            call_count += 1
+        time.sleep(1.0)  # longer than the (shrunk) wait cap
+        return real_snapshot(*args, **kwargs)
+
+    monkeypatch.setattr(diff, "snapshot", slow_snapshot)
+
+    results: list[diff.Snapshot | None] = [None, None]
+
+    def build(index: int) -> None:
+        results[index] = diff.old_snapshot(
+            root,
+            "HEAD~1",
+            None,
+            (),
+            10_000_000,
+            cache_mod.IncrementalCache({}),
+        )
+
+    t1 = threading.Thread(target=build, args=(0,))
+    t2 = threading.Thread(target=build, args=(1,))
+    t1.start()
+    time.sleep(0.1)
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    # The waiter's cap was hit before the holder's slow build landed,
+    # so it fell open to its own uncoordinated build -- both results
+    # must still be correct even though the build wasn't deduplicated.
+    assert call_count == 2
+    assert results[0] is not None and results[1] is not None
+    assert set(results[0].symbols) == set(results[1].symbols)
+    assert results[0].body == results[1].body
+
+
+def test_compare_silent_when_only_partial_fraction_changed(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    names = [f"f{i}" for i in range(diff._SUSPICIOUS_CHANGE_RATIO_MIN_SYMBOLS)]
+    old = _snap(names, "-old")
+    new = _snap(names, "-old")
+    changed_id = f"a.py::{names[0]}"
+    new.body[changed_id] = "different"
+
+    diff.compare("HEAD", old, new)
+
+    assert capsys.readouterr().err == ""

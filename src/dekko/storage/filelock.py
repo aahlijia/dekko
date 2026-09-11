@@ -25,19 +25,21 @@ from pathlib import Path
 LOCK_NAME = "regen.lock"
 
 
-def _open_lock_file(root: Path) -> int:
+def _open_lock_file(root: Path, name: str = LOCK_NAME) -> int:
     """Open (creating if needed) the lock file under ``root/.dekko/``.
 
     Args:
         root: Repository root containing (or about to contain) the
             ``.dekko/`` directory.
+        name: Lock file name (and, for a name containing ``/``, its
+            path) relative to ``root/.dekko/``. Defaults to the
+            regen-lock's own name for backward compatibility.
 
     Returns:
         A raw file descriptor for the lock file, opened for writing.
     """
-    lock_dir = root / ".dekko"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / LOCK_NAME
+    lock_path = root / ".dekko" / name
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     return os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
 
 
@@ -101,30 +103,39 @@ def _release_windows(fd: int) -> None:
 
 
 @contextlib.contextmanager
-def try_regen_lock(root: Path) -> Iterator[bool]:
-    """Best-effort advisory lock around a ``.dekko/`` regen.
+def try_named_lock(root: Path, name: str) -> Iterator[bool]:
+    """Best-effort advisory lock around an arbitrary named critical
+    section under ``root/.dekko/``.
+
+    Generalizes :func:`try_regen_lock`'s mechanism (originally
+    hardcoded to the single ``.dekko/`` regen lock) to any named lock
+    file, so other critical sections (e.g. per-SHA rev-cache builds,
+    round 28) can reuse the identical acquire/wait/fail-open shape
+    without duplicating the platform-branching logic.
 
     Yields ``True`` if the lock was acquired (caller should proceed
-    with its own regen), ``False`` if another process already holds it
-    (caller should wait briefly and re-check freshness rather than
-    redundantly regenerating -- the other process's regen will make
-    this one unnecessary). Never raises: any locking-primitive failure
-    (a filesystem that doesn't support locks, a permissions error, an
-    unsupported platform) yields ``True``, matching this project's
-    fail-open philosophy elsewhere (daemon lifecycle, atomic writes) --
-    a lock that can't be acquired reliably must never *block* a regen
-    from happening, only deduplicate it when coordination is cheaply
-    possible.
+    with its own work), ``False`` if another process already holds it
+    (caller should wait briefly and re-check for the other process's
+    result rather than redundantly repeating the same work). Never
+    raises: any locking-primitive failure (a filesystem that doesn't
+    support locks, a permissions error, an unsupported platform)
+    yields ``True``, matching this project's fail-open philosophy
+    elsewhere (daemon lifecycle, atomic writes) -- a lock that can't be
+    acquired reliably must never *block* the work from happening, only
+    deduplicate it when coordination is cheaply possible.
 
     The lock is released automatically when the ``with`` block exits,
     including on an unhandled exception -- a crashed holder never
-    permanently wedges future regens, since a non-blocking acquisition
+    permanently wedges future work, since a non-blocking acquisition
     attempt from a subsequent process simply succeeds once the OS
     reclaims the crashed process's file descriptors.
 
     Args:
-        root: Repository root whose ``.dekko/`` regen is being
-            coordinated.
+        root: Repository root under whose ``.dekko/`` the lock file
+            lives.
+        name: Lock file name (may include ``/`` to nest under a
+            subdirectory of ``.dekko/``, e.g. ``"rev-cache/<sha>
+            .lock"``).
 
     Yields:
         ``True`` if this call acquired the lock (or locking isn't
@@ -132,7 +143,7 @@ def try_regen_lock(root: Path) -> Iterator[bool]:
         by design); ``False`` if another process currently holds it.
     """
     try:
-        fd = _open_lock_file(root)
+        fd = _open_lock_file(root, name)
     except OSError:
         yield True
         return
@@ -158,3 +169,22 @@ def try_regen_lock(root: Path) -> Iterator[bool]:
                 _release_posix(fd)
         with contextlib.suppress(OSError):
             os.close(fd)
+
+
+def try_regen_lock(root: Path) -> "contextlib.AbstractContextManager[bool]":
+    """Best-effort advisory lock around a ``.dekko/`` regen.
+
+    Thin wrapper over :func:`try_named_lock` for the regen critical
+    section specifically -- kept as its own name since every existing
+    caller (``repo_ops._locked_regen``) already depends on this exact
+    signature.
+
+    Args:
+        root: Repository root whose ``.dekko/`` regen is being
+            coordinated.
+
+    Returns:
+        A context manager yielding ``True``/``False`` exactly as
+        documented on :func:`try_named_lock`.
+    """
+    return try_named_lock(root, LOCK_NAME)

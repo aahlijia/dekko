@@ -22,6 +22,7 @@ diffed against many different revs over time doesn't grow
 """
 
 import subprocess
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -151,15 +152,55 @@ def load(root: Path, sha: str) -> "Snapshot | None":
     return snap
 
 
+def _is_all_empty_body(snap: "Snapshot") -> bool:
+    """Whether every symbol in ``snap`` hashed to an empty body.
+
+    A non-empty symbol table whose body map is either missing entries
+    or all-empty-string is the exact signature of
+    ``diff._body_hashes_for_path``'s silent OSError fallback having
+    fired for every mapped file — never a legitimate outcome for a
+    real snapshot (round 28 tensorflow finding). An empty symbol table
+    (a subpath filter matching nothing) is not flagged; there is
+    nothing to be wrong about.
+
+    Args:
+        snap: The snapshot to check.
+
+    Returns:
+        ``True`` if ``snap`` has at least one symbol and every one of
+        them has an empty (or missing) body hash.
+    """
+    if not snap.symbols:
+        return False
+    return all(not snap.body.get(sid) for sid in snap.symbols)
+
+
 def save(root: Path, sha: str, snap: "Snapshot") -> None:
     """Persist a snapshot for a resolved commit SHA, then evict old
     entries past :data:`MAX_ENTRIES`.
+
+    Refuses to write a snapshot whose body map is all-empty-string
+    across every symbol (see :func:`_is_all_empty_body`) — the known
+    signature of a transient read failure during old-side export
+    (round 28 tensorflow finding: a corrupted entry saved this way was
+    then served forever, since a rev-cache hit needs no freshness
+    check by design). Logs one loud ``note:`` line and skips the write
+    rather than persisting a maximally-wrong cache entry.
 
     Args:
         root: Repository root.
         sha: Full commit SHA the snapshot was built from.
         snap: The snapshot to cache.
     """
+    if _is_all_empty_body(snap):
+        print(
+            f"note: refusing to cache rev {sha[:12]} -- every symbol's "
+            "body hash came back empty (likely a transient read "
+            "failure while exporting the old-side tree); re-run to "
+            "retry rather than caching a known-corrupt snapshot",
+            file=sys.stderr,
+        )
+        return
     cache_dir = _cache_dir(root)
     cache_dir.mkdir(parents=True, exist_ok=True)
     atomic_write_bytes(

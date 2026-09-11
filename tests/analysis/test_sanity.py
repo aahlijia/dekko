@@ -100,6 +100,60 @@ def test_classify_miss_generic_name() -> None:
     assert cause == sanity.CAUSE_GENERIC_NAME
 
 
+# --- data-driven generic-name signal (round 28 cline.md §3.5) ----------
+
+
+def test_is_generic_name_true_for_curated_word() -> None:
+    assert sanity._is_generic_name("delete")
+
+
+def test_is_generic_name_true_for_known_collision_name() -> None:
+    # "dispose" is not in the curated list -- the new signal must fire
+    # independently of curation.
+    assert sanity._is_generic_name("dispose", is_known_collision_name=True)
+
+
+def test_is_generic_name_false_for_uncollided_uncurated_name() -> None:
+    # Additive, not a blanket loosening: absent both signals, an
+    # uncurated, non-colliding name stays non-generic.
+    assert not sanity._is_generic_name(
+        "dispose", is_known_collision_name=False
+    )
+
+
+def test_is_generic_name_curated_word_still_true_without_collision_flag() -> (
+    None
+):
+    # Extend-not-replace: a curated word must keep registering as
+    # generic even when the new collision signal is absent (e.g. a
+    # small synthetic repo where it doesn't happen to collide yet).
+    assert sanity._is_generic_name("new", is_known_collision_name=False)
+
+
+def test_classify_miss_known_collision_name_is_generic() -> None:
+    cause = sanity.classify_miss(
+        "value = dispose(x)",
+        "dispose",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        is_known_collision_name=True,
+    )
+    assert cause == sanity.CAUSE_GENERIC_NAME
+
+
+def test_classify_miss_uncollided_uncurated_name_is_unexplained() -> None:
+    cause = sanity.classify_miss(
+        "value = dispose(x)",
+        "dispose",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        is_known_collision_name=False,
+    )
+    assert cause == sanity.CAUSE_UNEXPLAINED
+
+
 def test_classify_miss_unexplained() -> None:
     cause = sanity.classify_miss(
         "value = totally_unrelated_wrapper(x)",
@@ -444,6 +498,80 @@ def test_sanity_generic_name_caution(
     doc = json.loads(capsys.readouterr().out)
     causes = {row["cause"] for row in doc["grep_only"]}
     assert sanity.CAUSE_GENERIC_NAME in causes
+
+
+def test_sanity_data_driven_collision_flags_uncurated_name(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # round 28 cline.md §3.5: "dispose" is not in the curated
+    # _GENERIC_NAMES list, but two unrelated dispose() methods create
+    # a real, measurable ambiguous call-graph collision the moment a
+    # bare, receiverless call to it exists -- ambiguous.collision_names
+    # must surface that collision as CAUSE_GENERIC_NAME here, not
+    # CAUSE_UNEXPLAINED, even absent any curation.
+    root = make_mapped_repo(
+        {
+            "a.py": "class A:\n    def dispose(self):\n        pass\n",
+            "b.py": "class B:\n    def dispose(self):\n        pass\n",
+            "c.py": "def caller(x):\n    return dispose(x)\n",
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "A.dispose", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["cause"] for row in doc["grep_only"]}
+    assert sanity.CAUSE_GENERIC_NAME in causes
+
+
+def test_sanity_no_generic_name_caution_for_non_colliding_name(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Cross-repo no-op guard: a real, single-candidate, low-fan-in
+    # symbol with a genuinely unrelated grep-only miss elsewhere must
+    # not be swept up into the new collision-based caution.
+    root = make_mapped_repo(
+        {
+            "a.py": ("def distinctivelyuniquename():\n    return 1\n"),
+            "b.py": ("value = distinctivelyuniquename\n"),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        ["sanity", "distinctivelyuniquename", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    causes = {row["cause"] for row in doc["grep_only"]}
+    assert sanity.CAUSE_GENERIC_NAME not in causes
+    assert sanity.CAUSE_UNEXPLAINED in causes
+
+
+def test_sanity_usages_mode_never_sets_collision_signal(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # round 28 cline.md §3.5 risk note: --usages mode has no
+    # "candidate" concept for an external base identifier the way
+    # there is for a repo-defined symbol's bare name, so the
+    # collision-name signal must always be False there -- even for a
+    # bare name that would otherwise be flagged as a curated generic
+    # name, an --usages report should classify via the ordinary ladder
+    # (here: a real dekko-side match), not fabricate a collision.
+    root = make_mapped_repo(
+        {"a.py": "import os\n\n\ndef caller():\n    return os.getcwd()\n"}
+    )
+    code = cli.main(
+        ["sanity", "getcwd", "--usages", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["query_action"] == "uses"
+    assert doc["counts"]["matches"] >= 1
 
 
 def test_sanity_unexplained_miss_says_so(
@@ -1512,6 +1640,171 @@ def test_looks_like_type_annotation_javascript_generic() -> None:
     )
 
 
+# --- Rust type-position usage (round 28 zed.md §3.4) -------------------
+
+
+def test_looks_like_type_annotation_rust_field_annotation() -> None:
+    # Rust's field/parameter shape is syntactically identical to TS's
+    # `x: Output` -- the already-generic template, reachable for Rust
+    # once the grammar gate is open, needs no new template of its own.
+    assert sanity._looks_like_type_annotation(
+        "    handle: NavHistory,", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_param_annotation() -> None:
+    assert sanity._looks_like_type_annotation(
+        "fn resolve(history: NavHistory) -> bool {", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_impl_for() -> None:
+    assert sanity._looks_like_type_annotation(
+        "impl SomeTrait for NavHistory {", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_impl_for_generic() -> None:
+    assert sanity._looks_like_type_annotation(
+        "impl<T> SomeTrait<T> for NavHistory<T> {", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_impl_for_multi_bound() -> None:
+    # A pathological one-line impl header with an inline trait bound
+    # and where clause -- the match must still land on the trailing
+    # `for {name}`, not misfire earlier in the line.
+    assert sanity._looks_like_type_annotation(
+        "impl<T: Clone + Send> Trait<T> for NavHistory<T> where T: Debug {",
+        "NavHistory",
+        "a.rs",
+    )
+
+
+def test_looks_like_type_annotation_rust_turbofish_type() -> None:
+    assert sanity._looks_like_type_annotation(
+        "let x = Container::<NavHistory>::new();", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_turbofish_func() -> None:
+    assert sanity._looks_like_type_annotation(
+        "let x = parse::<NavHistory>();", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_where_clause_generic() -> None:
+    # Non-turbofish generic use inside a trait bound -- already caught
+    # by the existing, now-Rust-gated `<\s*{name}\s*[,>]` template.
+    assert sanity._looks_like_type_annotation(
+        "fn f<T>(x: T) where T: SomeTrait<NavHistory> {", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_inherent_impl() -> None:
+    # Plain inherent impl (no trailing "for Trait") -- surfaced by a
+    # real-repo spot-check on zed after the design doc's own
+    # `impl...for` template alone left this exact line (the master
+    # report's own motivating example) unclassified.
+    assert sanity._looks_like_type_annotation(
+        "impl NavHistory {", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_inherent_impl_generic() -> None:
+    assert sanity._looks_like_type_annotation(
+        "impl<T> NavHistory<T> {", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_return_type() -> None:
+    # Also surfaced by the same zed spot-check -- the master report's
+    # own repro cited this exact line as unexplained.
+    assert sanity._looks_like_type_annotation(
+        "pub fn fork_nav_history(&self) -> NavHistory {",
+        "NavHistory",
+        "a.rs",
+    )
+
+
+def test_looks_like_type_annotation_rust_return_type_ref() -> None:
+    assert sanity._looks_like_type_annotation(
+        "pub fn nav_history(&self) -> &NavHistory {", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_return_type_ref_mut() -> None:
+    assert sanity._looks_like_type_annotation(
+        "pub fn nav_history_mut(&mut self) -> &mut NavHistory {",
+        "NavHistory",
+        "a.rs",
+    )
+
+
+def test_looks_like_type_annotation_rust_ref_type_nested_param() -> None:
+    # A reference-type mention nested inside a higher-order function's
+    # own parameter list (a closure type), not directly after a
+    # top-level colon -- the third shape the same zed spot-check
+    # surfaced.
+    assert sanity._looks_like_type_annotation(
+        "cb: &mut dyn FnMut(&mut NavHistory, &mut App) "
+        "-> Option<NavigationEntry>,",
+        "NavHistory",
+        "a.rs",
+    )
+
+
+def test_looks_like_type_annotation_rust_ref_call_not_annotation() -> None:
+    # A reference to a freshly-constructed tuple struct is a real call,
+    # not a bare type mention.
+    assert not sanity._looks_like_type_annotation(
+        "let x = &NavHistory(a, b);", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_ref_qual_call_not_annotation() -> (
+    None
+):
+    assert not sanity._looks_like_type_annotation(
+        "let x = &NavHistory::new();", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_call_not_annotation() -> None:
+    # A real call -- tuple-struct construction -- must not be
+    # misclassified as a type annotation.
+    assert not sanity._looks_like_type_annotation(
+        "let x = NavHistory(a, b);", "NavHistory", "a.rs"
+    )
+
+
+def test_looks_like_type_annotation_rust_qualified_call_not_annotation() -> (
+    None
+):
+    assert not sanity._looks_like_type_annotation(
+        "let x = NavHistory::new();", "NavHistory", "a.rs"
+    )
+
+
+def test_classify_miss_rust_qualified_call_wins_over_type_annotation() -> None:
+    # The qualified-call check runs earlier in classify_miss's ladder
+    # than looks_like_type_annotation and must still win -- a genuine
+    # `Type::new()` call for bare_name "new" must never be swallowed
+    # as a type annotation.
+    snippet = "let x = NavHistory::new();"
+    cause = sanity.classify_miss(
+        snippet,
+        "new",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_type_annotation=sanity._looks_like_type_annotation(
+            snippet, "new", "a.rs"
+        ),
+    )
+    assert cause == sanity.CAUSE_QUALIFIED_CALL
+
+
 def test_classify_miss_type_annotation() -> None:
     # classify_miss stays pure/I/O-free -- the caller computes
     # looks_like_type_annotation and passes it in, same contract as
@@ -1614,6 +1907,79 @@ def test_looks_like_local_binding_or_literal_ordering_caveat() -> None:
     assert sanity._looks_like_local_binding_or_literal(
         'someFunc("warn")', "warn"
     )
+
+
+# --- catch binding / interface field (round 28 cline.md §3.5) ----------
+
+
+def test_looks_like_local_binding_or_literal_catch_binding() -> None:
+    assert sanity._looks_like_local_binding_or_literal(
+        "catch (error) {", "error"
+    )
+
+
+def test_looks_like_local_binding_or_literal_catch_binding_brace() -> None:
+    # The common `} catch (error) {` brace-placement style, where the
+    # previous block's closer sits on the same line as `catch`.
+    assert sanity._looks_like_local_binding_or_literal(
+        "} catch (error) {", "error"
+    )
+
+
+def test_looks_like_local_binding_or_literal_interface_field() -> None:
+    assert sanity._looks_like_local_binding_or_literal(
+        "error: string;", "error"
+    )
+
+
+def test_looks_like_local_binding_or_literal_interface_field_optional() -> (
+    None
+):
+    assert sanity._looks_like_local_binding_or_literal(
+        "error?: string;", "error"
+    )
+
+
+def test_looks_like_local_binding_or_literal_iface_field_ternary_safe() -> (
+    None
+):
+    # A ternary expression using the name must not false-positive
+    # against the interface-field template's anchoring.
+    assert not sanity._looks_like_local_binding_or_literal(
+        "x ? error : other", "error"
+    )
+
+
+def test_classify_miss_catch_binding() -> None:
+    cause = sanity.classify_miss(
+        "catch (error) {",
+        "error",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_local_binding_or_literal=(
+            sanity._looks_like_local_binding_or_literal(
+                "catch (error) {", "error"
+            )
+        ),
+    )
+    assert cause == sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
+
+
+def test_classify_miss_interface_field() -> None:
+    cause = sanity.classify_miss(
+        "error?: string;",
+        "error",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        looks_like_local_binding_or_literal=(
+            sanity._looks_like_local_binding_or_literal(
+                "error?: string;", "error"
+            )
+        ),
+    )
+    assert cause == sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
 
 
 def test_classify_miss_local_binding_or_literal() -> None:
@@ -3170,12 +3536,23 @@ def test_sanity_group_by_file_rolls_up_grep_only(
     # C.3: two unexplained-cause hits clustered in b.py and one
     # qualified-call hit in c.py must roll up into a per-file count
     # with a per-cause breakdown, largest cluster first.
+    #
+    # b.py's two hits are bare *references* (no call parens), not
+    # calls -- a bare cross-file call to a same-named symbol with no
+    # confirming import is itself a real, deterministic collision
+    # dekko's resolver already records (``ambiguous_in``/``_out``),
+    # which round 28's data-driven generic-name signal now correctly
+    # surfaces as ``CAUSE_GENERIC_NAME`` rather than leaving it
+    # unexplained. A bare reference (not a call) is dropped rather
+    # than recorded as ambiguous either way, keeping these two hits
+    # genuinely unexplained -- the rendering behavior this test
+    # actually exercises.
     root = make_mapped_repo(
         {
             "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
             "b.py": (
-                "value = totally_unrelated_wrapper(x)\n"
-                "value = totally_unrelated_wrapper(y)\n"
+                "value = totally_unrelated_wrapper\n"
+                "another = totally_unrelated_wrapper\n"
             ),
             "c.py": (
                 "import pkg\n\n\n"
@@ -3213,12 +3590,19 @@ def test_sanity_group_by_file_omitted_keeps_flat_listing(
 ) -> None:
     # C.3: default behavior (--group-by-file omitted) is unchanged —
     # the existing flat _print_bucket_text rendering still applies.
+    #
+    # Bare references (no call parens), not calls -- see the sibling
+    # rollup test above for why: a bare cross-file *call* with no
+    # import is itself a real ambiguous-edge collision round 28's
+    # generic-name signal now surfaces as CAUSE_GENERIC_NAME, but a
+    # bare reference is dropped rather than recorded as ambiguous,
+    # keeping these hits genuinely unexplained.
     root = make_mapped_repo(
         {
             "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
             "b.py": (
-                "value = totally_unrelated_wrapper(x)\n"
-                "value = totally_unrelated_wrapper(y)\n"
+                "value = totally_unrelated_wrapper\n"
+                "another = totally_unrelated_wrapper\n"
             ),
         }
     )

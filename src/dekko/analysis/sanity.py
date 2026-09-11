@@ -94,7 +94,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from dekko import repo_ops
-from dekko.analysis import query
+from dekko.analysis import ambiguous, query
 from dekko.classify import is_test_path
 from dekko.core import languages
 from dekko.core.model import TYPE_KINDS, Symbol
@@ -401,11 +401,29 @@ _GENERIC_NAMES = frozenset(
 _QUALIFIED_CALL_TEMPLATE = r"[A-Za-z_][A-Za-z0-9_]*(?:\.|::){name}\s*\("
 
 
-def _is_generic_name(name: str) -> bool:
-    """Whether ``name`` is short/common enough to warrant a directional
-    caution — dekko-verify's "dense-repo common short method name"
-    case."""
-    return len(name) <= _GENERIC_NAME_MAX_LEN or name.lower() in _GENERIC_NAMES
+def _is_generic_name(name: str, is_known_collision_name: bool = False) -> bool:
+    """Whether ``name`` is short/common enough, or has *measurably*
+    collided repo-wide in this specific map, to warrant a directional
+    caution.
+
+    Two independent, additive signals: the curated word list (and
+    length shortcut) catches conventionally-generic names even in a
+    small/synthetic repo where they happen not to collide yet;
+    ``is_known_collision_name`` (from ``ambiguous.collision_names``)
+    catches any name -- regardless of curation -- that has *actually*
+    collided 2+ ways somewhere in this repo's own call graph (round 28
+    cline.md §3.5: ``delete``/``resolve``/``close``/``invoke``/
+    ``dispose``/``clear``/``error`` all reproduced this exact
+    collision shape while absent from the curated list). Additive by
+    design: this can only ever add cases to ``CAUSE_GENERIC_NAME``,
+    never remove one the curated list already caught, so no existing
+    passing test can regress.
+    """
+    return (
+        len(name) <= _GENERIC_NAME_MAX_LEN
+        or name.lower() in _GENERIC_NAMES
+        or is_known_collision_name
+    )
 
 
 def _looks_qualified_call(snippet: str, bare_name: str) -> bool:
@@ -500,21 +518,82 @@ def _looks_like_import_statement(snippet: str, bare_name: str) -> bool:
 # own follow-up evidence before extending this check there (same "ship
 # the shape that's evidenced" precedent as the Java/Kotlin import
 # template split above).
-_TYPE_ANNOTATION_GRAMMARS = frozenset({"typescript", "tsx", "javascript"})
+_TYPE_ANNOTATION_GRAMMARS = frozenset(
+    {"typescript", "tsx", "javascript", "rust"}
+)
 _TS_IMPORT_TYPE_TEMPLATE = r"^import\s+type\s+.*\b{name}\b"
 _TS_TYPE_POSITION_TEMPLATE = (
     r":\s*{name}\b(?!\s*\()"  # `x: Output`, not `x: Output()`
     r"|<\s*{name}\s*[,>]"  # `Foo<Output>`, `Foo<Output, Bar>`
 )
+# Round 28 zed.md §3.4: Rust's type-position idioms have no TS
+# equivalent and need their own templates, even with "rust" now
+# admitted to _TYPE_ANNOTATION_GRAMMARS -- Rust's field/parameter
+# shape (`field: Type`) is syntactically identical to TS's `x: Output`
+# and already falls out of _TS_TYPE_POSITION_TEMPLATE's first half for
+# free once the grammar gate is open.
+#
+# `impl Trait for Type` / `impl<T> Trait<T> for Type<T>` -- an `impl`
+# header naming the type being implemented for, not a call or a value
+# reference. TS has no equivalent shape.
+_RUST_IMPL_FOR_TEMPLATE = r"^impl(?:<[^>]*>)?\s+.+\bfor\s+{name}\b"
+# Rust turbofish (`Type::<Concrete>`, `func::<Type>()`) -- distinct
+# from TS's bare `<Output>` generic-argument shape by its leading
+# `::`. Anchored on the `::` prefix for precision, even though the
+# existing generic-argument template would likely also match the
+# bare `<Type>` substring once Rust is grammar-gated in.
+_RUST_TURBOFISH_TEMPLATE = r"::<\s*{name}\s*>"
+# Round 28 zed.md §3.4 spot-check (real-repo verification against
+# zed's own two motivating examples, `NavHistory`/`BufferFontSize`):
+# the design doc's `impl...for` template alone left the plain
+# *inherent* impl block (`impl NavHistory { ... }`, `impl<T>
+# NavHistory<T> { ... }` -- no trailing `for Trait`) unclassified, even
+# though the master report's own repro cited exactly this line
+# (`impl NavHistory {`) as a motivating example. Anchored the same way
+# as `_RUST_IMPL_FOR_TEMPLATE` (start of line, optional generic
+# parameter list) but requires the name immediately after, not after a
+# `for`.
+_RUST_IMPL_TEMPLATE = r"^impl(?:<[^>]*>)?\s+{name}\b"
+# A function's return-type position (`-> Type`, `-> &Type`, `-> &mut
+# Type`) has no TS equivalent needing this shape (TS's colon-based
+# return-type syntax, `): Type {`, already falls out of the existing
+# colon template for free) -- Rust's `->` arrow syntax needs its own.
+# Also evidenced directly by the master report's own repro (`pub fn
+# nav_history(&self) -> &NavHistory {`). Same negative-lookahead
+# discipline as the colon template, to avoid misclassifying `-> Type()`
+# (a call whose result is the return value) as a type annotation --
+# not a real Rust shape (a function's return type is never itself a
+# call expression), but kept for defense-in-depth consistency with
+# every other template in this module. The lookahead also excludes a
+# trailing `::` (a qualified call/path via a leading reference, e.g.
+# `&Type::method()`) for the same defense-in-depth reason, even though
+# a return type is never itself `-> Type::method()`.
+_RUST_RETURN_TYPE_TEMPLATE = r"->\s*&?(?:mut\s+)?{name}\b(?!\s*\(|::)"
+# A reference-type mention anywhere in the line (`&Type`, `&mut Type`)
+# -- covers shapes the colon/return-type templates above don't anchor
+# to, e.g. a nested parameter type inside a higher-order function
+# signature (master report's own repro: `cb: &mut dyn FnMut(&mut
+# NavHistory, &mut App) -> Option<NavigationEntry>,`, where `&mut
+# NavHistory` sits inside a `FnMut(...)` parameter list, not directly
+# after a top-level colon). Gated with the same call-site negative
+# lookahead as every other template here, since `&Type(args)` (a
+# reference to a freshly-constructed tuple struct) is a real call, not
+# a bare type mention -- also excludes a trailing `::` so `&Type::
+# method()` (a qualified call on a reference) isn't misclassified
+# either, even though in practice dekko's own resolver already
+# attributes such a call as a match before classify_miss ever sees it.
+_RUST_REF_TYPE_TEMPLATE = r"&(?:mut\s+)?{name}\b(?!\s*\(|::)"
 
 
 def _looks_like_type_annotation(
     snippet: str, bare_name: str, path: str
 ) -> bool:
-    """Whether a grep-matched line uses ``bare_name`` in a TS/JS
-    type position (an ``import type`` statement, a parameter/variable
-    type annotation, or a generic type argument) rather than as a call
-    or value reference.
+    """Whether a grep-matched line uses ``bare_name`` in a TS/JS or
+    Rust type position (an ``import type`` statement, a parameter/
+    variable type annotation, a generic type argument, an ``impl``
+    header naming the type (with or without a trailing ``for Trait``),
+    a return-type arrow, a reference type, or turbofish) rather than as
+    a call or value reference.
 
     ``_TS_TYPE_POSITION_TEMPLATE``'s negative lookahead after the name
     exists specifically to avoid misclassifying ``x: someFunc()`` (a
@@ -522,18 +601,32 @@ def _looks_like_type_annotation(
     mirrors this module's existing "accept the gap, don't guess wrong"
     discipline. Scoped to ``_TYPE_ANNOTATION_GRAMMARS`` via
     ``_grammar_for_path`` -- always ``False`` outside those grammars,
-    never a guess.
+    never a guess. The Rust-specific templates are additionally gated
+    on the grammar being Rust specifically, since their syntax
+    (``impl``, ``->``, ``&``, ``::<...>``) never appears in TS/JS
+    source the same way.
     """
-    if _grammar_for_path(path) not in _TYPE_ANNOTATION_GRAMMARS:
+    grammar = _grammar_for_path(path)
+    if grammar not in _TYPE_ANNOTATION_GRAMMARS:
         return False
     name = re.escape(bare_name)
     stripped = snippet.strip()
     if re.search(_TS_IMPORT_TYPE_TEMPLATE.format(name=name), stripped):
         return True
-    return (
-        re.search(_TS_TYPE_POSITION_TEMPLATE.format(name=name), stripped)
-        is not None
-    )
+    if re.search(_TS_TYPE_POSITION_TEMPLATE.format(name=name), stripped):
+        return True
+    if grammar == "rust" and any(
+        re.search(template.format(name=name), stripped)
+        for template in (
+            _RUST_IMPL_FOR_TEMPLATE,
+            _RUST_IMPL_TEMPLATE,
+            _RUST_TURBOFISH_TEMPLATE,
+            _RUST_RETURN_TYPE_TEMPLATE,
+            _RUST_REF_TYPE_TEMPLATE,
+        )
+    ):
+        return True
+    return False
 
 
 # Round 25 claude-buddy.md Finding 2: a same-bare-name local variable/
@@ -550,12 +643,30 @@ def _looks_like_type_annotation(
 # round surfaces one of those as a concrete new bucket).
 _LOCAL_DECL_TEMPLATE = r"^(?:const|let|var)\s+{name}\s*[:=]"
 _STRING_LITERAL_TEMPLATE = r'["\']{name}["\']'
+# Round 28 cline.md §3.5: a `catch (error) { ... }` parameter binding
+# -- the caught exception name shares the target's bare name but is a
+# fresh local binding, not a reference to it. The optional leading
+# `}` covers the common `} catch (error) {` brace-placement style
+# (the previous block's closer on the same line as `catch`).
+_CATCH_BINDING_TEMPLATE = r"^\}}?\s*catch\s*\(\s*{name}\b"
+# A bare interface/type field declaration (`error?: string;` /
+# `error: string;`) inside an object/interface body -- same "local
+# binding, not a reference" shape as the const/let/var case, just
+# without a keyword prefix. Anchored to avoid matching a real
+# assignment/comparison expression that happens to start with the
+# name followed by ":" in an unrelated context (e.g. a ternary) --
+# requires the line, stripped, to consist of just `name` then
+# `:`/`?:` then a type and a terminator, mirroring this module's
+# existing "visible in the line itself" anchoring discipline.
+_INTERFACE_FIELD_TEMPLATE = r"^{name}\??\s*:\s*\S"
 
 
 def _looks_like_local_binding_or_literal(snippet: str, bare_name: str) -> bool:
     """Whether a grep-matched line is an unrelated local variable/
-    parameter declaration naming ``bare_name``, or a bare quoted string
-    literal equal to it -- neither is a reference to the target.
+    parameter declaration naming ``bare_name``, a ``catch`` binding, a
+    bare interface/type field declaration, or a bare quoted string
+    literal equal to it -- none of these are a reference to the
+    target.
 
     Must only ever be consulted after ``_looks_qualified_call``/
     ``_looks_like_import_statement`` have already run (both are checked
@@ -570,6 +681,10 @@ def _looks_like_local_binding_or_literal(snippet: str, bare_name: str) -> bool:
     name = re.escape(bare_name)
     stripped = snippet.strip()
     if re.search(_LOCAL_DECL_TEMPLATE.format(name=name), stripped):
+        return True
+    if re.search(_CATCH_BINDING_TEMPLATE.format(name=name), stripped):
+        return True
+    if re.search(_INTERFACE_FIELD_TEMPLATE.format(name=name), stripped):
         return True
     # Only treat a bare quoted match as a literal, not a substring of a
     # longer string -- requires the quote characters to be the
@@ -860,6 +975,7 @@ def classify_miss(
     likely_unrelated_external: bool = False,
     looks_like_cross_file_collision: bool = False,
     in_leading_header_comment: bool = False,
+    is_known_collision_name: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
@@ -963,6 +1079,12 @@ def classify_miss(
             outside that gated scenario (see ``run()``'s own gating
             computation) — never a guess made from inside this
             function.
+        is_known_collision_name: Whether ``bare_name`` has measurably
+            collided 2+ ways somewhere in this repo's own call graph
+            (``ambiguous.collision_names``) -- an additive signal to
+            ``_is_generic_name`` alongside its curated word list,
+            computed once per ``run()``/``run_all()`` invocation by the
+            caller (round 28 cline.md §3.5).
 
     Returns:
         One of the ``CAUSE_*`` constants.
@@ -987,6 +1109,7 @@ def classify_miss(
         in_leading_header_comment=in_leading_header_comment,
         looks_like_cross_file_collision=looks_like_cross_file_collision,
         likely_unrelated_external=likely_unrelated_external,
+        is_known_collision_name=is_known_collision_name,
     )
 
 
@@ -1001,6 +1124,7 @@ def _classify_miss_remaining(
     in_leading_header_comment: bool,
     looks_like_cross_file_collision: bool,
     likely_unrelated_external: bool,
+    is_known_collision_name: bool = False,
 ) -> str:
     """The back half of ``classify_miss``'s ladder -- split out purely
     to keep ``classify_miss`` itself under this module's McCabe
@@ -1021,7 +1145,7 @@ def _classify_miss_remaining(
         return CAUSE_LIKELY_EXTERNAL_COLLISION
     if tests_excluded and is_test_file:
         return CAUSE_TEST_FILTER
-    if _is_generic_name(bare_name):
+    if _is_generic_name(bare_name, is_known_collision_name):
         return CAUSE_GENERIC_NAME
     return CAUSE_UNEXPLAINED
 
@@ -1213,6 +1337,7 @@ def _classify_grep_hits(
     declaring_type: str | None = None,
     declaring_path: str | None = None,
     other_candidate_files: frozenset[str] = frozenset(),
+    is_known_collision_name: bool = False,
 ) -> dict[tuple[str, int], str]:
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
@@ -1262,6 +1387,11 @@ def _classify_grep_hits(
             ``_BARE_CALL_TEMPLATE``) is threaded into ``classify_miss``
             as ``looks_like_cross_file_collision``. Defaults to empty
             (the existing, ungated behavior).
+        is_known_collision_name: Whether ``bare_name`` is a member of
+            ``ambiguous.collision_names(query_index)`` -- a single
+            value per call (the same bare name for every hit in this
+            call), computed once by the caller (round 28 cline.md
+            §3.5) and threaded into every ``classify_miss`` call below.
 
     Returns:
         ``(path, line) -> CAUSE_*`` for every hit not in
@@ -1314,6 +1444,7 @@ def _classify_grep_hits(
                 declaring_type is not None
                 and _receiver_mismatch(root, h, declaring_type, declaring_path)
             ),
+            is_known_collision_name=is_known_collision_name,
         )
     return causes
 
@@ -2136,6 +2267,13 @@ def run(
         h for h in grep_hits if (h.path, h.line) not in dekko_set
     ]
     tests_excluded = not include_tests
+    # round 28 cline.md §3.5: consulted only in callers mode -- there
+    # is no "candidate" concept for an external base identifier the
+    # way there is for a repo-defined symbol's bare name, so
+    # ``--usages`` mode never has a collision to report here.
+    is_known_collision_name = (
+        not usages and bare_name in ambiguous.collision_names(query_index)
+    )
     causes = _classify_grep_hits(
         grep_hits,
         bare_name,
@@ -2145,6 +2283,7 @@ def run(
         declaring_type=declaring_type,
         declaring_path=sym.path if declaring_type is not None else None,
         other_candidate_files=other_candidate_files,
+        is_known_collision_name=is_known_collision_name,
     )
     grep_only_rows = [
         _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits
@@ -2253,6 +2392,7 @@ def _sweep_bare_name(
     own_def_locs: frozenset[tuple[str, int]],
     tests_excluded: bool,
     other_candidate_files: frozenset[str] = frozenset(),
+    is_known_collision_name: bool = False,
 ) -> tuple[GrepSweepResult, dict[tuple[str, int], str]]:
     """One grep + classify pass for ``bare_name``, shared across every
     symbol in its fan-in group — the sweep's whole cost-saving
@@ -2273,6 +2413,10 @@ def _sweep_bare_name(
             "every file but one symbol's own," the way ``run()``
             computes it), a deliberate simplification safe under the
             ``--all`` sweep's shared-causes-per-bare-name design.
+        is_known_collision_name: Whether ``bare_name`` is a member of
+            ``ambiguous.collision_names(query_index)`` -- computed once
+            by ``run_all()`` and threaded through unchanged (round 28
+            cline.md §3.5).
 
     Returns:
         ``(sweep, causes)``. ``causes`` is empty when ``sweep.error``
@@ -2289,6 +2433,7 @@ def _sweep_bare_name(
         root,
         own_def_locs=own_def_locs,
         tests_excluded=tests_excluded,
+        is_known_collision_name=is_known_collision_name,
         other_candidate_files=other_candidate_files,
     )
     return sweep, causes
@@ -2504,7 +2649,15 @@ def _run_all_sweeps(
     """Run one grep+classify sweep per unique bare name in ``names``,
     sequentially or via a thread pool sized by ``workers`` — see
     ``run_all``'s own docstring for why threads, not processes.
+
+    Round 28 cline.md §3.5: ``ambiguous.collision_names(query_index)``
+    is computed exactly once here (not once per name in the loop
+    below) and consulted per name from the already-built ``frozenset``
+    -- avoiding quadratic-ish re-computation across a large ``--all``
+    sweep, since ``collision_names`` itself is bounded by the map's
+    own already-computed ambiguous-edge count, not by sweep size.
     """
+    collision = ambiguous.collision_names(query_index)
 
     def _sweep_one(
         name: str,
@@ -2539,6 +2692,7 @@ def _run_all_sweeps(
             own_def_locs=own_def_locs,
             tests_excluded=tests_excluded,
             other_candidate_files=other_candidate_files,
+            is_known_collision_name=name in collision,
         )
         return name, sweep, causes
 

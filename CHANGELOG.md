@@ -9,6 +9,71 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.50] — 2026-09-11
+
+### Fixed
+- **Rev-cache corruption could silently persist a false "100% of repo
+  changed" result** (round 28, Track 1, HIGH) — `diff`/`affected`/
+  `workset` cached the historical-rev side of a comparison under
+  `.dekko/rev-cache/<sha>.json` assuming a cache hit was always safe
+  since a commit's tree is immutable, but a transient read failure
+  while exporting the old tree silently produced an all-empty-string
+  body-hash map that then compared as "everything changed" against the
+  new side, and got cached forever. Three-layer fix: `revcache.save()`
+  now refuses to persist a snapshot whose body map is entirely empty
+  for a non-empty symbol set (logging a `note:` instead); `diff.
+  old_snapshot()` now takes a per-SHA lock (`filelock.
+  try_named_lock`, generalized from `try_regen_lock`) so two concurrent
+  builds for the same rev serialize instead of racing; `diff.compare()`
+  now warns to stderr whenever every shared symbol across a common set
+  of 500+ reports changed with nothing added/removed, since that
+  pattern also matches a pre-existing corrupted cache entry from before
+  this fix. Verified against tensorflow, including reproducing the
+  original symptom byte-for-byte against a hand-corrupted cache entry
+  and confirming the new stderr warning fires.
+- **`dekko deps` misresolved bare, repo-root-relative JS/TS imports as
+  external** (round 28, Track 3, MEDIUM) — `_resolve_import_js` only
+  resolved a bare specifier via a tsconfig/jsconfig path alias, so a
+  repo-root-relative bare import with no governing alias (`import {
+  ... } from 'src/bootstrap/state.js'`) fell straight to `external`
+  even when the target file existed in the repo. Added a third
+  resolution attempt, gated on the specifier containing a `/` (so a
+  single-segment specifier like `'lodash'` still resolves to
+  `external`, as a real npm package name should): try the bare
+  specifier as a path relative to the repo root, using the same
+  extension/index-file candidate ladder relative imports already use.
+  Verified on claude-code: `dekko deps --file src/main.tsx`'s external
+  count dropped from 41 to 10, matching the 34 real internal files the
+  originating report identified.
+- **`sanity`'s type-annotation classifier didn't cover Rust** (round
+  28, Track 4, MEDIUM) — `CAUSE_TYPE_ANNOTATION` existed since round
+  25 for TS/JS but excluded Rust's grammar entirely, so every Rust
+  type-position hit (`impl Trait for Type`, turbofish `Type::<Concrete>`,
+  a bare reference-type mention, a `-> Type` return position) fell
+  through to `CAUSE_UNEXPLAINED`, making `sanity --all
+  --fail-on-unexplained` unusable as a CI gate on Rust repos with any
+  type-name reuse. Added `"rust"` to `_TYPE_ANNOTATION_GRAMMARS` plus
+  five new templates covering `impl Trait for Type`, plain inherent
+  `impl Type`, turbofish, `-> Type` return positions, and bare
+  reference-type mentions inside nested parameter lists. Verified on
+  zed: the master report's `NavHistory` repro went from 3/8 to 8/8
+  grep-only hits correctly classified.
+- **`sanity`'s generic-name caution relied on a static, hand-curated
+  word list** (round 28, Track 5, MEDIUM) — `_is_generic_name` checked
+  a fixed 28-word list even though the map already computes real,
+  per-repo collision data via `dekko ambiguous`. `_is_generic_name` now
+  also consults `ambiguous.collision_names()` (computed once per
+  `sanity` invocation), additively: any name that has genuinely
+  collided 2+ ways in this repo's own call graph now gets the
+  directional caution, whether or not it's in the curated list. Also
+  extended `_LOCAL_DECL_TEMPLATE`'s local-binding coverage to
+  `catch (error) {` parameter bindings and bare interface/type field
+  declarations (`error?: string;`), the same underlying "local
+  binding, not a reference" shape. Verified on cline: all seven of the
+  report's uncurated collision names (`resolve`, `close`, `invoke`,
+  `dispose`, `clear`, `error`, plus the already-curated `delete`) now
+  correctly report `CAUSE_GENERIC_NAME`.
+
 ## [0.43.49] — 2026-09-09
 
 ### Fixed

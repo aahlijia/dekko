@@ -193,3 +193,76 @@ def test_has_entry_false_for_resolvable_rev_with_no_cache_file(
 
 def test_has_entry_false_for_unresolvable_rev(tmp_path: Path) -> None:
     assert revcache.has_entry(tmp_path, "not-a-real-rev") is False
+
+
+# ---------------------------------------------------------------------
+# Round 28 layer 1: refuse to persist a snapshot whose body map is
+# all-empty-string across every symbol -- the known signature of
+# diff._body_hashes_for_path's silent OSError fallback having fired
+# for every mapped file (tensorflow finding: a corrupted entry saved
+# this way was then served forever, since a rev-cache hit needs no
+# freshness check by design).
+# ---------------------------------------------------------------------
+
+
+def _all_empty_body_snapshot(name: str) -> Snapshot:
+    sym = _symbol(f"a.py::{name}", name)
+    return Snapshot(
+        symbols={sym.id: sym},
+        callers={},
+        body={sym.id: ""},
+        imports={},
+    )
+
+
+def test_save_refuses_all_empty_body_snapshot(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sha = "1" * 40
+    revcache.save(tmp_path, sha, _all_empty_body_snapshot("f"))
+
+    assert revcache.load(tmp_path, sha) is None
+    entry_path = tmp_path / ".dekko" / "rev-cache" / f"{sha}.json"
+    assert not entry_path.exists()
+    assert "refusing to cache" in capsys.readouterr().err
+
+
+def test_save_refuses_missing_body_entries_too(tmp_path: Path) -> None:
+    sha = "2" * 40
+    sym = _symbol("a.py::f", "f")
+    snap = Snapshot(symbols={sym.id: sym}, callers={}, body={}, imports={})
+    revcache.save(tmp_path, sha, snap)
+    assert revcache.load(tmp_path, sha) is None
+
+
+def test_save_still_writes_snapshot_with_real_hashes(
+    tmp_path: Path,
+) -> None:
+    sha = "3" * 40
+    revcache.save(tmp_path, sha, _snapshot("f"))
+    assert revcache.load(tmp_path, sha) is not None
+
+
+def test_save_does_not_flag_empty_symbol_table(tmp_path: Path) -> None:
+    # A subpath filter matching nothing produces an empty symbol
+    # table -- there is nothing to be wrong about, so this must save
+    # normally, not be treated as corrupted.
+    sha = "4" * 40
+    empty_snap = Snapshot(symbols={}, callers={}, body={}, imports={})
+    revcache.save(tmp_path, sha, empty_snap)
+    loaded = revcache.load(tmp_path, sha)
+    assert loaded is not None
+    assert loaded.symbols == {}
+
+
+def test_is_all_empty_body_true_for_all_empty(tmp_path: Path) -> None:
+    assert revcache._is_all_empty_body(_all_empty_body_snapshot("f"))
+
+
+def test_is_all_empty_body_false_for_real_hashes() -> None:
+    assert not revcache._is_all_empty_body(_snapshot("f"))
+
+
+def test_is_all_empty_body_false_for_empty_symbol_table() -> None:
+    empty_snap = Snapshot(symbols={}, callers={}, body={}, imports={})
+    assert not revcache._is_all_empty_body(empty_snap)
