@@ -273,3 +273,35 @@ def test_map_run_stamps_ambiguous_rate_into_provenance(
     assert loaded is not None
     assert loaded["ambiguous_sites"] == 1
     assert loaded["ambiguous_rate"] == 1.0
+
+
+# --- follow_symlinks threading (round 28 §3.2) -----------------------------
+
+
+def test_map_repository_threads_follow_symlinks_to_discover(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real.py").write_text(
+        "def f() -> int:\n    return 1\n"
+    )
+    (tmp_path / "src" / "alias.py").symlink_to(tmp_path / "src" / "real.py")
+
+    files, skipped = repo_ops.map_repository(
+        tmp_path,
+        subpath=None,
+        excludes=(),
+        max_file_size=1_000_000,
+    )
+    assert {fm.path for fm in files} == {"src/real.py"}
+    assert dict(skipped)["src/alias.py"] == "symlink"
+
+    files, skipped = repo_ops.map_repository(
+        tmp_path,
+        subpath=None,
+        excludes=(),
+        max_file_size=1_000_000,
+        follow_symlinks=True,
+    )
+    assert {fm.path for fm in files} == {"src/real.py", "src/alias.py"}
+    assert "src/alias.py" not in dict(skipped)

@@ -85,6 +85,7 @@ _BASE_SPLIT = re.compile(r"::|\.|->|/")
 _UNSUPPORTED_PREFIX = "no parser ("
 _VENDORED_PREFIX = "vendored ("
 _TOO_LARGE_REASON = "too large"
+_SYMLINK_REASON = "symlink"
 # Cap on how many "too large" paths a coverage note names outright —
 # unlike no-grammar/vendored skips (which can number in the hundreds
 # and are only ever shown as aggregate counts), an oversized file is
@@ -419,18 +420,52 @@ def _too_large_summary(
     }
 
 
+def _symlink_summary(
+    skipped: list[tuple[str, str]] | None,
+) -> dict | None:
+    """Aggregate ``walker.discover``'s ``"symlink"`` reasons.
+
+    Named like ``_too_large_summary`` (paths listed outright, not
+    aggregated by directory) rather than ``_vendored_summary`` — a
+    symlinked source file is rare enough that the actual path is the
+    useful signal: a user wants to know *which* file quietly became
+    invisible (round-28 §3.2), not just a count.
+
+    Args:
+        skipped: ``(path, reason)`` pairs from ``walker.discover``.
+
+    Returns:
+        ``{"count": N, "paths": [...]}`` (paths capped at
+        ``_MAX_TOO_LARGE_PATHS``, sorted), or ``None`` when there is
+        nothing to report.
+    """
+    if not skipped:
+        return None
+    paths = sorted(
+        path for path, reason in skipped if reason == _SYMLINK_REASON
+    )
+    if not paths:
+        return None
+    return {
+        "count": len(paths),
+        "paths": paths[:_MAX_TOO_LARGE_PATHS],
+    }
+
+
 def format_unsupported(provenance: dict | None) -> str | None:
     """Coverage note(s) from a provenance dict's skip aggregates.
 
-    Combines three independent coverage gaps into one caller-facing
+    Combines four independent coverage gaps into one caller-facing
     note, each included only when present: confirmed-unsupported
     languages (``provenance["unsupported"]``), files skipped only
     because they live under a default-excluded directory that
     sometimes holds first-party code
     (``provenance["vendored_excluded"]`` — e.g. tensorflow's
-    ``third_party/xla``), and files that exceeded the size cap
+    ``third_party/xla``), files that exceeded the size cap
     (``provenance["too_large"]`` — e.g. a large first-party test file,
-    round-18's zed finding). Shared by ``dekko status``, ``map_status``,
+    round-18's zed finding), and symlinked files skipped by default to
+    avoid double-indexing (``provenance["symlink_excluded"]`` —
+    round-28 §3.2). Shared by ``dekko status``, ``map_status``,
     ``dekko summary``, and ``query``'s not-found/ambiguous replies so
     the wording is identical everywhere a caller might see it.
 
@@ -475,6 +510,19 @@ def format_unsupported(provenance: dict | None) -> str | None:
             f"mapped: {detail} — pass --max-file-size N to include "
             "them if they hold first-party code"
         )
+    symlinked = provenance.get("symlink_excluded")
+    if symlinked:
+        paths = symlinked.get("paths", [])
+        count = symlinked.get("count", 0)
+        detail = ", ".join(paths)
+        hidden = count - len(paths)
+        if hidden > 0:
+            detail += f", +{hidden} more"
+        parts.append(
+            f"{count} symlinked file(s) were not mapped: {detail} — "
+            "pass --follow-symlinks to include them (indexed under "
+            "their own path, with no dedup against the target)"
+        )
     if not parts:
         return None
     return "\n  ".join(parts)
@@ -488,6 +536,7 @@ def compute_provenance(
     max_file_size: int,
     graph: CallGraph,
     skipped: list[tuple[str, str]] | None = None,
+    follow_symlinks: bool = False,
 ) -> dict:
     """Build the provenance stamp for a freshly generated map.
 
@@ -505,8 +554,12 @@ def compute_provenance(
             discover`` call that produced ``paths``, used to record
             coverage notes for confirmed-unsupported languages, for
             files skipped only because they live under a
-            default-excluded (vendored/build-output) directory, and
-            for files that exceeded ``max_file_size``.
+            default-excluded (vendored/build-output) directory, for
+            files that exceeded ``max_file_size``, and for symlinked
+            files skipped because ``follow_symlinks`` was ``False``.
+        follow_symlinks: Whether this run indexed symlinked files as-is
+            instead of skipping them — recorded so a later freshness
+            check can detect the flag changing between runs.
 
     Returns:
         JSON-serializable provenance dict.
@@ -519,11 +572,13 @@ def compute_provenance(
         "subpath": subpath,
         "excludes": list(excludes),
         "max_file_size": max_file_size,
+        "follow_symlinks": follow_symlinks,
         "files": {rel: _file_hash(root / rel) for rel in paths},
         "stat": {rel: _stat_sig(root / rel) for rel in paths},
         "unsupported": _unsupported_summary(skipped),
         "vendored_excluded": _vendored_summary(skipped),
         "too_large": _too_large_summary(skipped),
+        "symlink_excluded": _symlink_summary(skipped),
         "ambiguous_sites": len(graph.ambiguous),
         "ambiguous_rate": (
             round(len(graph.ambiguous) / denom, 4) if denom else 0.0
@@ -1759,6 +1814,7 @@ def _freshness_from_provenance(root: Path, prov: dict) -> Freshness:
         subpath=prov.get("subpath"),
         excludes=tuple(prov.get("excludes", [])),
         max_file_size=prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE),
+        follow_symlinks=prov.get("follow_symlinks", False),
     )
     # Fast path: a file whose (mtime, size) signature is unchanged is
     # assumed unchanged and not re-hashed. Files that are new, lack a

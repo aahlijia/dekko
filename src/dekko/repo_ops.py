@@ -165,6 +165,7 @@ def map_repository(
     cache: cache_mod.IncrementalCache | None = None,
     jobs: int = 1,
     candidates: list[str] | None = None,
+    follow_symlinks: bool = False,
 ) -> tuple[list[FileMap], list[tuple[str, str]]]:
     """Discover and extract every mappable file under a root.
 
@@ -184,6 +185,8 @@ def map_repository(
         candidates: Explicit repo-relative paths to consider, bypassing
             ``walker.discover``'s own tracked-file discovery — see that
             function's ``candidates`` parameter.
+        follow_symlinks: See ``walker.discover``'s parameter of the
+            same name.
 
     Returns:
         ``(file_maps, skipped)`` where ``skipped`` pairs paths with
@@ -195,6 +198,7 @@ def map_repository(
         excludes=excludes,
         max_file_size=max_file_size,
         candidates=candidates,
+        follow_symlinks=follow_symlinks,
     )
     extracted: dict[str, FileMap] = {}
     misses: list[str] = []
@@ -448,6 +452,8 @@ def _map_run_is_noop(
         prov.get("subpath") == args.subpath
         and prov.get("excludes", []) == list(args.exclude)
         and prov.get("max_file_size") == args.max_file_size
+        and prov.get("follow_symlinks", False)
+        == getattr(args, "follow_symlinks", False)
     )
     version_match = (
         prov.get("tool_version") == _pkg_version("dekko")
@@ -586,6 +592,7 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
         max_file_size=args.max_file_size,
         cache=cache,
         jobs=getattr(args, "jobs", 1),
+        follow_symlinks=getattr(args, "follow_symlinks", False),
     )
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     if not files:
@@ -698,6 +705,7 @@ def _write_json_output(
         max_file_size=args.max_file_size,
         graph=graph,
         skipped=skipped,
+        follow_symlinks=getattr(args, "follow_symlinks", False),
     )
     json_path.parent.mkdir(parents=True, exist_ok=True)
     mapfile.atomic_write_bytes(
@@ -723,6 +731,8 @@ def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
         prov.get("subpath") == args.subpath
         and prov.get("excludes", []) == list(args.exclude)
         and prov.get("max_file_size") == args.max_file_size
+        and prov.get("follow_symlinks", False)
+        == getattr(args, "follow_symlinks", False)
     )
     if not options_match:
         return False
@@ -1007,6 +1017,7 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
         subpath=prov.get("subpath"),
         exclude=list(prov.get("excludes", [])),
         max_file_size=prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE),
+        follow_symlinks=prov.get("follow_symlinks", False),
         output=None,
         json_output=None,
         no_json=False,

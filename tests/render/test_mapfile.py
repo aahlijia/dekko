@@ -342,6 +342,37 @@ def test_too_large_none_when_no_files_exceed_cap(
     assert index.provenance["too_large"] is None
 
 
+def test_provenance_records_symlink_excluded_files_with_paths(
+    tmp_path: Path,
+) -> None:
+    # round-28 §3.2: a symlinked source file skipped by default must
+    # be disclosed like a too-large skip -- the actual path is the
+    # useful signal, not just a count.
+    (tmp_path / "real_module.py").write_text("def f() -> None:\n    pass\n")
+    (tmp_path / "alias_module.py").symlink_to(tmp_path / "real_module.py")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    index = mapfile.load_map(tmp_path)
+    assert index is not None
+    assert index.provenance is not None
+    symlinked = index.provenance["symlink_excluded"]
+    assert symlinked == {"count": 1, "paths": ["alias_module.py"]}
+    note = mapfile.format_unsupported(index.provenance)
+    assert note is not None
+    assert "1 symlinked file(s)" in note
+    assert "alias_module.py" in note
+    assert "--follow-symlinks" in note
+
+
+def test_symlink_excluded_none_when_no_symlinks_present(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    index = mapfile.load_map(root)
+    assert index is not None
+    assert index.provenance["symlink_excluded"] is None
+
+
 def test_version_stamp_stale_even_with_unchanged_source(
     make_mapped_repo: RepoFactory,
 ) -> None:

@@ -286,6 +286,53 @@ def test_bare_map_after_exclude_run_honors_persisted_pattern(
     assert "b.py" in doc["provenance"]["files"]
 
 
+def test_map_follow_symlinks_flag_includes_symlinked_file(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "src" / "alias.py").symlink_to(tmp_path / "src" / "real.py")
+
+    assert cli.main(["map", str(tmp_path)]) == 0
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert "src/alias.py" not in doc["provenance"]["files"]
+    assert doc["provenance"]["symlink_excluded"]["paths"] == ["src/alias.py"]
+
+    assert cli.main(["map", str(tmp_path), "--follow-symlinks"]) == 0
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert "src/alias.py" in doc["provenance"]["files"]
+    assert doc["provenance"]["follow_symlinks"] is True
+    assert doc["provenance"]["symlink_excluded"] is None
+
+
+def test_map_follow_symlinks_toggle_invalidates_if_stale(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "src" / "alias.py").symlink_to(tmp_path / "src" / "real.py")
+
+    assert cli.main(["map", str(tmp_path)]) == 0
+    capsys.readouterr()
+
+    # Same options -- the existing map is genuinely fresh, so --if-stale
+    # skips regeneration outright (prints "map fresh").
+    assert cli.main(["map", str(tmp_path), "--if-stale"]) == 0
+    assert "map fresh" in capsys.readouterr().out
+
+    # Toggling --follow-symlinks changes this run's discovery options,
+    # so the existing map must not be treated as fresh even though no
+    # source file changed -- it has to regenerate with the new option.
+    assert (
+        cli.main(["map", str(tmp_path), "--if-stale", "--follow-symlinks"])
+        == 0
+    )
+    assert "map fresh" not in capsys.readouterr().out
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert doc["provenance"]["follow_symlinks"] is True
+    assert "src/alias.py" in doc["provenance"]["files"]
+
+
 def test_regen_map_does_not_re_persist_dekkoignore(
     tmp_path: Path,
 ) -> None:

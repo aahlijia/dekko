@@ -280,6 +280,13 @@ def _add_map_options(parser: argparse.ArgumentParser) -> None:
         help="skip files larger than this (default: 1000000)",
     )
     parser.add_argument(
+        "--follow-symlinks",
+        action="store_true",
+        help="index symlinked source files under their own path instead "
+        "of skipping them (default: skip, to avoid double-indexing the "
+        "symlink target's symbols under two paths)",
+    )
+    parser.add_argument(
         "--quiet", action="store_true", help="suppress the summary on stdout"
     )
     parser.add_argument(

@@ -9,6 +9,29 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.51] — 2026-09-14
+
+### Fixed
+- **A symlinked source file was silently double-indexed, phantom-
+  duplicating every symbol it defines** (round 28, Track 2,
+  MEDIUM-HIGH) — `walker.discover()` had no symlink-handling code path
+  at all, so a symlink to a sibling source file got its target's
+  content fully re-parsed a second time under the symlink's own path,
+  with matching line numbers and signatures — silently corrupting
+  fan-in/ambiguity counts with no warning. Symlinked files are now
+  skipped by default (reason `"symlink"`, reported in the run summary
+  and a new `symlink_excluded` coverage note, mirroring the existing
+  `too_large`/`vendored_excluded` notes), matching `git`/`ripgrep`
+  convention. A new `--follow-symlinks` flag restores the previous
+  behavior for callers who genuinely want it (e.g. npm/pnpm workspace
+  symlinks), correctly invalidating a cached map when toggled. Verified
+  independently on the two repos that reproduced this in round 28:
+  claude-buddy (`buddyStateDir`) and spring-boot (`SpringApplication`)
+  — reproducing the original phantom-ambiguity bug exactly via
+  `--follow-symlinks`, confirming the default fix suppresses it, and
+  confirming a byte-identical no-op on both repos' real, unmodified
+  trees.
+
 ## [0.43.50] — 2026-09-11
 
 ### Fixed
