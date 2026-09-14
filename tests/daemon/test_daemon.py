@@ -905,35 +905,36 @@ def test_try_daemon_uses_scaled_client_timeout(
 # ---------------------------------------------------------------------
 
 
-def test_scaled_client_timeout_for_revcache_miss_floors_when_untrackable(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An unresolvable rev (``tracked_at_rev`` returns ``None``) -- the
-    floor, same failure-mode contract as ``_scaled_client_timeout``
-    with no ``map.json``."""
-    monkeypatch.setattr(daemon.diff_mod, "tracked_at_rev", lambda r, rev: None)
+def test_scaled_client_timeout_for_revcache_miss_floors_when_untrackable() -> (
+    None
+):
+    """An unresolvable rev (``candidates is None``) -- the floor, same
+    failure-mode contract as ``_scaled_client_timeout`` with no
+    ``map.json``.
+
+    Round-29 Track 2: the caller (``_timeout_and_args_for_command``)
+    now computes ``tracked_at_rev`` once and passes the result in
+    directly, rather than this helper calling it a second time.
+    """
     assert (
-        daemon._scaled_client_timeout_for_revcache_miss(short_root, "HEAD")
+        daemon._scaled_client_timeout_for_revcache_miss(None)
         == daemon._CLIENT_TIMEOUT
     )
 
 
-def test_scaled_client_timeout_for_revcache_miss_floors_for_few_files(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_scaled_client_timeout_for_revcache_miss_floors_for_few_files() -> (
+    None
+):
     """A small tracked-file count never drops the budget below the
     floor."""
-    monkeypatch.setattr(
-        daemon.diff_mod, "tracked_at_rev", lambda r, rev: ["a.py", "b.py"]
-    )
     assert (
-        daemon._scaled_client_timeout_for_revcache_miss(short_root, "HEAD")
+        daemon._scaled_client_timeout_for_revcache_miss(["a.py", "b.py"])
         == daemon._CLIENT_TIMEOUT
     )
 
 
 def test_scaled_client_timeout_for_revcache_miss_scales_past_the_floor(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Round-24 §2 fix: a large tracked-file count widens the budget,
     scaled by ``_TIMEOUT_SECONDS_PER_TRACKED_FILE`` rather than
@@ -947,28 +948,20 @@ def test_scaled_client_timeout_for_revcache_miss_scales_past_the_floor(
     """
     monkeypatch.setattr(daemon, "_TIMEOUT_SECONDS_PER_TRACKED_FILE", 1.0)
     candidates = [f"f{i}.py" for i in range(100)]
-    monkeypatch.setattr(
-        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
-    )
-    scaled = daemon._scaled_client_timeout_for_revcache_miss(
-        short_root, "HEAD"
-    )
+    scaled = daemon._scaled_client_timeout_for_revcache_miss(candidates)
     assert scaled == pytest.approx(100.0)
     assert scaled > daemon._CLIENT_TIMEOUT
 
 
 def test_scaled_client_timeout_for_revcache_miss_is_capped(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pathologically large tracked-file count is capped, not
     unbounded -- same cap ``_scaled_client_timeout`` shares."""
     monkeypatch.setattr(daemon, "_TIMEOUT_SECONDS_PER_TRACKED_FILE", 1.0)
     candidates = [f"f{i}.py" for i in range(10_000)]
-    monkeypatch.setattr(
-        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
-    )
     assert (
-        daemon._scaled_client_timeout_for_revcache_miss(short_root, "HEAD")
+        daemon._scaled_client_timeout_for_revcache_miss(candidates)
         == daemon._SCALED_CLIENT_TIMEOUT_CAP
     )
 
@@ -1034,7 +1027,7 @@ def test_try_daemon_uses_revcache_miss_timeout_for_a_genuine_miss(
     monkeypatch.setattr(
         daemon,
         "_scaled_client_timeout_for_revcache_miss",
-        lambda r, rev: sentinel,
+        lambda candidates: sentinel,
     )
     # A wrong value here would mean the test passed for the wrong
     # reason (the miss-aware path never actually got picked).
@@ -1077,7 +1070,7 @@ def test_try_daemon_uses_ordinary_timeout_on_a_revcache_hit(
     monkeypatch.setattr(
         daemon,
         "_scaled_client_timeout_for_revcache_miss",
-        lambda r, rev: 999999.0,
+        lambda candidates: 999999.0,
     )
 
     transport_cls = type(dt.default_transport_for(root))
@@ -1111,7 +1104,7 @@ def test_try_daemon_other_commands_never_use_revcache_miss_timeout(
     root = daemon_thread_root
     called = False
 
-    def _fail_if_called(r: Path, rev: str) -> float:
+    def _fail_if_called(candidates: list[str] | None) -> float:
         nonlocal called
         called = True
         return 1.0
@@ -1152,7 +1145,7 @@ def test_try_daemon_defaults_jobs_to_zero_on_a_genuine_miss_when_not_explicit(
     monkeypatch.setattr(
         daemon,
         "_scaled_client_timeout_for_revcache_miss",
-        lambda r, rev: 999.0,
+        lambda candidates: 999.0,
     )
 
     seen_jobs: list[int | None] = []
@@ -1188,7 +1181,7 @@ def test_try_daemon_preserves_an_explicit_jobs_one_on_a_genuine_miss(
     monkeypatch.setattr(
         daemon,
         "_scaled_client_timeout_for_revcache_miss",
-        lambda r, rev: 999.0,
+        lambda candidates: 999.0,
     )
 
     seen_jobs: list[int | None] = []
@@ -1253,7 +1246,7 @@ def test_try_daemon_abandoned_error_carries_the_jobs_actually_sent(
     monkeypatch.setattr(
         daemon,
         "_scaled_client_timeout_for_revcache_miss",
-        lambda r, rev: 999.0,
+        lambda candidates: 999.0,
     )
 
     def _raise_abandoned(sock):  # noqa: ANN001, ANN202
@@ -1272,6 +1265,152 @@ def test_try_daemon_abandoned_error_carries_the_jobs_actually_sent(
     with pytest.raises(daemon.DaemonRequestAbandonedError) as excinfo2:
         daemon.try_daemon(args, jobs_explicit=True)
     assert excinfo2.value.jobs == 1  # caller's explicit choice kept
+
+
+# ---------------------------------------------------------------------
+# Round-29 Track 2: client-side pre-dispatch disclosure for a
+# cold-rev-cache diff/affected/workset call routed through the daemon
+# -- the in-process note (diff._maybe_warn_sequential) only reaches
+# the caller after the wait, buffered in the routed response's
+# stdout/stderr replay, so a routed call needs its own, earlier note.
+# ---------------------------------------------------------------------
+
+
+def test_timeout_and_args_discloses_all_cores_wording_when_override_applies(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A genuine rev-cache miss, jobs not explicit: the round-25
+    override rewrites jobs to 0, and the client-side note must say so
+    ("with all cores"), not the single-threaded wording."""
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    candidates = [f"f{i}.py" for i in range(6000)]
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
+    )
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(short_root)]
+    )
+    _, new_args = daemon._timeout_and_args_for_command(
+        "affected", args, short_root, jobs_explicit=False
+    )
+
+    assert new_args.jobs == 0
+    err = capsys.readouterr().err
+    assert err.count("note:") == 1
+    assert "with all cores" in err
+    assert "6000" in err
+
+
+def test_timeout_and_args_discloses_sequential_wording_when_jobs_explicit(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """An explicit ``--jobs 1``: the round-25 override never applies,
+    so the note keeps the existing single-threaded wording (including
+    the ``--jobs 0`` hint), matching ``_maybe_warn_sequential``'s own
+    in-process message -- the two call sites share one message-
+    building helper (``diff.sequential_disclosure_message``) so they
+    can't drift apart."""
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    candidates = [f"f{i}.py" for i in range(6000)]
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
+    )
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(short_root), "--jobs", "1"]
+    )
+    _, new_args = daemon._timeout_and_args_for_command(
+        "affected", args, short_root, jobs_explicit=True
+    )
+
+    assert new_args.jobs == 1
+    err = capsys.readouterr().err
+    assert err.count("note:") == 1
+    assert "single-threaded" in err
+    assert "--jobs 0" in err
+
+
+def test_timeout_and_args_silent_below_the_disclosure_threshold(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A small tracked-file count stays quiet, same threshold the
+    in-process note already uses."""
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: ["a.py", "b.py"]
+    )
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(short_root)]
+    )
+    daemon._timeout_and_args_for_command(
+        "affected", args, short_root, jobs_explicit=False
+    )
+
+    assert capsys.readouterr().err == ""
+
+
+def test_timeout_and_args_silent_for_workset_symbol_seed(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """``workset --symbol`` never resolves a target rev
+    (``_target_rev_for`` returns ``None``), so there's nothing to
+    disclose -- and ``tracked_at_rev`` is never even called."""
+    called = False
+
+    def _fail_if_called(r, rev):  # noqa: ANN001, ANN202
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(daemon.diff_mod, "tracked_at_rev", _fail_if_called)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["workset", "--symbol", "foo", "--root", str(short_root)]
+    )
+    daemon._timeout_and_args_for_command(
+        "workset", args, short_root, jobs_explicit=False
+    )
+
+    assert called is False
+    assert capsys.readouterr().err == ""
+
+
+def test_timeout_and_args_silent_on_a_revcache_hit(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A rev-cache hit never takes the slow path -- no note, and
+    ``tracked_at_rev`` is never even called."""
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: True)
+    called = False
+
+    def _fail_if_called(r, rev):  # noqa: ANN001, ANN202
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(daemon.diff_mod, "tracked_at_rev", _fail_if_called)
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(short_root)]
+    )
+    daemon._timeout_and_args_for_command(
+        "affected", args, short_root, jobs_explicit=False
+    )
+
+    assert called is False
+    assert capsys.readouterr().err == ""
 
 
 def test_jobs_flag_explicit_detects_bare_and_equals_forms() -> None:
@@ -1486,7 +1625,9 @@ def test_start_does_not_spawn_duplicate_while_daemon_busy(
 
             spawned: list[list[str]] = []
             monkeypatch.setattr(
-                daemon, "spawn_detached", lambda cmd: spawned.append(cmd)
+                daemon,
+                "spawn_detached",
+                lambda cmd, **kw: spawned.append(cmd),
             )
             code = daemon.start(root)
             assert code == 0
@@ -1988,7 +2129,9 @@ def test_start_waits_for_bind_confirmation_before_reporting_started(
     monkeypatch.setattr(daemon, "_START_CONFIRM_POLL_INTERVAL", 0.001)
     spawned: list[list[str]] = []
     monkeypatch.setattr(
-        daemon, "spawn_detached", lambda cmd: spawned.append(cmd)
+        daemon,
+        "spawn_detached",
+        lambda cmd, **kw: spawned.append(cmd),
     )
 
     code = daemon.start(short_root)
@@ -1999,6 +2142,38 @@ def test_start_waits_for_bind_confirmation_before_reporting_started(
     out = capsys.readouterr().out
     assert f"dekko daemon: started for {short_root}" in out
     assert "didn't confirm" not in out
+
+
+def test_start_spawns_with_the_dekko_daemon_log_path(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-29 Track 2: ``start()`` passes a ``.dekko/daemon.log``
+    path to ``spawn_detached`` so the detached child's stdio lands
+    somewhere a later ``dekko daemon`` invocation (or a human) can
+    read it, instead of inheriting the launching shell's now-defunct
+    fds. No live daemon needed -- this only asserts on the spawn
+    kwargs."""
+    transport = _FakeStartTransport(exists_after=0)
+    monkeypatch.setattr(
+        daemon, "default_transport_for", lambda root: transport
+    )
+    monkeypatch.setattr(daemon, "is_daemon_reachable", lambda t: False)
+    monkeypatch.setattr(daemon, "_START_CONFIRM_POLL_INTERVAL", 0.001)
+    seen: dict[str, object] = {}
+
+    def _spy_spawn(cmd, log_path=None):  # noqa: ANN001, ANN202
+        seen["log_path"] = log_path
+        return None
+
+    monkeypatch.setattr(daemon, "spawn_detached", _spy_spawn)
+
+    code = daemon.start(short_root)
+
+    assert code == 0
+    assert seen["log_path"] == (
+        short_root / daemon.cache_mod.CACHE_DIR / daemon.DAEMON_LOG_FILE
+    )
 
 
 def test_start_reports_unconfirmed_when_bind_poll_times_out(
@@ -2020,7 +2195,7 @@ def test_start_reports_unconfirmed_when_bind_poll_times_out(
     monkeypatch.setattr(daemon, "is_daemon_reachable", lambda t: False)
     monkeypatch.setattr(daemon, "_START_CONFIRM_TIMEOUT", 0.05)
     monkeypatch.setattr(daemon, "_START_CONFIRM_POLL_INTERVAL", 0.01)
-    monkeypatch.setattr(daemon, "spawn_detached", lambda cmd: None)
+    monkeypatch.setattr(daemon, "spawn_detached", lambda cmd, **kw: None)
 
     code = daemon.start(short_root)
 

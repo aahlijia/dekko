@@ -418,9 +418,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_map.add_argument(
         "--jobs",
         type=int,
-        default=1,
+        default=0,
         metavar="N",
-        help="parallel extraction workers (1 = sequential, 0 = all cores)",
+        help="parallel extraction/resolution workers (0 = all cores, "
+        "1 = sequential; default: 0)",
     )
     _add_map_options(p_map)
     p_map.set_defaults(func=_cmd_map)

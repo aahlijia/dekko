@@ -1,11 +1,24 @@
 """The .dekko incremental cache: creation, reuse, and --full."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 
 from dekko import repo_ops
-from dekko.core.model import FileMap
+from dekko.analysis import query
+from dekko.core.model import (
+    EnvRead,
+    FileMap,
+    Import,
+    Param,
+    RawCall,
+    RawCatch,
+    RawHeritage,
+    RawRef,
+    RawThrow,
+    Symbol,
+)
 from dekko.render import mapfile
 from dekko.render.mapfile import _file_hash
 from dekko.storage import cache as cache_mod
@@ -465,3 +478,243 @@ def test_heritage_survives_a_cache_hit_reparse(
     reloaded = mapfile.load_map(root)
     assert reloaded is not None
     assert reloaded.heritage_out["dog.py::Dog"] == ["base.py::Animal"]
+
+
+# --- round-29 Critical: cache._filemap_from_dict field loss ---------
+
+
+def _fully_populated_filemap() -> FileMap:
+    """Build a ``FileMap`` with every field holding a non-default,
+    distinguishable value.
+
+    Backs both ``test_every_field_is_populated_in_the_fixture`` and
+    ``test_filemap_dict_round_trip_preserves_every_field`` below: a
+    future ``FileMap`` field addition with only a default value makes
+    the first test fail until this fixture (and, if the deserializer
+    needs it too, ``cache._filemap_from_dict``) is updated, which is
+    exactly the recurrence-proofing the round-29 fix design calls for
+    -- the original bug was "a field was added to the model and one
+    manual deserializer wasn't updated."
+    """
+    return FileMap(
+        path="a.py",
+        language="python",
+        symbols=[
+            Symbol(
+                id="a.py::f",
+                name="f",
+                qualname="f",
+                kind="function",
+                path="a.py",
+                language="python",
+                params=[Param(name="x", type="int", has_default=True)],
+                returns="int",
+                start_line=1,
+                end_line=2,
+                decorated=True,
+                exported=True,
+                doc="does a thing",
+                test=True,
+            ),
+        ],
+        calls=[
+            RawCall(
+                caller_id="a.py::f",
+                path="a.py",
+                text="g()",
+                name="g",
+                receiver=None,
+                line=3,
+                arg_count=0,
+            ),
+        ],
+        refs=[
+            RawRef(
+                caller_id="a.py::f",
+                path="a.py",
+                name="callback",
+                receiver=None,
+                line=4,
+            ),
+        ],
+        heritage=[
+            RawHeritage(
+                subtype_id="a.py::Dog",
+                path="a.py",
+                text="Animal",
+                name="Animal",
+                receiver=None,
+                relation="extends",
+                line=5,
+            ),
+        ],
+        throws=[
+            RawThrow(
+                caller_id="a.py::f",
+                path="a.py",
+                text="ValueError('bad')",
+                name="ValueError",
+                line=6,
+            ),
+        ],
+        catches=[
+            RawCatch(
+                caller_id="a.py::f",
+                path="a.py",
+                types=["ValueError"],
+                bare=False,
+                line=7,
+            ),
+        ],
+        env_reads=[
+            EnvRead(
+                caller_id="a.py::f",
+                path="a.py",
+                key="PORT",
+                call="os.getenv",
+                line=8,
+            ),
+        ],
+        imports=[
+            Import(path="a.py", name="g", source="b"),
+        ],
+        type_aliases=["Alias"],
+        error="parse error",
+        doc="module docstring",
+    )
+
+
+def test_every_field_is_populated_in_the_fixture() -> None:
+    """Guards the fixture itself against silently going stale.
+
+    If ``FileMap`` grows a new field, this fails until
+    ``_fully_populated_filemap`` is updated to give it a non-default
+    value -- which then also puts that field in front of
+    ``test_filemap_dict_round_trip_preserves_every_field``'s
+    round-trip check.
+    """
+    fm = _fully_populated_filemap()
+    values = dataclasses.asdict(fm)
+    for f in dataclasses.fields(FileMap):
+        default = (
+            f.default_factory()
+            if f.default_factory is not dataclasses.MISSING
+            else f.default
+        )
+        assert values[f.name] != default, (
+            f"FileMap.{f.name} still holds its default value in "
+            "_fully_populated_filemap -- update the fixture (and "
+            "likely cache._filemap_from_dict) for this new/changed "
+            "field"
+        )
+
+
+def test_filemap_dict_round_trip_preserves_every_field() -> None:
+    """The load-bearing regression test for the round-29 Critical.
+
+    Every ``FileMap`` field must survive a cache write
+    (``_filemap_to_dict``) + read (``_filemap_from_dict``) round
+    trip. Fails on the pre-fix code because ``throws``/``catches``/
+    ``env_reads``/``type_aliases`` silently reset to their dataclass
+    defaults on the read side even though the write side always
+    serialized them correctly.
+    """
+    original = _fully_populated_filemap()
+    rebuilt = cache_mod._filemap_from_dict(
+        cache_mod._filemap_to_dict(original)
+    )
+    assert dataclasses.asdict(rebuilt) == dataclasses.asdict(original)
+
+
+def test_reuse_preserves_every_field(tmp_path: Path) -> None:
+    """Narrower than the parity test: anchors ``IncrementalCache``'s
+    actual ``store`` -> ``reuse`` path specifically, not just the two
+    private functions it calls.
+    """
+    root = tmp_path
+    (root / "a.py").write_text("x = 1\n")
+    fm = _fully_populated_filemap()
+
+    store_cache = cache_mod.IncrementalCache({})
+    store_cache.store(root, "a.py", fm)
+
+    reuse_cache = cache_mod.IncrementalCache(store_cache.entries)
+    reused = reuse_cache.reuse(root, "a.py")
+
+    assert reused is not None
+    assert dataclasses.asdict(reused) == dataclasses.asdict(fm)
+
+
+THROWS_CATCHES_ENV_TYPE_ALIAS_SRC = {
+    "errors.py": "class ConfigError(Exception):\n    pass\n",
+    "app.py": (
+        "from errors import ConfigError\n"
+        "import os\n"
+        "\n"
+        "\n"
+        "def load_config():\n"
+        "    port = os.getenv('PORT')\n"
+        "    try:\n"
+        "        pass\n"
+        "    except ValueError:\n"
+        "        raise ConfigError('bad')\n"
+    ),
+    "types.ts": "export type Alias = {\n  run(): void;\n};\n",
+    "other.py": "def unrelated() -> int:\n    return 1\n",
+}
+
+
+def test_throws_catches_env_type_aliases_survive_a_cache_hit_reparse(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The round-29 Critical, end to end: an incremental (cache-hit)
+    re-map used to silently zero throws/catches/env_reads/
+    type_aliases for every file served from the cache, even though
+    the on-disk ``cache.json`` already held the data (the write side,
+    ``_filemap_to_dict``, was always correct; only the read side,
+    ``_filemap_from_dict``, dropped the four fields). Mirrors
+    ``test_heritage_survives_a_cache_hit_reparse`` above but for the
+    four fields that bug actually hit, going through the real
+    ``query throws``/``catches``/``env`` commands the reports used.
+    """
+    root = make_mapped_repo(THROWS_CATCHES_ENV_TYPE_ALIAS_SRC)
+
+    def _snapshot() -> tuple[str, str, str, frozenset]:
+        assert (
+            cli.main(["query", "throws", "load_config", "--root", str(root)])
+            == query.EXIT_OK
+        )
+        throws_out = capsys.readouterr().out
+        assert (
+            cli.main(["query", "catches", "ValueError", "--root", str(root)])
+            == query.EXIT_OK
+        )
+        catches_out = capsys.readouterr().out
+        assert (
+            cli.main(["query", "env", "PORT", "--root", str(root)])
+            == query.EXIT_OK
+        )
+        env_out = capsys.readouterr().out
+        index = mapfile.load_map(root)
+        assert index is not None
+        aliases = index.type_aliases_by_path["types.ts"]
+        return throws_out, catches_out, env_out, aliases
+
+    baseline = _snapshot()
+    assert "ConfigError" in baseline[0]
+    assert "app.py" in baseline[1]
+    assert "app.py" in baseline[2]
+    assert "Alias" in baseline[3]
+
+    # Second run: touch an unrelated file only, so app.py/errors.py/
+    # types.ts are all served straight from the cache -- exercising
+    # IncrementalCache.reuse()'s cache-hit path exclusively for the
+    # files this bug hit.
+    (root / "other.py").write_text("def unrelated() -> int:\n    return 2\n")
+    parsed = _count_extractions(monkeypatch)
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    assert parsed == ["other.py"]
+
+    assert _snapshot() == baseline

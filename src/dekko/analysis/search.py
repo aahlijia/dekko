@@ -59,7 +59,7 @@ from pathlib import Path
 
 from dekko.storage import embedding
 from dekko.analysis import relevance
-from dekko.render.mapfile import MapIndex
+from dekko.render.mapfile import MapIndex, format_unsupported
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.analysis.relevance import BM25Scorer, Candidate, TaskContext
 from dekko.textutil import fit_to_budget, oneline, signature
@@ -714,7 +714,19 @@ def run(
         hits, excluded_test_count, top_score=top_score
     )
     scale_note = _scale_note(scorer_name)
-    note = "; ".join(n for n in (exclusion_note, scale_note) if n) or None
+    # round-29 Track 4b: search never disclosed skipped-file coverage
+    # (unsupported languages, vendored/too-large/symlinked exclusions)
+    # -- a symbol living only in a skipped file is invisible to
+    # search the same way it's invisible to `query`, but only `query`
+    # carried the caveat. Folded into the same "; "-joined note as
+    # the other two, always shown when present (no "no results"
+    # gating — search's own "(no matches)" empty state already
+    # explains itself without this).
+    coverage_note = format_unsupported(index.provenance)
+    note = (
+        "; ".join(n for n in (exclusion_note, scale_note, coverage_note) if n)
+        or None
+    )
     if as_json:
         return _render_json(query_text, hits, budget, limit, note)
     return _render_text(query_text, hits, budget, limit, note)

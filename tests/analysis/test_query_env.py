@@ -84,6 +84,37 @@ def test_env_not_found(
     assert "no env-var reads found for 'NOPE'" in err
 
 
+def test_env_exact_key_lookup_discloses_coverage_gap_with_real_results(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round-29 Track 4b: `query env`'s text-mode success branch (a
+    # real match found, not the not-found path) used to skip the
+    # unsupported-file coverage note entirely -- the one branch of
+    # this command where it never showed up at all, unlike every
+    # other query action's own success branch... which turns out to
+    # have the exact same gap (see the round's implementation notes),
+    # but env is the one this round's report actually flagged.
+    root = make_mapped_repo(
+        dict(ENV_SRC, **{"Card.astro": "---\nconst x = 1;\n---\n"})
+    )
+    code = cli.main(["query", "env", "DATABASE_URL", "--root", str(root)])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "no parser for: astro" in err
+
+
+def test_env_list_discloses_coverage_gap_with_real_results(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        dict(ENV_SRC, **{"Card.astro": "---\nconst x = 1;\n---\n"})
+    )
+    code = cli.main(["query", "env", "--list", "--root", str(root)])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "no parser for: astro" in err
+
+
 def test_env_list_ranking(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

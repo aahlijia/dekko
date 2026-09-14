@@ -329,6 +329,27 @@ This sweep only re-checks symbols dekko already believes have callers
 to zero callers in the first place (a different, already-tracked
 class of gap).
 
+## Incremental vs. `--full` map runs
+
+Bare `dekko map` reuses the per-file extraction cache
+(`.dekko/cache.json`) for any file whose content hash hasn't changed
+since the last run, re-parsing only what actually changed;
+`--full` ignores the cache and re-parses everything. Resolution
+(the pass that builds call/heritage/throw/catch/env edges) always
+runs repo-wide either way — it's cheap relative to parsing, so an
+incremental run's time savings track the *parsing* cost only.
+
+On a very large repo (tensorflow/spring-boot scale), that repo-wide
+resolve pass can still dominate the incremental run's total time, so
+don't expect a one-file edit's remap to be near-instant — its floor
+is the resolve/render cost, not the parse delta. `dekko map` defaults
+to `--jobs 0` (all cores), the same worker choice the auto-regen path
+every read subcommand uses on a stale map has always made; pass
+`--jobs 1` explicitly if you need a sequential run (e.g. to keep a
+shared machine quiet). Small repos and small deltas stay sequential
+automatically regardless of the flag — the parallel pools only engage
+past internal size thresholds where they actually pay off.
+
 ## Mapping a subtree
 
 `dekko map` takes its two positional arguments in `[DIR] [SUBPATH]`

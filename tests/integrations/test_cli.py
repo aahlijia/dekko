@@ -55,6 +55,19 @@ def test_affected_budget_defaults_to_affected_default_budget() -> None:
     assert args.budget == affected.DEFAULT_BUDGET
 
 
+def test_map_jobs_defaults_to_all_cores() -> None:
+    # Round-29 Track 3: bare `dekko map` defaulted to --jobs 1, so a
+    # one-file edit's remap on a large repo ran the repo-wide resolve
+    # single-threaded (tensorflow: 12m24s incremental vs. 5m03s for a
+    # parallel --full rebuild). The auto-regen path (repo_ops.regen_map)
+    # has requested all cores since round 11; the explicit invocation
+    # must match it. An explicit --jobs value still wins.
+    parser = cli.build_subcommand_parser()
+    assert parser.parse_args(["map", "."]).jobs == 0
+    assert parser.parse_args(["map", ".", "--jobs", "1"]).jobs == 1
+    assert parser.parse_args(["map", ".", "--jobs", "4"]).jobs == 4
+
+
 def test_map_writes_outputs_to_target_dir(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("def f():\n    return 1\n")
     assert cli.main(["--map", str(tmp_path), "--quiet"]) == 0

@@ -4598,6 +4598,29 @@ def bare_import_source(imp: Import, language: str) -> str:
 # same way.
 
 
+def import_resolution_supported(language: str) -> bool:
+    """Whether ``resolve_imports`` can resolve this language's imports
+    to in-repo files at all.
+
+    ``False`` for Go (and any Tier-2/generic-grammar language) — see
+    the comment just above this function for why Go specifically has
+    no entry in :data:`_IMPORT_RESOLVERS`: every import for such a
+    language reports external unconditionally, which reads
+    identically to "import resolution is broken" on an all-Go repo
+    (``dekko deps``'s "0 resolved import edges" headline, awesome-go
+    rounds 27/28/29) unless a caller checks this first and discloses
+    the gap explicitly.
+
+    Args:
+        language: A ``FileMap.language``/``Symbol.language`` value.
+
+    Returns:
+        ``True`` if ``language`` has a real per-language resolver
+        registered, ``False`` otherwise.
+    """
+    return language in _IMPORT_RESOLVERS
+
+
 def _py_package_roots(paths: frozenset[str]) -> dict[str, list[str]]:
     """Top-level Python package name → directory path(s).
 

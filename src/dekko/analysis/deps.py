@@ -26,9 +26,9 @@ import sys
 from pathlib import Path
 
 from dekko.analysis.query import paths_matching
-from dekko.core.resolver import find_cycles
+from dekko.core.resolver import find_cycles, import_resolution_supported
 from dekko.render import export
-from dekko.render.mapfile import MapIndex
+from dekko.render.mapfile import MapIndex, format_unsupported
 from dekko.textutil import fit_to_budget, token_footer
 
 EXIT_OK = 0
@@ -77,13 +77,63 @@ def compute(index: MapIndex, top: int) -> dict:
     }
 
 
-def _print_summary_text(doc: dict) -> None:
+def _import_resolution_coverage_note(index: MapIndex) -> str | None:
+    """Scope-gap disclosure for a "0 resolved import edges" headline.
+
+    Round-29 Track 4a (flagged rounds 27/28/29 on awesome-go): an
+    all-Go repo's ``dekko deps`` leads with "0 resolved import edges"
+    before the ``external (K)`` breakdown explains it, reading as "did
+    something break" every round it's re-found. Go (and any Tier-2/
+    generic-grammar language — see ``resolver.import_resolution_
+    supported``) has no per-language import resolver at all: every one
+    of its imports reports external unconditionally by design, not a
+    mapping failure.
+
+    Mirrors ``query throws``'s "permanently excluded from this query"
+    and ``query catches``'s "N of M mapped files are in a language
+    this query doesn't cover" framing (same disclosure shape, applied
+    to import-resolution coverage instead of exception-handling
+    coverage — deps has no equivalent existing helper to reuse, since
+    ``mapfile.format_unsupported`` covers unparsed/skipped *files*,
+    not "parsed fine, but this language's imports never resolve").
+
+    Args:
+        index: Loaded map index.
+
+    Returns:
+        A one-line note naming the uncovered language(s) and their
+        share of mapped files, or ``None`` when every mapped file's
+        language has real import-resolution support.
+    """
+    total = len(index.languages_by_path)
+    if not total:
+        return None
+    uncovered: dict[str, int] = {}
+    for lang in index.languages_by_path.values():
+        if not import_resolution_supported(lang):
+            uncovered[lang] = uncovered.get(lang, 0) + 1
+    if not uncovered:
+        return None
+    count = sum(uncovered.values())
+    lang_list = "/".join(sorted(uncovered))
+    return (
+        f"{count:,} of {total:,} mapped files are in a language "
+        f"({lang_list}) whose imports dekko does not resolve to "
+        "in-repo files by design -- every import there reports "
+        "external, not a mapping gap"
+    )
+
+
+def _print_summary_text(doc: dict, coverage: str | None = None) -> None:
     """Print the default (no ``--file``/``--cycles``) text summary."""
-    lines = [
+    lines = []
+    if coverage:
+        lines.append(f"note: {coverage}")
+    lines.append(
         f"dekko: {doc['files']} files, {doc['edges']} resolved import "
         f"edges, {doc['external_sources']} external sources across "
         f"{doc['external_only_files']} external-only files",
-    ]
+    )
     if doc["cycles"] or doc["self_cycles"]:
         parts = []
         if doc["cycles"]:
@@ -109,13 +159,29 @@ def _print_summary_text(doc: dict) -> None:
 def _run_summary(index: MapIndex, top: int, as_json: bool) -> int:
     """Handle the default (no ``--file``/``--cycles``) summary view."""
     doc = compute(index, top)
+    # Two independent coverage gaps, both round-29 Track 4: skipped
+    # files (unsupported language, vendored/too-large/symlinked --
+    # the same note status/summary/stats/search all carry), and a
+    # language whose files *are* mapped but whose imports never
+    # resolve (Go) -- only surfaced when it would actually explain
+    # the headline, not on every run regardless of edge count.
+    skipped = format_unsupported(index.provenance)
+    import_gap = (
+        _import_resolution_coverage_note(index) if doc["edges"] == 0 else None
+    )
     if as_json:
+        if skipped:
+            doc["coverage_warning"] = skipped
+        if import_gap:
+            doc["import_resolution_coverage"] = import_gap
         print(json.dumps(doc, indent=2))
         return EXIT_OK
     if doc["files"] == 0:
         print("dekko: no mapped files")
         return EXIT_OK
-    _print_summary_text(doc)
+    _print_summary_text(doc, import_gap)
+    if skipped:
+        print(f"coverage: {skipped} — results above may be incomplete")
     return EXIT_OK
 
 

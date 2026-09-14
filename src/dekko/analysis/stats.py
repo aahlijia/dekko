@@ -3,7 +3,7 @@
 import json
 from collections import Counter
 
-from dekko.render.mapfile import MapIndex
+from dekko.render.mapfile import MapIndex, format_unsupported
 from dekko.core.model import Symbol
 from dekko.textutil import signature
 
@@ -115,8 +115,20 @@ def run(index: MapIndex, top: int, as_json: bool) -> int:
     Returns:
         Always ``0``.
     """
+    # round-29 Track 4b: stats never disclosed skipped-file coverage
+    # (unsupported languages, vendored/too-large/symlinked exclusions)
+    # at all -- unlike status/summary/orient, which all attach this
+    # note via the same `format_unsupported` helper. Always shown when
+    # present (not gated on an empty result), matching summary.py's
+    # own whole-repo-digest convention rather than query.py's
+    # per-target "only on a no-match reply" one -- stats has no
+    # target/no-match branch for this to attach to.
+    coverage = format_unsupported(index.provenance)
     if as_json:
-        print(json.dumps(compute(index, top), indent=2))
+        doc = compute(index, top)
+        if coverage:
+            doc["coverage_warning"] = coverage
+        print(json.dumps(doc, indent=2))
         return 0
 
     print(
@@ -127,6 +139,8 @@ def run(index: MapIndex, top: int, as_json: bool) -> int:
         f"{lang} {nf}f/{ns}s" for lang, nf, ns in _language_mix(index)
     )
     print(f"languages: {mix}")
+    if coverage:
+        print(f"coverage: {coverage} — results below may be incomplete")
     _print_hotspots("top fan-in:", _hotspots(index, index.calls_in, top))
     _print_hotspots("top fan-out:", _hotspots(index, index.calls_out, top))
     largest = _largest_files(index, top)

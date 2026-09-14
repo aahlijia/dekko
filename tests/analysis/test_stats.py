@@ -44,6 +44,28 @@ def test_stats_json_shape_and_hotspot(
     assert langs["python"]["files"] == 2
 
 
+def test_stats_discloses_unsupported_file_coverage_gap(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round-29 Track 4b: unlike status/summary/orient/query, `stats`
+    # never surfaced the "N files unparsed" coverage note at all --
+    # not gated behind an empty result the way query's is (stats has
+    # no such branch), always shown when the map skipped something.
+    root = make_mapped_repo(dict(SRC, **{"Card.astro": "---\nx = 1\n---\n"}))
+    assert cli.main(["stats", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "no parser for: astro" in out
+
+
+def test_stats_json_discloses_unsupported_file_coverage_gap(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(dict(SRC, **{"Card.astro": "---\nx = 1\n---\n"}))
+    assert cli.main(["stats", "--root", str(root), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert "no parser for: astro" in doc["coverage_warning"]
+
+
 def test_hotspots_exclude_noise_names() -> None:
     # A symbol named ``String``/``expect``/etc. must never surface in
     # a fan-in/fan-out ranking, even with a very high adjacency count

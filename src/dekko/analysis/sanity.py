@@ -2009,7 +2009,17 @@ def _run_unused_check(
         reference_rows.append(row)
 
     kept, meter = _fit_rows(reference_rows, budget, limit)
-    generic_caution = _is_generic_name(bare_name)
+    # Round-29 Track 4c (cline "Confirmed still-open" §1): this single-
+    # target path never threaded ``ambiguous.collision_names`` into
+    # `_is_generic_name` at all, unlike `_run_all_sweeps`'s ``--all``
+    # path (see its own docstring) -- so a name like ``error``, absent
+    # from the curated `_GENERIC_NAMES` list but measurably collision-
+    # prone in this specific repo's own call graph, ran the full grep
+    # sweep into the safety cap with no caution disclosed. Not a
+    # curated-list or threshold gap after all: a wiring gap, one call
+    # site round 28 missed.
+    is_known_collision_name = bare_name in ambiguous.collision_names(index)
+    generic_caution = _is_generic_name(bare_name, is_known_collision_name)
 
     if as_json:
         doc = _build_unused_json_doc(

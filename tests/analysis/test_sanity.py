@@ -2768,6 +2768,44 @@ def test_sanity_unused_generic_name_caution_text_note(
     assert sanity.CAUSE_GENERIC_NAME in out
 
 
+# Round-29 Track 4c (cline "Confirmed still-open" §1): ``error`` is
+# absent from the curated ``_GENERIC_NAMES`` list and longer than the
+# short-name shortcut, but is a genuine repo-wide method-name collision
+# (``Logger.error``/``Response.error``, both reached through the same
+# untyped-receiver call site) -- exactly the shape ``ambiguous.
+# collision_names`` exists to catch. Root cause (confirmed by reading
+# ``_run_unused_check``): the single-target ``sanity --unused`` path
+# never threaded that signal into ``_is_generic_name`` at all -- only
+# ``--all``'s ``_run_all_sweeps`` did -- so this collided on the
+# resolver's own call graph without ever tripping the caution.
+UNUSED_COLLISION_NAME_REPO = {
+    "logger.py": "class Logger:\n    def error(self, msg):\n        pass\n",
+    "response.py": (
+        "class Response:\n    def error(self, msg):\n        pass\n"
+    ),
+    "caller.py": ("def handle(obj):\n    obj.error('bad')\n"),
+}
+
+
+def test_sanity_unused_data_driven_collision_name_caution(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(UNUSED_COLLISION_NAME_REPO)
+    code = cli.main(
+        [
+            "sanity",
+            "--unused",
+            "logger.py:Logger.error",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["generic_name_caution"] is True
+
+
 def test_sanity_unused_json_discloses_truncation_and_pathological_skips(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,

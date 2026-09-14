@@ -427,6 +427,49 @@ def _build_and_cache_old_snapshot(
     return old
 
 
+def sequential_disclosure_message(
+    tracked_count: int, *, all_cores: bool
+) -> str | None:
+    """Build the "no rev-cache ... may take a while" note text.
+
+    Factored out so the two places this note can fire -- the in-
+    process warning below (daemon-side or direct-execution, always
+    single-threaded by the time it's called) and the daemon client's
+    pre-dispatch disclosure (``daemon.py::_timeout_and_args_for_
+    command``, which knows *before sending the request* whether the
+    round-25 ``--jobs 0`` override will apply) -- can't drift apart in
+    wording (round-29 Track 2).
+
+    Args:
+        tracked_count: Git-tracked file count at the target rev (see
+            ``_maybe_warn_sequential``'s ``candidates`` docstring for
+            why this is a ``git ls-tree`` count, not the mapped-file
+            count).
+        all_cores: Whether the resolve about to run will actually
+            engage all cores (the daemon-routed round-25 override
+            applied) rather than run single-threaded (the direct-
+            execution default, or an explicit ``--jobs 1``).
+
+    Returns:
+        The note text (no trailing newline, not yet routed to
+        stderr), or ``None`` when ``tracked_count`` is below
+        ``_SEQUENTIAL_DISCLOSURE_THRESHOLD`` (small repos stay quiet).
+    """
+    if tracked_count < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
+        return None
+    if all_cores:
+        return (
+            f"note: no rev-cache for this commit; resolving "
+            f"{tracked_count} git-tracked files with all cores may "
+            f"take a while"
+        )
+    return (
+        f"note: no rev-cache for this commit; single-threaded resolve "
+        f"on {tracked_count} git-tracked files may take a while -- "
+        f"pass --jobs 0 to use all cores"
+    )
+
+
 def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     """Disclose a slow single-threaded rev-cache-miss re-parse/resolve.
 
@@ -449,8 +492,6 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     """
     if jobs > 1 or candidates is None:
         return
-    if len(candidates) < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
-        return
     # round-18 tensorflow finding: `candidates` is `git ls-tree`'s full
     # tracked-file count at the target rev -- before `walker.discover`
     # excludes vendored/no-parser/too-large files -- so it can read
@@ -459,12 +500,10 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     # into thinking the wait scales with the mapped set. Naming it
     # "git-tracked" makes that distinction explicit instead of
     # implying it's the same count `dekko map`'s own summary reports.
-    print(
-        f"note: no rev-cache for this commit; single-threaded resolve "
-        f"on {len(candidates)} git-tracked files may take a while -- "
-        f"pass --jobs 0 to use all cores",
-        file=sys.stderr,
-    )
+    message = sequential_disclosure_message(len(candidates), all_cores=False)
+    if message is None:
+        return
+    print(message, file=sys.stderr)
 
 
 def tracked_at_rev(root: Path, rev: str) -> list[str] | None:

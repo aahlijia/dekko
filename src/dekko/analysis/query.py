@@ -1912,6 +1912,12 @@ def _run_env(
     if not reads:
         return _run_env_not_found(index, needle), None
     reads = sorted(reads, key=lambda r: (is_test_path(r.path), r.path, r.line))
+    # round-29 Track 4b: computed once, regardless of as_json, mirroring
+    # every other query action (_run_throws/_run_heritage/etc.) --
+    # `env`'s text-mode success branch used to skip this entirely
+    # (never even computed), the one text path where a symlink/
+    # unsupported-file coverage gap went completely undisclosed.
+    coverage = _coverage_note(index)
     if as_json:
         entries = [_env_entry(index, r) for r in reads]
         kept, meter = _fit_entries(entries, budget, limit)
@@ -1922,12 +1928,13 @@ def _run_env(
             "note": _ENV_CAVEAT,
             "meta": meter.as_dict(),
         }
-        coverage = _coverage_note(index)
         if coverage:
             doc["coverage_warning"] = coverage
         print(json.dumps(doc, indent=2))
         return EXIT_OK, None
     print(f"  note: {_ENV_CAVEAT}", file=sys.stderr)
+    if coverage:
+        print(f"  note: {coverage}", file=sys.stderr)
     lines = [_env_row(r) for r in reads]
     return EXIT_OK, _emit_lines(lines, budget, limit)
 
@@ -2011,6 +2018,8 @@ def _run_env_list(
         f"{len(files)} files"
     )
     print(f"  note: {_ENV_CAVEAT}", file=sys.stderr)
+    if coverage:
+        print(f"  note: {coverage}", file=sys.stderr)
     lines_out = [_env_list_row(k, c) for k, c in counts]
     return EXIT_OK, _emit_lines(lines_out, budget, limit, prefix=header)
 

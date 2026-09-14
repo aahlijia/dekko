@@ -80,6 +80,72 @@ def test_deps_summary_acyclic_repo_no_cycle_line(
     assert "detected" not in out
 
 
+# Round-29 Track 4a (flagged rounds 27/28/29 on awesome-go): a repo
+# with zero resolved import edges purely because its only language
+# (Go) has no per-language import resolver at all -- every Go import
+# reports external unconditionally, not a mapping failure -- must say
+# so up front rather than read as "did something break."
+GO_ONLY_REPO = {
+    "main.go": (
+        'package main\n\nimport "fmt"\n\nfunc main() {\n'
+        '\tfmt.Println("hi")\n}\n'
+    ),
+    "helper.go": "package main\n\nfunc helper() int {\n\treturn 1\n}\n",
+}
+
+
+def test_deps_go_only_repo_discloses_import_resolution_gap(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(GO_ONLY_REPO)
+    code = cli.main(["deps", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "0 resolved import edges" in out
+    assert "go" in out
+    assert "imports dekko does not resolve" in out
+
+
+def test_deps_go_only_repo_json_discloses_import_resolution_gap(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(GO_ONLY_REPO)
+    code = cli.main(["deps", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["edges"] == 0
+    assert (
+        "imports dekko does not resolve" in doc["import_resolution_coverage"]
+    )
+
+
+def test_deps_real_resolved_edges_no_import_resolution_gap_note(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A repo with genuine resolved edges (Python, fully covered) must
+    # never show the Go-scope-gap note -- it's gated on edges == 0.
+    root = make_mapped_repo(ACYCLIC_REPO)
+    code = cli.main(["deps", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "imports dekko does not resolve" not in out
+
+
+def test_deps_discloses_unsupported_file_coverage_gap(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round-29 Track 4b: `deps` never disclosed skipped-file coverage
+    # (unsupported languages, vendored/too-large/symlinked exclusions)
+    # at all, distinct from the Go import-resolution-scope note above.
+    root = make_mapped_repo(
+        dict(ACYCLIC_REPO, **{"Card.astro": "---\nconst x = 1;\n---\n"})
+    )
+    code = cli.main(["deps", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "no parser for: astro" in out
+
+
 def test_deps_file_view_text(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
