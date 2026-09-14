@@ -329,6 +329,31 @@ This sweep only re-checks symbols dekko already believes have callers
 to zero callers in the first place (a different, already-tracked
 class of gap).
 
+## Mapping a subtree
+
+`dekko map` takes its two positional arguments in `[DIR] [SUBPATH]`
+order — `DIR` is the repo root, `SUBPATH` (optional) restricts the map
+to a subtree of it:
+
+```sh
+dekko map . src        # map only src/, rooted at the repo in cwd
+dekko map /path/to/repo src   # same, with an explicit repo root
+```
+
+A single positional argument that happens to be a subdirectory of an
+*already-mapped* repo — `dekko map src` where `src/` is a subtree of a
+repo mapped at its parent — is the one shape that reads ambiguously:
+it looks like "re-map just this subtree," but is actually "treat `src`
+as a brand-new, independent repo root," which would silently create a
+second, unrelated `.dekko/` tree nested inside `src/`. `dekko map`
+detects this and refuses (exit 2) with a suggested corrected command,
+rather than creating the nested root silently. Pass `--force-new-root`
+to map the subdirectory as its own independent root anyway — the
+legitimate use case (a vendored subproject deliberately mapped in
+isolation, with no git submodule boundary of its own). A subdirectory
+that already has its own `.git` (a real git submodule) is never
+flagged, since that already marks a distinct, intentional root.
+
 ## Excluding files
 
 `--exclude GLOB` (repeatable) skips extra files for `dekko map`,

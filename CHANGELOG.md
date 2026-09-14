@@ -9,6 +9,28 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.52] — 2026-09-14
+
+### Fixed
+- **`dekko map <subdir-of-an-already-mapped-repo>` silently forked a
+  second, orphan `.dekko/` root** (round 28, Track 6, LOW) — `dekko
+  map`'s two positional arguments are `[DIR] [SUBPATH]`, so a single
+  argument that happens to be a subdirectory of an already-mapped repo
+  reads as "re-map just this subtree" but was instead treated as
+  "start a brand-new, independent repo root," nested silently inside
+  the subdirectory with no error or warning — spring-boot's report
+  only noticed via `git status` surfacing the untracked nested
+  directory. `dekko map` now detects this and refuses (exit 2) with a
+  suggested corrected command; a new `--force-new-root` flag opts into
+  the independent-root behavior explicitly, for the legitimate case (a
+  vendored subproject deliberately mapped in isolation). A
+  subdirectory that is itself a distinct git repo (a real submodule)
+  is never flagged. Verified on spring-boot's real Gradle multi-module
+  layout: `dekko map core/spring-boot` now rejects with a correct
+  suggested command instead of silently creating
+  `core/spring-boot/.dekko/`, while `dekko map . core/spring-boot`
+  (the correct two-arg form) is unaffected.
+
 ## [0.43.51] — 2026-09-14
 
 ### Fixed

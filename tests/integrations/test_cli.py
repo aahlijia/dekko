@@ -257,6 +257,99 @@ def test_map_scoped_run_over_existing_scoped_map_not_blocked(
     assert cli.main(["map", str(tmp_path), "sub", "--full"]) == 0
 
 
+def test_map_orphan_root_rejected_by_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    code = cli.main(["map", str(tmp_path / "sub")])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "subdirectory of an already-mapped repo" in err
+    assert "--force-new-root" in err
+    assert not (tmp_path / "sub" / ".dekko").exists()
+
+
+def test_map_two_arg_subpath_unaffected_by_orphan_root_check(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+
+    # A real two-arg `dekko map ROOT SUBPATH` is never ambiguous --
+    # must proceed normally, unaffected by the one-arg orphan-root
+    # detection.
+    code = cli.main(["map", str(tmp_path), "sub", "--quiet"])
+    assert code == 0
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert len(doc["files"]) == 1
+
+
+def test_map_force_new_root_creates_nested_dekko(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    code = cli.main(
+        ["map", str(tmp_path / "sub"), "--force-new-root", "--quiet"]
+    )
+    assert code == 0
+    assert (tmp_path / "sub" / ".dekko" / "map.json").exists()
+
+
+def test_map_git_submodule_directory_not_flagged(tmp_path: Path) -> None:
+    # A subdirectory that is itself a distinct git repo (a submodule,
+    # or a deliberately isolated vendored subproject) is a legitimate
+    # independent root, not the footgun this check exists to catch --
+    # its own `.git` must short-circuit the check before it ever
+    # reaches the parent repo's `.dekko/`.
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    submodule = tmp_path / "vendored"
+    submodule.mkdir()
+    (submodule / ".git").mkdir()
+    (submodule / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    code = cli.main(["map", str(submodule), "--quiet"])
+    assert code == 0
+    assert (submodule / ".dekko" / "map.json").exists()
+
+
+def test_map_unrelated_directory_not_flagged(tmp_path: Path) -> None:
+    (tmp_path / "unrelated").mkdir()
+    (tmp_path / "unrelated" / "c.py").write_text(
+        "def h() -> int:\n    return 3\n"
+    )
+
+    code = cli.main(["map", str(tmp_path / "unrelated"), "--quiet"])
+    assert code == 0
+
+
+def test_map_remapping_directory_with_its_own_dekko_not_flagged(
+    tmp_path: Path,
+) -> None:
+    # A directory that already has its own `.dekko/` from a prior
+    # (legitimate) `--force-new-root` run is not an orphan-root
+    # surprise on a *second* run -- re-mapping it in place must not be
+    # blocked.
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+    assert (
+        cli.main(["map", str(tmp_path / "sub"), "--force-new-root", "--quiet"])
+        == 0
+    )
+
+    code = cli.main(["map", str(tmp_path / "sub"), "--full", "--quiet"])
+    assert code == 0
+
+
 def test_map_exclude_persists_to_dekkoignore(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("def f():\n    return 1\n")
     (tmp_path / "widget.astro").write_text("---\n---\n")
