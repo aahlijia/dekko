@@ -334,21 +334,36 @@ class of gap).
 Bare `dekko map` reuses the per-file extraction cache
 (`.dekko/cache.json`) for any file whose content hash hasn't changed
 since the last run, re-parsing only what actually changed;
-`--full` ignores the cache and re-parses everything. Resolution
-(the pass that builds call/heritage/throw/catch/env edges) always
-runs repo-wide either way — it's cheap relative to parsing, so an
-incremental run's time savings track the *parsing* cost only.
+`--full` ignores the cache and re-parses everything.
 
-On a very large repo (tensorflow/spring-boot scale), that repo-wide
-resolve pass can still dominate the incremental run's total time, so
-don't expect a one-file edit's remap to be near-instant — its floor
-is the resolve/render cost, not the parse delta. `dekko map` defaults
-to `--jobs 0` (all cores), the same worker choice the auto-regen path
-every read subcommand uses on a stale map has always made; pass
-`--jobs 1` explicitly if you need a sequential run (e.g. to keep a
-shared machine quiet). Small repos and small deltas stay sequential
-automatically regardless of the flag — the parallel pools only engage
-past internal size thresholds where they actually pay off.
+Call resolution is also incremental. Per-file call edges are cached in
+`.dekko/resolved-calls.json.gz`, so an edit re-resolves only the files
+that changed instead of the whole repo. On tensorflow, a one-line edit
+remaps in ~47s where it used to take ~229s. The reuse is deliberately
+conservative: it applies only when the repo's *global* resolution inputs
+are provably unchanged — no file added, deleted, or renamed, and no
+changed file altering its own symbols (a new, renamed, or deleted
+function, or a changed signature). Anything else falls back to the
+previous repo-wide resolve, so correctness never rests on guessing what
+an edit could have affected. Either way the output is identical; you can
+check that yourself by diffing `map.json` against a `--full` run of the
+same tree.
+
+The other resolution passes (references, heritage, imports, throws,
+catches) still run repo-wide every time. They're a small share of the
+cost, so an incremental run's remaining floor is those plus rendering,
+not call resolution.
+
+`dekko map` defaults to `--jobs 0` (all cores), the same worker choice
+the auto-regen path every read subcommand uses on a stale map has
+always made; pass `--jobs 1` explicitly if you need a sequential run
+(e.g. to keep a shared machine quiet). Note that `--jobs N` is an
+**upper bound, not a target**: each resolve worker needs its own copy of
+the repo's symbol index, so dekko lowers the count to what the work
+actually justifies and runs fully sequentially when even two workers
+wouldn't pay for themselves. `--jobs 11` legitimately running three
+workers is expected. Small repos and small deltas stay sequential
+automatically regardless of the flag.
 
 ## Mapping a subtree
 

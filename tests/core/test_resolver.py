@@ -2271,12 +2271,30 @@ def test_reference_resolution_unaffected_by_noise_guard() -> None:
 
 # 1.4: resolve()/resolve_refs() gained a process-pool parallelization
 # split (``_resolve_all``/``_chunk_files``) for large repos. These
-# tests force the parallel path (by monkeypatching the item-count
-# threshold down to 0) on modest, hand-built fixtures rather than a
-# huge repo, and assert byte-identical output against the sequential
-# (``workers=1``) path — the merge step must not reorder, drop, or
-# double-count any edge/ambiguous/external/reference entry regardless
-# of which worker resolved which file.
+# tests force the parallel path (see ``_force_resolve_pool``) on
+# modest, hand-built fixtures rather than a huge repo, and assert
+# byte-identical output against the sequential (``workers=1``) path —
+# the merge step must not reorder, drop, or double-count any
+# edge/ambiguous/external/reference entry regardless of which worker
+# resolved which file.
+
+
+def _force_resolve_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make tiny fixtures actually take the process-pool path.
+
+    Round 30 added two more limits to ``_pool_workers`` beyond the
+    original item-count floor: a minimum items-per-worker, and a RAM
+    cap. A test that neutralizes only one of the three silently runs
+    the *sequential* path while appearing to test parallelism — the
+    exact failure mode where a parity assertion passes without
+    exercising anything. Neutralize all three, together, in one place.
+
+    The RAM cap is stubbed rather than tuned because it reads real host
+    memory: on a small-RAM CI box with a grown test process it could
+    legitimately return 1 and make these tests flaky.
+    """
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_MIN_ITEMS_PER_WORKER", 1)
 
 
 def _multi_file_call_fixture() -> list[FileMap]:
@@ -2372,7 +2390,7 @@ def test_chunk_files_never_makes_more_chunks_than_files() -> None:
 def test_resolve_parallel_matches_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     files = _multi_file_call_fixture()
 
     sequential = resolve(files, workers=1)
@@ -2394,7 +2412,7 @@ def test_resolve_all_oversubscribes_chunk_count_beyond_worker_count(
     alone wouldn't catch a silent revert to one-chunk-per-worker, since
     output is correct either way -- this asserts the chunk *count*
     the pool actually sees, by spying on ``_chunk_files``."""
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     files = _multi_file_call_fixture()  # 20 files, plenty to chunk finely
 
     real_chunk_files = resolver_mod._chunk_files
@@ -2418,7 +2436,7 @@ def test_resolve_all_oversubscribes_chunk_count_beyond_worker_count(
 def test_resolve_refs_parallel_matches_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     files = _multi_file_ref_fixture()
 
     seq_edges, seq_in, seq_out = resolve_refs(files, workers=1)
@@ -2523,7 +2541,7 @@ def _multi_file_catches_fixture() -> list[FileMap]:
 def test_resolve_throws_parallel_matches_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     files = _multi_file_throws_fixture()
 
     seq = resolve_throws(files, workers=1)
@@ -2546,7 +2564,7 @@ def test_resolve_throws_parallel_matches_sequential(
 def test_resolve_catches_parallel_matches_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     files = _multi_file_catches_fixture()
 
     seq = resolve_catches(files, workers=1)
@@ -2884,7 +2902,7 @@ def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
         ) -> None:
             pass
 
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(resolver_mod, "ProcessPoolExecutor", _StalledPool)
     files = _multi_file_call_fixture()
 
@@ -2977,7 +2995,7 @@ def test_run_pool_bounded_kills_wedged_worker_after_timeout(
 def test_resolve_parallel_retries_once_on_broken_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(
         resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
     )
@@ -2991,7 +3009,7 @@ def test_resolve_parallel_retries_once_on_broken_pool(
 def test_resolve_parallel_propagates_when_retry_also_broken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(
         resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(99)
     )
@@ -3004,7 +3022,7 @@ def test_resolve_parallel_propagates_when_retry_also_broken(
 def test_resolve_refs_parallel_retries_once_on_broken_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(
         resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
     )
@@ -3018,7 +3036,7 @@ def test_resolve_refs_parallel_retries_once_on_broken_pool(
 def test_resolve_throws_parallel_retries_once_on_broken_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(
         resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
     )
@@ -3032,7 +3050,7 @@ def test_resolve_throws_parallel_retries_once_on_broken_pool(
 def test_resolve_catches_parallel_retries_once_on_broken_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(
         resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
     )
@@ -4381,3 +4399,69 @@ def test_same_file_two_candidates_including_caller_unaffected() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert not edges
     assert graph.ambiguous == [(caller.id, "render", [caller.id, other.id])]
+
+
+# Round 30 (.features/fixes/round30/
+# 03-resolve-pool-memory-overhead.md): the resolve pool is memory-bound,
+# not CPU-bound -- each worker holds a private, unpickled copy of the
+# repo indices under ``spawn``. Measured on spring-boot (285,609 calls),
+# 11 workers were a *net loss* against sequential (6.82s vs 4.91s), and
+# on tensorflow 11 workers attempted ~27.5 GB of live objects on an
+# 18 GB machine. ``_pool_workers`` gates on work available and RAM, not
+# just a raw item count.
+
+
+def test_pool_workers_returns_1_below_the_item_floor() -> None:
+    assert resolver_mod._pool_workers(8, 0) == 1
+    assert (
+        resolver_mod._pool_workers(
+            8, resolver_mod._RESOLVE_PARALLEL_MIN_ITEMS - 1
+        )
+        == 1
+    )
+
+
+def test_pool_workers_returns_1_when_caller_asked_for_one_worker() -> None:
+    assert resolver_mod._pool_workers(1, 10_000_000) == 1
+    assert resolver_mod._pool_workers(0, 10_000_000) == 1
+
+
+def test_pool_workers_caps_at_what_the_work_justifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spring-boot regression: plenty of items by the old gate's
+    standard, but not enough to justify 11 private index copies.
+
+    Measured on spring-boot (285,609 calls): 3 workers was the optimum
+    at 3.99s, while the 11 the old gate allowed took 6.82s -- slower
+    than the 4.91s sequential path."""
+    per = resolver_mod._RESOLVE_MIN_ITEMS_PER_WORKER
+
+    # Exactly 3 workers' worth of work, 11 requested -> 3.
+    assert resolver_mod._pool_workers(11, per * 3) == 3
+    # More work than 11 workers need -> the request still caps it.
+    assert resolver_mod._pool_workers(11, per * 50) == 11
+
+
+def test_pool_workers_goes_sequential_rather_than_single_worker_pool() -> None:
+    """One worker in a pool is strictly worse than in-process: it pays
+    the whole index transfer for zero parallelism."""
+    per = resolver_mod._RESOLVE_MIN_ITEMS_PER_WORKER
+    assert resolver_mod._pool_workers(11, per) == 1
+    assert resolver_mod._pool_workers(11, per * 2) == 2
+
+
+def test_pool_workers_choice_does_not_change_resolution_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point of gating on workers is that it is a pure
+    performance decision: map.json must not depend on how many workers
+    ran -- including when ``_pool_workers`` picks a number *different*
+    from what the caller requested."""
+    _force_resolve_pool(monkeypatch)
+    files = _multi_file_call_fixture()
+    baseline = _graph_shape(resolve(files, workers=1))
+
+    for per in (1, 2, 5):
+        monkeypatch.setattr(resolver_mod, "_RESOLVE_MIN_ITEMS_PER_WORKER", per)
+        assert _graph_shape(resolve(files, workers=8)) == baseline

@@ -243,7 +243,11 @@ def test_jobs_flag_also_parallelizes_resolution(
 
     root = make_mapped_repo(SRC)
     monkeypatch.setattr(repo_ops, "_PARALLEL_MIN", 1)
+    # Round 30: both of _pool_workers' limits have to be lifted, or this
+    # silently exercises the sequential path. See
+    # tests/core/test_resolver.py::_force_resolve_pool.
     monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_MIN_ITEMS_PER_WORKER", 1)
 
     assert (
         cli.main(["map", str(root), "--quiet", "--full", "--jobs", "2"]) == 0

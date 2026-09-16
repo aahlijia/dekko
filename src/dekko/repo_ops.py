@@ -27,8 +27,10 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from dekko.storage import cache as cache_mod
+from dekko.storage import resolvecache
 from dekko import classify
 from dekko.core import grammars
+from dekko.core import resolver as resolver_mod
 from dekko.render import mapfile
 from dekko.render import render_md
 from dekko.storage import filelock
@@ -555,6 +557,34 @@ def _maybe_persist_excludes(
         cache_mod.persist_dekkoignore(root, args.exclude)
 
 
+def _reuse_plan(
+    root: Path,
+    args: argparse.Namespace,
+    cache: cache_mod.IncrementalCache | None,
+    files: list[FileMap],
+) -> resolver_mod.ResolveReuse | None:
+    """Cached call resolution this run may reuse, if any.
+
+    Round 30 Track 1: an incremental run used to re-resolve the whole
+    repo, so it only ever saved tree-sitter extraction. This lets
+    unchanged files keep their previously resolved call edges.
+
+    Args:
+        root: Repository root.
+        args: Parsed map arguments; ``--full`` opts out entirely.
+        cache: This run's extraction cache, or ``None`` with
+            ``--no-json`` (no cache, so nothing to key reuse on).
+        files: Every mapped file.
+
+    Returns:
+        A reuse plan, or ``None`` to resolve the whole repo as before.
+    """
+    if cache is None or getattr(args, "full", False):
+        return None
+
+    return resolvecache.build_reuse(root, files, cache)
+
+
 def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
     """Execute the mapping action for parsed CLI arguments.
 
@@ -612,6 +642,7 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
         files,
         workers=resolve_workers(getattr(args, "jobs", 1)),
         root=root,
+        reuse=_reuse_plan(root, args, cache, files),
     )
     label = root.name + (f"/{args.subpath}" if args.subpath else "")
 
@@ -649,6 +680,11 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
 
     if cache is not None:
         cache_mod.save(root, cache)
+        # Written on every successful run, gate hit or miss: a miss that
+        # left no cache behind would make the next run miss too, forever.
+        resolvecache.save(
+            root, resolver_mod.partition_resolution(files, graph), cache
+        )
 
     if not args.quiet:
         print(

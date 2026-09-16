@@ -9,6 +9,63 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.54] — 2026-09-16
+
+### Performance
+- **Incremental `dekko map` now reuses call resolution for unchanged
+  files** (round 30, Track 1) — `resolve()` was a pure function of the
+  *whole* file list and ran unconditionally on every map, so an
+  incremental run only ever saved tree-sitter extraction. Editing one
+  file out of 9,942 cost 93% of a full rebuild, and on a large repo
+  repo-wide resolution was the floor no amount of parallelism could get
+  under. Per-file call resolution is now cached in
+  `.dekko/resolved-calls.json.gz`, so an edit re-resolves only the files
+  that changed. **tensorflow: a one-line edit went from 229s to 46.6s
+  (4.9x).** Reuse is gated on the global resolution inputs being
+  *provably* identical to the cached run — no file added, deleted, or
+  renamed, and no changed file altering its resolution-relevant symbols —
+  so an unchanged file's resolution is identical by construction rather
+  than by heuristic. Anything else (a new/renamed/deleted symbol, a
+  signature change, a path-set change, a dekko or resolver-source change)
+  falls back to the previous full repo-wide resolve. Output is unchanged:
+  a test suite asserts `map.json` is identical between incremental and
+  `--full` runs across a range of edit shapes. Only the call pass is
+  cached; refs/heritage/imports/throws/catches are still recomputed in
+  full. The new artifact is small — symbol ids are interned, so it lands
+  at ~3% of the extraction cache's size (17 MB next to tensorflow's
+  559 MB `cache.json`).
+- **A byte-identical no-op `dekko map` still short-circuits** before
+  resolution as before, so it writes no resolve cache. A deleted or
+  corrupt `resolved-calls.json.gz` is therefore repaired on the next run
+  that does real work, not on a no-op run; a corrupt file always reads as
+  a cache miss rather than an error.
+- **Resolution passes no longer build oversized worker pools** (round
+  30, Track 3b) — the parallel gate was a flat 5,000-item floor, so any
+  pass clearing it got the *full* requested worker count regardless of
+  how little work there actually was. In practice that meant a pass with
+  ~7,000 items was handed an 11-worker process pool, and because each
+  worker unpickles its own private copy of the whole repo symbol index
+  under `spawn` (~90-205 MB depending on repo), nearly all of that time
+  was pool setup rather than resolution. spring-boot's reference pass
+  (8,430 items) took 5.84s to do work that takes 0.11s sequentially;
+  tensorflow's throw pass (7,376 items) took 22.52s to do work that
+  takes 0.92s. A new `_pool_workers` now scales the worker count to the
+  work available (≥75,000 items per worker, calibrated from a measured
+  worker sweep) and runs fully sequentially rather than building a
+  single-worker pool. Total resolve time: **19.65s → 5.32s on
+  spring-boot (3.7x), 288.40s → 176.99s on tensorflow**. Output is
+  unchanged — worker count has never affected `map.json`, and a test now
+  asserts that across every count the new logic can pick. This also
+  explains why round 29's `--jobs 0` default flip underdelivered: the
+  extra cores were being spent on index transfer, not resolution.
+
+### Changed
+- **`--jobs N` is now an upper bound rather than a target.** The work
+  available can lower the actual worker count below what you asked for
+  (e.g. `--jobs 11` on a repo whose call count justifies 3 workers runs
+  3). `--jobs 1` still forces fully sequential as before. This affects
+  wall-clock and worker counts only, never output.
+
 ## [0.43.53] — 2026-09-14
 
 ### Fixed
