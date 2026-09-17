@@ -24,6 +24,7 @@ from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from importlib.metadata import version as _pkg_version
+from multiprocessing.context import BaseContext
 from pathlib import Path
 
 from dekko.storage import cache as cache_mod
@@ -147,8 +148,8 @@ def _extract_misses(
     if workers <= 1 or len(misses) < _PARALLEL_MIN:
         return {rel: extract_one(root, rel) for rel in misses}
 
-    def _run(w: int) -> dict[str, FileMap | None]:
-        pool = ProcessPoolExecutor(max_workers=w)
+    def _run(w: int, ctx: BaseContext) -> dict[str, FileMap | None]:
+        pool = ProcessPoolExecutor(max_workers=w, mp_context=ctx)
         try:
             futures = [pool.submit(extract_one, root, rel) for rel in misses]
             results = _run_pool_bounded(pool, futures)

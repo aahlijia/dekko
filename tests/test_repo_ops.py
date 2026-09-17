@@ -48,7 +48,11 @@ def _flaky_pool_factory(fail_times: int) -> type:
     state = {"calls": 0}
 
     class _FlakyPool:
-        def __init__(self, max_workers: int | None = None) -> None:
+        def __init__(
+            self,
+            max_workers: int | None = None,
+            mp_context: object = None,
+        ) -> None:
             state["calls"] += 1
             if state["calls"] <= fail_times:
                 raise BrokenProcessPool("simulated: process pool broken")
@@ -131,7 +135,11 @@ def test_extract_misses_raises_pool_stalled_error_on_stalled_worker(
             raise PoolTimeoutError("simulated: worker never returned")
 
     class _StalledPool:
-        def __init__(self, max_workers: int | None = None) -> None:
+        def __init__(
+            self,
+            max_workers: int | None = None,
+            mp_context: object = None,
+        ) -> None:
             # ``_run_pool_bounded`` reads the private
             # ``_processes`` attribute (dict of pid -> Process) to
             # force-kill any still-wedged worker after a timeout --

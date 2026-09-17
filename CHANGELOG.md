@@ -9,6 +9,33 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.55] — 2026-09-17
+
+### Performance
+- **Process pools now fork instead of spawn where provably safe**
+  (round 30, Track 3 (c)) — on macOS every pool worker previously
+  received a private, pickled-and-unpickled copy of the resolution
+  indices (~205 MB pickled per worker on a tensorflow-scale repo,
+  serially, per pool). Pools now run under an explicitly chosen
+  multiprocessing context: `fork` when the parent is provably
+  single-threaded on POSIX (the CLI and MCP server), `spawn` otherwise
+  (the daemon — its status thread makes fork unsafe — and Windows,
+  which has no fork). Fork workers share the parent's indices
+  copy-on-write, eliminating the per-worker transfer entirely.
+  Measured on interleaved runs: spring-boot resolve **6.70s → 4.66s**
+  median (fork won every pair, non-overlapping ranges), tensorflow
+  **176.4s → 163.4s** median (fork won all three interleaved pairs).
+  `map.json` output is byte-identical either way. Choosing the context
+  explicitly also pins `fork` on Linux ahead of Python 3.14's
+  `forkserver` default flip, which would have silently reintroduced
+  per-worker pickling there. A `BrokenProcessPool` under fork retries
+  under `spawn` (a fork-specific failure and CPU contention are both
+  covered by one bounded fallback), so a host where fork misbehaves
+  degrades to the previous behavior at the cost of one attempt.
+  `DEKKO_POOL_START_METHOD=spawn` opts a problem host back out. The
+  shared-pool follow-up ((d) in the round-30 design docs) was closed
+  WONTFIX by its own measurement gate.
+
 ## [0.43.54] — 2026-09-16
 
 ### Performance
