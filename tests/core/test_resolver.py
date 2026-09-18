@@ -5539,3 +5539,85 @@ def test_rust_flatten_denylisted_without_structural_evidence(
         "crates/search/src/search.rs::collect_all", []
     )
     assert "crates/text/src/text.rs::Edit.flatten" not in resolved
+
+
+# Round 31 integration review of the F7 receiver-type rule.
+
+
+def test_object_type_field_tokens_picks_the_receivers_field() -> None:
+    text = "{ bot: Chat; client: HubSessionClient; sessionId?: string }"
+    pick = resolver_mod._object_type_field_tokens
+    assert pick(text, "input.client") == [("HubSessionClient", False)]
+    assert pick(text, "input.bot") == [("Chat", False)]
+    # A lowercase/primitive field type, an unknown field, or a call on
+    # the object itself names no receiver type.
+    assert pick(text, "input.sessionId") == []
+    assert pick(text, "input.missing") == []
+    assert pick(text, "input") == []
+    # Not an inline object type: defer to the ordinary token chain.
+    assert pick("Entity<Workspace>", "workspace") is None
+
+
+def test_rust_cross_crate_guard_respects_scope_and_imports() -> None:
+    guard = resolver_mod._rust_typed_match_looks_cross_crate
+    own_private = _fn("crates/md/src/html.rs", "Context", "Context")
+    own_private.kind = "struct"
+    own_private.exported = False
+    foreign = _fn("crates/gpui/src/context.rs", "Context", "Context")
+    foreign.kind = "struct"
+    foreign.exported = True
+    method = _fn("crates/gpui/src/context.rs", "spawn", "Context.spawn")
+    index = {"Context": [own_private, foreign]}
+    call = RawCall(
+        caller_id="crates/md/src/md.rs::run",
+        path="crates/md/src/md.rs",
+        text="cx.spawn",
+        name="spawn",
+        receiver="cx",
+        line=1,
+    )
+    # A private same-named struct elsewhere in the crate is not in
+    # scope here, so it disproves nothing (zed: markdown's Context).
+    assert not guard(call, method, "Context", index, {}, "&mut Context<Self>")
+    # Once it is `pub`, a glob re-export can bring it into scope.
+    own_private.exported = True
+    assert guard(call, method, "Context", index, {}, "&mut Context<Self>")
+    # ...unless the file imports the name from elsewhere, or the
+    # annotation names the foreign crate itself.
+    imports = {
+        "Context": Import("crates/md/src/md.rs", "Context", "gpui::Context")
+    }
+    assert not guard(call, method, "Context", index, imports, "&Context")
+    assert not guard(call, method, "Context", index, {}, "&gpui::Context")
+
+
+def test_rust_dot_call_vetoes_a_free_function_without_narrowing() -> None:
+    # `stdout.or(stderr)`: a free `fn or` plus one `EnvVar.or` method.
+    # Pre-filtering the free fn left the method as a lone survivor and
+    # 137 Option::or calls on zed newly resolved to it. A veto can only
+    # remove an edge, never mint one.
+    free = _fn("crates/a/src/util.rs", "or", "or", language="rust")
+    method = _fn("crates/b/src/env.rs", "or", "EnvVar.or", language="rust")
+    method.kind = "method"
+    caller = _fn("crates/c/src/run.rs", "go", "go", language="rust")
+    files = [
+        FileMap("crates/a/src/util.rs", "rust", symbols=[free]),
+        FileMap("crates/b/src/env.rs", "rust", symbols=[method]),
+        FileMap(
+            "crates/c/src/run.rs",
+            "rust",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="crates/c/src/run.rs",
+                    text="stdout.or",
+                    name="or",
+                    receiver="stdout",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.edges == []

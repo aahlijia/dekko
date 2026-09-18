@@ -2727,7 +2727,7 @@ class _Noise:
 _NOISE = _Noise()
 
 
-def _pick_candidate(
+def _pick_candidate_ladder(
     call: _Referable,
     candidates: list[Symbol],
     same_file: list[Symbol],
@@ -2824,7 +2824,9 @@ def _pick_candidate(
     if shape_narrowed and not candidates:
         return _NOISE if repo_stems is not None else None
 
-    structural = _structural_match(call, candidates, same_file, caller, index)
+    structural = _structural_match(
+        call, candidates, same_file, caller, index, file_imports
+    )
     if structural is not None:
         return structural
 
@@ -2859,6 +2861,61 @@ def _pick_candidate(
         )
 
     return _last_resort_match(call, candidates, by_name_path)
+
+
+def _pick_candidate(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    file_imports: dict[str, Import],
+    caller: Symbol | None,
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    index: dict[str, list[Symbol]],
+    repo_stems: set[str] | None = None,
+    raw_imports: list[Import] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
+) -> Symbol | _Noise | None:
+    """Run the candidate ladder, then veto a structurally impossible pick.
+
+    See ``_pick_candidate_ladder`` for the ladder itself and every
+    parameter. The one rule applied here: a Rust dot-call
+    (``recv.name(..)``) can never reach a free function (round 31 zed
+    coverage pass F11: ``.px(..)`` landing on ``fn px``, ``x.clone()``
+    on a test module's ``fn clone``).
+
+    It is a *veto on the result*, deliberately not a filter on the
+    candidates going in. The first implementation pre-filtered, and
+    integration review measured what that did on zed: removing a free
+    ``fn or`` left ``EnvVar.or`` as the lone survivor, so 137
+    ``Option::or`` calls (``stdout.or(stderr)``) newly resolved to it;
+    removing a same-file free ``fn focus_handle`` left one same-file
+    method, so ``cx.focus_handle()`` newly took it. Narrowing a
+    candidate list turns "honestly ambiguous" into "confidently
+    guessed" whenever it happens to leave one. A veto can only ever
+    remove an edge.
+    """
+    picked = _pick_candidate_ladder(
+        call,
+        candidates,
+        same_file,
+        file_imports,
+        caller,
+        by_name_path,
+        index,
+        repo_stems,
+        raw_imports,
+        crate_roots,
+        tiebreak_hits,
+    )
+    if (
+        isinstance(picked, Symbol)
+        and _rust_is_dot_call(call)
+        and not _drop_free_functions([picked])
+    ):
+        return _NOISE if repo_stems is not None else None
+
+    return picked
 
 
 def _sole_candidate_match(
@@ -3386,6 +3443,43 @@ _TYPE_QUALIFIER_WORDS = frozenset({"mut", "const", "ref", "readonly"})
 _TYPE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+_OBJECT_TYPE_FIELD = re.compile(r"([A-Za-z_$][\w$]*)\??\s*:\s*([A-Z][\w$]*)")
+
+
+def _object_type_field_tokens(
+    type_text: str, receiver: str
+) -> list[tuple[str, bool]] | None:
+    """Receiver-type tokens for a TS/JS inline object-type parameter.
+
+    ``input: { bot: Chat; client: HubSessionClient; ... }`` is not a
+    wrapper around one type: each field carries its own, and the call
+    site says which one it means (``input.client.getSchedule(..)``).
+    The outermost-token rule in ``_typed_param_token_candidates`` was
+    written for ``Wrapper<T>`` shapes; applied here it stopped at
+    ``Chat``, the first field's type, and integration review found it
+    had dropped 9 correct ``HubSessionClient.*`` edges on cline.
+
+    Args:
+        type_text: The parameter's declared type, as written.
+        receiver: The call's receiver text (``input.client``).
+
+    Returns:
+        ``None`` when ``type_text`` isn't an inline object type, so the
+        caller falls back to the ordinary token chain. Otherwise the
+        single field type the receiver's second segment names, or an
+        empty list when it names none (a call made directly on the
+        object literal, or on a field this type doesn't declare).
+    """
+    if not type_text.lstrip().startswith("{"):
+        return None
+    segments = _PATH_SPLIT.split(receiver)
+    if len(segments) < 2:
+        return []
+    fields = dict(_OBJECT_TYPE_FIELD.findall(type_text))
+    field_type = fields.get(segments[1])
+    return [(field_type, False)] if field_type else []
+
+
 def _typed_param_token_candidates(
     type_text: str,
 ) -> list[tuple[str, bool]]:
@@ -3496,6 +3590,7 @@ def _structural_match(
     same_file: list[Symbol],
     caller: Symbol | None,
     index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
 ) -> Symbol | None:
     """The ladder's three structural steps, strongest first.
 
@@ -3510,7 +3605,7 @@ def _structural_match(
     receiver_type = _receiver_type_match(call, candidates, index)
     if receiver_type is not None:
         return receiver_type
-    return _typed_param_match(call, candidates, caller, index)
+    return _typed_param_match(call, candidates, caller, index, file_imports)
 
 
 def _rust_shape_narrowed_candidates(
@@ -3555,12 +3650,11 @@ def _rust_shape_narrowed_candidates(
             _owned_by_receiver_type(call, same_file, index),
             True,
         )
-    if _rust_is_dot_call(call):
-        return (
-            _drop_free_functions(candidates),
-            _drop_free_functions(same_file),
-            True,
-        )
+    if _rust_is_dot_call(call) and not _drop_free_functions(candidates):
+        # Every candidate is a free function: nothing a dot-call could
+        # mean. Anything less than that is left alone here on purpose,
+        # see ``_pick_candidate``'s veto.
+        return [], [], True
     return candidates, same_file, False
 
 
@@ -3711,6 +3805,7 @@ def _typed_param_match(
     candidates: list[Symbol],
     caller: Symbol | None,
     index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
 ) -> Symbol | None:
     """Resolve a call through one of the caller's own typed parameters.
 
@@ -3781,7 +3876,10 @@ def _typed_param_match(
     )
     if not param_type:
         return None
-    for token, is_parameterized in _typed_param_token_candidates(param_type):
+    tokens = _object_type_field_tokens(param_type, call.receiver)
+    if tokens is None:
+        tokens = _typed_param_token_candidates(param_type)
+    for token, is_parameterized in tokens:
         if is_parameterized and not any(
             sym.kind in TYPE_KINDS for sym in index.get(token, [])
         ):
@@ -3792,7 +3890,7 @@ def _typed_param_match(
             continue
         only = matched[0]
         if call.path.endswith(".rs") and _rust_typed_match_looks_cross_crate(
-            call, only, token, index
+            call, only, token, index, file_imports, param_type
         ):
             continue
         return only
@@ -3800,7 +3898,12 @@ def _typed_param_match(
 
 
 def _rust_typed_match_looks_cross_crate(
-    call: _Referable, only: Symbol, outer: str, index: dict[str, list[Symbol]]
+    call: _Referable,
+    only: Symbol,
+    outer: str,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
+    type_text: str = "",
 ) -> bool:
     """Whether ``_typed_param_match``'s sole candidate is provably the
     *wrong* crate's same-named type.
@@ -3839,13 +3942,50 @@ def _rust_typed_match_looks_cross_crate(
         True only when the caller's own crate defines a same-named
         type and ``only`` isn't in it.
     """
+    imp = (file_imports or {}).get(outer)
+    if imp is not None and not imp.source.startswith(_RUST_IN_CRATE_PREFIXES):
+        # The file says where this type comes from, and it isn't here.
+        # zed's ``language`` crate defines its own ``BufferSnapshot``
+        # *and* ``syntax_map.rs`` does ``use text::{BufferSnapshot, ..}``:
+        # "the caller's own crate defines one too" is then no evidence
+        # against ``text::BufferSnapshot.remote_id``. Integration review
+        # of this guard found 37 correct edges it had disproved.
+        return False
+
+    if re.search(
+        rf"\b(?!crate\b|self\b|super\b)[a-z_]\w*::{outer}\b", type_text
+    ):
+        # ``text: &text::BufferSnapshot`` names the foreign crate in the
+        # annotation itself.
+        return False
+
     outer_types = [s for s in index.get(outer, []) if s.kind in TYPE_KINDS]
     if len(outer_types) < 2:
         return False
     own_crate = _rust_crate_dir(call.path)
-    if not any(_rust_crate_dir(t.path) == own_crate for t in outer_types):
+    own = [t for t in outer_types if _rust_crate_dir(t.path) == own_crate]
+    if not own or _rust_crate_dir(only.path) == own_crate:
         return False
-    return _rust_crate_dir(only.path) != own_crate
+    # "The caller's crate defines one too" only disproves the match
+    # when that one is actually *in scope here*: imported via
+    # ``crate::``/``super::``/``self::``, or defined in this very file.
+    # zed's ``markdown`` crate has a private ``struct Context<'a>`` in
+    # ``html/html_minifier.rs``; ``markdown.rs`` never imports it and
+    # gets ``gpui::Context`` through a prelude glob, yet the unscoped
+    # version of this check disproved every ``cx.observe_global(..)``
+    # edge in the file (integration review, round 31).
+    #
+    # A ``pub`` own-crate type is the opposite case: it reaches other
+    # modules through ``pub use binding::*;``-style globs dekko can't
+    # trace, so it counts as in scope without an import. ``gpui``'s
+    # ``keymap.rs`` gets ``gpui::KeyBinding`` exactly that way, and
+    # without this its ``binding.name()`` lands on ``ui``'s unrelated
+    # ``KeyBinding.name``, a crate gpui cannot depend on.
+    return (
+        imp is not None
+        or any(t.path == call.path for t in own)
+        or any(t.exported for t in own)
+    )
 
 
 # Constructor method names this resolver recognizes for a class-shaped

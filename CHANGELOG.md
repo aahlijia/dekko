@@ -9,6 +9,110 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.63] — 2026-09-18
+
+The rest of round 31's open list, from the design in
+`test-repos/reports/31-tokentest-7repo-post04355/FIX-PLAN-remaining.md`.
+Implemented as three parallel work packages, then integrated and
+re-verified on zed, cline and claude-code by diffing edge sets against
+the previous maps (`scripts/map_edge_diff.py`, new). That review
+changed three of the packages' own rules; each is noted below.
+
+### Fixed
+- **`use localmod::X` resolves to the local module, not a same-named
+  workspace crate** (zed F12). Rust 2018 resolves a bare first segment
+  against local scope first; dekko went straight to the crate table.
+  zed: 26 impossible module edges removed, 340 correct ones added, and
+  `deps --cycles`' headline cycle shrank from **100 files across 12
+  crates to 38 files in 1 crate**. The 100-file cycle was an artifact.
+- **A Rust `impl X for Y` can only name a trait** (zed F8). Heritage
+  candidates were filtered to "any type kind"; a same-named struct is
+  not a legal target. zed `heritage_ambiguous` 86 → 32; `Component`
+  subtypes 7 → 66 of 66, matching grep. All 30 lost edges targeted a
+  struct.
+- **`impl Trait for X` in a different file from `struct X` gets its
+  edge** (zed F2). The extractor dropped the clause when the type
+  wasn't in the same file; it now emits it with a `subtype_name`, and
+  the resolver places it within the same crate (exactly one match, or
+  it is counted as unplaced, never guessed). zed +49 heritage edges,
+  0 lost. `map.json` gains `heritage_unplaced_subtype_count`.
+- **The receiver-type guess no longer reads a generic *argument* as
+  the receiver's type** (zed F7). `rows: &BTreeMap<DisplayRow, u8>`
+  then `rows.get(..)` resolved to `DisplayRow.get`. Transparent
+  wrappers (`Box`/`Rc`/`Arc`/`Ref`, `Optional`, `T | undefined`) still
+  pass through; the chain stops at the first opaque type. zed: 138
+  guessed edges removed. *Integration review* found the package's
+  cross-crate guard also disproved correct edges and fixed it: an
+  explicit `use text::BufferSnapshot` or a `text::BufferSnapshot`
+  annotation now outranks "this crate defines one too", and a
+  *private* same-named struct elsewhere in the crate no longer counts
+  as in scope (45 correct zed edges recovered). It also found the rule
+  breaking TypeScript inline object types: `input: { bot: Chat;
+  client: HubSessionClient }` stopped at `Chat`, dropping 9 correct
+  edges on cline. The receiver's own field (`input.client`) now picks
+  the type.
+- **A Rust dot-call can never reach a free function** (zed F11:
+  `.px(..)` → `fn px`, `x.clone()` → a test module's `fn clone`), and
+  the std-method denylist gained the iterator/`Option` adaptor names
+  that were resolving to repo symbols (zed F9: `.flatten()` →
+  `Edit.flatten`, 454 callers; `.chain()` 217). zed: 860 wrong edges
+  removed. *Integration review* turned the dot-call rule from a
+  candidate pre-filter into a veto on the result: pre-filtering
+  removed a free `fn or`, left `EnvVar.or` as the lone survivor, and
+  137 `Option::or` calls newly resolved to it. A veto can only remove
+  an edge. The widened denylist also stopped `Promise.all(..)`
+  resolving to a repo function named `all` (196 wrong edges on
+  claude-code).
+- **`sanity --group-by-file` groups the full bucket, then applies
+  `--limit` to the groups** (zed F10). It used to group whatever rows
+  survived truncation, hiding exactly the clustering it exists to show.
+  `docs/cli.md` had documented that as intended; corrected.
+- `sanity` recognizes ` * ...` JSDoc/Javadoc continuation lines as
+  comments, only when a bounded backward scan finds an unclosed `/*`
+  (a wrapped `* x` multiplication line must not match).
+- `ambiguous`: the "path+qualname alone can't disambiguate" hint no
+  longer prints under a single candidate (zed F5).
+- MCP `outline` on a directory capped its rows but forwarded one
+  sparse-file note per file uncapped: ~59K tokens on claude-code's
+  `src/`, now ~3.6K with the omitted count disclosed. `outline` also
+  follows the budget-governs-alone rule from 0.43.59.
+
+### Performance
+- **Incremental `dekko map` no longer pays full price for adding,
+  removing, renaming or re-signing a function.** The round-30 gate
+  re-resolved the whole repo on any symbol-set change (tensorflow:
+  41s for a body edit, 223-291s for adding or removing one function).
+  It is now a name delta: an unchanged file is re-resolved only if one
+  of its recorded calls names a changed symbol. Any change to a *type*
+  still takes the full path, because receiver- and parameter-type
+  lookups consult the index for type kinds only, and excluding type
+  deltas removes that whole class of question rather than answering
+  it. An audit of every index read the ladder makes found two the
+  design had missed, both closed: an added constructor is invisible to
+  name scanning (callers call the class), and an aliased import
+  resolves under a different name than the call's. Parity (incremental
+  `map.json` identical to `--full`) is tested for add / remove /
+  rename / re-sign / add-method / add-struct, and held live on
+  spring-boot and cline, including an `export`-flag flip that changes
+  workspace-package narrowing in *other* files.
+
+### Added
+- `scripts/map_edge_diff.py`: compares two `map.json` files by
+  `(caller, callee)` pairs. Raw section equality is useless because
+  ids are interned ints that shift with the symbol table.
+
+### Known limits
+- `Default::default()` / `Vec::default()` and calls on
+  macro-generated types still take a same-file `default` (~35 edges on
+  zed). Fixing it safely needs Rust `type` aliases indexed first
+  (designed as A6, not implemented).
+- The std-method denylist is not language-gated. That is what fixed
+  `Promise.all`, and it only ever suppresses a single-candidate guess
+  with no structural evidence, but a repo method named `find`/`count`
+  called on an untyped receiver now reads as external.
+- `heritage_unplaced_subtype_count` is in `map.json` only; no query
+  output discloses it yet.
+
 ## [0.43.62] — 2026-09-18
 
 A regression 0.43.61 exposed, caught the same day by the zed coverage
