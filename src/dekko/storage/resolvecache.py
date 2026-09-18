@@ -18,9 +18,16 @@ the tree make it sound rather than heuristic:
    function body cannot dangle a cached edge pointing into that file.
 
 Reuse is gated on the global resolution inputs being provably
-*identical* to the cached run (``build_reuse``), never on a guess about
-which names an edit could have affected. When the gate fails, the whole
-repo is re-resolved exactly as before.
+*identical* to the cached run for the files it decides to trust
+(``build_reuse``) -- never on a heuristic guess. When a dirty file's own
+symbol set is unchanged (the dominant agent-loop edit: a body edit, a
+new call, a literal fix), every other file's cached resolution is
+provably still correct outright. When it *did* change, v2's name-delta
+analysis (``resolver.name_delta``) identifies exactly which bare names
+changed meaning and re-resolves only the files that could depend on one
+of them -- see ``build_reuse``'s docstring for the full rule, including
+the two cases (a type-kind name, or no prior symbols to diff against)
+that still fall back to re-resolving the whole repo.
 
 Only the call pass is cached. Refs/heritage/imports/throws/catches are
 always recomputed: together they are a small share of the cost, and
@@ -48,13 +55,21 @@ from pathlib import Path
 
 from dekko.core.resolver import (
     ResolveReuse,
+    alias_original_name,
+    name_delta,
     resolve_fingerprint,
+    resolved_id_name,
     symbol_projection,
     workspace_fingerprint,
 )
 from dekko.core.languages import spec_fingerprint
 from dekko.core.model import FileMap
-from dekko.render.mapfile import _json_dumps, _json_loads, atomic_write_bytes
+from dekko.render.mapfile import (
+    _callee_base,
+    _json_dumps,
+    _json_loads,
+    atomic_write_bytes,
+)
 from dekko.storage.cache import (
     CACHE_DIR,
     IncrementalCache,
@@ -244,14 +259,172 @@ def clear(root: Path) -> None:
     _path(root).unlink(missing_ok=True)
 
 
+def _entry_names(entry: dict) -> set[str]:
+    """Every bare name one cached file's call resolution depends on.
+
+    Mirrors the three buckets ``partition_resolution`` writes:
+
+    - ``edges``: the *resolved* callee's own bare name, recovered from
+      its id (``resolver.resolved_id_name``). Correct even when the
+      call reached that target via ``_alias_candidates`` -- the callee
+      id is always the real target's id, never the local alias text.
+    - ``ambiguous``: both the stored call name (the common case, where
+      it already equals every candidate's own name) **and** each
+      candidate id's own recovered name -- the second is what makes an
+      aliased ambiguous call track its *real* dependency rather than
+      the alias text, since an alias's candidates can have a different
+      bare name than ``call.name``.
+    - ``external``: the base identifier of the raw callee text, the
+      same split ``render.mapfile``'s ``externals_by_name`` index uses
+      (``_callee_base``) -- so a newly-defined symbol that would now
+      resolve a previously-unresolved *direct* (non-aliased) call is
+      still caught by name.
+
+    What this does **not** catch: an external entry that came from an
+    aliased import whose target didn't exist yet
+    (``_alias_candidates`` found zero candidates for the recovered
+    name). Nothing in the cached entry records that recovered name --
+    only ``call.text``, which reflects the alias, not the target. See
+    ``_files_importing`` for how that residual gap is closed instead.
+    """
+    names: set[str] = set()
+    for _caller, callee, _lines in entry.get("edges", ()):
+        names.add(resolved_id_name(callee))
+    for _caller, name, cands in entry.get("ambiguous", ()):
+        names.add(name)
+        names.update(resolved_id_name(c) for c in cands)
+    for _caller, text, _lines in entry.get("external", ()):
+        names.add(_callee_base(text))
+    names.discard("")
+    return names
+
+
+def _files_naming(
+    cached: dict[str, dict], dirty: set[str], names: set[str]
+) -> set[str]:
+    """Clean files whose cached resolution names a delta symbol.
+
+    A single linear pass over every cached entry -- equivalent to
+    building the "name -> {paths}" index the design describes and then
+    looking up each delta name in it, just without materializing the
+    whole reverse index when ``names`` (typically a handful of symbols)
+    is far smaller than the repo's full name vocabulary.
+
+    Args:
+        cached: This run's loaded resolve cache (``load()``'s output).
+        dirty: Paths already known dirty -- skipped, since they're
+            re-resolved from scratch regardless.
+        names: ``NameDelta.changed`` names to test against.
+
+    Returns:
+        Additional paths (disjoint from ``dirty``) whose cached entry
+        must be discarded.
+    """
+    found: set[str] = set()
+    for path, entry in cached.items():
+        if path in dirty:
+            continue
+        if _entry_names(entry) & names:
+            found.add(path)
+    return found
+
+
+def _files_importing(
+    files: list[FileMap], dirty: set[str], added_names: set[str]
+) -> set[str]:
+    """Clean files whose own import could newly resolve via an alias.
+
+    Closes the one gap ``_files_naming`` can't reach (see
+    ``_entry_names``): an import-alias miss recorded in ``external``
+    carries no trace of the name ``_alias_candidates`` actually looked
+    up (``resolver.alias_original_name``), only the alias text as
+    written at the call site. A file is at risk here regardless of
+    whether it currently has a cached miss for that particular import --
+    checking every import directly, rather than trying to first prove
+    one produced a miss, is the cheap side of "over-invalidate, never
+    under."
+
+    Args:
+        files: Every mapped file (fresh, current ``fm.imports`` --
+            unaffected by the reuse gate, since imports are always
+            re-extracted for every file every run).
+        dirty: Paths already known dirty -- skipped.
+        added_names: ``NameDelta.newly_defined`` names to test against
+            -- only a name with *no* prior candidates can flip an
+            alias miss to a hit.
+
+    Returns:
+        Additional paths (disjoint from ``dirty``) whose cached entry
+        must be discarded.
+    """
+    found: set[str] = set()
+    for fm in files:
+        if fm.path in dirty:
+            continue
+        for imp in fm.imports:
+            if alias_original_name(imp.source) in added_names:
+                found.add(fm.path)
+                break
+    return found
+
+
+def _name_delta_dirty(
+    files: list[FileMap],
+    cached: dict[str, dict],
+    cache: IncrementalCache,
+    dirty: set[str],
+) -> set[str] | None:
+    """Every clean file the dirty set's symbol-name changes invalidate.
+
+    Args:
+        files: Every mapped file, freshly discovered this run.
+        cached: This run's loaded resolve cache.
+        cache: This run's extraction cache.
+        dirty: Paths already known dirty from the content-hash check.
+
+    Returns:
+        Additional paths to fold into ``dirty``, or ``None`` when any
+        dirty file's delta includes a type-kind name -- see
+        ``resolver.NameDelta.blocks_reuse`` -- and the caller must fall
+        back to a full resolve instead.
+    """
+    changed: set[str] = set()
+    newly_defined: set[str] = set()
+    for fm in files:
+        if fm.path not in dirty:
+            continue
+        old = cache.old_symbols(fm.path)
+        if old is None:
+            return None
+        # Whole-file compare first: cheaper than the grouped analysis
+        # below, and this is the dominant agent-loop edit (a body edit,
+        # a new call, a literal fix -- none of which touch any symbol's
+        # projection), so most dirty files skip name_delta entirely.
+        if symbol_projection(old) == symbol_projection(fm.symbols):
+            continue
+        delta = name_delta(old, fm.symbols)
+        if delta.blocks_reuse:
+            return None
+        changed |= delta.changed
+        newly_defined |= delta.newly_defined
+
+    extra: set[str] = set()
+    if changed:
+        extra |= _files_naming(cached, dirty, changed)
+    if newly_defined:
+        extra |= _files_importing(files, dirty, newly_defined)
+    return extra
+
+
 def build_reuse(
     root: Path, files: list[FileMap], cache: IncrementalCache
 ) -> ResolveReuse | None:
     """Decide what cached resolution this run may reuse.
 
     Returns a reuse plan only when the global resolution inputs are
-    provably identical to the cached run, which makes an unchanged file's
-    resolution identical *by construction*:
+    provably identical to the cached run for the files it marks
+    reusable, which makes an unchanged file's resolution identical *by
+    construction*:
 
     - **No file added, deleted, or renamed.** The ladder consults several
       structures derived from the set of file paths, not from file
@@ -260,16 +433,30 @@ def build_reuse(
       resolution for a file that references no changed *name*, which no
       name-based invalidation would catch. Requiring an identical path
       set removes that whole class of question.
-    - **No changed file altered its resolution-relevant symbols**
-      (``resolver.symbol_projection``). If every symbol a file exposes is
-      unchanged, the repo-wide name index every other file resolves
-      against is unchanged too.
+    - **Every name a dirty file's delta touches is propagated to every
+      file that could depend on it** (``resolver.name_delta``, plus
+      ``_files_naming``/``_files_importing`` here). Unlike v1's blanket
+      "any symbol-set change forces a full resolve," this narrows the
+      re-resolve to exactly the files ``_pick_candidate``'s ladder could
+      actually answer differently for -- see WP-B's dependency-class
+      audit in ``test-repos/reports/31-tokentest-7repo-post04355/
+      FIX-PLAN-remaining.md`` for the full case analysis, including the
+      two gaps the v1 design didn't anticipate (constructor-collapse,
+      import-alias recovery) that this closes.
+    - A dirty file whose delta includes a **type-kind** name (a class,
+      struct, interface, enum, trait, or type alias) forces a full
+      resolve outright, because the type-aware ladder steps
+      (``_receiver_type_match`` and friends) read the whole repo-wide
+      index for a type name regardless of which file wrote the call --
+      there is no bounded set of "files that could be affected" to
+      compute for that case, so the whole gate degrades to v1's original
+      behavior for it.
 
-    When either fails, returns ``None`` and the caller re-resolves the
-    whole repo. That is the v1 trade: a provable gate that covers the
-    dominant agent-loop edit (change a body, add a call, fix a literal --
-    none of which alter the symbol set), rather than a narrower
-    name-delta analysis whose correctness rests on case analysis.
+    When the file-set check fails, returns ``None`` outright. When a
+    dirty file can't be diffed (no prior symbols) or its delta blocks
+    reuse, also returns ``None`` -- the caller re-resolves the whole
+    repo. Otherwise every file not proven safe by the checks above is
+    folded into ``dirty``.
 
     Args:
         root: Repository root.
@@ -295,15 +482,9 @@ def build_reuse(
         if cached[fm.path].get("hash") != known["hash"]:
             dirty.add(fm.path)
 
-    # Every dirty file must leave the repo-wide symbol picture untouched,
-    # or unchanged files' cached resolution can't be trusted.
-    for fm in files:
-        if fm.path not in dirty:
-            continue
-        old = cache.old_symbols(fm.path)
-        if old is None:
-            return None
-        if symbol_projection(old) != symbol_projection(fm.symbols):
-            return None
+    extra = _name_delta_dirty(files, cached, cache, dirty)
+    if extra is None:
+        return None
+    dirty |= extra
 
     return ResolveReuse(cached=cached, dirty=frozenset(dirty))

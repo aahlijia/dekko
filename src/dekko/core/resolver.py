@@ -403,6 +403,232 @@ def resolve_fingerprint() -> str:
 
 
 @dataclass(frozen=True)
+class _NameGroup:
+    """One bare symbol name's resolution-relevant state in one file.
+
+    Built by ``_group_by_name`` and compared by ``name_delta`` -- see
+    that function's docstring for why grouping (rather than comparing
+    the file's symbol list as a whole) is what makes a *name-scoped*
+    reuse gate provable.
+
+    Attributes:
+        rows: One canonical JSON row per symbol sharing this name
+            (``symbol_projection``'s per-symbol form, not the whole
+            file's). Compared by ``==``/``!=`` only -- a **set**, not a
+            sequence, because within one name unordered comparison is
+            correct here even though whole-file ``symbol_projection``
+            must stay order-sensitive (round 30 risk #2): two entries
+            that swap their ``#N`` collision suffix produce two
+            genuinely different row strings (the suffix lives in
+            ``id``), so the set still changes when a swap changes what
+            the ids mean, and stays equal when it doesn't.
+        kinds: Every ``Symbol.kind`` seen under this name.
+        containers: For ``kind == "method"`` entries, the bare name of
+            the qualname's enclosing type (``Cls.method`` -> ``Cls``).
+            Feeds the constructor-collapse rule in ``name_delta``.
+    """
+
+    rows: frozenset[str]
+    kinds: frozenset[str]
+    containers: frozenset[str]
+
+
+_EMPTY_NAME_GROUP = _NameGroup(
+    rows=frozenset(), kinds=frozenset(), containers=frozenset()
+)
+
+
+def _group_by_name(
+    symbols: list[Symbol] | list[dict],
+) -> dict[str, _NameGroup]:
+    """Bucket a file's resolution-relevant symbol projections by name.
+
+    Args:
+        symbols: A file's symbols, in either form ``symbol_projection``
+            accepts.
+
+    Returns:
+        Bare name -> ``_NameGroup``. A name absent from the input has
+        no entry (callers use ``dict.get(name, _EMPTY_NAME_GROUP)``).
+    """
+    field_names = _projected_symbol_fields()
+    rows: dict[str, set[str]] = {}
+    kinds: dict[str, set[str]] = {}
+    containers: dict[str, set[str]] = {}
+    for sym in symbols:
+        d = asdict(sym) if isinstance(sym, Symbol) else sym
+        name = str(d.get("name", ""))
+        row = {f: d.get(f) for f in field_names}
+        rows.setdefault(name, set()).add(
+            json.dumps(row, sort_keys=True, separators=(",", ":"))
+        )
+        kind = str(d.get("kind", ""))
+        kinds.setdefault(name, set()).add(kind)
+        qualname = str(d.get("qualname", ""))
+        if kind == "method" and "." in qualname:
+            container = qualname.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+            containers.setdefault(name, set()).add(container)
+    return {
+        name: _NameGroup(
+            rows=frozenset(rows.get(name, ())),
+            kinds=frozenset(kinds.get(name, ())),
+            containers=frozenset(containers.get(name, ())),
+        )
+        for name in rows.keys() | kinds.keys()
+    }
+
+
+@dataclass(frozen=True)
+class NameDelta:
+    """A dirty file's symbol-name delta, for the incremental resolve gate.
+
+    ``storage.resolvecache.build_reuse``'s v1 gate falls back to a full
+    repo-wide resolve whenever a dirty file's symbol set changed at
+    all. This is v2: identify exactly which bare *names* changed
+    meaning, so an unchanged file's cached resolution can be trusted
+    unless it actually depends on one of them. See
+    ``.features/fixes/round30/01-incremental-resolution.md``'s "v2"
+    section and ``test-repos/reports/31-tokentest-7repo-post04355/
+    FIX-PLAN-remaining.md`` WP-B for the dependency-class analysis this
+    implements.
+
+    Attributes:
+        blocks_reuse: True when a type-kind symbol (``model.TYPE_KINDS``)
+            is among the changed names. Every one of ``_pick_candidate``'s
+            type-aware steps (``_receiver_type_match``,
+            ``_rust_type_path_receiver``, ``_owned_by_receiver_type``'s
+            trait check, ``_typed_param_match``) reads the *whole*
+            repo-wide index for a type-kind name, not just this file's
+            own calls -- so a type addition/removal/change can affect
+            resolution anywhere a same-named receiver or parameter type
+            is written, which no per-file name scan can bound. When
+            this is set, ``changed``/``newly_defined`` are incomplete
+            and must not be used; the caller falls back to a full
+            resolve instead.
+        changed: Bare names whose grouped entries (``_NameGroup.rows``)
+            differ between the old and new symbol list -- added,
+            removed, or substantively changed (candidate count, kind,
+            qualname, params, ...; never a pure line-number shift, see
+            ``_projected_symbol_fields``). Includes the constructor-
+            collapse extension: when a changed name is constructor-
+            shaped (``_CONSTRUCTOR_NAMES``, e.g. Python's ``__init__``
+            or JS/TS's ``constructor``), its enclosing type's own bare
+            name is added too. Without this, adding an ``__init__`` to
+            an existing class would go undetected by any cached
+            caller's *own* name-scan: ``_constructor_of`` looks up the
+            new method by a name (``__init__``) that never appears in
+            an already-cached ``MyClass()`` edge, whose callee id ends
+            in ``MyClass``, not ``__init__``. Adding the class's own
+            name closes that gap without needing to know which files
+            call the class directly -- the ordinary name-scan finds
+            them once the class's name is itself in the delta.
+        newly_defined: The subset of ``changed`` with *no* entries in
+            the old projection at all -- names the repo did not define
+            before this edit. Only a genuinely new name can flip an
+            import-alias miss (``_alias_candidates``, which recovers a
+            name via ``alias_original_name`` and retries the index
+            lookup under it) from empty to non-empty; a name that
+            already existed already had whatever candidates it was
+            going to have, so it can't newly enable that recovery.
+    """
+
+    blocks_reuse: bool
+    changed: frozenset[str]
+    newly_defined: frozenset[str]
+
+
+def name_delta(
+    old_symbols: list[Symbol] | list[dict],
+    new_symbols: list[Symbol] | list[dict],
+) -> NameDelta:
+    """Compute which symbol names changed meaning between two versions.
+
+    Args:
+        old_symbols: The file's previously cached symbols.
+        new_symbols: The file's freshly extracted symbols.
+
+    Returns:
+        A ``NameDelta``. See its docstring for what each field means
+        and why the constructor-collapse extension is folded into
+        ``changed`` here rather than left to the caller.
+    """
+    old = _group_by_name(old_symbols)
+    new = _group_by_name(new_symbols)
+    changed = {
+        name
+        for name in old.keys() | new.keys()
+        if old.get(name, _EMPTY_NAME_GROUP).rows
+        != new.get(name, _EMPTY_NAME_GROUP).rows
+    }
+    blocks_reuse = any(
+        old.get(name, _EMPTY_NAME_GROUP).kinds & TYPE_KINDS
+        or new.get(name, _EMPTY_NAME_GROUP).kinds & TYPE_KINDS
+        for name in changed
+    )
+    newly_defined = {
+        name for name in changed if not old.get(name, _EMPTY_NAME_GROUP).rows
+    }
+    ctor_containers: set[str] = set()
+    for name in changed & _CONSTRUCTOR_NAME_SET:
+        ctor_containers |= old.get(name, _EMPTY_NAME_GROUP).containers
+        ctor_containers |= new.get(name, _EMPTY_NAME_GROUP).containers
+
+    return NameDelta(
+        blocks_reuse=blocks_reuse,
+        changed=frozenset(changed | ctor_containers),
+        newly_defined=frozenset(newly_defined),
+    )
+
+
+def resolved_id_name(symbol_id: str) -> str:
+    """Bare ``Symbol.name`` a resolved symbol id's qualname ends in.
+
+    Ids are ``relpath::Qualname`` (``extractor._make_symbol``), with an
+    optional ``#N`` collision suffix appended to the *whole* id, never
+    to the qualname itself. Splitting on the first ``"::"`` therefore
+    isolates the qualname cleanly -- a relpath can contain ``.`` and
+    ``/`` but never ``::``, and a qualname (dot-joined containers) never
+    contains ``::`` either (``_make_symbol`` converts any ``::`` in a
+    captured name into dot-joined containers before building the id).
+
+    Used by ``storage.resolvecache``'s name-delta gate to ask "does
+    this cached edge/ambiguous candidate depend on name N" without
+    storing the name redundantly alongside every id.
+
+    Args:
+        symbol_id: A real, resolved ``Symbol.id`` -- never a module
+            pseudo-caller id (``MODULE_CALLER_SUFFIX``), which this
+            function never receives in practice since only genuine
+            *callees*/*candidates* are ever looked up this way.
+
+    Returns:
+        The bare name, with any ``#N`` suffix stripped.
+    """
+    _, _, qualname = symbol_id.partition("::")
+    tail = qualname.rsplit(".", 1)[-1]
+    return tail.partition("#")[0]
+
+
+def alias_original_name(source: str) -> str:
+    """The pre-alias bare name ``_alias_candidates`` recovers from an
+    import's ``source``.
+
+    Factored out of ``_alias_candidates`` so
+    ``storage.resolvecache``'s name-delta gate can replicate exactly
+    what that function would look up for a given import, rather than
+    risking the two derivations drifting apart -- see
+    ``NameDelta.newly_defined``.
+
+    Args:
+        source: An ``Import.source`` string.
+
+    Returns:
+        Its last path-like segment, or ``""`` for an empty source.
+    """
+    return _PATH_SPLIT.split(source)[-1] if source else ""
+
+
+@dataclass(frozen=True)
 class ResolveReuse:
     """Per-file ``_resolve_all`` output that may be reused verbatim.
 
@@ -3172,6 +3398,10 @@ def _typed_param_match(
 # class's own bare name (Java's ``constructor_declaration`` has no
 # distinct keyword: its extracted ``name`` field is the class name).
 _CONSTRUCTOR_NAMES = ("constructor", "__init__")
+# Set form for ``name_delta``'s membership test — the class's-own-name
+# case above needs no separate handling there, since that name is
+# already the changed name itself (see ``NameDelta.changed``).
+_CONSTRUCTOR_NAME_SET = frozenset(_CONSTRUCTOR_NAMES)
 
 
 def _constructor_of(
@@ -3500,7 +3730,7 @@ def _alias_candidates(
     imp = file_imports.get(call.name)
     if imp is None:
         return []
-    original = _PATH_SPLIT.split(imp.source)[-1]
+    original = alias_original_name(imp.source)
     return [
         c
         for c in index.get(original, [])
