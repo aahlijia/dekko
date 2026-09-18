@@ -280,13 +280,17 @@ cause breakdown per file, largest cluster first) instead of listing
 individual match rows — useful for spotting a single file that
 accounts for a large share of a big "unexplained" count instead of
 reading past `--limit`'s default truncation or reaching for `--json`
-and aggregating by hand. Grouping happens over whatever rows already
-survived `--limit`/`--budget` fitting, not the pre-truncation total —
-pair it with a raised `--limit`/`--budget` when chasing a suspected
-large cluster, or the rollup only reflects a truncated sample. Scoped
-to the grep-only bucket in single-target text mode; has no effect
-under `--json` (already fully groupable by an external consumer) or
-`--all` (which rolls up by symbol, not by file).
+and aggregating by hand. Grouping runs over the *full* grep-only
+bucket — every hit the sweep found — before `--limit`/`--budget` are
+applied; those caps then bound the number of file *groups* printed,
+not the number of rows grouping is allowed to see. (Before round 31,
+`--limit`/`--budget` were applied to rows first and grouping ran only
+over the survivors, which could hide the very clustering the flag
+exists to show — a file with the most real hits could still print
+zero rows if none of them individually made the row cut.) Scoped to
+the grep-only bucket in single-target text mode; has no effect under
+`--json` (already fully groupable by an external consumer) or `--all`
+(which rolls up by symbol, not by file).
 
 Always exits `0` on a completed comparison — a nonempty `grep-only`
 bucket is a finding to relay, not itself an error; this is a spot

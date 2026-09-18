@@ -1824,31 +1824,108 @@ def _print_bucket_text(title: str, rows: list[dict], meter: Meter) -> None:
         print(f"    ... +{total - len(rows)} more")
 
 
-def _print_bucket_by_file(title: str, rows: list[dict], meter: Meter) -> None:
-    """Roll up a bucket's rows by file, largest cluster first.
+def _group_grep_only_by_file(
+    rows: list[dict],
+) -> list[tuple[str, int, Counter[str]]]:
+    """Group a bucket's *full* row set by file, largest cluster first.
+
+    Round 31 zed.md F10: grouping must run over every row the sweep
+    found, not whatever survived ``--limit``/``--budget`` fitting
+    first. On zed, ``sanity ... --group-by-file`` with the default
+    ``--limit 200`` never showed either of the two largest real
+    clusters (139 hits in ``shadow.rs``, 125 in ``list.rs``) because
+    neither file's individual rows made it into the first 200 --
+    exactly the clustering the flag exists to surface. Callers cap the
+    *groups* this returns, not the rows that went into them.
 
     Args:
-        title: Bucket label (``"grep-only"``).
-        rows: The bucket's rendered rows (post ``--limit``/budget
-            fitting — grouping still respects whatever rows survived
-            fitting, same as ``_print_bucket_text``).
-        meter: The bucket's cost meter, for the total-count header.
+        rows: Every row in the bucket, unfitted.
+
+    Returns:
+        ``(file, file_total, causes)`` tuples, largest ``file_total``
+        first; ties keep the files' first-appearance order (stable
+        sort over dict-insertion order).
     """
-    total = meter.total
-    print(f"  {title}: {total} (grouped by file)")
     by_file: dict[str, Counter[str]] = defaultdict(Counter)
     for row in rows:
         by_file[row["file"]][row.get("cause", "(no cause)")] += 1
-    for file, causes in sorted(
-        by_file.items(), key=lambda kv: sum(kv[1].values()), reverse=True
-    ):
-        file_total = sum(causes.values())
+    groups = [
+        (file, sum(causes.values()), causes)
+        for file, causes in by_file.items()
+    ]
+    groups.sort(key=lambda g: g[1], reverse=True)
+    return groups
+
+
+def _fit_file_groups(
+    groups: list[tuple[str, int, Counter[str]]],
+    budget: int | None,
+    limit: int,
+) -> tuple[list[tuple[str, int, Counter[str]]], Meter]:
+    """Cap file groups by count then token budget.
+
+    Mirrors ``_fit_rows``, applied to the per-file group summaries
+    ``--group-by-file`` prints instead of individual rows -- so
+    ``--limit``/``--budget`` bound how many *files* are shown, the
+    same knob the rest of the report already uses, not a second
+    row-count cap layered on top of grouping (round 31 zed.md F10).
+
+    Args:
+        groups: Every file group, largest cluster first (see
+            ``_group_grep_only_by_file``).
+        budget: Approximate token budget for the printed groups, or
+            ``None`` for unbounded.
+        limit: Maximum number of groups to keep.
+
+    Returns:
+        ``(kept_groups, meter)`` -- ``meter.total`` is the group
+        count, not the row count, so its footer speaks in groups.
+    """
+    serialized = [
+        json.dumps({"file": f, "count": c, "causes": dict(causes)})
+        for f, c, causes in groups
+    ]
+    kept, meter = fit_to_budget(serialized, budget, limit)
+    return groups[: len(kept)], meter
+
+
+def _print_bucket_by_file(
+    title: str,
+    rows: list[dict],
+    *,
+    budget: int | None,
+    limit: int,
+) -> None:
+    """Roll up a bucket's full row set by file, largest cluster first.
+
+    Groups ``rows`` in full, then applies ``--limit``/``--budget`` to
+    the number of *file groups* printed -- see
+    ``_group_grep_only_by_file`` and ``_fit_file_groups`` for why
+    (round 31 zed.md F10: grouping over an already row-truncated
+    bucket hid the very clustering this flag exists to show).
+
+    Args:
+        title: Bucket label (``"grep-only"``).
+        rows: The bucket's full, unfitted rows -- every hit the sweep
+            classified into this bucket, not just the rows that would
+            survive ``--limit``/``--budget`` applied to rows directly.
+        budget: Token budget applied to the printed groups.
+        limit: Maximum number of file groups to print.
+    """
+    print(f"  {title}: {len(rows)} (grouped by file)")
+    groups = _group_grep_only_by_file(rows)
+    kept_groups, meter = _fit_file_groups(groups, budget, limit)
+    for file, file_total, causes in kept_groups:
         print(f"    {file}: {file_total}")
         for cause, count in causes.most_common():
             marker = "   <-- look here" if cause == CAUSE_UNEXPLAINED else ""
             print(f"      {count:>4}  {cause}{marker}")
-    if total > len(rows):
-        print(f"    ... +{total - len(rows)} more (outside --limit/budget)")
+    if meter.omitted:
+        plural = "" if meter.omitted == 1 else "s"
+        print(
+            f"    ... +{meter.omitted} more file group{plural} "
+            "(outside --limit/budget)"
+        )
 
 
 def _print_text(
@@ -1859,6 +1936,7 @@ def _print_text(
     matches: tuple[list[dict], Meter],
     dekko_only: tuple[list[dict], Meter],
     grep_only: tuple[list[dict], Meter],
+    grep_only_rows: list[dict],
     module_level: list[str],
     *,
     grep_truncated: bool = False,
@@ -1866,7 +1944,22 @@ def _print_text(
     excluded_declarations: int = 0,
     receiver_mismatch_note: str | None = None,
     group_by_file: bool = False,
+    budget: int | None = None,
+    limit: int = DEFAULT_REPORT_LIMIT,
 ) -> None:
+    """Render ``run()``'s text report.
+
+    Args:
+        grep_only: The grep-only bucket, already fit to
+            ``--limit``/``--budget`` by row count -- used for the flat
+            (non-grouped) rendering, unchanged from before round 31's
+            C1 fix.
+        grep_only_rows: The grep-only bucket's *full*, unfitted rows --
+            used only when ``group_by_file`` is set, so grouping runs
+            over every hit before ``--limit``/``--budget`` caps the
+            number of file groups instead of the number of rows (round
+            31 zed.md F10; see ``_print_bucket_by_file``).
+    """
     print(f"dekko sanity: '{target}' ({action}) vs. grep '{bare_name}'")
     print(f"  grep: {grep_command}")
     if grep_truncated:
@@ -1883,7 +1976,9 @@ def _print_text(
     else:
         _print_bucket_text("dekko-only", *dekko_only)
     if group_by_file:
-        _print_bucket_by_file("grep-only", *grep_only)
+        _print_bucket_by_file(
+            "grep-only", grep_only_rows, budget=budget, limit=limit
+        )
     else:
         _print_bucket_text("grep-only", *grep_only)
     if module_level:
@@ -2257,10 +2352,13 @@ def run(
         as_json: Emit structured JSON instead of a text report.
         group_by_file: Roll up the grep-only bucket's text-mode
             rendering by file (count and cause breakdown per file)
-            instead of a flat row list. Text mode only, single-target
-            only (no effect on ``--json`` or ``--unused``, which
-            already carries every row's ``file``/``cause`` for an
-            external consumer to group).
+            instead of a flat row list. Groups the *full* grep-only
+            bucket first, then applies ``limit``/``budget`` to the
+            number of file groups printed, not to rows before grouping
+            (round 31 zed.md F10 -- see ``_print_bucket_by_file``).
+            Text mode only, single-target only (no effect on ``--json``
+            or ``--unused``, which already carries every row's
+            ``file``/``cause`` for an external consumer to group).
 
     Returns:
         ``0`` on a completed comparison (regardless of findings),
@@ -2442,12 +2540,15 @@ def run(
         matches,
         dekko_only,
         grep_only,
+        grep_only_rows,
         module_level,
         grep_truncated=sweep.truncated,
         skipped_pathological=sweep.skipped_pathological,
         excluded_declarations=excluded_declarations,
         receiver_mismatch_note=receiver_mismatch_note,
         group_by_file=group_by_file,
+        budget=budget,
+        limit=limit,
     )
     return EXIT_OK
 

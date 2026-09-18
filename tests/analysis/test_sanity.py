@@ -3660,9 +3660,15 @@ def test_sanity_group_by_file_respects_limit_truncation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # C.3: grouping happens over whatever rows survived --limit
-    # fitting, not the pre-truncation total — the trailer must report
-    # against the already-truncated row count.
+    # Round 31 C1 (zed.md F10): grouping must run over the FULL
+    # grep-only bucket, then --limit caps the number of file *groups*
+    # printed, not the number of rows before grouping. Updated from
+    # the pre-fix pinning of "grouping happens over whatever rows
+    # survived --limit fitting" -- that was the bug (it hid real
+    # clustering behind an earlier row-count truncation), not the
+    # design. The header total (3) still reflects every grep-only hit;
+    # only the printed groups are capped, and the trailer now counts
+    # in groups, not rows.
     root = make_mapped_repo(
         {
             "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
@@ -3686,7 +3692,54 @@ def test_sanity_group_by_file_respects_limit_truncation(
     assert code == 0
     out = capsys.readouterr().out
     assert "grep-only: 3 (grouped by file)" in out
-    assert "... +2 more (outside --limit/budget)" in out
+    assert "... +2 more file groups (outside --limit/budget)" in out
+
+
+def test_sanity_group_by_file_groups_full_bucket_before_limit(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 31 C1 (zed.md F10), the actual regression: on zed, a
+    # --limit-200 row cap applied BEFORE grouping meant the two
+    # largest real clusters (139 and 125 hits) never appeared in the
+    # grouped output, because none of their individual rows survived
+    # the row-count cap. Reproduce the shape at small scale: one file
+    # with many hits, several files with one hit each, --limit small
+    # enough that the old (buggy) row-first order would drop the
+    # big file's rows before grouping ever saw them.
+    files = {
+        "a.py": "def totally_unrelated_wrapper():\n    return 1\n",
+        "big.py": "\n".join(
+            f"value{i} = totally_unrelated_wrapper(x)" for i in range(5)
+        )
+        + "\n",
+    }
+    for i in range(3):
+        files[f"small{i}.py"] = "value = totally_unrelated_wrapper(x)\n"
+    root = make_mapped_repo(files)
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "totally_unrelated_wrapper",
+            "--root",
+            str(root),
+            "--group-by-file",
+            "--limit",
+            "1",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    # 5 + 3*1 = 8 total grep-only hits across 4 files.
+    assert "grep-only: 8 (grouped by file)" in out
+    # big.py's 5-hit cluster must be the one group kept (it is the
+    # largest), not whichever file happened to hold the first row
+    # under a row-count-first cap.
+    assert "big.py: 5" in out
+    assert "small0.py" not in out
+    assert "... +3 more file groups (outside --limit/budget)" in out
 
 
 # --- round 31: buckets must reconcile with the printed grep ---------
