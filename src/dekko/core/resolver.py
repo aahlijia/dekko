@@ -3282,21 +3282,142 @@ def _shadowed_by_external_import(
     return not _import_is_in_repo(imp, repo_stems)
 
 
-# Type-annotation tokens that never name the receiver's own class —
-# generic/optional/collection wrappers and null-like literals a
-# declared type can be dressed in (``Optional[Controller]``,
-# ``Controller | undefined``, ``List<Controller>``, ``Box<Controller>``).
-# Filtered out before trying each remaining identifier token as a
-# candidate bare class name, rather than parsing the type expression
-# properly (best-effort, not a type-language parser).
-_TYPE_NOISE_WORDS = frozenset(
+# Wrapper type names whose own instance methods pass straight through
+# to their inner type ``T`` (Rust ``Box<T>``/``Rc<T>``/``Arc<T>``/
+# ``Ref<T>``/``RefMut<T>``, Python ``Optional[T]``). Every entry here
+# is *tried itself first* (see ``_typed_param_token_candidates``), then
+# the search continues one layer in if that doesn't match — it isn't
+# a claim that the wrapper is *never* the real receiver, only that
+# dekko can't always see when a call is written against the wrapper's
+# *contents* instead (a closure/rebind/destructure local dekko has no
+# way to attribute a declared type to). A genuine collection type
+# (``Vec``, ``List``, ``Array``, ``Promise``, ``HashMap``,
+# ``BTreeMap``, ...) stays *opaque*: the method belongs to the
+# collection itself, and there's no equivalent "same-name rebind to
+# the element type" idiom to protect. Round 31 zed coverage pass F7:
+# ``active_rows: &BTreeMap<DisplayRow, u8>`` then
+# ``active_rows.get(..)`` used to try *every* remaining identifier —
+# including ``DisplayRow``, a generic argument, never the receiver's
+# own type — and land on an unrelated crate's ``DisplayRow.get``.
+# ``_typed_param_token_candidates`` stops descending as soon as it
+# hits the first opaque wrapper, so a collection's own generic
+# arguments are never tried; a reference/mutability qualifier token
+# (``&mut Foo``, ``mut Foo``) is skipped outright, never itself tried
+# or counted as a wrapper.
+#
+# Every entry past ``Optional`` here is a deliberate deviation from
+# the design doc, which named ``Entity<T>`` (and, by the same shape,
+# would have named ``Option``/``Result``/``Mutex``/etc.) as *opaque*
+# examples. Live-measuring the design's literal choice against zed
+# (not just its own worked examples) first showed -3888/+156 edges,
+# two orders of magnitude past the "9 zed edges" this item's own
+# accept criterion expects, with ``ambiguous`` jumping +3207 --
+# treating ``Entity`` as fully opaque broke it. Each addition below is
+# read against source, not guessed:
+#
+# - ``Entity``/``WeakEntity``: gpui's shared-mutable-cell handle
+#   (semantically ``Rc<RefCell<T>>``). Dominant real shape:
+#   ``entity.update(cx, |inner, cx| inner.method())`` -- the closure
+#   parameter is named the same as the outer ``Entity<Buffer>``
+#   parameter, and the method call inside is real, on ``Buffer``
+#   (verified: ``crates/action_log/src/action_log.rs::
+#   ActionLog.reject_edits_in_ranges``).
+# - ``Mutex``: the identical shape via ``let x = x.lock();`` instead
+#   of a closure (verified:
+#   ``crates/agent/src/db.rs::ThreadsDatabase.save_thread_sync``,
+#   ``connection: &Arc<Mutex<Connection>>`` then
+#   ``let connection = connection.lock(); connection.exec_bound(..)``).
+# - ``Option``/``Result``: Rust's own irrefutable-destructure idiom,
+#   ``let Some(x) = x else { .. };``/``let Ok(x) = x else { .. };``,
+#   rebinds the *same name* to the unwrapped inner value -- as
+#   pervasive in real Rust as the ``Entity``/``Mutex`` shapes above
+#   (verified: ``crates/language/src/language_settings.rs::
+#   LanguageSettings.resolve``, ``buffer: Option<&'a Buffer>`` then
+#   ``let Some(buffer) = buffer else { .. }; buffer.file()``). Unlike
+#   a plain collection, there is no way to call a method through an
+#   un-destructured ``Option``/``Result`` at all, so this doesn't
+#   weaken the F7 collection-argument guard the way it might first
+#   appear to.
+#
+# All of the above still have real methods of their own
+# (``Entity::clone``/``downgrade``, ``Mutex::lock``/``try_lock``), so
+# none of them are purely transparent either -- confirmed by
+# re-measuring after the Entity-only fix (still -3708/+158, newly-LOST
+# dominated by ``Entity.clone`` targets). Every entry is tried, outer
+# type first (see ``_typed_param_token_candidates``), and whichever
+# one actually has a matching candidate wins. ``Option``/``Result``
+# themselves never do (no in-repo ``TYPE_KINDS`` symbol names them,
+# since they're foreign) -- ``_typed_param_match``'s own in-repo-type
+# gate for a parameterized token is what keeps a coincidental foreign-
+# type-local-impl match (zed's own ``impl Into<SelectionEffects> for
+# Option<Autoscroll>``) from absorbing an unrelated ``Option<X>``'s
+# ``.into()`` call; that gate is unaffected by adding them here.
+_TRANSPARENT_TYPE_WRAPPERS = frozenset(
     {
-        "Optional", "Promise", "List", "Array", "Vec", "Box", "Rc",
-        "Arc", "Option", "Result", "Ok", "Err", "None", "null",
-        "undefined", "readonly", "const", "mut", "ref",
+        "Box", "Rc", "Arc", "Ref", "RefMut", "Optional",
+        "Entity", "WeakEntity", "Mutex", "Option", "Result",
     }
 )  # fmt: skip
+_TYPE_QUALIFIER_WORDS = frozenset({"mut", "const", "ref", "readonly"})
 _TYPE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _typed_param_token_candidates(
+    type_text: str,
+) -> list[tuple[str, bool]]:
+    """Ordered type-name tokens to try as the declared type's own
+    receiver type, outermost first.
+
+    Every transparent wrapper (``_TRANSPARENT_TYPE_WRAPPERS``) is
+    itself tried — it can have real methods of its own — and then the
+    search continues one layer in, since it *also* commonly wraps a
+    type whose methods are reached some other way dekko can't see
+    (Rust's ``Box``/``Rc``/``Arc``/``Ref``/``RefMut`` deref coercion;
+    gpui's ``Entity<T>``/``Mutex<T>``-family shadowing idioms, see
+    ``_TRANSPARENT_TYPE_WRAPPERS``'s own comment). The chain stops
+    the moment it reaches an *opaque* wrapper or a plain type name —
+    that token is tried, but the search never descends into ITS own
+    generic arguments (round 31 zed coverage pass F7: a collection's
+    key/value type parameters are never the receiver).
+
+    A lowercase-leading token is skipped outright — never tried, never
+    counted as a stop — rather than treated as the type itself. Every
+    language dekko indexes names a defined type (class/struct/
+    interface/...) in PascalCase by convention, so a lowercase segment
+    is always a module/namespace qualifier (Rust ``watch::Receiver``,
+    ``std::collections::BTreeMap``), never the type. Without this, a
+    scoped path's own leading module segment (``watch`` in
+    ``watch::Receiver<()>``) would itself become the one token tried
+    — the real type, ``Receiver``, right behind it, never reached
+    (live-testing on zed: ``needs_refresh: watch::Receiver<()>`` then
+    ``needs_refresh.changed()`` regressed exactly this way while this
+    fix was in progress).
+
+    Args:
+        type_text: A declared parameter's type, as written.
+
+    Returns:
+        ``(token, is_parameterized)`` pairs to try, in order — empty
+        when ``type_text`` has no identifier tokens at all.
+        ``is_parameterized`` is True when the token is immediately
+        followed by ``<`` (it takes its own type arguments) — read by
+        ``_typed_param_match`` to decide whether the token needs an
+        in-repo-type check before being tried (see that function's own
+        docstring for why a parameterized token needs it and a bare
+        one doesn't).
+    """
+    tokens: list[tuple[str, bool]] = []
+    for match in _TYPE_TOKEN_RE.finditer(type_text):
+        token = match.group()
+        if token in _TYPE_QUALIFIER_WORDS:
+            continue
+        if not token[:1].isupper():
+            continue
+        is_parameterized = type_text[match.end() : match.end() + 1] == "<"
+        tokens.append((token, is_parameterized))
+        if token not in _TRANSPARENT_TYPE_WRAPPERS:
+            break
+    return tokens
 
 
 def _receiver_type_match(
@@ -3365,7 +3486,7 @@ def _structural_match(
     receiver_type = _receiver_type_match(call, candidates, index)
     if receiver_type is not None:
         return receiver_type
-    return _typed_param_match(call, candidates, caller)
+    return _typed_param_match(call, candidates, caller, index)
 
 
 def _rust_type_path_receiver(
@@ -3450,7 +3571,10 @@ def _owned_by_receiver_type(
 
 
 def _typed_param_match(
-    call: _Referable, candidates: list[Symbol], caller: Symbol | None
+    call: _Referable,
+    candidates: list[Symbol],
+    caller: Symbol | None,
+    index: dict[str, list[Symbol]],
 ) -> Symbol | None:
     """Resolve a call through one of the caller's own typed parameters.
 
@@ -3463,17 +3587,54 @@ def _typed_param_match(
     same-file candidate existed, straight to ``ambiguous`` whenever
     another same-named method existed anywhere else in the repo.
 
+    Tries each of the declared type's own ordered candidate tokens
+    (``_typed_param_token_candidates``), outermost first, and returns
+    the first one with a unique match — round 31 zed coverage pass F7
+    (see ``_TRANSPARENT_TYPE_WRAPPERS``'s comment): trying every
+    remaining identifier in the type string without regard to nesting,
+    including a generic *argument* buried inside an opaque wrapper,
+    used to land a call on an unrelated type entirely.
+
+    A *parameterized* token (one taking its own type arguments, e.g.
+    ``Option<...>``) is tried only when it also names an in-repo
+    ``TYPE_KINDS`` symbol. Without this, a token that happens to share
+    a name with a well-known foreign/std generic container (``Option``,
+    ``Result``) could still find a *method* candidate with that exact
+    qualname — not because the repo defines such a type, but because
+    Rust allows a local trait impl on a foreign generic instantiated
+    with a local type argument (zed's own ``impl
+    Into<SelectionEffects> for Option<Autoscroll>``, extracted with
+    container name ``Option`` since dekko's impl-block naming strips
+    the generic argument the same way a call's argument list already
+    is). That real symbol — genuinely the *only* thing in the whole
+    repo named ``Option.into`` — then silently absorbed every
+    unrelated ``.into()`` call whose declared parameter type merely
+    mentioned ``Option<...>`` anywhere, caught live-measuring this fix
+    against zed (-3153/+56 before this gate, mostly ``Option``/
+    ``Result``-shaped false positives). A *non*-parameterized token
+    (``WPARAM``, a plain foreign FFI type with no generic slot) gets
+    no such gate: it can never collide across differently-instantiated
+    uses the way a generic container can, so a local extension-trait
+    impl on it (zed's own ``impl HiLoWord for WPARAM``, gpui_windows)
+    is exactly as reliable a signal as it always was — gating it the
+    same way regressed real, correct matches (live-measuring: WPARAM/
+    LPARAM Windows FFI extension methods).
+
     Args:
         call: The raw call or reference being resolved.
         candidates: Every same-named symbol repo-wide (already looked
             up by the caller).
         caller: The enclosing symbol, or ``None`` for module-level
             calls — which have no declared parameters to check.
+        index: Bare symbol name to every symbol sharing it — used both
+            to gate a parameterized candidate token above and by the
+            Rust same-name-in-2+-crates tiebreak below.
 
     Returns:
         The uniquely-matching method, or ``None`` when the receiver
-        isn't one of ``caller``'s declared, typed parameters, or the
-        type doesn't narrow ``candidates`` to exactly one.
+        isn't one of ``caller``'s declared, typed parameters, or no
+        candidate token narrows ``candidates`` to exactly one (after
+        the in-repo-type gate, for a parameterized token).
     """
     if caller is None or not call.receiver:
         return None
@@ -3484,14 +3645,71 @@ def _typed_param_match(
     )
     if not param_type:
         return None
-    for token in _TYPE_TOKEN_RE.findall(param_type):
-        if token in _TYPE_NOISE_WORDS:
+    for token, is_parameterized in _typed_param_token_candidates(param_type):
+        if is_parameterized and not any(
+            sym.kind in TYPE_KINDS for sym in index.get(token, [])
+        ):
             continue
         target_qual = f"{token}.{call.name}"
         matched = [c for c in candidates if c.qualname == target_qual]
-        if len(matched) == 1:
-            return matched[0]
+        if len(matched) != 1:
+            continue
+        only = matched[0]
+        if call.path.endswith(".rs") and _rust_typed_match_looks_cross_crate(
+            call, only, token, index
+        ):
+            continue
+        return only
     return None
+
+
+def _rust_typed_match_looks_cross_crate(
+    call: _Referable, only: Symbol, outer: str, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether ``_typed_param_match``'s sole candidate is provably the
+    *wrong* crate's same-named type.
+
+    Round 31 zed coverage pass F7, "second half": a declared type's
+    outer identifier can genuinely name a *different* type in two
+    crates (zed defines its own ``Entity<T>`` in both ``gpui`` and
+    ``workspace``). Bare qualname equality (``"Entity.focus"``) can't
+    tell which one a candidate method belongs to, so a method that
+    exists on the *other* crate's same-named type but not the
+    caller's own can still look like a unique match —
+    ``view.read(cx).focus_handle(cx).focus(cx)`` inside ``gpui``
+    (which cannot depend on ``workspace``) resolved to
+    ``workspace::Entity.focus``.
+
+    Only fires — and only *can* fire — when there's positive evidence
+    of the wrong pick: the outer identifier names a type in 2+ crates
+    *and* one of them is the caller's own crate *and* the sole
+    candidate isn't in that crate. Any one of those missing (no
+    same-name collision at all, or the caller's own crate doesn't
+    define this type either) leaves the match untouched — round 31's
+    rule 0.3, "no evidence is not negative evidence": this function
+    can only disprove a match, never merely fail to confirm one, so a
+    declared type dekko can't independently place (common: many
+    typed-parameter matches target a type only ever seen through this
+    one parameter annotation) is never penalized for that alone.
+
+    Args:
+        call: The raw call or reference being resolved.
+        only: ``_typed_param_match``'s sole qualname-matching
+            candidate.
+        outer: The declared type's outermost identifier.
+        index: Bare symbol name to every symbol sharing it.
+
+    Returns:
+        True only when the caller's own crate defines a same-named
+        type and ``only`` isn't in it.
+    """
+    outer_types = [s for s in index.get(outer, []) if s.kind in TYPE_KINDS]
+    if len(outer_types) < 2:
+        return False
+    own_crate = _rust_crate_dir(call.path)
+    if not any(_rust_crate_dir(t.path) == own_crate for t in outer_types):
+        return False
+    return _rust_crate_dir(only.path) != own_crate
 
 
 # Constructor method names this resolver recognizes for a class-shaped

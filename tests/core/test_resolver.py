@@ -60,6 +60,24 @@ def _fn(
     )
 
 
+def _cls(
+    path: str,
+    name: str,
+    line: int = 1,
+    language: str = "python",
+) -> Symbol:
+    return Symbol(
+        id=f"{path}::{name}",
+        name=name,
+        qualname=name,
+        kind="class",
+        path=path,
+        language=language,
+        start_line=line,
+        end_line=line + 1,
+    )
+
+
 def _edges(root: Path) -> set[tuple[str, str]]:
     files, _ = map_repository(
         root,
@@ -675,7 +693,15 @@ def test_typed_parameter_call_resolves_to_declared_type_method() -> None:
     # as the target class (``controller: Controller``) must resolve to
     # that class's method — not fall into ``ambiguous`` just because
     # another same-named method exists elsewhere in the repo, and not
-    # get guessed via the (unrelated) same-file step either.
+    # get guessed via the (unrelated) same-file step either. The class
+    # symbol itself (not just its method) is part of the fixture,
+    # matching a real TS codebase where ``class Controller`` is
+    # independently indexed -- round 31 A4 requires the declared
+    # type's outer token to name a real in-repo type, to keep a
+    # same-named foreign/std generic (``Option``, ``Result``) from
+    # ever being tried as a candidate (see
+    # ``resolver._typed_param_match``'s own docstring).
+    controller_cls = _cls("a.ts", "Controller", language="typescript")
     right = _fn(
         "a.ts", "initTask", "Controller.initTask", language="typescript"
     )
@@ -690,7 +716,7 @@ def test_typed_parameter_call_resolves_to_declared_type_method() -> None:
         params=[Param(name="controller", type="Controller")],
     )
     files = [
-        FileMap("a.ts", "typescript", symbols=[right]),
+        FileMap("a.ts", "typescript", symbols=[controller_cls, right]),
         FileMap("b.ts", "typescript", symbols=[wrong]),
         FileMap(
             "caller.ts",
@@ -718,6 +744,7 @@ def test_typed_parameter_call_resolves_to_declared_type_method() -> None:
 def test_typed_parameter_match_strips_generic_wrapper() -> None:
     # A declared type dressed in a common wrapper (``Optional[X]``,
     # ``X | undefined``) must still narrow to the bare class name.
+    controller_cls = _cls("a.ts", "Controller", language="typescript")
     right = _fn(
         "a.ts", "initTask", "Controller.initTask", language="typescript"
     )
@@ -732,7 +759,7 @@ def test_typed_parameter_match_strips_generic_wrapper() -> None:
         params=[Param(name="controller", type="Controller | undefined")],
     )
     files = [
-        FileMap("a.ts", "typescript", symbols=[right]),
+        FileMap("a.ts", "typescript", symbols=[controller_cls, right]),
         FileMap("b.ts", "typescript", symbols=[wrong]),
         FileMap(
             "caller.ts",
@@ -5244,4 +5271,192 @@ def test_impl_heritage_narrowing_falls_back_when_no_trait_matches(
     )
     assert graph.heritage_out["crates/b/src/other.rs::Widget"] == [
         "crates/a/src/marker.rs::Marker"
+    ]
+
+
+# Round 31 zed coverage pass F7: the declared-type tokenizer tried
+# every remaining identifier in a typed parameter's type string,
+# including a generic *argument*, rather than stopping at the
+# receiver's own outermost type.
+
+
+def test_typed_param_match_ignores_opaque_wrapper_generic_argument(
+    tmp_path: Path,
+) -> None:
+    # `active_rows: &BTreeMap<DisplayRow, u8>` then
+    # `active_rows.get(..)`: BTreeMap is opaque (not a transparent
+    # wrapper) and not itself an in-repo type, so the step must
+    # decline rather than land on the generic argument DisplayRow's
+    # own unrelated `get` method.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/csv_preview/src/types.rs": (
+                "pub struct DisplayRow;\n"
+                "impl DisplayRow {\n"
+                "    pub fn get(&self) -> u8 { 0 }\n}\n"
+            ),
+            "crates/editor/src/element.rs": (
+                "use std::collections::BTreeMap;\n"
+                "use crates::csv_preview::DisplayRow;\n"
+                "pub fn render(active_rows: &BTreeMap<DisplayRow, u8>) {\n"
+                "    active_rows.get(&1);\n}\n"
+            ),
+        },
+    )
+    assert (
+        "crates/csv_preview/src/types.rs::DisplayRow.get"
+        not in graph.calls_out.get("crates/editor/src/element.rs::render", [])
+    )
+
+
+def test_typed_param_match_strips_transparent_wrapper(tmp_path: Path) -> None:
+    # Box/Rc/Arc/Ref/RefMut pass instance methods straight through to
+    # their inner type -- must still resolve, unlike an opaque
+    # wrapper.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/widget.rs": (
+                "pub struct Widget;\n"
+                "impl Widget {\n"
+                "    pub fn paint(&self) {}\n}\n"
+            ),
+            "crates/a/src/render.rs": (
+                "use crate::widget::Widget;\n"
+                "pub fn draw(widget: std::rc::Rc<Widget>) {\n"
+                "    widget.paint();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/render.rs::draw"] == [
+        "crates/a/src/widget.rs::Widget.paint"
+    ]
+
+
+def test_typed_param_match_declines_cross_crate_same_named_type(
+    tmp_path: Path,
+) -> None:
+    # gpui defines its own Entity<T> with no `focus` method; workspace
+    # defines an unrelated, same-named Entity<T> that does. gpui
+    # cannot depend on workspace, so a call through a gpui-declared
+    # `Entity<T>`-typed parameter must never resolve to workspace's
+    # method just because the bare qualname happens to match. A third,
+    # unrelated `focus` (crates/other) keeps the repo-wide candidate
+    # count at 2+, so the ladder's later sole-candidate fallback can't
+    # independently re-discover the same wrong answer once this step
+    # declines -- the structural decline has to be what's tested, not
+    # masked by a different rung resolving it anyway.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/gpui/src/entity.rs": "pub struct Entity<T> { t: T }\n",
+            "crates/workspace/src/entity.rs": (
+                "pub struct Entity<T> { t: T }\n"
+                "impl<T> Entity<T> {\n"
+                "    pub fn focus(&self) {}\n}\n"
+            ),
+            "crates/other/src/other.rs": (
+                "pub struct Other;\n"
+                "impl Other {\n"
+                "    pub fn focus(&self) {}\n}\n"
+            ),
+            "crates/gpui/src/context.rs": (
+                "use crate::entity::Entity;\n"
+                "pub fn run(view: Entity<u8>) {\n"
+                "    view.focus();\n}\n"
+            ),
+        },
+    )
+    resolved = graph.calls_out.get("crates/gpui/src/context.rs::run", [])
+    assert "crates/workspace/src/entity.rs::Entity.focus" not in resolved
+    assert "crates/other/src/other.rs::Other.focus" not in resolved
+
+
+def test_typed_param_match_resolves_own_crate_same_named_type(
+    tmp_path: Path,
+) -> None:
+    # The positive case for the same rule: when the resolved method
+    # really is on the caller's own crate's same-named type, it must
+    # still resolve.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/gpui/src/entity.rs": (
+                "pub struct Entity<T> { t: T }\n"
+                "impl<T> Entity<T> {\n"
+                "    pub fn focus(&self) {}\n}\n"
+            ),
+            "crates/workspace/src/entity.rs": (
+                "pub struct Entity<T> { t: T }\n"
+            ),
+            "crates/gpui/src/context.rs": (
+                "use crate::entity::Entity;\n"
+                "pub fn run(view: Entity<u8>) {\n"
+                "    view.focus();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/gpui/src/context.rs::run"] == [
+        "crates/gpui/src/entity.rs::Entity.focus"
+    ]
+
+
+def test_typed_param_match_option_result_still_resolve_own_method(
+    tmp_path: Path,
+) -> None:
+    # Option/Result are transparent (Rust's `let Some(x) = x else {..}`
+    # destructure idiom rebinds the same name to the unwrapped inner
+    # value -- dekko can't see that), but each still has real methods
+    # of its own tried first: an in-repo type coincidentally named
+    # "Option" must never itself be reachable, since no such type is
+    # ever really locally defined (round 31 A4's in-repo-type gate on
+    # a parameterized token). Only the descent to the real inner type
+    # is being tested here.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/widget.rs": (
+                "pub struct Widget;\n"
+                "impl Widget {\n"
+                "    pub fn paint(&self) {}\n}\n"
+            ),
+            "crates/a/src/render.rs": (
+                "use crate::widget::Widget;\n"
+                "pub fn draw(widget: Option<Widget>) {\n"
+                "    let Some(widget) = widget else { return };\n"
+                "    widget.paint();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/render.rs::draw"] == [
+        "crates/a/src/widget.rs::Widget.paint"
+    ]
+
+
+def test_typed_param_match_bare_foreign_type_no_type_kinds_gate(
+    tmp_path: Path,
+) -> None:
+    # A non-parameterized (bare) declared type gets no in-repo-type
+    # gate at all: a local extension-trait impl on a foreign,
+    # non-generic type (zed's own `impl HiLoWord for WPARAM`) is exactly
+    # as reliable a signal as it always was, since there is no
+    # per-instantiation collision risk the way a generic container has.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/util.rs": (
+                "pub trait HiLoWord {\n"
+                "    fn signed_hiword(&self) -> i16;\n}\n"
+                "impl HiLoWord for WPARAM {\n"
+                "    fn signed_hiword(&self) -> i16 { 0 }\n}\n"
+            ),
+            "crates/a/src/events.rs": (
+                "pub fn handle(wparam: WPARAM) -> i16 {\n"
+                "    wparam.signed_hiword()\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/events.rs::handle"] == [
+        "crates/a/src/util.rs::WPARAM.signed_hiword"
     ]
