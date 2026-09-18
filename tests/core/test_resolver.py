@@ -1,10 +1,13 @@
 """End-to-end resolution tests over the language fixtures."""
 
+import gc
+import multiprocessing
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
+from multiprocessing.context import BaseContext
 from pathlib import Path
 
 import pytest
@@ -2271,12 +2274,30 @@ def test_reference_resolution_unaffected_by_noise_guard() -> None:
 
 # 1.4: resolve()/resolve_refs() gained a process-pool parallelization
 # split (``_resolve_all``/``_chunk_files``) for large repos. These
-# tests force the parallel path (by monkeypatching the item-count
-# threshold down to 0) on modest, hand-built fixtures rather than a
-# huge repo, and assert byte-identical output against the sequential
-# (``workers=1``) path — the merge step must not reorder, drop, or
-# double-count any edge/ambiguous/external/reference entry regardless
-# of which worker resolved which file.
+# tests force the parallel path (see ``_force_resolve_pool``) on
+# modest, hand-built fixtures rather than a huge repo, and assert
+# byte-identical output against the sequential (``workers=1``) path —
+# the merge step must not reorder, drop, or double-count any
+# edge/ambiguous/external/reference entry regardless of which worker
+# resolved which file.
+
+
+def _force_resolve_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make tiny fixtures actually take the process-pool path.
+
+    Round 30 added two more limits to ``_pool_workers`` beyond the
+    original item-count floor: a minimum items-per-worker, and a RAM
+    cap. A test that neutralizes only one of the three silently runs
+    the *sequential* path while appearing to test parallelism — the
+    exact failure mode where a parity assertion passes without
+    exercising anything. Neutralize all three, together, in one place.
+
+    The RAM cap is stubbed rather than tuned because it reads real host
+    memory: on a small-RAM CI box with a grown test process it could
+    legitimately return 1 and make these tests flaky.
+    """
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_MIN_ITEMS_PER_WORKER", 1)
 
 
 def _multi_file_call_fixture() -> list[FileMap]:
@@ -2372,7 +2393,7 @@ def test_chunk_files_never_makes_more_chunks_than_files() -> None:
 def test_resolve_parallel_matches_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     files = _multi_file_call_fixture()
 
     sequential = resolve(files, workers=1)
@@ -2394,7 +2415,7 @@ def test_resolve_all_oversubscribes_chunk_count_beyond_worker_count(
     alone wouldn't catch a silent revert to one-chunk-per-worker, since
     output is correct either way -- this asserts the chunk *count*
     the pool actually sees, by spying on ``_chunk_files``."""
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     files = _multi_file_call_fixture()  # 20 files, plenty to chunk finely
 
     real_chunk_files = resolver_mod._chunk_files
@@ -2418,7 +2439,7 @@ def test_resolve_all_oversubscribes_chunk_count_beyond_worker_count(
 def test_resolve_refs_parallel_matches_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     files = _multi_file_ref_fixture()
 
     seq_edges, seq_in, seq_out = resolve_refs(files, workers=1)
@@ -2523,7 +2544,7 @@ def _multi_file_catches_fixture() -> list[FileMap]:
 def test_resolve_throws_parallel_matches_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     files = _multi_file_throws_fixture()
 
     seq = resolve_throws(files, workers=1)
@@ -2546,7 +2567,7 @@ def test_resolve_throws_parallel_matches_sequential(
 def test_resolve_catches_parallel_matches_sequential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     files = _multi_file_catches_fixture()
 
     seq = resolve_catches(files, workers=1)
@@ -2621,9 +2642,13 @@ def _flaky_pool_factory(fail_times: int) -> type:
         def __init__(
             self,
             max_workers: int | None = None,
+            mp_context: object = None,
             initializer: object = None,
             initargs: tuple = (),
         ) -> None:
+            # ``mp_context`` is accepted (round 30 (c): every real
+            # pool build now passes one) and dropped -- the fallback
+            # ``ThreadPoolExecutor`` has no such concept.
             state["calls"] += 1
             if state["calls"] <= fail_times:
                 raise BrokenProcessPool("simulated: process pool broken")
@@ -2664,7 +2689,7 @@ def _no_real_pool_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_run_pooled_with_retry_retries_once_then_succeeds() -> None:
     calls: list[int] = []
 
-    def run(w: int) -> str:
+    def run(w: int, ctx: BaseContext) -> str:
         calls.append(w)
         if len(calls) == 1:
             raise BrokenProcessPool("simulated: process pool broken")
@@ -2681,7 +2706,7 @@ def test_run_pooled_with_retry_caps_retry_at_original_workers() -> None:
     ``min(workers, _POOL_RETRY_WORKERS)``, not always exactly 2."""
     calls: list[int] = []
 
-    def run(w: int) -> str:
+    def run(w: int, ctx: BaseContext) -> str:
         calls.append(w)
         if len(calls) == 1:
             raise BrokenProcessPool("simulated: process pool broken")
@@ -2694,7 +2719,7 @@ def test_run_pooled_with_retry_caps_retry_at_original_workers() -> None:
 def test_run_pooled_with_retry_propagates_after_second_failure() -> None:
     calls: list[int] = []
 
-    def run(w: int) -> str:
+    def run(w: int, ctx: BaseContext) -> str:
         calls.append(w)
         raise BrokenProcessPool("simulated: process pool broken")
 
@@ -2723,7 +2748,7 @@ def test_run_pooled_with_retry_sleeps_before_retry(
 
     calls: list[int] = []
 
-    def run(w: int) -> str:
+    def run(w: int, ctx: BaseContext) -> str:
         calls.append(w)
         events.append(f"run-{w}")
         if len(calls) == 1:
@@ -2739,7 +2764,7 @@ def test_run_pooled_with_retry_sleeps_before_retry(
 def test_run_pooled_with_retry_prints_disclosure_note_on_retry(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    def run(w: int) -> str:
+    def run(w: int, ctx: BaseContext) -> str:
         if w == 8:
             raise BrokenProcessPool("simulated: process pool broken")
         return "ok"
@@ -2773,7 +2798,9 @@ def test_run_pooled_with_retry_pins_interpreter_before_first_attempt(
         lambda exe: calls.append(exe),
     )
 
-    resolver_mod.run_pooled_with_retry(lambda w: "ok", workers=4, what="test")
+    resolver_mod.run_pooled_with_retry(
+        lambda w, ctx: "ok", workers=4, what="test"
+    )
 
     assert calls == [sys.executable]
 
@@ -2789,7 +2816,7 @@ def test_run_pooled_with_retry_pins_interpreter_before_retry_too(
     )
     attempts: list[int] = []
 
-    def run(w: int) -> str:
+    def run(w: int, ctx: BaseContext) -> str:
         attempts.append(w)
         if len(attempts) == 1:
             raise BrokenProcessPool("simulated: process pool broken")
@@ -2804,7 +2831,7 @@ def test_run_pooled_with_retry_pins_interpreter_before_retry_too(
 
 
 def test_run_pooled_with_retry_raises_pool_stalled_error_on_timeout() -> None:
-    def run(w: int) -> str:
+    def run(w: int, ctx: BaseContext) -> str:
         raise PoolTimeoutError("simulated: worker never returned")
 
     with pytest.raises(resolver_mod.PoolStalledError, match="test"):
@@ -2819,7 +2846,7 @@ def test_run_pooled_with_retry_timeout_is_not_retried() -> None:
     outcome."""
     calls: list[int] = []
 
-    def run(w: int) -> str:
+    def run(w: int, ctx: BaseContext) -> str:
         calls.append(w)
         raise PoolTimeoutError("simulated: worker never returned")
 
@@ -2830,7 +2857,7 @@ def test_run_pooled_with_retry_timeout_is_not_retried() -> None:
 
 
 def test_run_pooled_with_retry_stalled_error_message_is_actionable() -> None:
-    def run(w: int) -> str:
+    def run(w: int, ctx: BaseContext) -> str:
         raise PoolTimeoutError("simulated: worker never returned")
 
     with pytest.raises(resolver_mod.PoolStalledError) as exc_info:
@@ -2842,6 +2869,292 @@ def test_run_pooled_with_retry_stalled_error_message_is_actionable() -> None:
     assert "file extraction" in message
     assert str(resolver_mod.POOL_RESULT_TIMEOUT_S) in message
     assert "--jobs 1" in message
+
+
+# Round 30 (c): every pool build passes an explicitly chosen
+# multiprocessing context -- ``fork`` from a provably single-threaded
+# POSIX parent (workers get copy-on-write access to the indices, no
+# per-worker pickling), ``spawn`` everywhere else -- and the bounded
+# ``BrokenProcessPool`` retry always falls back to ``spawn``, so a
+# host where ``fork`` misbehaves degrades to the previously-shipped
+# behavior at the cost of one wasted attempt. See
+# ``.features/fixes/round30/03b-fork-and-single-pool-designs.md``.
+
+_NO_FORK_ON_WINDOWS = pytest.mark.skipif(
+    sys.platform == "win32", reason="fork is unavailable on Windows"
+)
+
+
+def _single_threaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``_pool_mp_context``'s thread gate deterministically pass.
+
+    The real test process may carry helper threads from other test
+    modules (daemon tests run ``serve_daemon`` in-thread), so the
+    chooser tests pin the count rather than depending on suite
+    ordering.
+    """
+    monkeypatch.setattr(resolver_mod.threading, "active_count", lambda: 1)
+
+
+@_NO_FORK_ON_WINDOWS
+def test_pool_mp_context_defaults_to_fork_on_posix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _single_threaded(monkeypatch)
+    monkeypatch.delenv("DEKKO_POOL_START_METHOD", raising=False)
+    assert resolver_mod._choose_pool_mp_context().get_start_method() == "fork"
+
+
+def test_pool_mp_context_is_spawn_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _single_threaded(monkeypatch)
+    monkeypatch.delenv("DEKKO_POOL_START_METHOD", raising=False)
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert resolver_mod._choose_pool_mp_context().get_start_method() == "spawn"
+
+
+def test_pool_mp_context_is_spawn_in_a_threaded_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon always has its status thread alive while a request
+    executes, so it must never pass the fork gate -- asserted on the
+    mechanism (thread count) rather than by spinning up a daemon."""
+    monkeypatch.delenv("DEKKO_POOL_START_METHOD", raising=False)
+    monkeypatch.setattr(resolver_mod.threading, "active_count", lambda: 2)
+    assert resolver_mod._choose_pool_mp_context().get_start_method() == "spawn"
+
+
+def test_pool_mp_context_env_var_opts_back_out_to_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _single_threaded(monkeypatch)
+    monkeypatch.setenv("DEKKO_POOL_START_METHOD", "spawn")
+    assert resolver_mod._choose_pool_mp_context().get_start_method() == "spawn"
+
+
+@_NO_FORK_ON_WINDOWS
+def test_pool_mp_context_env_var_never_forces_fork_past_the_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``DEKKO_POOL_START_METHOD=fork`` is an explicit default, not an
+    override -- a threaded parent still gets ``spawn``. Forcing fork
+    where the safety gates refuse it would be handing out the exact
+    footgun the gate exists to prevent."""
+    monkeypatch.setenv("DEKKO_POOL_START_METHOD", "fork")
+    monkeypatch.setattr(resolver_mod.threading, "active_count", lambda: 2)
+    assert resolver_mod._choose_pool_mp_context().get_start_method() == "spawn"
+
+
+def test_pool_mp_context_caches_its_first_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[None] = []
+    spawn_ctx = multiprocessing.get_context("spawn")
+
+    def counting_chooser() -> object:
+        calls.append(None)
+        return spawn_ctx
+
+    monkeypatch.setattr(
+        resolver_mod, "_choose_pool_mp_context", counting_chooser
+    )
+
+    first = resolver_mod._pool_mp_context()
+    second = resolver_mod._pool_mp_context()
+
+    assert first is spawn_ctx
+    assert second is spawn_ctx
+    assert len(calls) == 1
+
+
+@_NO_FORK_ON_WINDOWS
+def test_pool_mp_context_verdict_survives_later_ghost_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression the cache exists for: ``shutdown(wait=False)``
+    can leave a finished pool's manager/feeder threads alive for a
+    moment, so a per-pool thread check would see the *extraction*
+    pool's ghost threads and silently downgrade every *resolve* pass
+    to ``spawn`` in the exact single-threaded CLI path fork exists
+    for. The first (honestly single-threaded) verdict must hold."""
+    monkeypatch.delenv("DEKKO_POOL_START_METHOD", raising=False)
+    monkeypatch.setattr(resolver_mod.threading, "active_count", lambda: 1)
+    assert resolver_mod._pool_mp_context().get_start_method() == "fork"
+
+    # A finished executor's helper threads linger past shutdown.
+    monkeypatch.setattr(resolver_mod.threading, "active_count", lambda: 2)
+    assert resolver_mod._pool_mp_context().get_start_method() == "fork"
+
+
+@_NO_FORK_ON_WINDOWS
+def test_run_pooled_with_retry_retry_attempt_switches_to_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        resolver_mod,
+        "_pool_mp_context",
+        lambda: multiprocessing.get_context("fork"),
+    )
+    methods: list[str] = []
+
+    def run(w: int, ctx: BaseContext) -> str:
+        methods.append(ctx.get_start_method())
+        if len(methods) == 1:
+            raise BrokenProcessPool("simulated: process pool broken")
+        return "ok"
+
+    result = resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+    assert result == "ok"
+    assert methods == ["fork", "spawn"]
+
+
+@_NO_FORK_ON_WINDOWS
+def test_pool_retry_note_names_the_spawn_switch_after_fork(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        resolver_mod,
+        "_pool_mp_context",
+        lambda: multiprocessing.get_context("fork"),
+    )
+
+    def run(w: int, ctx: BaseContext) -> str:
+        if ctx.get_start_method() == "fork":
+            raise BrokenProcessPool("simulated: process pool broken")
+        return "ok"
+
+    resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+    assert "switching fork -> spawn" in capsys.readouterr().err
+
+
+def test_pool_retry_note_omits_the_switch_under_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        resolver_mod,
+        "_pool_mp_context",
+        lambda: multiprocessing.get_context("spawn"),
+    )
+    attempts: list[int] = []
+
+    def run(w: int, ctx: BaseContext) -> str:
+        attempts.append(w)
+        if len(attempts) == 1:
+            raise BrokenProcessPool("simulated: process pool broken")
+        return "ok"
+
+    resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+    err = capsys.readouterr().err
+    assert "reduced parallelism" in err
+    assert "switching" not in err
+
+
+@_NO_FORK_ON_WINDOWS
+@pytest.mark.filterwarnings("ignore:This process:DeprecationWarning")
+def test_resolve_parallel_fork_context_matches_sequential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parity through a *real* fork-context pool -- the fork path must
+    be byte-identical to sequential, exactly as the spawn path already
+    is. Routed through ``_force_resolve_pool`` so it exercises a real
+    pool (the round-30 lesson about parity tests that silently stop
+    reaching the pool). The chooser is bypassed to force ``fork``, so
+    CPython's fork-in-a-threaded-process ``DeprecationWarning`` is
+    expected here (pytest itself may hold helper threads) and
+    filtered -- in production the thread gate makes it unreachable."""
+    _force_resolve_pool(monkeypatch)
+    monkeypatch.setattr(
+        resolver_mod,
+        "_pool_mp_context",
+        lambda: multiprocessing.get_context("fork"),
+    )
+    files = _multi_file_call_fixture()
+
+    sequential = resolve(files, workers=1)
+    parallel = resolve(files, workers=4)
+
+    assert _graph_shape(sequential) == _graph_shape(parallel)
+    assert sequential.edges
+
+
+@_NO_FORK_ON_WINDOWS
+def test_resolve_freezes_gc_while_fork_pools_are_possible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under a fork context, ``resolve()`` freezes the GC around its
+    passes (so GC header writes stop dirtying copy-on-write pages in
+    every worker) and always unfreezes on the way out."""
+    monkeypatch.setattr(
+        resolver_mod,
+        "_pool_mp_context",
+        lambda: multiprocessing.get_context("fork"),
+    )
+    baseline = gc.get_freeze_count()
+    frozen_during: list[bool] = []
+
+    def spy_resolve_all(*args: object, **kwargs: object) -> tuple:
+        frozen_during.append(gc.get_freeze_count() > baseline)
+        return {}, {}, {}
+
+    monkeypatch.setattr(resolver_mod, "_resolve_all", spy_resolve_all)
+
+    resolve(_multi_file_call_fixture(), workers=2)
+
+    assert frozen_during == [True]
+    assert gc.get_freeze_count() == baseline
+
+
+@_NO_FORK_ON_WINDOWS
+def test_resolve_unfreezes_gc_on_the_exception_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        resolver_mod,
+        "_pool_mp_context",
+        lambda: multiprocessing.get_context("fork"),
+    )
+    baseline = gc.get_freeze_count()
+
+    def boom(*args: object, **kwargs: object) -> tuple:
+        raise RuntimeError("simulated: resolution pass failed")
+
+    monkeypatch.setattr(resolver_mod, "_resolve_all", boom)
+
+    with pytest.raises(RuntimeError, match="simulated"):
+        resolve(_multi_file_call_fixture(), workers=2)
+
+    assert gc.get_freeze_count() == baseline
+
+
+def test_resolve_does_not_freeze_gc_under_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spawn-context behavior must be byte-for-byte unchanged -- no
+    freeze, no unfreeze, no new observable state."""
+    monkeypatch.setattr(
+        resolver_mod,
+        "_pool_mp_context",
+        lambda: multiprocessing.get_context("spawn"),
+    )
+    baseline = gc.get_freeze_count()
+    frozen_during: list[bool] = []
+
+    def spy_resolve_all(*args: object, **kwargs: object) -> tuple:
+        frozen_during.append(gc.get_freeze_count() > baseline)
+        return {}, {}, {}
+
+    monkeypatch.setattr(resolver_mod, "_resolve_all", spy_resolve_all)
+
+    resolve(_multi_file_call_fixture(), workers=2)
+
+    assert frozen_during == [False]
+    assert gc.get_freeze_count() == baseline
 
 
 def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
@@ -2859,6 +3172,7 @@ def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
         def __init__(
             self,
             max_workers: int | None = None,
+            mp_context: object = None,
             initializer: object = None,
             initargs: tuple = (),
         ) -> None:
@@ -2884,7 +3198,7 @@ def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
         ) -> None:
             pass
 
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(resolver_mod, "ProcessPoolExecutor", _StalledPool)
     files = _multi_file_call_fixture()
 
@@ -2977,7 +3291,7 @@ def test_run_pool_bounded_kills_wedged_worker_after_timeout(
 def test_resolve_parallel_retries_once_on_broken_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(
         resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
     )
@@ -2991,7 +3305,7 @@ def test_resolve_parallel_retries_once_on_broken_pool(
 def test_resolve_parallel_propagates_when_retry_also_broken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(
         resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(99)
     )
@@ -3004,7 +3318,7 @@ def test_resolve_parallel_propagates_when_retry_also_broken(
 def test_resolve_refs_parallel_retries_once_on_broken_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(
         resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
     )
@@ -3018,7 +3332,7 @@ def test_resolve_refs_parallel_retries_once_on_broken_pool(
 def test_resolve_throws_parallel_retries_once_on_broken_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(
         resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
     )
@@ -3032,7 +3346,7 @@ def test_resolve_throws_parallel_retries_once_on_broken_pool(
 def test_resolve_catches_parallel_retries_once_on_broken_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    _force_resolve_pool(monkeypatch)
     monkeypatch.setattr(
         resolver_mod, "ProcessPoolExecutor", _flaky_pool_factory(1)
     )
@@ -4381,3 +4695,69 @@ def test_same_file_two_candidates_including_caller_unaffected() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert not edges
     assert graph.ambiguous == [(caller.id, "render", [caller.id, other.id])]
+
+
+# Round 30 (.features/fixes/round30/
+# 03-resolve-pool-memory-overhead.md): the resolve pool is memory-bound,
+# not CPU-bound -- each worker holds a private, unpickled copy of the
+# repo indices under ``spawn``. Measured on spring-boot (285,609 calls),
+# 11 workers were a *net loss* against sequential (6.82s vs 4.91s), and
+# on tensorflow 11 workers attempted ~27.5 GB of live objects on an
+# 18 GB machine. ``_pool_workers`` gates on work available and RAM, not
+# just a raw item count.
+
+
+def test_pool_workers_returns_1_below_the_item_floor() -> None:
+    assert resolver_mod._pool_workers(8, 0) == 1
+    assert (
+        resolver_mod._pool_workers(
+            8, resolver_mod._RESOLVE_PARALLEL_MIN_ITEMS - 1
+        )
+        == 1
+    )
+
+
+def test_pool_workers_returns_1_when_caller_asked_for_one_worker() -> None:
+    assert resolver_mod._pool_workers(1, 10_000_000) == 1
+    assert resolver_mod._pool_workers(0, 10_000_000) == 1
+
+
+def test_pool_workers_caps_at_what_the_work_justifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spring-boot regression: plenty of items by the old gate's
+    standard, but not enough to justify 11 private index copies.
+
+    Measured on spring-boot (285,609 calls): 3 workers was the optimum
+    at 3.99s, while the 11 the old gate allowed took 6.82s -- slower
+    than the 4.91s sequential path."""
+    per = resolver_mod._RESOLVE_MIN_ITEMS_PER_WORKER
+
+    # Exactly 3 workers' worth of work, 11 requested -> 3.
+    assert resolver_mod._pool_workers(11, per * 3) == 3
+    # More work than 11 workers need -> the request still caps it.
+    assert resolver_mod._pool_workers(11, per * 50) == 11
+
+
+def test_pool_workers_goes_sequential_rather_than_single_worker_pool() -> None:
+    """One worker in a pool is strictly worse than in-process: it pays
+    the whole index transfer for zero parallelism."""
+    per = resolver_mod._RESOLVE_MIN_ITEMS_PER_WORKER
+    assert resolver_mod._pool_workers(11, per) == 1
+    assert resolver_mod._pool_workers(11, per * 2) == 2
+
+
+def test_pool_workers_choice_does_not_change_resolution_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole point of gating on workers is that it is a pure
+    performance decision: map.json must not depend on how many workers
+    ran -- including when ``_pool_workers`` picks a number *different*
+    from what the caller requested."""
+    _force_resolve_pool(monkeypatch)
+    files = _multi_file_call_fixture()
+    baseline = _graph_shape(resolve(files, workers=1))
+
+    for per in (1, 2, 5):
+        monkeypatch.setattr(resolver_mod, "_RESOLVE_MIN_ITEMS_PER_WORKER", per)
+        assert _graph_shape(resolve(files, workers=8)) == baseline

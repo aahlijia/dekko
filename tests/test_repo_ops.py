@@ -48,7 +48,11 @@ def _flaky_pool_factory(fail_times: int) -> type:
     state = {"calls": 0}
 
     class _FlakyPool:
-        def __init__(self, max_workers: int | None = None) -> None:
+        def __init__(
+            self,
+            max_workers: int | None = None,
+            mp_context: object = None,
+        ) -> None:
             state["calls"] += 1
             if state["calls"] <= fail_times:
                 raise BrokenProcessPool("simulated: process pool broken")
@@ -131,7 +135,11 @@ def test_extract_misses_raises_pool_stalled_error_on_stalled_worker(
             raise PoolTimeoutError("simulated: worker never returned")
 
     class _StalledPool:
-        def __init__(self, max_workers: int | None = None) -> None:
+        def __init__(
+            self,
+            max_workers: int | None = None,
+            mp_context: object = None,
+        ) -> None:
             # ``_run_pool_bounded`` reads the private
             # ``_processes`` attribute (dict of pid -> Process) to
             # force-kill any still-wedged worker after a timeout --
@@ -273,3 +281,35 @@ def test_map_run_stamps_ambiguous_rate_into_provenance(
     assert loaded is not None
     assert loaded["ambiguous_sites"] == 1
     assert loaded["ambiguous_rate"] == 1.0
+
+
+# --- follow_symlinks threading (round 28 §3.2) -----------------------------
+
+
+def test_map_repository_threads_follow_symlinks_to_discover(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real.py").write_text(
+        "def f() -> int:\n    return 1\n"
+    )
+    (tmp_path / "src" / "alias.py").symlink_to(tmp_path / "src" / "real.py")
+
+    files, skipped = repo_ops.map_repository(
+        tmp_path,
+        subpath=None,
+        excludes=(),
+        max_file_size=1_000_000,
+    )
+    assert {fm.path for fm in files} == {"src/real.py"}
+    assert dict(skipped)["src/alias.py"] == "symlink"
+
+    files, skipped = repo_ops.map_repository(
+        tmp_path,
+        subpath=None,
+        excludes=(),
+        max_file_size=1_000_000,
+        follow_symlinks=True,
+    )
+    assert {fm.path for fm in files} == {"src/real.py", "src/alias.py"}
+    assert "src/alias.py" not in dict(skipped)

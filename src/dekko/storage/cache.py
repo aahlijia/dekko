@@ -28,7 +28,16 @@ from dekko.render.mapfile import (
     _symbol_from_dict,
     atomic_write_bytes,
 )
-from dekko.core.model import FileMap, Import, RawCall, RawHeritage, RawRef
+from dekko.core.model import (
+    EnvRead,
+    FileMap,
+    Import,
+    RawCall,
+    RawCatch,
+    RawHeritage,
+    RawRef,
+    RawThrow,
+)
 
 CACHE_VERSION = 1
 CACHE_DIR = ".dekko"
@@ -65,7 +74,11 @@ def _filemap_from_dict(d: dict) -> FileMap:
         calls=[RawCall(**c) for c in d.get("calls", [])],
         refs=[RawRef(**r) for r in d.get("refs", [])],
         heritage=[RawHeritage(**h) for h in d.get("heritage", [])],
+        throws=[RawThrow(**t) for t in d.get("throws", [])],
+        catches=[RawCatch(**c) for c in d.get("catches", [])],
+        env_reads=[EnvRead(**e) for e in d.get("env_reads", [])],
         imports=[Import(**i) for i in d.get("imports", [])],
+        type_aliases=list(d.get("type_aliases", [])),
         error=d.get("error"),
         doc=d.get("doc"),
     )
@@ -79,6 +92,11 @@ class IncrementalCache:
             both reused and freshly extracted files.
         reused: Count of files served from the prior cache this run.
         parsed: Count of files freshly extracted this run.
+        parsed_paths: Repo-relative paths freshly extracted this run,
+            i.e. the ones whose content changed (or that had no prior
+            entry). The set form of ``parsed``, needed by
+            ``resolvecache.build_reuse`` to decide which files' cached
+            *resolution* is still valid.
     """
 
     def __init__(self, old: dict[str, dict]) -> None:
@@ -92,6 +110,26 @@ class IncrementalCache:
         self.entries: dict[str, dict] = {}
         self.reused = 0
         self.parsed = 0
+        self.parsed_paths: set[str] = set()
+
+    def old_symbols(self, rel: str) -> list[dict] | None:
+        """Previously cached symbol dicts for ``rel``, if any.
+
+        Lets a caller compare a re-extracted file's symbols against what
+        the last run saw without re-reading or re-parsing anything — the
+        prior extraction is already in memory.
+
+        Args:
+            rel: Repo-relative path of the file.
+
+        Returns:
+            The cached symbol dicts, or ``None`` when this file had no
+            prior cache entry at all.
+        """
+        entry = self._old.get(rel)
+        if entry is None:
+            return None
+        return entry.get("file", {}).get("symbols", [])
 
     def reuse(self, root: Path, rel: str) -> FileMap | None:
         """Return the cached ``FileMap`` for an unchanged file.
@@ -118,6 +156,7 @@ class IncrementalCache:
             "file": _filemap_to_dict(fm),
         }
         self.parsed += 1
+        self.parsed_paths.add(rel)
 
     def unchanged(self, paths: list[str]) -> bool:
         """True when every currently discovered path was already cached.

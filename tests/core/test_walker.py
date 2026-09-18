@@ -348,6 +348,65 @@ def test_discover_minified_check_ignores_unreadable_file(
 
 
 # ---------------------------------------------------------------------
+# symlinked files (round 28 §3.2: phantom duplicate symbols)
+
+
+def test_discover_skips_symlinked_file_by_default(tmp_path: Path) -> None:
+    _touch(tmp_path / "src" / "real.py")
+    (tmp_path / "src" / "alias.py").symlink_to(tmp_path / "src" / "real.py")
+
+    files, skipped = discover(tmp_path)
+    assert files == ["src/real.py"]
+    assert dict(skipped)["src/alias.py"] == "symlink"
+
+
+def test_discover_symlink_in_vendored_dir_keeps_vendored_reason(
+    tmp_path: Path,
+) -> None:
+    _touch(tmp_path / "src" / "real.py")
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "vendor" / "alias.py").symlink_to(tmp_path / "src" / "real.py")
+
+    files, skipped = discover(tmp_path)
+    assert files == ["src/real.py"]
+    assert dict(skipped)["vendor/alias.py"] == "vendored (vendor)"
+
+
+def test_discover_skips_broken_symlink_with_symlink_reason(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "dangling.py").symlink_to(tmp_path / "src" / "gone.py")
+
+    files, skipped = discover(tmp_path)
+    assert files == []
+    assert dict(skipped)["src/dangling.py"] == "symlink"
+
+
+def test_discover_follow_symlinks_restores_indexing_walk_fallback(
+    tmp_path: Path,
+) -> None:
+    _touch(tmp_path / "src" / "real.py")
+    (tmp_path / "src" / "alias.py").symlink_to(tmp_path / "src" / "real.py")
+
+    files, skipped = discover(tmp_path, follow_symlinks=True)
+    assert files == ["src/alias.py", "src/real.py"]
+    assert "src/alias.py" not in dict(skipped)
+
+
+def test_discover_follow_symlinks_restores_indexing_git(
+    tmp_path: Path,
+) -> None:
+    _touch(tmp_path / "src" / "real.py")
+    (tmp_path / "src" / "alias.py").symlink_to(tmp_path / "src" / "real.py")
+    _init_git_repo(tmp_path)
+
+    files, skipped = discover(tmp_path, follow_symlinks=True)
+    assert files == ["src/alias.py", "src/real.py"]
+    assert "src/alias.py" not in dict(skipped)
+
+
+# ---------------------------------------------------------------------
 # find_config_files (round 25 tsconfig/jsconfig path-alias resolution)
 
 

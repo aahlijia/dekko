@@ -61,12 +61,43 @@ def test_fails_open_when_lock_file_cannot_be_opened(
 ) -> None:
     # A filesystem that can't support the lock file at all (permissions,
     # read-only mount, ...) must never block a regen -- fail open.
-    def raise_oserror(root: Path) -> int:
+    def raise_oserror(root: Path, name: str = filelock.LOCK_NAME) -> int:
         raise OSError("simulated: cannot open lock file")
 
     monkeypatch.setattr(filelock, "_open_lock_file", raise_oserror)
     with filelock.try_regen_lock(tmp_path) as acquired:
         assert acquired is True
+
+
+def test_named_lock_different_names_do_not_contend(tmp_path: Path) -> None:
+    with filelock.try_named_lock(tmp_path, "a.lock") as first:
+        assert first is True
+        with filelock.try_named_lock(tmp_path, "b.lock") as second:
+            assert second is True
+
+
+def test_named_lock_same_name_contends(tmp_path: Path) -> None:
+    with filelock.try_named_lock(tmp_path, "rev-cache/abc123.lock") as first:
+        assert first is True
+        with filelock.try_named_lock(
+            tmp_path, "rev-cache/abc123.lock"
+        ) as second:
+            assert second is False
+
+
+def test_named_lock_nested_name_creates_subdirectory(tmp_path: Path) -> None:
+    with filelock.try_named_lock(tmp_path, "rev-cache/deadbeef.lock"):
+        pass
+    assert (tmp_path / ".dekko" / "rev-cache" / "deadbeef.lock").exists()
+
+
+def test_regen_lock_is_named_lock_wrapper(tmp_path: Path) -> None:
+    # try_regen_lock must still contend with itself exactly as before
+    # the generalization to try_named_lock.
+    with filelock.try_regen_lock(tmp_path) as first:
+        assert first is True
+        with filelock.try_regen_lock(tmp_path) as second:
+            assert second is False
 
 
 def test_lock_blocks_across_real_processes(tmp_path: Path) -> None:

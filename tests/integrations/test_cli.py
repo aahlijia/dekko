@@ -55,6 +55,19 @@ def test_affected_budget_defaults_to_affected_default_budget() -> None:
     assert args.budget == affected.DEFAULT_BUDGET
 
 
+def test_map_jobs_defaults_to_all_cores() -> None:
+    # Round-29 Track 3: bare `dekko map` defaulted to --jobs 1, so a
+    # one-file edit's remap on a large repo ran the repo-wide resolve
+    # single-threaded (tensorflow: 12m24s incremental vs. 5m03s for a
+    # parallel --full rebuild). The auto-regen path (repo_ops.regen_map)
+    # has requested all cores since round 11; the explicit invocation
+    # must match it. An explicit --jobs value still wins.
+    parser = cli.build_subcommand_parser()
+    assert parser.parse_args(["map", "."]).jobs == 0
+    assert parser.parse_args(["map", ".", "--jobs", "1"]).jobs == 1
+    assert parser.parse_args(["map", ".", "--jobs", "4"]).jobs == 4
+
+
 def test_map_writes_outputs_to_target_dir(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("def f():\n    return 1\n")
     assert cli.main(["--map", str(tmp_path), "--quiet"]) == 0
@@ -257,6 +270,99 @@ def test_map_scoped_run_over_existing_scoped_map_not_blocked(
     assert cli.main(["map", str(tmp_path), "sub", "--full"]) == 0
 
 
+def test_map_orphan_root_rejected_by_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    code = cli.main(["map", str(tmp_path / "sub")])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "subdirectory of an already-mapped repo" in err
+    assert "--force-new-root" in err
+    assert not (tmp_path / "sub" / ".dekko").exists()
+
+
+def test_map_two_arg_subpath_unaffected_by_orphan_root_check(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+
+    # A real two-arg `dekko map ROOT SUBPATH` is never ambiguous --
+    # must proceed normally, unaffected by the one-arg orphan-root
+    # detection.
+    code = cli.main(["map", str(tmp_path), "sub", "--quiet"])
+    assert code == 0
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert len(doc["files"]) == 1
+
+
+def test_map_force_new_root_creates_nested_dekko(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    code = cli.main(
+        ["map", str(tmp_path / "sub"), "--force-new-root", "--quiet"]
+    )
+    assert code == 0
+    assert (tmp_path / "sub" / ".dekko" / "map.json").exists()
+
+
+def test_map_git_submodule_directory_not_flagged(tmp_path: Path) -> None:
+    # A subdirectory that is itself a distinct git repo (a submodule,
+    # or a deliberately isolated vendored subproject) is a legitimate
+    # independent root, not the footgun this check exists to catch --
+    # its own `.git` must short-circuit the check before it ever
+    # reaches the parent repo's `.dekko/`.
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    submodule = tmp_path / "vendored"
+    submodule.mkdir()
+    (submodule / ".git").mkdir()
+    (submodule / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+
+    code = cli.main(["map", str(submodule), "--quiet"])
+    assert code == 0
+    assert (submodule / ".dekko" / "map.json").exists()
+
+
+def test_map_unrelated_directory_not_flagged(tmp_path: Path) -> None:
+    (tmp_path / "unrelated").mkdir()
+    (tmp_path / "unrelated" / "c.py").write_text(
+        "def h() -> int:\n    return 3\n"
+    )
+
+    code = cli.main(["map", str(tmp_path / "unrelated"), "--quiet"])
+    assert code == 0
+
+
+def test_map_remapping_directory_with_its_own_dekko_not_flagged(
+    tmp_path: Path,
+) -> None:
+    # A directory that already has its own `.dekko/` from a prior
+    # (legitimate) `--force-new-root` run is not an orphan-root
+    # surprise on a *second* run -- re-mapping it in place must not be
+    # blocked.
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("def g() -> int:\n    return 2\n")
+    assert cli.main(["map", str(tmp_path), "--quiet"]) == 0
+    assert (
+        cli.main(["map", str(tmp_path / "sub"), "--force-new-root", "--quiet"])
+        == 0
+    )
+
+    code = cli.main(["map", str(tmp_path / "sub"), "--full", "--quiet"])
+    assert code == 0
+
+
 def test_map_exclude_persists_to_dekkoignore(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("def f():\n    return 1\n")
     (tmp_path / "widget.astro").write_text("---\n---\n")
@@ -284,6 +390,53 @@ def test_bare_map_after_exclude_run_honors_persisted_pattern(
     doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
     assert "widget.astro" not in doc["provenance"]["files"]
     assert "b.py" in doc["provenance"]["files"]
+
+
+def test_map_follow_symlinks_flag_includes_symlinked_file(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "src" / "alias.py").symlink_to(tmp_path / "src" / "real.py")
+
+    assert cli.main(["map", str(tmp_path)]) == 0
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert "src/alias.py" not in doc["provenance"]["files"]
+    assert doc["provenance"]["symlink_excluded"]["paths"] == ["src/alias.py"]
+
+    assert cli.main(["map", str(tmp_path), "--follow-symlinks"]) == 0
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert "src/alias.py" in doc["provenance"]["files"]
+    assert doc["provenance"]["follow_symlinks"] is True
+    assert doc["provenance"]["symlink_excluded"] is None
+
+
+def test_map_follow_symlinks_toggle_invalidates_if_stale(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "real.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "src" / "alias.py").symlink_to(tmp_path / "src" / "real.py")
+
+    assert cli.main(["map", str(tmp_path)]) == 0
+    capsys.readouterr()
+
+    # Same options -- the existing map is genuinely fresh, so --if-stale
+    # skips regeneration outright (prints "map fresh").
+    assert cli.main(["map", str(tmp_path), "--if-stale"]) == 0
+    assert "map fresh" in capsys.readouterr().out
+
+    # Toggling --follow-symlinks changes this run's discovery options,
+    # so the existing map must not be treated as fresh even though no
+    # source file changed -- it has to regenerate with the new option.
+    assert (
+        cli.main(["map", str(tmp_path), "--if-stale", "--follow-symlinks"])
+        == 0
+    )
+    assert "map fresh" not in capsys.readouterr().out
+    doc = json.loads((tmp_path / ".dekko" / "map.json").read_text())
+    assert doc["provenance"]["follow_symlinks"] is True
+    assert "src/alias.py" in doc["provenance"]["files"]
 
 
 def test_regen_map_does_not_re_persist_dekkoignore(

@@ -314,6 +314,8 @@ def discover(
     excludes: tuple[str, ...] = (),
     max_file_size: int = DEFAULT_MAX_FILE_SIZE,
     candidates: list[str] | None = None,
+    *,
+    follow_symlinks: bool = False,
 ) -> tuple[list[str], list[tuple[str, str]]]:
     """Find all mappable source files under a root directory.
 
@@ -332,6 +334,12 @@ def discover(
             can't distinguish tracked from untracked paths against a
             ``.gitignore`` pattern (see ``diff.snapshot``'s
             ``candidates`` parameter).
+        follow_symlinks: When ``False`` (the default), a symlinked
+            source file is skipped (reason ``"symlink"``) rather than
+            indexed under its own path — indexing it would parse the
+            symlink target's content a second time, producing a
+            phantom duplicate of every symbol the target defines. Set
+            ``True`` to restore indexing symlinked files as-is.
 
     Returns:
         A pair ``(files, skipped)``: sorted repo-relative paths to
@@ -342,11 +350,12 @@ def discover(
         first-party code (reason ``"vendored (<dirname>)"``, see
         ``_VENDORED_DIRS`` — distinct from the purely-silent VCS/cache
         dirs in ``_NOISE_DIRS``, which are never recorded here at
-        all), and files matched by the persistent
+        all), files matched by the persistent
         ``.dekko/.dekkoignore`` (reason ``"ignored"``, distinct from
-        ``"excluded"`` — see ``_classify``). Extensions dekko simply
-        doesn't recognize at all (non-code files) are still omitted
-        with no entry here.
+        ``"excluded"`` — see ``_classify``), and symlinked files
+        (reason ``"symlink"``, see ``follow_symlinks`` above).
+        Extensions dekko simply doesn't recognize at all (non-code
+        files) are still omitted with no entry here.
     """
     if candidates is None:
         candidates = _git_files(root)
@@ -363,7 +372,13 @@ def discover(
     skipped: list[tuple[str, str]] = []
     for rel in sorted(set(candidates)):
         verdict = _classify(
-            root, rel, prefix, excludes, ignore_spec, max_file_size
+            root,
+            rel,
+            prefix,
+            excludes,
+            ignore_spec,
+            max_file_size,
+            follow_symlinks,
         )
         if verdict is None:
             continue
@@ -374,6 +389,21 @@ def discover(
     return files, skipped
 
 
+def _is_symlink(root: Path, rel: str) -> bool:
+    """Whether the candidate path itself is a symlink.
+
+    Only the leaf path needs checking -- a symlinked *directory* never
+    produces file candidates through either discovery path (os.walk's
+    default followlinks=False, and git's own symlink-blob
+    representation for a tracked directory symlink), so there is no
+    intermediate path component to check.
+    """
+    try:
+        return (root / rel).is_symlink()
+    except OSError:
+        return False
+
+
 def _classify(
     root: Path,
     rel: str,
@@ -381,6 +411,7 @@ def _classify(
     excludes: tuple[str, ...],
     ignore_spec: pathspec.PathSpec | None,
     max_file_size: int,
+    follow_symlinks: bool = False,
 ) -> str | None:
     """Categorize one candidate path.
 
@@ -400,6 +431,8 @@ def _classify(
         # first-party code (see this function's module docstring
         # note on `_VENDORED_DIRS`).
         return f"vendored ({vendored})"
+    if not follow_symlinks and _is_symlink(root, rel):
+        return "symlink"
     if _matches_any(rel, GENERATED_PATTERNS):
         return "generated"
     if _matches_any(rel, excludes) or any(

@@ -222,6 +222,23 @@ sets by `(file, line)` into three buckets:
   short/generic target name (resolver precision degrades in a dense
   repo), or "unexplained" when none of those fit.
 
+**Reconciling the buckets against the grep.** Declaration lines are
+excluded from the comparison before bucketing — the target's own
+definition, and every other same-bare-named symbol's. A declaration
+always contains the bare name but is never a call site, so counting
+one as a "miss" would be noise on every single check. Because that
+exclusion would otherwise leave `matches + grep-only` mysteriously
+short of the `grep:` command printed directly above them, the report
+discloses it: text prints a `note:` with the excluded count, and
+`--json` carries `counts.excluded_declarations` alongside
+`counts.grep_hits_swept` (`matches + grep_only +
+excluded_declarations`). That total is the real hit count of the
+printed grep command, so you can run the command yourself and check
+the arithmetic — which on an overload-heavy repo is the difference
+between "dekko dropped results" and "dekko excluded declarations."
+The identity holds unless `grep_truncated` is set, in which case the
+sweep hit its safety cap and discarded hits past it by design.
+
 **Receiver-mismatch detection.** When the target is a method (not a
 free function) with exactly one repo-defined symbol sharing its bare
 name and its declaring type resolves unambiguously, `sanity` checks
@@ -328,6 +345,67 @@ This sweep only re-checks symbols dekko already believes have callers
 — it does not find a resolver false-negative that undercounts a symbol
 to zero callers in the first place (a different, already-tracked
 class of gap).
+
+## Incremental vs. `--full` map runs
+
+Bare `dekko map` reuses the per-file extraction cache
+(`.dekko/cache.json`) for any file whose content hash hasn't changed
+since the last run, re-parsing only what actually changed;
+`--full` ignores the cache and re-parses everything.
+
+Call resolution is also incremental. Per-file call edges are cached in
+`.dekko/resolved-calls.json.gz`, so an edit re-resolves only the files
+that changed instead of the whole repo. On tensorflow, a one-line edit
+remaps in ~47s where it used to take ~229s. The reuse is deliberately
+conservative: it applies only when the repo's *global* resolution inputs
+are provably unchanged — no file added, deleted, or renamed, and no
+changed file altering its own symbols (a new, renamed, or deleted
+function, or a changed signature). Anything else falls back to the
+previous repo-wide resolve, so correctness never rests on guessing what
+an edit could have affected. Either way the output is identical; you can
+check that yourself by diffing `map.json` against a `--full` run of the
+same tree.
+
+The other resolution passes (references, heritage, imports, throws,
+catches) still run repo-wide every time. They're a small share of the
+cost, so an incremental run's remaining floor is those plus rendering,
+not call resolution.
+
+`dekko map` defaults to `--jobs 0` (all cores), the same worker choice
+the auto-regen path every read subcommand uses on a stale map has
+always made; pass `--jobs 1` explicitly if you need a sequential run
+(e.g. to keep a shared machine quiet). Note that `--jobs N` is an
+**upper bound, not a target**: each resolve worker needs its own copy of
+the repo's symbol index, so dekko lowers the count to what the work
+actually justifies and runs fully sequentially when even two workers
+wouldn't pay for themselves. `--jobs 11` legitimately running three
+workers is expected. Small repos and small deltas stay sequential
+automatically regardless of the flag.
+
+## Mapping a subtree
+
+`dekko map` takes its two positional arguments in `[DIR] [SUBPATH]`
+order — `DIR` is the repo root, `SUBPATH` (optional) restricts the map
+to a subtree of it:
+
+```sh
+dekko map . src        # map only src/, rooted at the repo in cwd
+dekko map /path/to/repo src   # same, with an explicit repo root
+```
+
+A single positional argument that happens to be a subdirectory of an
+*already-mapped* repo — `dekko map src` where `src/` is a subtree of a
+repo mapped at its parent — is the one shape that reads ambiguously:
+it looks like "re-map just this subtree," but is actually "treat `src`
+as a brand-new, independent repo root," which would silently create a
+second, unrelated `.dekko/` tree nested inside `src/`. `dekko map`
+detects this and refuses (exit 2) with a suggested corrected command,
+rather than creating the nested root silently. Pass `--force-new-root`
+to map the subdirectory as its own independent root anyway — the
+legitimate use case (a vendored subproject deliberately mapped in
+isolation, with no git submodule boundary of its own). A subdirectory
+that already has its own `.git` (a real git submodule) is never
+flagged, since that already marks a distinct, intentional root.
 
 ## Excluding files
 
@@ -577,6 +655,21 @@ remains the explicit spelling for scripts. `FILE`/`--file`,
 `--cycles`, and `--export` are mutually exclusive — give at most one,
 the same "one, not several" rule `ambiguous`'s `--by`/`--name` already
 follows.
+
+**Static imports only.** `deps` resolves imports that are declared
+statically. A file that wires its dependencies up at *runtime* —
+Python's `importlib.import_module`/`__import__`/`LazyLoader`,
+JS/TS dynamic `import()`, Rust's `include!`, Java's
+`Class.forName`/`ServiceLoader` — genuinely resolves to zero edges,
+which is accurate but easy to misread as "this file depends on
+nothing." So when `--file` finds such a construct in the file's own
+source, it says so: text prints a `note:` naming each construct and
+its occurrence count, and `--json` adds `dynamic_imports` (a
+`{construct, occurrences}` list) plus `dynamic_import_note`. This is
+a disclosure, not resolution — dekko still does not follow those
+edges, it just stops presenting an incomplete zero as a confident
+one. The note appears only when such a construct is actually present,
+never on every zero.
 
 Cycle detection groups files into strongly-connected components
 (Tarjan's SCC): a reported cycle is every file mutually reachable from

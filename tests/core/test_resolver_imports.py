@@ -17,8 +17,10 @@ from pathlib import Path
 
 from dekko.core.model import FileMap, Import
 from dekko.core.resolver import (
+    _ImportResolveContext,
     _merge_tsconfig_scope,
     _nearest_ts_config_scope,
+    _resolve_import_js,
     _resolve_ts_path_alias,
     _strip_jsonc_comments,
     _strip_trailing_commas,
@@ -305,6 +307,151 @@ def test_js_bare_alias_specifier_stays_external_when_root_omitted() -> None:
     graph = resolve_imports(files)
     assert graph.deps_out == {}
     assert graph.external["src/index.ts"] == ["@/components/Button"]
+
+
+# ---------------------------------------------------------------------
+# repo-root-relative bare-specifier fallback (round 28
+# claude-code.md §3.3, .features/fixes/round28/
+# 03-deps-bare-specifier-resolution.md)
+
+
+def test_js_bare_root_relative_specifier_resolves_to_repo_file() -> None:
+    # claude-code's own convention: a bare specifier with a "/" and no
+    # governing tsconfig alias, resolved against the repo root.
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [
+                _imp(
+                    "src/index.ts",
+                    "state",
+                    "src/bootstrap/state.js/state",
+                )
+            ],
+        ),
+        _fm("src/bootstrap/state.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["src/index.ts"] == ["src/bootstrap/state.ts"]
+
+
+def test_js_bare_root_relative_specifier_resolves_index_file() -> None:
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [_imp("src/index.ts", "widgets", "src/widgets/widgets")],
+        ),
+        _fm("src/widgets/index.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["src/index.ts"] == ["src/widgets/index.ts"]
+
+
+def test_js_bare_single_segment_specifier_stays_external() -> None:
+    # The "/"-gate: a single-segment bare specifier is overwhelmingly a
+    # real npm package name in practice and must stay external even
+    # when a same-named file exists at the repo root.
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [_imp("src/index.ts", "x", "lodash/x")],
+        ),
+        _fm("lodash.js", "javascript", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
+    assert graph.external["src/index.ts"] == ["lodash"]
+
+
+def test_js_bare_root_relative_specifier_scoped_package_with_slash() -> None:
+    # A scoped npm package (`@org/pkg`) has no further "/" so it stays
+    # external; `@org/pkg/sub` does have one and is attempted against
+    # the repo root -- documents the trade-off rather than leaving it
+    # untested (round 28 plan's own "scoped packages" risk note). No
+    # real npm package's files are ever laid out at a literal
+    # "@org/..." repo path, so this coincidental collision is narrow
+    # in practice, not a common false positive.
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [_imp("src/index.ts", "x", "@org/pkg/sub/x")],
+        ),
+        _fm("@org/pkg/sub.ts", "typescript", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["src/index.ts"] == ["@org/pkg/sub.ts"]
+
+
+def test_js_bare_specifier_tsconfig_alias_wins_over_root_relative() -> None:
+    # When both a configured tsconfig alias and the new root-relative
+    # fallback would technically match, the alias must still win --
+    # order-of-attempts test.
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [_imp("src/index.ts", "x", "src/thing/x")],
+        ),
+        _fm("src/thing/aliased.ts", "typescript", []),
+        _fm("src/thing.ts", "typescript", []),
+    ]
+    ctx = _ImportResolveContext(
+        paths=frozenset(f.path for f in files),
+        py_package_roots={},
+        java_suffix_index={},
+        cpp_basename_index={},
+        crate_roots={},
+        ts_path_aliases={
+            "": _TsConfigAliasTable(
+                base_dir="",
+                paths=(("src/thing", ("src/thing/aliased",)),),
+            )
+        },
+    )
+    resolved = _resolve_import_js(files[0].imports[0], "src/index.ts", ctx)
+    assert resolved == "src/thing/aliased.ts"
+
+
+def test_js_bare_root_relative_specifier_no_match_stays_external() -> None:
+    # A bare specifier matching neither an alias nor any real repo
+    # path still falls through to "external" -- regression guard on
+    # the existing default-external behavior for genuine npm packages.
+    files = [
+        _fm(
+            "src/index.ts",
+            "typescript",
+            [_imp("src/index.ts", "x", "some/missing/module/x")],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
+    assert graph.external["src/index.ts"] == ["some/missing/module"]
+
+
+def test_js_bare_root_relative_specifier_completes_a_cycle() -> None:
+    # A cycle that only exists through a previously-unresolved
+    # bare-root-relative edge is now detected.
+    files = [
+        _fm(
+            "src/a.ts",
+            "typescript",
+            [_imp("src/a.ts", "b", "src/b.js/b")],
+        ),
+        _fm(
+            "src/b.ts",
+            "typescript",
+            [_imp("src/b.ts", "a", "./a/a")],
+        ),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out["src/a.ts"] == ["src/b.ts"]
+    assert graph.deps_out["src/b.ts"] == ["src/a.ts"]
+    cycles = find_cycles(graph.deps_out)
+    assert any(set(cycle) == {"src/a.ts", "src/b.ts"} for cycle in cycles)
 
 
 def test_strip_jsonc_comments_line_comment() -> None:

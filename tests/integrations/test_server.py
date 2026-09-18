@@ -226,7 +226,14 @@ def test_index_for_caches_per_root(
     other_dir = tmp_path / "other"
     other_dir.mkdir()
     (other_dir / "z.py").write_text("def only_here() -> int:\n    return 1\n")
-    assert cli.main(["map", str(other_dir), "--quiet"]) == 0
+    # other_dir is nested under tmp_path purely as a fixture
+    # convenience -- it's meant to be a second, wholly unrelated root,
+    # not a subtree of root_a, so --force-new-root opts out of the
+    # orphan-root guard (round-28 §3.6) that would otherwise (rightly)
+    # flag this exact directory shape.
+    assert (
+        cli.main(["map", str(other_dir), "--quiet", "--force-new-root"]) == 0
+    )
 
     ctx = server.Context(default_root=root_a, no_regen=False)
     result_a = _call(ctx, "query_symbol", {"symbol": "f", "root": str(root_a)})

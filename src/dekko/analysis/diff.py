@@ -20,13 +20,14 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from dekko import repo_ops
 from dekko.storage import cache as cache_mod
 from dekko.render import mapfile
-from dekko.storage import revcache
+from dekko.storage import filelock, revcache
 from dekko.core import walker
 from dekko.core.model import Import, Symbol
 from dekko.textutil import signature
@@ -50,6 +51,23 @@ EXIT_ERROR = 2
 # where this was actually noticeable), so the note only fires where
 # it's likely to matter.
 _SEQUENTIAL_DISCLOSURE_THRESHOLD = 5000
+
+# Round 28 layer 2: how often to re-check the rev-cache while another
+# process is already building the old-side snapshot for the same SHA,
+# and how long to wait before giving up and building an uncoordinated
+# copy locally. Mirrors repo_ops._REGEN_LOCK_POLL_INTERVAL/
+# _REGEN_LOCK_WAIT_CAP's own values for consistency. A flat 30s cap is
+# a starting guess, not a measured one -- a rev-cache-miss build on a
+# tensorflow-scale repo can itself run into the hundreds of seconds
+# (see daemon._TIMEOUT_SECONDS_PER_TRACKED_FILE's own comment), so a
+# losing process waiting only 30s before falling open to its own
+# redundant multi-minute build may rarely help on the largest repos.
+# Scaling this the way daemon._scaled_client_timeout_for_revcache_miss
+# already scales the client's own request timeout is a reasonable
+# fast-follow once real wait-time data exists; not done here to avoid
+# guessing a scaling constant with no measurement behind it.
+_REV_CACHE_LOCK_POLL_INTERVAL = repo_ops._REGEN_LOCK_POLL_INTERVAL
+_REV_CACHE_LOCK_WAIT_CAP = repo_ops._REGEN_LOCK_WAIT_CAP
 
 
 @dataclass
@@ -298,6 +316,97 @@ def old_snapshot(
         cached = revcache.load(root, sha)
         if cached is not None:
             return cached
+        with filelock.try_named_lock(
+            root, f"rev-cache/{sha}.lock"
+        ) as acquired:
+            if not acquired:
+                waited = _wait_for_other_rev_cache_build(root, sha)
+                if waited is not None:
+                    return waited
+                # Wait cap hit without the other process's build
+                # landing -- fail open, fall through to an
+                # uncoordinated local build below (same fail-open
+                # philosophy filelock.py's own docstring states
+                # explicitly).
+            return _build_and_cache_old_snapshot(
+                root,
+                target_rev,
+                subpath,
+                excludes,
+                max_file_size,
+                old_cache,
+                sha,
+                jobs=jobs,
+            )
+    return _build_and_cache_old_snapshot(
+        root,
+        target_rev,
+        subpath,
+        excludes,
+        max_file_size,
+        old_cache,
+        sha,
+        jobs=jobs,
+    )
+
+
+def _wait_for_other_rev_cache_build(root: Path, sha: str) -> Snapshot | None:
+    """Poll for another process's in-flight old-snapshot build to land.
+
+    Called after ``filelock.try_named_lock`` reports that a different
+    process already holds the per-SHA rev-cache build lock -- rather
+    than redundantly building the same old-side snapshot in parallel,
+    wait a short bounded interval for that process's build to finish
+    and land in the rev-cache.
+
+    Args:
+        root: Repository root another process is building an
+            old-snapshot for.
+        sha: Full commit SHA being built.
+
+    Returns:
+        The cached snapshot if it landed within the wait cap; ``None``
+        if the cap was hit first (caller should fail open and build
+        locally).
+    """
+    print(
+        "note: another dekko process is already building the "
+        f"old-side snapshot for rev {sha[:12]} -- waiting up to "
+        f"{_REV_CACHE_LOCK_WAIT_CAP:.0f}s for it to finish",
+        file=sys.stderr,
+    )
+    deadline = time.monotonic() + _REV_CACHE_LOCK_WAIT_CAP
+    while time.monotonic() < deadline:
+        time.sleep(_REV_CACHE_LOCK_POLL_INTERVAL)
+        cached = revcache.load(root, sha)
+        if cached is not None:
+            return cached
+    print(
+        "note: gave up waiting for the other process's rev-cache "
+        "build -- running an independent build now (the other "
+        "process may still be in progress)",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _build_and_cache_old_snapshot(
+    root: Path,
+    target_rev: str,
+    subpath: str | None,
+    excludes: tuple[str, ...],
+    max_file_size: int,
+    old_cache: cache_mod.IncrementalCache,
+    sha: str | None,
+    jobs: int = 1,
+) -> Snapshot | None:
+    """Export, re-parse, and (if resolvable) cache the old-side snapshot.
+
+    The always-correct fallback path shared by every branch of
+    :func:`old_snapshot`, whether or not per-SHA lock coordination
+    applies (an unresolvable ``target_rev`` never has a SHA to lock
+    on).
+    """
     with tempfile.TemporaryDirectory(prefix="dekko-diff-") as tmp:
         old_root = Path(tmp)
         if not export_rev(root, target_rev, old_root):
@@ -316,6 +425,49 @@ def old_snapshot(
     if sha is not None:
         revcache.save(root, sha, old)
     return old
+
+
+def sequential_disclosure_message(
+    tracked_count: int, *, all_cores: bool
+) -> str | None:
+    """Build the "no rev-cache ... may take a while" note text.
+
+    Factored out so the two places this note can fire -- the in-
+    process warning below (daemon-side or direct-execution, always
+    single-threaded by the time it's called) and the daemon client's
+    pre-dispatch disclosure (``daemon.py::_timeout_and_args_for_
+    command``, which knows *before sending the request* whether the
+    round-25 ``--jobs 0`` override will apply) -- can't drift apart in
+    wording (round-29 Track 2).
+
+    Args:
+        tracked_count: Git-tracked file count at the target rev (see
+            ``_maybe_warn_sequential``'s ``candidates`` docstring for
+            why this is a ``git ls-tree`` count, not the mapped-file
+            count).
+        all_cores: Whether the resolve about to run will actually
+            engage all cores (the daemon-routed round-25 override
+            applied) rather than run single-threaded (the direct-
+            execution default, or an explicit ``--jobs 1``).
+
+    Returns:
+        The note text (no trailing newline, not yet routed to
+        stderr), or ``None`` when ``tracked_count`` is below
+        ``_SEQUENTIAL_DISCLOSURE_THRESHOLD`` (small repos stay quiet).
+    """
+    if tracked_count < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
+        return None
+    if all_cores:
+        return (
+            f"note: no rev-cache for this commit; resolving "
+            f"{tracked_count} git-tracked files with all cores may "
+            f"take a while"
+        )
+    return (
+        f"note: no rev-cache for this commit; single-threaded resolve "
+        f"on {tracked_count} git-tracked files may take a while -- "
+        f"pass --jobs 0 to use all cores"
+    )
 
 
 def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
@@ -340,8 +492,6 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     """
     if jobs > 1 or candidates is None:
         return
-    if len(candidates) < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
-        return
     # round-18 tensorflow finding: `candidates` is `git ls-tree`'s full
     # tracked-file count at the target rev -- before `walker.discover`
     # excludes vendored/no-parser/too-large files -- so it can read
@@ -350,12 +500,10 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     # into thinking the wait scales with the mapped set. Naming it
     # "git-tracked" makes that distinction explicit instead of
     # implying it's the same count `dekko map`'s own summary reports.
-    print(
-        f"note: no rev-cache for this commit; single-threaded resolve "
-        f"on {len(candidates)} git-tracked files may take a while -- "
-        f"pass --jobs 0 to use all cores",
-        file=sys.stderr,
-    )
+    message = sequential_disclosure_message(len(candidates), all_cores=False)
+    if message is None:
+        return
+    print(message, file=sys.stderr)
 
 
 def tracked_at_rev(root: Path, rev: str) -> list[str] | None:
@@ -456,6 +604,51 @@ def _callers_of(snap: Snapshot, sym_id: str) -> list[str]:
     ]
 
 
+# Round 28 finding: a corrupted rev-cache entry (every old-side symbol
+# hashed to an empty body, see revcache._is_all_empty_body) makes
+# every shared symbol report as "changed" with nothing added or
+# removed -- exactly the tensorflow repro (171706 changed, 0 added, 0
+# removed). Layer 1 (revcache.save's guard) stops *new* corrupted
+# entries from being written, but an already-corrupted entry from
+# before that fix (or one hand-placed, or the cache-side guard
+# somehow bypassed) is still served as-is by design (a rev-cache hit
+# needs no freshness check). This is the loud, consumer-side backstop:
+# it fires regardless of *why* the old side looks this way, so it
+# still helps someone carrying a pre-existing corrupted entry.
+# Mirrors _SEQUENTIAL_DISCLOSURE_THRESHOLD's own "only fire where it's
+# likely to matter" sizing convention -- avoids noise on tiny repos
+# where "everything changed" is unremarkable.
+_SUSPICIOUS_CHANGE_RATIO_MIN_SYMBOLS = 500
+
+
+def _warn_if_suspicious(
+    old: Snapshot, new: Snapshot, result: DiffResult
+) -> None:
+    """Warn on the known corrupted-rev-cache "everything changed" shape.
+
+    Args:
+        old: Old-side snapshot.
+        new: New-side snapshot.
+        result: The just-computed diff result to inspect.
+    """
+    common = set(old.symbols) & set(new.symbols)
+    if (
+        not result.added
+        and not result.removed
+        and len(common) >= _SUSPICIOUS_CHANGE_RATIO_MIN_SYMBOLS
+        and len(result.changed) == len(common)
+    ):
+        print(
+            "note: every symbol shared between both sides reports as "
+            "changed, with none added or removed -- this can mean a "
+            "real repo-wide rewrite, but also matches a known "
+            "corrupted-rev-cache signature; if this is unexpected, "
+            "retry with --no-daemon --jobs 0, or delete "
+            f".dekko/rev-cache/{result.rev[:12]}*.json and re-run",
+            file=sys.stderr,
+        )
+
+
 def compare(rev: str, old: Snapshot, new: Snapshot) -> DiffResult:
     """Diff two snapshots into added/removed/changed deltas."""
     old_ids, new_ids = set(old.symbols), set(new.symbols)
@@ -473,6 +666,7 @@ def compare(rev: str, old: Snapshot, new: Snapshot) -> DiffResult:
         for i in sorted(old_ids & new_ids)
         if old.body.get(i) != new.body.get(i)
     ]
+    _warn_if_suspicious(old, new, result)
     return result
 
 

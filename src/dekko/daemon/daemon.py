@@ -99,6 +99,14 @@ _REVCACHE_TIMEOUT_COMMANDS = frozenset({"diff", "affected", "workset"})
 _SHUTDOWN_CMD = "_shutdown"
 _STATUS_CMD = "_status"
 
+# Round-29 Track 2 fix: the detached daemon's own stdout/stderr used
+# to inherit whatever terminal ran `dekko daemon start`, which is
+# usually gone by the time the child prints anything -- orphaning
+# every daemon-side print (crashes included) to a file descriptor
+# nobody reads. `start()` redirects both streams here instead (see
+# `daemon_transport.spawn_detached`'s `log_path` parameter).
+DAEMON_LOG_FILE = "daemon.log"
+
 # cli.py's main() returns this when a daemon-routed request was sent
 # but abandoned (see DaemonRequestAbandonedError below) -- distinct from
 # every other exit code already in use across the CLI (0-6; see
@@ -249,7 +257,9 @@ def _scaled_client_timeout(root: Path) -> float:
     return min(max(_CLIENT_TIMEOUT, scaled), _SCALED_CLIENT_TIMEOUT_CAP)
 
 
-def _scaled_client_timeout_for_revcache_miss(root: Path, rev: str) -> float:
+def _scaled_client_timeout_for_revcache_miss(
+    candidates: list[str] | None,
+) -> float:
     """Client timeout for a ``diff``/``affected``/``workset`` rev-cache
     *miss*, scaled by the target rev's tracked-file count instead of
     ``map.json`` size.
@@ -263,9 +273,12 @@ def _scaled_client_timeout_for_revcache_miss(root: Path, rev: str) -> float:
     is the wrong proxy for that specific cost.
 
     Args:
-        root: Repo root (the real repository, with ``.git/``).
-        rev: The target rev :func:`_target_rev_for` resolved -- passed
-            through to ``diff.tracked_at_rev`` unchanged.
+        candidates: ``diff.tracked_at_rev(root, rev)``'s result,
+            computed once by the caller (:func:`_timeout_and_args_for_
+            command`) and shared with its own disclosure-note
+            decision -- this used to call ``tracked_at_rev`` itself,
+            paying a second ``git`` invocation for a value the caller
+            already had (round-29 Track 2).
 
     Returns:
         ``_CLIENT_TIMEOUT`` when the tracked-file count can't be
@@ -275,7 +288,6 @@ def _scaled_client_timeout_for_revcache_miss(root: Path, rev: str) -> float:
         :data:`_SCALED_CLIENT_TIMEOUT_CAP` used by
         :func:`_scaled_client_timeout`.
     """
-    candidates = diff_mod.tracked_at_rev(root, rev)
     if not candidates:
         return _CLIENT_TIMEOUT
     scaled = len(candidates) * _TIMEOUT_SECONDS_PER_TRACKED_FILE
@@ -995,6 +1007,14 @@ def _timeout_and_args_for_command(
         is never mutated in place, so a fallback to direct execution
         (if the daemon turns out to be unreachable) still sees the
         caller's original, un-overridden choice.
+
+    Before returning, prints the same cold-rev-cache disclosure note
+    ``diff._maybe_warn_sequential`` would print in-process -- but
+    client-side, before the request is dispatched, since a routed
+    request's own stdout/stderr only replay to the caller after the
+    (possibly multi-minute) resolve completes (round-29 Track 2:
+    the in-process note arrives too late to be useful for a
+    daemon-routed call).
     """
     if command not in _REVCACHE_TIMEOUT_COMMANDS:
         return _scaled_client_timeout(root), args
@@ -1003,7 +1023,8 @@ def _timeout_and_args_for_command(
     if target_rev is None or revcache.has_entry(root, target_rev):
         return _scaled_client_timeout(root), args
 
-    timeout = _scaled_client_timeout_for_revcache_miss(root, target_rev)
+    candidates = diff_mod.tracked_at_rev(root, target_rev)
+    timeout = _scaled_client_timeout_for_revcache_miss(candidates)
     if not jobs_explicit and getattr(args, "jobs", None) == 1:
         # Round-25 finding: this is the one operation shape (a
         # cold-rev-cache resolve on a large repo, routed through an
@@ -1014,6 +1035,13 @@ def _timeout_and_args_for_command(
         # successful one.
         args = argparse.Namespace(**vars(args))
         args.jobs = 0
+    if candidates is not None:
+        resolved_jobs = getattr(args, "jobs", 1)
+        message = diff_mod.sequential_disclosure_message(
+            len(candidates), all_cores=resolved_jobs != 1
+        )
+        if message is not None:
+            print(message, file=sys.stderr)
     return timeout, args
 
 
@@ -1241,8 +1269,9 @@ def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
         "--idle-timeout",
         str(idle_timeout),
     ]
+    log_path = root / cache_mod.CACHE_DIR / DAEMON_LOG_FILE
     try:
-        spawn_detached(cmd)
+        spawn_detached(cmd, log_path=log_path)
     except OSError as exc:
         print(f"dekko daemon: failed to start: {exc}", file=sys.stderr)
         return 1

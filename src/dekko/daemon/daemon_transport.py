@@ -667,7 +667,9 @@ def default_transport_for(root: Path) -> DaemonTransport:
     return UnixSocketTransport(root)
 
 
-def spawn_detached(cmd: list[str]) -> subprocess.Popen:
+def spawn_detached(
+    cmd: list[str], log_path: Path | None = None
+) -> subprocess.Popen:
     """Launch ``cmd`` as a detached background process.
 
     POSIX: ``start_new_session=True`` puts the child in its own
@@ -677,16 +679,57 @@ def spawn_detached(cmd: list[str]) -> subprocess.Popen:
     flags, which detach the child from the parent's console and
     process group the equivalent way on that platform.
 
+    Without ``log_path``, the child inherits the parent's stdout/
+    stderr file descriptors -- for a detached daemon, that means
+    whatever terminal ran ``dekko daemon start``, which is usually
+    long gone by the time the child prints anything (round-29 Track 2
+    finding: this orphans every daemon-side print, including ones
+    meant to warn a caller about a slow operation in progress). Pass
+    ``log_path`` to redirect both streams to that file instead (opened
+    append, so repeated starts don't clobber prior runs); a stream
+    that fails to open falls back to ``DEVNULL`` rather than aborting
+    the spawn.
+
     Args:
         cmd: Full argv for the detached process.
+        log_path: Path to append the child's stdout/stderr to, or
+            ``None`` to leave the parent's file descriptors inherited
+            (the pre-round-29 behavior).
 
     Returns:
         The ``subprocess.Popen`` handle for the spawned process.
     """
+    stdout = stderr = None
+    if log_path is not None:
+        stdout = stderr = _open_daemon_log(log_path)
     if sys.platform == "win32":
         creationflags = _CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS
-        return subprocess.Popen(cmd, creationflags=creationflags)
-    return subprocess.Popen(cmd, start_new_session=True)
+        return subprocess.Popen(
+            cmd, creationflags=creationflags, stdout=stdout, stderr=stderr
+        )
+    return subprocess.Popen(
+        cmd, start_new_session=True, stdout=stdout, stderr=stderr
+    )
+
+
+def _open_daemon_log(log_path: Path) -> int:
+    """Open ``log_path`` for append, falling back to ``DEVNULL``.
+
+    Best-effort: a daemon that can't open its own log file (a
+    permissions error, a missing parent directory) should still start
+    rather than fail the spawn over a hygiene nicety.
+
+    Args:
+        log_path: Path to open for appending.
+
+    Returns:
+        A file descriptor suitable for ``subprocess.Popen``'s
+        ``stdout``/``stderr`` kwargs.
+    """
+    try:
+        return os.open(str(log_path), os.O_APPEND | os.O_CREAT | os.O_WRONLY)
+    except OSError:
+        return subprocess.DEVNULL
 
 
 def force_stop(pid: int) -> None:

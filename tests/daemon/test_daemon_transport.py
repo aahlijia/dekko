@@ -10,6 +10,7 @@ other branch genuinely never runs on this OS.
 """
 
 import json
+import os
 import shutil
 import socket
 import stat
@@ -672,7 +673,13 @@ def test_spawn_detached_posix_branch(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert result == "fake-popen"
     assert captured["cmd"] == ["dekko", "daemon", "start"]
-    assert captured["kwargs"] == {"start_new_session": True}
+    # No log_path given -- stdout/stderr stay unset (inherit the
+    # parent's fds), the pre-round-29 behavior.
+    assert captured["kwargs"] == {
+        "start_new_session": True,
+        "stdout": None,
+        "stderr": None,
+    }
 
 
 def test_spawn_detached_windows_branch(
@@ -697,7 +704,62 @@ def test_spawn_detached_windows_branch(
     # build (subprocess doesn't define these attributes there) -- see
     # the module-level comment in daemon_transport.py.
     expected_flags = dt._CREATE_NEW_PROCESS_GROUP | dt._DETACHED_PROCESS
-    assert captured["kwargs"] == {"creationflags": expected_flags}
+    assert captured["kwargs"] == {
+        "creationflags": expected_flags,
+        "stdout": None,
+        "stderr": None,
+    }
+
+
+def test_spawn_detached_redirects_stdio_to_log_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``log_path`` redirects both stdout and stderr to the same
+    opened file descriptor -- round-29 Track 2's daemon-log fix: the
+    detached child otherwise inherits whatever terminal ran
+    ``dekko daemon start``, orphaning every daemon-side print."""
+    monkeypatch.setattr(dt.sys, "platform", "darwin")
+    captured = {}
+
+    def _fake_popen(cmd, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        captured["kwargs"] = kwargs
+        return "fake-popen"
+
+    monkeypatch.setattr(dt.subprocess, "Popen", _fake_popen)
+
+    log_path = tmp_path / "daemon.log"
+    result = dt.spawn_detached(["dekko", "daemon", "_serve"], log_path)
+
+    assert result == "fake-popen"
+    assert log_path.exists()
+    stdout_fd = captured["kwargs"]["stdout"]
+    stderr_fd = captured["kwargs"]["stderr"]
+    assert isinstance(stdout_fd, int) and stdout_fd >= 0
+    assert stdout_fd == stderr_fd
+    os.close(stdout_fd)
+
+
+def test_spawn_detached_falls_back_to_devnull_on_unopenable_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A log path whose parent directory doesn't exist can't be
+    opened -- the spawn still proceeds, redirected to ``DEVNULL``
+    rather than failing outright."""
+    monkeypatch.setattr(dt.sys, "platform", "darwin")
+    captured = {}
+
+    def _fake_popen(cmd, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        captured["kwargs"] = kwargs
+        return "fake-popen"
+
+    monkeypatch.setattr(dt.subprocess, "Popen", _fake_popen)
+
+    unopenable = tmp_path / "no" / "such" / "dir" / "daemon.log"
+    result = dt.spawn_detached(["dekko", "daemon", "_serve"], unopenable)
+
+    assert result == "fake-popen"
+    assert captured["kwargs"]["stdout"] == dt.subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] == dt.subprocess.DEVNULL
 
 
 # ---------------------------------------------------------------------

@@ -9,6 +9,323 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.56] — 2026-09-18
+
+Round 31's two cross-language disclosure defects, both found by the
+7-repo sweep in `test-repos/reports/31-tokentest-7repo-post04355/`.
+Neither is a resolution change: dekko resolves exactly what it did
+before, and now says so honestly where it previously reported a
+confident-looking number it could not back up.
+
+### Fixed
+- **`dekko sanity`'s buckets now reconcile with the grep command it
+  prints** (round 31, found independently on all five language
+  families tested — JS/TS, TS/TSX, Java, Python/C++, Rust). A
+  symbol's own declaration line, and every other same-bare-named
+  symbol's, is filtered out of the sweep before the
+  matches/dekko-only/grep-only split — correctly, since a declaration
+  is not a call site and never was a miss to explain. But the
+  exclusion was *silent*, so `matches + grep-only` never summed to the
+  hit count of the `grep:` command printed one line above it. The
+  shortfall equalled the number of colliding same-bare-name
+  declaration lines, which on an overload-heavy repo is never zero:
+  spring-boot's `SpringApplication` constructor came up 2 short of its
+  own grep's 983 hits, `Binder.bindOrCreate` 4 short of 40. An agent
+  reconciling `sanity`'s numbers by hand — the entire purpose of the
+  command — found an unexplained gap every time and had no way to tell
+  a filtered declaration from a dropped result. Both text and `--json`
+  now carry an `excluded_declarations` count, a `grep_hits_swept`
+  total, and a note explaining the exclusion; `--unused` mode, which
+  filtered identically, gets the same treatment.
+- **`dekko deps --file` no longer reports a bare `imports (0)` for a
+  file that wires its imports up at runtime** (round 31, confirmed on
+  five repos across four language families). dekko resolves static
+  imports only; files depending entirely on `importlib`/`LazyLoader`
+  (Python), dynamic `import()` (JS/TS), `include!` (Rust), or
+  `Class.forName`/`ServiceLoader` (Java) therefore resolve to zero
+  edges — accurate, but presented as a confident zero with no caveat.
+  Worst measured case was tensorflow's `keras/utils/version_utils.py`,
+  where 6 of 9 real edges were invisible behind that zero. dekko still
+  does not resolve these edges (a genuinely hard static-analysis
+  problem, not a bug); it now scans the named file for the constructs
+  it provably cannot follow and says so, naming each construct and its
+  occurrence count. The disclosure is evidence-gated — it appears only
+  when such a construct is actually present, never on every zero — and
+  reads as "the count above covers static imports only" when static
+  edges do exist.
+
+## [0.43.55] — 2026-09-17
+
+### Performance
+- **Process pools now fork instead of spawn where provably safe**
+  (round 30, Track 3 (c)) — on macOS every pool worker previously
+  received a private, pickled-and-unpickled copy of the resolution
+  indices (~205 MB pickled per worker on a tensorflow-scale repo,
+  serially, per pool). Pools now run under an explicitly chosen
+  multiprocessing context: `fork` when the parent is provably
+  single-threaded on POSIX (the CLI and MCP server), `spawn` otherwise
+  (the daemon — its status thread makes fork unsafe — and Windows,
+  which has no fork). Fork workers share the parent's indices
+  copy-on-write, eliminating the per-worker transfer entirely.
+  Measured on interleaved runs: spring-boot resolve **6.70s → 4.66s**
+  median (fork won every pair, non-overlapping ranges), tensorflow
+  **176.4s → 163.4s** median (fork won all three interleaved pairs).
+  `map.json` output is byte-identical either way. Choosing the context
+  explicitly also pins `fork` on Linux ahead of Python 3.14's
+  `forkserver` default flip, which would have silently reintroduced
+  per-worker pickling there. A `BrokenProcessPool` under fork retries
+  under `spawn` (a fork-specific failure and CPU contention are both
+  covered by one bounded fallback), so a host where fork misbehaves
+  degrades to the previous behavior at the cost of one attempt.
+  `DEKKO_POOL_START_METHOD=spawn` opts a problem host back out. The
+  shared-pool follow-up ((d) in the round-30 design docs) was closed
+  WONTFIX by its own measurement gate.
+
+## [0.43.54] — 2026-09-16
+
+### Performance
+- **Incremental `dekko map` now reuses call resolution for unchanged
+  files** (round 30, Track 1) — `resolve()` was a pure function of the
+  *whole* file list and ran unconditionally on every map, so an
+  incremental run only ever saved tree-sitter extraction. Editing one
+  file out of 9,942 cost 93% of a full rebuild, and on a large repo
+  repo-wide resolution was the floor no amount of parallelism could get
+  under. Per-file call resolution is now cached in
+  `.dekko/resolved-calls.json.gz`, so an edit re-resolves only the files
+  that changed. **tensorflow: a one-line edit went from 229s to 46.6s
+  (4.9x).** Reuse is gated on the global resolution inputs being
+  *provably* identical to the cached run — no file added, deleted, or
+  renamed, and no changed file altering its resolution-relevant symbols —
+  so an unchanged file's resolution is identical by construction rather
+  than by heuristic. Anything else (a new/renamed/deleted symbol, a
+  signature change, a path-set change, a dekko or resolver-source change)
+  falls back to the previous full repo-wide resolve. Output is unchanged:
+  a test suite asserts `map.json` is identical between incremental and
+  `--full` runs across a range of edit shapes. Only the call pass is
+  cached; refs/heritage/imports/throws/catches are still recomputed in
+  full. The new artifact is small — symbol ids are interned, so it lands
+  at ~3% of the extraction cache's size (17 MB next to tensorflow's
+  559 MB `cache.json`).
+- **A byte-identical no-op `dekko map` still short-circuits** before
+  resolution as before, so it writes no resolve cache. A deleted or
+  corrupt `resolved-calls.json.gz` is therefore repaired on the next run
+  that does real work, not on a no-op run; a corrupt file always reads as
+  a cache miss rather than an error.
+- **Resolution passes no longer build oversized worker pools** (round
+  30, Track 3b) — the parallel gate was a flat 5,000-item floor, so any
+  pass clearing it got the *full* requested worker count regardless of
+  how little work there actually was. In practice that meant a pass with
+  ~7,000 items was handed an 11-worker process pool, and because each
+  worker unpickles its own private copy of the whole repo symbol index
+  under `spawn` (~90-205 MB depending on repo), nearly all of that time
+  was pool setup rather than resolution. spring-boot's reference pass
+  (8,430 items) took 5.84s to do work that takes 0.11s sequentially;
+  tensorflow's throw pass (7,376 items) took 22.52s to do work that
+  takes 0.92s. A new `_pool_workers` now scales the worker count to the
+  work available (≥75,000 items per worker, calibrated from a measured
+  worker sweep) and runs fully sequentially rather than building a
+  single-worker pool. Total resolve time: **19.65s → 5.32s on
+  spring-boot (3.7x), 288.40s → 176.99s on tensorflow**. Output is
+  unchanged — worker count has never affected `map.json`, and a test now
+  asserts that across every count the new logic can pick. This also
+  explains why round 29's `--jobs 0` default flip underdelivered: the
+  extra cores were being spent on index transfer, not resolution.
+
+### Changed
+- **`--jobs N` is now an upper bound rather than a target.** The work
+  available can lower the actual worker count below what you asked for
+  (e.g. `--jobs 11` on a repo whose call count justifies 3 workers runs
+  3). `--jobs 1` still forces fully sequential as before. This affects
+  wall-clock and worker counts only, never output.
+
+## [0.43.53] — 2026-09-14
+
+### Fixed
+- **Incremental (non-`--full`) `dekko map` silently zeroed
+  `throws`/`catches`/`env_reads`/`type_aliases` repo-wide** (round 29,
+  Track 1, CRITICAL) — `cache.py`'s `_filemap_from_dict` manually
+  listed the `FileMap` fields it reconstructed and was never updated
+  for the four newer ones, so every file served from the extraction
+  cache (i.e. every file *not* touched since the last run) came back
+  with those fields empty. One ordinary edit-and-remap cycle was
+  enough to make `query throws`/`query catches`/`query env` return
+  confident false negatives for the whole repo, through all three
+  entry points (bare CLI, daemon auto-regen, MCP `refresh_map`),
+  while the run summary, `dekko status`, and symbol/call-edge counts
+  all looked completely healthy. The on-disk cache always held the
+  data (the write side serializes generically), so the fix is purely
+  read-side; a new round-trip parity test asserts every `FileMap`
+  field survives serialization, so a future field addition can't
+  silently repeat this. Found independently on 5 of 7 eval repos in
+  round 29; verified post-fix on claude-buddy, cline, spring-boot,
+  zed, and tensorflow (baseline counts now survive incremental runs
+  exactly). Maps generated by 0.43.30–0.43.52 should be regenerated
+  (`dekko map --full`) once on this version; the version bump itself
+  invalidates the extraction cache, so a plain `dekko map` after
+  upgrading also fully re-parses.
+- **The "no rev-cache for this commit ... may take a while"
+  disclosure never reached a daemon-routed caller** (round 29,
+  Track 2, HIGH) — with a daemon running, a first-touch
+  `diff`/`affected`/`workset` against an uncached rev either had the
+  note suppressed entirely (the daemon client's own `--jobs 0`
+  override made the daemon-side check conclude "parallel, nothing to
+  disclose") or buffered until the multi-minute resolve finished —
+  either way, the silent-wait-that-looks-like-a-hang problem the
+  round-15 note exists to prevent. The client now prints the
+  disclosure itself, before dispatching the request, with wording
+  that matches what will actually run (all-cores vs. sequential),
+  sharing one message helper with the in-process path so the two
+  can't drift. The detached daemon's stdout/stderr, previously left
+  attached to the long-gone terminal that ran `daemon start`, now
+  redirect to `.dekko/daemon.log`.
+- **`dekko deps` on an all-Go repo led with a bare "0 resolved import
+  edges"** (round 29, item 4a — requested three rounds running) — a
+  new in-band note now explains when the zero comes from languages
+  whose imports dekko deliberately doesn't resolve to in-repo files
+  (Go's fully-qualified module paths), mirroring `query throws`'s
+  existing scope-disclosure framing, in both text and `--json`
+  output.
+- **Coverage/symlink disclosure notes were missing from several read
+  commands** (round 29, item 4b) — `deps`, `stats`, and `search`
+  never surfaced the skipped-file coverage note at all, and `query
+  env`'s text-mode success path never computed it (only its
+  empty-result path did). All four now show the same note the other
+  read commands already print.
+- **`sanity --unused` never set `generic_name_caution` for
+  collision-prone bare names like `error`** (round 29, item 4c) —
+  the data-driven collision signal added in round 28 was wired into
+  the `--all` sweep and the plain-target path but not into
+  `--unused`'s own check, which still called the generic-name test
+  with the collision flag hardcoded off. Now threaded through,
+  matching the other call sites.
+
+### Changed
+- **`dekko map` now defaults to `--jobs 0` (all cores)** (round 29,
+  Track 3, maintainer-approved) — previously the explicit `dekko map`
+  invocation defaulted to sequential even though the auto-regen path
+  every read subcommand uses on a stale map has requested all cores
+  since round 11, so an incremental remap after a one-line edit on a
+  large repo could run *longer* than a full parallel rebuild
+  (tensorflow: 12m24s vs. 5m03s in round 29's measurements). With the
+  flip, the same tensorflow edit-and-remap cycle takes 216s vs.
+  243.6s for `--full --jobs 0` — incremental now beats the full
+  rebuild everywhere measured (spring-boot 31.1s ≈ 31.0s, zed 22.1s
+  vs. 25.1s). Pass `--jobs 1` for a sequential run; small repos and
+  small deltas stay sequential automatically (the parallel pools only
+  engage past existing size thresholds), so tiny-repo runs are
+  unaffected (claude-buddy: 1.09s cold / 0.77s incremental, slightly
+  faster than before).
+
+## [0.43.52] — 2026-09-14
+
+### Fixed
+- **`dekko map <subdir-of-an-already-mapped-repo>` silently forked a
+  second, orphan `.dekko/` root** (round 28, Track 6, LOW) — `dekko
+  map`'s two positional arguments are `[DIR] [SUBPATH]`, so a single
+  argument that happens to be a subdirectory of an already-mapped repo
+  reads as "re-map just this subtree" but was instead treated as
+  "start a brand-new, independent repo root," nested silently inside
+  the subdirectory with no error or warning — spring-boot's report
+  only noticed via `git status` surfacing the untracked nested
+  directory. `dekko map` now detects this and refuses (exit 2) with a
+  suggested corrected command; a new `--force-new-root` flag opts into
+  the independent-root behavior explicitly, for the legitimate case (a
+  vendored subproject deliberately mapped in isolation). A
+  subdirectory that is itself a distinct git repo (a real submodule)
+  is never flagged. Verified on spring-boot's real Gradle multi-module
+  layout: `dekko map core/spring-boot` now rejects with a correct
+  suggested command instead of silently creating
+  `core/spring-boot/.dekko/`, while `dekko map . core/spring-boot`
+  (the correct two-arg form) is unaffected.
+
+## [0.43.51] — 2026-09-14
+
+### Fixed
+- **A symlinked source file was silently double-indexed, phantom-
+  duplicating every symbol it defines** (round 28, Track 2,
+  MEDIUM-HIGH) — `walker.discover()` had no symlink-handling code path
+  at all, so a symlink to a sibling source file got its target's
+  content fully re-parsed a second time under the symlink's own path,
+  with matching line numbers and signatures — silently corrupting
+  fan-in/ambiguity counts with no warning. Symlinked files are now
+  skipped by default (reason `"symlink"`, reported in the run summary
+  and a new `symlink_excluded` coverage note, mirroring the existing
+  `too_large`/`vendored_excluded` notes), matching `git`/`ripgrep`
+  convention. A new `--follow-symlinks` flag restores the previous
+  behavior for callers who genuinely want it (e.g. npm/pnpm workspace
+  symlinks), correctly invalidating a cached map when toggled. Verified
+  independently on the two repos that reproduced this in round 28:
+  claude-buddy (`buddyStateDir`) and spring-boot (`SpringApplication`)
+  — reproducing the original phantom-ambiguity bug exactly via
+  `--follow-symlinks`, confirming the default fix suppresses it, and
+  confirming a byte-identical no-op on both repos' real, unmodified
+  trees.
+
+## [0.43.50] — 2026-09-11
+
+### Fixed
+- **Rev-cache corruption could silently persist a false "100% of repo
+  changed" result** (round 28, Track 1, HIGH) — `diff`/`affected`/
+  `workset` cached the historical-rev side of a comparison under
+  `.dekko/rev-cache/<sha>.json` assuming a cache hit was always safe
+  since a commit's tree is immutable, but a transient read failure
+  while exporting the old tree silently produced an all-empty-string
+  body-hash map that then compared as "everything changed" against the
+  new side, and got cached forever. Three-layer fix: `revcache.save()`
+  now refuses to persist a snapshot whose body map is entirely empty
+  for a non-empty symbol set (logging a `note:` instead); `diff.
+  old_snapshot()` now takes a per-SHA lock (`filelock.
+  try_named_lock`, generalized from `try_regen_lock`) so two concurrent
+  builds for the same rev serialize instead of racing; `diff.compare()`
+  now warns to stderr whenever every shared symbol across a common set
+  of 500+ reports changed with nothing added/removed, since that
+  pattern also matches a pre-existing corrupted cache entry from before
+  this fix. Verified against tensorflow, including reproducing the
+  original symptom byte-for-byte against a hand-corrupted cache entry
+  and confirming the new stderr warning fires.
+- **`dekko deps` misresolved bare, repo-root-relative JS/TS imports as
+  external** (round 28, Track 3, MEDIUM) — `_resolve_import_js` only
+  resolved a bare specifier via a tsconfig/jsconfig path alias, so a
+  repo-root-relative bare import with no governing alias (`import {
+  ... } from 'src/bootstrap/state.js'`) fell straight to `external`
+  even when the target file existed in the repo. Added a third
+  resolution attempt, gated on the specifier containing a `/` (so a
+  single-segment specifier like `'lodash'` still resolves to
+  `external`, as a real npm package name should): try the bare
+  specifier as a path relative to the repo root, using the same
+  extension/index-file candidate ladder relative imports already use.
+  Verified on claude-code: `dekko deps --file src/main.tsx`'s external
+  count dropped from 41 to 10, matching the 34 real internal files the
+  originating report identified.
+- **`sanity`'s type-annotation classifier didn't cover Rust** (round
+  28, Track 4, MEDIUM) — `CAUSE_TYPE_ANNOTATION` existed since round
+  25 for TS/JS but excluded Rust's grammar entirely, so every Rust
+  type-position hit (`impl Trait for Type`, turbofish `Type::<Concrete>`,
+  a bare reference-type mention, a `-> Type` return position) fell
+  through to `CAUSE_UNEXPLAINED`, making `sanity --all
+  --fail-on-unexplained` unusable as a CI gate on Rust repos with any
+  type-name reuse. Added `"rust"` to `_TYPE_ANNOTATION_GRAMMARS` plus
+  five new templates covering `impl Trait for Type`, plain inherent
+  `impl Type`, turbofish, `-> Type` return positions, and bare
+  reference-type mentions inside nested parameter lists. Verified on
+  zed: the master report's `NavHistory` repro went from 3/8 to 8/8
+  grep-only hits correctly classified.
+- **`sanity`'s generic-name caution relied on a static, hand-curated
+  word list** (round 28, Track 5, MEDIUM) — `_is_generic_name` checked
+  a fixed 28-word list even though the map already computes real,
+  per-repo collision data via `dekko ambiguous`. `_is_generic_name` now
+  also consults `ambiguous.collision_names()` (computed once per
+  `sanity` invocation), additively: any name that has genuinely
+  collided 2+ ways in this repo's own call graph now gets the
+  directional caution, whether or not it's in the curated list. Also
+  extended `_LOCAL_DECL_TEMPLATE`'s local-binding coverage to
+  `catch (error) {` parameter bindings and bare interface/type field
+  declarations (`error?: string;`), the same underlying "local
+  binding, not a reference" shape. Verified on cline: all seven of the
+  report's uncurated collision names (`resolve`, `close`, `invoke`,
+  `dispose`, `clear`, `error`, plus the already-curated `delete`) now
+  correctly report `CAUSE_GENERIC_NAME`.
+
 ## [0.43.49] — 2026-09-09
 
 ### Fixed

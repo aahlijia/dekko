@@ -280,6 +280,13 @@ def _add_map_options(parser: argparse.ArgumentParser) -> None:
         help="skip files larger than this (default: 1000000)",
     )
     parser.add_argument(
+        "--follow-symlinks",
+        action="store_true",
+        help="index symlinked source files under their own path instead "
+        "of skipping them (default: skip, to avoid double-indexing the "
+        "symlink target's symbols under two paths)",
+    )
+    parser.add_argument(
         "--quiet", action="store_true", help="suppress the summary on stdout"
     )
     parser.add_argument(
@@ -288,6 +295,15 @@ def _add_map_options(parser: argparse.ArgumentParser) -> None:
         help="overwrite an existing full-repo map with a subpath-"
         "scoped one at the default .dekko/ location, instead of "
         "refusing (see the subpath-narrowing guard this bypasses)",
+    )
+    parser.add_argument(
+        "--force-new-root",
+        action="store_true",
+        help="map DIR as its own independent repo root even though it "
+        "is a subdirectory of an already-mapped repo, instead of "
+        "refusing (see the orphan-root guard this bypasses — the "
+        "one-positional-arg form 'dekko map SUBDIR' usually means "
+        "'re-map just this subtree', which is 'dekko map ROOT SUBDIR')",
     )
 
 
@@ -402,9 +418,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_map.add_argument(
         "--jobs",
         type=int,
-        default=1,
+        default=0,
         metavar="N",
-        help="parallel extraction workers (1 = sequential, 0 = all cores)",
+        help="parallel extraction/resolution workers (0 = all cores, "
+        "1 = sequential; default: 0)",
     )
     _add_map_options(p_map)
     p_map.set_defaults(func=_cmd_map)
@@ -1709,8 +1726,103 @@ def mcp_uninstall() -> int:
     return 0
 
 
+def _find_ancestor_map_root(path: Path) -> Path | None:
+    """Nearest ancestor directory (at or above ``path``) already
+    holding a ``.dekko/`` map, or ``None``.
+
+    Checks for an existing map *before* checking for a ``.git``
+    boundary at each level, not after -- the directory holding the map
+    is almost always also the git root (an ordinary top-level
+    ``dekko map .``), so checking ``.git`` first would immediately
+    short-circuit the walk right at the one directory this function
+    exists to find, defeating the check in the overwhelmingly common
+    case. A ``.git`` found at a level with no map of its own still
+    stops the walk (return ``None``) -- that boundary marks a distinct,
+    nested git repository (e.g. a submodule) between ``path`` and
+    whatever might be further up, not a subtree of the same repo.
+    Mapping a nested git repo as its own root is a legitimate,
+    intentional use case, not the footgun this function exists to
+    catch -- ``path`` itself is checked first (not just its ancestors)
+    so that mapping a submodule directory directly is never flagged,
+    regardless of what sits above it, and a directory that already has
+    its own map is never reported as its own "ancestor" (re-mapping a
+    directory in place is not the orphan-root surprise). A submodule's
+    ``.git`` is often a file (pointing at ``.git/modules/<name>``)
+    rather than a directory in modern git -- ``Path.exists()`` is true
+    for either, so no special-casing needed.
+    """
+    target = path.resolve()
+    current = target
+    while True:
+        has_map = (current / ".dekko" / "map.json").exists() or (
+            current / ".dekko" / "provenance.json"
+        ).exists()
+        if has_map:
+            return current if current != target else None
+        if (current / ".git").exists():
+            return None
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
+def _reject_orphan_root(
+    directory: str, subpath: str | None, force_new_root: bool
+) -> int | None:
+    """Detect ``dekko map <subdir-of-an-already-mapped-repo>`` given as
+    a single positional argument.
+
+    ``dekko map``'s ``[DIR] [SUBPATH]`` positional order means a
+    one-arg invocation intending "re-map just this subtree" (the
+    natural reading if the argument order isn't memorized) is instead
+    read as "treat this directory as a brand-new repo root", silently
+    forking a second, independent ``.dekko/`` tree nested inside the
+    subdirectory (round-28 §3.6 — spring-boot's report only noticed via
+    ``git status`` surfacing the untracked nested directory).
+
+    Only fires when no ``subpath`` was given (a real two-arg
+    ``dekko map ROOT SUBPATH`` is never ambiguous this way) and
+    ``directory`` isn't ``"."`` (mapping the cwd is never a
+    subdirectory surprise). ``force_new_root`` is the escape hatch for
+    the legitimate case — a vendored subproject deliberately mapped in
+    isolation without its own git submodule boundary.
+
+    Args:
+        directory: The raw ``DIR`` argument as the user typed it (used
+            verbatim in the suggested-command message).
+        subpath: The parsed ``SUBPATH`` positional, if any.
+        force_new_root: Whether ``--force-new-root`` was passed.
+
+    Returns:
+        ``2`` (caller should return without mapping) when the
+        orphan-root pattern is detected; ``None`` to let the run
+        proceed.
+    """
+    if subpath is not None or directory == "." or force_new_root:
+        return None
+    resolved = Path(directory).resolve()
+    ancestor = _find_ancestor_map_root(resolved)
+    if ancestor is None:
+        return None
+    rel = resolved.relative_to(ancestor)
+    print(
+        f"dekko: '{directory}' is a subdirectory of an already-mapped "
+        f"repo at '{ancestor}' -- did you mean 'dekko map {ancestor} "
+        f"{rel}'? Pass --force-new-root to map '{directory}' as its "
+        "own independent repo root anyway.",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def _cmd_map(args: argparse.Namespace) -> int:
     """Adapter: ``dekko map DIR`` → ``run_map`` namespace."""
+    code = _reject_orphan_root(
+        args.dir, args.subpath, getattr(args, "force_new_root", False)
+    )
+    if code is not None:
+        return code
     args.map_dir = args.dir
     return repo_ops.run_map(args)
 
@@ -1996,6 +2108,7 @@ def run_deps(args: argparse.Namespace) -> int:
         export_fmt=args.export_fmt,
         max_nodes=args.max_nodes,
         out_path=out,
+        root=Path(args.root).resolve(),
     )
 
 
@@ -2490,9 +2603,25 @@ def _legacy_main(args_list: list[str]) -> int:
             config, args.cline_scope, force=args.cline_force
         )
 
+    return _legacy_map_dispatch(args)
+
+
+def _legacy_map_dispatch(args: argparse.Namespace) -> int:
+    """``_legacy_main``'s tail: the ``--map``/bare-map dispatch.
+
+    Split out purely to keep ``_legacy_main`` under this repo's
+    Ruff-enforced cyclomatic-complexity cap -- unrelated to the
+    preceding install/uninstall dispatch chain otherwise.
+    """
     if args.map_dir is None:
         build_subcommand_parser().print_help()
         return 0
+
+    code = _reject_orphan_root(
+        args.map_dir, args.subpath, getattr(args, "force_new_root", False)
+    )
+    if code is not None:
+        return code
 
     args.if_stale = False
     return repo_ops.run_map(args)

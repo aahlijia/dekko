@@ -227,6 +227,23 @@ def test_search_exclusion_note_absent_with_include_tests(
     assert "note" not in doc
 
 
+def test_search_discloses_unsupported_file_coverage_gap(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Round-29 Track 4b: `search` never disclosed skipped-file
+    # coverage at all -- a symbol living only in a file dekko can't
+    # parse is invisible to search the same way it's invisible to
+    # query, but only query carried the caveat.
+    root = make_mapped_repo(
+        dict(SRC, **{"Card.astro": "---\nconst x = 1;\n---\n"})
+    )
+    assert (
+        cli.main(["search", "http retry", "--root", str(root), "--json"]) == 0
+    )
+    doc = _json_out(capsys)
+    assert "no parser for: astro" in doc["note"]
+
+
 def test_search_kind_filter(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

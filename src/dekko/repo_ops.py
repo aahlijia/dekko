@@ -24,11 +24,14 @@ from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from importlib.metadata import version as _pkg_version
+from multiprocessing.context import BaseContext
 from pathlib import Path
 
 from dekko.storage import cache as cache_mod
+from dekko.storage import resolvecache
 from dekko import classify
 from dekko.core import grammars
+from dekko.core import resolver as resolver_mod
 from dekko.render import mapfile
 from dekko.render import render_md
 from dekko.storage import filelock
@@ -145,8 +148,8 @@ def _extract_misses(
     if workers <= 1 or len(misses) < _PARALLEL_MIN:
         return {rel: extract_one(root, rel) for rel in misses}
 
-    def _run(w: int) -> dict[str, FileMap | None]:
-        pool = ProcessPoolExecutor(max_workers=w)
+    def _run(w: int, ctx: BaseContext) -> dict[str, FileMap | None]:
+        pool = ProcessPoolExecutor(max_workers=w, mp_context=ctx)
         try:
             futures = [pool.submit(extract_one, root, rel) for rel in misses]
             results = _run_pool_bounded(pool, futures)
@@ -165,6 +168,7 @@ def map_repository(
     cache: cache_mod.IncrementalCache | None = None,
     jobs: int = 1,
     candidates: list[str] | None = None,
+    follow_symlinks: bool = False,
 ) -> tuple[list[FileMap], list[tuple[str, str]]]:
     """Discover and extract every mappable file under a root.
 
@@ -184,6 +188,8 @@ def map_repository(
         candidates: Explicit repo-relative paths to consider, bypassing
             ``walker.discover``'s own tracked-file discovery — see that
             function's ``candidates`` parameter.
+        follow_symlinks: See ``walker.discover``'s parameter of the
+            same name.
 
     Returns:
         ``(file_maps, skipped)`` where ``skipped`` pairs paths with
@@ -195,6 +201,7 @@ def map_repository(
         excludes=excludes,
         max_file_size=max_file_size,
         candidates=candidates,
+        follow_symlinks=follow_symlinks,
     )
     extracted: dict[str, FileMap] = {}
     misses: list[str] = []
@@ -448,6 +455,8 @@ def _map_run_is_noop(
         prov.get("subpath") == args.subpath
         and prov.get("excludes", []) == list(args.exclude)
         and prov.get("max_file_size") == args.max_file_size
+        and prov.get("follow_symlinks", False)
+        == getattr(args, "follow_symlinks", False)
     )
     version_match = (
         prov.get("tool_version") == _pkg_version("dekko")
@@ -549,6 +558,34 @@ def _maybe_persist_excludes(
         cache_mod.persist_dekkoignore(root, args.exclude)
 
 
+def _reuse_plan(
+    root: Path,
+    args: argparse.Namespace,
+    cache: cache_mod.IncrementalCache | None,
+    files: list[FileMap],
+) -> resolver_mod.ResolveReuse | None:
+    """Cached call resolution this run may reuse, if any.
+
+    Round 30 Track 1: an incremental run used to re-resolve the whole
+    repo, so it only ever saved tree-sitter extraction. This lets
+    unchanged files keep their previously resolved call edges.
+
+    Args:
+        root: Repository root.
+        args: Parsed map arguments; ``--full`` opts out entirely.
+        cache: This run's extraction cache, or ``None`` with
+            ``--no-json`` (no cache, so nothing to key reuse on).
+        files: Every mapped file.
+
+    Returns:
+        A reuse plan, or ``None`` to resolve the whole repo as before.
+    """
+    if cache is None or getattr(args, "full", False):
+        return None
+
+    return resolvecache.build_reuse(root, files, cache)
+
+
 def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
     """Execute the mapping action for parsed CLI arguments.
 
@@ -586,6 +623,7 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
         max_file_size=args.max_file_size,
         cache=cache,
         jobs=getattr(args, "jobs", 1),
+        follow_symlinks=getattr(args, "follow_symlinks", False),
     )
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     if not files:
@@ -605,6 +643,7 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
         files,
         workers=resolve_workers(getattr(args, "jobs", 1)),
         root=root,
+        reuse=_reuse_plan(root, args, cache, files),
     )
     label = root.name + (f"/{args.subpath}" if args.subpath else "")
 
@@ -642,6 +681,11 @@ def run_map(args: argparse.Namespace, persist_excludes: bool = True) -> int:
 
     if cache is not None:
         cache_mod.save(root, cache)
+        # Written on every successful run, gate hit or miss: a miss that
+        # left no cache behind would make the next run miss too, forever.
+        resolvecache.save(
+            root, resolver_mod.partition_resolution(files, graph), cache
+        )
 
     if not args.quiet:
         print(
@@ -698,6 +742,7 @@ def _write_json_output(
         max_file_size=args.max_file_size,
         graph=graph,
         skipped=skipped,
+        follow_symlinks=getattr(args, "follow_symlinks", False),
     )
     json_path.parent.mkdir(parents=True, exist_ok=True)
     mapfile.atomic_write_bytes(
@@ -723,6 +768,8 @@ def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
         prov.get("subpath") == args.subpath
         and prov.get("excludes", []) == list(args.exclude)
         and prov.get("max_file_size") == args.max_file_size
+        and prov.get("follow_symlinks", False)
+        == getattr(args, "follow_symlinks", False)
     )
     if not options_match:
         return False
@@ -1007,6 +1054,7 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
         subpath=prov.get("subpath"),
         exclude=list(prov.get("excludes", [])),
         max_file_size=prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE),
+        follow_symlinks=prov.get("follow_symlinks", False),
         output=None,
         json_output=None,
         no_json=False,

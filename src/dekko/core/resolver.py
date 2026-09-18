@@ -97,17 +97,22 @@ receiver/arity, ``(g *IDGenerator) Generate(...)`` in ``pkg/markdown``
 tests for a change a same-package unit test directly covered.
 """
 
+import gc
+import hashlib
 import json
 import multiprocessing
+import os
 import posixpath
 import re
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
+from multiprocessing.context import BaseContext
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
@@ -183,7 +188,62 @@ MODULE_CALLER_SUFFIX = "::<module>"
 # machine): this threshold is deliberately well below that scale so
 # medium repos see a win too, while trivial ones (most test fixtures)
 # stay sequential.
+#
+# Round 30 (.features/fixes/round30/03-resolve-pool-memory-overhead.md):
+# this alone is not a sufficient gate. It answers "is there enough work
+# to parallelize at all" but says nothing about how many workers that
+# work justifies, and each worker costs a private, unpickled copy of the
+# whole repo index under ``spawn``. spring-boot (285,609 calls, far past
+# this threshold) measured a *net loss* at 11 workers: 6.82s pooled vs.
+# 4.91s sequential. ``_pool_workers`` below applies the two additional
+# limits that fix that; this constant survives as the floor below which
+# no pool is ever built.
 _RESOLVE_PARALLEL_MIN_ITEMS = 5_000
+
+# Minimum items (raw calls/refs/throws/catches) a resolve worker must
+# have to be worth its own copy of the repo index.
+#
+# Calibrated by measured sweep on spring-boot (round 30, 11-core/18 GB;
+# `_resolve_all`, same work, varying worker count):
+#
+#     workers   wall    speedup   items/worker
+#           1   4.91s     1.00x        285,609
+#           2   4.59s     1.07x        142,804
+#           3   3.99s     1.23x         95,203   <- optimum
+#           4   4.29s     1.14x         71,402
+#           6   6.04s     0.81x         47,601   <- net loss
+#           8   6.45s     0.76x         35,701
+#          11   6.82s     0.72x         25,964
+#
+# The curve peaks near 95K items/worker and goes net-negative below
+# ~50K. 75_000 puts spring-boot at its measured optimum (3 workers) and
+# leaves tensorflow (1,395,061 calls) unconstrained by this limit — its
+# worker count is governed by the memory cap instead, which is the
+# intended division of labor between the two.
+_RESOLVE_MIN_ITEMS_PER_WORKER = 75_000
+
+# NOTE (round 30): a RAM-based worker cap was built here and then
+# REMOVED after measurement refuted it. The theory was sound-looking --
+# each worker holds a private ~2.5 GB copy of the indices under
+# ``spawn``, so tensorflow at 11 workers attempts ~27.5 GB of live
+# objects on an 18 GB machine and measured only 35% parallel efficiency.
+# The predicted fix (fewer workers to stay out of swap) does not
+# materialize. Sweeping tensorflow in both orders, to control for host
+# drift:
+#
+#     workers   order 11->6->4   order 4->6->11
+#           4          240.04s          268.45s
+#           6          199.59s          252.48s
+#          11          152.93s          250.66s
+#
+# Fewer workers never won. macOS's memory compression evidently absorbs
+# ~1.5x oversubscription far better than a swap model predicts, so
+# capping only gave up real parallelism. Do not reintroduce a proactive
+# memory cap without measurement on a genuinely RAM-starved machine
+# (untested here: an 18 GB host cannot simulate an 8 GB one). The
+# pathological case already has a reactive guard --
+# ``run_pooled_with_retry`` retries a ``BrokenProcessPool`` at
+# ``_POOL_RETRY_WORKERS``.
 
 # How many chunks to build per worker when parallelizing a resolution
 # pass (round 17 scaling investigation:
@@ -245,6 +305,304 @@ POOL_RESULT_TIMEOUT_S = 600
 
 _PoolResultT = TypeVar("_PoolResultT")
 
+# Symbol fields the resolution ladder can never read, so a change to one
+# of them cannot change any other file's resolution. Everything else is
+# compared when deciding whether cached resolution is still valid (see
+# ``symbol_projection``) -- the comparison is driven off
+# ``dataclasses.fields(Symbol)`` minus this set, never a hand-kept
+# inclusion list, so a field added to ``Symbol`` later is compared by
+# default. The failure direction is then "invalidate more than strictly
+# necessary", never "reuse something stale".
+#
+# ``start_line``/``end_line`` are the load-bearing exclusions: editing a
+# function body shifts the line numbers of every symbol below it, and if
+# those counted as changes the cache would never hit on the exact edit
+# shape it exists to serve. They are safe to exclude because symbol ids
+# are line-independent (``extractor.py`` builds ``relpath::Qualname``),
+# so no cached edge can be invalidated by a line shift alone.
+_RESOLUTION_BLIND_SYMBOL_FIELDS = frozenset({"start_line", "end_line", "doc"})
+
+_PROJECTED_SYMBOL_FIELDS: tuple[str, ...] = ()
+
+
+def _projected_symbol_fields() -> tuple[str, ...]:
+    """Symbol field names compared by ``symbol_projection``, cached."""
+    global _PROJECTED_SYMBOL_FIELDS
+    if not _PROJECTED_SYMBOL_FIELDS:
+        _PROJECTED_SYMBOL_FIELDS = tuple(
+            f.name
+            for f in fields(Symbol)
+            if f.name not in _RESOLUTION_BLIND_SYMBOL_FIELDS
+        )
+    return _PROJECTED_SYMBOL_FIELDS
+
+
+def symbol_projection(symbols: list[Symbol] | list[dict]) -> str:
+    """Canonical form of the parts of ``symbols`` resolution can read.
+
+    Two symbol lists with the same projection are interchangeable as far
+    as every *other* file's resolution is concerned, so cached
+    resolution for unchanged files stays valid across an edit that leaves
+    the projection intact.
+
+    Accepts ``Symbol`` objects (the freshly extracted side) or the plain
+    dicts the extraction cache stores (the previous side), and normalizes
+    both through JSON so a ``Param`` dataclass and its cached dict form
+    compare equal.
+
+    Args:
+        symbols: Symbols of one file, in extraction order. Order is
+            significant and preserved: the ``#N`` suffix the extractor
+            appends to same-qualname collisions is assigned in
+            extraction order, so reordering two colliding symbols swaps
+            which id means which symbol while leaving the *set* of ids
+            identical.
+
+    Returns:
+        A stable string; compare with ``==``.
+    """
+    names = _projected_symbol_fields()
+    rows = []
+    for sym in symbols:
+        d = asdict(sym) if isinstance(sym, Symbol) else sym
+        rows.append({name: d.get(name) for name in names})
+    return json.dumps(rows, sort_keys=True, separators=(",", ":"))
+
+
+_RESOLVE_FINGERPRINT = ""
+
+
+def resolve_fingerprint() -> str:
+    """Hash of this module's source, for invalidating cached resolution.
+
+    The extraction cache's existing ``spec_hash``
+    (``languages.spec_fingerprint``) covers what the *extractor* pulls
+    out of a file, and says nothing about the resolution ladder. Without
+    a separate key, editing ``_pick_candidate`` and re-running would
+    silently reuse edges resolved by the old ladder -- a footgun aimed
+    squarely at whoever is working on the resolver.
+
+    Hashing the whole module over-invalidates (a comment edit costs one
+    full resolve) and that is the right trade: the alternative, a
+    hand-bumped constant, relies on every future contributor remembering.
+
+    Returns:
+        A stable hex digest, or ``""`` when the source can't be read (a
+        frozen/zipped install, where the released version string in the
+        cache document is the operative key anyway).
+    """
+    global _RESOLVE_FINGERPRINT
+    if not _RESOLVE_FINGERPRINT:
+        try:
+            source = Path(__file__).read_bytes()
+        except OSError:
+            return ""
+        _RESOLVE_FINGERPRINT = hashlib.sha256(source).hexdigest()
+    return _RESOLVE_FINGERPRINT
+
+
+@dataclass(frozen=True)
+class ResolveReuse:
+    """Per-file ``_resolve_all`` output that may be reused verbatim.
+
+    Built by ``storage.resolvecache.build_reuse`` only when the global
+    resolution inputs are provably identical to the cached run, so that
+    an unchanged file's resolution is identical by construction rather
+    than by heuristic. See
+    ``.features/fixes/round30/01-incremental-resolution.md``.
+
+    Attributes:
+        cached: ``path -> {"edges": [...], "ambiguous": [...],
+            "external": [...]}``, as written by
+            ``partition_resolution``.
+        dirty: Paths whose cached entry must *not* be used, because the
+            file changed (or was never resolved). Every path in the
+            repo is either in ``dirty`` or has a usable ``cached``
+            entry; nothing may fall between the two, or its edges would
+            silently vanish from the map.
+    """
+
+    cached: dict[str, dict]
+    dirty: frozenset[str]
+
+
+def _caller_path(caller_id: str) -> str:
+    """Repo-relative path owning ``caller_id``.
+
+    Symbol ids are ``relpath::Qualname`` (``extractor.py``), and module
+    pseudo-ids are ``relpath::<module>``, so the path is everything
+    before the first separator.
+    """
+    return caller_id.split("::", 1)[0]
+
+
+def partition_resolution(
+    files: list[FileMap], graph: "CallGraph"
+) -> dict[str, dict]:
+    """Split a resolved call graph into per-owning-file entries.
+
+    Sound because a call's ``caller_id`` always belongs to the file the
+    call was extracted from -- the same invariant ``_resolve_all``'s
+    chunking already relies on, so no two files can produce a colliding
+    edge/ambiguous/external key.
+
+    Args:
+        files: Every mapped file, so a file that resolved to nothing
+            still gets an (empty) entry. Without that, such a file would
+            look "never resolved" to ``build_reuse`` and be re-resolved
+            on every run forever.
+        graph: The resolved graph to split.
+
+    Returns:
+        ``path -> {"edges", "ambiguous", "external"}``, JSON-ready.
+    """
+    out: dict[str, dict] = {
+        fm.path: {"edges": [], "ambiguous": [], "external": []} for fm in files
+    }
+    for edge in graph.edges:
+        entry = out.get(_caller_path(edge.caller))
+        if entry is not None:
+            entry["edges"].append([edge.caller, edge.callee, edge.lines])
+    for caller, name, cands in graph.ambiguous:
+        entry = out.get(_caller_path(caller))
+        if entry is not None:
+            entry["ambiguous"].append([caller, name, cands])
+    for ext in graph.external:
+        entry = out.get(_caller_path(ext.caller))
+        if entry is not None:
+            entry["external"].append([ext.caller, ext.callee, ext.lines])
+    return out
+
+
+def _merge_reused(
+    reuse: ResolveReuse,
+    edges: dict[tuple[str, str], set[int]],
+    ambiguous: dict[tuple[str, str], list[str]],
+    external: dict[tuple[str, str], set[int]],
+) -> None:
+    """Fold every non-dirty cached entry into the fresh accumulators."""
+    for path, entry in reuse.cached.items():
+        if path in reuse.dirty:
+            continue
+        for caller, callee, lines in entry.get("edges", ()):
+            edges.setdefault((caller, callee), set()).update(lines)
+        for caller, name, cands in entry.get("ambiguous", ()):
+            ambiguous.setdefault((caller, name), list(cands))
+        for caller, target, lines in entry.get("external", ()):
+            external.setdefault((caller, target), set()).update(lines)
+
+
+def _pool_workers(workers: int, items: int) -> int:
+    """How many resolve workers this workload justifies.
+
+    Takes the strictest of two limits: the caller's own request, and the
+    work available (``_RESOLVE_MIN_ITEMS_PER_WORKER`` per worker, since
+    each worker costs a private copy of the whole repo index under
+    ``spawn``). Returns 1 to mean "run sequentially, build no pool at
+    all" -- a pool of one worker is strictly worse than the in-process
+    path, since it pays the full index transfer for zero parallelism.
+
+    A third limit, a RAM-based cap, was implemented here and removed
+    after measurement refuted it -- see the note above
+    ``_RESOLVE_CHUNK_OVERSUBSCRIPTION`` for the sweep data and why not to
+    reintroduce it blind.
+
+    Round 30: before this existed, each pass gated only on
+    ``workers > 1 and items >= _RESOLVE_PARALLEL_MIN_ITEMS``, which let
+    spring-boot run 11 workers on work that justified 3 and measured a
+    net loss against sequential. See
+    ``.features/fixes/round30/03-resolve-pool-memory-overhead.md``.
+
+    Args:
+        workers: Worker count the caller asked for.
+        items: Units of work in this pass (raw calls, refs, throws, or
+            catch clauses, depending on the pass).
+
+    Returns:
+        Worker count to build the pool with, or 1 for sequential.
+    """
+    if workers <= 1 or items < _RESOLVE_PARALLEL_MIN_ITEMS:
+        return 1
+    justified = items // _RESOLVE_MIN_ITEMS_PER_WORKER
+    chosen = min(workers, justified)
+    return chosen if chosen >= 2 else 1
+
+
+# Process-wide cached verdict of ``_choose_pool_mp_context`` -- see
+# ``_pool_mp_context`` for why the decision is made exactly once.
+_pool_ctx_cache: BaseContext | None = None
+
+
+def _pool_mp_context() -> BaseContext:
+    """The (cached) start method for dekko's process pools.
+
+    Decided once per process, at the first pool build, and reused for
+    every later one. The cache is not an optimization -- it is what
+    makes the thread gate sound: ``ProcessPoolExecutor.shutdown(
+    wait=False)`` (every call site's teardown, deliberately, since
+    round 22) can leave the executor's manager/feeder threads alive
+    for a moment after a pool finishes, so a naive per-pool check
+    would see the *extraction* pool's harmless ghost threads and
+    silently downgrade every *resolve* pass to ``spawn`` in the exact
+    single-threaded CLI path fork exists for. At first-pool time the
+    check is honest: the CLI/MCP parent has one thread, and the daemon
+    has already started its status thread before any request can
+    build a pool, so each process caches the verdict that is correct
+    for its whole lifetime.
+
+    Returns:
+        The multiprocessing context every pool build should pass as
+        ``mp_context=``.
+    """
+    global _pool_ctx_cache
+    if _pool_ctx_cache is None:
+        _pool_ctx_cache = _choose_pool_mp_context()
+
+    return _pool_ctx_cache
+
+
+def _choose_pool_mp_context() -> BaseContext:
+    """Start method for dekko's process pools: ``fork`` when provably safe.
+
+    ``fork`` gives workers copy-on-write access to the parent's memory:
+    the resolution indices are not pickled, transferred, or duplicated
+    per worker the way they are under ``spawn`` (round 30 measured
+    ~205 MB pickled per worker expanding to ~2.5 GB live on a
+    tensorflow-scale repo -- see ``.features/fixes/round30/
+    03b-fork-and-single-pool-designs.md``). Linux got this for free as
+    the platform default through Python 3.13; choosing the context
+    explicitly both extends it to macOS and pins it on Linux before
+    3.14's ``forkserver`` default flip silently takes it away
+    (``forkserver`` re-pickles initargs per worker, so it has
+    ``spawn``'s transfer cost -- it buys nothing here).
+
+    ``fork`` is only safe from a single-threaded parent, so the gate is
+    a runtime thread-count check at pool-build time -- the daemon (its
+    status thread is always running while a request executes) can never
+    pass it, with no plumbing to forget. Windows has no ``fork`` at
+    all. ``DEKKO_POOL_START_METHOD`` is the escape hatch, consulted
+    only when the safety gates would allow ``fork``: ``spawn`` opts a
+    problem host back out, ``fork`` is an explicit default. A
+    first-attempt failure under ``fork`` is retried under ``spawn`` by
+    ``run_pooled_with_retry``, so a host where ``fork`` misbehaves
+    degrades to exactly the pre-round-30 behavior at the cost of one
+    wasted attempt.
+
+    Returns:
+        The freshly chosen context. Callers go through
+        ``_pool_mp_context``, which caches the first verdict for the
+        life of the process -- including this function's env-var read.
+    """
+    if sys.platform == "win32":
+        return multiprocessing.get_context("spawn")
+    if threading.active_count() > 1:
+        return multiprocessing.get_context("spawn")
+    forced = os.environ.get("DEKKO_POOL_START_METHOD")
+    if forced in ("spawn", "fork"):
+        return multiprocessing.get_context(forced)
+
+    return multiprocessing.get_context("fork")
+
 
 class PoolStalledError(RuntimeError):
     """A process-pool future made no progress within its timeout.
@@ -259,29 +617,46 @@ class PoolStalledError(RuntimeError):
     """
 
 
-def _pool_retry_note(what: str, retry_workers: int) -> None:
+def _pool_retry_note(what: str, retry_workers: int, forked: bool) -> None:
     """Print the process-pool-retry disclosure note to stderr.
 
     Mirrors round 15's ``_maybe_warn_sequential`` pattern (a one-line
     ``note:`` on stderr before a slower fallback path runs) so a
     caller that ends up waiting longer for a reduced-parallelism retry
-    isn't left in the dark about why.
+    isn't left in the dark about why. When the first attempt ran under
+    ``fork``, the retry also switches start method to ``spawn`` (see
+    ``run_pooled_with_retry``), and the note says so -- the disclosure
+    should name the actual mechanism change, not just the worker count.
     """
     plural = "" if retry_workers == 1 else "s"
+    switched = ", switching fork -> spawn" if forked else ""
     print(
         f"note: process pool failed during {what} (likely CPU "
         "contention from another concurrent dekko process on this "
         f"machine) -- retrying with reduced parallelism "
-        f"({retry_workers} worker{plural})",
+        f"({retry_workers} worker{plural}{switched})",
         file=sys.stderr,
     )
 
 
 def run_pooled_with_retry(
-    run: Callable[[int], _PoolResultT], workers: int, what: str
+    run: Callable[[int, BaseContext], _PoolResultT],
+    workers: int,
+    what: str,
 ) -> _PoolResultT:
     """Run a process-pool step, retrying once at reduced parallelism if
     the pool itself breaks.
+
+    Round 30 (c): also chooses the pool's start method. The first
+    attempt runs under ``_pool_mp_context()`` (``fork`` from a provably
+    single-threaded POSIX parent, ``spawn`` otherwise); the retry
+    always runs under ``spawn``. A first-attempt failure under ``fork``
+    is at least as likely to be fork-specific (a macOS Objective-C
+    ``+initialize`` abort in a worker is delivered as exactly
+    ``BrokenProcessPool``) as it is the round-17 contention case, and
+    retrying under ``spawn`` covers both causes at once -- ``fork`` is
+    strictly opportunistic, and its worst case is one wasted attempt
+    followed by the previously-shipped behavior.
 
     ``BrokenProcessPool`` most often means sibling multiprocessing
     contention on the host machine starved worker-process startup
@@ -323,6 +698,7 @@ def run_pooled_with_retry(
 
     Args:
         run: Builds a fresh pool at the given worker count and
+            multiprocessing context (pass it as ``mp_context=``) and
             returns the merged result. Called once, or twice on a
             first-attempt ``BrokenProcessPool``; must be safe to call
             again with no partial state left visible to the caller
@@ -341,15 +717,17 @@ def run_pooled_with_retry(
             ``POOL_RESULT_TIMEOUT_S``.
     """
     multiprocessing.set_executable(sys.executable)
+    ctx = _pool_mp_context()
     try:
         try:
-            return run(workers)
+            return run(workers, ctx)
         except BrokenProcessPool:
             retry_workers = min(workers, _POOL_RETRY_WORKERS)
-            _pool_retry_note(what, retry_workers)
+            forked = ctx.get_start_method() == "fork"
+            _pool_retry_note(what, retry_workers, forked)
             time.sleep(_POOL_RETRY_DELAY_S)
             multiprocessing.set_executable(sys.executable)
-            return run(retry_workers)
+            return run(retry_workers, multiprocessing.get_context("spawn"))
     except PoolTimeoutError as exc:
         raise PoolStalledError(
             f"process pool made no progress during {what} within "
@@ -484,7 +862,10 @@ def _init_resolve_worker(
 
 
 def resolve(
-    files: list[FileMap], workers: int = 1, root: Path | None = None
+    files: list[FileMap],
+    workers: int = 1,
+    root: Path | None = None,
+    reuse: ResolveReuse | None = None,
 ) -> CallGraph:
     """Resolve every raw call across the repo into a call graph.
 
@@ -501,6 +882,15 @@ def resolve(
             (the default) skips that discovery entirely — every caller
             that doesn't pass a real root sees byte-identical behavior
             to before this parameter existed.
+        reuse: Cached per-file call resolution to reuse for unchanged
+            files, from ``storage.resolvecache.build_reuse``. ``None``
+            (the default, and every caller except ``run_map``) resolves
+            the whole repo exactly as before. Only the *call* pass is
+            reusable; refs/heritage/imports/throws/catches are always
+            recomputed in full — they are a small share of the cost and
+            caching them would drag in path-set and tsconfig
+            invalidation questions the call pass doesn't have. See
+            ``.features/fixes/round30/01-incremental-resolution.md``.
 
     Returns:
         The resolved ``CallGraph`` with bidirectional adjacency.
@@ -511,56 +901,90 @@ def resolve(
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
 
-    edges, ambiguous, external = _resolve_all(
-        files,
-        index,
-        by_name_path,
-        imports_by_file,
-        repo_stems,
-        symbols_by_id,
-        workers,
+    # Round 30 (c): under fork-context pools, CPython refcounting
+    # dirties copy-on-write pages on mere *reads*, so each worker
+    # progressively re-privatizes index pages as it touches them.
+    # gc.freeze() moves everything currently alive (the FileMaps and
+    # the five indices built above) into the permanent generation so
+    # at least the GC's own per-object header writes stop forcing
+    # copies. Refcount writes have no stdlib mitigation; this is the
+    # cheap half. Skipped entirely unless a fork pool is actually
+    # possible, so spawn-context behavior is byte-for-byte unchanged.
+    fork_pools = (
+        workers > 1 and _pool_mp_context().get_start_method() == "fork"
     )
+    if fork_pools:
+        gc.freeze()
+    try:
+        # Only the changed files need re-resolving, but they resolve
+        # against the *whole* repo's indices built above -- narrowing
+        # the file list without narrowing the indices is what makes
+        # this sound.
+        to_resolve = (
+            files
+            if reuse is None
+            else [fm for fm in files if fm.path in reuse.dirty]
+        )
+        if reuse is not None and not to_resolve:
+            edges, ambiguous, external = {}, {}, {}
+        else:
+            edges, ambiguous, external = _resolve_all(
+                to_resolve,
+                index,
+                by_name_path,
+                imports_by_file,
+                repo_stems,
+                symbols_by_id,
+                workers,
+            )
+        if reuse is not None:
+            _merge_reused(reuse, edges, ambiguous, external)
 
-    graph = CallGraph(
-        edges=[
-            Edge(caller=c, callee=e, lines=sorted(lines))
-            for (c, e), lines in sorted(edges.items())
-        ],
-        ambiguous=[
-            (caller, name, cands)
-            for (caller, name), cands in sorted(ambiguous.items())
-        ],
-        external=[
-            ExternalCall(caller=c, callee=t, lines=sorted(lines))
-            for (c, t), lines in sorted(external.items())
-        ],
-    )
-    _build_adjacency(graph)
-    graph.referenced, graph.referenced_in, graph.referenced_out = resolve_refs(
-        files, workers
-    )
-    (
-        graph.heritage,
-        graph.heritage_out,
-        graph.heritage_in,
-        graph.heritage_ambiguous,
-        graph.heritage_external,
-        graph.heritage_synthetic_tiebreak_count,
-    ) = resolve_heritage(files)
-    graph.modules = resolve_imports(files, root=root)
-    (
-        graph.throws,
-        graph.throws_out,
-        graph.throws_ambiguous,
-        graph.throws_external,
-        graph.throws_bare,
-    ) = resolve_throws(files, workers)
-    graph.catches = resolve_catches(files, workers)
-    # No resolution pass needed — a literal env-var key is already the
-    # fully-resolved fact (see model.EnvRead's docstring), so this is
-    # a plain flatten across files, not a call into a dedicated
-    # resolve_env_reads() the way every other section above is.
-    graph.env_reads = [r for fm in files for r in fm.env_reads]
+        graph = CallGraph(
+            edges=[
+                Edge(caller=c, callee=e, lines=sorted(lines))
+                for (c, e), lines in sorted(edges.items())
+            ],
+            ambiguous=[
+                (caller, name, cands)
+                for (caller, name), cands in sorted(ambiguous.items())
+            ],
+            external=[
+                ExternalCall(caller=c, callee=t, lines=sorted(lines))
+                for (c, t), lines in sorted(external.items())
+            ],
+        )
+        _build_adjacency(graph)
+        graph.referenced, graph.referenced_in, graph.referenced_out = (
+            resolve_refs(files, workers)
+        )
+        (
+            graph.heritage,
+            graph.heritage_out,
+            graph.heritage_in,
+            graph.heritage_ambiguous,
+            graph.heritage_external,
+            graph.heritage_synthetic_tiebreak_count,
+        ) = resolve_heritage(files)
+        graph.modules = resolve_imports(files, root=root)
+        (
+            graph.throws,
+            graph.throws_out,
+            graph.throws_ambiguous,
+            graph.throws_external,
+            graph.throws_bare,
+        ) = resolve_throws(files, workers)
+        graph.catches = resolve_catches(files, workers)
+        # No resolution pass needed — a literal env-var key is already
+        # the fully-resolved fact (see model.EnvRead's docstring), so
+        # this is a plain flatten across files, not a call into a
+        # dedicated resolve_env_reads() the way every other section
+        # above is.
+        graph.env_reads = [r for fm in files for r in fm.env_reads]
+    finally:
+        if fork_pools:
+            gc.unfreeze()
+
     return graph
 
 
@@ -665,11 +1089,16 @@ def _resolve_all(
 ]:
     """Resolve every file's calls, across a process pool when it pays off.
 
-    Below ``_RESOLVE_PARALLEL_MIN_ITEMS`` total raw calls, or with
-    ``workers <= 1``, this is exactly the old single-process loop (via
+    ``_pool_workers`` decides how many workers this run justifies, from
+    the caller's request, the raw-call count, and available RAM. When it
+    returns 1, this is exactly the old single-process loop (via
     ``_resolve_files_chunk`` called once on the full file list) — same
-    result, same cost, no pool startup overhead paid for nothing.
-    Above the threshold, ``files`` is split into up to ``workers``
+    result, same cost, no pool startup overhead paid for nothing. That
+    now happens on repos well above ``_RESOLVE_PARALLEL_MIN_ITEMS``
+    whose work doesn't justify a second worker's private index copy,
+    which is deliberate: round 30 measured spring-boot (285,609 calls)
+    losing to sequential at 11 workers. Otherwise ``files`` is split
+    into up to ``_pool_workers``-many x oversubscription
     chunks; each chunk resolves independently against the same
     shared, read-only indices (safe: a call's ``caller_id`` always
     belongs to the file it was extracted from, so no two chunks ever
@@ -686,7 +1115,8 @@ def _resolve_all(
     propagating — see that function's docstring.
     """
     total_calls = sum(len(fm.calls) for fm in files)
-    if workers <= 1 or total_calls < _RESOLVE_PARALLEL_MIN_ITEMS:
+    pool_workers = _pool_workers(workers, total_calls)
+    if pool_workers <= 1:
         return _resolve_files_chunk(
             files,
             index,
@@ -698,6 +1128,7 @@ def _resolve_all(
 
     def _run(
         w: int,
+        ctx: BaseContext,
     ) -> tuple[
         dict[tuple[str, str], set[int]],
         dict[tuple[str, str], list[str]],
@@ -719,6 +1150,7 @@ def _resolve_all(
         external: dict[tuple[str, str], set[int]] = {}
         pool = ProcessPoolExecutor(
             max_workers=w,
+            mp_context=ctx,
             initializer=_init_resolve_worker,
             initargs=(
                 index,
@@ -748,7 +1180,7 @@ def _resolve_all(
             pool.shutdown(wait=False)
         return edges, ambiguous, external
 
-    return run_pooled_with_retry(_run, workers, "call resolution")
+    return run_pooled_with_retry(_run, pool_workers, "call resolution")
 
 
 def _resolve_refs_chunk(
@@ -825,9 +1257,10 @@ def resolve_refs(
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
 
     total_refs = sum(len(fm.refs) for fm in files)
-    use_pool = workers > 1 and total_refs >= _RESOLVE_PARALLEL_MIN_ITEMS
+    pool_workers = _pool_workers(workers, total_refs)
+    use_pool = pool_workers > 1
 
-    def _run(w: int) -> dict[tuple[str, str], set[int]]:
+    def _run(w: int, ctx: BaseContext) -> dict[tuple[str, str], set[int]]:
         chunks = (
             _chunk_files(files, w * _RESOLVE_CHUNK_OVERSUBSCRIPTION)
             if use_pool
@@ -841,6 +1274,7 @@ def resolve_refs(
         edges: dict[tuple[str, str], set[int]] = {}
         pool = ProcessPoolExecutor(
             max_workers=w,
+            mp_context=ctx,
             initializer=_init_resolve_worker,
             initargs=(
                 index,
@@ -862,7 +1296,7 @@ def resolve_refs(
             pool.shutdown(wait=False)
         return edges
 
-    edges = run_pooled_with_retry(_run, workers, "reference resolution")
+    edges = run_pooled_with_retry(_run, pool_workers, "reference resolution")
 
     edge_list = [
         Edge(caller=c, callee=e, lines=sorted(lines))
@@ -1326,10 +1760,12 @@ def resolve_throws(
     imports_by_file = _imports_by_file(files)
 
     total_throws = sum(len(fm.throws) for fm in files)
-    use_pool = workers > 1 and total_throws >= _RESOLVE_PARALLEL_MIN_ITEMS
+    pool_workers = _pool_workers(workers, total_throws)
+    use_pool = pool_workers > 1
 
     def _run(
         w: int,
+        ctx: BaseContext,
     ) -> tuple[
         dict[tuple[str, str], set[int]],
         dict[tuple[str, str], list[str]],
@@ -1352,6 +1788,7 @@ def resolve_throws(
         bare: list[tuple[str, str, int]] = []
         pool = ProcessPoolExecutor(
             max_workers=w,
+            mp_context=ctx,
             initializer=_init_resolve_worker,
             initargs=(index, by_name_path, imports_by_file, None, None),
         )
@@ -1375,7 +1812,7 @@ def resolve_throws(
         return edges, ambiguous, external, bare
 
     edges, ambiguous, external, bare = run_pooled_with_retry(
-        _run, workers, "throw resolution"
+        _run, pool_workers, "throw resolution"
     )
 
     throw_edges = [
@@ -1478,9 +1915,10 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
     imports_by_file = _imports_by_file(files)
 
     total_catches = sum(len(fm.catches) for fm in files)
-    use_pool = workers > 1 and total_catches >= _RESOLVE_PARALLEL_MIN_ITEMS
+    pool_workers = _pool_workers(workers, total_catches)
+    use_pool = pool_workers > 1
 
-    def _run(w: int) -> list[CatchSite]:
+    def _run(w: int, ctx: BaseContext) -> list[CatchSite]:
         chunks = (
             _chunk_files(files, w * _RESOLVE_CHUNK_OVERSUBSCRIPTION)
             if use_pool
@@ -1494,6 +1932,7 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
         sites: list[CatchSite] = []
         pool = ProcessPoolExecutor(
             max_workers=w,
+            mp_context=ctx,
             initializer=_init_resolve_worker,
             initargs=(index, by_name_path, imports_by_file, None, None),
         )
@@ -1508,7 +1947,7 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
             pool.shutdown(wait=False)
         return sites
 
-    sites = run_pooled_with_retry(_run, workers, "catch resolution")
+    sites = run_pooled_with_retry(_run, pool_workers, "catch resolution")
     sites.sort(key=lambda s: (s.path, s.line, s.caller))
     return sites
 
@@ -4133,15 +4572,23 @@ def _resolve_import_js(
     stripping unconditionally would truncate a real path segment (e.g.
     ``"opentui-spinner/react"`` down to ``"opentui-spinner"``).
 
-    Bare specifiers (no leading ``.``/``..``) are external by
-    construction *unless* a ``tsconfig.json``/``jsconfig.json``
+    Bare specifiers (no leading ``.``/``..``) are resolved first
+    against a ``tsconfig.json``/``jsconfig.json``
     ``compilerOptions.paths`` alias governing this importer's directory
-    resolves it to a real in-repo file (``ctx.ts_path_aliases``, empty
-    whenever ``resolve_imports`` was called with no filesystem ``root``
-    — see ``_ImportResolveContext``'s docstring) — an npm package name
-    never collides with a relative path or a configured alias pattern,
-    so an alias miss still falls through to "external", no repo-root
-    search beyond the alias table itself is needed.
+    (``ctx.ts_path_aliases``, empty whenever ``resolve_imports`` was
+    called with no filesystem ``root`` — see
+    ``_ImportResolveContext``'s docstring), then, failing that, as a
+    path relative to the repo root (round 28 claude-code.md §3.3: a
+    bare, repo-root-relative specifier with no leading ``./`` and no
+    governing tsconfig alias, e.g. ``import { x } from
+    'src/bootstrap/state.js'``, is a real third convention seen in the
+    wild, not just "relative" or "alias-configured"). The root-relative
+    attempt is gated on the specifier containing at least one ``/`` — a
+    single-segment bare specifier (``"react"``, ``"lodash"``) is
+    overwhelmingly a real npm package name in practice, so leaving it
+    external bounds the false-positive risk of an npm package name
+    coincidentally matching an in-repo path. Only once both attempts
+    miss does the specifier fall through to "external".
     """
     module_source = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
     if not (module_source.startswith("./") or module_source.startswith("../")):
@@ -4150,6 +4597,13 @@ def _resolve_import_js(
             resolved = _resolve_ts_path_alias(module_source, scope, ctx.paths)
             if resolved is not None:
                 return resolved
+        if "/" in module_source:
+            joined = posixpath.normpath(module_source)
+            root_relative = _first_match(
+                ctx.paths, _js_module_candidates(joined)
+            )
+            if root_relative is not None:
+                return root_relative
         return None
     base_dir = _dirname(importer_path)
     joined = posixpath.normpath(
@@ -4581,6 +5035,29 @@ def bare_import_source(imp: Import, language: str) -> str:
 # from a bare directory-name match, which would silently misresolve
 # as often as it helped. Any other/generic language falls through the
 # same way.
+
+
+def import_resolution_supported(language: str) -> bool:
+    """Whether ``resolve_imports`` can resolve this language's imports
+    to in-repo files at all.
+
+    ``False`` for Go (and any Tier-2/generic-grammar language) — see
+    the comment just above this function for why Go specifically has
+    no entry in :data:`_IMPORT_RESOLVERS`: every import for such a
+    language reports external unconditionally, which reads
+    identically to "import resolution is broken" on an all-Go repo
+    (``dekko deps``'s "0 resolved import edges" headline, awesome-go
+    rounds 27/28/29) unless a caller checks this first and discloses
+    the gap explicitly.
+
+    Args:
+        language: A ``FileMap.language``/``Symbol.language`` value.
+
+    Returns:
+        ``True`` if ``language`` has a real per-language resolver
+        registered, ``False`` otherwise.
+    """
+    return language in _IMPORT_RESOLVERS
 
 
 def _py_package_roots(paths: frozenset[str]) -> dict[str, list[str]]:
