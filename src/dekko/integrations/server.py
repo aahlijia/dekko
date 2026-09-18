@@ -155,6 +155,77 @@ def _with_notes(out: str, err: str, fallback: str = "") -> str:
     return f"{text}\n\n{notes}" if text else notes
 
 
+# Cap on the sparse-file caveats a directory ``outline`` forwards
+# through ``_with_notes``. Round 31 tensorflow.md Observation 4.3:
+# ``outline``'s row content is already budget-capped
+# (``DEFAULT_ORIENT_BUDGET``/``_outline_limit_arg``), but
+# ``outline.py``'s per-file "few named symbols" caveat
+# (``_sparse_note``) is emitted to stderr once per file in the
+# *target directory*, independent of which files' rows actually
+# survived that cap -- so on a large directory the notes alone grew
+# past 8k tokens even though the visible outline content stayed
+# small. Live-verified on claude-code's 1900-file ``src/``: an
+# uncapped MCP call returned ~237k chars, almost entirely sparse-file
+# notes for files whose own rows never made it into the output at
+# all. Scoped to ``tool_outline`` alone, not folded into
+# ``_with_notes`` itself -- every other tool's stderr disclosures are
+# already small and already governed by the same content-level cap
+# their row output uses.
+_MAX_OUTLINE_NOTES = 20
+
+
+def _capped_notes(err: str, max_notes: int = _MAX_OUTLINE_NOTES) -> str:
+    """Keep at most ``max_notes`` lines of ``err``, footer-disclosed.
+
+    A note about a file whose own outline rows didn't survive
+    ``outline``'s row-level budget/limit fit isn't actionable anyway —
+    there's nothing shown for that file to act on — so capping the
+    note *count* here, independent of the row-level fit, is the right
+    knob rather than trying to thread this cap back through
+    ``outline.py``'s own rendering.
+
+    Args:
+        err: Raw captured stderr (``outline``'s only stderr output is
+            one ``note:`` line per sparse file; see
+            ``outline._sparse_note``).
+        max_notes: Maximum note lines to keep.
+
+    Returns:
+        ``err`` unchanged when it has ``max_notes`` lines or fewer;
+        otherwise the first ``max_notes`` lines plus a trailing
+        omission line in the same "raise --X" footer shape the rest
+        of the tool suite uses.
+    """
+    lines = err.strip().splitlines()
+    if len(lines) <= max_notes:
+        return err
+    omitted = len(lines) - max_notes
+    kept = lines[:max_notes]
+    kept.append(
+        f"note: {omitted} more sparse-file note(s) omitted — narrow "
+        "the target (a subdirectory, or one file) to see them all"
+    )
+    return "\n".join(kept)
+
+
+def _outline_limit_arg(args: dict) -> int:
+    """Row-count cap for ``tool_outline`` — mirrors ``_limit_arg``'s
+    budget/limit precedence (see its own docstring and
+    ``query.effective_limit``: an explicit ``budget`` with no explicit
+    ``limit`` lets the budget govern alone, since the tool's own
+    default budget doesn't count as "the caller chose one"), scoped to
+    ``outline``'s own row-count default (200, matching the CLI's own
+    ``--limit`` default) rather than the relation tools' (``query.
+    DEFAULT_LIMIT``, 50) — the two tools' row shapes and defaults have
+    never been the same, only the *precedence rule* is being mirrored
+    here.
+    """
+    limit = args.get("limit")
+    if limit is not None:
+        return int(limit)
+    return query.NO_ROW_LIMIT if args.get("budget") is not None else 200
+
+
 def _require(args: dict, key: str) -> str:
     """Return a required string argument or raise ``ToolError``."""
     value = args.get(key)
@@ -488,7 +559,7 @@ def tool_outline(ctx: Context, args: dict) -> str:
     """Structural outline of a file or directory (signatures, no bodies)."""
     index = _index_for(ctx, args)
     target = _require(args, "target")
-    limit = int(args.get("limit", 200))
+    limit = _outline_limit_arg(args)
     budget = int(args.get("budget", DEFAULT_ORIENT_BUDGET))
     root = _root_of(ctx, args)
     code, out, err = _capture(
@@ -503,7 +574,7 @@ def tool_outline(ctx: Context, args: dict) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return _with_notes(out, err)
+    return _with_notes(out, _capped_notes(err))
 
 
 def tool_trace_path(ctx: Context, args: dict) -> str:
@@ -1224,13 +1295,18 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max symbol rows (default 200)",
+                    "description": "Max symbol rows (default 200; if "
+                    "omitted and budget is set explicitly, budget "
+                    "governs instead — the 200 default doesn't stack "
+                    "with it)",
                 },
                 "budget": {
                     "type": "integer",
                     "description": "Approximate token budget (default "
                     "2000); lowest-relevance rows are dropped to fit "
-                    "and a cost footer is appended",
+                    "and a cost footer is appended. On a directory "
+                    "target, sparse-file caveats are separately capped "
+                    "and disclosed if truncated",
                 },
                 "root": _ROOT_PROP,
             },
