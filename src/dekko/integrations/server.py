@@ -158,7 +158,14 @@ def _with_notes(out: str, err: str, fallback: str = "") -> str:
 def _require(args: dict, key: str) -> str:
     """Return a required string argument or raise ``ToolError``."""
     value = args.get(key)
-    if not isinstance(value, str) or not value:
+    if value is not None and not isinstance(value, str):
+        # Present but mistyped is a different mistake from absent, and
+        # "missing" sends the caller hunting for a key it already sent
+        # (round 31 tensorflow coverage pass, finding 4.1).
+        raise ToolError(
+            f"argument '{key}' must be a string, got {type(value).__name__}"
+        )
+    if not value:
         raise ToolError(f"missing required argument '{key}'")
     return value
 

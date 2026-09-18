@@ -1592,3 +1592,12 @@ def test_check_ambiguous_tool_schema_has_no_drilldown_params() -> None:
     tool = next(t for t in server.TOOLS if t["name"] == "check_ambiguous")
     props = set(tool["inputSchema"]["properties"])
     assert props == {"top", "budget", "root"}
+
+
+def test_require_distinguishes_wrong_type_from_missing() -> None:
+    with pytest.raises(server.ToolError, match="must be a string, got int"):
+        server._require({"symbol": 42}, "symbol")
+    with pytest.raises(server.ToolError, match="missing required argument"):
+        server._require({}, "symbol")
+    with pytest.raises(server.ToolError, match="missing required argument"):
+        server._require({"symbol": ""}, "symbol")

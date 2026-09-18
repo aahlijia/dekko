@@ -1536,3 +1536,40 @@ def test_dispatch_majority_warning_prints_above_the_rows(
     lines = capsys.readouterr().out.splitlines()
     assert lines[1] == "warning: y"
     assert lines.index("note: x") > lines.index("warning: y") + 3
+
+
+# --- languages_without_calls (round 31 tensorflow coverage pass) -----
+
+
+def test_unused_does_not_judge_a_language_with_no_extracted_calls() -> None:
+    # Python has call evidence (an external call is enough); "bash"
+    # has symbols but not one call of any kind, so fan-in 0 there
+    # proves nothing.
+    py_dead = _sym("dead", "a.py")
+    py_caller = _sym("main", "a.py")
+    sh_fn = _sym("tfrun", "run.sh", language="bash")
+    index = _index(
+        [py_dead, py_caller, sh_fn],
+        externals_by_name={
+            "print": [ExternalCall(caller=py_caller.id, callee="print")]
+        },
+    )
+    assert unused.languages_without_calls(index) == {"bash"}
+    names = {s.name for s in unused.find_unused(index, ())}
+    assert "tfrun" not in names
+    assert "dead" in names
+    caveat = unused._blind_language_caveat(index, "callables")
+    assert caveat is not None
+    assert caveat.startswith("note: 1 symbol(s) not evaluated (bash 1)")
+
+
+def test_no_blind_language_caveat_when_every_language_has_calls() -> None:
+    caller = _sym("main", "a.py")
+    index = _index(
+        [caller],
+        externals_by_name={
+            "print": [ExternalCall(caller=caller.id, callee="print")]
+        },
+    )
+    assert unused.languages_without_calls(index) == set()
+    assert unused._blind_language_caveat(index, "callables") is None

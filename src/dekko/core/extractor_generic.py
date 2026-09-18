@@ -51,7 +51,19 @@ def _generic_class_kind(node_type: str) -> str:
     return "class"
 
 
-_CALL_RE = re.compile(r"call$|call_expression|invocation")
+# ``^command$`` is the shell family's call node (tree-sitter-bash, fish,
+# PowerShell: ``command`` with a ``name`` field). Round 31's tensorflow
+# coverage pass found it missing: with no ``command`` nodes collected,
+# *zero* calls were extracted from any bash file, so every bash
+# function in a repo had fan-in 0 and was listed by ``dekko unused``
+# (``tfrun()``, 27 real call sites) with no caveat. Anchored so it can't
+# also swallow ``command_name``/``command_substitution``.
+_CALL_RE = re.compile(r"call$|call_expression|invocation|^command$")
+# A shell ``command`` is any word in command position: ``./build.sh``,
+# ``"$TOOL"``, ``-f``. Only a plain identifier can ever be a call to a
+# repo-defined function, so everything else is dropped at the source
+# rather than inflating ``external`` with one entry per path and flag.
+_SHELL_FUNCTION_NAME = re.compile(r"^[A-Za-z_][\w.:-]*$")
 _NAME_SPLIT = re.compile(r"[.:]+")
 
 _CALLEE_FIELDS = ("function", "callee", "constructor")
@@ -224,6 +236,8 @@ def _collect_calls(
     for node in call_nodes:
         parts = _call_parts(node)
         if parts is None:
+            continue
+        if node.type == "command" and not _SHELL_FUNCTION_NAME.match(parts[1]):
             continue
 
         text, name, receiver = parts

@@ -49,6 +49,7 @@ import re
 
 from dekko.analysis import ambiguous, query
 from dekko.classify import is_test_path
+from dekko.core.languages import SPEC_BY_NAME
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.textutil import fit_to_budget, signature
@@ -333,14 +334,72 @@ def find_unused(
     reexports = reexported_names(index)
     used = _used_keys(index)
     container_index = _container_type_index(index)
+    blind = languages_without_calls(index)
     found = [
         sym
         for sym in index.symbols_by_id.values()
         if (kinds != "types" or sym.kind in TYPE_KINDS)
+        and sym.language not in blind
         and (sym.path, sym.qualname) not in used
         and not _is_root(sym, reexports, root_globs, index, container_index)
     ]
     return sorted(found, key=lambda s: (s.path, s.start_line))
+
+
+def languages_without_calls(index: MapIndex) -> set[str]:
+    """Languages with symbols in the map but not one extracted call.
+
+    "No inbound calls" is only evidence of dead code in a language
+    whose calls dekko can see. A Tier-2 (generic-grammar) language is
+    parsed by node-type heuristics, and when its call node doesn't
+    match them, every function in it has fan-in 0 by construction.
+    Round 31's tensorflow coverage pass hit exactly that: bash calls
+    are ``command`` nodes, none were collected, and ``unused`` listed
+    ``tfrun()`` -- 27 real call sites -- with no caveat. Bash itself
+    is fixed at the extractor, but ~55 other generic grammars sit
+    behind the same heuristic, so ``unused`` refuses to judge a
+    language it has zero call evidence for, and says so
+    (``_blind_language_caveat``).
+
+    A caller counts whatever became of its call (resolved, ambiguous,
+    or external): any of the three proves extraction saw calls there.
+
+    Tier-1 languages are never reported: each has a dedicated,
+    tested call query, so a Tier-1 file with no calls really has none,
+    and its fan-in-0 symbols are exactly what ``unused`` is for. The
+    blind spot is a property of the heuristic extractor alone.
+    """
+    lang_of_path = {s.path: s.language for s in index.symbols_by_id.values()}
+    generic = set(lang_of_path.values()) - set(SPEC_BY_NAME)
+    if not generic:
+        return set()
+    callers = set(index.calls_out) | set(index.ambiguous_out)
+    for calls in index.externals_by_name.values():
+        callers.update(call.caller for call in calls)
+    seeing = {lang_of_path.get(c.split("::", 1)[0]) for c in callers}
+    return generic - seeing
+
+
+def _blind_language_caveat(index: MapIndex, kinds: str) -> str | None:
+    """Disclose the symbols ``find_unused`` declined to judge, or ``None``."""
+    blind = languages_without_calls(index)
+    if not blind:
+        return None
+    counts: dict[str, int] = {}
+    for sym in index.symbols_by_id.values():
+        if sym.language in blind and (
+            kinds != "types" or sym.kind in TYPE_KINDS
+        ):
+            counts[sym.language] = counts.get(sym.language, 0) + 1
+    if not counts:
+        return None
+    mix = ", ".join(f"{lang} {n}" for lang, n in sorted(counts.items()))
+    return (
+        f"note: {sum(counts.values())} symbol(s) not evaluated ({mix}) -- "
+        "dekko extracted no calls from any file in that language here, "
+        'so "no callers" would not be evidence of dead code. Check '
+        "those with grep."
+    )
 
 
 def _has_direct_fan_in(sym: Symbol, index: MapIndex) -> bool:
@@ -786,6 +845,7 @@ def run(
     dispatch_candidates = find_dispatch_candidates(index, root_globs, kinds)
     c_abi_caveat = _c_abi_caveat(found)
     dispatch_caveat = _dispatch_caveat(dispatch_candidates)
+    blind_caveat = _blind_language_caveat(index, kinds)
 
     if as_json:
         doc = _build_json_doc(
@@ -799,6 +859,8 @@ def run(
             budget,
             limit,
         )
+        if blind_caveat:
+            doc["caveats"].append(blind_caveat)
         print(json.dumps(doc, indent=2))
         return EXIT_FOUND if found else EXIT_NONE
 
@@ -811,6 +873,11 @@ def run(
         dispatch_caveat,
         _dispatch_majority_warning(len(dispatch_candidates), len(found)),
     )
+    # Printed here, not inside _print_text: it matters most on the
+    # "no unused symbols" early-return path, where a clean-looking
+    # result would otherwise hide that a whole language went unjudged.
+    if blind_caveat:
+        print(blind_caveat)
 
     if suspect:
         _print_suspects_text(suspects)

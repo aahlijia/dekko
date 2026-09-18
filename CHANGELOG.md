@@ -9,6 +9,43 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.60] — 2026-09-18
+
+Found by round 31's tensorflow coverage follow-up
+(`test-repos/reports/31-tokentest-7repo-post04355/coverage-followup/tensorflow.md`).
+
+### Fixed
+- **Shell function calls are extracted, so bash functions stop
+  reading as dead code.** tree-sitter-bash's call node is `command`,
+  which the generic (Tier-2) extractor's call heuristic never matched.
+  Not one call was extracted from any `.sh` file, so every bash
+  function had fan-in 0, `query callers` came back empty, and `dekko
+  unused` listed live functions with no caveat: tensorflow's `tfrun()`
+  (27 call sites), and on claude-buddy 5 of 5 flagged bash functions
+  were false positives (`pick_reaction` alone has 27 call sites).
+  `command` nodes are now collected, including inside `$(...)` and at
+  script top level. Only an identifier-shaped command name is kept: a
+  path, an expansion or a flag in command position (`./build.sh`,
+  `"$TOOL"`) can never be a call to a repo-defined function, and
+  keeping them would add an `external` entry per script path.
+  Requires the `[all]` extra, like all shell parsing. Re-map to pick
+  it up (the version bump invalidates the extraction cache).
+- **`dekko unused` no longer judges a language it extracted no calls
+  from.** The bash bug was one instance of a general blind spot: ~55
+  generic-grammar languages share the same node-type heuristic, and
+  wherever it misses a grammar's call node, every function in that
+  language is "unused" by construction. `unused` now skips symbols in
+  any generic-tier language with zero extracted calls repo-wide and
+  says so: `note: N symbol(s) not evaluated (lang N) -- dekko
+  extracted no calls from any file in that language here ...`, also
+  on the "no unused symbols" path and in `--json` `caveats`. Tier-1
+  languages are never skipped: each has a dedicated call query, so a
+  Tier-1 file with no calls really has none.
+- MCP: a required argument sent with the wrong type reports
+  `argument 'symbol' must be a string, got int` instead of `missing
+  required argument`, which sent callers hunting for a key they had
+  already supplied.
+
 ## [0.43.59] — 2026-09-18
 
 Round 31 close-out: the remaining P2/P3 items from
