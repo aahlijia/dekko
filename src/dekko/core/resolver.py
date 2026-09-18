@@ -2818,14 +2818,11 @@ def _pick_candidate(
     same language) as the call site.
     """
     candidates = _language_filtered(call, candidates)
-    if _rust_type_path_receiver(call, index):
-        # ``Point::default()``: the path itself names the owning type,
-        # so only that type's members may answer -- see
-        # ``_owned_by_receiver_type``.
-        candidates = _owned_by_receiver_type(call, candidates, index)
-        same_file = _owned_by_receiver_type(call, same_file, index)
-        if not candidates:
-            return _NOISE if repo_stems is not None else None
+    candidates, same_file, shape_narrowed = _rust_shape_narrowed_candidates(
+        call, candidates, same_file, index
+    )
+    if shape_narrowed and not candidates:
+        return _NOISE if repo_stems is not None else None
 
     structural = _structural_match(call, candidates, same_file, caller, index)
     if structural is not None:
@@ -3088,6 +3085,29 @@ _CHAIN_BUILDER_METHOD_NAMES = frozenset(
 # zed.md`` §3). Not gated by language, matching how
 # ``_BUILTIN_METHOD_NAMES`` (JS/TS-flavored) already isn't — these
 # names are unlikely method names to collide with in other languages.
+# Round 31 zed coverage pass F9: the iterator/Option/Result adaptor
+# vocabulary was missing from this set entirely -- ``.flatten()``
+# (zed's *only* ``fn flatten``, in ``text.rs``) absorbed 454 unrelated
+# std-iterator callers (``x.iter().flatten()``-shaped, per
+# ``query callers``/grep cross-check; 566 total ``.flatten()`` call
+# sites repo-wide). Each addition below was checked against the
+# current zed index first, per the design's own instruction: 12 of
+# the 22 candidate names (``flat_map``, ``filter_map``, ``skip``,
+# ``zip``, ``rev``, ``enumerate``, ``peekable``, ``nth``, ``copied``,
+# ``ok_or``, ``ok_or_else``, ``as_deref``) have *zero* repo-defined
+# methods with that name, so adding them is a pure no-op risk-wise
+# (this guard only ever suppresses a call from reaching a real
+# in-repo candidate, and there is none to suppress). ``flatten`` and
+# ``chain`` each have exactly one repo-defined method; ``chain``'s
+# (``gpui_wgpu/src/cosmic_text_system.rs``) takes no ``self``, so a
+# dot-call could never legitimately reach it anyway. The rest
+# (``any``, ``all``, ``find``, ``position``, ``last``, ``count``,
+# ``sum``, ``cloned``) have 3-27 repo-defined candidates each — this
+# guard only ever suppresses the *no-structural-evidence* single-/
+# pair-candidate fast path (see this function's own docstring), which
+# never applies past 2 candidates, so for these the guard only
+# reclassifies an already-unresolvable call from ambiguous to
+# external, never turns a real resolution into a miss.
 _RUST_STD_METHOD_NAMES = frozenset(
     {
         "then", "then_some", "iter", "iter_mut", "into_iter", "map",
@@ -3097,6 +3117,10 @@ _RUST_STD_METHOD_NAMES = frozenset(
         "to_owned", "to_vec", "borrow", "borrow_mut", "lock", "read",
         "write", "collect", "filter", "for_each", "fold", "is_some",
         "is_none", "is_ok", "is_err", "ok", "err", "take", "replace",
+        "flatten", "flat_map", "filter_map", "skip", "zip", "chain",
+        "rev", "enumerate", "peekable", "any", "all", "find",
+        "position", "last", "nth", "count", "sum", "cloned", "copied",
+        "ok_or", "ok_or_else", "as_deref",
     }
 )  # fmt: skip
 
@@ -3487,6 +3511,118 @@ def _structural_match(
     if receiver_type is not None:
         return receiver_type
     return _typed_param_match(call, candidates, caller, index)
+
+
+def _rust_shape_narrowed_candidates(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> tuple[list[Symbol], list[Symbol], bool]:
+    """Narrow candidates by Rust call shape, before the rest of
+    ``_pick_candidate``'s ladder runs.
+
+    Two shapes each rule out an entire class of candidate: a
+    ``Type::name`` path can only reach that type's own members
+    (``_owned_by_receiver_type``), and a ``recv.name`` dot-call can
+    never reach a free function (``_drop_free_functions``, round 31
+    F11). Split out of ``_pick_candidate`` purely to keep that
+    function's cyclomatic complexity under the project's Ruff limit
+    (round 31 rule 0.5) — mirrors ``_structural_match``'s own reason
+    for existing. ``_rust_type_path_receiver``/``_rust_is_dot_call``
+    test the same call text for opposite join characters (``::`` vs
+    ``.``), so the two shapes are mutually exclusive by construction
+    and at most one narrowing ever applies.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidates: Every same-named, language-filtered symbol
+            repo-wide.
+        same_file: Same-named symbols in the calling file.
+        index: Bare symbol name to every symbol sharing it.
+
+    Returns:
+        ``(candidates, same_file, narrowed)`` — the (possibly)
+        narrowed lists, and whether either shape actually applied.
+        ``narrowed`` tells the caller whether an empty ``candidates``
+        here means "this call structurally cannot reach any repo
+        symbol" (worth a ``_NOISE``/external verdict) as opposed to
+        merely having started out empty for an unrelated reason.
+    """
+    if _rust_type_path_receiver(call, index):
+        return (
+            _owned_by_receiver_type(call, candidates, index),
+            _owned_by_receiver_type(call, same_file, index),
+            True,
+        )
+    if _rust_is_dot_call(call):
+        return (
+            _drop_free_functions(candidates),
+            _drop_free_functions(same_file),
+            True,
+        )
+    return candidates, same_file, False
+
+
+def _rust_is_dot_call(call: _Referable) -> bool:
+    """Whether a Rust call joins its receiver and name with ``.``,
+    not ``::``.
+
+    Round 31 zed coverage pass F11: a Rust *method* call
+    (``recv.name(..)``) can never reach a free (module-level)
+    function — the language simply has no syntax for it, unlike
+    Python/JS/TS's ``module.func()``, a legitimate dot-call on a
+    namespace object (so this check is Rust-only, gated the same way
+    ``_rust_type_path_receiver`` gates itself). ``.px(..)`` on a
+    ``Styled`` trait method resolving to the unrelated free function
+    ``fn px(...)`` (``crates/gpui/src/geometry.rs``) was 28 of zed's
+    dekko-only ``sanity`` rows for that name alone.
+
+    Uses ``call.text`` (via ``getattr``, since ``RawRef`` carries no
+    ``text`` field at all — round 31 rule 0.6; its ``receiver`` field
+    exists but is always ``None``, which already short-circuits this
+    function before ``text`` is ever read) rather than re-deriving the
+    join character: for a genuine method call built by
+    ``extractor._callee_parts``, ``receiver`` is the *full* qualifier
+    expression's text (not just its first segment the way
+    ``call.receiver`` is read elsewhere in this ladder), so ``text``
+    ends in exactly ``.<name>`` for a dot-call and ``::<name>`` for a
+    scoped path — never both.
+
+    Args:
+        call: The raw call or reference being resolved.
+
+    Returns:
+        True when ``call`` is a Rust call whose text ends in
+        ``.<name>``.
+    """
+    if not call.receiver or not call.path.endswith(".rs"):
+        return False
+    text = getattr(call, "text", "") or ""
+    return text.endswith(f".{call.name}")
+
+
+def _drop_free_functions(symbols: list[Symbol]) -> list[Symbol]:
+    """Remove free (containerless) function candidates.
+
+    A free function's ``qualname`` equals its bare ``name`` (no
+    ``.`` — see ``Symbol.qualname``'s own docstring); a method or
+    associated function always has a container prefix. Used by the
+    round 31 F11 dot-call guard in ``_pick_candidate``: only
+    ``kind == "function"`` is dropped, never a variable/type/other
+    kind, and only when it's genuinely containerless.
+
+    Args:
+        symbols: Candidates to filter.
+
+    Returns:
+        ``symbols`` with every free-function entry removed.
+    """
+    return [
+        s
+        for s in symbols
+        if not (s.kind == "function" and "." not in s.qualname)
+    ]
 
 
 def _rust_type_path_receiver(

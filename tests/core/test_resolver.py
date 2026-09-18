@@ -5460,3 +5460,82 @@ def test_typed_param_match_bare_foreign_type_no_type_kinds_gate(
     assert graph.calls_out["crates/a/src/events.rs::handle"] == [
         "crates/a/src/util.rs::WPARAM.signed_hiword"
     ]
+
+
+# Round 31 zed coverage pass F11/F9: a Rust dot-call resolving onto an
+# unrelated same-named symbol -- a free function a method-call syntax
+# can never reach (F11), or a std iterator/Option/Result adaptor name
+# the denylist was missing (F9).
+
+
+def test_rust_dot_call_never_targets_free_function(tmp_path: Path) -> None:
+    # `.px(..)` (a trait method on Styled) must never resolve to the
+    # unrelated free function `fn px(...)` -- Rust method-call syntax
+    # structurally cannot reach a free function.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/gpui/src/geometry.rs": "pub fn px(v: f32) -> f32 { v }\n",
+            "crates/gpui/src/styled.rs": (
+                "pub trait Styled {\n    fn px(&self, v: f32) -> Self;\n}\n"
+            ),
+            "crates/ui/src/header.rs": (
+                "use crate::styled::Styled;\n"
+                "pub struct Header;\n"
+                "impl Header {\n"
+                "    pub fn render(self) -> Self {\n"
+                "        self.px(12.0)\n    }\n}\n"
+            ),
+        },
+    )
+    resolved = graph.calls_out.get(
+        "crates/ui/src/header.rs::Header.render", []
+    )
+    assert "crates/gpui/src/geometry.rs::px" not in resolved
+
+
+def test_rust_dot_call_free_function_fallback_stays_available_for_path_call(
+    tmp_path: Path,
+) -> None:
+    # A `::`-qualified path call to the same free function must still
+    # resolve -- only dot-call syntax is restricted.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/gpui/src/geometry.rs": "pub fn px(v: f32) -> f32 { v }\n",
+            "crates/ui/src/header.rs": (
+                "use gpui::geometry::px;\n"
+                "pub fn make(v: f32) -> f32 {\n"
+                "    px(v)\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/ui/src/header.rs::make"] == [
+        "crates/gpui/src/geometry.rs::px"
+    ]
+
+
+def test_rust_flatten_denylisted_without_structural_evidence(
+    tmp_path: Path,
+) -> None:
+    # A sole in-repo `fn flatten` must not absorb every unrelated
+    # `.flatten()` call with no other structural evidence -- it
+    # should land external, not silently resolve.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/text/src/text.rs": (
+                "pub struct Edit;\n"
+                "impl Edit {\n"
+                "    pub fn flatten(self) -> Self { self }\n}\n"
+            ),
+            "crates/search/src/search.rs": (
+                "pub fn collect_all(items: Vec<Vec<u8>>) -> Vec<u8> {\n"
+                "    items.into_iter().flatten().collect()\n}\n"
+            ),
+        },
+    )
+    resolved = graph.calls_out.get(
+        "crates/search/src/search.rs::collect_all", []
+    )
+    assert "crates/text/src/text.rs::Edit.flatten" not in resolved
