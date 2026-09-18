@@ -1613,7 +1613,64 @@ def _resolve_one_heritage(
     if target is not None:
         _add_heritage_edge(h, target.id, edges, relations)
         return
+    decoy_free = _hintless_decoy_tiebreak(h, candidates, tiebreak_hits)
+    if decoy_free is not None:
+        _add_heritage_edge(h, decoy_free.id, edges, relations)
+        return
     _record_ambiguous(h.subtype_id, h.name, candidates, ambiguous)
+
+
+def _hintless_decoy_tiebreak(
+    h: RawHeritage,
+    candidates: list[Symbol],
+    tiebreak_hits: list[int] | None,
+) -> Symbol | None:
+    """Last-resort Rust fixture-decoy tiebreak for a clause with no hint.
+
+    Round 24's ``_prefer_non_synthetic_crate_match`` only ever ran
+    inside the crate-hint steps, i.e. when the file names the crate
+    (``use gpui::Render;`` / ``impl gpui::Render for X``). Round 31
+    zed.md measured what that leaves behind on its own motivating
+    example: 174 of 358 ``impl Render for`` clauses resolved, 184
+    ambiguous -- and **every one of the 184 had the identical two
+    candidates**, the real ``crates/gpui/src/element.rs::Render`` and
+    the ``tooling/lints/test_fixture/gpui`` stand-in. Those files reach
+    ``Render`` through a glob (``use ui::prelude::*;``, 165 of them) or
+    a re-exporting crate (``use ui::Render;``, 19), so there is no
+    crate name to build a hint from, and there never will be short of
+    tracing glob re-exports.
+
+    The same convention answers it without a hint: real code does not
+    implement a test fixture's stand-in trait. Reuses the round-24
+    function whole, so its guarantees carry over unchanged -- a clause
+    written *inside* the fixture crate resolves to the fixture's own
+    trait (the structural self-crate check, tried first), exactly one
+    non-synthetic survivor is required, and every edge resolved this
+    way is counted in ``tiebreak_hits`` and disclosed by ``query
+    subtypes``/``supertypes`` as resting on a convention rather than a
+    structural match. Two real crates defining the same trait name
+    stay ambiguous.
+
+    Rust only: the crate-directory notion the tiebreak reasons about
+    (``_rust_crate_dir``) is Rust-shaped.
+    """
+    if not h.path.endswith(".rs"):
+        return None
+    if _looks_like_synthetic_crate_root(_rust_crate_dir(h.path)):
+        # The clause itself lives in a fixture/vendor tree. "Real code
+        # doesn't implement a fixture's trait" says nothing about
+        # *fixture* code: zed's ``test_fixture/render_consumer`` crate
+        # depends on the sibling ``test_fixture/gpui`` stand-in, not on
+        # the real gpui, and a different crate is not something the
+        # self-crate check can see. Live-testing caught 8 such edges
+        # pointed at the real trait. Stay ambiguous.
+        return None
+    same_language = _language_filtered(h, candidates)
+    if len(same_language) < 2:
+        return None
+    return _prefer_non_synthetic_crate_match(
+        same_language, h.path, tiebreak_hits
+    )
 
 
 def _add_heritage_edge(
@@ -2428,22 +2485,57 @@ def _pick_candidate(
         return _NOISE
 
     if len(candidates) == 1:
-        if _arity_plausible(candidates[0], call):
-            return candidates[0]
-        # Structural layer 2: the sole candidate's declared arity
-        # doesn't fit this call site's written argument count -- drop
-        # it before the last-resort tail below, rather than returning
-        # it anyway. Emptying `candidates` here (instead of just not
-        # returning) matters: `_last_resort_match` ->
-        # `_bare_call_non_method_match` would otherwise re-derive this
-        # same single candidate for a bare, non-method call (its own
-        # "exactly one non-method candidate left" check is a no-op
-        # when there was only ever one candidate to begin with),
-        # silently undoing this guard for exactly the bare-call shape
-        # it exists to cover.
-        candidates = []
+        return _sole_candidate_match(
+            call, candidates[0], by_name_path, repo_stems is not None
+        )
 
     return _last_resort_match(call, candidates, by_name_path)
+
+
+def _sole_candidate_match(
+    call: _Referable,
+    only: Symbol,
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    noise_aware: bool,
+) -> "Symbol | _Noise | None":
+    """Resolve, or reject, the single remaining candidate for a call.
+
+    Structural layer 2: when the sole candidate's declared arity
+    doesn't fit the call site's written argument count, it is dropped
+    rather than returned anyway. ``_last_resort_match`` is then run
+    over an *empty* list, not skipped: ``_bare_call_non_method_match``
+    would otherwise re-derive this same single candidate for a bare,
+    non-method call (its own "exactly one non-method candidate left"
+    check is a no-op when there was only ever one), silently undoing
+    this guard for exactly the bare-call shape it exists to cover.
+
+    A rejected sole candidate is **not** ambiguous: a collision needs
+    two live candidates, and this call has none. Round 31 cline.md
+    §4.2: 542 of cline's 6,271 "ambiguous" call entries had exactly one
+    candidate, all of this shape -- ``arr.at(-1)`` (1 arg) against the
+    repo's only ``at``, a local ``at(r, c)``; ``Buffer.byteLength(s,
+    "utf8")`` against a one-parameter ``byteLength(value)``. Filing
+    them as ambiguous made ``query symbol at`` print "+86 additional
+    call site(s) resolved ambiguously" about calls that provably
+    cannot be its own, and showed up in ``dekko ambiguous --by name``
+    as the self-contradictory "avg 1.0 candidates". Same defect class
+    and same remedy as the round 22 ``_NOISE`` split: no plausible
+    repo target means external.
+
+    Args:
+        call: The raw call/reference/heritage clause being resolved.
+        only: The single language-filtered candidate.
+        by_name_path: ``(name, path)`` → same-file symbols.
+        noise_aware: Whether the caller handles ``_NOISE`` (it passed
+            a non-``None`` ``repo_stems`` to ``_pick_candidate``).
+            ``_resolve_ref`` doesn't, and has no external bucket to
+            feed, so it keeps the plain ``None``.
+    """
+    if _arity_plausible(only, call):
+        return only
+    if noise_aware:
+        return _NOISE
+    return _last_resort_match(call, [], by_name_path)
 
 
 def _last_resort_match(

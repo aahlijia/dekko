@@ -13,6 +13,13 @@ generically), add the extra:
 pip install dekko[all]
 ```
 
+This matters more than "extra languages" suggests: **shell scripts are
+in the extras set.** Without `[all]`, every `.sh` file in a repo is
+discovered but not parsed (no symbols, no edges). `dekko map` says so
+on its own `NOT parsed (...)` line and tells you the fix. For a `uv`
+install that is `uv tool install 'dekko[all]'`, or from a checkout,
+`uv tool install '.[all]'`.
+
 `dekko search` works out of the box (BM25 lexical scoring, no
 dependencies). For its optional embedding-based scorer
 (`--scorer embedding` / `search_code`'s `scorer: "embedding"`) — a

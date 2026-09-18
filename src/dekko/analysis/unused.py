@@ -579,6 +579,40 @@ def _dispatch_caveat(dispatch_candidates: list[Symbol]) -> str | None:
     )
 
 
+# Above this share of dispatch candidates, "run unused, trust the list"
+# is wrong more often than right, and the trailing caveat is too easy
+# to miss under a long listing. A small floor keeps a 3-row listing
+# with 2 candidates from shouting.
+_DISPATCH_MAJORITY_RATIO = 0.5
+_DISPATCH_MAJORITY_MIN = 20
+
+
+def _dispatch_majority_warning(n_dispatch: int, n_found: int) -> str | None:
+    """Leading warning when most flagged symbols are dispatch candidates.
+
+    Round 31 spring-boot.md: 2,323 of 3,281 flagged symbols (70.8%)
+    were also polymorphic-dispatch candidates the resolver can't
+    attribute through interface-typed call sites. ``_dispatch_caveat``
+    fired correctly, but as the *last* line under thousands of rows,
+    on exactly the repo shape (interface-heavy Java/Spring) where the
+    list is mostly not dead code. Printed above the listing instead,
+    so it is read before the rows are.
+    """
+    if n_dispatch < _DISPATCH_MAJORITY_MIN or n_found == 0:
+        return None
+    ratio = n_dispatch / n_found
+    if ratio < _DISPATCH_MAJORITY_RATIO:
+        return None
+    return (
+        f"warning: {n_dispatch} of {n_found} ({ratio:.0%}) flagged "
+        "symbols are polymorphic-dispatch candidates -- on this repo "
+        "most of this list is likely NOT dead code (interface/"
+        "trait-typed call sites the resolver can't attribute). Treat "
+        "it as leads, not a delete list; verify with `dekko sanity "
+        "--unused <name>`."
+    )
+
+
 _C_ABI_CAVEAT = (
     'note: exported/extern "C" symbols may be consumed outside this '
     "repo's call graph — treat top hits on a public C API skeptically"
@@ -640,6 +674,9 @@ def _build_json_doc(
         "kind_totals": _kind_totals(found),
         "caveats": [c_abi_caveat] if c_abi_caveat else [],
         "dispatch_caveat": dispatch_caveat,
+        "dispatch_majority_warning": _dispatch_majority_warning(
+            len(dispatch_candidates), len(found)
+        ),
     }
     if suspect:
         doc["suspects"] = [_suspect_json(s) for s in suspects[:_SUSPECT_LIMIT]]
@@ -657,8 +694,12 @@ def _print_text(
     limit: int,
     c_abi_caveat: str | None,
     dispatch_caveat: str | None,
+    majority_warning: str | None = None,
 ) -> None:
     """Print ``run``'s text-mode listing, footer, and caveats.
+
+    ``majority_warning`` (see ``_dispatch_majority_warning``) is the
+    one caveat printed *above* the rows rather than below them.
 
     Factored out of ``run`` to keep it under the module's cyclomatic-
     complexity cap; prints nothing beyond the "no unused symbols" line
@@ -682,6 +723,8 @@ def _print_text(
     ]
     kept, meter = fit_to_budget(rows, budget, limit, prefix=header)
     print(header)
+    if majority_warning:
+        print(majority_warning)
     for row in kept:
         print(row)
     print(meter.footer())
@@ -759,7 +802,15 @@ def run(
         print(json.dumps(doc, indent=2))
         return EXIT_FOUND if found else EXIT_NONE
 
-    _print_text(found, kinds, budget, limit, c_abi_caveat, dispatch_caveat)
+    _print_text(
+        found,
+        kinds,
+        budget,
+        limit,
+        c_abi_caveat,
+        dispatch_caveat,
+        _dispatch_majority_warning(len(dispatch_candidates), len(found)),
+    )
 
     if suspect:
         _print_suspects_text(suspects)

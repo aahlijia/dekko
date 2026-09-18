@@ -447,8 +447,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_query.add_argument(
         "--limit",
         type=int,
-        default=50,
-        help="max text result lines (default: 50)",
+        default=None,
+        help=(
+            "max text result lines (default: 50; with --budget and no "
+            "--limit, the budget alone governs)"
+        ),
     )
     p_query.add_argument(
         "--budget",
@@ -1873,7 +1876,7 @@ def run_query(args: argparse.Namespace) -> int:
         args.action,
         args.target or "",
         as_json=args.as_json,
-        limit=args.limit,
+        limit=query.effective_limit(args.limit, args.budget),
         sites=args.sites,
         notes=args.notes,
         budget=args.budget,

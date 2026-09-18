@@ -337,7 +337,17 @@ def _summary(
     outputs: list[Path],
 ) -> str:
     """Build the human-readable run summary."""
-    by_lang = Counter(fm.language for fm in files)
+    # Round 31 claude-buddy.md S2: a file whose grammar isn't installed
+    # yields zero symbols, yet used to be counted in "mapped N files
+    # (... bash 12 ...)" -- which reads as "these 12 bash files were
+    # mapped". They are reported on their own line instead, with the
+    # fix, so the top line only ever claims what was actually parsed.
+    unparsed = Counter(
+        fm.language
+        for fm in files
+        if fm.error and grammars.is_grammar_unavailable_message(fm.error)
+    )
+    by_lang = Counter(fm.language for fm in files) - unparsed
     langs = ", ".join(f"{lang} {n}" for lang, n in by_lang.most_common())
 
     funcs = sum(
@@ -358,14 +368,10 @@ def _summary(
     # share one alarming "parse error N" bucket, even though the
     # per-file detail line already named the missing grammar
     # accurately -- see ``grammars.is_grammar_unavailable_message``.
-    no_grammar = sum(
-        1
-        for fm in files
-        if fm.error and grammars.is_grammar_unavailable_message(fm.error)
-    )
+    no_grammar = sum(unparsed.values())
     errors = sum(1 for fm in files if fm.error) - no_grammar
     lines = [
-        f"dekko: mapped {len(files)} files ({langs})",
+        f"dekko: mapped {len(files) - no_grammar} files ({langs})",
         f"  symbols: {funcs} functions/methods, {classes} types, "
         f"{variables} variables",
         f"  call edges: {edges} resolved, {ambiguous} ambiguous, "
@@ -384,6 +390,14 @@ def _summary(
         )
 
         lines.append(f"  skipped: {detail}")
+
+    if unparsed:
+        mix = ", ".join(f"{lang} {n}" for lang, n in unparsed.most_common())
+        lines.append(
+            f"  NOT parsed (no symbols, no edges): {mix} -- grammar not "
+            "installed; install the extras to map them: "
+            "pip install 'dekko[all]'  (or: uv tool install 'dekko[all]')"
+        )
 
     pages = [
         p for p in outputs if p.parent.name == "map" and p.suffix == ".md"

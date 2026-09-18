@@ -563,3 +563,68 @@ def test_cpp_subtypes_finds_derived(
     assert code == 0
     out = capsys.readouterr().out
     assert "Derived" in out
+
+
+# Round 31 spring-boot.md (P3.4): a bare name shared by a class and its
+# own constructors is not ambiguous *for a heritage query* -- only the
+# type is a valid target.
+
+JAVA_CTOR_COLLISION = {
+    "Base.java": "public interface Base {}\n",
+    "Proc.java": (
+        "public class Proc implements Base {\n"
+        "    public Proc() {}\n"
+        "    public Proc(int a) {}\n"
+        "}\n"
+    ),
+}
+
+
+def test_heritage_query_prefers_sole_type_candidate(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(JAVA_CTOR_COLLISION)
+    code = cli.main(["query", "supertypes", "Proc", "--root", str(root)])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "interface Base" in captured.out
+    # Disclosed, never silent.
+    assert "also names 2 non-type symbol(s)" in captured.err
+
+
+def test_non_heritage_query_still_reports_the_collision(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(JAVA_CTOR_COLLISION)
+    code = cli.main(["query", "callers", "Proc", "--root", str(root)])
+    assert code != 0
+    assert "also names" not in capsys.readouterr().err
+
+
+def test_sole_type_candidate_needs_exactly_one_type() -> None:
+    def sym(kind: str, line: int) -> Symbol:
+        return Symbol(
+            id=f"a.java::X{line}",
+            name="X",
+            qualname="X",
+            kind=kind,
+            path="a.java",
+            language="java",
+            start_line=line,
+            end_line=line,
+        )
+
+    two_types = [sym("class", 1), sym("interface", 9), sym("method", 3)]
+    assert query._sole_type_candidate("X", two_types) is None
+    assert query._sole_type_candidate("X", [sym("method", 3)]) is None
+
+
+# Round 31 claude-code.md (P3.2): --limit and --budget are independent
+# caps; an explicit budget with no explicit limit lets the budget govern.
+
+
+def test_effective_limit_rules() -> None:
+    assert query.effective_limit(None, None) == query.DEFAULT_LIMIT
+    assert query.effective_limit(None, 20000) == query.NO_ROW_LIMIT
+    assert query.effective_limit(10, 20000) == 10
+    assert query.effective_limit(300, None) == 300

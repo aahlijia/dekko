@@ -1507,3 +1507,32 @@ def test_unused_dispatch_caveat_absent_for_unrelated_dead_code(
     assert code == 1
     doc = json.loads(capsys.readouterr().out)
     assert doc["dispatch_caveat"] is None
+
+
+# --- _dispatch_majority_warning (round 31 spring-boot.md, P3.1) -------
+
+
+def test_dispatch_majority_warning_fires_above_half() -> None:
+    warning = unused._dispatch_majority_warning(2323, 3281)
+    assert warning is not None
+    assert warning.startswith("warning: 2323 of 3281 (71%)")
+    assert "NOT dead code" in warning
+
+
+def test_dispatch_majority_warning_quiet_below_ratio_or_floor() -> None:
+    assert unused._dispatch_majority_warning(40, 100) is None
+    # 2 of 3 is a majority, but far too small a sample to shout about.
+    assert unused._dispatch_majority_warning(2, 3) is None
+    assert unused._dispatch_majority_warning(0, 0) is None
+
+
+def test_dispatch_majority_warning_prints_above_the_rows(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    found = [_sym(f"f{i}", "a.py") for i in range(3)]
+    unused._print_text(
+        found, "callables", None, 50, None, "note: x", "warning: y"
+    )
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1] == "warning: y"
+    assert lines.index("note: x") > lines.index("warning: y") + 3

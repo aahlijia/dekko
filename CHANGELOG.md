@@ -9,6 +9,83 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.59] — 2026-09-18
+
+Round 31 close-out: the remaining P2/P3 items from
+`test-repos/reports/31-tokentest-7repo-post04355/OPEN-ISSUES.md`.
+Two of these change which bucket a call or heritage clause lands in;
+**no existing resolved call edge changes** (verified identical on
+cline, claude-code and zed).
+
+### Fixed
+- **A call whose only same-named repo symbol is rejected is `external`,
+  not `ambiguous`** (round 31 cline.md §4.2, the `at` entry).
+  `arr.at(-1)` against the repo's only `at`, a local two-parameter
+  `at(r, c)`, is correctly refused by the arity guard. But it was then
+  filed as ambiguous, against a candidate list of one. A collision
+  needs two live candidates; this call has none. It showed up as the
+  self-contradictory `ambiguous --by name` row "86 sites, avg 1.0
+  candidates" and made `query symbol at` claim "+86 additional call
+  site(s) resolved ambiguously" about calls that provably cannot be
+  its own. Same defect class, and same remedy, as the round-22
+  `_NOISE` split. cline: 542 of 6,271 ambiguous entries had exactly
+  one candidate, now 20; claude-code: 990 → 0. A sample of 14 was
+  checked by hand: all 14 rejections were right
+  (`Buffer.byteLength(s, "utf8")`, `vscode.commands.executeCommand`,
+  a zero-arg call to a local closure). The 20 left on cline are the
+  cross-*language* sole-candidate case, which stays ambiguous by an
+  earlier, deliberate design decision.
+- **Rust heritage: the fixture-decoy tiebreak no longer needs the file
+  to name the crate** (round 31 zed.md / OPEN-ISSUES P2.1). On zed's
+  motivating example only 174 of 358 `impl Render for` clauses
+  resolved. All 184 ambiguous ones had the *identical* two candidates,
+  the real `crates/gpui/src/element.rs::Render` and the
+  `tooling/lints/test_fixture/gpui` stand-in, and reached `Render`
+  through a glob (`use ui::prelude::*;`) or a re-exporting crate
+  (`use ui::Render;`), so there was never a crate name to build the
+  round-24 hint from. The same convention now applies as a last
+  resort: real code doesn't implement a test fixture's stand-in
+  trait. Exactly one non-synthetic survivor is still required, two
+  real crates sharing a name stay ambiguous, and every edge resolved
+  this way is counted in the already-disclosed
+  `heritage_synthetic_tiebreak_count`. A clause written *inside* a
+  fixture tree is left ambiguous: live-testing caught 8 edges from
+  zed's `test_fixture/render_consumer` wrongly pointed at the real
+  trait before that guard existed. zed: **+306 heritage edges, 0
+  lost, heritage-ambiguous 384 → 78; `Render` 355 of 358 resolved**
+  (the other 3 are that fixture consumer).
+- **`dekko map` no longer counts unparsed files as mapped** (round 31
+  claude-buddy.md S2). Without the `[all]` extra, a repo's bash files
+  yield no symbols, yet the summary read `mapped 57 files (... bash
+  12 ...)`. The top line now counts and lists only what was parsed,
+  and a new line names the unparsed languages with the fix:
+  `NOT parsed (no symbols, no edges): bash 12 -- grammar not
+  installed; ... pip install 'dekko[all]'`. The existing `skipped: no
+  grammar installed N` line is unchanged.
+
+### Changed
+- **`query --budget N` with no `--limit` lets the budget govern**
+  (round 31 claude-code.md). `--limit` (rows, default 50) and
+  `--budget` (tokens) are independent caps, and both bound by default:
+  `query callers getGlobalConfig --budget 20000` returned 51 of 203
+  rows. An explicit budget without an explicit limit now lifts the row
+  default; an explicit `--limit` is always honored; neither flag keeps
+  the 50-row default. The MCP query-backed tools follow the same rule
+  for an explicit `budget` argument.
+- **`query supertypes`/`subtypes` pick the one type among an
+  ambiguous name's candidates** (round 31 spring-boot.md). A bare name
+  shared by a class and its own constructors isn't ambiguous for a
+  heritage query, since only the type is a valid target. The choice is
+  printed to stderr. Two or more type candidates stay ambiguous, and
+  every other action is unchanged.
+- **`dekko unused` leads with a warning when most of the list is
+  dispatch candidates** (round 31 spring-boot.md: 2,323 of 3,281,
+  71%). The existing caveat fired correctly, but as the last line
+  under thousands of rows, on exactly the interface-heavy repo shape
+  where the list is mostly *not* dead code. At ≥50% (and ≥20
+  candidates) a `warning:` now prints directly under the header;
+  `--json` carries it as `dispatch_majority_warning`.
+
 ## [0.43.58] — 2026-09-18
 
 The rest of round 31's P1 list, plus one P3 that turned out to share

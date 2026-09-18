@@ -818,6 +818,13 @@ alphabetization; within each group, rows still sort by path/line/
 caller. This matters most when `--limit`/`--budget` truncates: the
 higher-signal exact matches are now what survives the cap.
 
+`query` has two independent caps: `--limit` (rows, default 50) and
+`--budget` (estimated tokens). Passing `--budget N` **without**
+`--limit` lets the budget govern alone, so `query callers X --budget
+20000` returns every row that fits rather than stopping at 50. An
+explicit `--limit` is always honored. The footer names whichever cap
+actually cut the output (`raise --limit` / `raise --budget`).
+
 **`--lang <language>` scopes `throws`/`catches` to one language** —
 cuts cross-language noise on a multi-language repo, e.g. a 99%-Java
 repo carrying a handful of vendored JS files whose untyped catch-alls

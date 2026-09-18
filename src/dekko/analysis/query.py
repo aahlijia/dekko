@@ -138,6 +138,33 @@ def paths_matching(
     return sorted(p for p in universe if p.endswith(suffix))
 
 
+DEFAULT_LIMIT = 50
+# Large enough to never bind; a plain int keeps every ``[:limit]``
+# slice and ``len(x) > limit`` comparison downstream untouched.
+NO_ROW_LIMIT = 1_000_000
+
+
+def effective_limit(limit: int | None, budget: int | None) -> int:
+    """The row cap to apply, given what the caller actually asked for.
+
+    ``--limit`` and ``--budget`` are independent caps, and both used
+    to bind by default: ``query callers X --budget 20000`` returned 51
+    of 203 rows because the *row* default (50) cut in long before the
+    token budget did (round 31 claude-code.md). An explicit budget
+    with no explicit limit now means "the budget governs": the caller
+    has already said how much output they can take, in the unit that
+    actually matters to them. An explicit ``--limit`` is always
+    honored, and with neither flag the 50-row default stands.
+
+    Args:
+        limit: The caller's explicit row limit, or ``None``.
+        budget: The caller's explicit token budget, or ``None``.
+    """
+    if limit is not None:
+        return limit
+    return NO_ROW_LIMIT if budget is not None else DEFAULT_LIMIT
+
+
 def resolve_target(
     index: MapIndex, target: str
 ) -> tuple[Symbol | None, list[Symbol]]:
@@ -2684,6 +2711,35 @@ def _heritage_external_label(index: MapIndex, sym: Symbol, name: str) -> str:
     return "external"
 
 
+def _sole_type_candidate(
+    target: str, candidates: list[Symbol]
+) -> Symbol | None:
+    """The one type-kind symbol among an ambiguous target's candidates.
+
+    A heritage query can only ever be about a type, so a bare name
+    shared by a class and its own constructors/methods (Java's
+    ``ConfigDataEnvironmentPostProcessor``: one class, three ctors) is
+    not genuinely ambiguous *for this action* -- every non-type
+    candidate would just hit ``_run_heritage_wrong_kind``. Round 31
+    spring-boot.md: the generic candidate list sent an agent off to
+    copy a ``:LINE`` qualifier to say something the action already
+    implies. Two or more type candidates stay ambiguous, as before.
+    The choice is disclosed on stderr, never silent.
+    """
+    types = [c for c in candidates if c.kind in TYPE_KINDS]
+    if len(types) != 1 or len(candidates) < 2:
+        return None
+    only = types[0]
+    others = len(candidates) - 1
+    print(
+        f"dekko: note: '{target}' also names {others} non-type "
+        f"symbol(s); using the {only.kind} at {only.path}:"
+        f"{only.start_line} (supertypes/subtypes only apply to types)",
+        file=sys.stderr,
+    )
+    return only
+
+
 def _run_heritage_wrong_kind(sym: Symbol) -> int:
     """Report a resolved target that isn't a type-kind symbol."""
     print(
@@ -3420,6 +3476,8 @@ def _dispatch(
         return scanned
 
     sym, candidates = resolve_target(index, target)
+    if sym is None and action in ("supertypes", "subtypes"):
+        sym = _sole_type_candidate(target, candidates)
     if sym is None:
         return report_unresolved(target, candidates, index), None
     if action == "symbol":

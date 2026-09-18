@@ -179,6 +179,22 @@ _SYMBOL_ALIAS_TOOLS = frozenset(
 )
 
 
+def _limit_arg(args: dict) -> int:
+    """Row limit for a query-backed tool (see ``query.effective_limit``).
+
+    An explicit ``budget`` with no explicit ``limit`` lets the budget
+    govern alone, same as the CLI. The tool's *default* budget doesn't
+    count: only a caller who actually chose a budget has said how much
+    output they can take.
+    """
+    limit = args.get("limit")
+    budget = args.get("budget")
+    return query.effective_limit(
+        int(limit) if limit is not None else None,
+        int(budget) if budget is not None else None,
+    )
+
+
 def _resolve_symbol_alias(tool_name: str, args: dict) -> dict:
     """Accept ``name`` as an alias for ``symbol`` on tools that need it.
 
@@ -295,7 +311,7 @@ def _relation_tool(
     include_tests = bool(args.get("include_tests", default_include_tests))
     index = _index_for(ctx, args, include_tests=include_tests)
     target = _require(args, "symbol")
-    limit = int(args.get("limit", 50))
+    limit = _limit_arg(args)
     sites = bool(args.get("sites", False))
     budget = args.get("budget")
     budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
@@ -340,7 +356,7 @@ def tool_find_usages(ctx: Context, args: dict) -> str:
     """Symbols that reference an external (out-of-repo) name."""
     index = _index_for(ctx, args)
     name = _require(args, "name")
-    limit = int(args.get("limit", 50))
+    limit = _limit_arg(args)
     budget = args.get("budget")
     budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
     code, out, err = _capture(
@@ -358,7 +374,7 @@ def tool_find_type_usages(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     name = _require(args, "type")
     exact = bool(args.get("exact", False))
-    limit = int(args.get("limit", 50))
+    limit = _limit_arg(args)
     budget = args.get("budget")
     budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
     code, out, err = _capture(
@@ -505,7 +521,7 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     roots = args.get("roots") or []
     if not isinstance(roots, list):
         raise ToolError("'roots' must be a list of path globs")
-    limit = int(args.get("limit", 50))
+    limit = _limit_arg(args)
     budget = args.get("budget")
     budget = int(budget) if budget is not None else None
     suspect = bool(args.get("suspect", False))

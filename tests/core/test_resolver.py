@@ -1609,12 +1609,15 @@ def test_bare_call_to_same_file_builder_named_function_still_resolves() -> (
 # test, rather than being intercepted earlier by layer 1.
 
 
-def test_single_candidate_arity_mismatch_falls_back_to_ambiguous() -> None:
+def test_single_candidate_arity_mismatch_lands_in_external() -> None:
     # The general shape spring-boot's isTrue() repro illustrates: a
     # bare call with 0 written arguments against the sole repo-defined
     # ``check`` (1 required parameter) must not be guessed via the
-    # single-candidate fast path -- it should land in ``ambiguous``,
+    # single-candidate fast path -- it should land in ``external``,
     # exactly as if there had been zero candidates, not one wrong one.
+    # (Until round 31 it landed in ``ambiguous``, which a zero-candidate
+    # call never does: a collision needs two live candidates. cline had
+    # 542 such "ambiguous, avg 1.0 candidates" entries.)
     check_fn = _fn("mod.py", "check", language="python")
     check_fn.params = [Param(name="value")]
     caller = _fn("main.py", "run", language="python")
@@ -1640,11 +1643,10 @@ def test_single_candidate_arity_mismatch_falls_back_to_ambiguous() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, check_fn.id) not in edges
     assert graph.calls_in.get(check_fn.id, []) == []
-    assert len(graph.ambiguous) == 1
-    amb_caller, amb_name, amb_cands = graph.ambiguous[0]
-    assert amb_caller == caller.id
-    assert amb_name == "check"
-    assert amb_cands == [check_fn.id]
+    assert graph.ambiguous == []
+    assert [(e.caller, e.callee) for e in graph.external] == [
+        (caller.id, "check")
+    ]
 
 
 def test_single_candidate_arity_mismatch_bare_call_non_method_candidate() -> (
@@ -1683,7 +1685,8 @@ def test_single_candidate_arity_mismatch_bare_call_non_method_candidate() -> (
     graph = resolve(files)
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, log_fn.id) not in edges
-    assert len(graph.ambiguous) == 1
+    assert graph.ambiguous == []
+    assert len(graph.external) == 1
 
 
 def test_single_candidate_arity_mismatch_receiver_qualified() -> None:
@@ -1720,7 +1723,8 @@ def test_single_candidate_arity_mismatch_receiver_qualified() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, handle_fn.id) not in edges
     assert graph.calls_in.get(handle_fn.id, []) == []
-    assert len(graph.ambiguous) == 1
+    assert graph.ambiguous == []
+    assert len(graph.external) == 1
 
 
 def test_single_candidate_arity_within_variadic_range_still_resolves() -> None:
@@ -4809,3 +4813,74 @@ def test_dotted_filename_import_disambiguates_colliding_call(
     assert graph.calls_out["src/builtins.ts::run"] == [
         "src/catalog/catalog.generated-access.ts::getModels"
     ]
+
+
+# Round 31 zed.md (P2.1): the round-24 fixture-decoy tiebreak only ran
+# when the file named the crate. 184 of zed's `impl Render for` clauses
+# reach Render through a glob (`use ui::prelude::*;`) and had the same
+# two candidates, real gpui vs. the test_fixture stand-in.
+
+RUST_DECOY_REPO = {
+    "crates/gpui/src/element.rs": "pub trait Render {}\n",
+    "tooling/lints/test_fixture/gpui/src/lib.rs": "pub trait Render {}\n",
+    "crates/ui/src/prelude.rs": "pub use gpui::Render;\n",
+    "crates/editor/src/editor.rs": (
+        "use ui::prelude::*;\npub struct Editor;\nimpl Render for Editor {}\n"
+    ),
+    "tooling/lints/test_fixture/render_consumer/src/lib.rs": (
+        "use ui::prelude::*;\npub struct View;\nimpl Render for View {}\n"
+    ),
+}
+
+
+def _write_tree(root: Path, tree: dict[str, str]) -> None:
+    for rel, text in tree.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+def test_hintless_glob_import_heritage_prefers_real_crate(
+    tmp_path: Path,
+) -> None:
+    _write_tree(tmp_path, RUST_DECOY_REPO)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    real = "crates/gpui/src/element.rs::Render"
+    assert graph.heritage_out["crates/editor/src/editor.rs::Editor"] == [real]
+    # Convention-based, so it must be counted for disclosure.
+    assert graph.heritage_synthetic_tiebreak_count == 1
+
+
+def test_hintless_tiebreak_leaves_fixture_tree_clauses_ambiguous(
+    tmp_path: Path,
+) -> None:
+    # A consumer crate *inside* the fixture tree depends on the sibling
+    # stand-in, not the real crate. Live-testing on zed caught 8 edges
+    # wrongly pointed at the real trait before this guard existed.
+    _write_tree(tmp_path, RUST_DECOY_REPO)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    consumer = "tooling/lints/test_fixture/render_consumer/src/lib.rs::View"
+    assert consumer not in graph.heritage_out
+    assert [s for s, _, _ in graph.heritage_ambiguous] == [consumer]
+
+
+def test_hintless_tiebreak_two_real_crates_stay_ambiguous(
+    tmp_path: Path,
+) -> None:
+    tree = dict(RUST_DECOY_REPO)
+    del tree["tooling/lints/test_fixture/gpui/src/lib.rs"]
+    del tree["tooling/lints/test_fixture/render_consumer/src/lib.rs"]
+    tree["crates/other/src/lib.rs"] = "pub trait Render {}\n"
+    _write_tree(tmp_path, tree)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert "crates/editor/src/editor.rs::Editor" not in graph.heritage_out
+    assert graph.heritage_synthetic_tiebreak_count == 0
