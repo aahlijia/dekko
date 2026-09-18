@@ -9,6 +9,50 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.61] — 2026-09-18
+
+Found by round 31's zed coverage follow-up
+(`test-repos/reports/31-tokentest-7repo-post04355/coverage-followup/zed.md`),
+which was asked to attack 0.43.59's heritage tiebreak and did.
+
+### Fixed
+- **Rust `use crate::…` / `super::…` / `self::…` imports are in-repo
+  by definition.** `use crate::{AgentTool};` names a trait the crate
+  root merely re-exports (`pub use thread::*;`). The "does this import
+  point into the repo" test compares the source's segments against
+  file stems, drops `crate` itself, and was left with `AgentTool`,
+  which is no file's stem. So the clause was filed `external`, and
+  because external is not ambiguous, the row vanished from `query
+  subtypes` with no hint: **`AgentTool` showed 11 of 35
+  implementors.** A file reaching the same trait through a glob
+  (`use crate::prelude::*;`) resolved fine, which was the tell. The
+  same short-circuit hit receiver-qualified calls (`use crate::{Vim};`
+  then `Vim::take_forced_motion(cx)`). zed: **+213 heritage edges
+  (`AgentTool` 35 of 35), +2,388 resolved call edges, 0 lost in
+  either**; `heritage_external` 2,503 → 2,289. Same defect class as
+  0.43.57's workspace-package fix, in a different language.
+- **0.43.59's hintless fixture-decoy tiebreak no longer resolves code
+  that lives beside the fixture.** It pointed 7 clauses in zed's
+  dylint UI tests (`tooling/lints/ui/*.rs`) at the real `gpui` trait.
+  Their paths carry no `test_fixture` marker, but they are compiled
+  with `--extern=gpui=<fixture rlib>`, so their `use gpui::*;` *is*
+  the stand-in. They were honestly ambiguous before 0.43.59, so this
+  was a regression that release introduced. The build flag is
+  unknowable statically; shared directory depth is a usable proxy. A
+  clause whose file shares a deeper directory prefix with a fixture
+  candidate than with the real one now stays ambiguous. zed after
+  both changes in this round: `Render` 349 resolved, 9 ambiguous (all
+  9 beside the fixture), versus 174 / 184 before 0.43.59. **This
+  corrects 0.43.59's "355 of 358" figure**, 6 of which were these
+  wrong edges.
+
+### Known limits (found, not fixed)
+- An `impl Trait for X` block in a *different file* from `struct X`
+  (`text_finder/render.rs` implementing for a struct in
+  `text_finder.rs`) produces no heritage edge at all: Rust heritage
+  resolves its subtype side by same-file name lookup. 3 of zed's 396
+  `impl Render for` blocks. Tracked in the round-31 OPEN-ISSUES.
+
 ## [0.43.60] — 2026-09-18
 
 Found by round 31's tensorflow coverage follow-up

@@ -1668,9 +1668,53 @@ def _hintless_decoy_tiebreak(
     same_language = _language_filtered(h, candidates)
     if len(same_language) < 2:
         return None
+    if _nearer_to_a_decoy(h.path, same_language):
+        return None
     return _prefer_non_synthetic_crate_match(
         same_language, h.path, tiebreak_hits
     )
+
+
+def _nearer_to_a_decoy(path: str, candidates: list[Symbol]) -> bool:
+    """Whether ``path`` sits closer to a fixture candidate than a real one.
+
+    The hintless tiebreak's premise is "real code doesn't implement a
+    fixture's trait". Code that lives *beside* a fixture is the
+    exception, and a path marker can't see it: zed's dylint UI tests
+    (``tooling/lints/ui/*.rs``) carry no ``test_fixture`` segment, yet
+    ``tooling/lints/src/lib.rs`` compiles them with
+    ``--extern=gpui=<fixture rlib>``, so their ``use gpui::*;`` is the
+    stand-in. Round 31's zed coverage pass caught 7 such edges this
+    tiebreak had newly pointed at the real trait (they were honestly
+    ambiguous before it existed). The build flag is unknowable
+    statically; shared directory depth is a usable proxy.
+    ``tooling/lints/ui/x.rs`` shares ``tooling/lints`` with the decoy
+    and nothing with ``crates/gpui``, while a real consumer
+    (``crates/editor/...``) shares ``crates`` with the real crate and
+    nothing with the decoy. Ties go to resolving.
+    """
+
+    def shared(other: str) -> int:
+        depth = 0
+        for a, b in zip(path.split("/")[:-1], other.split("/")[:-1]):
+            if a != b:
+                break
+            depth += 1
+        return depth
+
+    decoys = [
+        shared(c.path)
+        for c in candidates
+        if _looks_like_synthetic_crate_root(_rust_crate_dir(c.path))
+    ]
+    real = [
+        shared(c.path)
+        for c in candidates
+        if not _looks_like_synthetic_crate_root(_rust_crate_dir(c.path))
+    ]
+    if not decoys or not real:
+        return False
+    return max(decoys) > max(real)
 
 
 def _add_heritage_edge(
@@ -4167,6 +4211,9 @@ def _workspace_tagged(
     )
 
 
+_RUST_IN_CRATE_PREFIXES = ("crate::", "super::", "self::")
+
+
 def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     """Whether an import binding plausibly points into this repo.
 
@@ -4178,6 +4225,18 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     ``_dotted_components``).
     """
     if isinstance(imp, _WorkspaceImport):
+        return True
+    if imp.source.startswith(_RUST_IN_CRATE_PREFIXES):
+        # ``use crate::{AgentTool};`` is in-repo by definition, whatever
+        # the file stems say. The stem test fails it whenever the crate
+        # root merely *re-exports* the name (``pub use thread::*;``):
+        # ``_import_segments`` drops ``crate`` itself, leaving only
+        # ``AgentTool``, which is no file's stem. Round 31 zed coverage
+        # pass F1: 218 of zed's 2,503 ``heritage_external`` entries
+        # named an in-repo trait this way, and ``query subtypes
+        # AgentTool`` showed 11 of 35 implementors with no hint that 24
+        # were missing. A file reaching the same trait through a glob
+        # resolved fine, which was the tell.
         return True
     if _import_segments(imp.source) & repo_stems:
         return True

@@ -4884,3 +4884,68 @@ def test_hintless_tiebreak_two_real_crates_stay_ambiguous(
     graph = resolve(files)
     assert "crates/editor/src/editor.rs::Editor" not in graph.heritage_out
     assert graph.heritage_synthetic_tiebreak_count == 0
+
+
+# Round 31 zed coverage pass F1: `use crate::{Trait}` where the crate
+# root only re-exports the name (`pub use thread::*;`). The stem test
+# saw just `AgentTool`, no file's stem, and filed the clause external:
+# `query subtypes AgentTool` showed 11 of 35 implementors, silently.
+
+RUST_CRATE_REEXPORT = {
+    "crates/agent/src/agent.rs": "mod thread;\npub use thread::*;\n",
+    "crates/agent/src/thread.rs": (
+        "pub trait AgentTool {}\n"
+        "pub struct ToolInput;\n"
+        "impl ToolInput {\n"
+        "    pub fn resolved(x: u8) -> Self { ToolInput }\n}\n"
+    ),
+    "crates/agent/src/tools/list.rs": (
+        "use crate::{AgentTool, ToolInput};\n"
+        "pub struct ListTool;\n"
+        "impl AgentTool for ListTool {}\n"
+        "pub fn run() {\n    ToolInput::resolved(1);\n}\n"
+    ),
+}
+
+
+def test_rust_crate_rooted_import_of_reexported_trait_resolves(
+    tmp_path: Path,
+) -> None:
+    _write_tree(tmp_path, RUST_CRATE_REEXPORT)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert graph.heritage_out["crates/agent/src/tools/list.rs::ListTool"] == [
+        "crates/agent/src/thread.rs::AgentTool"
+    ]
+    assert graph.heritage_external == []
+    # The receiver-qualified call through the same import, previously
+    # short-circuited to external by _receiver_is_external.
+    assert (
+        "crates/agent/src/thread.rs::ToolInput.resolved"
+        in graph.calls_out["crates/agent/src/tools/list.rs::run"]
+    )
+
+
+def test_hintless_tiebreak_stays_ambiguous_next_to_the_fixture(
+    tmp_path: Path,
+) -> None:
+    # zed's dylint UI tests: no fixture marker in their own path, but
+    # compiled against the fixture crate sitting beside them.
+    tree = dict(RUST_DECOY_REPO)
+    tree["tooling/lints/ui/entity_update.rs"] = (
+        "use gpui::*;\npub struct Probe;\nimpl Render for Probe {}\n"
+    )
+    _write_tree(tmp_path, tree)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    probe = "tooling/lints/ui/entity_update.rs::Probe"
+    assert probe not in graph.heritage_out
+    assert probe in [s for s, _, _ in graph.heritage_ambiguous]
+    # The real consumer is unaffected by the guard.
+    assert graph.heritage_out["crates/editor/src/editor.rs::Editor"] == [
+        "crates/gpui/src/element.rs::Render"
+    ]
