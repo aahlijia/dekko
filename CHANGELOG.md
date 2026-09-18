@@ -9,6 +9,61 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.57] — 2026-09-18
+
+Round 31 P1.1. Unlike 0.43.56's two disclosure fixes, this one
+**changes what dekko resolves**, on JS/TS monorepos that declare
+workspaces. Every other repo is byte-identical. Analysis and numbers:
+`test-repos/reports/31-tokentest-7repo-post04355/P1.1-workspace-package-imports.md`.
+
+### Fixed
+- **Workspace-package imports are no longer mistaken for npm
+  dependencies** (round 31 cline.md §4.1 Bug A). `import type {
+  ApiHandler } from "@cline/llms"` names a *package*, not a file, so
+  the resolver's "does this import point into the repo" test, which
+  only ever compared the specifier's segments against repo file
+  stems, called it external. The call or heritage clause landed in
+  `external` before the candidate ladder ran. Reported as one missing
+  `query subtypes ApiHandler` row; measured on cline it was 2,610
+  import bindings across 690 files. dekko now reads the repo's
+  declared workspaces (npm/yarn/bun `workspaces`, array or
+  `{"packages": [...]}`; `pnpm-workspace.yaml`; `**` and `!negation`
+  globs) into a package-name → directory table, treats a matching
+  import as in-repo, and narrows a colliding name to the candidates
+  living under the imported package (exported ones preferred). Zero
+  in-package candidates means a cross-package re-export, which is no
+  evidence, so the rest of the ladder runs untouched. Only *declared
+  members* count: cline ships a stub package literally named `vscode`
+  that is no workspace member and must not capture real `from
+  "vscode"` imports. On cline: **+975 resolved call edges, +14
+  heritage edges, −882 false externals**.
+- **12 confidently wrong edges on cline now point at the right
+  package.** The old stem test could also pass by coincidence:
+  `import { ClineAccountService } from "@cline/core"` "resolved" into
+  `apps/vscode/.../ClineAccountService.ts` purely because that file's
+  stem equals the imported name. Package-scoped narrowing now runs
+  before the stem hints, so the package the name was actually
+  imported from wins.
+
+### Changed
+- `.dekko/resolved-calls.json.gz` carries a `workspace_hash`. A
+  renamed `package.json` or edited `workspaces` glob changes which
+  imports count as in-repo without touching any source file, which
+  the incremental call-resolution cache's path-set and symbol gates
+  can't see. A mismatch is a cache miss (one full re-resolve). Caches
+  written by earlier builds were already invalidated by the version
+  bump.
+
+### Known limits
+- The module graph (`dekko deps`, `query importers`) still reports a
+  workspace package as `external`. Entry-point resolution
+  (`exports`/`main` point at `dist/`, not source) is a separate
+  change, tracked as round-31 P1.1b.
+- A receiver-qualified call through an imported namespace
+  (`Llms.getProvider()`) is un-blocked from `external` but not
+  narrowed: the namespace is routinely re-exported from another
+  package, so its import says nothing about where the member lives.
+
 ## [0.43.56] — 2026-09-18
 
 Round 31's two cross-language disclosure defects, both found by the

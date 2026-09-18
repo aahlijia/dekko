@@ -97,6 +97,7 @@ receiver/arity, ``(g *IDGenerator) Generate(...)`` in ``pkg/markdown``
 tests for a change a same-package unit test directly covered.
 """
 
+import fnmatch
 import gc
 import hashlib
 import json
@@ -877,8 +878,12 @@ def resolve(
             behavior exactly). See ``_resolve_all`` for how chunking
             and the parallelization threshold work.
         root: Repository root, used only to discover and parse
-            ``tsconfig.json``/``jsconfig.json`` path-alias config for
-            JS/TS import resolution (see ``resolve_imports``). ``None``
+            JS/TS project config: ``tsconfig.json``/``jsconfig.json``
+            path aliases for import resolution (see
+            ``resolve_imports``) and the workspace package table (see
+            ``load_workspace_packages``) the call, reference and
+            heritage passes use to recognize a workspace-package
+            import as in-repo. ``None``
             (the default) skips that discovery entirely — every caller
             that doesn't pass a real root sees byte-identical behavior
             to before this parameter existed.
@@ -897,7 +902,10 @@ def resolve(
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files)
+    workspace_pkgs = (
+        load_workspace_packages(root) if root is not None else None
+    )
+    imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
 
@@ -956,7 +964,7 @@ def resolve(
         )
         _build_adjacency(graph)
         graph.referenced, graph.referenced_in, graph.referenced_out = (
-            resolve_refs(files, workers)
+            resolve_refs(files, workers, workspace_pkgs)
         )
         (
             graph.heritage,
@@ -965,7 +973,7 @@ def resolve(
             graph.heritage_ambiguous,
             graph.heritage_external,
             graph.heritage_synthetic_tiebreak_count,
-        ) = resolve_heritage(files)
+        ) = resolve_heritage(files, workspace_pkgs)
         graph.modules = resolve_imports(files, root=root)
         (
             graph.throws,
@@ -1227,7 +1235,9 @@ def _resolve_refs_chunk_worker(
 
 
 def resolve_refs(
-    files: list[FileMap], workers: int = 1
+    files: list[FileMap],
+    workers: int = 1,
+    workspace_pkgs: dict[str, str] | None = None,
 ) -> tuple[list[Edge], dict[str, list[str]], dict[str, list[str]]]:
     """Resolve every raw value reference across the repo.
 
@@ -1246,6 +1256,10 @@ def resolve_refs(
             the default). See ``resolve``'s own ``workers`` parameter
             and ``_resolve_all``'s docstring for the parallelization
             shape this mirrors.
+        workspace_pkgs: JS/TS workspace package name → directory (see
+            ``load_workspace_packages``), or ``None``. Lets a
+            workspace-package import narrow a colliding name to the
+            package it was imported from.
 
     Returns:
         ``(edges, referenced_in, referenced_out)``, the same shape
@@ -1253,7 +1267,7 @@ def resolve_refs(
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files)
+    imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
 
     total_refs = sum(len(fm.refs) for fm in files)
@@ -1352,6 +1366,7 @@ def _resolve_ref(
 
 def resolve_heritage(
     files: list[FileMap],
+    workspace_pkgs: dict[str, str] | None = None,
 ) -> tuple[
     list[HeritageEdge],
     dict[str, list[str]],
@@ -1409,6 +1424,11 @@ def resolve_heritage(
 
     Args:
         files: Per-file extraction results.
+        workspace_pkgs: JS/TS workspace package name → directory (see
+            ``load_workspace_packages``), or ``None``. Without it, a
+            clause whose base is imported by package name (``import
+            type { ApiHandler } from "@cline/llms"``) is misfiled as
+            external -- round 31 cline.md §4.1 Bug A.
 
     Returns:
         ``(heritage_edges, heritage_out, heritage_in,
@@ -1433,7 +1453,7 @@ def resolve_heritage(
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files)
+    imports_by_file = _imports_by_file(files, workspace_pkgs)
     repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
     crate_roots = _rust_crate_roots_index_all(
         frozenset(fm.path for fm in files)
@@ -2792,7 +2812,7 @@ def _shadowed_by_external_import(
     imp = file_imports.get(call.name)
     if imp is None:
         return False
-    return not (_import_segments(imp.source) & repo_stems)
+    return not _import_is_in_repo(imp, repo_stems)
 
 
 # Type-annotation tokens that never name the receiver's own class —
@@ -3078,6 +3098,15 @@ def _import_match(
     how many resolved edges rest on that convention-based tiebreak
     rather than a structural match.
     """
+    # Workspace narrowing runs first on purpose: for a package-shaped
+    # specifier, ``_module_matches``'s stem test below can only ever
+    # hit by coincidence (``@cline/shared/Logger`` "matching" an
+    # unrelated ``Logger.ts`` in another package), so the package
+    # directory is the stronger evidence and gets first say.
+    candidates, narrowed = _workspace_narrowed(call, candidates, file_imports)
+    if narrowed and len(candidates) == 1:
+        return candidates[0]
+
     hints: list[str] = []
     imp = file_imports.get(call.name)
     if imp is not None:
@@ -3332,7 +3361,7 @@ def _receiver_is_external(
     imp = file_imports.get(first)
     if imp is None:
         return False
-    return not (_import_segments(imp.source) & repo_stems)
+    return not _import_is_in_repo(imp, repo_stems)
 
 
 def _import_segments(source: str) -> set[str]:
@@ -3745,13 +3774,299 @@ def _build_name_path_index(
     return index
 
 
-def _imports_by_file(files: list[FileMap]) -> dict[str, dict[str, Import]]:
-    """Map file path → local name → import record."""
+# ---------------------------------------------------------------------
+# Workspace packages (JS/TS monorepos)
+#
+# ``import { ApiHandler } from "@cline/llms"`` names a *package*, not a
+# file: nothing in the specifier is a file stem, so the stem-based
+# "does this import point into the repo" test every external guard
+# relied on (``_import_segments(source) & repo_stems``) called it an
+# npm dependency, and the call/heritage clause landed in ``external``
+# before the candidate ladder ever ran. Round 31 cline.md §4.1 Bug A
+# found it as one missing ``query subtypes`` row; measured against
+# cline it was ~900 call edges, 12 heritage edges and 2,610 import
+# bindings across 690 files -- the dominant import shape of the whole
+# TS-monorepo repo class.
+#
+# The table below (package ``name`` -> package directory, declared
+# workspace members only) is the JS/TS analog of
+# ``_rust_crate_roots_index_all``: the import names a package root, so
+# candidates are narrowed to the ones living under it. Membership is
+# attached to the import binding itself (``_WorkspaceImport``) rather
+# than threaded as yet another parameter, so it reaches every ladder
+# step -- and every pool worker, via the already-pickled
+# ``imports_by_file`` -- with no signature changes.
+
+_WORKSPACE_MANIFESTS = frozenset({"package.json", "pnpm-workspace.yaml"})
+
+
+@dataclass
+class _WorkspaceImport(Import):
+    """An import binding whose source names an in-repo workspace package.
+
+    Attributes:
+        package_dir: Repo-relative directory of the workspace package
+            the source resolves into.
+    """
+
+    package_dir: str = ""
+
+
+def load_workspace_packages(root: Path) -> dict[str, str]:
+    """Discover the repo's JS/TS workspace packages.
+
+    Only *declared workspace members* count: a ``package.json`` whose
+    directory matches a ``workspaces`` glob (npm/yarn/bun, array or
+    ``{"packages": [...]}`` form) or a ``pnpm-workspace.yaml``
+    ``packages`` entry of some manifest above it. A bare "any
+    ``package.json`` with a ``name``" rule is unsound -- cline itself
+    ships a stub package literally named ``vscode`` (``apps/vscode/
+    standalone/runtime-files/vscode``) that is no workspace member, and
+    would otherwise capture every real ``import * as vscode from
+    "vscode"`` in the repo.
+
+    Discovery reuses ``walker.find_config_files``, so ``node_modules``
+    and other vendored/ignored trees are excluded exactly as they are
+    for source files. A name claimed by two member directories is
+    dropped: no evidence beats a coin flip.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Package ``name`` → repo-relative package directory. Empty when
+        the repo declares no workspaces, which leaves every resolution
+        path byte-identical to a repo this feature never touched.
+    """
+    named: dict[str, list[str]] = {}
+    patterns: list[tuple[str, str]] = []
+    for rel in walker.find_config_files(root, _WORKSPACE_MANIFESTS):
+        base = _dirname(rel)
+        if rel.endswith(".yaml"):
+            globs = _pnpm_workspace_globs(root, rel)
+        else:
+            data = _read_jsonc_config(root, rel)
+            if data is None:
+                continue
+            name = data.get("name")
+            if isinstance(name, str) and name:
+                named.setdefault(name, []).append(base)
+            globs = _package_json_workspace_globs(data)
+        patterns.extend((base, g) for g in globs)
+
+    if not patterns:
+        return {}
+
+    packages: dict[str, str] = {}
+    for name, dirs in named.items():
+        members = [d for d in dirs if _is_workspace_member(d, patterns)]
+        if len(members) == 1:
+            packages[name] = members[0]
+    return packages
+
+
+def workspace_fingerprint(root: Path) -> str:
+    """Digest of the workspace package table, for cache invalidation.
+
+    The cached call pass (``storage.resolvecache``) is gated on the
+    repo's *source* path set and symbols being unchanged, neither of
+    which moves when a ``package.json`` is renamed or a ``workspaces``
+    glob edited -- yet either changes what the ladder resolves.
+
+    Returns:
+        A stable hex digest, or ``""`` for a repo with no workspaces.
+    """
+    packages = load_workspace_packages(root)
+    if not packages:
+        return ""
+    payload = json.dumps(sorted(packages.items())).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _package_json_workspace_globs(data: dict) -> list[str]:
+    """A ``package.json``'s ``workspaces`` globs, either spelling."""
+    spec = data.get("workspaces")
+    if isinstance(spec, dict):
+        spec = spec.get("packages")
+    if not isinstance(spec, list):
+        return []
+    return [g for g in spec if isinstance(g, str) and g]
+
+
+def _pnpm_workspace_globs(root: Path, rel: str) -> list[str]:
+    """The ``packages:`` block-list entries of a ``pnpm-workspace.yaml``.
+
+    A deliberately tiny reader rather than a YAML dependency (dekko
+    ships none): the file's real-world shape is one top-level
+    ``packages:`` key holding a block list of quoted globs. The rarer
+    flow spelling (``packages: ["a", "b"]``) yields nothing, which
+    degrades to "no workspaces declared here", never to a wrong answer.
+    """
+    try:
+        text = (root / rel).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+
+    globs: list[str] = []
+    in_packages = False
+    for raw in text.splitlines():
+        line = raw.split(" #", 1)[0].rstrip()
+        item = line.strip()
+        if not item or item.startswith("#"):
+            continue
+        if item.startswith("-"):
+            if in_packages:
+                globs.append(item[1:].strip().strip("'\""))
+            continue
+        if not raw[0].isspace():
+            in_packages = item.split(":", 1)[0].strip() == "packages"
+    return [g for g in globs if g]
+
+
+def _is_workspace_member(
+    package_dir: str, patterns: list[tuple[str, str]]
+) -> bool:
+    """Whether ``package_dir`` matches a declared workspace glob.
+
+    Args:
+        package_dir: Repo-relative directory holding a ``package.json``.
+        patterns: ``(declaring manifest's directory, glob)`` pairs. A
+            glob is relative to its own manifest; a leading ``!``
+            excludes, and an exclusion from the same manifest wins.
+    """
+    included = False
+    for base, pattern in patterns:
+        if base and not package_dir.startswith(base + "/"):
+            continue
+        rel = package_dir[len(base) + 1 :] if base else package_dir
+        if not rel:
+            continue
+        negated = pattern.startswith("!")
+        glob = pattern.lstrip("!").removeprefix("./").strip("/")
+        if not _glob_segments_match(glob.split("/"), rel.split("/")):
+            continue
+        if negated:
+            return False
+        included = True
+    return included
+
+
+def _glob_segments_match(pattern: list[str], parts: list[str]) -> bool:
+    """Match path segments against glob segments (``**`` spans any)."""
+    if not pattern:
+        return not parts
+    if pattern[0] == "**":
+        return any(
+            _glob_segments_match(pattern[1:], parts[i:])
+            for i in range(len(parts) + 1)
+        )
+    if not parts:
+        return False
+    return fnmatch.fnmatchcase(parts[0], pattern[0]) and _glob_segments_match(
+        pattern[1:], parts[1:]
+    )
+
+
+def _workspace_package_name(source: str) -> str | None:
+    """The package-name prefix of a bare JS/TS import source.
+
+    npm names are ``name`` or ``@scope/name``, so the prefix is read
+    straight off the source in O(1) rather than probing every known
+    package -- this runs once per import binding in the repo.
+    """
+    if not source or source[0] in "./":
+        return None
+    parts = source.split("/")
+    if source[0] != "@":
+        return parts[0]
+    if len(parts) < 2:
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+
+def _workspace_tagged(
+    imp: Import, workspace_pkgs: dict[str, str] | None
+) -> Import:
+    """``imp``, upgraded to a ``_WorkspaceImport`` when it names one."""
+    if not workspace_pkgs or not imp.path.endswith(_JS_TS_EXTENSIONS):
+        return imp
+    name = _workspace_package_name(imp.source)
+    package_dir = workspace_pkgs.get(name) if name else None
+    if package_dir is None:
+        return imp
+    return _WorkspaceImport(
+        path=imp.path,
+        name=imp.name,
+        source=imp.source,
+        package_dir=package_dir,
+    )
+
+
+def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
+    """Whether an import binding plausibly points into this repo.
+
+    True for a workspace-package import (see ``_WorkspaceImport``), or
+    when any segment of the source is a repo file stem -- the original,
+    file-shaped test, which a package-shaped specifier can only ever
+    pass by coincidence.
+    """
+    if isinstance(imp, _WorkspaceImport):
+        return True
+    return bool(_import_segments(imp.source) & repo_stems)
+
+
+def _workspace_narrowed(
+    call: _Referable,
+    candidates: list[Symbol],
+    file_imports: dict[str, Import],
+) -> tuple[list[Symbol], bool]:
+    """Narrow ``candidates`` to the workspace package the name came from.
+
+    Only the call's *own name* binding is used (``import { X } from
+    "@scope/pkg"`` then ``X(...)`` / ``implements X``). A receiver
+    binding (``Ns.fn()``) is deliberately not: ``Ns`` is routinely a
+    namespace one package re-exports from another, where the imported
+    package's directory says nothing about where ``fn`` lives.
+
+    Within the package, exported candidates are preferred -- a name
+    importable from outside the package is by definition exported, so
+    a same-named private helper or method is not the target.
+
+    Zero in-package candidates means a cross-package re-export (the
+    name is defined elsewhere and re-exported through this package's
+    barrel): that is *no* evidence, not negative evidence, so the
+    candidate list is returned untouched.
+
+    Returns:
+        ``(candidates, narrowed)`` -- ``narrowed`` is True only when
+        the returned list is a strict in-package subset.
+    """
+    imp = file_imports.get(call.name)
+    if not isinstance(imp, _WorkspaceImport):
+        return candidates, False
+    prefix = f"{imp.package_dir}/" if imp.package_dir else ""
+    inside = [c for c in candidates if c.path.startswith(prefix)]
+    if not inside:
+        return candidates, False
+    exported = [c for c in inside if c.exported]
+    return (exported or inside), True
+
+
+def _imports_by_file(
+    files: list[FileMap], workspace_pkgs: dict[str, str] | None = None
+) -> dict[str, dict[str, Import]]:
+    """Map file path → local name → import record.
+
+    ``workspace_pkgs`` (see ``load_workspace_packages``), when given,
+    upgrades every JS/TS binding that names a workspace package to a
+    ``_WorkspaceImport``. ``None``/empty leaves every record as-is.
+    """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
         table = out.setdefault(fm.path, {})
         for imp in fm.imports:
-            table.setdefault(imp.name, imp)
+            if imp.name not in table:
+                table[imp.name] = _workspace_tagged(imp, workspace_pkgs)
     return out
 
 

@@ -50,6 +50,7 @@ from dekko.core.resolver import (
     ResolveReuse,
     resolve_fingerprint,
     symbol_projection,
+    workspace_fingerprint,
 )
 from dekko.core.languages import spec_fingerprint
 from dekko.core.model import FileMap
@@ -164,9 +165,13 @@ def load(root: Path) -> dict[str, dict] | None:
 
     Discards the cache outright when anything that could change what
     resolution *produces* has moved: the cache format, the dekko version,
-    the extraction spec (different symbols in, different edges out), or
+    the extraction spec (different symbols in, different edges out),
     the resolver's own source (``resolve_fingerprint`` -- the extraction
-    spec hash says nothing about the resolution ladder).
+    spec hash says nothing about the resolution ladder), or the JS/TS
+    workspace package table (``workspace_fingerprint`` -- a renamed
+    ``package.json`` or edited ``workspaces`` glob changes which imports
+    count as in-repo without touching a single source file, so neither
+    ``build_reuse``'s path-set check nor its symbol check would see it).
 
     Args:
         root: Repository root.
@@ -187,6 +192,8 @@ def load(root: Path) -> dict[str, dict] | None:
     if doc.get("spec_hash") != spec_fingerprint():
         return None
     if doc.get("resolve_hash") != resolve_fingerprint():
+        return None
+    if doc.get("workspace_hash", "") != workspace_fingerprint(root):
         return None
     files = doc.get("files")
     table = doc.get("ids")
@@ -221,6 +228,7 @@ def save(
         "tool_version": _tool_version(),
         "spec_hash": spec_fingerprint(),
         "resolve_hash": resolve_fingerprint(),
+        "workspace_hash": workspace_fingerprint(root),
         "ids": table,
         "files": files,
     }
