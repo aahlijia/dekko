@@ -112,7 +112,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from multiprocessing.context import BaseContext
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
@@ -1200,6 +1200,7 @@ def resolve(
             graph.heritage_ambiguous,
             graph.heritage_external,
             graph.heritage_synthetic_tiebreak_count,
+            graph.heritage_unplaced_subtype_count,
         ) = resolve_heritage(files, workspace_pkgs)
         graph.modules = resolve_imports(
             files, root=root, workspace_manifests=manifests
@@ -1603,6 +1604,7 @@ def resolve_heritage(
     list[tuple[str, str, list[str]]],
     list[ExternalCall],
     int,
+    int,
 ]:
     """Resolve every heritage clause across the repo into a heritage graph.
 
@@ -1662,23 +1664,30 @@ def resolve_heritage(
     Returns:
         ``(heritage_edges, heritage_out, heritage_in,
         heritage_ambiguous, heritage_external,
-        synthetic_tiebreak_count)`` — the first five are the same
-        shapes ``resolve()`` assigns onto ``CallGraph.heritage``/
-        ``heritage_out``/``heritage_in``/``heritage_ambiguous``/
-        ``heritage_external``. Built as a plain tuple return (mirroring
-        ``resolve_refs()``'s own return shape) rather than a
-        ``CallGraph`` method, since ``resolve()`` just assigns the
-        pieces onto the graph it already built, exactly as it already
-        does for ``resolve_refs()``'s result. ``synthetic_tiebreak_count``
-        (round 24, ``.features/plans/round24/
-        03-heritage-crate-decoy-tiebreak.md``) is how many of the
-        resolved edges above were resolved via
+        synthetic_tiebreak_count, unplaced_subtype_count)`` — the
+        first five are the same shapes ``resolve()`` assigns onto
+        ``CallGraph.heritage``/``heritage_out``/``heritage_in``/
+        ``heritage_ambiguous``/``heritage_external``. Built as a plain
+        tuple return (mirroring ``resolve_refs()``'s own return shape)
+        rather than a ``CallGraph`` method, since ``resolve()`` just
+        assigns the pieces onto the graph it already built, exactly as
+        it already does for ``resolve_refs()``'s result.
+        ``synthetic_tiebreak_count`` (round 24, ``.features/plans/
+        round24/03-heritage-crate-decoy-tiebreak.md``) is how many of
+        the resolved edges above were resolved via
         ``_prefer_non_synthetic_crate_match`` rather than an
         unambiguous structural match — a convention-based guess about
         which of two same-named crates is "the real one," surfaced to
         ``CallGraph.heritage_synthetic_tiebreak_count`` so ``query
         subtypes``/``supertypes`` can disclose it rather than blending
         it silently into every other, more certain resolution.
+        ``unplaced_subtype_count`` (round 31 A3) is how many clauses
+        with an empty ``subtype_id`` (see ``RawHeritage.subtype_name``)
+        were dropped because ``_resolve_heritage_subtype_id`` found
+        zero or 2+ same-crate candidates for the written type name —
+        surfaced the same way, so a later round can see how many were
+        genuinely unplaceable rather than the count silently vanishing
+        into "clause never happened."
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
@@ -1688,6 +1697,7 @@ def resolve_heritage(
         frozenset(fm.path for fm in files)
     )
     tiebreak_hits = [0]
+    unplaced_subtype_count = 0
 
     edges: dict[tuple[str, str], set[int]] = {}
     relations: dict[tuple[str, str], str] = {}
@@ -1699,6 +1709,12 @@ def resolve_heritage(
             fm.imports if fm.language in _WHOLE_FILE_IMPORT_LANGUAGES else None
         )
         for h in fm.heritage:
+            if not h.subtype_id:
+                subtype_id = _resolve_heritage_subtype_id(h, index)
+                if subtype_id is None:
+                    unplaced_subtype_count += 1
+                    continue
+                h = replace(h, subtype_id=subtype_id)
             _resolve_one_heritage(
                 h,
                 index,
@@ -1746,7 +1762,49 @@ def resolve_heritage(
         heritage_ambiguous,
         heritage_external,
         tiebreak_hits[0],
+        unplaced_subtype_count,
     )
+
+
+def _resolve_heritage_subtype_id(
+    h: RawHeritage, index: dict[str, list[Symbol]]
+) -> str | None:
+    """Resolve a cross-file Rust ``impl`` clause's own subject symbol.
+
+    Round 31 zed coverage pass F2/A3: ``extractor._heritage_rust_impl``
+    emits a clause with ``subtype_id=""`` and ``subtype_name`` set
+    when the implementing type isn't defined in the same file as the
+    ``impl`` block — an ordinary Rust layout
+    (``crates/search/src/text_finder/render.rs: impl Render for
+    TextFinder``, the ``struct TextFinder`` itself living in
+    ``text_finder.rs``), not a rare one.
+
+    Narrowed to the clause's own crate (``_rust_crate_dir``), matching
+    this resolver's existing Rust crate-scoping convention elsewhere
+    in this module (``_owned_by_receiver_type``, the crate-decoy
+    tiebreaks): an unqualified struct name repeats across zed's own
+    crates often enough (several same-named ``Editor``, ``View``, ...)
+    that ignoring crate boundaries here would trade one guess for
+    another, not remove the guess.
+
+    Args:
+        h: A heritage clause with an empty ``subtype_id`` and a
+            non-empty ``subtype_name``.
+        index: Bare symbol name to every symbol sharing it.
+
+    Returns:
+        The unique matching symbol's id, or ``None`` when zero or 2+
+        same-crate ``TYPE_KINDS`` symbols share ``h.subtype_name`` —
+        the caller counts this rather than guessing (see
+        ``resolve_heritage``'s ``unplaced_subtype_count``).
+    """
+    own_crate = _rust_crate_dir(h.path)
+    matches = [
+        sym
+        for sym in index.get(h.subtype_name, [])
+        if sym.kind in TYPE_KINDS and _rust_crate_dir(sym.path) == own_crate
+    ]
+    return matches[0].id if len(matches) == 1 else None
 
 
 def _narrow_impl_candidates_to_traits(

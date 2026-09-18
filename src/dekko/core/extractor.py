@@ -1679,12 +1679,24 @@ def _heritage_rust_impl(
     ``@impl_type``'s name is looked up against this file's own
     already-extracted ``TYPE_KINDS`` symbols by exact name match —
     Rust ``impl`` blocks are almost always in the same file as the
-    type they're for, though not required by the language. When the
-    type isn't defined in this file, or its name is ambiguous within
-    it (same-named types in two different ``mod`` blocks — legal but
-    rare), no symbol id exists to attach a ``RawHeritage`` to
-    (``subtype_id`` is never ``None``), so the impl block is silently
-    skipped rather than guessed at.
+    type they're for, though not required by the language.
+
+    Round 31 zed coverage pass F2: an ordinary Rust layout puts the
+    impl block in a sibling file (``text_finder/render.rs: impl
+    Render for TextFinder``) from the struct it's for
+    (``text_finder.rs: struct TextFinder``) — a normal way to split a
+    type's rendering logic out of its own module, not a rare shape.
+    When same-file lookup finds no unique match, the clause is
+    emitted anyway with ``subtype_id=""`` and ``subtype_name`` set to
+    the written type name, so ``resolver.resolve_heritage`` can
+    resolve the subject itself repo-wide (by name and crate) before
+    resolving the supertype the normal way — see ``RawHeritage``'s
+    own docstring. Only the *zero-match* case gets this recovery; a
+    same-named-in-two-``mod``-blocks collision (2+ matches, legal but
+    rare) still drops the clause outright, unchanged from before —
+    same-file kind/name ambiguity isn't this rule's problem to solve,
+    and guessing between two same-file candidates would be exactly
+    the kind of guess this codebase's resolver avoids elsewhere.
 
     An inherent ``impl Type { ... }`` block (no ``trait:`` field)
     never reaches this function — ``heritage_query``'s ``trait: (_)``
@@ -1699,25 +1711,27 @@ def _heritage_rust_impl(
     _, type_name, _ = _heritage_name_parts(impl_type)
     if not type_name:
         return []
+    text, name, receiver = _heritage_name_parts(impl_trait)
+    if not name:
+        return []
     candidates = [
         sym
         for _, sym in defs
         if sym.kind in TYPE_KINDS and sym.name == type_name
     ]
-    if len(candidates) != 1:
+    if len(candidates) > 1:
         return []
-    text, name, receiver = _heritage_name_parts(impl_trait)
-    if not name:
-        return []
+    subtype_id = candidates[0].id if len(candidates) == 1 else ""
     return [
         RawHeritage(
-            subtype_id=candidates[0].id,
+            subtype_id=subtype_id,
             path=rel,
             text=text,
             name=name,
             receiver=receiver,
             relation="impl",
             line=impl_trait.start_point[0] + 1,
+            subtype_name="" if subtype_id else type_name,
         )
     ]
 

@@ -1145,6 +1145,20 @@ def exception_handling_supported(language: str) -> bool:
 # to know to pass ``--full`` themselves.
 _HEADER_DISPATCH_HEURISTIC_VERSION = 1
 
+# Bumped whenever ``extractor._heritage_rust_impl``'s subject-recovery
+# logic changes -- round 31 zed coverage pass F2/A3: an ``impl Trait
+# for Type`` block whose ``Type`` isn't defined in the same file used
+# to be silently dropped at extraction (no same-file symbol to attach
+# a ``RawHeritage`` to); it's now emitted with ``subtype_id=""`` and
+# ``subtype_name`` set instead, for ``resolver.resolve_heritage`` to
+# resolve repo-wide. Like ``_HEADER_DISPATCH_HEURISTIC_VERSION`` above,
+# this is Python logic inside ``extractor.py``, not a ``LanguageSpec``
+# field, so the field-hashing loop below is structurally blind to it —
+# without this constant, a ``.dekko`` cache built before this change
+# would keep silently reusing ``FileMap``s missing every
+# cross-file-``impl`` heritage clause after an upgrade.
+_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.
@@ -1154,13 +1168,14 @@ def spec_fingerprint() -> str:
     style, and any field added to ``LanguageSpec`` later (the loop is
     driven by ``dataclasses.fields``, not a hand-kept list, so a new
     field is covered automatically) — plus
-    ``_HEADER_DISPATCH_HEURISTIC_VERSION``, which covers the one piece
-    of dispatch logic that lives outside any ``LanguageSpec`` (the
-    C/C++ ``.h`` content-sniffing heuristic — see that constant's
-    comment). Used to invalidate a stale ``.dekko`` cache entry or flag
-    a stale ``map.json`` even when the released package version string
-    hasn't changed — a dev iteration or hotfix that reuses the same
-    version, or an unreleased checkout.
+    ``_HEADER_DISPATCH_HEURISTIC_VERSION`` and
+    ``_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION``, which each cover
+    one piece of dispatch/recovery logic that lives outside any
+    ``LanguageSpec`` (see those constants' own comments). Used to
+    invalidate a stale ``.dekko`` cache entry or flag a stale
+    ``map.json`` even when the released package version string hasn't
+    changed — a dev iteration or hotfix that reuses the same version,
+    or an unreleased checkout.
 
     Returns:
         A stable hex digest, unchanged as long as extraction behavior
@@ -1168,6 +1183,8 @@ def spec_fingerprint() -> str:
     """
     parts: list[str] = [
         f"header_dispatch_heuristic={_HEADER_DISPATCH_HEURISTIC_VERSION}",
+        "rust_heritage_impl_subtype_recovery="
+        f"{_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):

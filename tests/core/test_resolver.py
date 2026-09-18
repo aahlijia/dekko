@@ -4110,7 +4110,9 @@ def test_heritage_qualified_std_display_external_despite_collision() -> None:
             ],
         ),
     ]
-    _, _, _, heritage_ambiguous, heritage_external, _ = resolve_heritage(files)
+    _, _, _, heritage_ambiguous, heritage_external, _, _ = resolve_heritage(
+        files
+    )
     assert heritage_ambiguous == []
     externals = {(ext.caller, ext.callee) for ext in heritage_external}
     assert (shared_uri.id, "std::fmt::Display") in externals
@@ -4154,7 +4156,9 @@ def test_heritage_qualified_std_debug_still_resolves_external() -> None:
             ],
         ),
     ]
-    _, _, _, heritage_ambiguous, heritage_external, _ = resolve_heritage(files)
+    _, _, _, heritage_ambiguous, heritage_external, _, _ = resolve_heritage(
+        files
+    )
     assert heritage_ambiguous == []
     externals = {(ext.caller, ext.callee) for ext in heritage_external}
     assert (shared_uri.id, "std::fmt::Debug") in externals
@@ -4202,7 +4206,9 @@ def test_rust_impl_std_display_external_via_real_extraction(
         ),
         shared_uri_fm,
     ]
-    _, _, _, heritage_ambiguous, heritage_external, _ = resolve_heritage(files)
+    _, _, _, heritage_ambiguous, heritage_external, _, _ = resolve_heritage(
+        files
+    )
     assert heritage_ambiguous == []
     externals = {(ext.caller, ext.callee) for ext in heritage_external}
     shared_uri_id = next(

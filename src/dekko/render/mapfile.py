@@ -720,6 +720,12 @@ class MapIndex:
             unambiguous structural match — see
             ``model.CallGraph.heritage_synthetic_tiebreak_count``.
             ``0`` for maps written before doc version 11.
+        heritage_unplaced_subtype_count: Repo-wide count of Rust
+            cross-file ``impl Trait for Type`` clauses (round 31 A3)
+            dropped because their own subject type couldn't be placed
+            uniquely within its crate — see
+            ``model.CallGraph.heritage_unplaced_subtype_count``. ``0``
+            for maps written before this field existed.
         module_deps_out: File path → sorted paths it imports (empty
             for maps written before doc version 7) — see
             ``resolver.resolve_imports``/``model.ModuleGraph``. Keyed
@@ -825,6 +831,7 @@ class MapIndex:
         default_factory=dict
     )
     heritage_synthetic_tiebreak_count: int = 0
+    heritage_unplaced_subtype_count: int = 0
     module_deps_out: dict[str, list[str]] = field(default_factory=dict)
     module_deps_in: dict[str, list[str]] = field(default_factory=dict)
     module_edge_names: dict[tuple[str, str], list[str]] = field(
@@ -1032,6 +1039,7 @@ def _filter_heritage(
     out.heritage_synthetic_tiebreak_count = (
         src.heritage_synthetic_tiebreak_count
     )
+    out.heritage_unplaced_subtype_count = src.heritage_unplaced_subtype_count
 
 
 def _filter_module_graph(src: "MapIndex", out: "MapIndex") -> None:
@@ -1459,6 +1467,9 @@ def _load_heritage(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
     index.heritage_synthetic_tiebreak_count = doc.get(
         "heritage_synthetic_tiebreak_count", 0
     )
+    index.heritage_unplaced_subtype_count = doc.get(
+        "heritage_unplaced_subtype_count", 0
+    )
 
 
 def _load_module_graph(
@@ -1660,6 +1671,9 @@ def index_from_maps(
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
     index.heritage_synthetic_tiebreak_count = (
         graph.heritage_synthetic_tiebreak_count
+    )
+    index.heritage_unplaced_subtype_count = (
+        graph.heritage_unplaced_subtype_count
     )
     _index_module_graph(index, graph)
     _index_throws_catches(index, graph)

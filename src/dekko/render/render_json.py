@@ -124,6 +124,14 @@ def render_json(
         "heritage_synthetic_tiebreak_count": (
             graph.heritage_synthetic_tiebreak_count
         ),
+        # Round 31 A3: same shape as the tiebreak count above -- a
+        # cross-file Rust ``impl Trait for Type`` clause whose
+        # ``Type`` couldn't be placed uniquely within its own crate,
+        # dropped rather than guessed (see
+        # ``resolver._resolve_heritage_subtype_id``).
+        "heritage_unplaced_subtype_count": (
+            graph.heritage_unplaced_subtype_count
+        ),
         "module_graph": {
             "edges": [
                 {
