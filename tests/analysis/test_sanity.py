@@ -3778,3 +3778,83 @@ def test_sanity_unused_counts_reconcile(
         + counts["filtered_noise"]
         + counts["excluded_declarations"]
     )
+
+
+# Round 31: the member check widened from "exactly one bare name" to a
+# full specifier-list line, and the opener to export/default+named
+# blocks (claude-buddy.md C1 / cline.md §4.1 Bug B's mislabel half).
+
+
+def test_multiline_import_member_packed_several_names_per_line(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "hunt.ts").write_text(
+        "import {\n"
+        "  searchBuddy, renderBuddy, SPECIES,\n"
+        "  type Species, type Rarity,\n"
+        '} from "../server/engine.ts";\n'
+    )
+    packed = sanity.GrepHit(
+        path="hunt.ts", line=2, snippet="  searchBuddy, renderBuddy, SPECIES,"
+    )
+    typed = sanity.GrepHit(
+        path="hunt.ts", line=3, snippet="  type Species, type Rarity,"
+    )
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, packed, "renderBuddy"
+    )
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, typed, "Rarity"
+    )
+    # Whole-word only: "Buddy" is a substring of two members, not one.
+    assert not sanity._looks_like_multiline_import_member(
+        tmp_path, packed, "Buddy"
+    )
+
+
+def test_multiline_import_member_inside_reexport_block(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "index.ts").write_text(
+        "export {\n"
+        "\tgetGeneratedModelsForProvider,\n"
+        "\tgetGeneratedProviderModels,\n"
+        '} from "./catalog/catalog.generated-access";\n'
+    )
+    hit = sanity.GrepHit(
+        path="index.ts", line=2, snippet="\tgetGeneratedModelsForProvider,"
+    )
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "getGeneratedModelsForProvider"
+    )
+
+
+def test_multiline_import_member_default_plus_named_opener(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.tsx").write_text(
+        'import React, {\n  useState,\n  useEffect,\n} from "react";\n'
+    )
+    hit = sanity.GrepHit(path="app.tsx", line=3, snippet="  useEffect,")
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "useEffect"
+    )
+
+
+def test_multiline_import_member_rejects_object_literal_and_calls(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "use.ts").write_text(
+        "const handlers = {\n  buildThing,\n};\n"
+        "import {\n  other,\n  buildThing(other),\n"
+    )
+    shorthand = sanity.GrepHit(path="use.ts", line=2, snippet="  buildThing,")
+    call = sanity.GrepHit(
+        path="use.ts", line=6, snippet="  buildThing(other),"
+    )
+    assert not sanity._looks_like_multiline_import_member(
+        tmp_path, shorthand, "buildThing"
+    )
+    assert not sanity._looks_like_multiline_import_member(
+        tmp_path, call, "buildThing"
+    )

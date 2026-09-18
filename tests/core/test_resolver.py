@@ -28,6 +28,7 @@ from dekko.core.model import (
     Symbol,
 )
 from dekko.core.resolver import (
+    _module_matches,
     resolve,
     resolve_catches,
     resolve_heritage,
@@ -4761,3 +4762,50 @@ def test_pool_workers_choice_does_not_change_resolution_output(
     for per in (1, 2, 5):
         monkeypatch.setattr(resolver_mod, "_RESOLVE_MIN_ITEMS_PER_WORKER", per)
         assert _graph_shape(resolve(files, workers=8)) == baseline
+
+
+# Round 31 cline.md §4.1 Bug B: `_PATH_SPLIT` splits import sources on
+# ".", so a dotted file stem could never appear among the segments and
+# a relative import of `./catalog.generated-access` lost its hint.
+
+
+def test_module_matches_dotted_filename_stem() -> None:
+    target = "pkg/src/catalog/catalog.generated-access.ts"
+    assert _module_matches(
+        "../catalog/catalog.generated-access/getModels", target
+    )
+    # ESM spelling: a `.js` specifier naming the `.ts` source.
+    assert _module_matches(
+        "./user.service.js/UserService", "a/user.service.ts"
+    )
+    # C/C++ include of a dotted header.
+    assert _module_matches("gen/foo.pb.h", "gen/foo.pb.h")
+    # A sibling sharing only the first dotted part is not a match.
+    assert not _module_matches("../catalog/catalog/getModels", target)
+    assert not _module_matches("./catalog.other/getModels", target)
+
+
+def test_dotted_filename_import_disambiguates_colliding_call(
+    tmp_path: Path,
+) -> None:
+    body = (
+        "export function getModels(id: string): string[] {\n"
+        "  return [id];\n}\n"
+    )
+    dotted = "src/catalog/catalog.generated-access.ts"
+    for rel in (dotted, "src/registry.ts"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    (tmp_path / "src/builtins.ts").write_text(
+        'import { getModels } from "./catalog/catalog.generated-access";\n'
+        "export function run(): string[] {\n"
+        '  return getModels("x");\n}\n'
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert graph.calls_out["src/builtins.ts::run"] == [
+        "src/catalog/catalog.generated-access.ts::getModels"
+    ]

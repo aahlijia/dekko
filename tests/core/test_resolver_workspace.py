@@ -249,3 +249,132 @@ def test_only_js_ts_bindings_are_tagged() -> None:
     tagged = table["apps/web/main.ts"]["helper"]
     assert isinstance(tagged, _WorkspaceImport)
     assert tagged.package_dir == "packages/shared"
+
+
+# ---------------------------------------------------------------------
+# Module graph (round 31 P1.1b): a bare workspace specifier resolves to
+# the package's *source* entry file, mapped back from build output.
+
+
+def _deps(root: Path, importer: str) -> list[str]:
+    return _resolve(root).modules.deps_out.get(importer, [])
+
+
+def _entry_repo(root: Path, manifest: dict, files: list[str]) -> None:
+    _pkg(root, "", name="acme", workspaces=["packages/*", "apps/*"])
+    _pkg(root, "packages/llms", name="@acme/llms", **manifest)
+    _pkg(root, "apps/web", name="acme-web")
+    for rel in files:
+        _write(root, f"packages/llms/{rel}", "export const x = 1;\n")
+
+
+def test_workspace_entry_maps_dist_exports_back_to_src(
+    tmp_path: Path,
+) -> None:
+    # cline's real shape, `browser` condition listed first: a general
+    # consumer must land on index.ts, not index.browser.ts.
+    _entry_repo(
+        tmp_path,
+        {
+            "main": "./dist/index.js",
+            "types": "./dist/index.d.ts",
+            "exports": {
+                ".": {
+                    "browser": "./dist/index.browser.js",
+                    "import": "./dist/index.js",
+                    "types": "./dist/index.d.ts",
+                },
+                "./browser": {"import": "./dist/index.browser.js"},
+            },
+        },
+        ["src/index.ts", "src/index.browser.ts"],
+    )
+    _write(
+        tmp_path,
+        "apps/web/src/a.ts",
+        'import { x } from "@acme/llms";\nexport const a = x;\n',
+    )
+    _write(
+        tmp_path,
+        "apps/web/src/b.ts",
+        'import { x } from "@acme/llms/browser";\nexport const b = x;\n',
+    )
+    graph = _resolve(tmp_path)
+    assert graph.modules.deps_out["apps/web/src/a.ts"] == [
+        "packages/llms/src/index.ts"
+    ]
+    assert graph.modules.deps_out["apps/web/src/b.ts"] == [
+        "packages/llms/src/index.browser.ts"
+    ]
+    assert "apps/web/src/a.ts" not in graph.modules.external
+
+
+def test_workspace_entry_without_exports_uses_conventions(
+    tmp_path: Path,
+) -> None:
+    _entry_repo(tmp_path, {}, ["src/index.ts", "src/storage/index.ts"])
+    _write(
+        tmp_path,
+        "apps/web/src/a.ts",
+        'import { x } from "@acme/llms";\n'
+        'import { x as y } from "@acme/llms/storage";\n'
+        "export const a = [x, y];\n",
+    )
+    assert _deps(tmp_path, "apps/web/src/a.ts") == [
+        "packages/llms/src/index.ts",
+        "packages/llms/src/storage/index.ts",
+    ]
+
+
+def test_workspace_entry_subpath_pattern_and_source_field(
+    tmp_path: Path,
+) -> None:
+    _entry_repo(
+        tmp_path,
+        {
+            "source": "./lib-src/main.ts",
+            "exports": {"./tools/*": "./dist/esm/tools/*.js"},
+        },
+        ["lib-src/main.ts", "src/tools/create.ts"],
+    )
+    _write(
+        tmp_path,
+        "apps/web/src/a.ts",
+        'import { x } from "@acme/llms";\n'
+        'import { x as y } from "@acme/llms/tools/create";\n'
+        "export const a = [x, y];\n",
+    )
+    assert _deps(tmp_path, "apps/web/src/a.ts") == [
+        "packages/llms/lib-src/main.ts",
+        "packages/llms/src/tools/create.ts",
+    ]
+
+
+def test_workspace_entry_unresolvable_stays_external(tmp_path: Path) -> None:
+    # A member whose entry can't be found is honestly external, and a
+    # real npm package is never captured.
+    _entry_repo(tmp_path, {"main": "./dist/bundle.js"}, ["lib/core.ts"])
+    _write(
+        tmp_path,
+        "apps/web/src/a.ts",
+        'import { x } from "@acme/llms";\n'
+        'import React from "react";\n'
+        "export const a = [x, React];\n",
+    )
+    graph = _resolve(tmp_path)
+    assert _deps(tmp_path, "apps/web/src/a.ts") == []
+    assert graph.modules.external["apps/web/src/a.ts"] == [
+        "@acme/llms",
+        "react",
+    ]
+
+
+def test_workspace_entry_inert_without_root(tmp_path: Path) -> None:
+    _entry_repo(tmp_path, {}, ["src/index.ts"])
+    _write(
+        tmp_path,
+        "apps/web/src/a.ts",
+        'import { x } from "@acme/llms";\nexport const a = x;\n',
+    )
+    graph = _resolve(tmp_path, with_root=False)
+    assert graph.modules.deps_out.get("apps/web/src/a.ts", []) == []

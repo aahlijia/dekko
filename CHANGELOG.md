@@ -9,6 +9,61 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.58] — 2026-09-18
+
+The rest of round 31's P1 list, plus one P3 that turned out to share
+a classifier with it. Analysis:
+`test-repos/reports/31-tokentest-7repo-post04355/P1.1-workspace-package-imports.md`.
+
+### Fixed
+- **`dekko deps` / the module graph resolve workspace-package imports
+  to a source file** (round 31 P1.1b, the module-graph half of
+  0.43.57's fix). `import ... from "@cline/llms"` was still listed
+  under `external`. A declared workspace member's bare specifier now
+  resolves to the package's *source* entry: the manifest's `exports`
+  (subpaths and single-`*` patterns included) and
+  `source`/`types`/`module`/`main` fields, each mapped from build
+  output back to source (`./dist/index.js` → `src/index.ts`; the
+  `dist/` tree is gitignored and never in the map), then the
+  `src/<subpath>` / `<subpath>` conventions. General `exports`
+  conditions are tried before environment-specific ones (`browser`,
+  `worker`, `react-server`, ...) regardless of manifest order, so a
+  manifest that lists `browser` first doesn't send every importer to
+  `index.browser.ts`. An entry that can't be found stays `external`
+  rather than guessing. On cline: **+347 module edges, −347
+  externals, zero `@cline/*` specifiers left external**; call and
+  heritage graphs untouched.
+- **A relative import of a dotted filename keeps its import hint**
+  (round 31 cline.md §4.1 Bug B). Import sources are split on `.` as
+  well as `/` (right for `pkg.mod.name`), so the stem of
+  `catalog.generated-access.ts` could never appear among the segments
+  and `import { x } from "./catalog.generated-access"` told the
+  resolver nothing. A name defined twice in the repo then went
+  ambiguous even though the file's own import was unambiguous, and the
+  target read as fan-in 0. Dotted stems now get a component-wise
+  comparison (extensionless, ESM `.js`-for-`.ts`, and C/C++
+  `foo.pb.h` spellings); the two external-import guards use it too.
+  Gated on the stem containing a dot, so undotted files match exactly
+  as before. cline's reported case: fan-in 0 → 7, `sanity` matches
+  0 → 9. This is why three other repos couldn't reproduce it: it takes
+  a dotted non-test source file *and* a colliding name. It is **not**
+  the same root cause as P1.1, contrary to the round-31 guess.
+- **`dekko sanity` recognizes multi-line `export { ... }` lists and
+  packed specifier lines as import statements.** Two misclassifications
+  with one cause: the multi-line member check only accepted a line
+  that was exactly one bare `name,` under an `import {` opener. A
+  barrel's re-export list (`export {` + `getGeneratedModelsForProvider,`)
+  fell through to "generic name in a dense repo", which told an agent
+  a specific 30-character identifier was a common word (the mislabel
+  half of cline Bug B). And a line packing several specifiers
+  (`searchBuddy, renderBuddy, SPECIES,` / `type Species, type Rarity,`)
+  fell through to "unexplained miss" (round 31 claude-buddy C1 /
+  OPEN-ISSUES P3.6, which two one-name-per-line repos could not
+  reproduce, for exactly that reason). The opener now also accepts
+  `export {`, `export type {` and `import Default, {`; the member
+  line is any pure specifier list naming the symbol as a whole word.
+  Object-literal shorthand and call-shaped lines still don't match.
+
 ## [0.43.57] — 2026-09-18
 
 Round 31 P1.1. Unlike 0.43.56's two disclosure fixes, this one

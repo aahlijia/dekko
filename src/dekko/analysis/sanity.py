@@ -706,7 +706,26 @@ def _looks_like_local_binding_or_literal(snippet: str, bare_name: str) -> bool:
 # and it fell through to CAUSE_UNEXPLAINED. This was the dominant
 # "grep-only" shape in that repo (6 of 8 flagged rows), not the edge
 # case.
-_IMPORT_OPEN_BRACE = re.compile(r"^\s*import\s+(?:type\s+)?\{")
+#
+# Round 31 widened both halves. The opener also accepts ``export {``
+# / ``export type {`` (a barrel's re-export list -- cline.md §4.1 Bug
+# B: those rows fell through to CAUSE_GENERIC_NAME, telling an agent a
+# specific 30-character identifier was "a generic name") and a leading
+# default binding (``import React, {``). And the member line no longer
+# has to be exactly one name: claude-buddy.md C1 packs several per
+# line (``searchBuddy, renderBuddy, SPECIES,`` / ``type Species, type
+# Rarity,``), which is why two one-name-per-line repos could not
+# reproduce that finding.
+_IMPORT_OPEN_BRACE = re.compile(
+    r"^\s*(?:import|export)\s+(?:type\s+)?(?:[\w$]+\s*,\s*)?\{"
+)
+# One line of an import/export specifier list: only specifiers
+# (optional ``type`` modifier, optional ``as`` alias) and commas.
+# Anything call- or expression-shaped fails it, which is what keeps a
+# widened member check from swallowing real references.
+_IMPORT_MEMBER_LINE = re.compile(
+    r"^\s*(?:(?:type\s+)?[\w$]+(?:\s+as\s+[\w$]+)?\s*(?:,\s*|$))+$"
+)
 # How many lines above a bare-name hit to scan for an unclosed
 # ``import {`` block opener -- generous enough for a real multi-line
 # destructured import list (which rarely runs past a couple dozen
@@ -717,10 +736,11 @@ _IMPORT_WINDOW_LINES = 20
 def _looks_like_multiline_import_member(
     root: Path, hit: "GrepHit", bare_name: str
 ) -> bool:
-    """Whether ``hit``'s line is a bare ``name,``/``name`` member
-    inside a multi-line destructured ``import { ... } from "...";``
-    block -- ``_looks_like_import_statement`` only catches the
-    single-line shape (round 22 claude-buddy.md §2.4: 6 of 8 flagged
+    """Whether ``hit``'s line is a specifier-list line (one or more
+    ``name,`` members) inside a multi-line ``import { ... } from
+    "...";`` or ``export { ... }`` block --
+    ``_looks_like_import_statement`` only catches the single-line
+    shape (round 22 claude-buddy.md §2.4: 6 of 8 flagged
     rows in that repo are this multi-line shape, the dominant style
     there). Reads a small window of the hit's own file around its
     line -- the only file re-read this module does, kept small and
@@ -740,9 +760,12 @@ def _looks_like_multiline_import_member(
     (``import { X } from 'y';``, which matches both patterns) is
     correctly treated as closed, not as a dangling opener.
     """
-    stripped = hit.snippet.strip().rstrip(",")
-    if stripped != bare_name:
-        return False  # not a bare "name," line at all -- cheap bail-out
+    if not _IMPORT_MEMBER_LINE.match(hit.snippet):
+        return False  # not a specifier-list line at all -- cheap bail-out
+    if not re.search(
+        rf"(?<![\w$]){re.escape(bare_name)}(?![\w$])", hit.snippet
+    ):
+        return False
     try:
         lines = (
             (root / hit.path)

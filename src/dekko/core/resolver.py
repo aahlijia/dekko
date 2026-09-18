@@ -902,9 +902,10 @@ def resolve(
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
-    workspace_pkgs = (
-        load_workspace_packages(root) if root is not None else None
-    )
+    # One discovery pass feeds both the symbol-level passes (name ->
+    # directory) and the module graph (entry-point fields).
+    manifests = _load_workspace_manifests(root) if root is not None else {}
+    workspace_pkgs = {n: m.package_dir for n, m in manifests.items()}
     imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
@@ -974,7 +975,9 @@ def resolve(
             graph.heritage_external,
             graph.heritage_synthetic_tiebreak_count,
         ) = resolve_heritage(files, workspace_pkgs)
-        graph.modules = resolve_imports(files, root=root)
+        graph.modules = resolve_imports(
+            files, root=root, workspace_manifests=manifests
+        )
         (
             graph.throws,
             graph.throws_out,
@@ -3380,6 +3383,34 @@ def _import_segments(source: str) -> set[str]:
     }
 
 
+def _dotted_components(source: str) -> set[str]:
+    """``/``-components of an import source that could name a dotted file.
+
+    ``_import_segments`` splits on ``.`` as well as ``/`` (right for
+    ``pkg.mod.name``, wrong for ``./catalog.generated-access``), so a
+    file whose *stem* contains a dot needs its own comparison set. Each
+    dotted component contributes itself (the extensionless JS/TS
+    spelling) and itself minus one suffix (``./user.service.js``, the
+    ESM spelling of ``user.service.ts``; ``gen/foo.pb.h`` for a C++
+    include). A leading-dot component (``.``, ``..``) is a relative
+    marker, never a file.
+
+    Args:
+        source: Import source string.
+
+    Returns:
+        Candidate stems, possibly empty. Only ever compared against
+        dotted repo stems.
+    """
+    out: set[str] = set()
+    for part in source.split("/"):
+        if "." not in part or part.startswith("."):
+            continue
+        out.add(part)
+        out.add(part.rsplit(".", 1)[0])
+    return out
+
+
 def _repo_stem(path: PurePosixPath) -> str:
     """Compute the stem used to match a file against import sources.
 
@@ -3435,6 +3466,15 @@ def _module_matches(source: str, candidate_path: str) -> bool:
     gate keeps this JS/TS-only, leaving every other language's
     stem-matching untouched.
 
+    A *dotted* stem (``catalog.generated-access.ts``, Angular's
+    ``user.service.ts``, a C++ ``foo.pb.h``) gets a second,
+    component-wise check -- see ``_dotted_components``. Round 31
+    cline.md §4.1 Bug B: ``_import_segments`` splits on ``.``, so such
+    a stem could never appear among the segments, and a plain relative
+    import of a dotted filename silently lost its import hint. Gated
+    on the stem actually containing a dot, so every undotted file
+    matches exactly as before.
+
     Checked against ``source.split("/", 1)[0]``, not the whole
     ``source`` string -- ``extractor._imports_js`` encodes every
     *named* import's ``source`` as ``f"{module}/{name}"`` (e.g.
@@ -3453,7 +3493,9 @@ def _module_matches(source: str, candidate_path: str) -> bool:
     ):
         return False
     stem = _repo_stem(PurePosixPath(candidate_path))
-    return stem in _import_segments(source)
+    if stem in _import_segments(source):
+        return True
+    return "." in stem and stem in _dotted_components(source)
 
 
 _SYNTHETIC_CRATE_DIR_MARKERS = frozenset(
@@ -3838,7 +3880,34 @@ def load_workspace_packages(root: Path) -> dict[str, str]:
         the repo declares no workspaces, which leaves every resolution
         path byte-identical to a repo this feature never touched.
     """
-    named: dict[str, list[str]] = {}
+    manifests = _load_workspace_manifests(root)
+    return {name: m.package_dir for name, m in manifests.items()}
+
+
+@dataclass(frozen=True)
+class _WorkspaceManifest:
+    """One workspace member's directory plus its parsed ``package.json``.
+
+    Attributes:
+        package_dir: Repo-relative package directory.
+        data: The parsed manifest, kept whole: the module graph reads
+            its entry-point fields (``exports``/``main``/``types``/...)
+            to turn a bare package specifier into a source file.
+    """
+
+    package_dir: str
+    data: dict
+
+
+def _load_workspace_manifests(root: Path) -> dict[str, _WorkspaceManifest]:
+    """Package ``name`` → manifest, for every declared workspace member.
+
+    The single discovery pass behind both ``load_workspace_packages``
+    (name → directory, all the symbol-level passes need) and
+    ``resolve_imports`` (which also needs each member's entry-point
+    fields). See ``load_workspace_packages`` for the membership rules.
+    """
+    named: dict[str, list[_WorkspaceManifest]] = {}
     patterns: list[tuple[str, str]] = []
     for rel in walker.find_config_files(root, _WORKSPACE_MANIFESTS):
         base = _dirname(rel)
@@ -3850,19 +3919,23 @@ def load_workspace_packages(root: Path) -> dict[str, str]:
                 continue
             name = data.get("name")
             if isinstance(name, str) and name:
-                named.setdefault(name, []).append(base)
+                named.setdefault(name, []).append(
+                    _WorkspaceManifest(package_dir=base, data=data)
+                )
             globs = _package_json_workspace_globs(data)
         patterns.extend((base, g) for g in globs)
 
     if not patterns:
         return {}
 
-    packages: dict[str, str] = {}
-    for name, dirs in named.items():
-        members = [d for d in dirs if _is_workspace_member(d, patterns)]
+    manifests: dict[str, _WorkspaceManifest] = {}
+    for name, found in named.items():
+        members = [
+            m for m in found if _is_workspace_member(m.package_dir, patterns)
+        ]
         if len(members) == 1:
-            packages[name] = members[0]
-    return packages
+            manifests[name] = members[0]
+    return manifests
 
 
 def workspace_fingerprint(root: Path) -> str:
@@ -4008,11 +4081,15 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     True for a workspace-package import (see ``_WorkspaceImport``), or
     when any segment of the source is a repo file stem -- the original,
     file-shaped test, which a package-shaped specifier can only ever
-    pass by coincidence.
+    pass by coincidence. A dotted filename's stem is never a single
+    segment, hence the second, component-wise check (see
+    ``_dotted_components``).
     """
     if isinstance(imp, _WorkspaceImport):
         return True
-    return bool(_import_segments(imp.source) & repo_stems)
+    if _import_segments(imp.source) & repo_stems:
+        return True
+    return bool(_dotted_components(imp.source) & repo_stems)
 
 
 def _workspace_narrowed(
@@ -4150,6 +4227,12 @@ class _ImportResolveContext:
             keeps today's "bare specifier is always external" behavior
             for ``_resolve_import_js`` exactly, since this dict never
             gets populated without a real filesystem root to search.
+        workspace_manifests: JS/TS workspace package name → its
+            directory and parsed ``package.json`` (see
+            ``_load_workspace_manifests``), so a bare ``@scope/pkg``
+            specifier resolves to that package's source entry file
+            instead of reading as an npm dependency. Empty without a
+            root or without declared workspaces.
     """
 
     paths: frozenset[str]
@@ -4157,6 +4240,9 @@ class _ImportResolveContext:
     java_suffix_index: dict[str, list[str]] = field(default_factory=dict)
     cpp_basename_index: dict[str, list[str]] = field(default_factory=dict)
     crate_roots: dict[str, list[str]] = field(default_factory=dict)
+    workspace_manifests: dict[str, "_WorkspaceManifest"] = field(
+        default_factory=dict
+    )
     ts_path_aliases: dict[str, "_TsConfigAliasTable"] = field(
         default_factory=dict
     )
@@ -4872,6 +4958,186 @@ def _resolve_ts_path_alias(
     return None
 
 
+# Build-output directory names a manifest's entry points routinely
+# point into. None of them is source, and none is in the map (build
+# output is gitignored), so each is swapped for ``src`` -- or dropped --
+# to find the file the entry was compiled *from*.
+_JS_BUILD_DIRS = frozenset(
+    {"dist", "build", "lib", "out", "esm", "cjs", "es", "umd", "types"}
+)
+# Manifest fields naming the package's root entry, most source-like
+# first. ``source`` is the (informal, bundler-honored) pointer at real
+# source; the rest normally name build output.
+_JS_ENTRY_FIELDS = ("source", "types", "typings", "module", "main")
+_JS_DECLARATION_SUFFIXES = (".d.ts", ".d.mts", ".d.cts")
+# ``exports`` conditions selecting a specific runtime/bundler target
+# rather than the package's general entry -- tried last.
+_JS_NICHE_EXPORT_CONDITIONS = frozenset(
+    {
+        "browser", "worker", "workerd", "deno", "bun", "react-native",
+        "react-server", "edge-light", "electron", "development",
+    }
+)  # fmt: skip
+
+
+def _resolve_workspace_entry(
+    module_source: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a bare specifier naming a workspace package to a file.
+
+    ``"@cline/llms"`` -> the package's root entry; ``"@cline/llms/
+    browser"`` -> its ``./browser`` subpath. Entry targets come from
+    the manifest (``exports``, then ``source``/``types``/``module``/
+    ``main`` for the root), each mapped from build output back to
+    source (see ``_workspace_source_candidates``), then from the
+    near-universal conventions ``src/<subpath>`` and ``<subpath>``.
+    The first candidate that is a real mapped file wins.
+
+    Returns:
+        The entry file's repo-relative path, or ``None`` when the
+        specifier names no workspace package or none of its candidate
+        entries exists in the map -- which leaves it ``external``,
+        honestly, rather than guessing a file.
+    """
+    if not ctx.workspace_manifests:
+        return None
+    name = _workspace_package_name(module_source)
+    manifest = ctx.workspace_manifests.get(name) if name else None
+    if manifest is None or name is None:
+        return None
+
+    subpath = module_source[len(name) :].strip("/")
+    targets = _manifest_entry_targets(manifest.data, subpath)
+    targets += [f"src/{subpath}" if subpath else "src/index"]
+    targets += [subpath or "index"]
+    for target in targets:
+        for rel in _workspace_source_candidates(target):
+            joined = posixpath.normpath(
+                f"{manifest.package_dir}/{rel}"
+                if manifest.package_dir
+                else rel
+            )
+            found = _first_match(ctx.paths, _js_module_candidates(joined))
+            if found is not None:
+                return found
+    return None
+
+
+def _manifest_entry_targets(data: dict, subpath: str) -> list[str]:
+    """Package-relative entry targets a manifest declares for a subpath.
+
+    Args:
+        data: Parsed ``package.json``.
+        subpath: ``""`` for the package root, else the specifier's
+            remainder (``"browser"`` for ``"@scope/pkg/browser"``).
+
+    Returns:
+        Every string target found, in preference order: the matching
+        ``exports`` entry's leaves (all conditions -- dekko has no
+        "active condition", and every one of them was compiled from
+        the same source), then for the root only the classic
+        single-entry fields.
+    """
+    key = f"./{subpath}" if subpath else "."
+    targets: list[str] = []
+    exports = data.get("exports")
+    if isinstance(exports, str) and not subpath:
+        targets.append(exports)
+    elif isinstance(exports, dict):
+        if not any(k.startswith(".") for k in exports):
+            # A bare conditions object is sugar for {".": {...}}.
+            exports = {".": exports}
+        if key in exports:
+            targets += _export_leaves(exports[key])
+        else:
+            targets += _export_pattern_targets(exports, key)
+    if not subpath:
+        targets += [
+            data[f] for f in _JS_ENTRY_FIELDS if isinstance(data.get(f), str)
+        ]
+    return [t for t in targets if t]
+
+
+def _export_leaves(node: object) -> list[str]:
+    """Every string leaf of an ``exports`` value, conditions flattened.
+
+    General-purpose conditions (``import``/``require``/``default``/
+    ``types``/...) come before environment-specific ones
+    (``_JS_NICHE_EXPORT_CONDITIONS``), whatever order the manifest
+    lists them in. dekko has no "active condition" to evaluate, and a
+    manifest conventionally lists its most specific condition first --
+    cline's ``@cline/llms`` leads with ``browser``, which would send
+    every importer's edge to ``index.browser.ts`` instead of the
+    ``index.ts`` a Node/extension-host consumer actually loads.
+    """
+    general: list[str] = []
+    niche: list[str] = []
+    _collect_export_leaves(node, False, general, niche)
+    return general + niche
+
+
+def _collect_export_leaves(
+    node: object, in_niche: bool, general: list[str], niche: list[str]
+) -> None:
+    """Depth-first walk behind ``_export_leaves``."""
+    if isinstance(node, str):
+        (niche if in_niche else general).append(node)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_export_leaves(item, in_niche, general, niche)
+    elif isinstance(node, dict):
+        for condition, value in node.items():
+            _collect_export_leaves(
+                value,
+                in_niche or condition in _JS_NICHE_EXPORT_CONDITIONS,
+                general,
+                niche,
+            )
+
+
+def _export_pattern_targets(exports: dict, key: str) -> list[str]:
+    """Targets from ``exports`` subpath patterns (``"./*"``) for ``key``."""
+    targets: list[str] = []
+    for pattern, node in exports.items():
+        if pattern.count("*") != 1:
+            continue
+        head, tail = pattern.split("*")
+        if not (key.startswith(head) and key.endswith(tail)):
+            continue
+        if len(key) < len(head) + len(tail):
+            continue
+        middle = key[len(head) : len(key) - len(tail)]
+        targets += [leaf.replace("*", middle) for leaf in _export_leaves(node)]
+    return targets
+
+
+def _workspace_source_candidates(target: str) -> list[str]:
+    """Package-relative source paths a manifest entry target may mean.
+
+    ``./dist/index.js`` -> ``dist/index.js`` as written (a package may
+    point straight at source), then with its leading build-output
+    directories swapped for ``src`` (``src/index.js``) and dropped
+    (``index.js``). A ``.d.ts`` suffix is reduced to its stem first;
+    ``_js_module_candidates`` then re-runs its own extension ladder
+    (including the ``.js`` -> ``.ts`` pass) over each result.
+    """
+    rel = posixpath.normpath(target.removeprefix("./"))
+    for suffix in _JS_DECLARATION_SUFFIXES:
+        if rel.endswith(suffix):
+            rel = rel[: -len(suffix)]
+            break
+
+    candidates = [rel]
+    parts = rel.split("/")
+    stripped = list(parts)
+    while len(stripped) > 1 and stripped[0] in _JS_BUILD_DIRS:
+        stripped = stripped[1:]
+    if stripped != parts:
+        candidates.append("/".join(["src", *stripped]))
+        candidates.append("/".join(stripped))
+    return candidates
+
+
 def _resolve_import_js(
     imp: Import, importer_path: str, ctx: _ImportResolveContext
 ) -> str | None:
@@ -4902,8 +5168,16 @@ def _resolve_import_js(
     single-segment bare specifier (``"react"``, ``"lodash"``) is
     overwhelmingly a real npm package name in practice, so leaving it
     external bounds the false-positive risk of an npm package name
-    coincidentally matching an in-repo path. Only once both attempts
-    miss does the specifier fall through to "external".
+    coincidentally matching an in-repo path. Only once every attempt
+    misses does the specifier fall through to "external".
+
+    Between those two sits the workspace-package attempt (round 31
+    P1.1b, see ``_resolve_workspace_entry``): ``"@cline/llms"`` is an
+    in-repo package in a monorepo that declares it as a workspace
+    member, and resolves to that package's source entry file. After
+    the tsconfig alias (explicit per-scope config outranks a
+    repo-wide convention), before root-relative (a declared package
+    name is stronger evidence than a path that happens to exist).
     """
     module_source = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
     if not (module_source.startswith("./") or module_source.startswith("../")):
@@ -4912,6 +5186,9 @@ def _resolve_import_js(
             resolved = _resolve_ts_path_alias(module_source, scope, ctx.paths)
             if resolved is not None:
                 return resolved
+        workspace_entry = _resolve_workspace_entry(module_source, ctx)
+        if workspace_entry is not None:
+            return workspace_entry
         if "/" in module_source:
             joined = posixpath.normpath(module_source)
             root_relative = _first_match(
@@ -5478,7 +5755,9 @@ def _cpp_basename_index(paths: frozenset[str]) -> dict[str, list[str]]:
 
 
 def resolve_imports(
-    files: list[FileMap], root: Path | None = None
+    files: list[FileMap],
+    root: Path | None = None,
+    workspace_manifests: dict[str, _WorkspaceManifest] | None = None,
 ) -> ModuleGraph:
     """Resolve every file's raw imports into a file-to-file dependency
     graph.
@@ -5515,11 +5794,22 @@ def resolve_imports(
             function's own long-standing "pure function of
             already-extracted ``FileMap``s" shape exactly for every
             caller that doesn't opt in — including the entire
-            in-memory-``FileMap`` test suite.
+            in-memory-``FileMap`` test suite. Also used to discover
+            the JS/TS workspace package table, unless the caller
+            already has it.
+        workspace_manifests: Already-loaded workspace manifests (see
+            ``_load_workspace_manifests``), so ``resolve()`` pays for
+            one discovery pass rather than two. ``None`` loads them
+            from ``root`` (or nothing, without a root).
 
     Returns:
         The resolved ``ModuleGraph``.
     """
+    if workspace_manifests is None:
+        workspace_manifests = (
+            _load_workspace_manifests(root) if root is not None else {}
+        )
+
     paths = frozenset(fm.path for fm in files)
     ctx = _ImportResolveContext(
         paths=paths,
@@ -5530,6 +5820,7 @@ def resolve_imports(
         ts_path_aliases=(
             _load_tsconfig_alias_tables(root) if root is not None else {}
         ),
+        workspace_manifests=workspace_manifests,
     )
 
     edge_names: dict[tuple[str, str], set[str]] = {}
