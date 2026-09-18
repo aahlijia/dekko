@@ -5083,3 +5083,75 @@ def test_rust_crate_import_prefers_own_crates_same_named_type(
     assert graph.calls_out["crates/a/src/element.rs::make"] == [
         "crates/a/src/foo.rs::Foo.build"
     ]
+
+
+# Round 31 zed coverage pass F12: `use localmod::X` (a sibling `mod
+# localmod;`) was always looked up against `ctx.crate_roots` first,
+# resolving to a same-named *workspace crate* instead of the local
+# module the file itself declares — real shape on zed:
+# `crates/gpui/src/gpui.rs` declares `mod util;` and does `pub use
+# util::{FutureExt, Timeout};`, which pointed at sibling crate
+# `crates/util` (gpui has no such dependency) instead of
+# `crates/gpui/src/util.rs`.
+
+
+def test_rust_local_module_shadows_same_named_crate(tmp_path: Path) -> None:
+    _write_tree(
+        tmp_path,
+        {
+            "crates/gpui/src/gpui.rs": ("mod util;\npub use util::Timeout;\n"),
+            "crates/gpui/src/util.rs": "pub struct Timeout;\n",
+            "crates/util/src/util.rs": "pub struct Timeout;\n",
+        },
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert graph.modules.deps_out["crates/gpui/src/gpui.rs"] == [
+        "crates/gpui/src/util.rs"
+    ]
+
+
+def test_rust_local_directory_module_shadows_same_named_crate(
+    tmp_path: Path,
+) -> None:
+    # The pre-2018 directory-module shape (`localmod/mod.rs`) must be
+    # recognized the same way as the per-file shape above.
+    _write_tree(
+        tmp_path,
+        {
+            "crates/gpui/src/gpui.rs": ("mod util;\npub use util::Timeout;\n"),
+            "crates/gpui/src/util/mod.rs": "pub struct Timeout;\n",
+            "crates/util/src/util.rs": "pub struct Timeout;\n",
+        },
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert graph.modules.deps_out["crates/gpui/src/gpui.rs"] == [
+        "crates/gpui/src/util/mod.rs"
+    ]
+
+
+def test_rust_bare_import_still_resolves_crate_with_no_local_shadow(
+    tmp_path: Path,
+) -> None:
+    # An unshadowed bare crate name must still resolve against
+    # ctx.crate_roots exactly as before -- this rule only changes
+    # behavior when a same-named local module file actually exists.
+    _write_tree(
+        tmp_path,
+        {
+            "crates/gpui/src/gpui.rs": "pub use other::Timeout;\n",
+            "crates/other/src/other.rs": "pub struct Timeout;\n",
+        },
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert graph.modules.deps_out["crates/gpui/src/gpui.rs"] == [
+        "crates/other/src/other.rs"
+    ]

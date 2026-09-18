@@ -5956,6 +5956,76 @@ def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
     return roots
 
 
+def _rust_local_module_base(
+    seg: str, importer_path: str, paths: frozenset[str]
+) -> str | None:
+    """The base ``seg`` resolves against, when it names a child module
+    of the importer's own module position — shadowing a same-named
+    workspace crate.
+
+    Round 31 zed coverage pass F12: Rust 2018+ resolves a bare
+    leading ``use`` segment against the local scope before a crate
+    name — ``mod localmod;`` (or its per-file sibling directory,
+    ``localmod/``) declared alongside the importing file wins over a
+    workspace crate that happens to share the same name. File
+    existence is used as the evidence (not ``mod`` declaration
+    parsing, out of scope — see ``_resolve_import_rust``'s docstring):
+    a Rust 2018+ per-file submodule either has a matching
+    ``<base>/<seg>.rs`` file or a matching ``<base>/<seg>/mod.rs``
+    (the pre-2018 directory-module shape), and one of those two must
+    exist on disk for the module to be reachable at all — an inline
+    ``mod x { ... }`` block has neither and is correctly not matched
+    here, leaving it to fall through to the crate lookup below
+    unchanged.
+
+    Tries ``_rust_self_base(importer_path)`` first (the ordinary case,
+    and the same base ``self::``/``super::`` already resolve
+    against). ``_rust_self_base`` only recognizes the literal
+    ``lib.rs``/``main.rs``/``mod.rs`` index names as "this file's own
+    base is its own directory", though — a crate whose Cargo ``[lib]
+    path`` override gives its root file a custom name (zed's own
+    ``crates/gpui/src/gpui.rs``, ~216/222 of its crates per
+    ``_rust_crate_root``'s own docstring) is treated as an ordinary
+    leaf module one directory level too deep, exactly the file this
+    rule's own motivating example (``mod util;`` inside ``gpui.rs``
+    itself) needs. Retried against the importer's own directory when
+    the importer's filename is itself a recognized crate-root index
+    name for that directory (``_rust_crate_root_index_names``, which
+    only needs the directory, not a separate crate-root discovery
+    walk — the importer's own directory already *is* the candidate
+    crate root being tested here).
+
+    Args:
+        seg: The ``use`` path's first segment.
+        importer_path: The importing file's repo-relative path.
+        paths: Every known file path.
+
+    Returns:
+        The base ``seg`` resolves against (``_rust_self_base``'s
+        result, or the importer's own directory for the custom-named
+        crate-root case above), or ``None`` when neither shape names
+        an on-disk local module.
+    """
+    self_base = _rust_self_base(importer_path)
+    if (
+        f"{self_base}/{seg}.rs" in paths
+        or f"{self_base}/{seg}/mod.rs" in paths
+    ):
+        return self_base
+    own_dir = _dirname(importer_path)
+    own_name = importer_path.rsplit("/", 1)[-1]
+    if (
+        own_dir
+        and own_name in _rust_crate_root_index_names(own_dir, paths)
+        and (
+            f"{own_dir}/{seg}.rs" in paths
+            or f"{own_dir}/{seg}/mod.rs" in paths
+        )
+    ):
+        return own_dir
+    return None
+
+
 def _resolve_import_rust(
     imp: Import, importer_path: str, ctx: _ImportResolveContext
 ) -> str | None:
@@ -5987,6 +6057,22 @@ def _resolve_import_rust(
     Like Python, the trailing segment is ambiguous between "a
     submodule" and "an item defined in the parent module" — resolved
     the same way, via ``_resolve_two_candidate_lists``.
+
+    Round 31 zed coverage pass F12: a bare first segment was always
+    looked up in ``ctx.crate_roots`` first, but Rust 2018+ resolves a
+    bare path against the *local scope first* — a sibling ``mod
+    localmod;`` declared in (or reachable from) the importing file's
+    own module shadows a same-named workspace crate. Confirmed on zed:
+    ``crates/gpui/src/gpui.rs`` declares ``mod util;`` and does ``pub
+    use util::{FutureExt, Timeout};`` — the bare segment ``util``
+    matched the sibling workspace crate ``crates/util`` (gpui has no
+    such dependency) instead of ``crates/gpui/src/util.rs``, which
+    really exists. 13 such impossible cross-crate module edges were
+    fabricating a 100-file/12-crate false dependency cycle in ``dekko
+    deps --cycles``. Checked before the crate-name lookup, via
+    ``_rust_local_module_base``'s plain file-existence test — no
+    ``mod``-declaration parsing, so an inline ``mod x { ... }`` (no
+    file) is correctly untouched.
     """
     segs = imp.source.split("::")
     if not segs:
@@ -6006,6 +6092,13 @@ def _resolve_import_rust(
         if i < len(segs) and segs[i] == "self":
             i += 1
         rest = segs[i:]
+    elif (
+        local_base := _rust_local_module_base(
+            segs[0], importer_path, ctx.paths
+        )
+    ) is not None:
+        base = local_base
+        rest = segs
     else:
         crate_dirs = ctx.crate_roots.get(segs[0])
         if not crate_dirs:
