@@ -5155,3 +5155,87 @@ def test_rust_bare_import_still_resolves_crate_with_no_local_shadow(
     assert graph.modules.deps_out["crates/gpui/src/gpui.rs"] == [
         "crates/other/src/other.rs"
     ]
+
+
+# Round 31 zed coverage pass F8: an `impl X for Y` clause's `X` can
+# only ever name a trait -- a same-named struct is never a legal
+# candidate, but heritage candidates were only filtered to TYPE_KINDS
+# (every type kind), so a same-named struct dragged a resolvable
+# clause into "ambiguous."
+
+
+def test_impl_heritage_candidates_narrow_to_trait_only(
+    tmp_path: Path,
+) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/component/src/component.rs": ("pub trait Component {}\n"),
+            "crates/extension_api/src/extension_api.rs": (
+                "pub struct Component;\n"
+            ),
+            "crates/ui/src/table.rs": (
+                "use crate::Component;\n"
+                "pub struct Table;\n"
+                "impl Component for Table {}\n"
+            ),
+        },
+    )
+    assert graph.heritage_out["crates/ui/src/table.rs::Table"] == [
+        "crates/component/src/component.rs::Component"
+    ]
+    assert graph.heritage_ambiguous == []
+
+
+def test_impl_heritage_narrowing_leaves_non_impl_relations_unchanged(
+    tmp_path: Path,
+) -> None:
+    # A non-``impl`` heritage clause (Rust's own supertrait-bound
+    # shape, ``relation == "extends"``) must not be narrowed -- only
+    # an ``impl Trait for Type`` clause can only mean a trait.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/component/src/component.rs": ("pub trait Component {}\n"),
+            "crates/extension_api/src/extension_api.rs": (
+                "pub struct Component;\n"
+            ),
+            "crates/ui/src/panel.rs": (
+                "use crate::Component;\npub trait Panel: Component {}\n"
+            ),
+        },
+    )
+    assert graph.heritage_ambiguous == [
+        (
+            "crates/ui/src/panel.rs::Panel",
+            "Component",
+            sorted(
+                [
+                    "crates/component/src/component.rs::Component",
+                    "crates/extension_api/src/extension_api.rs::Component",
+                ]
+            ),
+        )
+    ]
+
+
+def test_impl_heritage_narrowing_falls_back_when_no_trait_matches(
+    tmp_path: Path,
+) -> None:
+    # No trait candidate at all -- keep the full, unnarrowed list
+    # rather than manufacturing an empty one (rule 0.3: "no evidence
+    # is not negative evidence").
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/marker.rs": "pub struct Marker;\n",
+            "crates/b/src/other.rs": (
+                "use crate::Marker;\n"
+                "pub struct Widget;\n"
+                "impl Marker for Widget {}\n"
+            ),
+        },
+    )
+    assert graph.heritage_out["crates/b/src/other.rs::Widget"] == [
+        "crates/a/src/marker.rs::Marker"
+    ]

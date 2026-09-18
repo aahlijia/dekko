@@ -1749,6 +1749,46 @@ def resolve_heritage(
     )
 
 
+def _narrow_impl_candidates_to_traits(
+    candidates: list[Symbol],
+) -> list[Symbol]:
+    """Narrow ``impl Trait for Type`` candidates to trait-kind only.
+
+    Round 31 zed coverage pass F8: heritage candidates were filtered
+    only to ``TYPE_KINDS`` (every type kind), but a Rust ``impl X for
+    Y`` clause's ``X`` can only ever name a *trait* — a same-named
+    struct/enum/other type is never a legal candidate (``impl
+    <struct> for Y`` doesn't compile). 66 of zed's 86
+    ``heritage_ambiguous`` entries had exactly one trait candidate
+    alongside an unrelated same-named struct (``Component`` the trait
+    vs. ``extension_api::Component`` the struct, line 364) — the
+    struct half of every one of those pairs was pure noise dragging a
+    resolvable clause into "ambiguous."
+
+    Same shape as ``query._sole_type_candidate`` (round 31 P3.4),
+    applied here at resolve time instead of at query time: only
+    narrows when doing so leaves at least one candidate (rule 0.3 in
+    the round 31 fix design — "no evidence is not negative evidence").
+    A clause whose name matches *no* trait at all keeps its full,
+    unnarrowed candidate list — it may still resolve some other way
+    (same-file, import hint) that this kind filter alone can't rule
+    out with certainty, and an empty result here is not the "no
+    candidate can possibly be the target" proof the ``Type::name``
+    owner rule gets to make.
+
+    Args:
+        candidates: Already ``TYPE_KINDS``-filtered same-named
+            symbols (either the repo-wide index lookup or the
+            same-file lookup — both call sites need this identically).
+
+    Returns:
+        Only the ``trait``-kind entries of ``candidates``, or
+        ``candidates`` unchanged when none are traits.
+    """
+    traits = [c for c in candidates if c.kind == "trait"]
+    return traits or candidates
+
+
 def _resolve_one_heritage(
     h: RawHeritage,
     index: dict[str, list[Symbol]],
@@ -1800,6 +1840,8 @@ def _resolve_one_heritage(
         return
 
     candidates = [c for c in index.get(h.name, []) if c.kind in TYPE_KINDS]
+    if h.relation == "impl":
+        candidates = _narrow_impl_candidates_to_traits(candidates)
     if not candidates:
         alias = [
             c
@@ -1820,6 +1862,8 @@ def _resolve_one_heritage(
         for c in by_name_path.get((h.name, h.path), [])
         if c.kind in TYPE_KINDS
     ]
+    if h.relation == "impl":
+        same_file = _narrow_impl_candidates_to_traits(same_file)
     target = _pick_candidate(
         h,
         candidates,
