@@ -559,12 +559,23 @@ def render_candidates(candidates: list[Symbol]) -> list[str]:
             f"  … +{more} more (qualify with "
             f"`{sample.path}:{sample.qualname}` to narrow)"
         )
-    if len({(s.path, s.qualname) for s in candidates}) == 1:
-        # Every candidate shares (path, qualname) — an overload set a
-        # plain `file.py:qualname` qualifier can never narrow, since
-        # that's exactly the key they collide on. The line-number
-        # qualifier (round-08 §2.5) is the only escape hatch; point at
-        # it directly with a real candidate's own line as an example.
+    if (
+        len(candidates) >= 2
+        and len({(s.path, s.qualname) for s in candidates}) == 1
+    ):
+        # Round 31 zed.md F5: a *single* candidate trivially forms a
+        # one-element (path, qualname) set too, so the bare set-size
+        # check fired this "can't disambiguate" hint under a row that
+        # has nothing to disambiguate (``ambiguous --name print``
+        # showing Python's builtin ``print`` matched against exactly
+        # one same-named Rust method, kept "ambiguous" on purpose --
+        # the cross-language sole-candidate case, F4 -- but with a
+        # nonsense hint attached). The hint is only meaningful for an
+        # actual overload SET: 2+ candidates a plain `file.py:qualname`
+        # qualifier can never narrow, since that's exactly the key they
+        # collide on. The line-number qualifier (round-08 §2.5) is the
+        # only escape hatch; point at it directly with a real
+        # candidate's own line as an example.
         sample = ranked[0]
         rows.append(
             "  … path+qualname alone can't disambiguate these (same "
