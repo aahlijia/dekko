@@ -2490,18 +2490,18 @@ def _pick_candidate(
     same language) as the call site.
     """
     candidates = _language_filtered(call, candidates)
+    if _rust_type_path_receiver(call, index):
+        # ``Point::default()``: the path itself names the owning type,
+        # so only that type's members may answer -- see
+        # ``_owned_by_receiver_type``.
+        candidates = _owned_by_receiver_type(call, candidates, index)
+        same_file = _owned_by_receiver_type(call, same_file, index)
+        if not candidates:
+            return _NOISE if repo_stems is not None else None
 
-    container_match = _container_match(call, caller, same_file)
-    if container_match is not None:
-        return container_match
-
-    receiver_type = _receiver_type_match(call, candidates, index)
-    if receiver_type is not None:
-        return receiver_type
-
-    typed = _typed_param_match(call, candidates, caller)
-    if typed is not None:
-        return typed
+    structural = _structural_match(call, candidates, same_file, caller, index)
+    if structural is not None:
+        return structural
 
     if len(same_file) == 1:
         only = same_file[0]
@@ -3017,6 +3017,110 @@ def _receiver_type_match(
     return None
 
 
+def _structural_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    caller: Symbol | None,
+    index: dict[str, list[Symbol]],
+) -> Symbol | None:
+    """The ladder's three structural steps, strongest first.
+
+    Self/this container, explicit ``Type::method`` receiver, then a
+    typed parameter of the caller. Grouped only to keep
+    ``_pick_candidate`` under the complexity ceiling; order and
+    behavior are exactly what they were inline.
+    """
+    container_match = _container_match(call, caller, same_file)
+    if container_match is not None:
+        return container_match
+    receiver_type = _receiver_type_match(call, candidates, index)
+    if receiver_type is not None:
+        return receiver_type
+    return _typed_param_match(call, candidates, caller)
+
+
+def _rust_type_path_receiver(
+    call: _Referable, index: dict[str, list[Symbol]]
+) -> str | None:
+    """The in-repo type a Rust ``Type::name(...)`` path is rooted at.
+
+    Returns the receiver's last path segment when the call is a Rust
+    ``::`` path whose receiver ends in the name of an in-repo type
+    (``Point::new``, ``gpui::Point::new``), else ``None``. ``Self`` and
+    lowercase module paths (``module::func``) never qualify.
+    """
+    receiver = getattr(call, "receiver", None)
+    if not receiver or not call.path.endswith(".rs"):
+        return None
+    if f"{receiver}::" not in (getattr(call, "text", "") or ""):
+        return None
+    last = receiver.rsplit("::", 1)[-1].split("<", 1)[0].strip()
+    if not last[:1].isupper() or last == "Self":
+        return None
+    if not any(sym.kind in TYPE_KINDS for sym in index.get(last, [])):
+        return None
+    return last
+
+
+def _owned_by_receiver_type(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> list[Symbol]:
+    """Keep only candidates a ``Type::name`` path could actually mean.
+
+    ``_receiver_type_match`` uses an explicit type receiver as positive
+    evidence only: exactly one ``Type.name`` wins, anything else falls
+    through to the generic ladder *with the full candidate list*. For
+    ``Point::default()`` where ``Default`` is derived (no ``Point.
+    default`` symbol exists), that ladder then picked whatever
+    ``default`` was nearest: ``ScrollHandle.default``, because it is
+    the only ``default`` in the same file. Round 31 zed coverage pass
+    F6 counted 35 such wrong edges that 0.43.61 exposed by no longer
+    short-circuiting ``crate::``-imported receivers to ``external``
+    (they were skipped before, for the wrong reason). The rule was
+    always missing; that release just stopped hiding it.
+
+    A Rust ``Type::name`` path can only name a member of ``Type``, or
+    a default method of a trait ``Type`` implements. So a candidate
+    survives when its container is ``Type`` itself, or is a trait. A
+    free function, an unrelated struct (``Enum::Variant(..)`` landing
+    on a same-named struct), or another type's method cannot be the
+    target. Nothing left means no plausible repo target.
+    """
+    owner = _rust_type_path_receiver(call, index)
+    if owner is None:
+        return candidates
+    own: list[Symbol] = []
+    via_trait: list[Symbol] = []
+    for cand in candidates:
+        if "." not in cand.qualname:
+            continue
+        container_name = cand.qualname.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+        if container_name == owner:
+            own.append(cand)
+        elif any(sym.kind == "trait" for sym in index.get(container_name, [])):
+            via_trait.append(cand)
+    # The type's own members outrank another trait's defaults: the
+    # trait allowance exists for ``Type::method()`` where ``Type``
+    # itself declares no such member, not as a rival to one it does.
+    # Live-testing on zed: ``RangeExt::overlaps(&a, &b)`` drifted to an
+    # unrelated ``AnchorRangeExt.overlaps`` because a UFCS call's extra
+    # explicit ``self`` argument made that one's arity fit better.
+    kept = own or via_trait
+    # One type routinely has two same-named members: an inherent
+    # ``fn zero() -> Self`` and a trait impl's ``fn zero(_cx: ())``.
+    # The written argument count tells them apart, and it has to be
+    # applied *here*: narrowing ``same_file`` to the owner can leave
+    # the wrong one as a lone same-file match, which the ladder takes
+    # without an arity check (live-testing on zed: 7 ``Point::zero()``
+    # calls moved from ``point.rs``'s inherent fn to the ``Dimension``
+    # impl sitting in the caller's own file).
+    plausible = [c for c in kept if _arity_plausible(c, call)]
+    return plausible or kept
+
+
 def _typed_param_match(
     call: _Referable, candidates: list[Symbol], caller: Symbol | None
 ) -> Symbol | None:
@@ -3243,6 +3347,11 @@ def _import_match(
     # unrelated ``Logger.ts`` in another package), so the package
     # directory is the stronger evidence and gets first say.
     candidates, narrowed = _workspace_narrowed(call, candidates, file_imports)
+    if narrowed and len(candidates) == 1:
+        return candidates[0]
+    candidates, narrowed = _rust_own_crate_narrowed(
+        call, candidates, file_imports
+    )
     if narrowed and len(candidates) == 1:
         return candidates[0]
 
@@ -4278,6 +4387,56 @@ def _workspace_narrowed(
         return candidates, False
     exported = [c for c in inside if c.exported]
     return (exported or inside), True
+
+
+def _rust_own_crate_narrowed(
+    call: _Referable,
+    candidates: list[Symbol],
+    file_imports: dict[str, Import],
+) -> tuple[list[Symbol], bool]:
+    """Narrow to the importing file's own crate for a ``crate::`` import.
+
+    The Rust counterpart of ``_workspace_narrowed``. ``use crate::Foo;``
+    says ``Foo`` is reachable from *this* crate's root, so when the
+    repo has two ``Foo``s, the one inside this crate is the one meant
+    (round 31 zed coverage pass F6: ``Foo::build()`` landed on an
+    unrelated crate's ``Foo.build``, a crate that isn't even a
+    dependency). Checked for the call's own name and for its
+    receiver's leading segment.
+
+    Zero in-crate candidates is the common, legitimate case of a crate
+    root re-exporting another crate's type (``editor``: ``pub use
+    multi_buffer::MultiBuffer;``), so it is no evidence and the list is
+    returned untouched.
+    """
+    # A bare call's own name is the imported binding. With a receiver,
+    # the name is a member *of that receiver* and an import of the same
+    # word is a coincidence: ``proto::view::Variant::Editor(..)`` is not
+    # the ``Editor`` this file imported from ``crate::``.
+    # ``RawRef`` carries neither ``receiver`` nor ``text``.
+    receiver = getattr(call, "receiver", None)
+    text = getattr(call, "text", "") or ""
+    names = [] if receiver else [call.name]
+    if receiver and text == f"{receiver}::{call.name}":
+        # Only a pure ``Type::name`` path. For a chained receiver
+        # (``Store::global(cx).read(cx)``) the import says where
+        # ``Store`` lives, which is nothing about ``read``: live-testing
+        # on zed had that landing on the crate's one free ``fn read``.
+        names.append(_PATH_SPLIT.split(receiver)[0])
+    # ``crate::point(..)`` spells the crate root out at the call site
+    # itself: no import needed to know it means this crate.
+    literal = text.startswith(_RUST_IN_CRATE_PREFIXES)
+    if not literal and not any(
+        (imp := file_imports.get(n)) is not None
+        and imp.source.startswith(_RUST_IN_CRATE_PREFIXES)
+        for n in names
+    ):
+        return candidates, False
+    own = _rust_crate_dir(call.path)
+    inside = [c for c in candidates if _rust_crate_dir(c.path) == own]
+    if not inside or len(inside) == len(candidates):
+        return candidates, False
+    return inside, True
 
 
 def _imports_by_file(

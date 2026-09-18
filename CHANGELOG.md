@@ -9,6 +9,57 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.62] — 2026-09-18
+
+A regression 0.43.61 exposed, caught the same day by the zed coverage
+follow-up's A/B against the previous build (finding F6 in
+`test-repos/reports/31-tokentest-7repo-post04355/coverage-followup/zed.md`).
+
+### Fixed
+- **A Rust `Type::name(..)` path can only resolve to a member of
+  `Type`** (or a default method of a trait). The ladder used an
+  explicit type receiver as *positive* evidence only: exactly one
+  `Type.name` won, and anything else fell through to the generic
+  ladder with the full candidate list. So `Point::default()` where
+  `Default` is derived (no `Point.default` symbol exists) took the
+  file's only other `default`, `ScrollHandle.default`. 0.43.61 made
+  this visible by no longer short-circuiting `crate::`-imported
+  receivers to `external`; the missing rule was older than that. Now
+  candidates are narrowed to `Type`'s own members, which outrank trait
+  defaults, with the written argument count breaking ties between an
+  inherent `fn zero()` and a trait impl's `fn zero(_cx)`. Nothing left
+  means no plausible repo target: `external`. A free function, an
+  unrelated struct (`Enum::Variant(..)` landing on a same-named
+  struct), or another type's method can no longer be chosen.
+  zed vs. 0.43.61: **952 call edges removed, 3,612 added**. Every
+  removed edge was checked mechanically against its source line: 950
+  name a different receiver type than the resolved owner, and the
+  other 2 moved to the right crate's `Key.new`. Of the added edges,
+  2,226 have receiver == owner and 1,169 are trait default/UFCS
+  methods (`TitleBarSettings::get_global(cx)` → `Settings.get_global`);
+  zero name a mismatched non-trait owner.
+- **`use crate::Foo;` prefers the importing file's own crate** when
+  the repo has two `Foo`s. `Foo::build()` had landed on an unrelated
+  crate that isn't even a dependency. Zero in-crate candidates (a
+  crate root re-exporting another crate's type, e.g. `editor`'s `pub
+  use multi_buffer::MultiBuffer;`) is no evidence and changes nothing.
+  Applies to bare imported names and pure `Type::name` paths only.
+
+Three regressions in these fixes themselves were caught by
+re-mapping zed before any unit test existed, and each is now a test:
+`Point::zero()` drifting to a same-file trait impl, a UFCS
+`RangeExt::overlaps(&a, &b)` drifting to a rival trait whose arity
+fit the explicit `self`, and `Store::global(cx).read(cx)` landing on
+the crate's one free `fn read`.
+
+### Known limits (found, not fixed)
+- `Default::default()`, `Vec::default()`, `FxHashMap::default()` and
+  calls on macro-generated types still take a same-file `default`
+  when one exists (~35 edges on zed). The receiver names no in-repo
+  type, and Rust `type` aliases aren't indexed, so "unknown type ⇒
+  external" would also drop real `Alias::new()` edges. Needs alias
+  indexing first.
+
 ## [0.43.61] — 2026-09-18
 
 Found by round 31's zed coverage follow-up

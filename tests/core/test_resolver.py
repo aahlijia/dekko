@@ -17,6 +17,7 @@ from dekko.core import resolver as resolver_mod
 from dekko.core.extractor import extract_file
 from dekko.repo_ops import map_repository
 from dekko.core.model import (
+    CallGraph,
     FileMap,
     Import,
     Param,
@@ -1997,7 +1998,14 @@ def test_explicit_type_receiver_no_unique_method_falls_through() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, unrelated_a.id) not in edges
     assert (caller.id, unrelated_b.id) not in edges
-    assert len(graph.ambiguous) == 1
+    # Until round 31 this landed in ``ambiguous`` between Foo.render
+    # and Bar.render -- neither of which a ``Widget::render`` path can
+    # possibly mean. No member of Widget (and no trait default) is a
+    # candidate, so there is no plausible repo target: external.
+    assert graph.ambiguous == []
+    assert [(e.caller, e.callee) for e in graph.external] == [
+        (caller.id, "Widget::render")
+    ]
 
 
 def test_bare_call_shadowed_by_external_import_not_guessed() -> None:
@@ -4948,4 +4956,130 @@ def test_hintless_tiebreak_stays_ambiguous_next_to_the_fixture(
     # The real consumer is unaffected by the guard.
     assert graph.heritage_out["crates/editor/src/editor.rs::Editor"] == [
         "crates/gpui/src/element.rs::Render"
+    ]
+
+
+# Round 31 zed coverage pass F6: a Rust `Type::name(..)` path names the
+# owning type outright, but the ladder only ever used that as positive
+# evidence. With no `Point.default` symbol (Default is derived), the
+# call fell through and took the file's only other `default`.
+
+
+def _rust_graph(tmp_path: Path, tree: dict[str, str]) -> CallGraph:
+    _write_tree(tmp_path, tree)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    return resolve(files)
+
+
+def test_rust_type_path_never_lands_on_another_types_member(
+    tmp_path: Path,
+) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/g/src/div.rs": (
+                "#[derive(Default)]\npub struct Point;\n"
+                "pub struct ScrollHandle;\n"
+                "impl ScrollHandle {\n"
+                "    pub fn default() -> Self { ScrollHandle }\n}\n"
+                "pub fn make() {\n    let _p = Point::default();\n}\n"
+            ),
+        },
+    )
+    assert "crates/g/src/div.rs::make" not in graph.calls_out
+    assert graph.ambiguous == []
+    assert [e.callee for e in graph.external] == ["Point::default"]
+
+
+def test_rust_type_path_prefers_arity_fitting_member(tmp_path: Path) -> None:
+    # Inherent `zero()` vs a trait impl's `zero(_cx)` on the same type,
+    # the latter sitting in the caller's own file.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/r/src/point.rs": (
+                "pub struct Point;\n"
+                "impl Point {\n    pub fn zero() -> Self { Point }\n}\n"
+            ),
+            "crates/r/src/rope.rs": (
+                "use crate::point::Point;\n"
+                "pub trait Dimension {\n    fn zero(cx: ()) -> Self;\n}\n"
+                "impl Dimension for Point {\n"
+                "    fn zero(_cx: ()) -> Self { Point }\n}\n"
+                "pub fn start() {\n    let _p = Point::zero();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/r/src/rope.rs::start"] == [
+        "crates/r/src/point.rs::Point.zero"
+    ]
+
+
+def test_rust_ufcs_trait_path_keeps_its_own_trait(tmp_path: Path) -> None:
+    # The explicit `self` argument makes a rival trait's 2-param method
+    # "fit" better by arity; the named trait must still win.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/u/src/util.rs": (
+                "pub trait RangeExt {\n"
+                "    fn overlaps(&self, other: &u8) -> bool;\n}\n"
+                "pub trait AnchorRangeExt {\n"
+                "    fn overlaps(&self, other: &u8, buf: &u8) -> bool;\n}\n"
+            ),
+            "crates/e/src/fold.rs": (
+                "use util::RangeExt;\n"
+                "pub fn unfold(a: u8, b: u8) -> bool {\n"
+                "    RangeExt::overlaps(&a, &b)\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/e/src/fold.rs::unfold"] == [
+        "crates/u/src/util.rs::RangeExt.overlaps"
+    ]
+
+
+def test_rust_type_path_reaches_a_trait_default_method(tmp_path: Path) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/s/src/settings.rs": (
+                "pub trait Settings {\n"
+                "    fn get_global(cx: &u8) -> u8 { 0 }\n}\n"
+            ),
+            "crates/t/src/title.rs": (
+                "use settings::Settings;\n"
+                "pub struct TitleBarSettings;\n"
+                "impl Settings for TitleBarSettings {}\n"
+                "pub fn show(cx: &u8) -> u8 {\n"
+                "    TitleBarSettings::get_global(cx)\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/t/src/title.rs::show"] == [
+        "crates/s/src/settings.rs::Settings.get_global"
+    ]
+
+
+def test_rust_crate_import_prefers_own_crates_same_named_type(
+    tmp_path: Path,
+) -> None:
+    body = (
+        "pub struct Foo;\nimpl Foo {\n    pub fn build() -> Self { Foo }\n}\n"
+    )
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/lib.rs": "mod foo;\npub use foo::*;\n",
+            "crates/a/src/foo.rs": body,
+            "crates/b/src/lib.rs": body,
+            "crates/a/src/element.rs": (
+                "use crate::Foo;\npub fn make() {\n    Foo::build();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/element.rs::make"] == [
+        "crates/a/src/foo.rs::Foo.build"
     ]
