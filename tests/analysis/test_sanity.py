@@ -3687,3 +3687,94 @@ def test_sanity_group_by_file_respects_limit_truncation(
     out = capsys.readouterr().out
     assert "grep-only: 3 (grouped by file)" in out
     assert "... +2 more (outside --limit/budget)" in out
+
+
+# --- round 31: buckets must reconcile with the printed grep ---------
+
+# Two same-bare-named declarations plus a real call site. Before round
+# 31 both declaration lines were dropped from the buckets silently, so
+# ``matches + grep_only`` came up short against the very grep command
+# printed above them, with nothing explaining the gap. Found on all
+# five language families tested; worst on overload-heavy repos, where
+# the shortfall equals the number of colliding declarations.
+COLLIDING_DECLS_REPO = {
+    "a.py": (
+        "def target():\n    return 1\n\n\ndef caller():\n    return target()\n"
+    ),
+    "b.py": "def target():\n    return 2\n",
+}
+
+
+def _raw_grep_hits(root: Path, command: str) -> int:
+    """Hit count of the exact grep command sanity printed."""
+    proc = subprocess.run(
+        command, shell=True, cwd=root, capture_output=True, text=True
+    )
+    return len([ln for ln in proc.stdout.splitlines() if ln.strip()])
+
+
+def test_sanity_counts_reconcile_with_printed_grep(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(COLLIDING_DECLS_REPO)
+    code = cli.main(["sanity", "a.py:target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    counts = doc["counts"]
+
+    # Two declarations of the bare name 'target' were excluded.
+    assert counts["excluded_declarations"] == 2
+    # The buckets plus the exclusions account for every swept hit...
+    assert counts["grep_hits_swept"] == (
+        counts["matches"] + counts["grep_only"] + 2
+    )
+    # ...and that total is the real hit count of the printed command,
+    # which is the whole point: the report reconciles by hand now.
+    raw = _raw_grep_hits(root, doc["grep_command"])
+    assert counts["grep_hits_swept"] + doc["grep_skipped_pathological"] == raw
+    assert "excluded_declarations_note" in doc
+
+
+def test_sanity_text_discloses_excluded_declarations(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(COLLIDING_DECLS_REPO)
+    code = cli.main(["sanity", "a.py:target", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "declaration line" in out
+    assert "reconciles" in out
+
+
+def test_sanity_no_collision_still_excludes_own_declaration(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """Even with no siblings, the target's own declaration is counted."""
+    root = make_mapped_repo(SIMPLE_REPO)
+    code = cli.main(["sanity", "helper", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    counts = doc["counts"]
+    assert counts["excluded_declarations"] == 1
+    assert counts["grep_hits_swept"] == (
+        counts["matches"] + counts["grep_only"] + 1
+    )
+
+
+def test_sanity_unused_counts_reconcile(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """``--unused`` filtered declarations silently too."""
+    root = make_mapped_repo(COLLIDING_DECLS_REPO)
+    code = cli.main(
+        ["sanity", "--unused", "b.py:target", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    counts = doc["counts"]
+    assert counts["excluded_declarations"] == 2
+    assert counts["grep_hits_swept"] == (
+        counts["reference_hits"]
+        + counts["filtered_noise"]
+        + counts["excluded_declarations"]
+    )

@@ -2108,6 +2108,7 @@ def run_deps(args: argparse.Namespace) -> int:
         export_fmt=args.export_fmt,
         max_nodes=args.max_nodes,
         out_path=out,
+        root=Path(args.root).resolve(),
     )
 
 

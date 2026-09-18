@@ -1626,6 +1626,34 @@ def _pathological_skip_note(count: int) -> str:
     )
 
 
+def _excluded_declarations_note(count: int) -> str:
+    """The banner disclosing declaration lines dropped from the grep
+    sweep before bucketing.
+
+    Round 31 (found independently on all five language families
+    tested): a symbol's own declaration line -- and every other
+    same-bare-named symbol's -- is filtered out of the sweep before
+    the matches/grep-only split, because a declaration is not a call
+    site and never was a miss to explain. That exclusion is correct,
+    but it used to be *silent*, so ``matches + grep-only`` never summed
+    to the hit count of the very ``grep:`` command printed one line
+    above it. The gap equalled the number of colliding same-bare-name
+    declaration lines, which on an overload-heavy repo is never zero,
+    and an agent reconciling the two numbers by hand found an
+    unexplained shortfall every time. Disclosing the count makes the
+    report self-reconciling: matches + grep-only + excluded == the
+    swept hit total.
+    """
+    plural = "" if count == 1 else "s"
+    return (
+        f"{count} declaration line{plural} excluded from the buckets "
+        "below (the target's own definition and any same-bare-named "
+        "symbol's) -- a declaration is not a call site, so it is not a "
+        "miss to explain. Counted here so matches + grep-only + "
+        "excluded reconciles with the grep command's own hit total."
+    )
+
+
 def _receiver_mismatch_note(
     bare_name: str, declaring_type: str, count: int
 ) -> str:
@@ -1677,6 +1705,7 @@ def _build_json_doc(
     dekko_only_meter: Meter | None,
     grep_only: tuple[list[dict], Meter],
     module_level: list[str],
+    excluded_declarations: int = 0,
     receiver_mismatch_note: str | None = None,
     receiver_mismatch_declaring_type: str | None = None,
     receiver_mismatch_count: int | None = None,
@@ -1719,6 +1748,15 @@ def _build_json_doc(
                 dekko_only_meter.total if dekko_only_meter else None
             ),
             "grep_only": grep_only_meter.total,
+            # Round 31: without this, matches + grep_only silently
+            # failed to sum to the printed grep command's own hit
+            # count -- see ``_excluded_declarations_note``.
+            "excluded_declarations": excluded_declarations,
+            "grep_hits_swept": (
+                matches_meter.total
+                + grep_only_meter.total
+                + excluded_declarations
+            ),
         },
         "meta": {
             "matches": matches_meter.as_dict(),
@@ -1733,6 +1771,10 @@ def _build_json_doc(
     if sweep.skipped_pathological:
         doc["grep_skipped_pathological_note"] = _pathological_skip_note(
             sweep.skipped_pathological
+        )
+    if excluded_declarations:
+        doc["excluded_declarations_note"] = _excluded_declarations_note(
+            excluded_declarations
         )
     if module_level:
         doc["dekko_module_level"] = sorted(module_level)
@@ -1798,6 +1840,7 @@ def _print_text(
     *,
     grep_truncated: bool = False,
     skipped_pathological: int = 0,
+    excluded_declarations: int = 0,
     receiver_mismatch_note: str | None = None,
     group_by_file: bool = False,
 ) -> None:
@@ -1807,6 +1850,8 @@ def _print_text(
         print(f"  note: {_TRUNCATION_NOTE}")
     if skipped_pathological:
         print(f"  note: {_pathological_skip_note(skipped_pathological)}")
+    if excluded_declarations:
+        print(f"  note: {_excluded_declarations_note(excluded_declarations)}")
     if receiver_mismatch_note:
         print(f"  note: {receiver_mismatch_note}")
     _print_bucket_text("matches", *matches)
@@ -1840,6 +1885,7 @@ def _build_unused_json_doc(
     reference_hits: tuple[list[dict], Meter],
     noise_count: int,
     generic_name_caution: bool,
+    excluded_declarations: int = 0,
 ) -> dict:
     """Assemble ``sanity --unused``'s JSON output document.
 
@@ -1865,10 +1911,20 @@ def _build_unused_json_doc(
         "counts": {
             "reference_hits": meter.total,
             "filtered_noise": noise_count,
+            # Round 31: same silent-exclusion gap the callers/uses
+            # path had -- see ``_excluded_declarations_note``.
+            "excluded_declarations": excluded_declarations,
+            "grep_hits_swept": (
+                meter.total + noise_count + excluded_declarations
+            ),
         },
         "meta": {"reference_hits": meter.as_dict()},
         "generic_name_caution": generic_name_caution,
     }
+    if excluded_declarations:
+        doc["excluded_declarations_note"] = _excluded_declarations_note(
+            excluded_declarations
+        )
     if sweep.truncated:
         doc["reference_hits_note"] = _TRUNCATION_NOTE
     if sweep.skipped_pathological:
@@ -1889,6 +1945,7 @@ def _print_unused_text(
     *,
     grep_truncated: bool = False,
     skipped_pathological: int = 0,
+    excluded_declarations: int = 0,
 ) -> None:
     """Render ``sanity --unused``'s text report.
 
@@ -1905,6 +1962,8 @@ def _print_unused_text(
         print(f"  note: {_TRUNCATION_NOTE}")
     if skipped_pathological:
         print(f"  note: {_pathological_skip_note(skipped_pathological)}")
+    if excluded_declarations:
+        print(f"  note: {_excluded_declarations_note(excluded_declarations)}")
     evidence = (
         "none -- this is why it was flagged" if not has_evidence else "present"
     )
@@ -1992,6 +2051,9 @@ def _run_unused_check(
         return EXIT_GREP_FAILED
 
     hits = [h for h in sweep.hits if (h.path, h.line) not in own_def_locs]
+    # Round 31: same silent-exclusion disclosure as the callers/uses
+    # path -- see ``_excluded_declarations_note``.
+    excluded_declarations = len(sweep.hits) - len(hits)
     reference_rows: list[dict] = []
     noise_count = 0
     for h in hits:
@@ -2031,6 +2093,7 @@ def _run_unused_check(
             reference_hits=(kept, meter),
             noise_count=noise_count,
             generic_name_caution=generic_caution,
+            excluded_declarations=excluded_declarations,
         )
         print(json.dumps(doc, indent=2))
         return EXIT_OK
@@ -2045,6 +2108,7 @@ def _run_unused_check(
         generic_caution,
         grep_truncated=sweep.truncated,
         skipped_pathological=sweep.skipped_pathological,
+        excluded_declarations=excluded_declarations,
     )
     return EXIT_OK
 
@@ -2267,6 +2331,10 @@ def run(
         grep_hits = [
             h for h in grep_hits if (h.path, h.line) not in own_def_locs
         ]
+    # Round 31: disclose how many raw hits that filter removed, so the
+    # buckets below reconcile against the ``grep:`` command printed
+    # above them -- see ``_excluded_declarations_note``.
+    excluded_declarations = len(sweep.hits) - len(grep_hits)
 
     dekko_set = set(dekko_hits)
     grep_by_loc = {(h.path, h.line): h for h in grep_hits}
@@ -2333,6 +2401,7 @@ def run(
             dekko_only_meter=dekko_only_meter,
             grep_only=grep_only,
             module_level=module_level,
+            excluded_declarations=excluded_declarations,
             receiver_mismatch_note=receiver_mismatch_note,
             receiver_mismatch_declaring_type=declaring_type,
             receiver_mismatch_count=(
@@ -2353,6 +2422,7 @@ def run(
         module_level,
         grep_truncated=sweep.truncated,
         skipped_pathological=sweep.skipped_pathological,
+        excluded_declarations=excluded_declarations,
         receiver_mismatch_note=receiver_mismatch_note,
         group_by_file=group_by_file,
     )

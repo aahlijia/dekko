@@ -576,3 +576,103 @@ def test_deps_compute_top_by_deps_in_ranking(
     assert index is not None
     doc = deps.compute(index, top=5)
     assert doc["top_by_deps_in"][0] == {"path": "hot.py", "count": 3}
+
+
+# --- round 31: runtime-import disclosure ----------------------------
+
+# A file whose only real dependency is wired at runtime, so static
+# import extraction correctly resolves zero edges for it. Mirrors
+# tensorflow's LazyLoader-wired keras modules, where round 31 measured
+# 6 of 9 real edges invisible behind a bare "imports (0)".
+DYNAMIC_IMPORT_REPO = {
+    "lazy.py": (
+        "import importlib\n"
+        "def load():\n"
+        "    return importlib.import_module('.target', __package__)\n"
+    ),
+    "target.py": "def thing():\n    return 1\n",
+    "plain.py": "def helper():\n    return 2\n",
+}
+
+
+def test_deps_file_view_discloses_dynamic_imports(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DYNAMIC_IMPORT_REPO)
+    code = cli.main(["deps", "--root", str(root), "--file", "lazy.py"])
+    assert code == 0
+    out = capsys.readouterr().out
+    # The zero is still reported -- it is accurate for static imports.
+    assert "imports (0):" in out
+    # ...but no longer bare.
+    assert "importlib.import_module()" in out
+    assert "not proof of no dependencies" in out
+
+
+def test_deps_file_view_dynamic_imports_json(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DYNAMIC_IMPORT_REPO)
+    code = cli.main(
+        ["deps", "--root", str(root), "--file", "lazy.py", "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["imports"] == []
+    assert doc["dynamic_imports"] == [
+        {"construct": "importlib.import_module()", "occurrences": 1}
+    ]
+    assert "dynamic_import_note" in doc
+
+
+def test_deps_file_view_no_dynamic_imports_stays_silent(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """The disclosure is evidence-gated, not printed on every zero."""
+    root = make_mapped_repo(DYNAMIC_IMPORT_REPO)
+    code = cli.main(
+        ["deps", "--root", str(root), "--file", "plain.py", "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["imports"] == []
+    assert "dynamic_imports" not in doc
+    assert "dynamic_import_note" not in doc
+
+
+def test_deps_dynamic_note_wording_when_static_edges_exist(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """A nonzero static count is framed as incomplete, not as a zero."""
+    root = make_mapped_repo(
+        {
+            "mixed.py": (
+                "import importlib\n"
+                "from .target import thing\n"
+                "def load():\n"
+                "    thing()\n"
+                "    return importlib.import_module('.other', __package__)\n"
+            ),
+            "target.py": "def thing():\n    return 1\n",
+            "other.py": "def other():\n    return 3\n",
+        }
+    )
+    code = cli.main(["deps", "--root", str(root), "--file", "mixed.py"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "imports (1):" in out
+    assert "covers static imports only" in out
+    assert "not proof of no dependencies" not in out
+
+
+def test_deps_dynamic_scan_handles_unreadable_and_unknown_language(
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    """The scan never raises -- it degrades to 'no disclosure'."""
+    from pathlib import Path
+
+    root = Path(str(tmp_path))
+    assert deps._dynamic_import_constructs(root, "missing.py", "python") == []
+    assert deps._dynamic_import_constructs(None, "x.py", "python") == []
+    assert deps._dynamic_import_constructs(root, "x.cob", "cobol") == []
+    assert deps._dynamic_import_constructs(root, "x.py", None) == []

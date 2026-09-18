@@ -222,6 +222,23 @@ sets by `(file, line)` into three buckets:
   short/generic target name (resolver precision degrades in a dense
   repo), or "unexplained" when none of those fit.
 
+**Reconciling the buckets against the grep.** Declaration lines are
+excluded from the comparison before bucketing — the target's own
+definition, and every other same-bare-named symbol's. A declaration
+always contains the bare name but is never a call site, so counting
+one as a "miss" would be noise on every single check. Because that
+exclusion would otherwise leave `matches + grep-only` mysteriously
+short of the `grep:` command printed directly above them, the report
+discloses it: text prints a `note:` with the excluded count, and
+`--json` carries `counts.excluded_declarations` alongside
+`counts.grep_hits_swept` (`matches + grep_only +
+excluded_declarations`). That total is the real hit count of the
+printed grep command, so you can run the command yourself and check
+the arithmetic — which on an overload-heavy repo is the difference
+between "dekko dropped results" and "dekko excluded declarations."
+The identity holds unless `grep_truncated` is set, in which case the
+sweep hit its safety cap and discarded hits past it by design.
+
 **Receiver-mismatch detection.** When the target is a method (not a
 free function) with exactly one repo-defined symbol sharing its bare
 name and its declaring type resolves unambiguously, `sanity` checks
@@ -638,6 +655,21 @@ remains the explicit spelling for scripts. `FILE`/`--file`,
 `--cycles`, and `--export` are mutually exclusive — give at most one,
 the same "one, not several" rule `ambiguous`'s `--by`/`--name` already
 follows.
+
+**Static imports only.** `deps` resolves imports that are declared
+statically. A file that wires its dependencies up at *runtime* —
+Python's `importlib.import_module`/`__import__`/`LazyLoader`,
+JS/TS dynamic `import()`, Rust's `include!`, Java's
+`Class.forName`/`ServiceLoader` — genuinely resolves to zero edges,
+which is accurate but easy to misread as "this file depends on
+nothing." So when `--file` finds such a construct in the file's own
+source, it says so: text prints a `note:` naming each construct and
+its occurrence count, and `--json` adds `dynamic_imports` (a
+`{construct, occurrences}` list) plus `dynamic_import_note`. This is
+a disclosure, not resolution — dekko still does not follow those
+edges, it just stops presenting an incomplete zero as a confident
+one. The note appears only when such a construct is actually present,
+never on every zero.
 
 Cycle detection groups files into strongly-connected components
 (Tarjan's SCC): a reported cycle is every file mutually reachable from

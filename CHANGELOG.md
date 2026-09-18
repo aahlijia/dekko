@@ -9,6 +9,51 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.56] — 2026-09-18
+
+Round 31's two cross-language disclosure defects, both found by the
+7-repo sweep in `test-repos/reports/31-tokentest-7repo-post04355/`.
+Neither is a resolution change: dekko resolves exactly what it did
+before, and now says so honestly where it previously reported a
+confident-looking number it could not back up.
+
+### Fixed
+- **`dekko sanity`'s buckets now reconcile with the grep command it
+  prints** (round 31, found independently on all five language
+  families tested — JS/TS, TS/TSX, Java, Python/C++, Rust). A
+  symbol's own declaration line, and every other same-bare-named
+  symbol's, is filtered out of the sweep before the
+  matches/dekko-only/grep-only split — correctly, since a declaration
+  is not a call site and never was a miss to explain. But the
+  exclusion was *silent*, so `matches + grep-only` never summed to the
+  hit count of the `grep:` command printed one line above it. The
+  shortfall equalled the number of colliding same-bare-name
+  declaration lines, which on an overload-heavy repo is never zero:
+  spring-boot's `SpringApplication` constructor came up 2 short of its
+  own grep's 983 hits, `Binder.bindOrCreate` 4 short of 40. An agent
+  reconciling `sanity`'s numbers by hand — the entire purpose of the
+  command — found an unexplained gap every time and had no way to tell
+  a filtered declaration from a dropped result. Both text and `--json`
+  now carry an `excluded_declarations` count, a `grep_hits_swept`
+  total, and a note explaining the exclusion; `--unused` mode, which
+  filtered identically, gets the same treatment.
+- **`dekko deps --file` no longer reports a bare `imports (0)` for a
+  file that wires its imports up at runtime** (round 31, confirmed on
+  five repos across four language families). dekko resolves static
+  imports only; files depending entirely on `importlib`/`LazyLoader`
+  (Python), dynamic `import()` (JS/TS), `include!` (Rust), or
+  `Class.forName`/`ServiceLoader` (Java) therefore resolve to zero
+  edges — accurate, but presented as a confident zero with no caveat.
+  Worst measured case was tensorflow's `keras/utils/version_utils.py`,
+  where 6 of 9 real edges were invisible behind that zero. dekko still
+  does not resolve these edges (a genuinely hard static-analysis
+  problem, not a bug); it now scans the named file for the constructs
+  it provably cannot follow and says so, naming each construct and its
+  occurrence count. The disclosure is evidence-gated — it appears only
+  when such a construct is actually present, never on every zero — and
+  reads as "the count above covers static imports only" when static
+  edges do exist.
+
 ## [0.43.55] — 2026-09-17
 
 ### Performance
