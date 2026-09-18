@@ -983,6 +983,79 @@ def _looks_like_comment_line(snippet: str, path: str) -> bool:
     return snippet.strip().startswith(prefixes)
 
 
+# Bounded scan depth for the block-comment-continuation check below --
+# same "generous but bounded" shape as ``_HEADER_SCAN_LINES``, sized to
+# cover a long Javadoc/JSDoc ``@param``/``@return`` run without an
+# unbounded read.
+_BLOCK_COMMENT_SCAN_LINES = 40
+
+
+def _looks_like_block_comment_continuation(root: Path, hit: "GrepHit") -> bool:
+    """Whether ``hit``'s line is a ``/* ... */`` block-comment
+    continuation row (a Javadoc/JSDoc-style `` * text`` line), not real
+    code -- round 31 tensorflow.md Observation 5.2: a `` *
+    {@link ANeuralNetworksEvent_wait},`` line plainly inside a ``/**
+    ... */`` block was labelled ``[unexplained miss]`` because a bare
+    ``*`` prefix is deliberately absent from every C-style family in
+    ``_COMMENT_PREFIXES_BY_GRAMMAR`` -- see that table's own comment on
+    why: a gofmt/rustfmt/clang-format-wrapped ``* Helper(x-1)``
+    multiplication/dereference continuation line has the exact same
+    shape and can sit right next to a real definition, so a bare prefix
+    match alone can't tell the two apart.
+
+    That trap only exists *inside* an already-open comment block,
+    though -- real code can open a ``/*`` and leave it unclosed across
+    a line boundary, but it can never do so as an ongoing multi-line
+    *expression* the way a `` * Helper(x-1)`` continuation implies
+    (that reading requires the ``/*`` to already be a comment). So
+    this adds the missing evidence a bare prefix check can't see on
+    its own -- an unclosed ``/*`` above the hit, found before any
+    ``*/`` -- rather than loosening ``_looks_like_comment_line``'s
+    prefix check itself.
+
+    Args:
+        root: Repo root, to re-read the hit's own file (same
+            "small file re-read, best-effort" pattern as
+            ``_in_leading_header_comment``).
+        hit: The grep hit to classify.
+
+    Returns:
+        ``True`` only when the hit's grammar uses ``/* */`` block
+        comments, the stripped line starts with ``*`` but isn't a bare
+        ``*/`` close, a ``*=`` compound-assignment, or a ``**``
+        (kwargs-unpack/exponent/double-pointer) line, AND a bounded
+        backward scan from the hit finds an unclosed ``/*`` before any
+        ``*/``. Any read failure, or scanning past the bound without
+        finding an opener, returns ``False`` -- best-effort, never a
+        guess.
+    """
+    prefixes = _COMMENT_PREFIXES_BY_GRAMMAR.get(
+        _grammar_for_path(hit.path) or ""
+    )
+    if not prefixes or "/*" not in prefixes:
+        return False
+    stripped = hit.snippet.strip()
+    if not stripped.startswith("*"):
+        return False
+    if stripped == "*/" or stripped.startswith(("*=", "**")):
+        return False
+    try:
+        lines = (
+            (root / hit.path)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+        )
+    except OSError:
+        return False
+    start = max(0, hit.line - 1 - _BLOCK_COMMENT_SCAN_LINES)
+    for ln in reversed(lines[start : hit.line - 1]):
+        if "*/" in ln:
+            return False
+        if "/*" in ln:
+            return True
+    return False
+
+
 def classify_miss(
     snippet: str,
     bare_name: str,
@@ -1438,7 +1511,10 @@ def _classify_grep_hits(
                 h.path == p and abs(h.line - ln) <= _COMMENT_PROXIMITY_LINES
                 for p, ln in own_def_locs
             ),
-            looks_like_comment=_looks_like_comment_line(h.snippet, h.path),
+            looks_like_comment=(
+                _looks_like_comment_line(h.snippet, h.path)
+                or _looks_like_block_comment_continuation(root, h)
+            ),
             looks_like_import_member=_looks_like_multiline_import_member(
                 root, h, bare_name
             ),
@@ -2179,6 +2255,14 @@ def _run_unused_check(
             h.snippet, bare_name, path=h.path
         )
         if bucket == "noise":
+            noise_count += 1
+            continue
+        # Round 31 tensorflow.md Observation 5.2: classify_unused_
+        # reference's own comment check is _looks_like_comment_line
+        # alone, which -- like classify_miss's -- never recognizes a
+        # bare ``*`` block-comment continuation line. Same re-read
+        # pattern as the multiline-import-member check right below.
+        if _looks_like_block_comment_continuation(root, h):
             noise_count += 1
             continue
         if _looks_like_multiline_import_member(root, h, bare_name):

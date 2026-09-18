@@ -2144,6 +2144,131 @@ def test_in_leading_header_comment_unreadable_file_is_false(
     assert not sanity._in_leading_header_comment(tmp_path, hit)
 
 
+# --- block-comment continuation lines (round 31 tensorflow.md 5.2) ------
+
+
+def test_block_comment_continuation_true_for_jsdoc_line(
+    tmp_path: Path,
+) -> None:
+    # True positive: a Javadoc/JSDoc-style `` * {@link ...}`` line
+    # sitting inside an open ``/** ... */`` block.
+    (tmp_path / "widget.ts").write_text(
+        "/**\n"
+        " * See also {@link Helper} for details.\n"
+        " */\n"
+        "export function widget() {}\n"
+    )
+    hit = sanity.GrepHit(
+        path="widget.ts",
+        line=2,
+        snippet=" * See also {@link Helper} for details.",
+    )
+    assert sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_false_for_multiplication_trap(
+    tmp_path: Path,
+) -> None:
+    # The documented false-positive trap this design exists to avoid:
+    # a gofmt/rustfmt/clang-format-wrapped ``* Helper(x-1)``
+    # multiplication/dereference continuation line has the exact same
+    # ``* ...`` shape as a doc-comment line, but with NO open ``/*``
+    # above it -- real code, not a comment.
+    (tmp_path / "helper.go").write_text(
+        "func recurse(x int) int {\n\treturn x\n\t\t* Helper(x-1)\n}\n"
+    )
+    hit = sanity.GrepHit(path="helper.go", line=3, snippet="\t\t* Helper(x-1)")
+    assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_false_when_closed_before_hit(
+    tmp_path: Path,
+) -> None:
+    # A `*/` between the hit and the nearest `/*` means the block was
+    # already closed -- the hit line is ordinary code that happens to
+    # start with `*` (e.g. a pointer dereference), not a continuation.
+    (tmp_path / "helper.c").write_text(
+        "/* an unrelated, already-closed comment */\n"
+        "int x = 1;\n"
+        "*Helper = compute(x);\n"
+    )
+    hit = sanity.GrepHit(
+        path="helper.c", line=3, snippet="*Helper = compute(x);"
+    )
+    assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_excludes_bare_close_star_equals_star_star(
+    tmp_path: Path,
+) -> None:
+    # Even genuinely inside an open block comment, a bare `*/`-only
+    # close, a `*=` compound-assignment-shaped line, or a `**` line
+    # (kwargs-unpack/exponent/double-pointer shape) are excluded --
+    # none of them is a doc-comment continuation worth reporting as
+    # CAUSE_COMMENT_MENTION even when they coincidentally sit inside
+    # an unrelated open block.
+    (tmp_path / "widget.c").write_text("/* opens here\n*/\n*= 2;\n**pp;\n")
+    for line, snippet in ((2, "*/"), (3, "*= 2;"), (4, "**pp;")):
+        hit = sanity.GrepHit(path="widget.c", line=line, snippet=snippet)
+        assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_false_past_scan_cap(
+    tmp_path: Path,
+) -> None:
+    lines = ["/* opens here\n"] + ["filler\n"] * (
+        sanity._BLOCK_COMMENT_SCAN_LINES + 1
+    )
+    lines.append(" * continuation line\n")
+    (tmp_path / "big.c").write_text("".join(lines))
+    hit = sanity.GrepHit(
+        path="big.c",
+        line=len(lines),
+        snippet=" * continuation line",
+    )
+    assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_false_for_non_slash_style_grammar(
+    tmp_path: Path,
+) -> None:
+    # A grammar with no `/* */` block-comment family at all (Python's
+    # is hash/docstring-only) can never have this shape.
+    (tmp_path / "helper.py").write_text("/* fake\n * continuation\n")
+    hit = sanity.GrepHit(path="helper.py", line=2, snippet=" * continuation")
+    assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_unreadable_file_is_false(
+    tmp_path: Path,
+) -> None:
+    hit = sanity.GrepHit(path="missing.c", line=2, snippet=" * x")
+    assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_sanity_unused_block_comment_continuation_is_noise(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # End-to-end reproduction of tensorflow.md Observation 5.2: a
+    # JSDoc-style continuation line mentioning the target inside an
+    # open block comment must be filtered as noise, not reported as
+    # unexplained reference evidence.
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    (root / "widget.ts").write_text(
+        "/**\n"
+        " * Calls into TARGET_NAME under the hood.\n"
+        " */\n"
+        "export function widget() {}\n"
+    )
+    code = cli.main(
+        ["sanity", "--unused", "TARGET_NAME", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["reference_hits"] == []
+    assert doc["counts"]["filtered_noise"] == 1
+
+
 # --- other same-named symbols' own def lines (round 22 §10) -------------
 
 
