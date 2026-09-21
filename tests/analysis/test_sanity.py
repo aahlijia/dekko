@@ -4651,35 +4651,35 @@ def test_track2a_tier1_stands_down_in_a_file_that_shadows_the_name(
     assert sanity.CAUSE_VALUE_REFERENCE not in rows.values()
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "const count = 1;\n",
-        "const { a, count } = cfg;\n",
-        "function f(a: string, count: number) {}\n",
-        "xs.map(count => count + 1);\n",
-        "xs.map((count) => count + 1);\n",
-        "} catch (count) {\n",
-        "    count = 3\n",
-        "    count := 3\n",
-        "for count in items:\n",
-        "for _, count := range items {\n",
-    ],
-)
-def test_track2a_file_shadows_name_shapes(tmp_path: Path, text: str) -> None:
-    (tmp_path / "f.ts").write_text(text)
-    assert sanity._file_shadows_name(tmp_path, "f.ts", "count")
-
-
-def test_track2a_file_shadows_name_negatives(tmp_path: Path) -> None:
-    (tmp_path / "f.ts").write_text(
-        'import { count } from "./array";\n'
-        "if (count === other) register(count);\n"
-        "const recount = discount(1);\n"
+def test_track5b_tier1_labels_a_true_ref_beside_a_shadowing_local(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The flip side of the test above. 0.43.68's textual guard
+    # (`_file_shadows_name`) switched tier 1 off for the *whole file*
+    # once any local of the name appeared in it. With scope-aware
+    # extraction the map tells the two lines apart by itself: line 3
+    # is a real reference and gets its label, line 7 is a local and
+    # never becomes an edge.
+    root = make_mapped_repo(
+        {
+            "errors.ts": (
+                "export function describeErr(e: unknown): string {\n"
+                "  return String(e);\n"
+                "}\n"
+            ),
+            "ide.ts": (
+                'import { describeErr } from "./errors";\n'
+                "export function wire(): unknown[] {\n"
+                "  return [describeErr];\n"
+                "}\n"
+                "export function install(error: unknown): string {\n"
+                "  const describeErr = String(error);\n"
+                "  return [describeErr].join();\n"
+                "}\n"
+            ),
+        }
     )
-    assert not sanity._file_shadows_name(tmp_path, "f.ts", "count")
-    # Java's only reference shape, `Type::name`, is never a local.
-    (tmp_path / "F.java").write_text("int count = 1;\n")
-    assert not sanity._file_shadows_name(tmp_path, "F.java", "count")
-    # Unreadable file: no evidence, no label.
-    assert sanity._file_shadows_name(tmp_path, "missing.ts", "count")
+    rows = _grep_only_causes(root, "errors.ts:describeErr", capsys)
+    assert rows.get(3) == sanity.CAUSE_VALUE_REFERENCE
+    assert rows.get(7) != sanity.CAUSE_VALUE_REFERENCE

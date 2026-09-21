@@ -59,6 +59,32 @@ class LanguageSpec:
             tree (no argument list) and so are invisible to
             ``call_query`` too. ``None`` for languages still lacking
             one (Rust, C, C++ as of this writing).
+        binding_query: Query locating the places a *local* name is
+            bound, so ``extractor._collect_refs`` can tell a bare
+            identifier that names a repo symbol from one that names a
+            parameter or a local of the same spelling (round 32 Track
+            5b). The capture name says where the binding lives:
+            ``@params`` (a parameter list, binds in its parent),
+            ``@param`` (one parameter pattern, same), ``@local``
+            (nearest block or function scope), ``@funclocal`` (nearest
+            function scope: JS ``var``), ``@scoped`` with a sibling
+            ``@scope`` (binds in exactly that node: a catch clause, a
+            ``for..of`` head, a comprehension), ``@defname`` (a nested
+            definition's name: recorded only so it *stops* the lookup,
+            since the map indexes it as a symbol), and Python's
+            ``@global``/``@nonlocal``/``@import``. Destructuring nests
+            to any depth and a query can't recurse, so the query finds
+            the pattern's root and ``extractor._pattern_identifiers``
+            walks it. ``None`` for languages whose reference shapes
+            can't be shadowed by a value local (Go's type identifiers,
+            Java's ``Type::method``).
+        binding_function_scopes: Node types that open a function-level
+            scope for ``binding_query``. For Python this includes
+            ``class_definition``: a class body binds its own
+            statements' names (and is skipped again on lookup from
+            inside a method, see ``extractor._CLASS_SCOPES``).
+        binding_block_scopes: Node types that open a block-level scope
+            (``let``/``const``). Empty for Python, which has none.
         heritage_query: Query capturing a type definition's own
             ``extends``/``implements`` clause(s) — one ``@classdef``
             match per type, with the clause(s) attached as sibling
@@ -158,6 +184,9 @@ class LanguageSpec:
     catch_query: str | None = None
     env_read_query: str | None = None
     type_alias_query: str | None = None
+    binding_query: str | None = None
+    binding_function_scopes: tuple[str, ...] = ()
+    binding_block_scopes: tuple[str, ...] = ()
 
 
 # Bare identifiers used as *values* rather than invoked -- keyword-
@@ -180,6 +209,37 @@ _PY_REFERENCE_QUERY = """
 (assignment right: (identifier) @ref)
 (default_parameter value: (identifier) @ref)
 (return_statement (identifier) @ref)
+"""
+
+# Where Python binds a local name (round 32 Track 5b, see
+# ``LanguageSpec.binding_query``). Assignment targets that aren't
+# names (``self.x = ..``, ``table[k] = ..``) fall out by themselves:
+# ``extractor._pattern_identifiers`` only descends into pattern nodes.
+# ``global`` makes a name *not* local (recorded as a lookup stop);
+# ``nonlocal`` leaves it to the enclosing function's own binding. A
+# function-level ``import`` binds an import, not a local, the same
+# exemption JS's lazy ``await import()`` gets. Node shapes verified
+# against the pinned tree-sitter-python grammar (``with .. as (a, b)``
+# is an ``as_pattern_target`` holding a plain ``tuple``, not a
+# ``tuple_pattern``).
+_PY_BINDING_QUERY = """
+(function_definition parameters: (parameters) @params)
+(lambda parameters: (lambda_parameters) @params)
+(assignment left: (_) @local)
+(augmented_assignment left: (_) @local)
+(named_expression name: (identifier) @local)
+(for_statement left: (_) @local)
+(as_pattern alias: (as_pattern_target) @local)
+(list_comprehension (for_in_clause left: (_) @scoped)) @scope
+(set_comprehension (for_in_clause left: (_) @scoped)) @scope
+(dictionary_comprehension (for_in_clause left: (_) @scoped)) @scope
+(generator_expression (for_in_clause left: (_) @scoped)) @scope
+(function_definition name: (identifier) @defname)
+(class_definition name: (identifier) @defname)
+(global_statement (identifier) @global)
+(nonlocal_statement (identifier) @nonlocal)
+(import_statement) @import
+(import_from_statement) @import
 """
 
 PYTHON = LanguageSpec(
@@ -221,6 +281,12 @@ PYTHON = LanguageSpec(
     method_containers=("class_definition",),
     param_style="python",
     reference_query=_PY_REFERENCE_QUERY,
+    binding_query=_PY_BINDING_QUERY,
+    binding_function_scopes=(
+        "function_definition",
+        "lambda",
+        "class_definition",
+    ),
     heritage_query="""
 (class_definition
   name: (identifier) @classname
@@ -623,6 +689,40 @@ _JSX_REFERENCE_EXTRA = """
 
 _JS_REFERENCE_QUERY = _JS_REFERENCE_BASE + _JSX_REFERENCE_EXTRA
 
+# Where JS/TS/TSX bind a local name (round 32 Track 5b, see
+# ``LanguageSpec.binding_query``). ``const``/``let`` bind in the
+# nearest block, ``var`` in the nearest function. ``for (x of xs)``
+# with no ``const``/``let``/``var`` assigns to an existing name and
+# binds nothing, hence ``kind: _``. TS wraps each parameter in a
+# ``required_parameter``/``optional_parameter`` and names a class with
+# a ``type_identifier``; both are absorbed by ``(_)`` and
+# ``extractor._pattern_identifiers`` rather than a second query. The
+# two TS-only declaration nodes can't be: naming them against
+# tree-sitter-javascript raises "Invalid node type", the same split
+# ``_TS_TYPE_REFERENCE_EXTRA`` exists for.
+_JS_BINDING_QUERY = """
+(formal_parameters) @params
+(arrow_function parameter: (identifier) @param)
+(lexical_declaration (variable_declarator name: (_) @local))
+(variable_declaration (variable_declarator name: (_) @funclocal))
+(catch_clause parameter: (_) @scoped) @scope
+(for_in_statement kind: _ left: (_) @scoped) @scope
+(function_declaration name: (identifier) @defname)
+(generator_function_declaration name: (identifier) @defname)
+(class_declaration name: (_) @defname)
+"""
+_TS_BINDING_EXTRA = """
+(abstract_class_declaration name: (_) @defname)
+(enum_declaration name: (_) @defname)
+"""
+_JS_BLOCK_SCOPES = (
+    "statement_block",
+    "for_statement",
+    "for_in_statement",
+    "catch_clause",
+    "switch_body",
+)
+
 # JS/TS/TSX throw/catch: ``throw_statement``'s expression is an
 # unfielded first named child (see ``extractor._raise_expr``, shared
 # with Python/C++'s identically-shaped ``raise_statement``/
@@ -777,6 +877,9 @@ JAVASCRIPT = LanguageSpec(
     param_style="js",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY,
+    binding_query=_JS_BINDING_QUERY,
+    binding_function_scopes=_JS_FUNCTION_BOUNDARIES,
+    binding_block_scopes=_JS_BLOCK_SCOPES,
     heritage_query="""
 (class_declaration
   name: (identifier) @classname
@@ -943,6 +1046,9 @@ TYPESCRIPT = LanguageSpec(
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     # Plain (non-JSX) TypeScript has no jsx_expression node type.
     reference_query=_JS_REFERENCE_BASE + _TS_TYPE_REFERENCE_EXTRA,
+    binding_query=_JS_BINDING_QUERY + _TS_BINDING_EXTRA,
+    binding_function_scopes=_JS_FUNCTION_BOUNDARIES,
+    binding_block_scopes=_JS_BLOCK_SCOPES,
     heritage_query=_TS_HERITAGE,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
@@ -962,6 +1068,9 @@ TSX = LanguageSpec(
     param_style="ts",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY + _TS_TYPE_REFERENCE_EXTRA,
+    binding_query=_JS_BINDING_QUERY + _TS_BINDING_EXTRA,
+    binding_function_scopes=_JS_FUNCTION_BOUNDARIES,
+    binding_block_scopes=_JS_BLOCK_SCOPES,
     heritage_query=_TS_HERITAGE,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,

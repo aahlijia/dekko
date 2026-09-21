@@ -1,5 +1,6 @@
 """Per-language extraction and resolution tests for Tier-1 specs."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -254,3 +255,34 @@ def test_rust_kind_mapping() -> None:
     assert syms["lib.rs::Point"].kind == "struct"
     assert syms["kinds.rs::Shape"].kind == "enum"
     assert syms["kinds.rs::Named"].kind == "trait"
+
+
+def test_spec_fingerprint_covers_the_binding_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round 32 Track 5b: `RawRef.bound` comes from `binding_query`, so
+    # a cache built before a change to it holds refs with stale tags.
+    # The fingerprint loops `dataclasses.fields`, so the new fields are
+    # meant to be covered with no hand-kept list. Confirm it, since a
+    # silent miss here means wrong edges from a warm cache.
+    baseline = languages.spec_fingerprint()
+    edited = dataclasses.replace(
+        languages.PYTHON,
+        binding_query=(languages.PYTHON.binding_query or "") + "\n",
+    )
+    specs = tuple(
+        edited if spec is languages.PYTHON else spec
+        for spec in languages.TIER1_SPECS
+    )
+    monkeypatch.setattr(languages, "TIER1_SPECS", specs)
+    assert languages.spec_fingerprint() != baseline
+
+
+def test_binding_queries_cover_exactly_the_shadowable_languages() -> None:
+    # Go's references are type identifiers and Java's are
+    # `Type::method`: a value local can't shadow either, so they carry
+    # no binding query, the same line `_REF_VISIBILITY_LANGUAGES` draws.
+    with_query = {
+        spec.name for spec in languages.TIER1_SPECS if spec.binding_query
+    }
+    assert with_query == {"python", "javascript", "typescript", "tsx"}

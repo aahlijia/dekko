@@ -1435,6 +1435,7 @@ def _resolve_refs_chunk(
     edges: dict[tuple[str, str], set[int]] = {}
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
+        file_exports = any(sym.exported for sym in fm.symbols)
         for ref in fm.refs:
             _resolve_ref(
                 ref,
@@ -1444,6 +1445,7 @@ def _resolve_refs_chunk(
                 symbols_by_id=symbols_by_id,
                 edges=edges,
                 repo_stems=repo_stems,
+                file_exports=file_exports,
             )
     return edges
 
@@ -1575,6 +1577,7 @@ def _resolve_ref(
     symbols_by_id: dict[str, Symbol],
     edges: dict[tuple[str, str], set[int]],
     repo_stems: set[str],
+    file_exports: bool = False,
 ) -> None:
     """Resolve one reference; ambiguous/unmatched refs are dropped.
 
@@ -1586,6 +1589,15 @@ def _resolve_ref(
     """
     caller_id = ref.caller_id or f"{ref.path}{MODULE_CALLER_SUFFIX}"
     candidates = index.get(ref.name, [])
+    if ref.bound is not None:
+        # The identifier names a parameter or a local (round 32 Track
+        # 5b). Not the candidate pre-filter ``_pick_candidate`` warns
+        # about: nothing is being narrowed, the reference itself is
+        # impossible, so dropping it can only ever remove an edge.
+        fixture = _fixture_param_target(ref, candidates)
+        if fixture is not None and fixture.id != caller_id:
+            edges.setdefault((caller_id, fixture.id), set()).add(ref.line)
+        return
     if not candidates:
         alias = _alias_candidates(ref, file_imports, index)
         if len(alias) == 1 and alias[0].id != caller_id:
@@ -1604,9 +1616,55 @@ def _resolve_ref(
     if (
         target is not None
         and target.id != caller_id
-        and _ref_target_visible(ref, target, file_imports, repo_stems)
+        and _ref_target_visible(
+            ref, target, file_imports, repo_stems, file_exports
+        )
     ):
         edges.setdefault((caller_id, target.id), set()).add(ref.line)
+
+
+_CONFTEST = "conftest.py"
+
+
+def _fixture_param_target(
+    ref: RawRef, candidates: list[Symbol]
+) -> Symbol | None:
+    """The pytest fixture a bound parameter stands for, if any.
+
+    The one bound reference that still earns an edge. ``def
+    test_x(short_root): run(short_root)`` shadows the ``short_root``
+    fixture function lexically, and *is* that fixture semantically:
+    pytest injects by parameter name. 102 of the 119 shadowed
+    reference sites in dekko's own repo are this shape, and without
+    the edge a fixture that is passed along but never called in the
+    test is invisible to ``affected`` and ``query uses``.
+
+    Same file first, then the ``conftest.py`` in the nearest ancestor
+    directory, which is the only cross-file name Python sees without
+    an import (so this path deliberately skips
+    ``_ref_target_visible``, whose Python rule cut 47 such edges in
+    0.43.69). ``decorated`` means *any* decorator, not
+    ``@pytest.fixture`` specifically; inside a test file, against a
+    parameter of the same name, that is close enough. Two candidates
+    at the same distance: no edge.
+    """
+    if ref.bound != "param" or not is_test_path(ref.path):
+        return None
+    fixtures = [
+        c
+        for c in candidates
+        if c.language == "python" and c.kind == "function" and c.decorated
+    ]
+    same_file = [c for c in fixtures if c.path == ref.path]
+    if same_file:
+        return same_file[0] if len(same_file) == 1 else None
+    here = PurePosixPath(ref.path).parent
+    for directory in (here, *here.parents):
+        found = [c for c in fixtures if c.path == str(directory / _CONFTEST)]
+        if found:
+            return found[0] if len(found) == 1 else None
+
+    return None
 
 
 # Languages whose references are bare *value* identifiers, the only
@@ -1624,6 +1682,7 @@ def _ref_target_visible(
     target: Symbol,
     file_imports: dict[str, Import],
     repo_stems: set[str],
+    file_exports: bool = False,
 ) -> bool:
     """Whether the file holding ``ref`` could name ``target`` at all.
 
@@ -1649,17 +1708,22 @@ def _ref_target_visible(
     Errs toward keeping the edge wherever the import table can't be
     trusted to be complete:
 
-    - A JS-family file with no recorded import at all. CommonJS
-      ``require`` bindings aren't recorded as imports, and a
-      script-style file shares globals across files, so an empty table
-      proves nothing there.
+    - A JS-family file with no recorded import **and no exported
+      symbol** (``file_exports``). That is a script: it shares one
+      global scope with every other script, which is also exactly how
+      TypeScript treats a file with neither ``import`` nor ``export``.
+      A file that exports something is a module and shares nothing, so
+      a free ``process`` or ``performance`` in it is the runtime
+      global, not ``cronScheduler.ts::process`` (Track 5b: 33 such
+      sites on claude-code, 49 on cline).
     - A target declared in a ``.d.ts``: ambient types are global.
 
-    Not covered, by design: a local that shadows a *same-file* or an
-    *imported* symbol (claude-code ``utils/ide.ts`` imports
-    ``errorMessage`` and rebinds it in a catch block). That needs the
-    extractor to know scopes; ``sanity._file_shadows_name`` is the
-    read-side stopgap.
+    Not this function's job: a local that shadows a *same-file* or
+    an *imported* symbol (claude-code ``utils/ide.ts`` imports
+    ``errorMessage`` and rebinds it in a catch block), or any local in
+    a zero-import file. Those never get here since Track 5b: the
+    extractor tags them (``RawRef.bound``) and ``_resolve_ref`` drops
+    them before the ladder runs.
     """
     if target.path == ref.path or target.language not in (
         _REF_VISIBILITY_LANGUAGES
@@ -1675,7 +1739,8 @@ def _ref_target_visible(
         # matter (cline: ``fs``, ``os``, vitest's ``expect``).
         return _import_is_in_repo(imp, repo_stems)
     if target.language in _JS_FAMILY:
-        return not file_imports or target.path.endswith(".d.ts")
+        is_script = not file_imports and not file_exports
+        return is_script or target.path.endswith(".d.ts")
 
     return False
 

@@ -9,6 +9,108 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.70] — 2026-09-21
+
+Round 32 Track 5b, the half of Track 5 the visibility veto can't see.
+Design, measurements and the probe that produced them:
+`.features/fixes/round31/05b-scope-aware-references.md`.
+
+0.43.69 stopped reference edges between files that can't see each
+other. What it could not stop: a local that shadows a symbol in its
+*own* file, a local that shadows a name the file really *does* import
+(claude-code `utils/ide.ts` imports `errorMessage`, then binds `const
+errorMessage` in a catch block), and any local at all in a file with
+zero imports, which the veto has to exempt. Measured on 0.43.69:
+**6.2% of claude-code's reference sites and 4.1% of cline's were still
+locals**, two thirds of them in zero-import files.
+`src/utils/bash/bashParser.ts` imports nothing, so its loop character
+`c` pointed at `src/buddy/types.ts::c` 387 times.
+
+### Fixed
+- **References know what they are bound to.** The extractor now walks
+  scopes for Python and JS/TS/TSX and tags each bare-identifier
+  reference (`RawRef.bound`: a parameter, a local, or nothing).
+  Parameters of every shape, `const`/`let` (block), `var` (function),
+  destructuring to any depth, catch bindings, `for..of` heads, Python
+  assignment targets, `with`/`except .. as`, walrus, comprehension
+  variables, `global`/`nonlocal`. A reference bound to a plain local
+  never reaches the resolver's ladder. Three kinds of binding are
+  deliberately *not* locals: a module-level name, a nested definition
+  the map indexes as a symbol (`const helper = () => ..` inside a
+  function), and a function-local lazy import (`const { X } = await
+  import("./x")`, about 40 true edges on claude-code that a naive
+  scope walk would have cut). Everything fails open: a binding shape
+  the table doesn't know leaves the reference untagged, which is the
+  old behavior, so this can leave a false edge standing and never
+  remove a true one. Reference edges: claude-buddy 695 -> 684,
+  claude-code 10,437 -> 10,121, cline 9,517 -> 9,191, **zero edges
+  added, zero call edges changed**. Every lost edge in the two risky
+  classes (imported-then-shadowed: 30 + 12; same-file function
+  targets) was read against source. All false.
+- **A pytest fixture parameter is the fixture.** `def
+  test_x(short_root): run(short_root)` shadows the `short_root`
+  fixture lexically and *is* that fixture semantically, because pytest
+  injects by parameter name. 102 of the 119 lexically shadowed
+  reference sites in dekko's own repo are this shape, so the tag is a
+  tag and not a filter: the resolver keeps the edge for a bound
+  *parameter* in a test file whose name matches a decorated function
+  in the same file, or in the `conftest.py` of the nearest ancestor
+  directory.
+- **Regression from 0.43.69: conftest fixtures lost every reference
+  edge.** The visibility veto requires an import for a cross-file
+  Python edge, and a conftest fixture is the one cross-file name
+  Python sees without one. dekko's own repo lost all 47 reference
+  edges from tests into `tests/conftest.py`. Call edges survived, so
+  `affected` mostly still worked, but a fixture passed along and never
+  called in the test was invisible. The fixture rule above restores
+  all 47.
+- **A file that exports is a module, not a script.** The veto's
+  zero-import exemption exists for script-style files that share one
+  global scope. A file with no imports *but an exported symbol* is an
+  ES module and shares nothing (this is also exactly how TypeScript
+  reads such a file), so a free `process` or `performance` in it is
+  the runtime global. 21 edges on claude-code and 20 on cline, every
+  one `process`, `performance` or `String` pointing at some file's
+  same-named function. Files with neither import nor export keep the
+  exemption.
+
+### Changed
+- `dekko unused` flags 23 more symbols on claude-code and 8 on cline.
+  None of them has a single unbound use of its name anywhere in its
+  own file (checked by parsing each one). They are object-literal
+  methods on tool definitions (`description()`, `prompt()`, `get
+  state()`) that were being spared by a same-named local elsewhere in
+  the file. 67 of claude-code's 80 such tool methods were already
+  flagged; now 77 are, which is at least consistent. That these are
+  called through a property and never seen as used is a separate,
+  older limit of `unused` on object-literal methods.
+- `sanity`'s textual "does this file bind a local of this name" guard
+  (`_file_shadows_name`, 0.43.68) is gone. It had to switch the
+  "dekko has this as a reference" label off for a whole file, because
+  no regex can tell which scope a line sits in. The map can now, so a
+  true reference next to a shadowing local gets its label back.
+  `_can_see` stays, for maps built by an older dekko.
+- Extraction cost: not measurable. `map --full --jobs 0` on
+  claude-code 4.3s -> 4.2s, cline 5.8s -> 5.7s, tensorflow (the Python
+  walk at scale) 175.5s / 172.4s -> 172.3s / 174.4s, alternating runs
+  on an otherwise idle machine, all inside noise. Bindings are found by one more compiled query per file, and
+  a reference only pays for a scope lookup when its name is bound
+  somewhere in the file.
+
+### Not fixed
+- Post-fix probe: 0 false sites on claude-buddy, 1 on claude-code, 17
+  on cline (0.1%), all explained. 8 are `process` in true scripts
+  (no import, no export: the exemption working as designed). 8 are a
+  bare identifier resolving to a same-named **class member**
+  (`invoke` from a lazily imported external package landing on
+  `DesktopClient.invoke`), which a bare identifier can never name. A
+  three-line veto would take them; the design set a bar of 10 edges
+  for adding it and this is 8, so it is recorded here instead. 2 are
+  module-level destructures that aren't symbols.
+- `def f(text=text)`: the default value is read in the enclosing
+  scope but is tagged as the parameter. Same for JS default values.
+- `table[key]` index reads, still out by the round-23 decision.
+
 ## [0.43.69] — 2026-09-21
 
 Round 32 Track 5, found while building Track 2, not by the sweep.

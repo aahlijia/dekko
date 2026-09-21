@@ -186,6 +186,15 @@ class RawRef:
             list. Present only for shape parity with ``RawCall`` so
             the resolver's shared ``_pick_candidate`` ladder (see
             ``RawCall.arg_count``) works unmodified across both types.
+        bound: What the identifier is lexically bound to, when that is
+            a plain local the map does not index: ``"param"`` or
+            ``"local"``. ``None`` for a free, module-level or
+            import-bound name, and for every language without a
+            ``LanguageSpec.binding_query``. A tag rather than a filter
+            in the extractor on purpose: whether a bound reference
+            still earns an edge (a pytest fixture parameter does) is a
+            question about the *target*, which only the resolver has
+            (round 32 Track 5b).
     """
 
     caller_id: str | None
@@ -194,6 +203,7 @@ class RawRef:
     receiver: str | None = None
     line: int = 0
     arg_count: int | None = None
+    bound: str | None = None
 
 
 @dataclass

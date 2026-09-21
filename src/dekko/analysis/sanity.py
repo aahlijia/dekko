@@ -1681,48 +1681,6 @@ def _can_see(index: MapIndex, path: str, sym: Symbol) -> bool:
     )
 
 
-# ``_can_see``'s blind side: a file that imports ``errorMessage`` *and*
-# binds its own ``const errorMessage`` in a catch block (claude-code
-# ``utils/ide.ts``). The import makes the edge possible, the local
-# makes this particular line not it, and no regex can tell which
-# scope a line sits in. So any local binding of the name anywhere in
-# the file switches tier 1 off for that whole file. Shapes: a keyword
-# declaration, a destructuring one, a typed parameter, an arrow
-# parameter, a catch binding, a Python/Go bare assignment, a loop
-# variable.
-_LOCAL_SHADOW_TEMPLATES = (
-    r"\b(?:const|let|var|val)\s+{name}\b",
-    r"\b(?:const|let|var)\s*[\{{\[][^=;]*\b{name}\b[^=;]*[\}}\]]\s*=",
-    r"[(,]\s*{name}\??\s*:\s*\S",
-    r"\b{name}\s*=>|\(\s*{name}\s*\)\s*=>",
-    r"\bcatch\s*\(\s*{name}\b",
-    r"^\s*{name}\s*:?=(?!=)",
-    r"\bfor\s+(?:\w+\s*,\s*)?{name}\b",
-)
-
-
-def _file_shadows_name(root: Path, path: str, bare_name: str) -> bool:
-    """Whether ``path`` binds a local named ``bare_name`` anywhere --
-    the second, textual half of tier 1's "could this edge be real"
-    test (``_can_see`` is the index half).
-
-    Java is exempt: its only reference shape is ``Type::name``, which
-    is never a local. A read failure returns ``True``: no evidence, no
-    label, the same safe direction as every refusal in this tier.
-    """
-    if _grammar_for_path(path) == "java":
-        return False
-    try:
-        text = (root / path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return True
-    name = re.escape(bare_name)
-    return any(
-        re.search(template.format(name=name), text, re.MULTILINE)
-        for template in _LOCAL_SHADOW_TEMPLATES
-    )
-
-
 def _classify_grep_hits(
     hits: list[GrepHit],
     bare_name: str,
@@ -1811,8 +1769,6 @@ def _classify_grep_hits(
     """
     target_is_type = bool(target_kinds) and target_kinds <= TYPE_KINDS
     allow_value_shape = bool(target_kinds) and not (target_kinds & TYPE_KINDS)
-    # path -> ``_file_shadows_name``, one file read per path at most.
-    shadowed: dict[str, bool] = {}
     causes: dict[tuple[str, int], str] = {}
     for h in hits:
         loc = (h.path, h.line)
@@ -1821,12 +1777,13 @@ def _classify_grep_hits(
         looks_like_value = allow_value_shape and _looks_like_value_reference(
             h.snippet, bare_name, h.path
         )
+        # No textual "does this file shadow the name" guard any more
+        # (``_file_shadows_name``, 0.43.68 to 0.43.69). It switched
+        # tier 1 off for a whole file because no regex can tell which
+        # scope a line sits in. Since round 32 Track 5b the extractor
+        # can: a shadowing local never becomes an edge, so an edge that
+        # is in the map (and passed ``_can_see``) is one to trust.
         is_recorded_reference = loc in ref_sites
-        if is_recorded_reference:
-            if h.path not in shadowed:
-                shadowed[h.path] = _file_shadows_name(root, h.path, bare_name)
-            is_recorded_reference = not shadowed[h.path]
-
         causes[loc] = classify_miss(
             h.snippet,
             bare_name,

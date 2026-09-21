@@ -6270,3 +6270,195 @@ def test_ref_veto_runs_inside_the_pooled_path_too(
         (e.caller, e.callee, e.lines) for e in sequential[0]
     ]
     assert sequential[1] == {target.id: [user.id]}
+
+
+# --- round 32 Track 5b: bound references, fixtures, scripts vs modules -
+#
+# The veto above proves what it can from the import table. It can't see
+# a local shadowing a same-file or imported symbol, or any local in a
+# zero-import file. The extractor now tags those (`RawRef.bound`) and
+# `_resolve_ref` drops them before the ladder: 6.2% of claude-code's
+# surviving reference sites and 4.1% of cline's.
+
+
+def _bound_ref_graph(bound: str | None, same_file: bool) -> CallGraph:
+    target_path = "screen.ts" if same_file else "utils/array.ts"
+    target = _fn(target_path, "count", language="typescript")
+    user = _fn("screen.ts", "render", line=20, language="typescript")
+    ref = RawRef(
+        caller_id=user.id, path="screen.ts", name="count", line=21, bound=bound
+    )
+    imp = Import("screen.ts", "count", "./utils/array/count")
+    screen = FileMap(
+        "screen.ts",
+        "typescript",
+        symbols=[target, user] if same_file else [user],
+        imports=[] if same_file else [imp],
+        refs=[ref],
+    )
+    files = [screen]
+    if not same_file:
+        files.append(FileMap(target_path, "typescript", symbols=[target]))
+    return resolve(files)
+
+
+@pytest.mark.parametrize("bound", ["param", "local"])
+@pytest.mark.parametrize("same_file", [True, False])
+def test_bound_ref_makes_no_edge(bound: str, same_file: bool) -> None:
+    # same_file: a local shadowing a symbol in its own file.
+    # not same_file: imported, then shadowed (claude-code `ide.ts`).
+    # Both pass `_ref_target_visible`; only the tag can stop them.
+    assert _bound_ref_graph(bound, same_file).referenced == []
+
+
+@pytest.mark.parametrize("same_file", [True, False])
+def test_unbound_ref_keeps_its_edge(same_file: bool) -> None:
+    graph = _bound_ref_graph(None, same_file)
+    assert len(graph.referenced) == 1
+
+
+def _fixture_files(
+    fixture_paths: list[str],
+    test_path: str = "tests/daemon/test_daemon.py",
+    bound: str | None = "param",
+    decorated: bool = True,
+) -> tuple[list[FileMap], Symbol]:
+    user = _fn(test_path, "test_affected", line=10)
+    ref = RawRef(
+        caller_id=user.id,
+        path=test_path,
+        name="short_root",
+        line=11,
+        bound=bound,
+    )
+    by_path: dict[str, FileMap] = {
+        test_path: FileMap(test_path, "python", symbols=[user], refs=[ref])
+    }
+    for path in fixture_paths:
+        fixture = _fn(path, "short_root")
+        fixture.decorated = decorated
+        fm = by_path.setdefault(path, FileMap(path, "python"))
+        fm.symbols.append(fixture)
+    return list(by_path.values()), user
+
+
+def _ref_targets(files: list[FileMap]) -> list[str]:
+    return [e.callee for e in resolve(files).referenced]
+
+
+def test_fixture_param_in_the_same_file_keeps_its_edge() -> None:
+    # `def test_x(short_root): run(short_root)` shadows the fixture
+    # lexically and *is* the fixture: pytest injects by name. 102 of
+    # the 119 shadowed sites in dekko's own repo are this shape.
+    files, _ = _fixture_files(["tests/daemon/test_daemon.py"])
+    assert _ref_targets(files) == ["tests/daemon/test_daemon.py::short_root"]
+
+
+def test_fixture_param_resolves_to_an_ancestor_conftest() -> None:
+    # The one cross-file name Python sees with no import. 0.43.69's
+    # visibility veto cut all 47 of these edges in dekko's own repo.
+    files, _ = _fixture_files(["tests/conftest.py"])
+    assert _ref_targets(files) == ["tests/conftest.py::short_root"]
+
+
+def test_fixture_param_picks_the_nearest_conftest() -> None:
+    files, _ = _fixture_files(
+        ["conftest.py", "tests/conftest.py", "tests/daemon/conftest.py"]
+    )
+    assert _ref_targets(files) == ["tests/daemon/conftest.py::short_root"]
+
+
+def test_fixture_param_ignores_a_conftest_off_the_ancestor_path() -> None:
+    files, _ = _fixture_files(["tests/render/conftest.py"])
+    assert _ref_targets(files) == []
+
+
+def test_fixture_rule_needs_a_decorator() -> None:
+    files, _ = _fixture_files(["tests/conftest.py"], decorated=False)
+    assert _ref_targets(files) == []
+
+
+def test_fixture_rule_is_for_parameters_only() -> None:
+    # A plain local named like a fixture is just a local.
+    files, _ = _fixture_files(["tests/conftest.py"], bound="local")
+    assert _ref_targets(files) == []
+
+
+def test_fixture_rule_is_for_test_files_only() -> None:
+    # Production code with a parameter named like a decorated function
+    # elsewhere: no pytest, no injection, no edge.
+    files, _ = _fixture_files(
+        ["src/app/conftest.py"], test_path="src/app/service.py"
+    )
+    assert _ref_targets(files) == []
+
+
+def _script_or_module(exported: bool) -> CallGraph:
+    target = _fn("utils/cron.ts", "process", language="typescript")
+    user = _fn("cli/exit.ts", "exit", language="typescript")
+    user.exported = exported
+    files = [
+        FileMap("utils/cron.ts", "typescript", symbols=[target]),
+        FileMap(
+            "cli/exit.ts",
+            "typescript",
+            symbols=[user],
+            refs=[
+                RawRef(
+                    caller_id=user.id,
+                    path="cli/exit.ts",
+                    name="process",
+                    line=22,
+                )
+            ],
+        ),
+    ]
+    return resolve(files)
+
+
+def test_zero_import_file_that_exports_is_a_module() -> None:
+    # No imports but it exports: an ES module, which shares no globals.
+    # A free `process` in it is the runtime's, not
+    # `cronScheduler.ts::process` (33 such sites on claude-code).
+    assert _script_or_module(exported=True).referenced == []
+
+
+def test_zero_import_file_with_no_exports_is_still_a_script() -> None:
+    # Neither import nor export: a script, one shared global scope,
+    # which is also how TypeScript itself reads such a file.
+    assert len(_script_or_module(exported=False).referenced) == 1
+
+
+def test_pooled_ref_resolution_agrees_on_bound_and_export_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _force_resolve_pool(monkeypatch)
+    files, _ = _fixture_files(["tests/conftest.py"])
+    target = _fn("utils/cron.ts", "process", language="typescript")
+    files.append(FileMap("utils/cron.ts", "typescript", symbols=[target]))
+    for n in range(12):
+        user = _fn(f"cli/m{n}.ts", "run", language="typescript")
+        user.exported = n % 2 == 0
+        files.append(
+            FileMap(
+                f"cli/m{n}.ts",
+                "typescript",
+                symbols=[user],
+                refs=[
+                    RawRef(
+                        caller_id=user.id,
+                        path=f"cli/m{n}.ts",
+                        name="process",
+                        line=3,
+                        bound="local" if n % 3 == 0 else None,
+                    )
+                ],
+            )
+        )
+    sequential = resolve_refs(files, workers=1)
+    pooled = resolve_refs(files, workers=2)
+    assert [(e.caller, e.callee) for e in pooled[0]] == [
+        (e.caller, e.callee) for e in sequential[0]
+    ]
+    # Odd n (no export, a script) and not bound: 1, 5, 7, 11.
+    assert len(sequential[0]) == 1 + 4
