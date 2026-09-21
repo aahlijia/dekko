@@ -79,6 +79,7 @@ def _filemap_from_dict(d: dict) -> FileMap:
         env_reads=[EnvRead(**e) for e in d.get("env_reads", [])],
         imports=[Import(**i) for i in d.get("imports", [])],
         type_aliases=list(d.get("type_aliases", [])),
+        enum_variants=list(d.get("enum_variants", [])),
         error=d.get("error"),
         doc=d.get("doc"),
     )

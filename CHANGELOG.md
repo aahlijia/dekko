@@ -9,6 +9,58 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.71] — 2026-09-21
+
+Round 32 Track 4, the last open item of the round. Design and
+measurements: `.features/fixes/round31/04-type-constructor-arity.md`.
+
+### Fixed
+- **`Name(x)` constructs a Rust tuple struct.** Every type symbol
+  carried `params=[]`, because no signature was read off a struct
+  definition, and the resolver's arity check reads `[]` as "takes zero
+  arguments". So a counted `GroupName(s)` was rejected against
+  `struct GroupName(String);` and filed external whenever it reached
+  the sole-candidate rung, which is every construction through a glob
+  import (`use super::*`, the norm in Rust test modules). A tuple
+  struct's positional fields are now its params. Brace and unit
+  structs keep none, correctly: `Brace(1)` against `struct Brace { a:
+  u8 }` is still rejected, now for a real reason. zed: **+424 call
+  edges**, every one a struct target with `Name(` written on the
+  caller's line (`MultiBufferOffset` 78, `DevicePixels` 39,
+  `MultiBufferRow` 35).
+- **A struct that shares its name with an enum's tuple variant is not
+  taken on name alone.** dekko indexes enums, not their variants, so
+  after `use AutoCompactThreshold::*`, `Percentage(0.9)` had exactly
+  one in-repo candidate, gpui's unrelated `struct Percentage`, and
+  took it with full confidence. Tuple variants are now recorded as a
+  name registry (not symbols: nothing in `map.json`, `unused`,
+  `search` or `outline` changes) and the sole-candidate rung stands
+  down on a collision. This is why the obvious fix ("ignore arity for
+  types") was measured and backed out in 0.43.67: 252 of its 552 new
+  edges were this collision. zed: **21 edges removed, all 21 read, all
+  21 wrong** (`End(MarkdownTagEnd::..)` on `sum_tree`'s `struct End`
+  10 times, `Identifier("a")`, `Text(..)`, `Column(..)`).
+- **A Rust dot-call never constructs a type.** `list.CommitList()`
+  (Windows COM) no longer resolves to `struct CommitList`. Same rule
+  as round 31's F11 (`recv.name()` can't reach a free function), one
+  more target kind.
+
+### Changed
+- Calls recovered from `assert_eq!(..)` bodies carry their real
+  argument count for a bare `Name(..)` again. 0.43.67 withheld it to
+  dodge the bug above. Zero edges moved on zed.
+- `map.json`: a Rust tuple struct's `params` is no longer empty.
+  `MAP.md` signatures are unchanged (`struct X`).
+- cline and spring-boot: every edge section identical to 0.43.70.
+
+### Not fixed
+- A bare `Left(x)` whose *only* reading is a variant still goes
+  external, as before. Resolving it to the owning enum is possible
+  (the registry knows the owner) and deliberately not built: it is a
+  new edge class that needs its own measurement, and any enum with an
+  `Ok`/`Some`/`Err` variant would swallow the prelude's. A missing
+  edge, never a wrong one.
+
 ## [0.43.70] — 2026-09-21
 
 Round 32 Track 5b, the half of Track 5 the visibility veto can't see.

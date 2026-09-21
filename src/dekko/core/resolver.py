@@ -3039,7 +3039,7 @@ def _pick_candidate_ladder(
 
     if len(candidates) == 1:
         return _sole_candidate_match(
-            call, candidates[0], by_name_path, repo_stems is not None
+            call, candidates[0], by_name_path, repo_stems is not None, index
         )
 
     return _last_resort_match(call, candidates, by_name_path)
@@ -3093,8 +3093,12 @@ def _pick_candidate(
     if (
         isinstance(picked, Symbol)
         and _rust_is_dot_call(call)
-        and not _drop_free_functions([picked])
+        and (not _drop_free_functions([picked]) or picked.kind in TYPE_KINDS)
     ):
+        # F11's rule, plus its Track 4 sibling: ``recv.Name(..)`` can no
+        # more construct a type than reach a free function
+        # (``handler.Update()``, Windows COM, landing on
+        # ``struct Update``).
         return _NOISE if repo_stems is not None else None
 
     return picked
@@ -3105,6 +3109,7 @@ def _sole_candidate_match(
     only: Symbol,
     by_name_path: dict[tuple[str, str], list[Symbol]],
     noise_aware: bool,
+    index: dict[str, list[Symbol]],
 ) -> "Symbol | _Noise | None":
     """Resolve, or reject, the single remaining candidate for a call.
 
@@ -3139,7 +3144,9 @@ def _sole_candidate_match(
             ``_resolve_ref`` doesn't, and has no external bucket to
             feed, so it keeps the plain ``None``.
     """
-    if _arity_plausible(only, call):
+    if _arity_plausible(only, call) and not _rust_name_is_also_a_variant(
+        call, only, index
+    ):
         return only
     if noise_aware:
         return _NOISE
@@ -5198,13 +5205,55 @@ def _rust_crate_hint_matches(
     )
 
 
+# Reserved ``index`` namespace for Rust tuple enum variants: the key
+# for variant ``Left`` holds every enum that declares a ``Left(..)``.
+# It rides in the name index because that is the one repo-wide table
+# already threaded through the whole ladder and into every pool
+# worker; the ``::`` prefix can't collide with an identifier, and the
+# index is only ever read by ``.get(name)``, never iterated.
+_RUST_VARIANT_KEY = "::variant::"
+
+
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
-    """Map bare symbol name → all symbols with that name."""
+    """Map bare symbol name → all symbols with that name, plus the
+    ``_RUST_VARIANT_KEY`` entries for tuple enum variants."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
             index.setdefault(sym.name, []).append(sym)
+        for entry in fm.enum_variants:
+            owner, _, variant = entry.partition("::")
+            index.setdefault(_RUST_VARIANT_KEY + variant, []).extend(
+                s for s in fm.symbols if s.kind == "enum" and s.name == owner
+            )
     return index
+
+
+def _rust_name_is_also_a_variant(
+    call: _Referable, only: Symbol, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether ``Name(..)`` has a second reading the map can't offer:
+    some enum's tuple variant of the same name.
+
+    Round 32 Track 4. dekko indexes enums, not their variants, so
+    ``Left(x)`` from a glob-imported ``enum Side { Left(u8) }`` has
+    exactly one in-repo candidate, an unrelated ``struct Left``, and
+    the sole-candidate rung would take it with full confidence.
+    Measured on zed before tuple structs were given their real arity:
+    252 of 552 newly resolvable ``Name(x)`` calls were this collision
+    (47 names: ``Left``, ``Text``, ``Image``, ``Path``, ``Literal``).
+    Some of those are fine (a variant *payload-named* after the
+    struct), and nothing in the map can tell which, so none resolve.
+
+    Calls only: a heritage clause (``impl Trait for Left``) names a
+    type in a position no variant can occupy.
+    """
+    return (
+        isinstance(call, RawCall)
+        and only.language == "rust"
+        and only.kind in TYPE_KINDS
+        and _RUST_VARIANT_KEY + call.name in index
+    )
 
 
 def _build_name_path_index(

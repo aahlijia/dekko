@@ -465,6 +465,12 @@ class FileMap:
             are turned into edges (see ``model.EnvRead``'s docstring).
         doc: First line of the file's module docstring or leading
             comment, or ``None`` (best-effort, per language).
+        enum_variants: ``"Owner::Variant"`` for every *tuple* enum
+            variant in this file (Rust only, see ``languages.
+            LanguageSpec.enum_variant_query``). Not symbols and not
+            written to ``map.json``: a name registry the resolver
+            reads so ``Left(x)`` is not taken for ``struct Left`` when
+            some enum also has a ``Left(..)`` variant.
         type_aliases: Bare names of type-alias declarations in this
             file (TS/TSX only — see ``languages.LanguageSpec.
             type_alias_query``). Not full symbols, just names: a
@@ -485,6 +491,7 @@ class FileMap:
     env_reads: list[EnvRead] = field(default_factory=list)
     imports: list[Import] = field(default_factory=list)
     type_aliases: list[str] = field(default_factory=list)
+    enum_variants: list[str] = field(default_factory=list)
     error: str | None = None
     doc: str | None = None
 

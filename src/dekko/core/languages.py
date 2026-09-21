@@ -59,6 +59,15 @@ class LanguageSpec:
             tree (no argument list) and so are invisible to
             ``call_query`` too. ``None`` for languages still lacking
             one (Rust, C, C++ as of this writing).
+        enum_variant_query: Query capturing an enum's *tuple* variants
+            (``@enum`` the owning enum's name, ``@variant`` the
+            variant's), Rust only. Variants are not symbols. They are a
+            repo-wide name registry the resolver consults before
+            taking ``Left(x)`` for a construction of ``struct Left``:
+            with ``enum Side { Left(u8) }`` anywhere in the repo that
+            call has two readings and the map only indexes one of them
+            (round 32 Track 4). Unit and struct-like variants are left
+            out: neither can be written ``Name(..)``.
         binding_query: Query locating the places a *local* name is
             bound, so ``extractor._collect_refs`` can tell a bare
             identifier that names a repo symbol from one that names a
@@ -184,6 +193,7 @@ class LanguageSpec:
     catch_query: str | None = None
     env_read_query: str | None = None
     type_alias_query: str | None = None
+    enum_variant_query: str | None = None
     binding_query: str | None = None
     binding_function_scopes: tuple[str, ...] = ()
     binding_block_scopes: tuple[str, ...] = ()
@@ -342,6 +352,18 @@ PYTHON = LanguageSpec(
 """,
 )
 
+# Tuple variants only: ``Left(u8)``, not ``Mid`` or ``Right { a: u8 }``
+# (see ``LanguageSpec.enum_variant_query``). Node shapes verified
+# against the pinned tree-sitter-rust grammar.
+_RUST_ENUM_VARIANT_QUERY = """
+(enum_item
+  name: (type_identifier) @enum
+  body: (enum_variant_list
+    (enum_variant
+      name: (identifier) @variant
+      body: (ordered_field_declaration_list))))
+"""
+
 RUST = LanguageSpec(
     name="rust",
     grammar="rust",
@@ -388,6 +410,7 @@ RUST = LanguageSpec(
     method_containers=("impl_item", "trait_item"),
     param_style="rust",
     function_boundary_types=("function_item", "closure_expression"),
+    enum_variant_query=_RUST_ENUM_VARIANT_QUERY,
     # ``impl_item`` with a ``trait:`` field is heritage (``impl Trait
     # for Type``); an inherent ``impl Type { ... }`` (no ``trait:``
     # field) never matches this pattern at all, so no query-time

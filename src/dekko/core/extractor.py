@@ -111,6 +111,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     env_reads = _collect_env_reads(spec, tree.root_node, rel, defs)
     imports = _collect_imports(spec, rel, import_matches)
     type_aliases = _collect_type_aliases(spec, tree.root_node)
+    enum_variants = _collect_enum_variants(spec, tree.root_node)
     return FileMap(
         path=rel,
         language=spec.name,
@@ -123,6 +124,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         env_reads=env_reads,
         imports=imports,
         type_aliases=type_aliases,
+        enum_variants=enum_variants,
         doc=_module_doc(spec.name, tree.root_node),
     )
 
@@ -197,7 +199,7 @@ def _collect_definitions(
                 def_node,
                 _text(class_name),
                 _CLASSDEF_KIND.get(kind_type, "class"),
-                params=[],
+                params=_tuple_struct_fields(def_node),
                 returns=None,
                 seen=seen,
             )
@@ -1307,11 +1309,7 @@ def _scan_rust_token_tree(node: Node, found: list[_MacroCallSite]) -> None:
                 name=name,
                 receiver=receiver,
                 joiner=joiner,
-                arg_count=(
-                    None
-                    if _rust_is_bare_constructor(name, receiver)
-                    else _rust_token_arg_count(args)
-                ),
+                arg_count=_rust_token_arg_count(args),
             )
         )
 
@@ -1321,31 +1319,6 @@ def _scan_rust_token_tree(node: Node, found: list[_MacroCallSite]) -> None:
 # ``assert_eq!(x, Foo::default())``, as common as Rust test idioms
 # get, was never recovered at all before round 32.
 _RUST_CALLEE_TOKEN_TYPES = frozenset({"identifier", "default", "union"})
-
-
-def _rust_is_bare_constructor(name: str, receiver: str | None) -> bool:
-    """Whether a recovered call is ``Name(..)``: a tuple-struct or
-    enum-variant construction, not a function call.
-
-    Those get no argument count, on purpose. A type symbol's
-    ``params`` is always ``[]`` (no signature is read off a struct
-    definition), and ``resolver._arity_plausible`` reads that as "takes
-    zero arguments", so a counted ``GroupName(s)`` is rejected against
-    ``struct GroupName(String);``. Live-testing this change on zed:
-    giving these calls a count lost 78 correct ``assert_eq!(Name(x),
-    ..)`` edges.
-
-    The resolver-side fix (treat a type candidate's arity as unknown)
-    was tried in the same session and backed out: it also resolves
-    every *parsed* ``Name(x)``, +552 edges on zed, and 252 of those go
-    to a struct whose name is also an enum variant somewhere
-    (``Left``, ``Text``, ``Image``, ``Path``). dekko doesn't index
-    variants, so ``Left(x)`` from a glob-imported enum would land on an
-    unrelated ``struct Left`` with full confidence. That needs variant
-    indexing first; until then this keeps recovered constructions
-    exactly where they were before round 32.
-    """
-    return receiver is None and name[:1].isupper()
 
 
 # Token node types that can be a segment of a ``::`` path. ``Self`` is
@@ -3108,6 +3081,42 @@ def _collect_env_reads(
 
 # ---------------------------------------------------------------------
 # Type aliases
+
+
+def _tuple_struct_fields(def_node: Node) -> list[Param]:
+    """A Rust tuple struct's positional fields, as its parameters.
+
+    ``struct GroupName(String);`` is constructed by the call-shaped
+    ``GroupName(s)``, so its fields are its signature. They used to be
+    dropped (every type got ``params=[]``), which ``resolver.
+    _arity_plausible`` reads as "takes zero arguments": a counted
+    ``GroupName(s)`` reaching the sole-candidate rung (through a glob
+    import, the norm in Rust test modules) was rejected and filed
+    external (round 32 Track 4). A brace struct and a unit struct keep
+    ``[]``, correctly: neither can be written ``Name(x)``.
+    """
+    if def_node.type != "struct_item":
+        return []
+    body = def_node.child_by_field_name("body")
+    if body is None or body.type != "ordered_field_declaration_list":
+        return []
+    return [
+        Param(name=str(i), type=_text(field_type))
+        for i, field_type in enumerate(body.children_by_field_name("type"))
+    ]
+
+
+def _collect_enum_variants(spec: LanguageSpec, root: Node) -> list[str]:
+    """``"Owner::Variant"`` for every tuple enum variant in this file
+    (see ``LanguageSpec.enum_variant_query``)."""
+    if spec.enum_variant_query is None:
+        return []
+    out: list[str] = []
+    for _, caps in _run_query(spec.grammar, spec.enum_variant_query, root):
+        owner, variant = _one(caps, "enum"), _one(caps, "variant")
+        if owner is not None and variant is not None:
+            out.append(f"{_text(owner)}::{_text(variant)}")
+    return out
 
 
 def _collect_type_aliases(spec: LanguageSpec, root: Node) -> list[str]:

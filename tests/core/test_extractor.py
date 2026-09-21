@@ -252,9 +252,58 @@ def test_rust_macro_recovered_arg_count_is_conservative(
     assert calls["xs.iter().map"].arg_count is None
     assert calls["k"].arg_count is None
     # A bare capitalized callee is a tuple-struct/variant construction.
-    # A type symbol has no params, so a count would reject the struct
-    # (zed: 78 correct edges lost when this was counted).
-    assert calls["GroupName"].arg_count is None
+    # It used to get no count at all: a type symbol had no params, so
+    # any count rejected the struct (zed: 78 correct edges lost when
+    # this was first counted). Round 32 Track 4 fixed the cause: a
+    # tuple struct's fields *are* its params, so the count is safe.
+    assert calls["GroupName"].arg_count == 1
+
+
+def test_rust_tuple_struct_fields_are_its_params(tmp_path: Path) -> None:
+    # Round 32 Track 4. `struct GroupName(String);` is constructed by
+    # the call-shaped `GroupName(s)`, so its fields are its signature.
+    # Every type used to get `params=[]`, which the resolver's arity
+    # check reads as "takes zero arguments".
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    (tmp_path / "a.rs").write_text(
+        "pub struct GroupName(pub String);\n"
+        "struct Pair(u8, Vec<(u8, u8)>);\n"
+        "struct Brace { a: u8 }\n"
+        "struct Unit;\n"
+        "enum Side { Left(u8) }\n"
+    )
+    fm = extract_file(tmp_path, "a.rs", spec)
+    params = {s.name: [(p.name, p.type) for p in s.params] for s in fm.symbols}
+    assert params["GroupName"] == [("0", "String")]
+    assert params["Pair"] == [("0", "u8"), ("1", "Vec<(u8, u8)>")]
+    # Neither can be written `Name(x)`, so neither has a signature.
+    assert params["Brace"] == []
+    assert params["Unit"] == []
+    assert params["Side"] == []
+
+
+def test_rust_tuple_enum_variants_are_registered(tmp_path: Path) -> None:
+    # Variants are not symbols. They are a name registry: with
+    # `enum Side { Left(u8) }` anywhere in the repo, `Left(x)` has a
+    # reading the map can't offer. Tuple variants only: a unit or
+    # struct-like variant can't be written `Name(..)`.
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    (tmp_path / "a.rs").write_text(
+        "enum Side { Left(u8), Right { a: u8 }, Mid, Two(u8, u8) }\n"
+        "pub enum Msg<T> { Text(T) }\n"
+    )
+    fm = extract_file(tmp_path, "a.rs", spec)
+    assert fm.enum_variants == ["Side::Left", "Side::Two", "Msg::Text"]
+    assert [s.name for s in fm.symbols] == ["Side", "Msg"]
+
+
+def test_enum_variants_only_for_rust(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("a.ts")
+    assert spec is not None
+    (tmp_path / "a.ts").write_text("enum Side { Left, Right }\n")
+    assert extract_file(tmp_path, "a.ts", spec).enum_variants == []
 
 
 def test_rust_nested_fn_not_a_method(tmp_path: Path) -> None:

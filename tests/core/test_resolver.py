@@ -6462,3 +6462,138 @@ def test_pooled_ref_resolution_agrees_on_bound_and_export_rules(
     ]
     # Odd n (no export, a script) and not bound: 1, 5, 7, 11.
     assert len(sequential[0]) == 1 + 4
+
+
+# --- round 32 Track 4: `Name(x)` constructs a tuple struct -------------
+#
+# Every type used to carry `params=[]`, which the arity check reads as
+# "takes zero arguments", so a counted `GroupName(s)` reaching the
+# sole-candidate rung (through a glob import, the norm in Rust test
+# modules) was rejected against `struct GroupName(String);`. The naive
+# fix (ignore arity for types) was measured on zed and backed out: 252
+# of its 552 new edges went to a struct whose name is also an enum
+# variant somewhere. Fixed at the cause instead, with a collision veto.
+
+_T4_TEST_MOD = (
+    "use super::*;\n"
+    "fn check() {\n"
+    "    let g = GroupName(name());\n"
+    "    let l = Left(3);\n"
+    "    let b = Brace(1);\n"
+    "    let p = Pair(1);\n"
+    "    handler.Update();\n"
+    "}\n"
+)
+
+
+def _t4_edges(tmp_path: Path, types: str) -> set[str]:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/types.rs": types,
+            "crates/b/src/tests.rs": _T4_TEST_MOD,
+        },
+    )
+    return {
+        e.callee.split("::", 1)[1]
+        for e in graph.edges
+        if e.caller.endswith("::check")
+    }
+
+
+def test_rust_tuple_struct_construction_resolves_by_arity(
+    tmp_path: Path,
+) -> None:
+    got = _t4_edges(
+        tmp_path,
+        "pub struct GroupName(pub String);\n"
+        "pub struct Left(u8);\n"
+        "pub struct Brace { a: u8 }\n"
+        "pub struct Pair(u8, u8);\n"
+        "pub struct Update;\n",
+    )
+    # One field, one argument.
+    assert "GroupName" in got
+    assert "Left" in got  # no enum in sight, so no second reading
+    # A brace struct can't be written `Brace(1)`; two fields don't
+    # take one argument. Both still rejected, now for a real reason.
+    assert "Brace" not in got
+    assert "Pair" not in got
+
+
+def test_rust_struct_sharing_a_name_with_a_tuple_variant_is_not_taken(
+    tmp_path: Path,
+) -> None:
+    # zed: `use AutoCompactThreshold::*; Percentage(0.9)` landed on
+    # gpui's unrelated `struct Percentage(f32)`. dekko indexes enums,
+    # not variants, so the struct was the *only* candidate and the
+    # rung took it with full confidence.
+    got = _t4_edges(
+        tmp_path,
+        "pub struct Left(u8);\n"
+        "pub struct GroupName(pub String);\n"
+        "pub enum Side { Left(u8), Right }\n",
+    )
+    assert "Left" not in got
+    assert "GroupName" in got  # an unrelated name is unaffected
+
+
+def test_rust_unit_and_struct_variants_do_not_veto(tmp_path: Path) -> None:
+    # Neither `Mid` nor `Right { .. }` can be written `Left(3)`.
+    got = _t4_edges(
+        tmp_path,
+        "pub struct Left(u8);\npub enum Side { Left, Other { Left: u8 } }\n",
+    )
+    assert "Left" in got
+
+
+def test_rust_dot_call_never_constructs_a_type(tmp_path: Path) -> None:
+    # Windows COM: `handler.Update()` against a sole `struct Update`.
+    # Zero written arguments fit a unit struct's zero params, so only
+    # the joiner says this can't be a construction (F11's sibling).
+    got = _t4_edges(tmp_path, "pub struct Update();\n")
+    assert "Update" not in got
+
+
+def test_rust_variant_veto_is_for_calls_only() -> None:
+    # `impl Shape for Left` names a type where no variant can stand, so
+    # a heritage clause whose subtype shares a variant's name must not
+    # be vetoed. (Checked at the predicate: a cross-file `impl` doesn't
+    # reach the sole-candidate rung to begin with.)
+    struct = _cls("crates/a/src/types.rs", "Left", language="rust")
+    struct.kind = "struct"
+    side = _cls("crates/a/src/types.rs", "Side", language="rust")
+    side.kind = "enum"
+    index = resolver_mod._build_index(
+        [
+            FileMap(
+                "crates/a/src/types.rs",
+                "rust",
+                symbols=[struct, side],
+                enum_variants=["Side::Left"],
+            )
+        ]
+    )
+    call = RawCall(
+        caller_id=None,
+        path="crates/b/src/t.rs",
+        text="Left",
+        name="Left",
+        receiver=None,
+        line=3,
+    )
+    clause = RawHeritage(
+        subtype_id=struct.id,
+        path="crates/b/src/imp.rs",
+        text="Left",
+        name="Left",
+        relation="extends",
+        line=2,
+    )
+    veto = resolver_mod._rust_name_is_also_a_variant
+    assert veto(call, struct, index)
+    assert not veto(clause, struct, index)
+    # The registry rides in the name index under a key no identifier
+    # can spell, and points at the owning enum.
+    assert index[resolver_mod._RUST_VARIANT_KEY + "Left"] == [side]
+    assert index["Left"] == [struct]

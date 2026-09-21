@@ -583,6 +583,7 @@ def _fully_populated_filemap() -> FileMap:
             Import(path="a.py", name="g", source="b"),
         ],
         type_aliases=["Alias"],
+        enum_variants=["Side::Left"],
         error="parse error",
         doc="module docstring",
     )
