@@ -1799,10 +1799,18 @@ def _resolve_heritage_subtype_id(
         ``resolve_heritage``'s ``unplaced_subtype_count``).
     """
     own_crate = _rust_crate_dir(h.path)
+    # A ``type`` alias is never the placement (round 31 F6b started
+    # indexing them). ``subtype_name`` is the bare last segment, so
+    # zed's ``impl<T> TideResultExt for tide::Result<T>`` would land on
+    # collab's own unrelated ``pub type Result<T, E = Error>``, the
+    # crate's only ``Result``. An alias names someone else's type by
+    # definition; the impl belongs to that type, not to the alias.
     matches = [
         sym
         for sym in index.get(h.subtype_name, [])
-        if sym.kind in TYPE_KINDS and _rust_crate_dir(sym.path) == own_crate
+        if sym.kind in TYPE_KINDS
+        and sym.kind != "type_alias"
+        and _rust_crate_dir(sym.path) == own_crate
     ]
     return matches[0].id if len(matches) == 1 else None
 
@@ -1840,11 +1848,27 @@ def _narrow_impl_candidates_to_traits(
             same-file lookup — both call sites need this identically).
 
     Returns:
-        Only the ``trait``-kind entries of ``candidates``, or
-        ``candidates`` unchanged when none are traits.
+        Only the ``trait``-kind entries of ``candidates``, or, when
+        none are traits, ``candidates`` minus any Rust ``type_alias``.
     """
     traits = [c for c in candidates if c.kind == "trait"]
-    return traits or candidates
+    if traits:
+        return traits
+
+    # No trait by that name. The "keep everything" allowance above is
+    # for kinds that *might* be the target; a Rust ``type`` alias never
+    # is (``impl Alias for Y`` doesn't compile, trait aliases being
+    # unstable). Round 31 F6b started indexing those aliases, and
+    # without this veto zed's ``impl ActionHandler for
+    # A11yActionHandler`` (accesskit's trait) resolved to ``ui``'s
+    # unrelated ``type ActionHandler = Box<dyn Fn(..)>``, its only
+    # same-named in-repo symbol. Path-gated since TS reuses the
+    # ``impl`` relation, and ``implements`` of a type alias is legal.
+    return [
+        c
+        for c in candidates
+        if not (c.kind == "type_alias" and c.path.endswith(".rs"))
+    ]
 
 
 def _resolve_one_heritage(
@@ -2625,8 +2649,15 @@ def _is_receiver_param(param: Param, language: str) -> bool:
     if language == "python":
         return param.name in _PYTHON_RECEIVER_PARAM_NAMES
     if language == "rust":
-        normalized = param.name.lstrip("&").replace("mut", "").strip()
-        return normalized == "self"
+        # The last word, not a strip-the-prefix: a lifetimed receiver
+        # (``&'a self``, ``&'a mut self``) used to fall through as an
+        # ordinary parameter, which put the method's arity one too
+        # high and made ``_sole_candidate_match`` reject a correct
+        # lone target (round 32, live-testing on zed:
+        # ``syntax_map.layers(&buffer)`` against ``fn layers<'a>(&'a
+        # self, buffer: ..)``). Rust reserves ``self`` for the
+        # receiver, so a parameter whose name ends in it is one.
+        return param.name.lstrip("&").split()[-1:] == ["self"]
     return False
 
 
@@ -2819,7 +2850,7 @@ def _pick_candidate_ladder(
     """
     candidates = _language_filtered(call, candidates)
     candidates, same_file, shape_narrowed = _rust_shape_narrowed_candidates(
-        call, candidates, same_file, index
+        call, candidates, same_file, index, file_imports, repo_stems
     )
     if shape_narrowed and not candidates:
         return _NOISE if repo_stems is not None else None
@@ -3178,6 +3209,15 @@ _RUST_STD_METHOD_NAMES = frozenset(
         "rev", "enumerate", "peekable", "any", "all", "find",
         "position", "last", "nth", "count", "sum", "cloned", "copied",
         "ok_or", "ok_or_else", "as_deref",
+        # Channel receivers (std mpsc, smol, futures, flume, tokio all
+        # spell it the same). Round 32: zed defines exactly one
+        # ``try_recv`` (gpui's ``PriorityQueueState``), and once the
+        # lifetimed-``self`` arity fix stopped rejecting it by
+        # accident, 66 ``rx.try_recv()`` calls on ordinary channels
+        # took it as their sole candidate. Its one real caller is in
+        # the same file and resolves on that rung, before this guard.
+        # ``try_send`` has no repo definition: a no-op today.
+        "try_recv", "try_send",
     }
 )  # fmt: skip
 
@@ -3613,21 +3653,27 @@ def _rust_shape_narrowed_candidates(
     candidates: list[Symbol],
     same_file: list[Symbol],
     index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
+    repo_stems: set[str] | None = None,
 ) -> tuple[list[Symbol], list[Symbol], bool]:
     """Narrow candidates by Rust call shape, before the rest of
     ``_pick_candidate``'s ladder runs.
 
-    Two shapes each rule out an entire class of candidate: a
+    Three shapes each rule out an entire class of candidate: a
     ``Type::name`` path can only reach that type's own members
-    (``_owned_by_receiver_type``), and a ``recv.name`` dot-call can
-    never reach a free function (``_drop_free_functions``, round 31
-    F11). Split out of ``_pick_candidate`` purely to keep that
-    function's cyclomatic complexity under the project's Ruff limit
+    (``_owned_by_receiver_type``), the same path rooted at a type the
+    repo doesn't define can reach nothing at all
+    (``_rust_unknown_type_path``, round 31 F6b), and a ``recv.name``
+    dot-call can never reach a free function
+    (``_drop_free_functions``, round 31 F11). Split out of
+    ``_pick_candidate`` purely to keep that function's cyclomatic
+    complexity under the project's Ruff limit
     (round 31 rule 0.5) — mirrors ``_structural_match``'s own reason
     for existing. ``_rust_type_path_receiver``/``_rust_is_dot_call``
     test the same call text for opposite join characters (``::`` vs
     ``.``), so the two shapes are mutually exclusive by construction
-    and at most one narrowing ever applies.
+    and at most one narrowing ever applies (the two ``::`` rules are
+    exclusive too: one needs an in-repo type, the other needs none).
 
     Args:
         call: The raw call or reference being resolved.
@@ -3635,6 +3681,9 @@ def _rust_shape_narrowed_candidates(
             repo-wide.
         same_file: Same-named symbols in the calling file.
         index: Bare symbol name to every symbol sharing it.
+        file_imports: The calling file's import bindings by local
+            name, for the unknown-type rule's in-repo ``use`` check.
+        repo_stems: Every repo file's matching stem, same purpose.
 
     Returns:
         ``(candidates, same_file, narrowed)`` — the (possibly)
@@ -3650,6 +3699,12 @@ def _rust_shape_narrowed_candidates(
             _owned_by_receiver_type(call, same_file, index),
             True,
         )
+    if _rust_unknown_type_path(
+        call, candidates, index, file_imports, repo_stems
+    ):
+        # Rooted at a type the repo doesn't define (round 31 F6b):
+        # nothing here can be the target.
+        return [], [], True
     if _rust_is_dot_call(call) and not _drop_free_functions(candidates):
         # Every candidate is a free function: nothing a dot-call could
         # mean. Anything less than that is left alone here on purpose,
@@ -3729,6 +3784,29 @@ def _rust_type_path_receiver(
     (``Point::new``, ``gpui::Point::new``), else ``None``. ``Self`` and
     lowercase module paths (``module::func``) never qualify.
     """
+    last = _rust_type_path_last_segment(call)
+    if last is None:
+        return None
+    # A ``type_alias`` alone doesn't qualify (round 31 F6b): an alias's
+    # members live under the type it aliases, so ``Alias::new()`` has
+    # no ``Alias.new`` to find and the owner rule would veto the real
+    # ``Real.new``. Leave those to the ordinary ladder.
+    if not any(
+        sym.kind in TYPE_KINDS and sym.kind != "type_alias"
+        for sym in index.get(last, [])
+    ):
+        return None
+
+    return last
+
+
+def _rust_type_path_last_segment(call: _Referable) -> str | None:
+    """The type-shaped last receiver segment of a Rust ``::`` path.
+
+    ``gpui::Point::<f32>::new`` gives ``Point``. Purely syntactic, no
+    index lookup: ``None`` for a non-Rust call, a dot-call, ``Self``,
+    and a lowercase module path (``module::func``).
+    """
     receiver = getattr(call, "receiver", None)
     if not receiver or not call.path.endswith(".rs"):
         return None
@@ -3737,9 +3815,110 @@ def _rust_type_path_receiver(
     last = receiver.rsplit("::", 1)[-1].split("<", 1)[0].strip()
     if not last[:1].isupper() or last == "Self":
         return None
-    if not any(sym.kind in TYPE_KINDS for sym in index.get(last, [])):
-        return None
+
     return last
+
+
+def _rust_unknown_type_path(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None,
+    repo_stems: set[str] | None,
+) -> bool:
+    """Whether a Rust ``Type::name`` path is rooted at a type the repo
+    doesn't define at all.
+
+    Round 31 zed coverage pass F6b: ``Default::default()``,
+    ``Vec::new()``, ``Box::new()`` and a macro-generated
+    ``StyleRefinement::default()`` name a std, third-party, or
+    macro-minted type. No repo symbol can be the target, yet the
+    generic ladder took whatever ``new``/``default`` sat in the
+    caller's file (1,076 wrong edges on zed, 884 of them ``Vec``/
+    ``Box``/``Default``/``String``). ``_owned_by_receiver_type``
+    couldn't veto them because its gate needs an in-repo type to be
+    the owner.
+
+    True only when every way the repo could know the name comes up
+    empty:
+
+    - no in-repo symbol of *any* kind carries it. This is what needed
+      Rust ``type`` aliases indexed first: ``type Alias = Real;`` makes
+      ``Alias::new()`` a real in-repo call, and without the alias
+      symbol this rule would send it external.
+    - no candidate is a member of it. A macro-generated struct with a
+      handwritten ``impl Foo { fn new() }`` has no ``Foo`` symbol but
+      does have ``Foo.new``.
+    - the calling file doesn't ``use`` it from inside the repo. A
+      rename matches no symbol by design, and it needn't be written
+      in this file: ``pub use text::Buffer as TextBuffer;`` in one
+      crate, then ``use language::TextBuffer;`` here (live-testing on
+      zed: a same-file-only ``as`` check lost 2 real
+      ``TextBuffer::new_normalized`` edges).
+    - it isn't an associated-type path. ``T::ProtoRequest::stop()``
+      and ``Self::Output::new()`` name a type only the trait solver
+      knows; the ladder's trait-method guess was right on zed (3 of
+      3), so they stay with the ladder.
+
+    Names of one or two characters are skipped: those are generic
+    parameters (``T::default()``, ``Tx::new()``), which the ladder
+    already treats as unknowable.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidates: Every same-named, language-filtered symbol
+            repo-wide.
+        index: Bare symbol name to every symbol sharing it.
+        file_imports: The calling file's import bindings by local name.
+        repo_stems: Every repo file's matching stem, to tell an in-repo
+            ``use`` from an external one. ``None`` (a caller that
+            can't take a ``_NOISE`` verdict) counts every ``use`` as
+            in-repo.
+
+    Returns:
+        True when no repo candidate can be this path's target.
+    """
+    last = _rust_type_path_last_segment(call)
+    if last is None or len(last) <= 2 or not candidates:
+        return False
+    if index.get(last) or _rust_is_associated_type_path(call):
+        return False
+    if any(_container_name(cand) == last for cand in candidates):
+        return False
+
+    binding = (file_imports or {}).get(last)
+    if binding is None:
+        return True
+
+    return repo_stems is not None and not _import_is_in_repo(
+        binding, repo_stems
+    )
+
+
+def _rust_is_associated_type_path(call: _Referable) -> bool:
+    """Whether a Rust path reaches its type through another type.
+
+    ``T::ProtoRequest::name`` and ``Self::Output::name``: a segment
+    before the last one is itself type-shaped (capitalized, or
+    ``Self``), where a plain module path (``std::collections::
+    HashMap::name``) is lowercase all the way to the type.
+    """
+    receiver = (getattr(call, "receiver", None) or "").strip()
+    if receiver.startswith("<"):
+        # ``<Cmd as LspCommand>::ProtoRequest::name``: the qualified
+        # form of the same thing (live-testing on zed, 1 real edge).
+        return True
+
+    qualifiers = receiver.split("<", 1)[0].split("::")[:-1]
+    return any(seg.strip()[:1].isupper() for seg in qualifiers)
+
+
+def _container_name(sym: Symbol) -> str | None:
+    """Bare name of the type or trait ``sym`` is a member of, if any."""
+    if "." not in sym.qualname:
+        return None
+
+    return sym.qualname.rsplit(".", 1)[0].rsplit(".", 1)[-1]
 
 
 def _owned_by_receiver_type(
@@ -3880,8 +4059,14 @@ def _typed_param_match(
     if tokens is None:
         tokens = _typed_param_token_candidates(param_type)
     for token, is_parameterized in tokens:
+        # A Rust ``type`` alias doesn't open the gate (round 31 F6b
+        # started indexing them): ``type Result<T> = std::result::
+        # Result<T, Error>;`` is the foreign generic container this
+        # gate exists to keep out, under a local name.
         if is_parameterized and not any(
-            sym.kind in TYPE_KINDS for sym in index.get(token, [])
+            sym.kind in TYPE_KINDS
+            and not (sym.kind == "type_alias" and sym.path.endswith(".rs"))
+            for sym in index.get(token, [])
         ):
             continue
         target_qual = f"{token}.{call.name}"

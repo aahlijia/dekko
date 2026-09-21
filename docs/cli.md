@@ -239,6 +239,48 @@ between "dekko dropped results" and "dekko excluded declarations."
 The identity holds unless `grep_truncated` is set, in which case the
 sweep hit its safety cap and discarded hits past it by design.
 
+**Comments, value references, Rust constructions.** Four line shapes
+a person classifies at a glance get a named cause instead of
+`unexplained miss`:
+
+- *A comment line, anywhere.* Near the symbol's definition or in its
+  file's header it reads `comment mention ... (near the symbol's own
+  definition, or in its file's leading header comment)`. Everywhere
+  else it reads `comment mention ... (a comment line, away from the
+  symbol's definition)`. A comment that quotes the name
+  (`# "tfrun" commands can't include pipes`) is a comment, not a
+  string literal.
+- *A recorded value reference.* `names.some(isChrome)`,
+  `process.on("exit", cleanup)`, `.map(Src::getSource)`: the map
+  already holds that line as a reference edge to the target (Python,
+  JS/TS, Go, Java), and the row says `passed or stored as a value,
+  not called — dekko has this as a reference`. Only when the file
+  could really have made that reference: it defines the target,
+  imports its name or its declaring type, or is a same-package
+  sibling (Go/Java), and it binds no local of the same name. A
+  `const count = ...; if (count >= 3)` in a file that never imports
+  `count` stays unexplained.
+- *A path-qualified function value in Rust or C++*, where dekko
+  records no reference edges: `.map(ExternalSourcePrompt::as_str)`,
+  `let f = handlers::my_fn;`. The cause says `line-shape match` and
+  names the blind spot. Never fires when a `(`, `::<` or `!` follows
+  the name, so a real missed call can't hide here. Function targets
+  only. A *bare* name (`register(my_fn)`, `handler: my_fn,`) is left
+  alone on purpose: in Rust it is nearly always a same-named local.
+- *Rust struct literals and payloads* for a type target:
+  `let loc = AbortLoc {`, `Variant(AbortLoc),`,
+  `struct Wrapper(pub AbortLoc);` read `type position (annotation,
+  generic argument, construction, or enum payload)`.
+
+Two shapes are left unexplained on purpose. A name *inside* a longer
+string (`"settings.json cleanup complete."`) also matches
+`eval("cleanup()")` and dispatch by string, which are real
+references. And a name in the middle of a multi-line Python docstring
+can't be told from code one line at a time. None of this moves a
+count: `matches`, `dekko-only` and `grep-only` are untouched, only the
+cause on a grep-only row changes. `--fail-on-unexplained` will fail
+less often as a result.
+
 **Receiver-mismatch detection.** When the target is a method (not a
 free function) with exactly one repo-defined symbol sharing its bare
 name and its declaring type resolves unambiguously, `sanity` checks
@@ -385,6 +427,14 @@ actually justifies and runs fully sequentially when even two workers
 wouldn't pay for themselves. `--jobs 11` legitimately running three
 workers is expected. Small repos and small deltas stay sequential
 automatically regardless of the flag.
+
+`dekko diff`, `dekko affected` and `dekko workset` default to
+`--jobs 0` too. The flag only matters on their slow path: the first
+time one of them is asked about a commit, dekko has to map that old
+commit from scratch, and on a very large repo that is minutes of work
+(it is cached per commit afterwards, so the second call is seconds).
+The MCP `impacted_tests` and `workset` tools make the same choice.
+Pass `--jobs 1` for a sequential run.
 
 ## Mapping a subtree
 

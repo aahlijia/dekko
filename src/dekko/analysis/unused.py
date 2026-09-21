@@ -46,6 +46,8 @@ are.
 import fnmatch
 import json
 import re
+from dataclasses import dataclass
+from typing import NamedTuple
 
 from dekko.analysis import ambiguous, query
 from dekko.classify import is_test_path
@@ -308,6 +310,111 @@ def _used_keys(index: MapIndex) -> set[tuple[str, str]]:
     return _used_keys_callables(index) | _used_keys_types(index)
 
 
+STATUS_FLAGGED = "flagged"
+STATUS_USED = "used"
+STATUS_ROOT = "root"
+STATUS_CALL_BLIND = "call-blind-language"
+
+
+class UnusedStatus(NamedTuple):
+    """Whether ``dekko unused`` lists a symbol, and if not, why.
+
+    Attributes:
+        flagged: True when ``find_unused`` would return the symbol.
+        reason: ``STATUS_FLAGGED``, or the first rule that spares it:
+            ``STATUS_CALL_BLIND`` (its language has no extracted calls
+            at all, so there is no verdict), ``STATUS_USED`` (inbound
+            call, reference, heritage or type-usage evidence), or
+            ``STATUS_ROOT`` (a plausible entry point).
+    """
+
+    flagged: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class _Evidence:
+    """The repo-wide lookups every per-symbol verdict reads.
+
+    Built once per ``find_unused`` sweep (or per ``unused_status``
+    call) so the verdict itself stays a cheap, pure function of one
+    symbol.
+
+    Attributes:
+        reexports: Names re-exported from a package entry point.
+        used: ``(path, qualname)`` keys kept alive by any evidence.
+        container_index: ``(path, qualname)`` to container type symbol.
+        blind: Languages with symbols but not one extracted call.
+    """
+
+    reexports: set[str]
+    used: set[tuple[str, str]]
+    container_index: dict[tuple[str, str], Symbol]
+    blind: set[str]
+
+
+def _gather_evidence(index: MapIndex) -> _Evidence:
+    """Build the lookups ``_status_of`` needs, once."""
+    return _Evidence(
+        reexports=reexported_names(index),
+        used=_used_keys(index),
+        container_index=_container_type_index(index),
+        blind=languages_without_calls(index),
+    )
+
+
+def _status_of(
+    sym: Symbol,
+    evidence: _Evidence,
+    root_globs: tuple[str, ...],
+    index: MapIndex,
+) -> str:
+    """The one place that decides whether a symbol is unused.
+
+    ``find_unused`` and ``unused_status`` both answer from here. Round
+    32: ``sanity --unused`` kept its own private notion of "unused"
+    (no ``calls_in``/``referenced_in``), which is not this question,
+    and told agents that ``SpringApplication.run`` had been flagged
+    dead. Sharing the function is the fix; a second copy of these
+    rules is how the two drift apart again.
+
+    The three sparing rules are independent, so their order changes
+    no verdict, only which reason is reported when several hold.
+    ``used`` outranks ``root`` because most symbols are exported, and
+    "it has 157 callers" is the more useful thing to say.
+    """
+    if sym.language in evidence.blind:
+        return STATUS_CALL_BLIND
+    if (sym.path, sym.qualname) in evidence.used:
+        return STATUS_USED
+    if _is_root(
+        sym, evidence.reexports, root_globs, index, evidence.container_index
+    ):
+        return STATUS_ROOT
+
+    return STATUS_FLAGGED
+
+
+def unused_status(
+    index: MapIndex,
+    sym: Symbol,
+    root_globs: tuple[str, ...] = (),
+) -> UnusedStatus:
+    """Whether ``dekko unused`` would list ``sym``, by the same rules.
+
+    Args:
+        index: Loaded map index.
+        sym: The symbol to check.
+        root_globs: Extra path globs whose symbols are always roots
+            (``dekko unused --roots``).
+
+    Returns:
+        The verdict and the reason behind it.
+    """
+    reason = _status_of(sym, _gather_evidence(index), root_globs, index)
+    return UnusedStatus(flagged=reason == STATUS_FLAGGED, reason=reason)
+
+
 def find_unused(
     index: MapIndex,
     root_globs: tuple[str, ...],
@@ -331,17 +438,12 @@ def find_unused(
     Returns:
         Unused symbols sorted by path then line.
     """
-    reexports = reexported_names(index)
-    used = _used_keys(index)
-    container_index = _container_type_index(index)
-    blind = languages_without_calls(index)
+    evidence = _gather_evidence(index)
     found = [
         sym
         for sym in index.symbols_by_id.values()
         if (kinds != "types" or sym.kind in TYPE_KINDS)
-        and sym.language not in blind
-        and (sym.path, sym.qualname) not in used
-        and not _is_root(sym, reexports, root_globs, index, container_index)
+        and _status_of(sym, evidence, root_globs, index) == STATUS_FLAGGED
     ]
     return sorted(found, key=lambda s: (s.path, s.start_line))
 

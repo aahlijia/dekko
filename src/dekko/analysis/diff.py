@@ -471,7 +471,13 @@ def sequential_disclosure_message(
 
 
 def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
-    """Disclose a slow single-threaded rev-cache-miss re-parse/resolve.
+    """Disclose a slow rev-cache-miss re-parse/resolve before it starts.
+
+    Round 31 P4.1 flipped ``diff``/``affected``/``workset`` to all
+    cores by default, which makes the sequential case below an explicit
+    ``--jobs 1`` choice. The note still fires for the parallel path,
+    with its own wording: a cold tensorflow snapshot is a four-minute
+    silence even with every core busy. The name predates that.
 
     Round-15 finding: at the default ``--jobs 1``, a first-touch
     ``diff``/``affected``/``workset`` call on a large repo re-parses
@@ -490,7 +496,7 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
             (an unreadable rev -- ``snapshot()`` will fall back to its
             own discovery, so there's nothing to count here).
     """
-    if jobs > 1 or candidates is None:
+    if candidates is None:
         return
     # round-18 tensorflow finding: `candidates` is `git ls-tree`'s full
     # tracked-file count at the target rev -- before `walker.discover`
@@ -500,7 +506,9 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     # into thinking the wait scales with the mapped set. Naming it
     # "git-tracked" makes that distinction explicit instead of
     # implying it's the same count `dekko map`'s own summary reports.
-    message = sequential_disclosure_message(len(candidates), all_cores=False)
+    message = sequential_disclosure_message(
+        len(candidates), all_cores=jobs > 1
+    )
     if message is None:
         return
     print(message, file=sys.stderr)

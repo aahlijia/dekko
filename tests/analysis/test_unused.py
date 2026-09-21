@@ -7,6 +7,7 @@ import pytest
 
 from dekko.integrations import cli
 from dekko.analysis import unused
+from dekko.render import mapfile
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import ExternalCall, Import, Param, Symbol
 
@@ -1573,3 +1574,31 @@ def test_no_blind_language_caveat_when_every_language_has_calls() -> None:
     )
     assert unused.languages_without_calls(index) == set()
     assert unused._blind_language_caveat(index, "callables") is None
+
+
+def test_unused_status_agrees_with_find_unused_for_every_symbol(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # The drift guard. `sanity --unused` answers "was this flagged?"
+    # through `unused_status`; round 32's bug was that it used to
+    # answer from a private, different notion of "unused".
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "class Config:\n    def load(self):\n        return 1\n\n\n"
+                "def _uses(c: Config):\n    return c.load()\n\n\n"
+                "def _dead():\n    return 2\n\n\n"
+                "def main():\n    return _uses(Config())\n"
+            ),
+            "tests/test_a.py": "def test_x():\n    return 1\n",
+            "run.sh": "helper() {\n  echo hi\n}\n",
+        }
+    )
+    index = mapfile.load_map(root)
+    for globs in ((), ("a.py",)):
+        flagged = {s.id for s in unused.find_unused(index, globs, "all")}
+        assert flagged or globs, "fixture must flag something"
+        for sym in index.symbols_by_id.values():
+            status = unused.unused_status(index, sym, globs)
+            assert status.flagged == (sym.id in flagged), sym.id
+            assert (status.reason == unused.STATUS_FLAGGED) == status.flagged

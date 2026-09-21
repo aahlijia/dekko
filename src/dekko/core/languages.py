@@ -294,7 +294,20 @@ RUST = LanguageSpec(
 (struct_item name: (type_identifier) @classname) @classdef
 (enum_item name: (type_identifier) @classname) @classdef
 (trait_item name: (type_identifier) @classname) @classdef
+
+(source_file
+  (type_item name: (type_identifier) @classname) @classdef)
+(mod_item
+  body: (declaration_list
+    (type_item name: (type_identifier) @classname) @classdef))
 """,
+    # The two ``type_item`` patterns above are anchored to a file or
+    # ``mod`` body on purpose (round 31 F6b): ``type Alias = Real;`` is
+    # a module-level alias worth a ``type_alias`` symbol, but the same
+    # node type inside an ``impl`` block is an *associated type*
+    # (``type Output = Foo;``), and indexing those would mint thousands
+    # of ``Item``/``Output``/``Target`` symbols that name nothing a
+    # ``Type::name()`` path could be rooted at.
     call_query="""
 (call_expression function: (_) @callee arguments: (_)? @args) @call
 """,
@@ -1159,6 +1172,17 @@ _HEADER_DISPATCH_HEURISTIC_VERSION = 1
 # cross-file-``impl`` heritage clause after an upgrade.
 _RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION = 1
 
+# Bumped whenever ``extractor._collect_rust_macro_calls`` changes what
+# it emits for a call recovered from a macro's token stream -- round
+# 32: those calls used to be rendered ``Type.name`` with no argument
+# count whatever the source said, and now carry their real ``::``/``.``
+# joiner, full path, and a count. Same blind spot as the two constants
+# above (Python logic, not a ``LanguageSpec`` field), and the same
+# failure if it's missed: a ``.dekko`` cache built before the change
+# keeps serving dot-joined ``RawCall``s, so after an upgrade the fix
+# would appear not to work on exactly the repos already mapped.
+_RUST_MACRO_CALL_RECOVERY_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.
@@ -1168,8 +1192,9 @@ def spec_fingerprint() -> str:
     style, and any field added to ``LanguageSpec`` later (the loop is
     driven by ``dataclasses.fields``, not a hand-kept list, so a new
     field is covered automatically) — plus
-    ``_HEADER_DISPATCH_HEURISTIC_VERSION`` and
-    ``_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION``, which each cover
+    ``_HEADER_DISPATCH_HEURISTIC_VERSION``,
+    ``_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION`` and
+    ``_RUST_MACRO_CALL_RECOVERY_VERSION``, which each cover
     one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments). Used to
     invalidate a stale ``.dekko`` cache entry or flag a stale
@@ -1185,6 +1210,7 @@ def spec_fingerprint() -> str:
         f"header_dispatch_heuristic={_HEADER_DISPATCH_HEURISTIC_VERSION}",
         "rust_heritage_impl_subtype_recovery="
         f"{_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION}",
+        f"rust_macro_call_recovery={_RUST_MACRO_CALL_RECOVERY_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):

@@ -5096,6 +5096,384 @@ def test_rust_type_path_reaches_a_trait_default_method(tmp_path: Path) -> None:
     ]
 
 
+# Round 31 F6b: the same path shape, rooted at a type the repo doesn't
+# define at all (std, third-party, macro-generated). The owner rule
+# above can't veto it, since there is no in-repo owner to name.
+
+_SCROLL_HANDLE = (
+    "pub struct ScrollHandle;\n"
+    "impl ScrollHandle {\n    pub fn default() -> Self { ScrollHandle }\n}\n"
+)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["Default::default", "Vec::default", "collections::FxHashMap::default"],
+)
+def test_rust_unknown_type_path_is_external(tmp_path: Path, path: str) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/g/src/div.rs": (
+                f"{_SCROLL_HANDLE}"
+                f"pub fn make() {{\n    let _v = {path}();\n}}\n"
+            ),
+        },
+    )
+    assert "crates/g/src/div.rs::make" not in graph.calls_out
+    assert graph.ambiguous == []
+    assert [e.callee for e in graph.external] == [path]
+
+
+def test_rust_type_alias_is_indexed_but_associated_types_are_not(
+    tmp_path: Path,
+) -> None:
+    _write_tree(
+        tmp_path,
+        {
+            "crates/a/src/lib.rs": (
+                "pub struct Real;\n"
+                "pub type Alias = Real;\n"
+                "pub mod inner {\n    pub type Nested = u8;\n}\n"
+                "pub trait Shape {\n    type Output;\n}\n"
+                "impl Shape for Real {\n    type Output = u8;\n}\n"
+            ),
+        },
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    kinds = {s.name: s.kind for f in files for s in f.symbols}
+    assert kinds["Alias"] == "type_alias"
+    assert kinds["Nested"] == "type_alias"
+    assert "Output" not in kinds
+
+
+def test_rust_type_alias_path_still_reaches_the_aliased_type(
+    tmp_path: Path,
+) -> None:
+    # The reason alias indexing had to land first: without an `Alias`
+    # symbol the unknown-type rule would send this real call external.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/real.rs": (
+                "pub struct Real;\n"
+                "impl Real {\n    pub fn build() -> Self { Real }\n}\n"
+                "pub type Alias = Real;\n"
+            ),
+            "crates/a/src/user.rs": (
+                "use crate::real::Alias;\n"
+                "pub fn make() {\n    let _r = Alias::build();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/user.rs::make"] == [
+        "crates/a/src/real.rs::Real.build"
+    ]
+
+
+def test_rust_use_as_rename_is_not_an_unknown_type(tmp_path: Path) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/real.rs": (
+                "pub struct Real;\n"
+                "impl Real {\n    pub fn build() -> Self { Real }\n}\n"
+            ),
+            "crates/a/src/user.rs": (
+                "use crate::real::Real as Renamed;\n"
+                "pub fn make() {\n    let _r = Renamed::build();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/user.rs::make"] == [
+        "crates/a/src/real.rs::Real.build"
+    ]
+
+
+def test_rust_in_repo_use_is_not_an_unknown_type() -> None:
+    # zed: `pub use text::Buffer as TextBuffer;` in `language`, then
+    # `use language::TextBuffer;` elsewhere. The rename isn't written
+    # in the calling file and matches no symbol, so only the in-repo
+    # `use` gives it away. Same binding from outside the repo: unknown.
+    call = RawCall(
+        caller_id=None,
+        path="crates/ui/src/ui.rs",
+        text="TextBuffer::build",
+        name="build",
+        receiver="TextBuffer",
+    )
+    build = _fn(
+        "crates/text/src/text.rs", "build", "Buffer.build", language="rust"
+    )
+
+    def unknown(source: str) -> bool:
+        binding = Import(path=call.path, name="TextBuffer", source=source)
+        return resolver_mod._rust_unknown_type_path(
+            call, [build], {}, {"TextBuffer": binding}, {"text", "language"}
+        )
+
+    assert not unknown("language::TextBuffer")
+    assert unknown("ropey::TextBuffer")
+
+
+def test_rust_associated_type_path_is_left_to_the_ladder(
+    tmp_path: Path,
+) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/p/src/lib.rs": (
+                "pub trait Message {\n    fn stop() {}\n}\n"
+                "pub trait Request {\n    type ProtoRequest: Message;\n}\n"
+                "pub fn run<T: Request>() {\n"
+                "    T::ProtoRequest::stop();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/p/src/lib.rs::run"] == [
+        "crates/p/src/lib.rs::Message.stop"
+    ]
+
+
+def test_rust_qualified_associated_type_path_is_left_to_the_ladder(
+    tmp_path: Path,
+) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/p/src/lib.rs": (
+                "pub trait Message {\n    fn stop() {}\n}\n"
+                "pub trait Request {\n    type ProtoRequest: Message;\n}\n"
+                "pub struct Cmd;\n"
+                "pub fn run() {\n"
+                "    <Cmd as Request>::ProtoRequest::stop();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/p/src/lib.rs::run"] == [
+        "crates/p/src/lib.rs::Message.stop"
+    ]
+
+
+def test_rust_cross_file_impl_is_never_placed_on_a_type_alias(
+    tmp_path: Path,
+) -> None:
+    # zed: `impl<T> TideResultExt for tide::Result<T>` is not an impl
+    # for collab's own `pub type Result<..>` alias.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/c/src/lib.rs": (
+                "pub type Result<T> = std::result::Result<T, u8>;\n"
+            ),
+            "crates/c/src/errors.rs": (
+                "pub trait TideResultExt {}\n"
+                "impl<T> TideResultExt for tide::Result<T> {}\n"
+            ),
+        },
+    )
+    assert "crates/c/src/lib.rs::Result" not in graph.heritage_out
+
+
+def test_rust_impl_supertype_is_never_a_type_alias(tmp_path: Path) -> None:
+    # zed: `impl ActionHandler for ..` means accesskit's trait; the
+    # only in-repo `ActionHandler` is an unrelated `type` alias.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/ui/src/lib.rs": (
+                "pub type ActionHandler = Box<dyn Fn(u8)>;\n"
+            ),
+            "crates/win/src/lib.rs": (
+                "use accesskit::ActionHandler;\n"
+                "pub struct A11yActionHandler;\n"
+                "impl ActionHandler for A11yActionHandler {}\n"
+            ),
+        },
+    )
+    assert "crates/win/src/lib.rs::A11yActionHandler" not in graph.heritage_out
+
+
+def test_rust_macro_generated_type_with_a_handwritten_impl(
+    tmp_path: Path,
+) -> None:
+    # No `Minted` symbol exists (a macro defines the struct), but
+    # `Minted.build` does, so the type is not unknown to the repo.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/lib.rs": (
+                "mint!(Minted);\n"
+                "impl Minted {\n    pub fn build() -> Self { todo!() }\n}\n"
+                "pub fn make() {\n    let _m = Minted::build();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/lib.rs::make"] == [
+        "crates/a/src/lib.rs::Minted.build"
+    ]
+
+
+def test_rust_generic_param_path_is_left_to_the_ladder(tmp_path: Path) -> None:
+    # `T::default()`: one or two characters is a generic parameter, not
+    # an unknown type. Behavior here must not change.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/g/src/div.rs": (
+                f"{_SCROLL_HANDLE}"
+                "pub fn make<T: Default>() {\n    let _v = T::default();\n}\n"
+            ),
+        },
+    )
+    assert [e.callee for e in graph.external] != ["T::default"]
+
+
+# Round 32 (zed): calls recovered from `assert_eq!(..)` bodies used to
+# reach the resolver as `Type.name` (a dot, no arg count), so none of
+# the Rust shape rules above ever applied to them.
+
+_POINT = (
+    "pub struct Point;\n"
+    "impl Point {\n    pub fn new(r: u32, c: u32) -> Self { Point }\n}\n"
+)
+
+
+def test_rust_macro_path_call_never_takes_the_files_only_new(
+    tmp_path: Path,
+) -> None:
+    # The reported repro, in miniature: a 2-arg `Point::new` credited
+    # to the file's lone, zero-arg `SelectionsCollection::new`.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/rope/src/rope.rs": _POINT,
+            "crates/editor/src/selections.rs": (
+                "use rope::Point;\n"
+                "pub struct Selections;\n"
+                "impl Selections {\n"
+                "    pub fn new() -> Self { Selections }\n}\n"
+                "pub fn check(p: Point) {\n"
+                "    assert_eq!(p, Point::new(1, 1));\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/editor/src/selections.rs::check"] == [
+        "crates/rope/src/rope.rs::Point.new"
+    ]
+
+
+def test_rust_macro_path_call_to_an_unknown_type_is_external(
+    tmp_path: Path,
+) -> None:
+    # F6b now reaches macro bodies too.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/g/src/div.rs": (
+                f"{_SCROLL_HANDLE}"
+                "pub fn check(v: Vec<u8>) {\n"
+                "    assert_eq!(v, Vec::default());\n}\n"
+            ),
+        },
+    )
+    assert "crates/g/src/div.rs::check" not in graph.calls_out
+    assert "Vec::default" in [e.callee for e in graph.external]
+
+
+def test_rust_macro_module_path_call_reaches_the_free_function(
+    tmp_path: Path,
+) -> None:
+    # Rendered `movement.down`, this read as a dot-call, and a
+    # dot-call can never reach a free function: the F11 veto was
+    # killing the CORRECT edge.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/e/src/movement.rs": "pub fn down(x: u8) -> u8 { x }\n",
+            "crates/e/src/tests.rs": (
+                "use crate::movement;\n"
+                "pub fn check() {\n    assert_eq!(movement::down(1), 1);\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/e/src/tests.rs::check"] == [
+        "crates/e/src/movement.rs::down"
+    ]
+
+
+def test_rust_macro_method_chain_never_lands_on_a_free_function(
+    tmp_path: Path,
+) -> None:
+    # `xs.iter().count()` used to be recovered as a bare `count()`.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/e/src/lib.rs": (
+                "pub fn count() -> usize { 0 }\n"
+                "pub fn check(xs: Vec<u8>) {\n"
+                "    assert_eq!(xs.iter().count(), 0);\n}\n"
+            ),
+        },
+    )
+    assert "crates/e/src/lib.rs::check" not in graph.calls_out
+
+
+def test_rust_lifetimed_self_is_a_receiver_for_arity(tmp_path: Path) -> None:
+    # `&'a self` wasn't recognized as the receiver, so the method's
+    # arity came out one too high and its lone correct caller was
+    # rejected. Parsed calls had this all along; it surfaced when
+    # macro-recovered calls gained an arg count (zed: +325 edges).
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/l/src/syntax_map.rs": (
+                "pub struct SyntaxSnapshot;\n"
+                "impl SyntaxSnapshot {\n"
+                "    pub fn layers<'a>(&'a self, b: &'a u8) -> u8 { 0 }\n"
+                "    pub fn edit<'a>(&'a mut self, b: &'a u8) {}\n}\n"
+            ),
+            "crates/l/src/user.rs": (
+                "pub fn read(b: u8) {\n"
+                "    let map = crate::make();\n"
+                "    let _n = map.layers(&b);\n"
+                "    map.edit(&b);\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/l/src/user.rs::read"] == [
+        "crates/l/src/syntax_map.rs::SyntaxSnapshot.edit",
+        "crates/l/src/syntax_map.rs::SyntaxSnapshot.layers",
+    ]
+
+
+def test_rust_channel_try_recv_is_not_the_repos_only_try_recv(
+    tmp_path: Path,
+) -> None:
+    # zed defines one `try_recv`; 66 `rx.try_recv()` calls on plain
+    # channels took it. Its own same-file caller must still resolve.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/g/src/queue.rs": (
+                "pub struct State;\n"
+                "impl State {\n    pub fn try_recv(&self) -> u8 { 0 }\n}\n"
+                "pub fn pop(state: State) -> u8 {\n    state.try_recv()\n}\n"
+            ),
+            "crates/a/src/tool.rs": (
+                "pub fn poll(rx: smol::channel::Receiver<u8>) {\n"
+                "    let _ = rx.try_recv();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/g/src/queue.rs::pop"] == [
+        "crates/g/src/queue.rs::State.try_recv"
+    ]
+    assert "crates/a/src/tool.rs::poll" not in graph.calls_out
+
+
 def test_rust_crate_import_prefers_own_crates_same_named_type(
     tmp_path: Path,
 ) -> None:

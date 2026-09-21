@@ -1026,6 +1026,10 @@ def _timeout_and_args_for_command(
     candidates = diff_mod.tracked_at_rev(root, target_rev)
     timeout = _scaled_client_timeout_for_revcache_miss(candidates)
     if not jobs_explicit and getattr(args, "jobs", None) == 1:
+        # Round 31 P4.1 made ``--jobs 0`` the CLI default for these
+        # commands, so a parsed CLI invocation no longer arrives here
+        # with an unchosen 1. Kept for a programmatic ``Namespace``
+        # that does.
         # Round-25 finding: this is the one operation shape (a
         # cold-rev-cache resolve on a large repo, routed through an
         # already-running daemon) where sequential is a uniquely bad

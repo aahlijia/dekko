@@ -120,6 +120,19 @@ def test_spec_fingerprint_changes_with_header_dispatch_heuristic_version(
     assert languages.spec_fingerprint() != baseline
 
 
+def test_spec_fingerprint_changes_with_rust_macro_call_recovery_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round 32: extractor._collect_rust_macro_calls changed what it
+    # emits (real `::`/`.` joiner, full path, arg count). Python logic,
+    # not a LanguageSpec field, so without this marker an upgraded
+    # install keeps serving cached dot-joined RawCalls and the fix
+    # appears not to work on any repo mapped before it.
+    baseline = languages.spec_fingerprint()
+    monkeypatch.setattr(languages, "_RUST_MACRO_CALL_RECOVERY_VERSION", 999999)
+    assert languages.spec_fingerprint() != baseline
+
+
 def test_javascript() -> None:
     files, edges = _map("js")
     syms = _symbols(files)

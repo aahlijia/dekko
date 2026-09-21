@@ -113,6 +113,18 @@ class Context:
     index_cache: dict[Path, mapfile.MapIndex] = field(default_factory=dict)
 
 
+# Worker count for a rev-cache-miss old-side re-parse/resolve behind
+# ``impacted_tests``/``workset`` (round 31 P4.1). These tools used to
+# call ``affected.run``/``workset.run`` without ``jobs`` at all, so they
+# inherited the functions' own sequential default: a first-touch call
+# on tensorflow ran single-threaded for 12+ minutes, far past any MCP
+# client's patience, while the same request with all cores finishes in
+# about four. Same value the CLI's ``--jobs 0`` default resolves to;
+# ``resolver._pool_workers`` still scales it down to what the work
+# justifies, so a small repo never pays for a pool it can't use.
+_COLD_REV_JOBS = repo_ops.resolve_workers(0)
+
+
 def _capture(fn: Callable[[], int]) -> tuple[int, str, str]:
     """Run ``fn`` with stdout/stderr captured.
 
@@ -628,7 +640,12 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     budget = int(budget) if budget is not None else affected.DEFAULT_BUDGET
     code, out, err = _capture(
         lambda: affected.run(
-            root, rev, as_json=False, limit=limit, budget=budget
+            root,
+            rev,
+            as_json=False,
+            limit=limit,
+            budget=budget,
+            jobs=_COLD_REV_JOBS,
         )
     )
     if code == affected.EXIT_ERROR:
@@ -705,6 +722,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
             no_regen=False,
             task=task,
             type_impact=type_impact,
+            jobs=_COLD_REV_JOBS,
         )
     )
     if code != 0:

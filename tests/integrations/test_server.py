@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import sys
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
@@ -1240,14 +1241,18 @@ def test_impacted_tests_tool_defaults_budget(
         as_json,  # noqa: ANN001
         limit,  # noqa: ANN001
         budget=None,  # noqa: ANN001
+        jobs=None,  # noqa: ANN001
     ) -> int:
         seen["budget"] = budget
+        seen["jobs"] = jobs
         print("impacted")
         return 0
 
     monkeypatch.setattr(server.affected, "run", fake_run)
     assert _call(ctx, "impacted_tests", {})["isError"] is False
     assert seen["budget"] == server.affected.DEFAULT_BUDGET
+    # Round 31 P4.1: never the function's own sequential default.
+    assert seen["jobs"] == (os.cpu_count() or 1)
 
     assert _call(ctx, "impacted_tests", {"budget": 9000})["isError"] is False
     assert seen["budget"] == 9000

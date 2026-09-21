@@ -4,7 +4,7 @@ from pathlib import Path
 
 from dekko.core import languages
 from dekko.core.extractor import _parse_rust_use, extract_file
-from dekko.core.model import Symbol
+from dekko.core.model import RawCall, Symbol
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -155,6 +155,104 @@ def test_rust_assert_macro_calls_are_visible(tmp_path: Path) -> None:
         1 for c in fm.calls if c.line in (15, 16) and c.name == "helper"
     )
     assert call_count_from_vec_and_println == 0
+
+
+def _rust_macro_calls(tmp_path: Path, body: str) -> dict[str, RawCall]:
+    spec = languages.spec_for_path("lib.rs")
+    assert spec is not None
+    (tmp_path / "lib.rs").write_text(f"fn t() {{\n{body}}}\n")
+    fm = extract_file(tmp_path, "lib.rs", spec)
+    assert fm.error is None
+    return {c.text: c for c in fm.calls}
+
+
+def test_rust_macro_recovered_calls_keep_their_joiner(tmp_path: Path) -> None:
+    # Round 32 (zed): every recovered call was rendered `recv.name`,
+    # whatever the source said, so `assert_eq!(p, Point::new(1, 1))`
+    # reached the resolver as `Point.new` with no arg count. Every
+    # Rust shape rule reads the joiner off that text: the `Type::name`
+    # owner rule and the unknown-type veto stood down, the dot-call
+    # veto fired, and the ladder took the file's only `new`. 4,287
+    # such sites on zed. Each expectation below is what the SAME call
+    # produces when tree-sitter parses it outside a macro.
+    calls = _rust_macro_calls(
+        tmp_path,
+        "    assert_eq!(gpui::Point::new(1, 1).is_zero(), true);\n"
+        "    assert_eq!(Self::build(a, b), Foo::default());\n"
+        "    assert!(crate::util::normalize(p) == super::helper());\n"
+        "    assert!(buf.len() > helper(1));\n",
+    )
+    assert calls["gpui::Point::new"].receiver == "gpui::Point"
+    assert calls["gpui::Point::new"].arg_count == 2
+    assert calls["Self::build"].receiver == "Self"
+    # `default` is a contextual keyword with its own token type.
+    assert calls["Foo::default"].arg_count == 0
+    assert calls["crate::util::normalize"].receiver == "crate::util"
+    assert calls["super::helper"].arg_count == 0
+    assert calls["buf.len"].receiver == "buf"
+    assert calls["helper"].receiver is None
+    assert calls["helper"].arg_count == 1
+    assert not any("Point.new" in text for text in calls)
+
+
+def test_rust_macro_recovered_method_chain_keeps_a_receiver(
+    tmp_path: Path,
+) -> None:
+    # The token left of the dot is a `token_tree`, not an identifier,
+    # so `count` used to lose its receiver and come out as a BARE
+    # call, which the ladder resolves by preferring a free function:
+    # the one thing a method call can't be.
+    calls = _rust_macro_calls(
+        tmp_path,
+        "    assert_eq!(x.iter().count(), 1);\n"
+        "    assert!((a - b).abs() < 1.0);\n",
+    )
+    assert calls["x.iter().count"].receiver == "x.iter()"
+    assert "count" not in calls
+    # A head this scan can't read still leaves a method call.
+    assert calls["_.abs"].receiver == "_"
+
+
+def test_rust_macro_recovered_turbofish_is_recovered_or_dropped(
+    tmp_path: Path,
+) -> None:
+    calls = _rust_macro_calls(
+        tmp_path,
+        "    assert!(Vec::<u8>::new().is_empty());\n"
+        "    assert!(HashMap::<K, Vec<u8>>::with_capacity(4).is_empty());\n"
+        "    assert_eq!(<Foo as Bar>::make(1), 2);\n"
+        "    assert!(a > b::c(1));\n",
+    )
+    assert calls["Vec::new"].receiver == "Vec"
+    assert calls["HashMap::with_capacity"].receiver == "HashMap"
+    # `>` here is a comparison, not the end of a turbofish.
+    assert calls["b::c"].receiver == "b"
+    # A joiner was seen but the path head is unreadable: emit NOTHING.
+    # A call known to be qualified, reported as bare, is known-wrong.
+    assert not any(c.name == "make" for c in calls.values())
+
+
+def test_rust_macro_recovered_arg_count_is_conservative(
+    tmp_path: Path,
+) -> None:
+    calls = _rust_macro_calls(
+        tmp_path,
+        "    assert_eq!(f(1, g(2, 3),), h());\n"
+        "    assert!(xs.iter().map(|a, b| a + b).len() > 0);\n"
+        "    assert!(k(Map::<A, B>::new()));\n"
+        "    assert_eq!(GroupName(s), other);\n",
+    )
+    assert calls["f"].arg_count == 2  # nested call and trailing comma
+    assert calls["g"].arg_count == 2
+    assert calls["h"].arg_count == 0
+    # Closure params and generic args put commas at the list's own
+    # depth. No count beats a wrong one: arity REJECTS candidates.
+    assert calls["xs.iter().map"].arg_count is None
+    assert calls["k"].arg_count is None
+    # A bare capitalized callee is a tuple-struct/variant construction.
+    # A type symbol has no params, so a count would reject the struct
+    # (zed: 78 correct edges lost when this was counted).
+    assert calls["GroupName"].arg_count is None
 
 
 def test_rust_nested_fn_not_a_method(tmp_path: Path) -> None:

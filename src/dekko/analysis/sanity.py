@@ -95,6 +95,7 @@ from pathlib import Path
 
 from dekko import repo_ops
 from dekko.analysis import ambiguous, query
+from dekko.analysis import unused as unused_mod
 from dekko.classify import is_test_path
 from dekko.core import languages
 from dekko.core.model import TYPE_KINDS, Symbol
@@ -204,11 +205,35 @@ CAUSE_COMMENT_MENTION = (
     "comment mention — not a call site (near the symbol's own "
     "definition, or in its file's leading header comment)"
 )
+# Round 32 Track 2(b): a comment line is never a call site wherever it
+# sits, so the old "only near the definition or in the file header"
+# gate protected nothing. The zone survives in the wording instead, so
+# a row still says how much context backs it.
+CAUSE_COMMENT_ELSEWHERE = (
+    "comment mention — not a call site (a comment line, away from the "
+    "symbol's definition)"
+)
 CAUSE_IMPORT_STATEMENT = (
     "import/require statement naming the symbol — not a call site"
 )
 CAUSE_TYPE_ANNOTATION = (
-    "type annotation / generic type argument — not a call site"
+    "type position (annotation, generic argument, construction, or "
+    "enum payload) — not a call site"
+)
+# Round 32 Track 2(a), tier 1: the map already holds this exact
+# (path, line) as a value-reference edge to the target. Not a guess.
+CAUSE_VALUE_REFERENCE = (
+    "passed or stored as a value, not called — dekko has this as a "
+    "reference (see: dekko query uses <target>)"
+)
+# Tier 2: a line-shape match in a language whose spec has no
+# ``reference_query``. The label says it is a shape match and names
+# what dekko can't see, per this module's "admit what you don't know"
+# rule.
+CAUSE_VALUE_REFERENCE_UNRESOLVED = (
+    "looks passed or stored as a value, not called (line-shape match) "
+    "— dekko records no value references for this file's language; a "
+    "known blind spot, not a call the resolver missed"
 )
 CAUSE_LOCAL_BINDING_OR_LITERAL = (
     "matches an unrelated local variable/parameter declaration, or a "
@@ -583,10 +608,47 @@ _RUST_RETURN_TYPE_TEMPLATE = r"->\s*&?(?:mut\s+)?{name}\b(?!\s*\(|::)"
 # either, even though in practice dekko's own resolver already
 # attributes such a call as a match before classify_miss ever sees it.
 _RUST_REF_TYPE_TEMPLATE = r"&(?:mut\s+)?{name}\b(?!\s*\(|::)"
+# Round 32 Track 2(d), zed.md: two Rust shapes that name a *type* with
+# no call involved. Both are consulted only when the target itself is
+# a type (``target_is_type``): for a function target ``name {`` is a
+# block after an expression and ``(name)`` is a value handed to a
+# call, which is value-reference territory, not this bucket's.
+#
+# Struct literal or struct pattern: ``let loc = AbortMessageLocation {``.
+_RUST_STRUCT_LITERAL_TEMPLATE = r"\b{name}\s*\{{"
+# ...but never a declaration or impl header, which also put ``Name {``
+# on the line. Own-definition lines are already excluded upstream and
+# ``impl`` headers match their own template above; this guard is for a
+# same-named declaration dekko didn't index (a ``macro_rules!`` body).
+_RUST_DECL_HEADER_TEMPLATE = (
+    r"\b(?:struct|enum|union|impl|trait|mod)\s+(?:<[^>]*>\s*)?{name}\b"
+)
+# Enum-variant payload or tuple-struct field: ``Variant(Name),``,
+# ``struct Wrapper(pub Name);``, ``Variant(Other, Name)``. The leading
+# CamelCase identifier is what separates a payload *declaration* from
+# ``items.map(Name)``, where a tuple-struct constructor travels as a
+# function value -- that one is a real (if indirect) use, left alone.
+_RUST_TUPLE_PAYLOAD_TEMPLATE = (
+    r"\b[A-Z]\w*\s*\((?:[^()]*,)?\s*(?:pub(?:\([^)]*\))?\s+)?"
+    r"{name}\s*[,)]"
+)
+
+
+def _looks_like_rust_type_construction(stripped: str, name: str) -> bool:
+    """Whether a stripped Rust line names the type ``name`` (already
+    ``re.escape``d) as a struct literal/pattern or a tuple payload."""
+    if re.search(_RUST_TUPLE_PAYLOAD_TEMPLATE.format(name=name), stripped):
+        return True
+    if re.search(_RUST_DECL_HEADER_TEMPLATE.format(name=name), stripped):
+        return False
+    return (
+        re.search(_RUST_STRUCT_LITERAL_TEMPLATE.format(name=name), stripped)
+        is not None
+    )
 
 
 def _looks_like_type_annotation(
-    snippet: str, bare_name: str, path: str
+    snippet: str, bare_name: str, path: str, target_is_type: bool = False
 ) -> bool:
     """Whether a grep-matched line uses ``bare_name`` in a TS/JS or
     Rust type position (an ``import type`` statement, a parameter/
@@ -605,6 +667,12 @@ def _looks_like_type_annotation(
     on the grammar being Rust specifically, since their syntax
     (``impl``, ``->``, ``&``, ``::<...>``) never appears in TS/JS
     source the same way.
+
+    ``target_is_type`` (round 32 Track 2(d)) additionally admits Rust
+    struct literals and enum/tuple-struct payloads -- see
+    ``_looks_like_rust_type_construction``. Computed by the caller from
+    the target symbol's kind; ``False`` keeps the pre-round-32
+    behavior.
     """
     grammar = _grammar_for_path(path)
     if grammar not in _TYPE_ANNOTATION_GRAMMARS:
@@ -626,7 +694,11 @@ def _looks_like_type_annotation(
         )
     ):
         return True
-    return False
+    return (
+        grammar == "rust"
+        and target_is_type
+        and _looks_like_rust_type_construction(stripped, name)
+    )
 
 
 # Round 25 claude-buddy.md Finding 2: a same-bare-name local variable/
@@ -692,6 +764,78 @@ def _looks_like_local_binding_or_literal(snippet: str, bare_name: str) -> bool:
     # anchored template in this module.
     return (
         re.search(_STRING_LITERAL_TEMPLATE.format(name=name), stripped)
+        is not None
+    )
+
+
+# Round 32 Track 2(a), tier 2: a function handed around as a value in
+# a language dekko extracts no reference edges for. Tier 1 (the map
+# already recorded this exact line as a reference) is the caller's job
+# and needs no regex; this is only the fallback for grammars whose
+# ``LanguageSpec.reference_query`` is ``None``.
+#
+# One shape only: the **path-qualified** name, ``.map(Thing::as_str)``.
+# The design also had a bare name in argument position
+# (``register(my_fn)``) and a field init (``handler: my_fn,``). Both
+# were built, measured on zed, and removed: of ~10,000 rows they
+# moved, nearly all were same-named *locals* (``Some(buffer)``,
+# ``(program, args)``, ``indent_guide(buffer_id, 1)``), because Rust
+# names a getter after what it returns. A bare name can't be told from
+# a local without scope analysis -- the read-side twin of the
+# resolver's own shadowed-local bug (Track 5). A ``::`` in front of
+# the name is the one thing a local can never have.
+#
+# Allowlisted grammars, not "every grammar without a reference query":
+# the path shape means this in Rust and C++; extend on evidence, same
+# as ``_TYPE_ANNOTATION_GRAMMARS``.
+_VALUE_REFERENCE_GRAMMARS = frozenset({"rust", "cpp"})
+# Refuses a ``(`` after the name -- the whole safety property: a real
+# missed *call* can never land here. Also refuses a trailing ``::``
+# (turbofish call ``name::<T>(x)``, or ``name`` being a module) and
+# ``!`` (macro invocation).
+_VALUE_PATH_TEMPLATE = r"::\s*{name}\b(?!\s*(?:\(|::|!))"
+# ``use a::b::name;`` / ``using ns::name;`` have the same shape and are
+# imports. Rust/C++ have no entry in ``_IMPORT_LINE_TEMPLATES``, so
+# this function has to stand down on them itself.
+_USE_STATEMENT = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?use\b|^using\b")
+# One row of a multi-line ``use a::{b, c::name};`` block: nothing but
+# names, ``::`` paths, commas and braces.
+_BARE_NAME_LIST_LINE = re.compile(r"^(?:[\w\s,{}*]|::)+;?$")
+# zed, measured: a path inside a string (``"std::net::UdpSocket::bind"``,
+# ``.expect("validated in BenchAppContext::build")``) or a lint path
+# in an attribute (``#[warn(clippy::all)]``) has the shape and is not
+# a value. Quoted text is blanked before matching; attribute lines are
+# refused outright.
+_DOUBLE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+_ATTRIBUTE_LINE_PREFIXES = ("#[", "#![")
+
+
+def _looks_like_value_reference(
+    snippet: str, bare_name: str, path: str
+) -> bool:
+    """Whether a grep-matched line names ``bare_name`` as a
+    path-qualified value (``Thing::name``) with no call after it.
+
+    A line-shape heuristic, scoped to ``_VALUE_REFERENCE_GRAMMARS`` --
+    always ``False`` elsewhere, including every language dekko *does*
+    record reference edges for, where an unrecorded value reference is
+    a real resolver miss and must stay visible as one. It can't say
+    *which* ``name`` the path reaches (``Other::as_str`` matches a
+    sanity run on ``Prompt::as_str``), only that the line is not a
+    call; the cause text says "line-shape match" for that reason. The
+    caller only consults this for a non-type target (see
+    ``_classify_grep_hits``).
+    """
+    if _grammar_for_path(path) not in _VALUE_REFERENCE_GRAMMARS:
+        return False
+    stripped = snippet.strip()
+    if stripped.startswith(_ATTRIBUTE_LINE_PREFIXES):
+        return False
+    if _USE_STATEMENT.search(stripped) or _BARE_NAME_LIST_LINE.match(stripped):
+        return False
+    code = _DOUBLE_QUOTED.sub('""', stripped)
+    return (
+        re.search(_VALUE_PATH_TEMPLATE.format(name=re.escape(bare_name)), code)
         is not None
     )
 
@@ -976,11 +1120,27 @@ def _looks_like_comment_line(snippet: str, path: str) -> bool:
     read. Returns ``False`` for a path whose grammar isn't in
     ``_COMMENT_PREFIXES_BY_GRAMMAR`` (unsupported entirely, or one of
     the deliberately-unmapped Vue/Svelte SFC grammars).
+
+    Round 32 Track 2(b) made this the *only* gate on a comment cause
+    (the near-definition/header zone now picks the wording, not the
+    verdict), so two prefix matches that aren't comments are refused
+    here: a PHP 8 ``#[Attribute]`` line (``#`` opens a comment in PHP,
+    ``#[`` opens an attribute, and an attribute can name a class), and
+    a line whose leading ``/* ... */`` closes with real code after it.
     """
-    prefixes = _COMMENT_PREFIXES_BY_GRAMMAR.get(_grammar_for_path(path) or "")
+    grammar = _grammar_for_path(path) or ""
+    prefixes = _COMMENT_PREFIXES_BY_GRAMMAR.get(grammar)
     if not prefixes:
         return False
-    return snippet.strip().startswith(prefixes)
+    stripped = snippet.strip()
+    if not stripped.startswith(prefixes):
+        return False
+    if grammar == "php" and stripped.startswith("#["):
+        return False
+    if stripped.startswith("/*") and "*/" in stripped:
+        return not stripped.split("*/", 1)[1].strip()
+
+    return True
 
 
 # Bounded scan depth for the block-comment-continuation check below --
@@ -1072,6 +1232,8 @@ def classify_miss(
     looks_like_cross_file_collision: bool = False,
     in_leading_header_comment: bool = False,
     is_known_collision_name: bool = False,
+    is_recorded_reference: bool = False,
+    looks_like_value_reference: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
@@ -1124,6 +1286,16 @@ def classify_miss(
     exact. A line matching none of these is reported as "unexplained"
     rather than forcing a guess that doesn't fit — matching the plan's
     own "false confidence from the classifier itself" caution.
+
+    Round 32 Track 2 changed that order in three places, and the
+    paragraph above predates it. The comment check now runs right
+    after the import checks (above the type and string-literal
+    checks) and fires for *any* comment line: the near-definition/
+    header zone only picks between ``CAUSE_COMMENT_MENTION`` and
+    ``CAUSE_COMMENT_ELSEWHERE``. ``is_recorded_reference`` comes next,
+    exact and index-backed. ``looks_like_value_reference``, a shape
+    heuristic, sits low: after the unsupported-language check and
+    before the cross-file-collision one.
 
     Args:
         snippet: The grep-matched line's text.
@@ -1181,6 +1353,14 @@ def classify_miss(
             ``_is_generic_name`` alongside its curated word list,
             computed once per ``run()``/``run_all()`` invocation by the
             caller (round 28 cline.md §3.5).
+        is_recorded_reference: Whether the map holds this hit's exact
+            ``(path, line)`` as a value-reference edge to the target
+            (``_reference_sites``). An index fact computed by the
+            caller, never a guess made from inside this function.
+        looks_like_value_reference: Whether the hit line has the shape
+            of the name used as a value in a language dekko records no
+            reference edges for (``_looks_like_value_reference``).
+            Callers leave it ``False`` for a type target.
 
     Returns:
         One of the ``CAUSE_*`` constants.
@@ -1191,6 +1371,17 @@ def classify_miss(
         return CAUSE_IMPORT_STATEMENT
     if looks_like_import_member:
         return CAUSE_IMPORT_STATEMENT
+    # Round 32 Track 2(c): the comment test sits above the type and
+    # string-literal checks. A comment is a comment whatever it quotes
+    # (``# ... "tfrun" commands ...`` used to get the literal label).
+    # It stays below the anchored qualified-call/import checks, which
+    # can't match prose.
+    if looks_like_comment:
+        if near_own_definition or in_leading_header_comment:
+            return CAUSE_COMMENT_MENTION
+        return CAUSE_COMMENT_ELSEWHERE
+    if is_recorded_reference:
+        return CAUSE_VALUE_REFERENCE
     if looks_like_type_annotation:
         return CAUSE_TYPE_ANNOTATION
     if looks_like_local_binding_or_literal:
@@ -1200,9 +1391,7 @@ def classify_miss(
         is_test_file=is_test_file,
         unsupported_language=unsupported_language,
         tests_excluded=tests_excluded,
-        near_own_definition=near_own_definition,
-        looks_like_comment=looks_like_comment,
-        in_leading_header_comment=in_leading_header_comment,
+        looks_like_value_reference=looks_like_value_reference,
         looks_like_cross_file_collision=looks_like_cross_file_collision,
         likely_unrelated_external=likely_unrelated_external,
         is_known_collision_name=is_known_collision_name,
@@ -1215,9 +1404,7 @@ def _classify_miss_remaining(
     is_test_file: bool,
     unsupported_language: bool,
     tests_excluded: bool,
-    near_own_definition: bool,
-    looks_like_comment: bool,
-    in_leading_header_comment: bool,
+    looks_like_value_reference: bool,
     looks_like_cross_file_collision: bool,
     likely_unrelated_external: bool,
     is_known_collision_name: bool = False,
@@ -1229,12 +1416,10 @@ def _classify_miss_remaining(
     documented/tested beyond what ``classify_miss``'s own test suite
     already exercises through the public function.
     """
-    if looks_like_comment and (
-        near_own_definition or in_leading_header_comment
-    ):
-        return CAUSE_COMMENT_MENTION
     if unsupported_language:
         return CAUSE_UNSUPPORTED_LANGUAGE
+    if looks_like_value_reference:
+        return CAUSE_VALUE_REFERENCE_UNRESOLVED
     if looks_like_cross_file_collision:
         return CAUSE_CROSS_FILE_COLLISION
     if likely_unrelated_external:
@@ -1423,6 +1608,116 @@ def _receiver_mismatch(
     return not any(declaring_type in ln for ln in window)
 
 
+def _reference_sites(
+    index: MapIndex, symbols: list[Symbol]
+) -> frozenset[tuple[str, int]]:
+    """Every ``(path, line)`` where the map records one of ``symbols``
+    used as a value rather than called (round 32 Track 2(a), tier 1).
+
+    Read off ``MapIndex.referenced_in``/``ref_lines``, the same tables
+    ``dekko query uses`` answers from -- but **only edges the
+    referencing file could actually have made** (``_can_see``). The
+    design called this tier "exact"; measuring it on claude-code said
+    otherwise. Reference resolution has no notion of a shadowing
+    local, so ``const count = ...; if (count >= 3)`` is recorded as a
+    reference to an unrelated ``utils/array.ts::count``: 876 of 1,507
+    candidate rows there (58%) sat in files that neither define nor
+    import the name. Labelling those "dekko has this as a reference"
+    would bless the resolver's mistake from the one command meant to
+    catch it. An edge that fails the visibility test contributes
+    nothing here, so its row keeps whatever cause it had before.
+
+    Module-scope references are included: their caller is the
+    ``path::<module>`` pseudo-id, which never enters ``symbols_by_id``,
+    so the path comes off the id itself (same fallback as
+    ``mapfile._prod_id``). Empty for any language whose spec has no
+    ``reference_query``.
+    """
+    sites: set[tuple[str, int]] = set()
+    for sym in symbols:
+        for caller in index.referenced_in.get(sym.id, []):
+            caller_sym = index.symbols_by_id.get(caller)
+            path = (
+                caller_sym.path
+                if caller_sym is not None
+                else caller.split("::", 1)[0]
+            )
+            if not _can_see(index, path, sym):
+                continue
+            sites.update(
+                (path, ln) for ln in index.ref_lines.get((caller, sym.id), [])
+            )
+    return frozenset(sites)
+
+
+# Languages where a sibling file in the same directory shares a
+# package/namespace and needs no import to name the target.
+_SAME_DIR_PACKAGE_GRAMMARS = frozenset({"go", "java"})
+
+
+def _can_see(index: MapIndex, path: str, sym: Symbol) -> bool:
+    """Whether code in ``path`` could name ``sym`` at all: same file,
+    an import binding the symbol's own name or its outermost declaring
+    type (``Src`` for ``Src::getSource``), or a same-directory sibling
+    in a package-scoped language.
+
+    An index fact (``MapIndex.imports_by_path``), no file I/O. Errs
+    toward ``False``: a namespace import (``import * as u``) or a
+    Python ``import mod`` doesn't bind the name and isn't credited.
+    """
+    if path == sym.path:
+        return True
+    visible = {sym.name, sym.qualname.split(".", 1)[0]}
+    if any(imp.name in visible for imp in index.imports_by_path.get(path, [])):
+        return True
+    return (
+        _grammar_for_path(path) in _SAME_DIR_PACKAGE_GRAMMARS
+        and Path(path).parent == Path(sym.path).parent
+    )
+
+
+# ``_can_see``'s blind side: a file that imports ``errorMessage`` *and*
+# binds its own ``const errorMessage`` in a catch block (claude-code
+# ``utils/ide.ts``). The import makes the edge possible, the local
+# makes this particular line not it, and no regex can tell which
+# scope a line sits in. So any local binding of the name anywhere in
+# the file switches tier 1 off for that whole file. Shapes: a keyword
+# declaration, a destructuring one, a typed parameter, an arrow
+# parameter, a catch binding, a Python/Go bare assignment, a loop
+# variable.
+_LOCAL_SHADOW_TEMPLATES = (
+    r"\b(?:const|let|var|val)\s+{name}\b",
+    r"\b(?:const|let|var)\s*[\{{\[][^=;]*\b{name}\b[^=;]*[\}}\]]\s*=",
+    r"[(,]\s*{name}\??\s*:\s*\S",
+    r"\b{name}\s*=>|\(\s*{name}\s*\)\s*=>",
+    r"\bcatch\s*\(\s*{name}\b",
+    r"^\s*{name}\s*:?=(?!=)",
+    r"\bfor\s+(?:\w+\s*,\s*)?{name}\b",
+)
+
+
+def _file_shadows_name(root: Path, path: str, bare_name: str) -> bool:
+    """Whether ``path`` binds a local named ``bare_name`` anywhere --
+    the second, textual half of tier 1's "could this edge be real"
+    test (``_can_see`` is the index half).
+
+    Java is exempt: its only reference shape is ``Type::name``, which
+    is never a local. A read failure returns ``True``: no evidence, no
+    label, the same safe direction as every refusal in this tier.
+    """
+    if _grammar_for_path(path) == "java":
+        return False
+    try:
+        text = (root / path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return True
+    name = re.escape(bare_name)
+    return any(
+        re.search(template.format(name=name), text, re.MULTILINE)
+        for template in _LOCAL_SHADOW_TEMPLATES
+    )
+
+
 def _classify_grep_hits(
     hits: list[GrepHit],
     bare_name: str,
@@ -1434,6 +1729,8 @@ def _classify_grep_hits(
     declaring_path: str | None = None,
     other_candidate_files: frozenset[str] = frozenset(),
     is_known_collision_name: bool = False,
+    ref_sites: frozenset[tuple[str, int]] = frozenset(),
+    target_kinds: frozenset[str] = frozenset(),
 ) -> dict[tuple[str, int], str]:
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
@@ -1488,6 +1785,17 @@ def _classify_grep_hits(
             value per call (the same bare name for every hit in this
             call), computed once by the caller (round 28 cline.md
             §3.5) and threaded into every ``classify_miss`` call below.
+        ref_sites: ``_reference_sites`` for the target (``run()``) or
+            for every symbol sharing ``bare_name`` (``--all``). A hit
+            at one of these locations is ``is_recorded_reference``.
+            Empty by default, and always in ``--usages`` mode.
+        target_kinds: The ``Symbol.kind`` of the target (``run()``) or
+            of every symbol sharing ``bare_name`` (``--all``). Gates
+            the two round-32 shape heuristics in opposite directions,
+            both conservatively on a mixed group: Rust construction/
+            payload shapes need *every* kind in ``TYPE_KINDS``, the
+            value-reference shape needs *none* of them to be. Empty
+            (the default, and ``--usages`` mode) switches both off.
 
     Returns:
         ``(path, line) -> CAUSE_*`` for every hit not in
@@ -1496,11 +1804,24 @@ def _classify_grep_hits(
         grep-only split; the map's values are the pre-computed cause
         for every location that turns out to be grep-only.
     """
+    target_is_type = bool(target_kinds) and target_kinds <= TYPE_KINDS
+    allow_value_shape = bool(target_kinds) and not (target_kinds & TYPE_KINDS)
+    # path -> ``_file_shadows_name``, one file read per path at most.
+    shadowed: dict[str, bool] = {}
     causes: dict[tuple[str, int], str] = {}
     for h in hits:
         loc = (h.path, h.line)
         if loc in own_def_locs:
             continue
+        looks_like_value = allow_value_shape and _looks_like_value_reference(
+            h.snippet, bare_name, h.path
+        )
+        is_recorded_reference = loc in ref_sites
+        if is_recorded_reference:
+            if h.path not in shadowed:
+                shadowed[h.path] = _file_shadows_name(root, h.path, bare_name)
+            is_recorded_reference = not shadowed[h.path]
+
         causes[loc] = classify_miss(
             h.snippet,
             bare_name,
@@ -1518,8 +1839,15 @@ def _classify_grep_hits(
             looks_like_import_member=_looks_like_multiline_import_member(
                 root, h, bare_name
             ),
-            looks_like_type_annotation=_looks_like_type_annotation(
-                h.snippet, bare_name, h.path
+            # ``.map(Prompt::as_str)`` also matches the TS-shaped
+            # ``: name`` type template (on the second colon of ``::``)
+            # and used to be labelled "type annotation" for a function
+            # target. The path-value reading wins.
+            looks_like_type_annotation=(
+                not looks_like_value
+                and _looks_like_type_annotation(
+                    h.snippet, bare_name, h.path, target_is_type
+                )
             ),
             looks_like_local_binding_or_literal=(
                 _looks_like_local_binding_or_literal(h.snippet, bare_name)
@@ -1544,6 +1872,8 @@ def _classify_grep_hits(
                 and _receiver_mismatch(root, h, declaring_type, declaring_path)
             ),
             is_known_collision_name=is_known_collision_name,
+            is_recorded_reference=is_recorded_reference,
+            looks_like_value_reference=looks_like_value,
         )
     return causes
 
@@ -2098,6 +2428,8 @@ def _build_unused_json_doc(
         "target": f"{sym.path}:{sym.qualname}:{sym.start_line}",
         "bare_name": bare_name,
         "has_dekko_evidence": has_dekko_evidence,
+        "flagged_by_unused": True,
+        "unused_status": unused_mod.STATUS_FLAGGED,
         "grep_command": grep_command,
         "grep_truncated": sweep.truncated,
         "grep_skipped_pathological": sweep.skipped_pathological,
@@ -2126,6 +2458,94 @@ def _build_unused_json_doc(
             sweep.skipped_pathological
         )
     return doc
+
+
+def _not_flagged_reason(
+    status: unused_mod.UnusedStatus,
+    sym: Symbol,
+    fan_in: int,
+    referenced_by: int,
+) -> str:
+    """Say, in words, why ``dekko unused`` doesn't list ``sym``."""
+    if status.reason == unused_mod.STATUS_CALL_BLIND:
+        return (
+            f"dekko extracts no calls for {sym.language}, so `dekko "
+            "unused` does not evaluate its symbols at all"
+        )
+    if status.reason == unused_mod.STATUS_ROOT:
+        return (
+            "it is a root, which is never dead code by definition "
+            "(exported, decorated, `main`, a test, re-exported, a "
+            "std-trait impl, or matched by --roots)"
+        )
+    if fan_in or referenced_by:
+        return f"it is in use (fan-in {fan_in}, referenced-by {referenced_by})"
+
+    return (
+        "it is kept alive by evidence other than a direct call: a used "
+        "member, a subtype, a type-position use, or an overload sharing "
+        "its qualified name"
+    )
+
+
+_NOT_FLAGGED_ADVICE = (
+    "--unused cross-checks a symbol `dekko unused` reported; for a low "
+    "or surprising caller count use: dekko sanity <target>"
+)
+
+
+def _report_not_flagged(
+    sym: Symbol,
+    status: unused_mod.UnusedStatus,
+    index: MapIndex,
+    as_json: bool,
+) -> int:
+    """``sanity --unused`` on a symbol ``dekko unused`` never flagged.
+
+    Round 32, reproduced on all seven repos: this mode used to run its
+    full grep sweep for any symbol and close with "flagged unused, but
+    N call-shaped references found (possible resolver miss)", for
+    ``SpringApplication.run`` (4,861 grep hits) as readily as for real
+    dead code. The premise was never checked, and the sweep's volume
+    is what made the false report look authoritative. So there is no
+    sweep here: no flag means no verdict to cross-check, and saying so
+    takes three lines and no grep.
+    """
+    fan_in = len(index.calls_in.get(sym.id) or [])
+    referenced_by = len(index.referenced_in.get(sym.id) or [])
+    reason = _not_flagged_reason(status, sym, fan_in, referenced_by)
+    if as_json:
+        empty = Meter(tokens=0, returned=0, total=0)
+        doc = {
+            "action": "sanity",
+            "query_action": "unused",
+            "target": f"{sym.path}:{sym.qualname}:{sym.start_line}",
+            "bare_name": sym.name,
+            "has_dekko_evidence": bool(fan_in or referenced_by),
+            "flagged_by_unused": False,
+            "unused_status": status.reason,
+            "skipped": f"not flagged by dekko unused: {reason}",
+            "advice": _NOT_FLAGGED_ADVICE,
+            "grep_command": None,
+            "grep_truncated": False,
+            "grep_skipped_pathological": 0,
+            "reference_hits": [],
+            "counts": {
+                "reference_hits": 0,
+                "filtered_noise": 0,
+                "excluded_declarations": 0,
+                "grep_hits_swept": 0,
+            },
+            "meta": {"reference_hits": empty.as_dict()},
+            "generic_name_caution": False,
+        }
+        print(json.dumps(doc, indent=2))
+        return EXIT_OK
+
+    print(f"dekko sanity --unused '{sym.name}' ({sym.path}:{sym.start_line})")
+    print(f"  not flagged by `dekko unused`: {reason}")
+    print(f"  no grep sweep run -- {_NOT_FLAGGED_ADVICE}")
+    return EXIT_OK
 
 
 def _print_unused_text(
@@ -2158,6 +2578,10 @@ def _print_unused_text(
         print(f"  note: {_pathological_skip_note(skipped_pathological)}")
     if excluded_declarations:
         print(f"  note: {_excluded_declarations_note(excluded_declarations)}")
+    # Only a symbol `dekko unused` really lists reaches this printer
+    # (see ``_report_not_flagged``), so "flagged" below is a checked
+    # fact, no longer an assumption. Evidence can still be "present"
+    # here: an overload's callers are keyed to a sibling's id.
     evidence = (
         "none -- this is why it was flagged" if not has_evidence else "present"
     )
@@ -2205,6 +2629,7 @@ def _run_unused_check(
     limit: int,
     budget: int | None,
     as_json: bool,
+    root_globs: tuple[str, ...] = (),
 ) -> int:
     """``dekko sanity --unused <target>`` — see module docstring.
 
@@ -2230,6 +2655,11 @@ def _run_unused_check(
     sym, candidates = query.resolve_target(index, target)
     if sym is None:
         return query.report_unresolved(target, candidates, index)
+
+    status = unused_mod.unused_status(index, sym, root_globs)
+    if not status.flagged:
+        return _report_not_flagged(sym, status, index, as_json)
+
     bare_name = sym.name
 
     own_def_locs = frozenset(
@@ -2376,6 +2806,7 @@ def run(
     budget: int | None = None,
     as_json: bool = False,
     group_by_file: bool = False,
+    root_globs: tuple[str, ...] = (),
 ) -> int:
     """Cross-check a ``callers``/``uses``/``unused`` result against a
     grep sweep.
@@ -2452,7 +2883,9 @@ def run(
         the grep sweep itself couldn't run.
     """
     if unused:
-        return _run_unused_check(index, target, root, limit, budget, as_json)
+        return _run_unused_check(
+            index, target, root, limit, budget, as_json, root_globs
+        )
 
     query_index = index if include_tests else index.without_tests()
     own_def_locs: frozenset[tuple[str, int]] = frozenset()
@@ -2469,6 +2902,12 @@ def run(
     # ``_classify_grep_hits`` in its existing, ungated behavior. See
     # ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``.
     declaring_type: str | None = None
+    # Round 32 Track 2: the target's recorded value-reference sites
+    # and its kind, for ``_classify_grep_hits``'s (a) and (d) checks.
+    # Callers mode only, like everything above: an external base
+    # identifier has neither a reference edge nor a kind.
+    ref_sites: frozenset[tuple[str, int]] = frozenset()
+    target_kinds: frozenset[str] = frozenset()
 
     if usages:
         bare_name = target
@@ -2510,6 +2949,8 @@ def run(
             if s.path != sym.path or s.start_line != sym.start_line
         )
         declaring_type = _resolve_declaring_type(query_index, sym)
+        ref_sites = _reference_sites(query_index, [sym])
+        target_kinds = frozenset({sym.kind})
         sym_target = f"{sym.path}:{sym.qualname}:{sym.start_line}"
         try:
             dekko_hits, module_level = _dekko_hits_callers(
@@ -2567,6 +3008,8 @@ def run(
         declaring_path=sym.path if declaring_type is not None else None,
         other_candidate_files=other_candidate_files,
         is_known_collision_name=is_known_collision_name,
+        ref_sites=ref_sites,
+        target_kinds=target_kinds,
     )
     grep_only_rows = [
         _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits
@@ -2681,6 +3124,8 @@ def _sweep_bare_name(
     tests_excluded: bool,
     other_candidate_files: frozenset[str] = frozenset(),
     is_known_collision_name: bool = False,
+    ref_sites: frozenset[tuple[str, int]] = frozenset(),
+    target_kinds: frozenset[str] = frozenset(),
 ) -> tuple[GrepSweepResult, dict[tuple[str, int], str]]:
     """One grep + classify pass for ``bare_name``, shared across every
     symbol in its fan-in group — the sweep's whole cost-saving
@@ -2705,6 +3150,11 @@ def _sweep_bare_name(
             ``ambiguous.collision_names(query_index)`` -- computed once
             by ``run_all()`` and threaded through unchanged (round 28
             cline.md §3.5).
+        ref_sites: Recorded value-reference sites for *every* symbol
+            sharing ``bare_name`` -- same shared-causes simplification
+            as ``other_candidate_files`` (round 32 Track 2(a)).
+        target_kinds: Kinds of every symbol sharing ``bare_name``; see
+            ``_classify_grep_hits`` for how a mixed group is handled.
 
     Returns:
         ``(sweep, causes)``. ``causes`` is empty when ``sweep.error``
@@ -2723,6 +3173,8 @@ def _sweep_bare_name(
         tests_excluded=tests_excluded,
         is_known_collision_name=is_known_collision_name,
         other_candidate_files=other_candidate_files,
+        ref_sites=ref_sites,
+        target_kinds=target_kinds,
     )
     return sweep, causes
 
@@ -2981,6 +3433,8 @@ def _run_all_sweeps(
             tests_excluded=tests_excluded,
             other_candidate_files=other_candidate_files,
             is_known_collision_name=name in collision,
+            ref_sites=_reference_sites(query_index, symbols_for_name),
+            target_kinds=frozenset(s.kind for s in symbols_for_name),
         )
         return name, sweep, causes
 

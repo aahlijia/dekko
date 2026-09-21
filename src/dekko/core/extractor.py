@@ -3,7 +3,7 @@
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from dekko.core.languages import LanguageSpec
 from dekko.core.model import (
@@ -42,6 +42,7 @@ _CLASSDEF_KIND: dict[str, str] = {
     "struct_type": "struct",
     "trait_item": "trait",
     "type_alias_declaration": "type_alias",
+    "type_item": "type_alias",
 }
 
 
@@ -1158,9 +1159,10 @@ def _collect_rust_macro_calls(
     finding — see ``round15-macro-extraction-gaps-plan.md`` Track A).
 
     Scans ``_RUST_ASSERT_MACROS`` invocations' token trees for
-    ``identifier(...)``/``identifier.identifier(...)``-shaped
-    subsequences and treats each as a call site. General user-defined
-    macro bodies are out of scope.
+    ``name(...)``, ``recv.name(...)`` and ``a::b::name(...)``-shaped
+    subsequences and treats each as a call site, rendered the way the
+    source wrote it (see ``_rust_token_qualifier`` for why the joiner
+    matters). General user-defined macro bodies are out of scope.
 
     Args:
         root: Parsed file's root node.
@@ -1193,17 +1195,17 @@ def _find_target_macro_invocations(
             and token_tree is not None
             and _text(macro_name) in _RUST_ASSERT_MACROS
         ):
-            for site, name, receiver in _rust_macro_call_sites(token_tree):
-                caller = _enclosing(spans, site.start_byte)
-                text = f"{receiver}.{name}" if receiver else name
+            for found in _rust_macro_call_sites(token_tree):
+                caller = _enclosing(spans, found.node.start_byte)
                 calls.append(
                     RawCall(
                         caller_id=caller.id if caller else None,
                         path=rel,
-                        text=text,
-                        name=name,
-                        receiver=receiver,
-                        line=site.start_point[0] + 1,
+                        text=found.text,
+                        name=found.name,
+                        receiver=found.receiver,
+                        line=found.node.start_point[0] + 1,
+                        arg_count=found.arg_count,
                     )
                 )
 
@@ -1219,9 +1221,37 @@ def _first_child_of_type(node: Node, node_type: str) -> Node | None:
     return None
 
 
-def _rust_macro_call_sites(
-    token_tree: Node,
-) -> list[tuple[Node, str, str | None]]:
+class _MacroCallSite(NamedTuple):
+    """One call recovered from a Rust macro's raw token stream.
+
+    Attributes:
+        node: The callee's own ``identifier`` node.
+        name: Its text (``new``).
+        receiver: What the call is qualified by, or ``None`` for a bare
+            call: the whole ``::`` path (``gpui::Point``), or for a
+            dot-call the one token left of the dot (``buf``,
+            ``iter()``).
+        joiner: ``"::"``, ``"."``, or ``""`` for a bare call.
+        arg_count: Written argument count, or ``None`` when the token
+            stream can't be counted reliably.
+    """
+
+    node: Node
+    name: str
+    receiver: str | None
+    joiner: str
+    arg_count: int | None
+
+    @property
+    def text(self) -> str:
+        """Callee text as the source wrote it, joiner included."""
+        if not self.receiver:
+            return self.name
+
+        return f"{self.receiver}{self.joiner}{self.name}"
+
+
+def _rust_macro_call_sites(token_tree: Node) -> list[_MacroCallSite]:
     """Find identifier-shaped call sites inside a macro's token tree.
 
     Structural, not textual: a call written inside a macro argument
@@ -1237,37 +1267,221 @@ def _rust_macro_call_sites(
         token_tree: A macro invocation's ``token_tree`` argument node.
 
     Returns:
-        ``(identifier_node, name, receiver)`` for each call-shaped
-        site found, in document order.
+        Each call-shaped site found, in document order.
     """
-    found: list[tuple[Node, str, str | None]] = []
+    found: list[_MacroCallSite] = []
     _scan_rust_token_tree(token_tree, found)
     return found
 
 
-def _scan_rust_token_tree(
-    node: Node, found: list[tuple[Node, str, str | None]]
-) -> None:
+def _scan_rust_token_tree(node: Node, found: list[_MacroCallSite]) -> None:
     """Depth-first scan for ``identifier(...)``-shaped subsequences."""
     children = node.children
     for i, child in enumerate(children):
-        if child.type == "identifier":
-            nxt = children[i + 1] if i + 1 < len(children) else None
-            if (
-                nxt is not None
-                and nxt.type == "token_tree"
-                and _text(nxt).startswith("(")
-            ):
-                receiver = None
-                if (
-                    i >= 2
-                    and children[i - 1].type in (".", "::")
-                    and children[i - 2].type == "identifier"
-                ):
-                    receiver = _text(children[i - 2])
-                found.append((child, _text(child), receiver))
-        elif child.type == "token_tree":
+        if child.type == "token_tree":
             _scan_rust_token_tree(child, found)
+            continue
+        if child.type not in _RUST_CALLEE_TOKEN_TYPES or i + 1 >= len(
+            children
+        ):
+            continue
+        args = children[i + 1]
+        if args.type != "token_tree" or not _text(args).startswith("("):
+            continue
+        qualifier = _rust_token_qualifier(children, i)
+        if qualifier is None:
+            continue
+        receiver, joiner = qualifier
+        name = _text(child)
+        found.append(
+            _MacroCallSite(
+                node=child,
+                name=name,
+                receiver=receiver,
+                joiner=joiner,
+                arg_count=(
+                    None
+                    if _rust_is_bare_constructor(name, receiver)
+                    else _rust_token_arg_count(args)
+                ),
+            )
+        )
+
+
+# Token node types that can name a callee. ``default`` and ``union``
+# are contextual keywords with node types of their own, so
+# ``assert_eq!(x, Foo::default())``, as common as Rust test idioms
+# get, was never recovered at all before round 32.
+_RUST_CALLEE_TOKEN_TYPES = frozenset({"identifier", "default", "union"})
+
+
+def _rust_is_bare_constructor(name: str, receiver: str | None) -> bool:
+    """Whether a recovered call is ``Name(..)``: a tuple-struct or
+    enum-variant construction, not a function call.
+
+    Those get no argument count, on purpose. A type symbol's
+    ``params`` is always ``[]`` (no signature is read off a struct
+    definition), and ``resolver._arity_plausible`` reads that as "takes
+    zero arguments", so a counted ``GroupName(s)`` is rejected against
+    ``struct GroupName(String);``. Live-testing this change on zed:
+    giving these calls a count lost 78 correct ``assert_eq!(Name(x),
+    ..)`` edges.
+
+    The resolver-side fix (treat a type candidate's arity as unknown)
+    was tried in the same session and backed out: it also resolves
+    every *parsed* ``Name(x)``, +552 edges on zed, and 252 of those go
+    to a struct whose name is also an enum variant somewhere
+    (``Left``, ``Text``, ``Image``, ``Path``). dekko doesn't index
+    variants, so ``Left(x)`` from a glob-imported enum would land on an
+    unrelated ``struct Left`` with full confidence. That needs variant
+    indexing first; until then this keeps recovered constructions
+    exactly where they were before round 32.
+    """
+    return receiver is None and name[:1].isupper()
+
+
+# Token node types that can be a segment of a ``::`` path. ``Self`` is
+# a plain ``identifier`` to tree-sitter-rust; these three are not.
+_RUST_PATH_SEGMENT_TYPES = frozenset({"identifier", "crate", "super", "self"})
+
+
+def _rust_token_qualifier(
+    children: list[Node], i: int
+) -> tuple[str | None, str] | None:
+    """What qualifies the callee at ``children[i]``, read leftwards.
+
+    Round 32 (zed): the joiner used to be matched and then thrown
+    away, every recovered call being rendered ``receiver.name``. So
+    ``assert_eq!(p, Point::new(1, 1))`` reached the resolver as
+    ``Point.new``, and every rule that reads a Rust call's *shape* off
+    its text misread it: the ``Type::name`` owner rule and the
+    unknown-type veto stood down (no ``::``), the dot-call veto fired
+    (a ``.``), and with nothing left to object the ladder took the
+    file's only ``new``. 4,287 such sites on zed, concentrated in
+    tests, which is what ``dekko affected`` reads.
+
+    Returns:
+        ``(None, "")`` for a bare call; ``(receiver, joiner)`` for a
+        qualified one; ``None`` when a joiner is present but what it
+        joins can't be recovered. The caller must then emit nothing: a
+        call known to be qualified, reported as bare, is known-wrong
+        (a bare ``new`` is exactly what takes the lone same-file
+        ``new``), and a missing edge beats a wrong one.
+    """
+    if i < 1 or children[i - 1].type not in (".", "::"):
+        return None, ""
+    joiner = children[i - 1].type
+    if joiner == ".":
+        return _rust_token_dot_receiver(children, i - 2), "."
+
+    segments: list[str] = []
+    j = i - 2
+    while True:
+        j = _rust_skip_generic_args(children, j)
+        if j < 0 or children[j].type not in _RUST_PATH_SEGMENT_TYPES:
+            # ``<Foo as Bar>::make(..)``, or a path head this scan
+            # doesn't understand.
+            return None
+        segments.append(_text(children[j]))
+        if j < 1 or children[j - 1].type != "::":
+            break
+        j -= 2
+
+    return "::".join(reversed(segments)), "::"
+
+
+def _rust_token_dot_receiver(children: list[Node], j: int) -> str:
+    """Receiver text for a recovered dot-call, rebuilt leftwards.
+
+    Walks the method chain back to its head, so ``x.iter().count()``
+    gives ``x.iter()`` for ``count``, the same receiver a parsed call
+    gets (argument text is dropped: ``x.get(k).len()`` reads
+    ``x.get()``; only the chain's first segment is ever looked at
+    downstream, for ``self``, an import binding, or a typed
+    parameter). What matters most is that there IS a receiver, so the
+    call stays a method call. It used to be lost whenever the token
+    left of the dot wasn't an ``identifier`` (here, a ``token_tree``),
+    and the call came out as a bare ``count()``, which the ladder
+    resolves by preferring a free function: the one thing a method
+    call can't be. ``"_"`` stands in for a head this scan can't read
+    (a literal, a parenthesised expression).
+    """
+    pieces: list[str] = []
+    while j >= 0:
+        node = children[j]
+        if node.type in _RUST_PATH_SEGMENT_TYPES:
+            pieces.append(_text(node))
+            j -= 1
+        elif (
+            node.type == "token_tree"
+            and j >= 1
+            and children[j - 1].type == "identifier"
+        ):
+            pieces.append(f"{_text(children[j - 1])}()")
+            j -= 2
+        else:
+            break
+        if j < 0 or children[j].type != ".":
+            break
+        j -= 1
+
+    return ".".join(reversed(pieces)) or "_"
+
+
+def _rust_skip_generic_args(children: list[Node], j: int) -> int:
+    """Step left over one turbofish group, if ``children[j]`` ends one.
+
+    ``Vec :: < u8 > :: new``: from the ``>`` back to the ``Vec``.
+    Generic arguments aren't nested token trees, just a flat run of
+    tokens, so this balances angle brackets by hand (``>>`` closes
+    two). Returns ``j`` unchanged when there is no group, and ``-1``
+    when one is opened but never balances, or isn't introduced by
+    ``::`` (so it was a comparison, not a turbofish).
+    """
+    if j < 0 or not _text(children[j]).startswith(">"):
+        return j
+    depth = 0
+    while j >= 0:
+        token = _text(children[j])
+        if token and set(token) == {">"}:
+            depth += len(token)
+        elif token and set(token) == {"<"}:
+            depth -= len(token)
+        if depth <= 0:
+            break
+        j -= 1
+    if j < 2 or depth != 0 or children[j - 1].type != "::":
+        return -1
+
+    return j - 2
+
+
+# Direct-child tokens that make comma-counting unsafe: closure
+# parameters (``|a, b| ..``) and generic arguments (``Map::<K, V>``)
+# both put their commas at the argument list's own depth.
+_RUST_UNCOUNTABLE_ARG_TOKENS = frozenset({"|", "||", "<", ">", "<<", ">>"})
+
+
+def _rust_token_arg_count(args: Node) -> int | None:
+    """Written argument count of a recovered call, when countable.
+
+    Parenthesised and bracketed sub-expressions are already nested
+    ``token_tree`` nodes, so a top-level comma really is a separator,
+    with the two exceptions in ``_RUST_UNCOUNTABLE_ARG_TOKENS``. Those
+    return ``None`` (this path's behavior before round 32) rather than
+    a guess: arity is used to *reject* a sole candidate
+    (``resolver._sole_candidate_match``), so a wrong count costs a
+    correct edge, where no count costs nothing.
+    """
+    inner = [c for c in args.children if c.type not in ("(", ")")]
+    if any(c.type in _RUST_UNCOUNTABLE_ARG_TOKENS for c in inner):
+        return None
+    if not inner:
+        return 0
+    commas = sum(1 for c in inner if c.type == ",")
+    trailing = 1 if inner[-1].type == "," else 0
+
+    return commas + 1 - trailing
 
 
 def _collect_cpp_ctor_arg_calls(
