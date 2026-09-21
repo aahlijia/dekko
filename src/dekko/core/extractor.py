@@ -2894,11 +2894,26 @@ def _imports_js(
     matches: list[tuple[int, dict[str, list[Node]]]], rel: str
 ) -> list[Import]:
     """Normalize JS/TS import statements (named, default, namespace,
-    and side-effect/bare)."""
+    and side-effect/bare), plus the two binding forms that aren't
+    ``import`` statements at all: a dynamic ``const { X } = await
+    import("./x")`` and a CommonJS ``const { X } = require("./x")`` /
+    ``const x = require("./x")``.
+
+    Round 32 Track 5: those two bind a cross-file name exactly as a
+    static import does, and the reference-visibility veto
+    (``resolver._ref_target_visible``) needs to see them. Without
+    them it dropped 23 true edges on claude-code, every one a lazily
+    imported component. The query can't spell "a call to ``require``"
+    without a predicate, so it captures any ``f("...")`` initializer as
+    ``@binder`` and the name is checked here.
+    """
     out: list[Import] = []
     for _, caps in matches:
         module = _one(caps, "from_module")
         if module is None:
+            continue
+        binder = _one(caps, "binder")
+        if binder is not None and _text(binder) != "require":
             continue
         source = _strip_quotes(_text(module))
         name = _one(caps, "name")

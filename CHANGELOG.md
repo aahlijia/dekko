@@ -9,6 +9,97 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.69] — 2026-09-21
+
+Round 32 Track 5, found while building Track 2, not by the sweep.
+Design and measurements:
+`.features/fixes/round31/05-reference-edges-shadowed-locals.md`.
+
+Value-reference edges (what `query uses`, MCP `find_usages` and
+`unused` read) were bound by name alone. The ladder references share
+with calls ends in "it's the only symbol with that name, take it".
+For a call that is a fair guess: `count(x)` on a local is rare. For a
+bare identifier it is not: `const count = ...; if (count >= 3)` is
+every other line, and each one became a reference to whichever
+unrelated `count` the repo defined once. **35% of claude-code's
+reference edges and 57% of cline's joined files that cannot see each
+other.** `uses error` on claude-code listed 1,272 sites of local
+`error` variables.
+
+### Fixed
+- **A reference needs a way to see its target.** In Python and
+  JS/TS/TSX, an edge to another file now needs an import binding that
+  name, and the import has to point into this repo (`import os from
+  "node:os"` then `os.tmpdir()` is not a reference to some script's
+  `const os`; calls have had that guard for a long time, references
+  never did). A veto on the ladder's result, not a filter on its
+  candidates: it can only ever remove an edge. Java and Go are left
+  alone on purpose: their references are syntactic (`Type::method`,
+  type identifiers) and can't be a shadowing local. Files that can't
+  see each other: claude-code 35% -> 2.1%, cline 57% -> 2.9%,
+  claude-buddy 10% -> 0%. The residue is deliberate: a JS-family file
+  with no imports at all (script-style globals) and targets declared
+  in a `.d.ts` (ambient) keep their edges.
+- **Dynamic imports and CommonJS requires are imports.** `const { X }
+  = await import("./x")`, `const { X } = require("./x")`, `const x =
+  require("./x")`, and TypeScript's `require("./x") as typeof
+  import("./x")` (167 sites in claude-code) bind a cross-file name
+  exactly as a static import does, and were recorded nowhere. The
+  veto above found this: it dropped 23 true edges on claude-code and
+  12 on cline, every one a lazily imported module, until these were
+  recorded. Hunting the lost edges for such bindings now finds 0 on
+  all three repos. Call resolution gains from it too: claude-code +23
+  call edges, cline +40 (tests reaching the module they `await
+  import`), and `dekko deps` gains 140 and 107 module edges.
+- **A relative import is in-repo, whatever the file stems say.**
+  `import { run } from "./index"` and `from "."` sent `run()` to
+  `external`. An index file's matching stem is its directory name
+  (`acp` for `acp/index.ts`), which `./index` never spells, so the
+  binding looked external and the call was thrown to noise. Static
+  imports had this bug all along; recording dynamic ones exposed more
+  sites (cline lost 9 correct call edges until it was fixed).
+- **Eight plain reads the JS/TS reference query never captured:**
+  `handle.close()`, `return DEFAULT_PORT`, `if (status)`, `!enabled`,
+  `await pending`, `() => fallback`, `for (const e of EXTENSIONS)`,
+  `export default styles`, plus TypeScript's `x!`, `x as T`, `x
+  satisfies T`. Nobody had noticed, because a module-level `let
+  knownChannelsVersion` read only by `return knownChannelsVersion` was
+  being kept alive by a *false* edge from another file's same-named
+  local. Removing the false edges exposed it: `unused` newly flagged
+  53 symbols and 40 of them were alive through exactly these
+  positions (measured by parsing each file and tallying the parent
+  node of every same-file use). Writes stay out: an assignment target
+  or `x++` is not a use. So does a subscript index (`table[key]`), a
+  round-23 decision left standing.
+
+### Changed
+- **`dekko unused` reports far fewer false positives on JS/TS.**
+  claude-buddy 40 -> 19, claude-code 1,956 -> 1,305, cline 2,136 ->
+  1,687. 28 of the symbols that left the list were sampled against
+  source and all 28 are alive (`loggedExposures.has(feature)`, `for
+  (const t of LINUX_TERMINALS)`, `export default meta`). Going the
+  other way, 9 and 7 symbols are newly flagged: object-literal methods
+  called through a receiver dekko can't type (`conn.isConnected()`),
+  which a false edge used to hide. That is `unused`'s documented
+  call-blind limit, now visible instead of masked.
+- `query uses` / `find_usages` return fewer, truer rows on JS/TS and
+  Python. `dekko deps` and `query importers` see dynamic imports and
+  requires.
+- Every lost call edge was read: claude-code lost 3, all wrong
+  (`axios.patch(..)` -> a repo `fn patch`; `getNativeModule()` from
+  the external `image-processor-napi` -> an unrelated in-repo port).
+  cline lost 0.
+
+### Not fixed
+- A local that shadows a *same-file* or an *imported* symbol
+  (claude-code `utils/ide.ts` imports `errorMessage`, then `const
+  errorMessage = ...` in a catch block). That needs the extractor to
+  know scopes. `sanity` keeps its own read-side guard for it.
+
+Spring-boot (Java), awesome-go and tensorflow's C/C++ (0 relative
+includes) are unaffected; Rust has no reference edges and no `./`
+import sources. Tests: +28 (2,330 passed).
+
 ## [0.43.68] — 2026-09-21
 
 Round 32 Track 2. `dekko sanity` labels every grep-only row with a

@@ -564,7 +564,32 @@ _JS_REFERENCE_BASE = """
 (ternary_expression alternative: (identifier) @ref)
 (spread_element (identifier) @ref)
 (subscript_expression object: (identifier) @ref)
+(member_expression object: (identifier) @ref)
+(return_statement (identifier) @ref)
+(parenthesized_expression (identifier) @ref)
+(unary_expression argument: (identifier) @ref)
+(await_expression (identifier) @ref)
+(arrow_function body: (identifier) @ref)
+(for_in_statement right: (identifier) @ref)
+(export_statement value: (identifier) @ref)
 """
+# The last eight positions above are round 32 Track 5. They are plain
+# *reads* that were never captured: ``handle.close()``, ``return
+# DEFAULT_PORT``, ``if (status)``, ``!enabled``, ``for (const e of
+# IMAGE_EXTENSIONS)``, ``export default styles``. Nobody noticed,
+# because a module-level ``let knownChannelsVersion`` read only by
+# ``return knownChannelsVersion`` was being kept "alive" by a *false*
+# reference edge from an unrelated file's same-named local. Removing
+# those false edges (``resolver._ref_target_visible``) exposed the
+# gap: ``dekko unused`` newly flagged 53 symbols across three repos
+# and 40 of them were alive through exactly these positions (measured
+# by parsing each file and tallying the parent node of every same-file
+# use). Writes are deliberately absent: an assignment target or
+# ``x++`` is not a use, and a variable that is only ever written is
+# dead. A subscript *index* / computed key (``table[key]``) stays
+# out too: round 23 scoped that pattern to ``object:`` on purpose,
+# since keys are overwhelmingly locals. It costs one known symbol
+# across three repos (cline ``hook-factory.ts::exec``).
 
 # TypeScript-only: ``typeof T`` as a *type* (a ``type_query`` node),
 # e.g. ``type X = typeof TOOL_DEFAULTS;`` or ``const w: typeof T = y;``.
@@ -577,6 +602,9 @@ _JS_REFERENCE_BASE = """
 # scoping discipline.
 _TS_TYPE_REFERENCE_EXTRA = """
 (type_query (identifier) @ref)
+(non_null_expression (identifier) @ref)
+(as_expression (identifier) @ref)
+(satisfies_expression (identifier) @ref)
 """
 
 # JSX attribute/expression values (``<Button onClick={handleClick}
@@ -708,6 +736,41 @@ JAVASCRIPT = LanguageSpec(
 
 (import_statement
   . (string) @from_module) @stmt
+
+(variable_declarator
+  name: (object_pattern
+    [(shorthand_property_identifier_pattern) @name
+     (pair_pattern
+       key: (property_identifier) @name
+       value: (identifier) @alias)])
+  value: [
+    (await_expression
+      (call_expression
+        function: (import)
+        arguments: (arguments . (string) @from_module)))
+    (call_expression
+      function: (import)
+      arguments: (arguments . (string) @from_module))
+    (call_expression
+      function: (identifier) @binder
+      arguments: (arguments . (string) @from_module))
+    (await_expression
+      (call_expression
+        function: (identifier) @binder
+        arguments: (arguments . (string) @from_module)))
+  ])
+
+(variable_declarator
+  name: (identifier) @name
+  value: [
+    (await_expression
+      (call_expression
+        function: (import)
+        arguments: (arguments . (string) @from_module)))
+    (call_expression
+      function: (identifier) @binder
+      arguments: (arguments . (string) @from_module))
+  ])
 """,
     container_types={"class_declaration": "name"},
     method_containers=("class_declaration",),
@@ -840,13 +903,40 @@ _TS_TYPE_ALIAS_QUERY = """
 (type_alias_declaration name: (type_identifier) @name)
 """
 
+# TypeScript-only binding form, appended to ``JAVASCRIPT.import_query``
+# for the TS/TSX specs: a CommonJS require wearing a type assertion,
+# ``const { X } = require("./x") as typeof import("./x")``. claude-code
+# has 167 of these (its feature-gated lazy requires). ``as_expression``
+# isn't a node type in the JavaScript grammar, so it can't live in the
+# shared query. Same ``@binder`` contract as the shared patterns: the
+# extractor keeps the match only when the callee is ``require``.
+_TS_IMPORT_EXTRA = """
+(variable_declarator
+  name: (object_pattern
+    [(shorthand_property_identifier_pattern) @name
+     (pair_pattern
+       key: (property_identifier) @name
+       value: (identifier) @alias)])
+  value: (as_expression
+    (call_expression
+      function: (identifier) @binder
+      arguments: (arguments . (string) @from_module))))
+
+(variable_declarator
+  name: (identifier) @name
+  value: (as_expression
+    (call_expression
+      function: (identifier) @binder
+      arguments: (arguments . (string) @from_module))))
+"""
+
 TYPESCRIPT = LanguageSpec(
     name="typescript",
     grammar="typescript",
     extensions=(".ts", ".mts", ".cts"),
     definition_query=_TS_DEFINITIONS,
     call_query=_TS_CALLS,
-    import_query=JAVASCRIPT.import_query,
+    import_query=JAVASCRIPT.import_query + _TS_IMPORT_EXTRA,
     container_types=_TS_CONTAINERS,
     method_containers=tuple(_TS_CONTAINERS),
     param_style="ts",
@@ -866,7 +956,7 @@ TSX = LanguageSpec(
     extensions=(".tsx",),
     definition_query=_TS_DEFINITIONS,
     call_query=_TS_CALLS,
-    import_query=JAVASCRIPT.import_query,
+    import_query=JAVASCRIPT.import_query + _TS_IMPORT_EXTRA,
     container_types=_TS_CONTAINERS,
     method_containers=tuple(_TS_CONTAINERS),
     param_style="ts",

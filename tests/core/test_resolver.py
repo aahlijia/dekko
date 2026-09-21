@@ -5999,3 +5999,274 @@ def test_rust_dot_call_vetoes_a_free_function_without_narrowing() -> None:
     ]
     graph = resolve(files)
     assert graph.edges == []
+
+
+# --- round 32 Track 5: a reference needs a way to see its target ------
+#
+# The ladder refs share with calls ends in name-only rungs. Fine for
+# `count(x)`; not for `const count = ...; if (count >= 3)`, which is
+# every other line. Measured before the fix: 35% of claude-code's and
+# 57% of cline's reference edges joined files that can't see each other.
+
+
+def _ref_graph(
+    lang: str,
+    ext: str,
+    imports: list[Import],
+    target_path: str | None = None,
+) -> tuple[CallGraph, Symbol, Symbol]:
+    target_path = target_path or f"utils/array.{ext}"
+    target = _fn(target_path, "count", language=lang)
+    user = _fn(f"screen.{ext}", "render", language=lang)
+    files = [
+        FileMap(target_path, lang, symbols=[target]),
+        FileMap(
+            f"screen.{ext}",
+            lang,
+            symbols=[user],
+            imports=imports,
+            refs=[
+                RawRef(
+                    caller_id=user.id,
+                    path=f"screen.{ext}",
+                    name="count",
+                    line=9,
+                )
+            ],
+        ),
+    ]
+    return resolve(files), target, user
+
+
+@pytest.mark.parametrize(
+    ("lang", "ext"),
+    [("typescript", "ts"), ("tsx", "tsx"), ("javascript", "js")],
+)
+def test_ref_to_unimported_name_in_a_module_makes_no_edge(
+    lang: str, ext: str
+) -> None:
+    # The file imports *something*, so it is a module, and a module
+    # can't name `count` without importing it: this `count` is a local.
+    other = Import(f"screen.{ext}", "useState", "react/useState")
+    graph, _target, _user = _ref_graph(lang, ext, [other])
+    assert graph.referenced == []
+
+
+def test_ref_to_unimported_python_name_makes_no_edge() -> None:
+    graph, _target, _user = _ref_graph("python", "py", [])
+    assert graph.referenced == []
+
+
+@pytest.mark.parametrize(
+    ("lang", "ext", "source"),
+    [
+        ("typescript", "ts", "./utils/array/count"),
+        ("python", "py", "utils.array.count"),
+    ],
+)
+def test_ref_to_imported_name_keeps_its_edge(
+    lang: str, ext: str, source: str
+) -> None:
+    imp = Import(f"screen.{ext}", "count", source)
+    graph, target, user = _ref_graph(lang, ext, [imp])
+    assert [(e.caller, e.callee) for e in graph.referenced] == [
+        (user.id, target.id)
+    ]
+
+
+def test_ref_within_one_file_keeps_its_edge() -> None:
+    target = _fn("a.py", "handler")
+    user = _fn("a.py", "wire", line=10)
+    files = [
+        FileMap(
+            "a.py",
+            "python",
+            symbols=[target, user],
+            refs=[
+                RawRef(caller_id=user.id, path="a.py", name="handler", line=11)
+            ],
+        )
+    ]
+    graph = resolve(files)
+    assert graph.referenced_in[target.id] == [user.id]
+
+
+def test_ref_from_a_js_file_with_no_imports_is_left_alone() -> None:
+    # No recorded import proves nothing in the JS family: a
+    # script-style file shares globals across files. Err toward the
+    # edge. (`test_reference_resolves_into_referenced_not_calls` above
+    # is this same shape and predates the veto.)
+    graph, target, user = _ref_graph("javascript", "js", [])
+    assert graph.referenced_in[target.id] == [user.id]
+
+
+def test_ref_to_an_ambient_dts_declaration_is_left_alone() -> None:
+    other = Import("screen.ts", "useState", "react/useState")
+    graph, target, user = _ref_graph(
+        "typescript", "ts", [other], target_path="types/globals.d.ts"
+    )
+    assert graph.referenced_in[target.id] == [user.id]
+
+
+def test_ref_veto_does_not_touch_java_or_go() -> None:
+    # Java's references are syntactic `Type::method`, Go's are type
+    # identifiers. Neither can be a shadowing local; a wrong edge there
+    # is an ordinary name collision and stays the ladder's business.
+    for lang, ext in (("java", "java"), ("go", "go")):
+        graph, target, user = _ref_graph(lang, ext, [])
+        assert graph.referenced_in[target.id] == [user.id], lang
+
+
+def test_ref_veto_never_changes_call_resolution() -> None:
+    # Same shape as the no-edge case above, but a *call*: `count(x)` on
+    # a local is rare, so the sole-candidate guess stays.
+    target = _fn("utils/array.ts", "count", language="typescript")
+    user = _fn("screen.ts", "render", language="typescript")
+    files = [
+        FileMap("utils/array.ts", "typescript", symbols=[target]),
+        FileMap(
+            "screen.ts",
+            "typescript",
+            symbols=[user],
+            imports=[Import("screen.ts", "useState", "react/useState")],
+            calls=[
+                RawCall(
+                    caller_id=user.id,
+                    path="screen.ts",
+                    text="count",
+                    name="count",
+                    receiver=None,
+                    line=9,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.calls_in[target.id] == [user.id]
+
+
+@pytest.mark.parametrize(
+    "source", ["./index/runMode", "./runMode", "../runMode"]
+)
+def test_relative_import_is_in_repo_even_when_no_stem_matches(
+    source: str,
+) -> None:
+    # An index file's matching stem is its *directory* (`acp`), which
+    # `./index` and `.` never spell. The binding used to look external,
+    # so the call was thrown to noise. Static imports had this bug too;
+    # recording `await import("./index")` just exposed more sites
+    # (cline lost 9 correct test-to-module call edges until fixed).
+    target = _fn("acp/index.ts", "runMode", language="typescript")
+    user = _fn("acp/index.test.ts", "check", language="typescript")
+    files = [
+        FileMap("acp/index.ts", "typescript", symbols=[target]),
+        FileMap(
+            "acp/index.test.ts",
+            "typescript",
+            symbols=[user],
+            imports=[Import("acp/index.test.ts", "runMode", source)],
+            calls=[
+                RawCall(
+                    caller_id=user.id,
+                    path="acp/index.test.ts",
+                    text="runMode",
+                    name="runMode",
+                    receiver=None,
+                    line=4,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.calls_in.get(target.id) == [user.id]
+    assert graph.external == []
+
+
+def test_bare_package_import_still_shadows_a_repo_name() -> None:
+    # The guard the relative-import fix must not loosen: `expect` from
+    # "vitest" is external, whatever the repo happens to define.
+    target = _fn("helpers/expect.ts", "expectish", language="typescript")
+    repo_expect = _fn("lib/assert.ts", "expect", language="typescript")
+    user = _fn("a.test.ts", "check", language="typescript")
+    files = [
+        FileMap("helpers/expect.ts", "typescript", symbols=[target]),
+        FileMap("lib/assert.ts", "typescript", symbols=[repo_expect]),
+        FileMap(
+            "a.test.ts",
+            "typescript",
+            symbols=[user],
+            imports=[Import("a.test.ts", "expect", "vitest/expect")],
+            calls=[
+                RawCall(
+                    caller_id=user.id,
+                    path="a.test.ts",
+                    text="expect",
+                    name="expect",
+                    receiver=None,
+                    line=3,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert repo_expect.id not in graph.calls_in
+
+
+def test_ref_to_a_name_imported_from_an_external_package_makes_no_edge() -> (
+    None
+):
+    # cline: `import os from "node:os"` then `os.tmpdir()` was recorded
+    # as a reference to a script's own `const os`. The name IS imported,
+    # just not from here. Calls have had this guard for a long time
+    # (`_shadowed_by_external_import`); references never did.
+    imp = Import("screen.ts", "count", "lodash/count")
+    graph, _target, _user = _ref_graph("typescript", "ts", [imp])
+    assert graph.referenced == []
+
+
+def test_ref_veto_runs_inside_the_pooled_path_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `repo_stems` reaches workers through the pool initializer; a
+    # `None` there would only blow up once refs really fan out, so
+    # force the thresholds down the way the other pool tests do.
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_MIN_ITEMS_PER_WORKER", 1)
+    imp = Import("screen.ts", "count", "./utils/array/count")
+    target = _fn("utils/array.ts", "count", language="typescript")
+    user = _fn("screen.ts", "render", language="typescript")
+    files = [
+        FileMap("utils/array.ts", "typescript", symbols=[target]),
+        FileMap(
+            "screen.ts",
+            "typescript",
+            symbols=[user],
+            imports=[imp],
+            refs=[
+                RawRef(
+                    caller_id=user.id, path="screen.ts", name="count", line=n
+                )
+                for n in range(1, 40)
+            ],
+        ),
+    ]
+    other = _fn("panel.ts", "panel", language="typescript")
+    files.append(
+        FileMap(
+            "panel.ts",
+            "typescript",
+            symbols=[other],
+            imports=[Import("panel.ts", "count", "lodash/count")],
+            refs=[
+                RawRef(
+                    caller_id=other.id, path="panel.ts", name="count", line=3
+                )
+            ],
+        )
+    )
+    sequential = resolve_refs(files, workers=1)
+    pooled = resolve_refs(files, workers=2)
+    assert [(e.caller, e.callee, e.lines) for e in pooled[0]] == [
+        (e.caller, e.callee, e.lines) for e in sequential[0]
+    ]
+    assert sequential[1] == {target.id: [user.id]}

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from dekko.core import languages
 from dekko.core.extractor import _parse_rust_use, extract_file
 from dekko.core.model import RawCall, Symbol
@@ -1231,3 +1233,150 @@ def test_parse_rust_use() -> None:
     ]
     assert _parse_rust_use("a::*") == []
     assert ("e", "x::e") in _parse_rust_use("x::{y::{z}, e}")
+
+
+# --- round 32 Track 5: binding forms that aren't import statements -----
+
+
+@pytest.mark.parametrize("filename", ["lazy.ts", "lazy.tsx", "lazy.js"])
+def test_js_dynamic_import_and_require_bindings_are_imports(
+    tmp_path: Path, filename: str
+) -> None:
+    # claude-code: `const { GroveDialog } = await import("./Grove")`.
+    # These bind a cross-file name exactly as a static import does. The
+    # reference-visibility veto dropped 23 true edges there until they
+    # were recorded.
+    spec = languages.spec_for_path(filename)
+    assert spec is not None
+    (tmp_path / filename).write_text(
+        "async function run() {\n"
+        '  const { GroveDialog, a: renamed } = await import("./Grove");\n'
+        "  const {\n"
+        "    Onboarding\n"
+        "  } = await import('./Onboarding');\n"
+        '  const { x } = require("./c");\n'
+        '  const whole = require("./c");\n'
+        '  const ns = await import("./d");\n'
+        "}\n"
+    )
+    fm = extract_file(tmp_path, filename, spec)
+    imports = {(i.name, i.source) for i in fm.imports}
+    assert ("GroveDialog", "./Grove/GroveDialog") in imports
+    assert ("renamed", "./Grove/a") in imports  # local alias, real name
+    assert ("Onboarding", "./Onboarding/Onboarding") in imports
+    assert ("x", "./c/x") in imports
+    assert ("whole", "./c/whole") in imports
+    assert ("ns", "./d/ns") in imports
+
+
+def test_js_only_require_and_import_bind_not_any_string_call(
+    tmp_path: Path,
+) -> None:
+    # The query can't say "a call to require" without a predicate, so
+    # it captures any `f("...")` initializer; the extractor filters.
+    spec = languages.spec_for_path("notimports.ts")
+    assert spec is not None
+    (tmp_path / "notimports.ts").write_text(
+        'const { y } = loadConfig("./e");\n'
+        'const w = translate("./f");\n'
+        'const { z } = await fetchJson("./g");\n'
+    )
+    fm = extract_file(tmp_path, "notimports.ts", spec)
+    assert fm.imports == []
+
+
+@pytest.mark.parametrize("filename", ["gated.ts", "gated.tsx"])
+def test_ts_require_with_type_assertion_is_an_import(
+    tmp_path: Path, filename: str
+) -> None:
+    # claude-code's feature-gated lazy require, 167 sites:
+    #   const { X } = require("./x") as typeof import("./x")
+    # `as_expression` is TypeScript-only, hence `_TS_IMPORT_EXTRA`.
+    spec = languages.spec_for_path(filename)
+    assert spec is not None
+    (tmp_path / filename).write_text(
+        "const {\n"
+        "  BRIEF_TOOL_NAME,\n"
+        "  LEGACY: legacyName\n"
+        "} = require('./prompt.js') as typeof import('./prompt.js');\n"
+        "const mod = require('./mod.js') as typeof import('./mod.js');\n"
+        "const { nope } = helper('./n.js') as Thing;\n"
+    )
+    fm = extract_file(tmp_path, filename, spec)
+    imports = {(i.name, i.source) for i in fm.imports}
+    assert imports == {
+        ("BRIEF_TOOL_NAME", "./prompt.js/BRIEF_TOOL_NAME"),
+        ("legacyName", "./prompt.js/LEGACY"),
+        ("mod", "./mod.js/mod"),
+    }
+
+
+def test_js_grammar_still_compiles_without_the_ts_extra() -> None:
+    # The shared query must stay free of TS-only node types.
+    js = languages.spec_for_path("a.js")
+    ts = languages.spec_for_path("a.ts")
+    assert js is not None and ts is not None
+    assert "as_expression" not in (js.import_query or "")
+    assert "as_expression" in (ts.import_query or "")
+
+
+@pytest.mark.parametrize("filename", ["reads.ts", "reads.js"])
+def test_js_reference_query_captures_plain_reads(
+    tmp_path: Path, filename: str
+) -> None:
+    # Round 32 Track 5: each of these is a read that was never
+    # captured. A module-level `let version` read only by
+    # `return version` looked alive purely because a false edge from
+    # another file's same-named local was propping it up.
+    spec = languages.spec_for_path(filename)
+    assert spec is not None
+    (tmp_path / filename).write_text(
+        "function f() {\n"
+        "  handle.close();\n"  # 2  member_expression object
+        "  if (status) {}\n"  # 3  parenthesized_expression
+        "  if (!enabled) {}\n"  # 4  unary_expression
+        "  for (const e of EXTENSIONS) {}\n"  # 5  for_in right
+        "  const g = () => fallback;\n"  # 6  arrow body
+        "  await pending;\n"  # 7  await_expression
+        "  return DEFAULT_PORT;\n"  # 8  return_statement
+        "}\n"
+        "export default styles;\n"  # 10 export value
+    )
+    fm = extract_file(tmp_path, filename, spec)
+    refs = {(r.name, r.line) for r in fm.refs}
+    assert {
+        ("handle", 2),
+        ("status", 3),
+        ("enabled", 4),
+        ("EXTENSIONS", 5),
+        ("fallback", 6),
+        ("pending", 7),
+        ("DEFAULT_PORT", 8),
+        ("styles", 10),
+    } <= refs
+
+
+def test_js_reference_query_does_not_count_writes(tmp_path: Path) -> None:
+    # A variable that is only ever assigned or incremented is dead.
+    spec = languages.spec_for_path("writes.ts")
+    assert spec is not None
+    (tmp_path / "writes.ts").write_text(
+        "function f() {\n  counter = 0;\n  counter++;\n  total += 1;\n}\n"
+    )
+    fm = extract_file(tmp_path, "writes.ts", spec)
+    assert {r.name for r in fm.refs} == set()
+
+
+def test_ts_reference_query_captures_ts_only_reads(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("tsreads.ts")
+    assert spec is not None
+    (tmp_path / "tsreads.ts").write_text(
+        "function f() {\n"
+        "  use(overrides!);\n"
+        "  const a = config as Settings;\n"
+        "  const b = theme satisfies Theme;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "tsreads.ts", spec)
+    names = {r.name for r in fm.refs}
+    assert {"overrides", "config", "theme"} <= names

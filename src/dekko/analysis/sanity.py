@@ -1627,6 +1627,11 @@ def _reference_sites(
     catch it. An edge that fails the visibility test contributes
     nothing here, so its row keeps whatever cause it had before.
 
+    Since 0.43.69 the resolver vetoes those edges itself
+    (``resolver._ref_target_visible``), so on a fresh map this filter
+    rarely removes anything. It stays for maps built by an older
+    dekko, and costs one dict lookup per edge.
+
     Module-scope references are included: their caller is the
     ``path::<module>`` pseudo-id, which never enters ``symbols_by_id``,
     so the path comes off the id itself (same fallback as

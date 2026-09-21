@@ -97,6 +97,11 @@ bare module specifier, not a particular named/default import binding
 with an arbitrary local binding name appended internally, which
 `--exact` strips back off before comparing, so two different named
 imports from the same package both satisfy the same `--exact` match.
+A JS/TS binding doesn't have to be an `import` statement to count:
+`const { X } = await import("./x")`, `const { X } = require("./x")`,
+`const x = require("./x")` and TypeScript's `require("./x") as typeof
+import("./x")` are all recorded as imports, so `importers` and `deps`
+see lazily loaded modules too.
 `peers <symbol>` finds other symbols
 whose outgoing calls overlap the target's by at least `--min-shared`
 callees (default 2 — a single shared callee, like both calling
@@ -107,6 +112,18 @@ callees has no peers by construction (a clean empty result, not an
 error); a symbol with fewer callees than `--min-shared` gets a hint to
 lower the threshold. Small/sparse repos often need `--min-shared 1`
 to find any peers at all under the default threshold of 2.
+
+`query uses <symbol>` (and `unused`, which reads the same edges) only
+credits a value reference the referencing file could actually make. In
+Python and JS/TS that means the symbol lives in the same file, or the
+file imports that name from somewhere inside the repo. A local
+`const count = ...; if (count >= 3)` in a file that never imports
+`count` is not a use of `utils/array.ts::count`, and `os.tmpdir()`
+after `import os from "node:os"` is not a use of a script's own `const
+os`. Two cases keep their edge because the import table can't settle
+them: a JS-family file with no imports at all (script-style globals)
+and a target declared in a `.d.ts`. Known gap: a local that shadows a
+name the same file *does* import or define still counts as a use.
 
 `query supertypes`/`subtypes` cover declared heritage — `extends`/
 `implements` for Python, JavaScript, TypeScript, and Java; `impl`

@@ -1427,6 +1427,7 @@ def _resolve_refs_chunk(
     by_name_path: dict[tuple[str, str], list[Symbol]],
     imports_by_file: dict[str, dict[str, Import]],
     symbols_by_id: dict[str, Symbol],
+    repo_stems: set[str],
 ) -> dict[tuple[str, str], set[int]]:
     """Resolve every reference in ``files`` into a fresh, local ``edges``
     dict — the reference-resolution analog of ``_resolve_files_chunk``,
@@ -1442,6 +1443,7 @@ def _resolve_refs_chunk(
                 file_imports=file_imports,
                 symbols_by_id=symbols_by_id,
                 edges=edges,
+                repo_stems=repo_stems,
             )
     return edges
 
@@ -1455,12 +1457,14 @@ def _resolve_refs_chunk_worker(
     analog of ``_resolve_files_chunk_worker``."""
     assert _worker_index is not None  # initializer always runs first
     assert _worker_symbols_by_id is not None
+    assert _worker_repo_stems is not None
     return _resolve_refs_chunk(
         files,
         _worker_index,
         _worker_by_name_path,
         _worker_imports_by_file,
         _worker_symbols_by_id,
+        _worker_repo_stems,
     )
 
 
@@ -1499,6 +1503,7 @@ def resolve_refs(
     by_name_path = _build_name_path_index(files)
     imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
+    repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
 
     total_refs = sum(len(fm.refs) for fm in files)
     pool_workers = _pool_workers(workers, total_refs)
@@ -1512,7 +1517,12 @@ def resolve_refs(
         )
         if len(chunks) < 2:
             return _resolve_refs_chunk(
-                files, index, by_name_path, imports_by_file, symbols_by_id
+                files,
+                index,
+                by_name_path,
+                imports_by_file,
+                symbols_by_id,
+                repo_stems,
             )
 
         edges: dict[tuple[str, str], set[int]] = {}
@@ -1524,7 +1534,7 @@ def resolve_refs(
                 index,
                 by_name_path,
                 imports_by_file,
-                None,
+                repo_stems,
                 symbols_by_id,
             ),
         )
@@ -1564,6 +1574,7 @@ def _resolve_ref(
     file_imports: dict[str, Import],
     symbols_by_id: dict[str, Symbol],
     edges: dict[tuple[str, str], set[int]],
+    repo_stems: set[str],
 ) -> None:
     """Resolve one reference; ambiguous/unmatched refs are dropped.
 
@@ -1590,8 +1601,83 @@ def _resolve_ref(
         by_name_path,
         index,
     )
-    if target is not None and target.id != caller_id:
+    if (
+        target is not None
+        and target.id != caller_id
+        and _ref_target_visible(ref, target, file_imports, repo_stems)
+    ):
         edges.setdefault((caller_id, target.id), set()).add(ref.line)
+
+
+# Languages whose references are bare *value* identifiers, the only
+# kind a local binding can shadow. Java's references are syntactic
+# ``Type::method`` and Go's are type identifiers: a wrong edge there is
+# an ordinary name collision, not this bug, and is left to the ladder.
+_REF_VISIBILITY_LANGUAGES = frozenset(
+    {"python", "javascript", "typescript", "tsx"}
+)
+_JS_FAMILY = _LANGUAGE_FAMILIES["javascript"]
+
+
+def _ref_target_visible(
+    ref: RawRef,
+    target: Symbol,
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+) -> bool:
+    """Whether the file holding ``ref`` could name ``target`` at all.
+
+    Round 32 Track 5. The ladder ``_resolve_ref`` shares with calls
+    ends in name-only rungs (sole candidate, last resort). For a call
+    that is a fair guess: ``count(x)`` on a local is rare. For a bare
+    value identifier it is not: ``const count = ...; if (count >= 3)``
+    is every other line, and each one became a reference edge to
+    whichever unrelated ``count`` the repo happened to define once.
+    Measured: 35% of claude-code's reference edges and 57% of cline's
+    joined files that cannot see each other (``error``, ``c``,
+    ``value``, ``sessionId``). ``unused`` spared dead code because of
+    them and ``query uses`` listed them.
+
+    In these languages a cross-file name has to be brought into scope,
+    so an edge to another file needs an import binding that name, and
+    that import has to point into this repo. A *veto on the result*,
+    not a pre-filter on the candidates, for the reason
+    ``_pick_candidate`` gives: narrowing a list can turn
+    "honestly ambiguous" into "confidently guessed"; a veto can only
+    ever remove an edge.
+
+    Errs toward keeping the edge wherever the import table can't be
+    trusted to be complete:
+
+    - A JS-family file with no recorded import at all. CommonJS
+      ``require`` bindings aren't recorded as imports, and a
+      script-style file shares globals across files, so an empty table
+      proves nothing there.
+    - A target declared in a ``.d.ts``: ambient types are global.
+
+    Not covered, by design: a local that shadows a *same-file* or an
+    *imported* symbol (claude-code ``utils/ide.ts`` imports
+    ``errorMessage`` and rebinds it in a catch block). That needs the
+    extractor to know scopes; ``sanity._file_shadows_name`` is the
+    read-side stopgap.
+    """
+    if target.path == ref.path or target.language not in (
+        _REF_VISIBILITY_LANGUAGES
+    ):
+        return True
+    imp = file_imports.get(ref.name)
+    if imp is not None:
+        # Imported, but from where? ``import fs from "node:fs"`` then
+        # ``fs.mkdtempSync(..)`` is the external ``fs``, whatever some
+        # test file's ``const fs = ...`` happens to be called. Calls
+        # have had this guard since ``_shadowed_by_external_import``;
+        # references never did, and capturing ``x.prop`` reads made it
+        # matter (cline: ``fs``, ``os``, vitest's ``expect``).
+        return _import_is_in_repo(imp, repo_stems)
+    if target.language in _JS_FAMILY:
+        return not file_imports or target.path.endswith(".d.ts")
+
+    return False
 
 
 def resolve_heritage(
@@ -5334,6 +5420,9 @@ def _workspace_tagged(
 _RUST_IN_CRATE_PREFIXES = ("crate::", "super::", "self::")
 
 
+_RELATIVE_SOURCE_PREFIXES = ("./", "../")
+
+
 def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     """Whether an import binding plausibly points into this repo.
 
@@ -5357,6 +5446,17 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
         # AgentTool`` showed 11 of 35 implementors with no hint that 24
         # were missing. A file reaching the same trait through a glob
         # resolved fine, which was the tell.
+        return True
+    if imp.source.startswith(_RELATIVE_SOURCE_PREFIXES):
+        # ``import { run } from "./index"`` / ``from "."`` / ``from
+        # ".."``: a relative specifier is in-repo by definition, and
+        # the stem test can't see it. An index file's matching stem is
+        # its *directory* name (``acp`` for ``acp/index.ts``, see
+        # ``_repo_stem``), which ``./index`` and ``.`` never spell, so
+        # the binding looked external and ``_shadowed_by_external_
+        # import`` threw the call to noise. Round 32 Track 5 found it:
+        # recording ``await import("./index")`` as an import cost cline
+        # 9 correct test-to-module call edges until this was fixed.
         return True
     if _import_segments(imp.source) & repo_stems:
         return True
