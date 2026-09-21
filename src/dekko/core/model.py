@@ -186,6 +186,15 @@ class RawRef:
             list. Present only for shape parity with ``RawCall`` so
             the resolver's shared ``_pick_candidate`` ladder (see
             ``RawCall.arg_count``) works unmodified across both types.
+        bound: What the identifier is lexically bound to, when that is
+            a plain local the map does not index: ``"param"`` or
+            ``"local"``. ``None`` for a free, module-level or
+            import-bound name, and for every language without a
+            ``LanguageSpec.binding_query``. A tag rather than a filter
+            in the extractor on purpose: whether a bound reference
+            still earns an edge (a pytest fixture parameter does) is a
+            question about the *target*, which only the resolver has
+            (round 32 Track 5b).
     """
 
     caller_id: str | None
@@ -194,6 +203,7 @@ class RawRef:
     receiver: str | None = None
     line: int = 0
     arg_count: int | None = None
+    bound: str | None = None
 
 
 @dataclass
@@ -201,14 +211,20 @@ class RawHeritage:
     """A heritage clause (extends/implements/impl-for/embeds) as
     written, before resolution.
 
-    Unlike ``RawCall.caller_id``, ``subtype_id`` is never ``None`` — a
-    heritage clause only ever appears attached to a ``TYPE_KINDS``
-    definition already extracted as its own ``Symbol`` by the time
-    heritage extraction runs (there's no "module-level heritage" the
-    way there's a module-level call).
+    Unlike ``RawCall.caller_id``, ``subtype_id`` is usually non-empty
+    — a heritage clause almost always appears attached to a
+    ``TYPE_KINDS`` definition already extracted as its own ``Symbol``
+    by the time heritage extraction runs (there's no "module-level
+    heritage" the way there's a module-level call). The one exception
+    is ``subtype_name`` below.
 
     Attributes:
-        subtype_id: Symbol id of the type declaring this clause.
+        subtype_id: Symbol id of the type declaring this clause, or
+            ``""`` when the extractor found the clause but not the
+            implementing type's own definition (see
+            ``subtype_name``) — never ``None``, since an empty string
+            is enough to make every existing ``if h.subtype_id:``-
+            shaped check work unmodified.
         path: File the clause appears in.
         text: Full supertype text as written (``Base``, ``mod::Trait``,
             ``pkg.Interface``).
@@ -224,6 +240,21 @@ class RawHeritage:
             Phase 1 extractor), or ``"embeds"`` (Go anonymous struct
             field, Phase 2 — not produced by any Phase 1 extractor).
         line: 1-based line of the clause.
+        subtype_name: Round 31 zed coverage pass F2 (extractor
+            ``_heritage_rust_impl``): a Rust ``impl Trait for Type``
+            block is resolved to its own ``subtype_id`` by same-file
+            name lookup against ``Type`` — ordinary Rust layout often
+            puts the impl block in a sibling file (``render.rs``)
+            from the struct it's for (``text_finder.rs``), so no
+            same-file symbol exists to attach to and the clause used
+            to be silently dropped at extraction, before the resolver
+            ever saw it. When that same-file lookup fails, the
+            extractor emits the clause anyway with ``subtype_id=""``
+            and this field set to the written type name instead, so
+            ``resolver.resolve_heritage`` can resolve the subject
+            itself (repo-wide, by name and crate) before resolving
+            the supertype the normal way. Empty whenever
+            ``subtype_id`` is already non-empty.
     """
 
     subtype_id: str
@@ -233,6 +264,7 @@ class RawHeritage:
     receiver: str | None = None
     relation: str = "extends"
     line: int = 0
+    subtype_name: str = ""
 
 
 @dataclass
@@ -433,6 +465,12 @@ class FileMap:
             are turned into edges (see ``model.EnvRead``'s docstring).
         doc: First line of the file's module docstring or leading
             comment, or ``None`` (best-effort, per language).
+        enum_variants: ``"Owner::Variant"`` for every *tuple* enum
+            variant in this file (Rust only, see ``languages.
+            LanguageSpec.enum_variant_query``). Not symbols and not
+            written to ``map.json``: a name registry the resolver
+            reads so ``Left(x)`` is not taken for ``struct Left`` when
+            some enum also has a ``Left(..)`` variant.
         type_aliases: Bare names of type-alias declarations in this
             file (TS/TSX only — see ``languages.LanguageSpec.
             type_alias_query``). Not full symbols, just names: a
@@ -453,6 +491,7 @@ class FileMap:
     env_reads: list[EnvRead] = field(default_factory=list)
     imports: list[Import] = field(default_factory=list)
     type_aliases: list[str] = field(default_factory=list)
+    enum_variants: list[str] = field(default_factory=list)
     error: str | None = None
     doc: str | None = None
 
@@ -640,6 +679,17 @@ class CallGraph:
             subtypes``/``supertypes`` can disclose this lower-certainty
             resolution rather than blending it silently into every
             other, structurally-resolved edge.
+        heritage_unplaced_subtype_count: How many Rust ``impl Trait
+            for Type`` clauses (round 31 A3, ``extractor.
+            _heritage_rust_impl``'s ``subtype_name`` recovery path)
+            named a ``Type`` not defined in the same file, and whose
+            subject symbol still couldn't be placed uniquely within
+            the clause's own crate (zero or 2+ same-crate candidates
+            for the written name) — dropped rather than guessed, and
+            counted here the same way ``heritage_synthetic_tiebreak_
+            count`` is, so a later round can see how many were
+            genuinely unplaceable rather than the count silently
+            vanishing into "clause never happened."
     """
 
     edges: list[Edge] = field(default_factory=list)
@@ -668,3 +718,4 @@ class CallGraph:
     catches: list[CatchSite] = field(default_factory=list)
     env_reads: list[EnvRead] = field(default_factory=list)
     heritage_synthetic_tiebreak_count: int = 0
+    heritage_unplaced_subtype_count: int = 0

@@ -583,6 +583,7 @@ def _fully_populated_filemap() -> FileMap:
             Import(path="a.py", name="g", source="b"),
         ],
         type_aliases=["Alias"],
+        enum_variants=["Side::Left"],
         error="parse error",
         doc="module docstring",
     )
@@ -722,3 +723,35 @@ def test_throws_catches_env_type_aliases_survive_a_cache_hit_reparse(
     assert parsed == ["other.py"]
 
     assert _snapshot() == baseline
+
+
+def test_cached_ref_without_bound_still_loads() -> None:
+    # Round 32 Track 5b added `RawRef.bound`. A cache entry written by
+    # an older dekko has no such key; `spec_fingerprint` invalidates it
+    # anyway, but loading it must never be what raises.
+    old_entry = {
+        "path": "a.ts",
+        "language": "typescript",
+        "refs": [
+            {
+                "caller_id": "a.ts::f",
+                "path": "a.ts",
+                "name": "count",
+                "receiver": None,
+                "line": 3,
+                "arg_count": None,
+            }
+        ],
+    }
+    fm = cache_mod._filemap_from_dict(old_entry)
+    assert fm.refs[0].bound is None
+
+
+def test_ref_bound_survives_a_cache_round_trip() -> None:
+    fm = FileMap(
+        "a.ts",
+        "typescript",
+        refs=[RawRef("a.ts::f", "a.ts", "count", line=3, bound="param")],
+    )
+    again = cache_mod._filemap_from_dict(cache_mod._filemap_to_dict(fm))
+    assert again.refs[0].bound == "param"

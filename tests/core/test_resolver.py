@@ -17,6 +17,7 @@ from dekko.core import resolver as resolver_mod
 from dekko.core.extractor import extract_file
 from dekko.repo_ops import map_repository
 from dekko.core.model import (
+    CallGraph,
     FileMap,
     Import,
     Param,
@@ -28,6 +29,7 @@ from dekko.core.model import (
     Symbol,
 )
 from dekko.core.resolver import (
+    _module_matches,
     resolve,
     resolve_catches,
     resolve_heritage,
@@ -51,6 +53,24 @@ def _fn(
         name=name,
         qualname=qual,
         kind="method" if "." in qual else "function",
+        path=path,
+        language=language,
+        start_line=line,
+        end_line=line + 1,
+    )
+
+
+def _cls(
+    path: str,
+    name: str,
+    line: int = 1,
+    language: str = "python",
+) -> Symbol:
+    return Symbol(
+        id=f"{path}::{name}",
+        name=name,
+        qualname=name,
+        kind="class",
         path=path,
         language=language,
         start_line=line,
@@ -673,7 +693,15 @@ def test_typed_parameter_call_resolves_to_declared_type_method() -> None:
     # as the target class (``controller: Controller``) must resolve to
     # that class's method — not fall into ``ambiguous`` just because
     # another same-named method exists elsewhere in the repo, and not
-    # get guessed via the (unrelated) same-file step either.
+    # get guessed via the (unrelated) same-file step either. The class
+    # symbol itself (not just its method) is part of the fixture,
+    # matching a real TS codebase where ``class Controller`` is
+    # independently indexed -- round 31 A4 requires the declared
+    # type's outer token to name a real in-repo type, to keep a
+    # same-named foreign/std generic (``Option``, ``Result``) from
+    # ever being tried as a candidate (see
+    # ``resolver._typed_param_match``'s own docstring).
+    controller_cls = _cls("a.ts", "Controller", language="typescript")
     right = _fn(
         "a.ts", "initTask", "Controller.initTask", language="typescript"
     )
@@ -688,7 +716,7 @@ def test_typed_parameter_call_resolves_to_declared_type_method() -> None:
         params=[Param(name="controller", type="Controller")],
     )
     files = [
-        FileMap("a.ts", "typescript", symbols=[right]),
+        FileMap("a.ts", "typescript", symbols=[controller_cls, right]),
         FileMap("b.ts", "typescript", symbols=[wrong]),
         FileMap(
             "caller.ts",
@@ -716,6 +744,7 @@ def test_typed_parameter_call_resolves_to_declared_type_method() -> None:
 def test_typed_parameter_match_strips_generic_wrapper() -> None:
     # A declared type dressed in a common wrapper (``Optional[X]``,
     # ``X | undefined``) must still narrow to the bare class name.
+    controller_cls = _cls("a.ts", "Controller", language="typescript")
     right = _fn(
         "a.ts", "initTask", "Controller.initTask", language="typescript"
     )
@@ -730,7 +759,7 @@ def test_typed_parameter_match_strips_generic_wrapper() -> None:
         params=[Param(name="controller", type="Controller | undefined")],
     )
     files = [
-        FileMap("a.ts", "typescript", symbols=[right]),
+        FileMap("a.ts", "typescript", symbols=[controller_cls, right]),
         FileMap("b.ts", "typescript", symbols=[wrong]),
         FileMap(
             "caller.ts",
@@ -1608,12 +1637,15 @@ def test_bare_call_to_same_file_builder_named_function_still_resolves() -> (
 # test, rather than being intercepted earlier by layer 1.
 
 
-def test_single_candidate_arity_mismatch_falls_back_to_ambiguous() -> None:
+def test_single_candidate_arity_mismatch_lands_in_external() -> None:
     # The general shape spring-boot's isTrue() repro illustrates: a
     # bare call with 0 written arguments against the sole repo-defined
     # ``check`` (1 required parameter) must not be guessed via the
-    # single-candidate fast path -- it should land in ``ambiguous``,
+    # single-candidate fast path -- it should land in ``external``,
     # exactly as if there had been zero candidates, not one wrong one.
+    # (Until round 31 it landed in ``ambiguous``, which a zero-candidate
+    # call never does: a collision needs two live candidates. cline had
+    # 542 such "ambiguous, avg 1.0 candidates" entries.)
     check_fn = _fn("mod.py", "check", language="python")
     check_fn.params = [Param(name="value")]
     caller = _fn("main.py", "run", language="python")
@@ -1639,11 +1671,10 @@ def test_single_candidate_arity_mismatch_falls_back_to_ambiguous() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, check_fn.id) not in edges
     assert graph.calls_in.get(check_fn.id, []) == []
-    assert len(graph.ambiguous) == 1
-    amb_caller, amb_name, amb_cands = graph.ambiguous[0]
-    assert amb_caller == caller.id
-    assert amb_name == "check"
-    assert amb_cands == [check_fn.id]
+    assert graph.ambiguous == []
+    assert [(e.caller, e.callee) for e in graph.external] == [
+        (caller.id, "check")
+    ]
 
 
 def test_single_candidate_arity_mismatch_bare_call_non_method_candidate() -> (
@@ -1682,7 +1713,8 @@ def test_single_candidate_arity_mismatch_bare_call_non_method_candidate() -> (
     graph = resolve(files)
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, log_fn.id) not in edges
-    assert len(graph.ambiguous) == 1
+    assert graph.ambiguous == []
+    assert len(graph.external) == 1
 
 
 def test_single_candidate_arity_mismatch_receiver_qualified() -> None:
@@ -1719,7 +1751,8 @@ def test_single_candidate_arity_mismatch_receiver_qualified() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, handle_fn.id) not in edges
     assert graph.calls_in.get(handle_fn.id, []) == []
-    assert len(graph.ambiguous) == 1
+    assert graph.ambiguous == []
+    assert len(graph.external) == 1
 
 
 def test_single_candidate_arity_within_variadic_range_still_resolves() -> None:
@@ -1992,7 +2025,14 @@ def test_explicit_type_receiver_no_unique_method_falls_through() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, unrelated_a.id) not in edges
     assert (caller.id, unrelated_b.id) not in edges
-    assert len(graph.ambiguous) == 1
+    # Until round 31 this landed in ``ambiguous`` between Foo.render
+    # and Bar.render -- neither of which a ``Widget::render`` path can
+    # possibly mean. No member of Widget (and no trait default) is a
+    # candidate, so there is no plausible repo target: external.
+    assert graph.ambiguous == []
+    assert [(e.caller, e.callee) for e in graph.external] == [
+        (caller.id, "Widget::render")
+    ]
 
 
 def test_bare_call_shadowed_by_external_import_not_guessed() -> None:
@@ -4097,7 +4137,9 @@ def test_heritage_qualified_std_display_external_despite_collision() -> None:
             ],
         ),
     ]
-    _, _, _, heritage_ambiguous, heritage_external, _ = resolve_heritage(files)
+    _, _, _, heritage_ambiguous, heritage_external, _, _ = resolve_heritage(
+        files
+    )
     assert heritage_ambiguous == []
     externals = {(ext.caller, ext.callee) for ext in heritage_external}
     assert (shared_uri.id, "std::fmt::Display") in externals
@@ -4141,7 +4183,9 @@ def test_heritage_qualified_std_debug_still_resolves_external() -> None:
             ],
         ),
     ]
-    _, _, _, heritage_ambiguous, heritage_external, _ = resolve_heritage(files)
+    _, _, _, heritage_ambiguous, heritage_external, _, _ = resolve_heritage(
+        files
+    )
     assert heritage_ambiguous == []
     externals = {(ext.caller, ext.callee) for ext in heritage_external}
     assert (shared_uri.id, "std::fmt::Debug") in externals
@@ -4189,7 +4233,9 @@ def test_rust_impl_std_display_external_via_real_extraction(
         ),
         shared_uri_fm,
     ]
-    _, _, _, heritage_ambiguous, heritage_external, _ = resolve_heritage(files)
+    _, _, _, heritage_ambiguous, heritage_external, _, _ = resolve_heritage(
+        files
+    )
     assert heritage_ambiguous == []
     externals = {(ext.caller, ext.callee) for ext in heritage_external}
     shared_uri_id = next(
@@ -4761,3 +4807,1793 @@ def test_pool_workers_choice_does_not_change_resolution_output(
     for per in (1, 2, 5):
         monkeypatch.setattr(resolver_mod, "_RESOLVE_MIN_ITEMS_PER_WORKER", per)
         assert _graph_shape(resolve(files, workers=8)) == baseline
+
+
+# Round 31 cline.md §4.1 Bug B: `_PATH_SPLIT` splits import sources on
+# ".", so a dotted file stem could never appear among the segments and
+# a relative import of `./catalog.generated-access` lost its hint.
+
+
+def test_module_matches_dotted_filename_stem() -> None:
+    target = "pkg/src/catalog/catalog.generated-access.ts"
+    assert _module_matches(
+        "../catalog/catalog.generated-access/getModels", target
+    )
+    # ESM spelling: a `.js` specifier naming the `.ts` source.
+    assert _module_matches(
+        "./user.service.js/UserService", "a/user.service.ts"
+    )
+    # C/C++ include of a dotted header.
+    assert _module_matches("gen/foo.pb.h", "gen/foo.pb.h")
+    # A sibling sharing only the first dotted part is not a match.
+    assert not _module_matches("../catalog/catalog/getModels", target)
+    assert not _module_matches("./catalog.other/getModels", target)
+
+
+def test_dotted_filename_import_disambiguates_colliding_call(
+    tmp_path: Path,
+) -> None:
+    body = (
+        "export function getModels(id: string): string[] {\n"
+        "  return [id];\n}\n"
+    )
+    dotted = "src/catalog/catalog.generated-access.ts"
+    for rel in (dotted, "src/registry.ts"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+    (tmp_path / "src/builtins.ts").write_text(
+        'import { getModels } from "./catalog/catalog.generated-access";\n'
+        "export function run(): string[] {\n"
+        '  return getModels("x");\n}\n'
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert graph.calls_out["src/builtins.ts::run"] == [
+        "src/catalog/catalog.generated-access.ts::getModels"
+    ]
+
+
+# Round 31 zed.md (P2.1): the round-24 fixture-decoy tiebreak only ran
+# when the file named the crate. 184 of zed's `impl Render for` clauses
+# reach Render through a glob (`use ui::prelude::*;`) and had the same
+# two candidates, real gpui vs. the test_fixture stand-in.
+
+RUST_DECOY_REPO = {
+    "crates/gpui/src/element.rs": "pub trait Render {}\n",
+    "tooling/lints/test_fixture/gpui/src/lib.rs": "pub trait Render {}\n",
+    "crates/ui/src/prelude.rs": "pub use gpui::Render;\n",
+    "crates/editor/src/editor.rs": (
+        "use ui::prelude::*;\npub struct Editor;\nimpl Render for Editor {}\n"
+    ),
+    "tooling/lints/test_fixture/render_consumer/src/lib.rs": (
+        "use ui::prelude::*;\npub struct View;\nimpl Render for View {}\n"
+    ),
+}
+
+
+def _write_tree(root: Path, tree: dict[str, str]) -> None:
+    for rel, text in tree.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+def test_hintless_glob_import_heritage_prefers_real_crate(
+    tmp_path: Path,
+) -> None:
+    _write_tree(tmp_path, RUST_DECOY_REPO)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    real = "crates/gpui/src/element.rs::Render"
+    assert graph.heritage_out["crates/editor/src/editor.rs::Editor"] == [real]
+    # Convention-based, so it must be counted for disclosure.
+    assert graph.heritage_synthetic_tiebreak_count == 1
+
+
+def test_hintless_tiebreak_leaves_fixture_tree_clauses_ambiguous(
+    tmp_path: Path,
+) -> None:
+    # A consumer crate *inside* the fixture tree depends on the sibling
+    # stand-in, not the real crate. Live-testing on zed caught 8 edges
+    # wrongly pointed at the real trait before this guard existed.
+    _write_tree(tmp_path, RUST_DECOY_REPO)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    consumer = "tooling/lints/test_fixture/render_consumer/src/lib.rs::View"
+    assert consumer not in graph.heritage_out
+    assert [s for s, _, _ in graph.heritage_ambiguous] == [consumer]
+
+
+def test_hintless_tiebreak_two_real_crates_stay_ambiguous(
+    tmp_path: Path,
+) -> None:
+    tree = dict(RUST_DECOY_REPO)
+    del tree["tooling/lints/test_fixture/gpui/src/lib.rs"]
+    del tree["tooling/lints/test_fixture/render_consumer/src/lib.rs"]
+    tree["crates/other/src/lib.rs"] = "pub trait Render {}\n"
+    _write_tree(tmp_path, tree)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert "crates/editor/src/editor.rs::Editor" not in graph.heritage_out
+    assert graph.heritage_synthetic_tiebreak_count == 0
+
+
+# Round 31 zed coverage pass F1: `use crate::{Trait}` where the crate
+# root only re-exports the name (`pub use thread::*;`). The stem test
+# saw just `AgentTool`, no file's stem, and filed the clause external:
+# `query subtypes AgentTool` showed 11 of 35 implementors, silently.
+
+RUST_CRATE_REEXPORT = {
+    "crates/agent/src/agent.rs": "mod thread;\npub use thread::*;\n",
+    "crates/agent/src/thread.rs": (
+        "pub trait AgentTool {}\n"
+        "pub struct ToolInput;\n"
+        "impl ToolInput {\n"
+        "    pub fn resolved(x: u8) -> Self { ToolInput }\n}\n"
+    ),
+    "crates/agent/src/tools/list.rs": (
+        "use crate::{AgentTool, ToolInput};\n"
+        "pub struct ListTool;\n"
+        "impl AgentTool for ListTool {}\n"
+        "pub fn run() {\n    ToolInput::resolved(1);\n}\n"
+    ),
+}
+
+
+def test_rust_crate_rooted_import_of_reexported_trait_resolves(
+    tmp_path: Path,
+) -> None:
+    _write_tree(tmp_path, RUST_CRATE_REEXPORT)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert graph.heritage_out["crates/agent/src/tools/list.rs::ListTool"] == [
+        "crates/agent/src/thread.rs::AgentTool"
+    ]
+    assert graph.heritage_external == []
+    # The receiver-qualified call through the same import, previously
+    # short-circuited to external by _receiver_is_external.
+    assert (
+        "crates/agent/src/thread.rs::ToolInput.resolved"
+        in graph.calls_out["crates/agent/src/tools/list.rs::run"]
+    )
+
+
+def test_hintless_tiebreak_stays_ambiguous_next_to_the_fixture(
+    tmp_path: Path,
+) -> None:
+    # zed's dylint UI tests: no fixture marker in their own path, but
+    # compiled against the fixture crate sitting beside them.
+    tree = dict(RUST_DECOY_REPO)
+    tree["tooling/lints/ui/entity_update.rs"] = (
+        "use gpui::*;\npub struct Probe;\nimpl Render for Probe {}\n"
+    )
+    _write_tree(tmp_path, tree)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    probe = "tooling/lints/ui/entity_update.rs::Probe"
+    assert probe not in graph.heritage_out
+    assert probe in [s for s, _, _ in graph.heritage_ambiguous]
+    # The real consumer is unaffected by the guard.
+    assert graph.heritage_out["crates/editor/src/editor.rs::Editor"] == [
+        "crates/gpui/src/element.rs::Render"
+    ]
+
+
+# Round 31 zed coverage pass F6: a Rust `Type::name(..)` path names the
+# owning type outright, but the ladder only ever used that as positive
+# evidence. With no `Point.default` symbol (Default is derived), the
+# call fell through and took the file's only other `default`.
+
+
+def _rust_graph(tmp_path: Path, tree: dict[str, str]) -> CallGraph:
+    _write_tree(tmp_path, tree)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    return resolve(files)
+
+
+def test_rust_type_path_never_lands_on_another_types_member(
+    tmp_path: Path,
+) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/g/src/div.rs": (
+                "#[derive(Default)]\npub struct Point;\n"
+                "pub struct ScrollHandle;\n"
+                "impl ScrollHandle {\n"
+                "    pub fn default() -> Self { ScrollHandle }\n}\n"
+                "pub fn make() {\n    let _p = Point::default();\n}\n"
+            ),
+        },
+    )
+    assert "crates/g/src/div.rs::make" not in graph.calls_out
+    assert graph.ambiguous == []
+    assert [e.callee for e in graph.external] == ["Point::default"]
+
+
+def test_rust_type_path_prefers_arity_fitting_member(tmp_path: Path) -> None:
+    # Inherent `zero()` vs a trait impl's `zero(_cx)` on the same type,
+    # the latter sitting in the caller's own file.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/r/src/point.rs": (
+                "pub struct Point;\n"
+                "impl Point {\n    pub fn zero() -> Self { Point }\n}\n"
+            ),
+            "crates/r/src/rope.rs": (
+                "use crate::point::Point;\n"
+                "pub trait Dimension {\n    fn zero(cx: ()) -> Self;\n}\n"
+                "impl Dimension for Point {\n"
+                "    fn zero(_cx: ()) -> Self { Point }\n}\n"
+                "pub fn start() {\n    let _p = Point::zero();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/r/src/rope.rs::start"] == [
+        "crates/r/src/point.rs::Point.zero"
+    ]
+
+
+def test_rust_ufcs_trait_path_keeps_its_own_trait(tmp_path: Path) -> None:
+    # The explicit `self` argument makes a rival trait's 2-param method
+    # "fit" better by arity; the named trait must still win.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/u/src/util.rs": (
+                "pub trait RangeExt {\n"
+                "    fn overlaps(&self, other: &u8) -> bool;\n}\n"
+                "pub trait AnchorRangeExt {\n"
+                "    fn overlaps(&self, other: &u8, buf: &u8) -> bool;\n}\n"
+            ),
+            "crates/e/src/fold.rs": (
+                "use util::RangeExt;\n"
+                "pub fn unfold(a: u8, b: u8) -> bool {\n"
+                "    RangeExt::overlaps(&a, &b)\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/e/src/fold.rs::unfold"] == [
+        "crates/u/src/util.rs::RangeExt.overlaps"
+    ]
+
+
+def test_rust_type_path_reaches_a_trait_default_method(tmp_path: Path) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/s/src/settings.rs": (
+                "pub trait Settings {\n"
+                "    fn get_global(cx: &u8) -> u8 { 0 }\n}\n"
+            ),
+            "crates/t/src/title.rs": (
+                "use settings::Settings;\n"
+                "pub struct TitleBarSettings;\n"
+                "impl Settings for TitleBarSettings {}\n"
+                "pub fn show(cx: &u8) -> u8 {\n"
+                "    TitleBarSettings::get_global(cx)\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/t/src/title.rs::show"] == [
+        "crates/s/src/settings.rs::Settings.get_global"
+    ]
+
+
+# Round 31 F6b: the same path shape, rooted at a type the repo doesn't
+# define at all (std, third-party, macro-generated). The owner rule
+# above can't veto it, since there is no in-repo owner to name.
+
+_SCROLL_HANDLE = (
+    "pub struct ScrollHandle;\n"
+    "impl ScrollHandle {\n    pub fn default() -> Self { ScrollHandle }\n}\n"
+)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["Default::default", "Vec::default", "collections::FxHashMap::default"],
+)
+def test_rust_unknown_type_path_is_external(tmp_path: Path, path: str) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/g/src/div.rs": (
+                f"{_SCROLL_HANDLE}"
+                f"pub fn make() {{\n    let _v = {path}();\n}}\n"
+            ),
+        },
+    )
+    assert "crates/g/src/div.rs::make" not in graph.calls_out
+    assert graph.ambiguous == []
+    assert [e.callee for e in graph.external] == [path]
+
+
+def test_rust_type_alias_is_indexed_but_associated_types_are_not(
+    tmp_path: Path,
+) -> None:
+    _write_tree(
+        tmp_path,
+        {
+            "crates/a/src/lib.rs": (
+                "pub struct Real;\n"
+                "pub type Alias = Real;\n"
+                "pub mod inner {\n    pub type Nested = u8;\n}\n"
+                "pub trait Shape {\n    type Output;\n}\n"
+                "impl Shape for Real {\n    type Output = u8;\n}\n"
+            ),
+        },
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    kinds = {s.name: s.kind for f in files for s in f.symbols}
+    assert kinds["Alias"] == "type_alias"
+    assert kinds["Nested"] == "type_alias"
+    assert "Output" not in kinds
+
+
+def test_rust_type_alias_path_still_reaches_the_aliased_type(
+    tmp_path: Path,
+) -> None:
+    # The reason alias indexing had to land first: without an `Alias`
+    # symbol the unknown-type rule would send this real call external.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/real.rs": (
+                "pub struct Real;\n"
+                "impl Real {\n    pub fn build() -> Self { Real }\n}\n"
+                "pub type Alias = Real;\n"
+            ),
+            "crates/a/src/user.rs": (
+                "use crate::real::Alias;\n"
+                "pub fn make() {\n    let _r = Alias::build();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/user.rs::make"] == [
+        "crates/a/src/real.rs::Real.build"
+    ]
+
+
+def test_rust_use_as_rename_is_not_an_unknown_type(tmp_path: Path) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/real.rs": (
+                "pub struct Real;\n"
+                "impl Real {\n    pub fn build() -> Self { Real }\n}\n"
+            ),
+            "crates/a/src/user.rs": (
+                "use crate::real::Real as Renamed;\n"
+                "pub fn make() {\n    let _r = Renamed::build();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/user.rs::make"] == [
+        "crates/a/src/real.rs::Real.build"
+    ]
+
+
+def test_rust_in_repo_use_is_not_an_unknown_type() -> None:
+    # zed: `pub use text::Buffer as TextBuffer;` in `language`, then
+    # `use language::TextBuffer;` elsewhere. The rename isn't written
+    # in the calling file and matches no symbol, so only the in-repo
+    # `use` gives it away. Same binding from outside the repo: unknown.
+    call = RawCall(
+        caller_id=None,
+        path="crates/ui/src/ui.rs",
+        text="TextBuffer::build",
+        name="build",
+        receiver="TextBuffer",
+    )
+    build = _fn(
+        "crates/text/src/text.rs", "build", "Buffer.build", language="rust"
+    )
+
+    def unknown(source: str) -> bool:
+        binding = Import(path=call.path, name="TextBuffer", source=source)
+        return resolver_mod._rust_unknown_type_path(
+            call, [build], {}, {"TextBuffer": binding}, {"text", "language"}
+        )
+
+    assert not unknown("language::TextBuffer")
+    assert unknown("ropey::TextBuffer")
+
+
+def test_rust_associated_type_path_is_left_to_the_ladder(
+    tmp_path: Path,
+) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/p/src/lib.rs": (
+                "pub trait Message {\n    fn stop() {}\n}\n"
+                "pub trait Request {\n    type ProtoRequest: Message;\n}\n"
+                "pub fn run<T: Request>() {\n"
+                "    T::ProtoRequest::stop();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/p/src/lib.rs::run"] == [
+        "crates/p/src/lib.rs::Message.stop"
+    ]
+
+
+def test_rust_qualified_associated_type_path_is_left_to_the_ladder(
+    tmp_path: Path,
+) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/p/src/lib.rs": (
+                "pub trait Message {\n    fn stop() {}\n}\n"
+                "pub trait Request {\n    type ProtoRequest: Message;\n}\n"
+                "pub struct Cmd;\n"
+                "pub fn run() {\n"
+                "    <Cmd as Request>::ProtoRequest::stop();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/p/src/lib.rs::run"] == [
+        "crates/p/src/lib.rs::Message.stop"
+    ]
+
+
+def test_rust_cross_file_impl_is_never_placed_on_a_type_alias(
+    tmp_path: Path,
+) -> None:
+    # zed: `impl<T> TideResultExt for tide::Result<T>` is not an impl
+    # for collab's own `pub type Result<..>` alias.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/c/src/lib.rs": (
+                "pub type Result<T> = std::result::Result<T, u8>;\n"
+            ),
+            "crates/c/src/errors.rs": (
+                "pub trait TideResultExt {}\n"
+                "impl<T> TideResultExt for tide::Result<T> {}\n"
+            ),
+        },
+    )
+    assert "crates/c/src/lib.rs::Result" not in graph.heritage_out
+
+
+def test_rust_impl_supertype_is_never_a_type_alias(tmp_path: Path) -> None:
+    # zed: `impl ActionHandler for ..` means accesskit's trait; the
+    # only in-repo `ActionHandler` is an unrelated `type` alias.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/ui/src/lib.rs": (
+                "pub type ActionHandler = Box<dyn Fn(u8)>;\n"
+            ),
+            "crates/win/src/lib.rs": (
+                "use accesskit::ActionHandler;\n"
+                "pub struct A11yActionHandler;\n"
+                "impl ActionHandler for A11yActionHandler {}\n"
+            ),
+        },
+    )
+    assert "crates/win/src/lib.rs::A11yActionHandler" not in graph.heritage_out
+
+
+def test_rust_macro_generated_type_with_a_handwritten_impl(
+    tmp_path: Path,
+) -> None:
+    # No `Minted` symbol exists (a macro defines the struct), but
+    # `Minted.build` does, so the type is not unknown to the repo.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/lib.rs": (
+                "mint!(Minted);\n"
+                "impl Minted {\n    pub fn build() -> Self { todo!() }\n}\n"
+                "pub fn make() {\n    let _m = Minted::build();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/lib.rs::make"] == [
+        "crates/a/src/lib.rs::Minted.build"
+    ]
+
+
+def test_rust_generic_param_path_is_left_to_the_ladder(tmp_path: Path) -> None:
+    # `T::default()`: one or two characters is a generic parameter, not
+    # an unknown type. Behavior here must not change.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/g/src/div.rs": (
+                f"{_SCROLL_HANDLE}"
+                "pub fn make<T: Default>() {\n    let _v = T::default();\n}\n"
+            ),
+        },
+    )
+    assert [e.callee for e in graph.external] != ["T::default"]
+
+
+# Round 32 (zed): calls recovered from `assert_eq!(..)` bodies used to
+# reach the resolver as `Type.name` (a dot, no arg count), so none of
+# the Rust shape rules above ever applied to them.
+
+_POINT = (
+    "pub struct Point;\n"
+    "impl Point {\n    pub fn new(r: u32, c: u32) -> Self { Point }\n}\n"
+)
+
+
+def test_rust_macro_path_call_never_takes_the_files_only_new(
+    tmp_path: Path,
+) -> None:
+    # The reported repro, in miniature: a 2-arg `Point::new` credited
+    # to the file's lone, zero-arg `SelectionsCollection::new`.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/rope/src/rope.rs": _POINT,
+            "crates/editor/src/selections.rs": (
+                "use rope::Point;\n"
+                "pub struct Selections;\n"
+                "impl Selections {\n"
+                "    pub fn new() -> Self { Selections }\n}\n"
+                "pub fn check(p: Point) {\n"
+                "    assert_eq!(p, Point::new(1, 1));\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/editor/src/selections.rs::check"] == [
+        "crates/rope/src/rope.rs::Point.new"
+    ]
+
+
+def test_rust_macro_path_call_to_an_unknown_type_is_external(
+    tmp_path: Path,
+) -> None:
+    # F6b now reaches macro bodies too.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/g/src/div.rs": (
+                f"{_SCROLL_HANDLE}"
+                "pub fn check(v: Vec<u8>) {\n"
+                "    assert_eq!(v, Vec::default());\n}\n"
+            ),
+        },
+    )
+    assert "crates/g/src/div.rs::check" not in graph.calls_out
+    assert "Vec::default" in [e.callee for e in graph.external]
+
+
+def test_rust_macro_module_path_call_reaches_the_free_function(
+    tmp_path: Path,
+) -> None:
+    # Rendered `movement.down`, this read as a dot-call, and a
+    # dot-call can never reach a free function: the F11 veto was
+    # killing the CORRECT edge.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/e/src/movement.rs": "pub fn down(x: u8) -> u8 { x }\n",
+            "crates/e/src/tests.rs": (
+                "use crate::movement;\n"
+                "pub fn check() {\n    assert_eq!(movement::down(1), 1);\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/e/src/tests.rs::check"] == [
+        "crates/e/src/movement.rs::down"
+    ]
+
+
+def test_rust_macro_method_chain_never_lands_on_a_free_function(
+    tmp_path: Path,
+) -> None:
+    # `xs.iter().count()` used to be recovered as a bare `count()`.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/e/src/lib.rs": (
+                "pub fn count() -> usize { 0 }\n"
+                "pub fn check(xs: Vec<u8>) {\n"
+                "    assert_eq!(xs.iter().count(), 0);\n}\n"
+            ),
+        },
+    )
+    assert "crates/e/src/lib.rs::check" not in graph.calls_out
+
+
+def test_rust_lifetimed_self_is_a_receiver_for_arity(tmp_path: Path) -> None:
+    # `&'a self` wasn't recognized as the receiver, so the method's
+    # arity came out one too high and its lone correct caller was
+    # rejected. Parsed calls had this all along; it surfaced when
+    # macro-recovered calls gained an arg count (zed: +325 edges).
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/l/src/syntax_map.rs": (
+                "pub struct SyntaxSnapshot;\n"
+                "impl SyntaxSnapshot {\n"
+                "    pub fn layers<'a>(&'a self, b: &'a u8) -> u8 { 0 }\n"
+                "    pub fn edit<'a>(&'a mut self, b: &'a u8) {}\n}\n"
+            ),
+            "crates/l/src/user.rs": (
+                "pub fn read(b: u8) {\n"
+                "    let map = crate::make();\n"
+                "    let _n = map.layers(&b);\n"
+                "    map.edit(&b);\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/l/src/user.rs::read"] == [
+        "crates/l/src/syntax_map.rs::SyntaxSnapshot.edit",
+        "crates/l/src/syntax_map.rs::SyntaxSnapshot.layers",
+    ]
+
+
+def test_rust_channel_try_recv_is_not_the_repos_only_try_recv(
+    tmp_path: Path,
+) -> None:
+    # zed defines one `try_recv`; 66 `rx.try_recv()` calls on plain
+    # channels took it. Its own same-file caller must still resolve.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/g/src/queue.rs": (
+                "pub struct State;\n"
+                "impl State {\n    pub fn try_recv(&self) -> u8 { 0 }\n}\n"
+                "pub fn pop(state: State) -> u8 {\n    state.try_recv()\n}\n"
+            ),
+            "crates/a/src/tool.rs": (
+                "pub fn poll(rx: smol::channel::Receiver<u8>) {\n"
+                "    let _ = rx.try_recv();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/g/src/queue.rs::pop"] == [
+        "crates/g/src/queue.rs::State.try_recv"
+    ]
+    assert "crates/a/src/tool.rs::poll" not in graph.calls_out
+
+
+def test_rust_crate_import_prefers_own_crates_same_named_type(
+    tmp_path: Path,
+) -> None:
+    body = (
+        "pub struct Foo;\nimpl Foo {\n    pub fn build() -> Self { Foo }\n}\n"
+    )
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/lib.rs": "mod foo;\npub use foo::*;\n",
+            "crates/a/src/foo.rs": body,
+            "crates/b/src/lib.rs": body,
+            "crates/a/src/element.rs": (
+                "use crate::Foo;\npub fn make() {\n    Foo::build();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/element.rs::make"] == [
+        "crates/a/src/foo.rs::Foo.build"
+    ]
+
+
+# Round 31 zed coverage pass F12: `use localmod::X` (a sibling `mod
+# localmod;`) was always looked up against `ctx.crate_roots` first,
+# resolving to a same-named *workspace crate* instead of the local
+# module the file itself declares — real shape on zed:
+# `crates/gpui/src/gpui.rs` declares `mod util;` and does `pub use
+# util::{FutureExt, Timeout};`, which pointed at sibling crate
+# `crates/util` (gpui has no such dependency) instead of
+# `crates/gpui/src/util.rs`.
+
+
+def test_rust_local_module_shadows_same_named_crate(tmp_path: Path) -> None:
+    _write_tree(
+        tmp_path,
+        {
+            "crates/gpui/src/gpui.rs": ("mod util;\npub use util::Timeout;\n"),
+            "crates/gpui/src/util.rs": "pub struct Timeout;\n",
+            "crates/util/src/util.rs": "pub struct Timeout;\n",
+        },
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert graph.modules.deps_out["crates/gpui/src/gpui.rs"] == [
+        "crates/gpui/src/util.rs"
+    ]
+
+
+def test_rust_local_directory_module_shadows_same_named_crate(
+    tmp_path: Path,
+) -> None:
+    # The pre-2018 directory-module shape (`localmod/mod.rs`) must be
+    # recognized the same way as the per-file shape above.
+    _write_tree(
+        tmp_path,
+        {
+            "crates/gpui/src/gpui.rs": ("mod util;\npub use util::Timeout;\n"),
+            "crates/gpui/src/util/mod.rs": "pub struct Timeout;\n",
+            "crates/util/src/util.rs": "pub struct Timeout;\n",
+        },
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert graph.modules.deps_out["crates/gpui/src/gpui.rs"] == [
+        "crates/gpui/src/util/mod.rs"
+    ]
+
+
+def test_rust_bare_import_still_resolves_crate_with_no_local_shadow(
+    tmp_path: Path,
+) -> None:
+    # An unshadowed bare crate name must still resolve against
+    # ctx.crate_roots exactly as before -- this rule only changes
+    # behavior when a same-named local module file actually exists.
+    _write_tree(
+        tmp_path,
+        {
+            "crates/gpui/src/gpui.rs": "pub use other::Timeout;\n",
+            "crates/other/src/other.rs": "pub struct Timeout;\n",
+        },
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    graph = resolve(files)
+    assert graph.modules.deps_out["crates/gpui/src/gpui.rs"] == [
+        "crates/other/src/other.rs"
+    ]
+
+
+# Round 31 zed coverage pass F8: an `impl X for Y` clause's `X` can
+# only ever name a trait -- a same-named struct is never a legal
+# candidate, but heritage candidates were only filtered to TYPE_KINDS
+# (every type kind), so a same-named struct dragged a resolvable
+# clause into "ambiguous."
+
+
+def test_impl_heritage_candidates_narrow_to_trait_only(
+    tmp_path: Path,
+) -> None:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/component/src/component.rs": ("pub trait Component {}\n"),
+            "crates/extension_api/src/extension_api.rs": (
+                "pub struct Component;\n"
+            ),
+            "crates/ui/src/table.rs": (
+                "use crate::Component;\n"
+                "pub struct Table;\n"
+                "impl Component for Table {}\n"
+            ),
+        },
+    )
+    assert graph.heritage_out["crates/ui/src/table.rs::Table"] == [
+        "crates/component/src/component.rs::Component"
+    ]
+    assert graph.heritage_ambiguous == []
+
+
+def test_impl_heritage_narrowing_leaves_non_impl_relations_unchanged(
+    tmp_path: Path,
+) -> None:
+    # A non-``impl`` heritage clause (Rust's own supertrait-bound
+    # shape, ``relation == "extends"``) must not be narrowed -- only
+    # an ``impl Trait for Type`` clause can only mean a trait.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/component/src/component.rs": ("pub trait Component {}\n"),
+            "crates/extension_api/src/extension_api.rs": (
+                "pub struct Component;\n"
+            ),
+            "crates/ui/src/panel.rs": (
+                "use crate::Component;\npub trait Panel: Component {}\n"
+            ),
+        },
+    )
+    assert graph.heritage_ambiguous == [
+        (
+            "crates/ui/src/panel.rs::Panel",
+            "Component",
+            sorted(
+                [
+                    "crates/component/src/component.rs::Component",
+                    "crates/extension_api/src/extension_api.rs::Component",
+                ]
+            ),
+        )
+    ]
+
+
+def test_impl_heritage_narrowing_falls_back_when_no_trait_matches(
+    tmp_path: Path,
+) -> None:
+    # No trait candidate at all -- keep the full, unnarrowed list
+    # rather than manufacturing an empty one (rule 0.3: "no evidence
+    # is not negative evidence").
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/marker.rs": "pub struct Marker;\n",
+            "crates/b/src/other.rs": (
+                "use crate::Marker;\n"
+                "pub struct Widget;\n"
+                "impl Marker for Widget {}\n"
+            ),
+        },
+    )
+    assert graph.heritage_out["crates/b/src/other.rs::Widget"] == [
+        "crates/a/src/marker.rs::Marker"
+    ]
+
+
+# Round 31 zed coverage pass F7: the declared-type tokenizer tried
+# every remaining identifier in a typed parameter's type string,
+# including a generic *argument*, rather than stopping at the
+# receiver's own outermost type.
+
+
+def test_typed_param_match_ignores_opaque_wrapper_generic_argument(
+    tmp_path: Path,
+) -> None:
+    # `active_rows: &BTreeMap<DisplayRow, u8>` then
+    # `active_rows.get(..)`: BTreeMap is opaque (not a transparent
+    # wrapper) and not itself an in-repo type, so the step must
+    # decline rather than land on the generic argument DisplayRow's
+    # own unrelated `get` method.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/csv_preview/src/types.rs": (
+                "pub struct DisplayRow;\n"
+                "impl DisplayRow {\n"
+                "    pub fn get(&self) -> u8 { 0 }\n}\n"
+            ),
+            "crates/editor/src/element.rs": (
+                "use std::collections::BTreeMap;\n"
+                "use crates::csv_preview::DisplayRow;\n"
+                "pub fn render(active_rows: &BTreeMap<DisplayRow, u8>) {\n"
+                "    active_rows.get(&1);\n}\n"
+            ),
+        },
+    )
+    assert (
+        "crates/csv_preview/src/types.rs::DisplayRow.get"
+        not in graph.calls_out.get("crates/editor/src/element.rs::render", [])
+    )
+
+
+def test_typed_param_match_strips_transparent_wrapper(tmp_path: Path) -> None:
+    # Box/Rc/Arc/Ref/RefMut pass instance methods straight through to
+    # their inner type -- must still resolve, unlike an opaque
+    # wrapper.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/widget.rs": (
+                "pub struct Widget;\n"
+                "impl Widget {\n"
+                "    pub fn paint(&self) {}\n}\n"
+            ),
+            "crates/a/src/render.rs": (
+                "use crate::widget::Widget;\n"
+                "pub fn draw(widget: std::rc::Rc<Widget>) {\n"
+                "    widget.paint();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/render.rs::draw"] == [
+        "crates/a/src/widget.rs::Widget.paint"
+    ]
+
+
+def test_typed_param_match_declines_cross_crate_same_named_type(
+    tmp_path: Path,
+) -> None:
+    # gpui defines its own Entity<T> with no `focus` method; workspace
+    # defines an unrelated, same-named Entity<T> that does. gpui
+    # cannot depend on workspace, so a call through a gpui-declared
+    # `Entity<T>`-typed parameter must never resolve to workspace's
+    # method just because the bare qualname happens to match. A third,
+    # unrelated `focus` (crates/other) keeps the repo-wide candidate
+    # count at 2+, so the ladder's later sole-candidate fallback can't
+    # independently re-discover the same wrong answer once this step
+    # declines -- the structural decline has to be what's tested, not
+    # masked by a different rung resolving it anyway.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/gpui/src/entity.rs": "pub struct Entity<T> { t: T }\n",
+            "crates/workspace/src/entity.rs": (
+                "pub struct Entity<T> { t: T }\n"
+                "impl<T> Entity<T> {\n"
+                "    pub fn focus(&self) {}\n}\n"
+            ),
+            "crates/other/src/other.rs": (
+                "pub struct Other;\n"
+                "impl Other {\n"
+                "    pub fn focus(&self) {}\n}\n"
+            ),
+            "crates/gpui/src/context.rs": (
+                "use crate::entity::Entity;\n"
+                "pub fn run(view: Entity<u8>) {\n"
+                "    view.focus();\n}\n"
+            ),
+        },
+    )
+    resolved = graph.calls_out.get("crates/gpui/src/context.rs::run", [])
+    assert "crates/workspace/src/entity.rs::Entity.focus" not in resolved
+    assert "crates/other/src/other.rs::Other.focus" not in resolved
+
+
+def test_typed_param_match_resolves_own_crate_same_named_type(
+    tmp_path: Path,
+) -> None:
+    # The positive case for the same rule: when the resolved method
+    # really is on the caller's own crate's same-named type, it must
+    # still resolve.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/gpui/src/entity.rs": (
+                "pub struct Entity<T> { t: T }\n"
+                "impl<T> Entity<T> {\n"
+                "    pub fn focus(&self) {}\n}\n"
+            ),
+            "crates/workspace/src/entity.rs": (
+                "pub struct Entity<T> { t: T }\n"
+            ),
+            "crates/gpui/src/context.rs": (
+                "use crate::entity::Entity;\n"
+                "pub fn run(view: Entity<u8>) {\n"
+                "    view.focus();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/gpui/src/context.rs::run"] == [
+        "crates/gpui/src/entity.rs::Entity.focus"
+    ]
+
+
+def test_typed_param_match_option_result_still_resolve_own_method(
+    tmp_path: Path,
+) -> None:
+    # Option/Result are transparent (Rust's `let Some(x) = x else {..}`
+    # destructure idiom rebinds the same name to the unwrapped inner
+    # value -- dekko can't see that), but each still has real methods
+    # of its own tried first: an in-repo type coincidentally named
+    # "Option" must never itself be reachable, since no such type is
+    # ever really locally defined (round 31 A4's in-repo-type gate on
+    # a parameterized token). Only the descent to the real inner type
+    # is being tested here.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/widget.rs": (
+                "pub struct Widget;\n"
+                "impl Widget {\n"
+                "    pub fn paint(&self) {}\n}\n"
+            ),
+            "crates/a/src/render.rs": (
+                "use crate::widget::Widget;\n"
+                "pub fn draw(widget: Option<Widget>) {\n"
+                "    let Some(widget) = widget else { return };\n"
+                "    widget.paint();\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/render.rs::draw"] == [
+        "crates/a/src/widget.rs::Widget.paint"
+    ]
+
+
+def test_typed_param_match_bare_foreign_type_no_type_kinds_gate(
+    tmp_path: Path,
+) -> None:
+    # A non-parameterized (bare) declared type gets no in-repo-type
+    # gate at all: a local extension-trait impl on a foreign,
+    # non-generic type (zed's own `impl HiLoWord for WPARAM`) is exactly
+    # as reliable a signal as it always was, since there is no
+    # per-instantiation collision risk the way a generic container has.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/util.rs": (
+                "pub trait HiLoWord {\n"
+                "    fn signed_hiword(&self) -> i16;\n}\n"
+                "impl HiLoWord for WPARAM {\n"
+                "    fn signed_hiword(&self) -> i16 { 0 }\n}\n"
+            ),
+            "crates/a/src/events.rs": (
+                "pub fn handle(wparam: WPARAM) -> i16 {\n"
+                "    wparam.signed_hiword()\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/a/src/events.rs::handle"] == [
+        "crates/a/src/util.rs::WPARAM.signed_hiword"
+    ]
+
+
+# Round 31 zed coverage pass F11/F9: a Rust dot-call resolving onto an
+# unrelated same-named symbol -- a free function a method-call syntax
+# can never reach (F11), or a std iterator/Option/Result adaptor name
+# the denylist was missing (F9).
+
+
+def test_rust_dot_call_never_targets_free_function(tmp_path: Path) -> None:
+    # `.px(..)` (a trait method on Styled) must never resolve to the
+    # unrelated free function `fn px(...)` -- Rust method-call syntax
+    # structurally cannot reach a free function.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/gpui/src/geometry.rs": "pub fn px(v: f32) -> f32 { v }\n",
+            "crates/gpui/src/styled.rs": (
+                "pub trait Styled {\n    fn px(&self, v: f32) -> Self;\n}\n"
+            ),
+            "crates/ui/src/header.rs": (
+                "use crate::styled::Styled;\n"
+                "pub struct Header;\n"
+                "impl Header {\n"
+                "    pub fn render(self) -> Self {\n"
+                "        self.px(12.0)\n    }\n}\n"
+            ),
+        },
+    )
+    resolved = graph.calls_out.get(
+        "crates/ui/src/header.rs::Header.render", []
+    )
+    assert "crates/gpui/src/geometry.rs::px" not in resolved
+
+
+def test_rust_dot_call_free_function_fallback_stays_available_for_path_call(
+    tmp_path: Path,
+) -> None:
+    # A `::`-qualified path call to the same free function must still
+    # resolve -- only dot-call syntax is restricted.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/gpui/src/geometry.rs": "pub fn px(v: f32) -> f32 { v }\n",
+            "crates/ui/src/header.rs": (
+                "use gpui::geometry::px;\n"
+                "pub fn make(v: f32) -> f32 {\n"
+                "    px(v)\n}\n"
+            ),
+        },
+    )
+    assert graph.calls_out["crates/ui/src/header.rs::make"] == [
+        "crates/gpui/src/geometry.rs::px"
+    ]
+
+
+def test_rust_flatten_denylisted_without_structural_evidence(
+    tmp_path: Path,
+) -> None:
+    # A sole in-repo `fn flatten` must not absorb every unrelated
+    # `.flatten()` call with no other structural evidence -- it
+    # should land external, not silently resolve.
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/text/src/text.rs": (
+                "pub struct Edit;\n"
+                "impl Edit {\n"
+                "    pub fn flatten(self) -> Self { self }\n}\n"
+            ),
+            "crates/search/src/search.rs": (
+                "pub fn collect_all(items: Vec<Vec<u8>>) -> Vec<u8> {\n"
+                "    items.into_iter().flatten().collect()\n}\n"
+            ),
+        },
+    )
+    resolved = graph.calls_out.get(
+        "crates/search/src/search.rs::collect_all", []
+    )
+    assert "crates/text/src/text.rs::Edit.flatten" not in resolved
+
+
+# Round 31 integration review of the F7 receiver-type rule.
+
+
+def test_object_type_field_tokens_picks_the_receivers_field() -> None:
+    text = "{ bot: Chat; client: HubSessionClient; sessionId?: string }"
+    pick = resolver_mod._object_type_field_tokens
+    assert pick(text, "input.client") == [("HubSessionClient", False)]
+    assert pick(text, "input.bot") == [("Chat", False)]
+    # A lowercase/primitive field type, an unknown field, or a call on
+    # the object itself names no receiver type.
+    assert pick(text, "input.sessionId") == []
+    assert pick(text, "input.missing") == []
+    assert pick(text, "input") == []
+    # Not an inline object type: defer to the ordinary token chain.
+    assert pick("Entity<Workspace>", "workspace") is None
+
+
+def test_rust_cross_crate_guard_respects_scope_and_imports() -> None:
+    guard = resolver_mod._rust_typed_match_looks_cross_crate
+    own_private = _fn("crates/md/src/html.rs", "Context", "Context")
+    own_private.kind = "struct"
+    own_private.exported = False
+    foreign = _fn("crates/gpui/src/context.rs", "Context", "Context")
+    foreign.kind = "struct"
+    foreign.exported = True
+    method = _fn("crates/gpui/src/context.rs", "spawn", "Context.spawn")
+    index = {"Context": [own_private, foreign]}
+    call = RawCall(
+        caller_id="crates/md/src/md.rs::run",
+        path="crates/md/src/md.rs",
+        text="cx.spawn",
+        name="spawn",
+        receiver="cx",
+        line=1,
+    )
+    # A private same-named struct elsewhere in the crate is not in
+    # scope here, so it disproves nothing (zed: markdown's Context).
+    assert not guard(call, method, "Context", index, {}, "&mut Context<Self>")
+    # Once it is `pub`, a glob re-export can bring it into scope.
+    own_private.exported = True
+    assert guard(call, method, "Context", index, {}, "&mut Context<Self>")
+    # ...unless the file imports the name from elsewhere, or the
+    # annotation names the foreign crate itself.
+    imports = {
+        "Context": Import("crates/md/src/md.rs", "Context", "gpui::Context")
+    }
+    assert not guard(call, method, "Context", index, imports, "&Context")
+    assert not guard(call, method, "Context", index, {}, "&gpui::Context")
+
+
+def test_rust_dot_call_vetoes_a_free_function_without_narrowing() -> None:
+    # `stdout.or(stderr)`: a free `fn or` plus one `EnvVar.or` method.
+    # Pre-filtering the free fn left the method as a lone survivor and
+    # 137 Option::or calls on zed newly resolved to it. A veto can only
+    # remove an edge, never mint one.
+    free = _fn("crates/a/src/util.rs", "or", "or", language="rust")
+    method = _fn("crates/b/src/env.rs", "or", "EnvVar.or", language="rust")
+    method.kind = "method"
+    caller = _fn("crates/c/src/run.rs", "go", "go", language="rust")
+    files = [
+        FileMap("crates/a/src/util.rs", "rust", symbols=[free]),
+        FileMap("crates/b/src/env.rs", "rust", symbols=[method]),
+        FileMap(
+            "crates/c/src/run.rs",
+            "rust",
+            symbols=[caller],
+            calls=[
+                RawCall(
+                    caller_id=caller.id,
+                    path="crates/c/src/run.rs",
+                    text="stdout.or",
+                    name="or",
+                    receiver="stdout",
+                    line=2,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.edges == []
+
+
+# --- round 32 Track 5: a reference needs a way to see its target ------
+#
+# The ladder refs share with calls ends in name-only rungs. Fine for
+# `count(x)`; not for `const count = ...; if (count >= 3)`, which is
+# every other line. Measured before the fix: 35% of claude-code's and
+# 57% of cline's reference edges joined files that can't see each other.
+
+
+def _ref_graph(
+    lang: str,
+    ext: str,
+    imports: list[Import],
+    target_path: str | None = None,
+) -> tuple[CallGraph, Symbol, Symbol]:
+    target_path = target_path or f"utils/array.{ext}"
+    target = _fn(target_path, "count", language=lang)
+    user = _fn(f"screen.{ext}", "render", language=lang)
+    files = [
+        FileMap(target_path, lang, symbols=[target]),
+        FileMap(
+            f"screen.{ext}",
+            lang,
+            symbols=[user],
+            imports=imports,
+            refs=[
+                RawRef(
+                    caller_id=user.id,
+                    path=f"screen.{ext}",
+                    name="count",
+                    line=9,
+                )
+            ],
+        ),
+    ]
+    return resolve(files), target, user
+
+
+@pytest.mark.parametrize(
+    ("lang", "ext"),
+    [("typescript", "ts"), ("tsx", "tsx"), ("javascript", "js")],
+)
+def test_ref_to_unimported_name_in_a_module_makes_no_edge(
+    lang: str, ext: str
+) -> None:
+    # The file imports *something*, so it is a module, and a module
+    # can't name `count` without importing it: this `count` is a local.
+    other = Import(f"screen.{ext}", "useState", "react/useState")
+    graph, _target, _user = _ref_graph(lang, ext, [other])
+    assert graph.referenced == []
+
+
+def test_ref_to_unimported_python_name_makes_no_edge() -> None:
+    graph, _target, _user = _ref_graph("python", "py", [])
+    assert graph.referenced == []
+
+
+@pytest.mark.parametrize(
+    ("lang", "ext", "source"),
+    [
+        ("typescript", "ts", "./utils/array/count"),
+        ("python", "py", "utils.array.count"),
+    ],
+)
+def test_ref_to_imported_name_keeps_its_edge(
+    lang: str, ext: str, source: str
+) -> None:
+    imp = Import(f"screen.{ext}", "count", source)
+    graph, target, user = _ref_graph(lang, ext, [imp])
+    assert [(e.caller, e.callee) for e in graph.referenced] == [
+        (user.id, target.id)
+    ]
+
+
+def test_ref_within_one_file_keeps_its_edge() -> None:
+    target = _fn("a.py", "handler")
+    user = _fn("a.py", "wire", line=10)
+    files = [
+        FileMap(
+            "a.py",
+            "python",
+            symbols=[target, user],
+            refs=[
+                RawRef(caller_id=user.id, path="a.py", name="handler", line=11)
+            ],
+        )
+    ]
+    graph = resolve(files)
+    assert graph.referenced_in[target.id] == [user.id]
+
+
+def test_ref_from_a_js_file_with_no_imports_is_left_alone() -> None:
+    # No recorded import proves nothing in the JS family: a
+    # script-style file shares globals across files. Err toward the
+    # edge. (`test_reference_resolves_into_referenced_not_calls` above
+    # is this same shape and predates the veto.)
+    graph, target, user = _ref_graph("javascript", "js", [])
+    assert graph.referenced_in[target.id] == [user.id]
+
+
+def test_ref_to_an_ambient_dts_declaration_is_left_alone() -> None:
+    other = Import("screen.ts", "useState", "react/useState")
+    graph, target, user = _ref_graph(
+        "typescript", "ts", [other], target_path="types/globals.d.ts"
+    )
+    assert graph.referenced_in[target.id] == [user.id]
+
+
+def test_ref_veto_does_not_touch_java_or_go() -> None:
+    # Java's references are syntactic `Type::method`, Go's are type
+    # identifiers. Neither can be a shadowing local; a wrong edge there
+    # is an ordinary name collision and stays the ladder's business.
+    for lang, ext in (("java", "java"), ("go", "go")):
+        graph, target, user = _ref_graph(lang, ext, [])
+        assert graph.referenced_in[target.id] == [user.id], lang
+
+
+def test_ref_veto_never_changes_call_resolution() -> None:
+    # Same shape as the no-edge case above, but a *call*: `count(x)` on
+    # a local is rare, so the sole-candidate guess stays.
+    target = _fn("utils/array.ts", "count", language="typescript")
+    user = _fn("screen.ts", "render", language="typescript")
+    files = [
+        FileMap("utils/array.ts", "typescript", symbols=[target]),
+        FileMap(
+            "screen.ts",
+            "typescript",
+            symbols=[user],
+            imports=[Import("screen.ts", "useState", "react/useState")],
+            calls=[
+                RawCall(
+                    caller_id=user.id,
+                    path="screen.ts",
+                    text="count",
+                    name="count",
+                    receiver=None,
+                    line=9,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.calls_in[target.id] == [user.id]
+
+
+@pytest.mark.parametrize(
+    "source", ["./index/runMode", "./runMode", "../runMode"]
+)
+def test_relative_import_is_in_repo_even_when_no_stem_matches(
+    source: str,
+) -> None:
+    # An index file's matching stem is its *directory* (`acp`), which
+    # `./index` and `.` never spell. The binding used to look external,
+    # so the call was thrown to noise. Static imports had this bug too;
+    # recording `await import("./index")` just exposed more sites
+    # (cline lost 9 correct test-to-module call edges until fixed).
+    target = _fn("acp/index.ts", "runMode", language="typescript")
+    user = _fn("acp/index.test.ts", "check", language="typescript")
+    files = [
+        FileMap("acp/index.ts", "typescript", symbols=[target]),
+        FileMap(
+            "acp/index.test.ts",
+            "typescript",
+            symbols=[user],
+            imports=[Import("acp/index.test.ts", "runMode", source)],
+            calls=[
+                RawCall(
+                    caller_id=user.id,
+                    path="acp/index.test.ts",
+                    text="runMode",
+                    name="runMode",
+                    receiver=None,
+                    line=4,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.calls_in.get(target.id) == [user.id]
+    assert graph.external == []
+
+
+def test_bare_package_import_still_shadows_a_repo_name() -> None:
+    # The guard the relative-import fix must not loosen: `expect` from
+    # "vitest" is external, whatever the repo happens to define.
+    target = _fn("helpers/expect.ts", "expectish", language="typescript")
+    repo_expect = _fn("lib/assert.ts", "expect", language="typescript")
+    user = _fn("a.test.ts", "check", language="typescript")
+    files = [
+        FileMap("helpers/expect.ts", "typescript", symbols=[target]),
+        FileMap("lib/assert.ts", "typescript", symbols=[repo_expect]),
+        FileMap(
+            "a.test.ts",
+            "typescript",
+            symbols=[user],
+            imports=[Import("a.test.ts", "expect", "vitest/expect")],
+            calls=[
+                RawCall(
+                    caller_id=user.id,
+                    path="a.test.ts",
+                    text="expect",
+                    name="expect",
+                    receiver=None,
+                    line=3,
+                )
+            ],
+        ),
+    ]
+    graph = resolve(files)
+    assert repo_expect.id not in graph.calls_in
+
+
+def test_ref_to_a_name_imported_from_an_external_package_makes_no_edge() -> (
+    None
+):
+    # cline: `import os from "node:os"` then `os.tmpdir()` was recorded
+    # as a reference to a script's own `const os`. The name IS imported,
+    # just not from here. Calls have had this guard for a long time
+    # (`_shadowed_by_external_import`); references never did.
+    imp = Import("screen.ts", "count", "lodash/count")
+    graph, _target, _user = _ref_graph("typescript", "ts", [imp])
+    assert graph.referenced == []
+
+
+def test_ref_veto_runs_inside_the_pooled_path_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `repo_stems` reaches workers through the pool initializer; a
+    # `None` there would only blow up once refs really fan out, so
+    # force the thresholds down the way the other pool tests do.
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
+    monkeypatch.setattr(resolver_mod, "_RESOLVE_MIN_ITEMS_PER_WORKER", 1)
+    imp = Import("screen.ts", "count", "./utils/array/count")
+    target = _fn("utils/array.ts", "count", language="typescript")
+    user = _fn("screen.ts", "render", language="typescript")
+    files = [
+        FileMap("utils/array.ts", "typescript", symbols=[target]),
+        FileMap(
+            "screen.ts",
+            "typescript",
+            symbols=[user],
+            imports=[imp],
+            refs=[
+                RawRef(
+                    caller_id=user.id, path="screen.ts", name="count", line=n
+                )
+                for n in range(1, 40)
+            ],
+        ),
+    ]
+    other = _fn("panel.ts", "panel", language="typescript")
+    files.append(
+        FileMap(
+            "panel.ts",
+            "typescript",
+            symbols=[other],
+            imports=[Import("panel.ts", "count", "lodash/count")],
+            refs=[
+                RawRef(
+                    caller_id=other.id, path="panel.ts", name="count", line=3
+                )
+            ],
+        )
+    )
+    sequential = resolve_refs(files, workers=1)
+    pooled = resolve_refs(files, workers=2)
+    assert [(e.caller, e.callee, e.lines) for e in pooled[0]] == [
+        (e.caller, e.callee, e.lines) for e in sequential[0]
+    ]
+    assert sequential[1] == {target.id: [user.id]}
+
+
+# --- round 32 Track 5b: bound references, fixtures, scripts vs modules -
+#
+# The veto above proves what it can from the import table. It can't see
+# a local shadowing a same-file or imported symbol, or any local in a
+# zero-import file. The extractor now tags those (`RawRef.bound`) and
+# `_resolve_ref` drops them before the ladder: 6.2% of claude-code's
+# surviving reference sites and 4.1% of cline's.
+
+
+def _bound_ref_graph(bound: str | None, same_file: bool) -> CallGraph:
+    target_path = "screen.ts" if same_file else "utils/array.ts"
+    target = _fn(target_path, "count", language="typescript")
+    user = _fn("screen.ts", "render", line=20, language="typescript")
+    ref = RawRef(
+        caller_id=user.id, path="screen.ts", name="count", line=21, bound=bound
+    )
+    imp = Import("screen.ts", "count", "./utils/array/count")
+    screen = FileMap(
+        "screen.ts",
+        "typescript",
+        symbols=[target, user] if same_file else [user],
+        imports=[] if same_file else [imp],
+        refs=[ref],
+    )
+    files = [screen]
+    if not same_file:
+        files.append(FileMap(target_path, "typescript", symbols=[target]))
+    return resolve(files)
+
+
+@pytest.mark.parametrize("bound", ["param", "local"])
+@pytest.mark.parametrize("same_file", [True, False])
+def test_bound_ref_makes_no_edge(bound: str, same_file: bool) -> None:
+    # same_file: a local shadowing a symbol in its own file.
+    # not same_file: imported, then shadowed (claude-code `ide.ts`).
+    # Both pass `_ref_target_visible`; only the tag can stop them.
+    assert _bound_ref_graph(bound, same_file).referenced == []
+
+
+@pytest.mark.parametrize("same_file", [True, False])
+def test_unbound_ref_keeps_its_edge(same_file: bool) -> None:
+    graph = _bound_ref_graph(None, same_file)
+    assert len(graph.referenced) == 1
+
+
+def _fixture_files(
+    fixture_paths: list[str],
+    test_path: str = "tests/daemon/test_daemon.py",
+    bound: str | None = "param",
+    decorated: bool = True,
+) -> tuple[list[FileMap], Symbol]:
+    user = _fn(test_path, "test_affected", line=10)
+    ref = RawRef(
+        caller_id=user.id,
+        path=test_path,
+        name="short_root",
+        line=11,
+        bound=bound,
+    )
+    by_path: dict[str, FileMap] = {
+        test_path: FileMap(test_path, "python", symbols=[user], refs=[ref])
+    }
+    for path in fixture_paths:
+        fixture = _fn(path, "short_root")
+        fixture.decorated = decorated
+        fm = by_path.setdefault(path, FileMap(path, "python"))
+        fm.symbols.append(fixture)
+    return list(by_path.values()), user
+
+
+def _ref_targets(files: list[FileMap]) -> list[str]:
+    return [e.callee for e in resolve(files).referenced]
+
+
+def test_fixture_param_in_the_same_file_keeps_its_edge() -> None:
+    # `def test_x(short_root): run(short_root)` shadows the fixture
+    # lexically and *is* the fixture: pytest injects by name. 102 of
+    # the 119 shadowed sites in dekko's own repo are this shape.
+    files, _ = _fixture_files(["tests/daemon/test_daemon.py"])
+    assert _ref_targets(files) == ["tests/daemon/test_daemon.py::short_root"]
+
+
+def test_fixture_param_resolves_to_an_ancestor_conftest() -> None:
+    # The one cross-file name Python sees with no import. 0.43.69's
+    # visibility veto cut all 47 of these edges in dekko's own repo.
+    files, _ = _fixture_files(["tests/conftest.py"])
+    assert _ref_targets(files) == ["tests/conftest.py::short_root"]
+
+
+def test_fixture_param_picks_the_nearest_conftest() -> None:
+    files, _ = _fixture_files(
+        ["conftest.py", "tests/conftest.py", "tests/daemon/conftest.py"]
+    )
+    assert _ref_targets(files) == ["tests/daemon/conftest.py::short_root"]
+
+
+def test_fixture_param_ignores_a_conftest_off_the_ancestor_path() -> None:
+    files, _ = _fixture_files(["tests/render/conftest.py"])
+    assert _ref_targets(files) == []
+
+
+def test_fixture_rule_needs_a_decorator() -> None:
+    files, _ = _fixture_files(["tests/conftest.py"], decorated=False)
+    assert _ref_targets(files) == []
+
+
+def test_fixture_rule_is_for_parameters_only() -> None:
+    # A plain local named like a fixture is just a local.
+    files, _ = _fixture_files(["tests/conftest.py"], bound="local")
+    assert _ref_targets(files) == []
+
+
+def test_fixture_rule_is_for_test_files_only() -> None:
+    # Production code with a parameter named like a decorated function
+    # elsewhere: no pytest, no injection, no edge.
+    files, _ = _fixture_files(
+        ["src/app/conftest.py"], test_path="src/app/service.py"
+    )
+    assert _ref_targets(files) == []
+
+
+def _script_or_module(exported: bool) -> CallGraph:
+    target = _fn("utils/cron.ts", "process", language="typescript")
+    user = _fn("cli/exit.ts", "exit", language="typescript")
+    user.exported = exported
+    files = [
+        FileMap("utils/cron.ts", "typescript", symbols=[target]),
+        FileMap(
+            "cli/exit.ts",
+            "typescript",
+            symbols=[user],
+            refs=[
+                RawRef(
+                    caller_id=user.id,
+                    path="cli/exit.ts",
+                    name="process",
+                    line=22,
+                )
+            ],
+        ),
+    ]
+    return resolve(files)
+
+
+def test_zero_import_file_that_exports_is_a_module() -> None:
+    # No imports but it exports: an ES module, which shares no globals.
+    # A free `process` in it is the runtime's, not
+    # `cronScheduler.ts::process` (33 such sites on claude-code).
+    assert _script_or_module(exported=True).referenced == []
+
+
+def test_zero_import_file_with_no_exports_is_still_a_script() -> None:
+    # Neither import nor export: a script, one shared global scope,
+    # which is also how TypeScript itself reads such a file.
+    assert len(_script_or_module(exported=False).referenced) == 1
+
+
+def test_pooled_ref_resolution_agrees_on_bound_and_export_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _force_resolve_pool(monkeypatch)
+    files, _ = _fixture_files(["tests/conftest.py"])
+    target = _fn("utils/cron.ts", "process", language="typescript")
+    files.append(FileMap("utils/cron.ts", "typescript", symbols=[target]))
+    for n in range(12):
+        user = _fn(f"cli/m{n}.ts", "run", language="typescript")
+        user.exported = n % 2 == 0
+        files.append(
+            FileMap(
+                f"cli/m{n}.ts",
+                "typescript",
+                symbols=[user],
+                refs=[
+                    RawRef(
+                        caller_id=user.id,
+                        path=f"cli/m{n}.ts",
+                        name="process",
+                        line=3,
+                        bound="local" if n % 3 == 0 else None,
+                    )
+                ],
+            )
+        )
+    sequential = resolve_refs(files, workers=1)
+    pooled = resolve_refs(files, workers=2)
+    assert [(e.caller, e.callee) for e in pooled[0]] == [
+        (e.caller, e.callee) for e in sequential[0]
+    ]
+    # Odd n (no export, a script) and not bound: 1, 5, 7, 11.
+    assert len(sequential[0]) == 1 + 4
+
+
+# --- round 32 Track 4: `Name(x)` constructs a tuple struct -------------
+#
+# Every type used to carry `params=[]`, which the arity check reads as
+# "takes zero arguments", so a counted `GroupName(s)` reaching the
+# sole-candidate rung (through a glob import, the norm in Rust test
+# modules) was rejected against `struct GroupName(String);`. The naive
+# fix (ignore arity for types) was measured on zed and backed out: 252
+# of its 552 new edges went to a struct whose name is also an enum
+# variant somewhere. Fixed at the cause instead, with a collision veto.
+
+_T4_TEST_MOD = (
+    "use super::*;\n"
+    "fn check() {\n"
+    "    let g = GroupName(name());\n"
+    "    let l = Left(3);\n"
+    "    let b = Brace(1);\n"
+    "    let p = Pair(1);\n"
+    "    handler.Update();\n"
+    "}\n"
+)
+
+
+def _t4_edges(tmp_path: Path, types: str) -> set[str]:
+    graph = _rust_graph(
+        tmp_path,
+        {
+            "crates/a/src/types.rs": types,
+            "crates/b/src/tests.rs": _T4_TEST_MOD,
+        },
+    )
+    return {
+        e.callee.split("::", 1)[1]
+        for e in graph.edges
+        if e.caller.endswith("::check")
+    }
+
+
+def test_rust_tuple_struct_construction_resolves_by_arity(
+    tmp_path: Path,
+) -> None:
+    got = _t4_edges(
+        tmp_path,
+        "pub struct GroupName(pub String);\n"
+        "pub struct Left(u8);\n"
+        "pub struct Brace { a: u8 }\n"
+        "pub struct Pair(u8, u8);\n"
+        "pub struct Update;\n",
+    )
+    # One field, one argument.
+    assert "GroupName" in got
+    assert "Left" in got  # no enum in sight, so no second reading
+    # A brace struct can't be written `Brace(1)`; two fields don't
+    # take one argument. Both still rejected, now for a real reason.
+    assert "Brace" not in got
+    assert "Pair" not in got
+
+
+def test_rust_struct_sharing_a_name_with_a_tuple_variant_is_not_taken(
+    tmp_path: Path,
+) -> None:
+    # zed: `use AutoCompactThreshold::*; Percentage(0.9)` landed on
+    # gpui's unrelated `struct Percentage(f32)`. dekko indexes enums,
+    # not variants, so the struct was the *only* candidate and the
+    # rung took it with full confidence.
+    got = _t4_edges(
+        tmp_path,
+        "pub struct Left(u8);\n"
+        "pub struct GroupName(pub String);\n"
+        "pub enum Side { Left(u8), Right }\n",
+    )
+    assert "Left" not in got
+    assert "GroupName" in got  # an unrelated name is unaffected
+
+
+def test_rust_unit_and_struct_variants_do_not_veto(tmp_path: Path) -> None:
+    # Neither `Mid` nor `Right { .. }` can be written `Left(3)`.
+    got = _t4_edges(
+        tmp_path,
+        "pub struct Left(u8);\npub enum Side { Left, Other { Left: u8 } }\n",
+    )
+    assert "Left" in got
+
+
+def test_rust_dot_call_never_constructs_a_type(tmp_path: Path) -> None:
+    # Windows COM: `handler.Update()` against a sole `struct Update`.
+    # Zero written arguments fit a unit struct's zero params, so only
+    # the joiner says this can't be a construction (F11's sibling).
+    got = _t4_edges(tmp_path, "pub struct Update();\n")
+    assert "Update" not in got
+
+
+def test_rust_variant_veto_is_for_calls_only() -> None:
+    # `impl Shape for Left` names a type where no variant can stand, so
+    # a heritage clause whose subtype shares a variant's name must not
+    # be vetoed. (Checked at the predicate: a cross-file `impl` doesn't
+    # reach the sole-candidate rung to begin with.)
+    struct = _cls("crates/a/src/types.rs", "Left", language="rust")
+    struct.kind = "struct"
+    side = _cls("crates/a/src/types.rs", "Side", language="rust")
+    side.kind = "enum"
+    index = resolver_mod._build_index(
+        [
+            FileMap(
+                "crates/a/src/types.rs",
+                "rust",
+                symbols=[struct, side],
+                enum_variants=["Side::Left"],
+            )
+        ]
+    )
+    call = RawCall(
+        caller_id=None,
+        path="crates/b/src/t.rs",
+        text="Left",
+        name="Left",
+        receiver=None,
+        line=3,
+    )
+    clause = RawHeritage(
+        subtype_id=struct.id,
+        path="crates/b/src/imp.rs",
+        text="Left",
+        name="Left",
+        relation="extends",
+        line=2,
+    )
+    veto = resolver_mod._rust_name_is_also_a_variant
+    assert veto(call, struct, index)
+    assert not veto(clause, struct, index)
+    # The registry rides in the name index under a key no identifier
+    # can spell, and points at the owning enum.
+    assert index[resolver_mod._RUST_VARIANT_KEY + "Left"] == [side]
+    assert index["Left"] == [struct]

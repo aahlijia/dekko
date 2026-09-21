@@ -113,6 +113,18 @@ class Context:
     index_cache: dict[Path, mapfile.MapIndex] = field(default_factory=dict)
 
 
+# Worker count for a rev-cache-miss old-side re-parse/resolve behind
+# ``impacted_tests``/``workset`` (round 31 P4.1). These tools used to
+# call ``affected.run``/``workset.run`` without ``jobs`` at all, so they
+# inherited the functions' own sequential default: a first-touch call
+# on tensorflow ran single-threaded for 12+ minutes, far past any MCP
+# client's patience, while the same request with all cores finishes in
+# about four. Same value the CLI's ``--jobs 0`` default resolves to;
+# ``resolver._pool_workers`` still scales it down to what the work
+# justifies, so a small repo never pays for a pool it can't use.
+_COLD_REV_JOBS = repo_ops.resolve_workers(0)
+
+
 def _capture(fn: Callable[[], int]) -> tuple[int, str, str]:
     """Run ``fn`` with stdout/stderr captured.
 
@@ -155,10 +167,88 @@ def _with_notes(out: str, err: str, fallback: str = "") -> str:
     return f"{text}\n\n{notes}" if text else notes
 
 
+# Cap on the sparse-file caveats a directory ``outline`` forwards
+# through ``_with_notes``. Round 31 tensorflow.md Observation 4.3:
+# ``outline``'s row content is already budget-capped
+# (``DEFAULT_ORIENT_BUDGET``/``_outline_limit_arg``), but
+# ``outline.py``'s per-file "few named symbols" caveat
+# (``_sparse_note``) is emitted to stderr once per file in the
+# *target directory*, independent of which files' rows actually
+# survived that cap -- so on a large directory the notes alone grew
+# past 8k tokens even though the visible outline content stayed
+# small. Live-verified on claude-code's 1900-file ``src/``: an
+# uncapped MCP call returned ~237k chars, almost entirely sparse-file
+# notes for files whose own rows never made it into the output at
+# all. Scoped to ``tool_outline`` alone, not folded into
+# ``_with_notes`` itself -- every other tool's stderr disclosures are
+# already small and already governed by the same content-level cap
+# their row output uses.
+_MAX_OUTLINE_NOTES = 20
+
+
+def _capped_notes(err: str, max_notes: int = _MAX_OUTLINE_NOTES) -> str:
+    """Keep at most ``max_notes`` lines of ``err``, footer-disclosed.
+
+    A note about a file whose own outline rows didn't survive
+    ``outline``'s row-level budget/limit fit isn't actionable anyway —
+    there's nothing shown for that file to act on — so capping the
+    note *count* here, independent of the row-level fit, is the right
+    knob rather than trying to thread this cap back through
+    ``outline.py``'s own rendering.
+
+    Args:
+        err: Raw captured stderr (``outline``'s only stderr output is
+            one ``note:`` line per sparse file; see
+            ``outline._sparse_note``).
+        max_notes: Maximum note lines to keep.
+
+    Returns:
+        ``err`` unchanged when it has ``max_notes`` lines or fewer;
+        otherwise the first ``max_notes`` lines plus a trailing
+        omission line in the same "raise --X" footer shape the rest
+        of the tool suite uses.
+    """
+    lines = err.strip().splitlines()
+    if len(lines) <= max_notes:
+        return err
+    omitted = len(lines) - max_notes
+    kept = lines[:max_notes]
+    kept.append(
+        f"note: {omitted} more sparse-file note(s) omitted — narrow "
+        "the target (a subdirectory, or one file) to see them all"
+    )
+    return "\n".join(kept)
+
+
+def _outline_limit_arg(args: dict) -> int:
+    """Row-count cap for ``tool_outline`` — mirrors ``_limit_arg``'s
+    budget/limit precedence (see its own docstring and
+    ``query.effective_limit``: an explicit ``budget`` with no explicit
+    ``limit`` lets the budget govern alone, since the tool's own
+    default budget doesn't count as "the caller chose one"), scoped to
+    ``outline``'s own row-count default (200, matching the CLI's own
+    ``--limit`` default) rather than the relation tools' (``query.
+    DEFAULT_LIMIT``, 50) — the two tools' row shapes and defaults have
+    never been the same, only the *precedence rule* is being mirrored
+    here.
+    """
+    limit = args.get("limit")
+    if limit is not None:
+        return int(limit)
+    return query.NO_ROW_LIMIT if args.get("budget") is not None else 200
+
+
 def _require(args: dict, key: str) -> str:
     """Return a required string argument or raise ``ToolError``."""
     value = args.get(key)
-    if not isinstance(value, str) or not value:
+    if value is not None and not isinstance(value, str):
+        # Present but mistyped is a different mistake from absent, and
+        # "missing" sends the caller hunting for a key it already sent
+        # (round 31 tensorflow coverage pass, finding 4.1).
+        raise ToolError(
+            f"argument '{key}' must be a string, got {type(value).__name__}"
+        )
+    if not value:
         raise ToolError(f"missing required argument '{key}'")
     return value
 
@@ -177,6 +267,22 @@ _SYMBOL_ALIAS_TOOLS = frozenset(
         "add_note",
     }
 )
+
+
+def _limit_arg(args: dict) -> int:
+    """Row limit for a query-backed tool (see ``query.effective_limit``).
+
+    An explicit ``budget`` with no explicit ``limit`` lets the budget
+    govern alone, same as the CLI. The tool's *default* budget doesn't
+    count: only a caller who actually chose a budget has said how much
+    output they can take.
+    """
+    limit = args.get("limit")
+    budget = args.get("budget")
+    return query.effective_limit(
+        int(limit) if limit is not None else None,
+        int(budget) if budget is not None else None,
+    )
 
 
 def _resolve_symbol_alias(tool_name: str, args: dict) -> dict:
@@ -295,7 +401,7 @@ def _relation_tool(
     include_tests = bool(args.get("include_tests", default_include_tests))
     index = _index_for(ctx, args, include_tests=include_tests)
     target = _require(args, "symbol")
-    limit = int(args.get("limit", 50))
+    limit = _limit_arg(args)
     sites = bool(args.get("sites", False))
     budget = args.get("budget")
     budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
@@ -340,7 +446,7 @@ def tool_find_usages(ctx: Context, args: dict) -> str:
     """Symbols that reference an external (out-of-repo) name."""
     index = _index_for(ctx, args)
     name = _require(args, "name")
-    limit = int(args.get("limit", 50))
+    limit = _limit_arg(args)
     budget = args.get("budget")
     budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
     code, out, err = _capture(
@@ -358,7 +464,7 @@ def tool_find_type_usages(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     name = _require(args, "type")
     exact = bool(args.get("exact", False))
-    limit = int(args.get("limit", 50))
+    limit = _limit_arg(args)
     budget = args.get("budget")
     budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
     code, out, err = _capture(
@@ -465,7 +571,7 @@ def tool_outline(ctx: Context, args: dict) -> str:
     """Structural outline of a file or directory (signatures, no bodies)."""
     index = _index_for(ctx, args)
     target = _require(args, "target")
-    limit = int(args.get("limit", 200))
+    limit = _outline_limit_arg(args)
     budget = int(args.get("budget", DEFAULT_ORIENT_BUDGET))
     root = _root_of(ctx, args)
     code, out, err = _capture(
@@ -480,7 +586,7 @@ def tool_outline(ctx: Context, args: dict) -> str:
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return _with_notes(out, err)
+    return _with_notes(out, _capped_notes(err))
 
 
 def tool_trace_path(ctx: Context, args: dict) -> str:
@@ -505,7 +611,7 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     roots = args.get("roots") or []
     if not isinstance(roots, list):
         raise ToolError("'roots' must be a list of path globs")
-    limit = int(args.get("limit", 50))
+    limit = _limit_arg(args)
     budget = args.get("budget")
     budget = int(budget) if budget is not None else None
     suspect = bool(args.get("suspect", False))
@@ -534,7 +640,12 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     budget = int(budget) if budget is not None else affected.DEFAULT_BUDGET
     code, out, err = _capture(
         lambda: affected.run(
-            root, rev, as_json=False, limit=limit, budget=budget
+            root,
+            rev,
+            as_json=False,
+            limit=limit,
+            budget=budget,
+            jobs=_COLD_REV_JOBS,
         )
     )
     if code == affected.EXIT_ERROR:
@@ -611,6 +722,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
             no_regen=False,
             task=task,
             type_impact=type_impact,
+            jobs=_COLD_REV_JOBS,
         )
     )
     if code != 0:
@@ -1201,13 +1313,18 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max symbol rows (default 200)",
+                    "description": "Max symbol rows (default 200; if "
+                    "omitted and budget is set explicitly, budget "
+                    "governs instead — the 200 default doesn't stack "
+                    "with it)",
                 },
                 "budget": {
                     "type": "integer",
                     "description": "Approximate token budget (default "
                     "2000); lowest-relevance rows are dropped to fit "
-                    "and a cost footer is appended",
+                    "and a cost footer is appended. On a directory "
+                    "target, sparse-file caveats are separately capped "
+                    "and disclosed if truncated",
                 },
                 "root": _ROOT_PROP,
             },

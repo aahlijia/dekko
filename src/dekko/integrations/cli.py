@@ -447,8 +447,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_query.add_argument(
         "--limit",
         type=int,
-        default=50,
-        help="max text result lines (default: 50)",
+        default=None,
+        help=(
+            "max text result lines (default: 50; with --budget and no "
+            "--limit, the budget alone governs)"
+        ),
     )
     p_query.add_argument(
         "--budget",
@@ -650,10 +653,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_diff.add_argument(
         "--jobs",
         type=int,
-        default=1,
+        default=0,
         metavar="N",
         help="parallel workers for a rev-cache-miss old-side re-parse/"
-        "resolve (1 = sequential, 0 = all cores)",
+        "resolve (0 = all cores, 1 = sequential; default: 0)",
     )
     p_diff.set_defaults(func=run_diff)
 
@@ -696,10 +699,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_affected.add_argument(
         "--jobs",
         type=int,
-        default=1,
+        default=0,
         metavar="N",
         help="parallel workers for a rev-cache-miss old-side re-parse/"
-        "resolve (1 = sequential, 0 = all cores)",
+        "resolve (0 = all cores, 1 = sequential; default: 0)",
     )
     p_affected.set_defaults(func=run_affected)
 
@@ -766,11 +769,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_workset.add_argument(
         "--jobs",
         type=int,
-        default=1,
+        default=0,
         metavar="N",
         help="parallel workers for a rev-cache-miss old-side re-parse/"
-        "resolve on a rev seed (1 = sequential, 0 = all cores); no "
-        "effect on a --symbol seed",
+        "resolve on a rev seed (0 = all cores, 1 = sequential; "
+        "default: 0); no effect on a --symbol seed",
     )
     _add_task_option(p_workset)
     p_workset.set_defaults(func=run_workset)
@@ -936,6 +939,15 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "target does (bare name, qualname, path:qualname, or "
         "#N-disambiguated). Mutually exclusive with --usages. Always "
         "advisory (exits 0)",
+    )
+    p_sanity.add_argument(
+        "--roots",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="with --unused: the same extra root globs you passed to "
+        "'dekko unused --roots', so both agree on what was flagged "
+        "(repeatable)",
     )
     p_sanity.add_argument(
         "--include-tests",
@@ -1873,7 +1885,7 @@ def run_query(args: argparse.Namespace) -> int:
         args.action,
         args.target or "",
         as_json=args.as_json,
-        limit=args.limit,
+        limit=query.effective_limit(args.limit, args.budget),
         sites=args.sites,
         notes=args.notes,
         budget=args.budget,
@@ -2565,6 +2577,7 @@ def run_sanity(args: argparse.Namespace) -> int:
         budget=args.budget,
         as_json=args.as_json,
         group_by_file=args.group_by_file,
+        root_globs=tuple(getattr(args, "roots", None) or ()),
     )
 
 

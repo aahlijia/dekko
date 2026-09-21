@@ -59,6 +59,41 @@ class LanguageSpec:
             tree (no argument list) and so are invisible to
             ``call_query`` too. ``None`` for languages still lacking
             one (Rust, C, C++ as of this writing).
+        enum_variant_query: Query capturing an enum's *tuple* variants
+            (``@enum`` the owning enum's name, ``@variant`` the
+            variant's), Rust only. Variants are not symbols. They are a
+            repo-wide name registry the resolver consults before
+            taking ``Left(x)`` for a construction of ``struct Left``:
+            with ``enum Side { Left(u8) }`` anywhere in the repo that
+            call has two readings and the map only indexes one of them
+            (round 32 Track 4). Unit and struct-like variants are left
+            out: neither can be written ``Name(..)``.
+        binding_query: Query locating the places a *local* name is
+            bound, so ``extractor._collect_refs`` can tell a bare
+            identifier that names a repo symbol from one that names a
+            parameter or a local of the same spelling (round 32 Track
+            5b). The capture name says where the binding lives:
+            ``@params`` (a parameter list, binds in its parent),
+            ``@param`` (one parameter pattern, same), ``@local``
+            (nearest block or function scope), ``@funclocal`` (nearest
+            function scope: JS ``var``), ``@scoped`` with a sibling
+            ``@scope`` (binds in exactly that node: a catch clause, a
+            ``for..of`` head, a comprehension), ``@defname`` (a nested
+            definition's name: recorded only so it *stops* the lookup,
+            since the map indexes it as a symbol), and Python's
+            ``@global``/``@nonlocal``/``@import``. Destructuring nests
+            to any depth and a query can't recurse, so the query finds
+            the pattern's root and ``extractor._pattern_identifiers``
+            walks it. ``None`` for languages whose reference shapes
+            can't be shadowed by a value local (Go's type identifiers,
+            Java's ``Type::method``).
+        binding_function_scopes: Node types that open a function-level
+            scope for ``binding_query``. For Python this includes
+            ``class_definition``: a class body binds its own
+            statements' names (and is skipped again on lookup from
+            inside a method, see ``extractor._CLASS_SCOPES``).
+        binding_block_scopes: Node types that open a block-level scope
+            (``let``/``const``). Empty for Python, which has none.
         heritage_query: Query capturing a type definition's own
             ``extends``/``implements`` clause(s) — one ``@classdef``
             match per type, with the clause(s) attached as sibling
@@ -158,6 +193,10 @@ class LanguageSpec:
     catch_query: str | None = None
     env_read_query: str | None = None
     type_alias_query: str | None = None
+    enum_variant_query: str | None = None
+    binding_query: str | None = None
+    binding_function_scopes: tuple[str, ...] = ()
+    binding_block_scopes: tuple[str, ...] = ()
 
 
 # Bare identifiers used as *values* rather than invoked -- keyword-
@@ -180,6 +219,37 @@ _PY_REFERENCE_QUERY = """
 (assignment right: (identifier) @ref)
 (default_parameter value: (identifier) @ref)
 (return_statement (identifier) @ref)
+"""
+
+# Where Python binds a local name (round 32 Track 5b, see
+# ``LanguageSpec.binding_query``). Assignment targets that aren't
+# names (``self.x = ..``, ``table[k] = ..``) fall out by themselves:
+# ``extractor._pattern_identifiers`` only descends into pattern nodes.
+# ``global`` makes a name *not* local (recorded as a lookup stop);
+# ``nonlocal`` leaves it to the enclosing function's own binding. A
+# function-level ``import`` binds an import, not a local, the same
+# exemption JS's lazy ``await import()`` gets. Node shapes verified
+# against the pinned tree-sitter-python grammar (``with .. as (a, b)``
+# is an ``as_pattern_target`` holding a plain ``tuple``, not a
+# ``tuple_pattern``).
+_PY_BINDING_QUERY = """
+(function_definition parameters: (parameters) @params)
+(lambda parameters: (lambda_parameters) @params)
+(assignment left: (_) @local)
+(augmented_assignment left: (_) @local)
+(named_expression name: (identifier) @local)
+(for_statement left: (_) @local)
+(as_pattern alias: (as_pattern_target) @local)
+(list_comprehension (for_in_clause left: (_) @scoped)) @scope
+(set_comprehension (for_in_clause left: (_) @scoped)) @scope
+(dictionary_comprehension (for_in_clause left: (_) @scoped)) @scope
+(generator_expression (for_in_clause left: (_) @scoped)) @scope
+(function_definition name: (identifier) @defname)
+(class_definition name: (identifier) @defname)
+(global_statement (identifier) @global)
+(nonlocal_statement (identifier) @nonlocal)
+(import_statement) @import
+(import_from_statement) @import
 """
 
 PYTHON = LanguageSpec(
@@ -221,6 +291,12 @@ PYTHON = LanguageSpec(
     method_containers=("class_definition",),
     param_style="python",
     reference_query=_PY_REFERENCE_QUERY,
+    binding_query=_PY_BINDING_QUERY,
+    binding_function_scopes=(
+        "function_definition",
+        "lambda",
+        "class_definition",
+    ),
     heritage_query="""
 (class_definition
   name: (identifier) @classname
@@ -276,6 +352,18 @@ PYTHON = LanguageSpec(
 """,
 )
 
+# Tuple variants only: ``Left(u8)``, not ``Mid`` or ``Right { a: u8 }``
+# (see ``LanguageSpec.enum_variant_query``). Node shapes verified
+# against the pinned tree-sitter-rust grammar.
+_RUST_ENUM_VARIANT_QUERY = """
+(enum_item
+  name: (type_identifier) @enum
+  body: (enum_variant_list
+    (enum_variant
+      name: (identifier) @variant
+      body: (ordered_field_declaration_list))))
+"""
+
 RUST = LanguageSpec(
     name="rust",
     grammar="rust",
@@ -294,7 +382,20 @@ RUST = LanguageSpec(
 (struct_item name: (type_identifier) @classname) @classdef
 (enum_item name: (type_identifier) @classname) @classdef
 (trait_item name: (type_identifier) @classname) @classdef
+
+(source_file
+  (type_item name: (type_identifier) @classname) @classdef)
+(mod_item
+  body: (declaration_list
+    (type_item name: (type_identifier) @classname) @classdef))
 """,
+    # The two ``type_item`` patterns above are anchored to a file or
+    # ``mod`` body on purpose (round 31 F6b): ``type Alias = Real;`` is
+    # a module-level alias worth a ``type_alias`` symbol, but the same
+    # node type inside an ``impl`` block is an *associated type*
+    # (``type Output = Foo;``), and indexing those would mint thousands
+    # of ``Item``/``Output``/``Target`` symbols that name nothing a
+    # ``Type::name()`` path could be rooted at.
     call_query="""
 (call_expression function: (_) @callee arguments: (_)? @args) @call
 """,
@@ -309,6 +410,7 @@ RUST = LanguageSpec(
     method_containers=("impl_item", "trait_item"),
     param_style="rust",
     function_boundary_types=("function_item", "closure_expression"),
+    enum_variant_query=_RUST_ENUM_VARIANT_QUERY,
     # ``impl_item`` with a ``trait:`` field is heritage (``impl Trait
     # for Type``); an inherent ``impl Type { ... }`` (no ``trait:``
     # field) never matches this pattern at all, so no query-time
@@ -551,7 +653,32 @@ _JS_REFERENCE_BASE = """
 (ternary_expression alternative: (identifier) @ref)
 (spread_element (identifier) @ref)
 (subscript_expression object: (identifier) @ref)
+(member_expression object: (identifier) @ref)
+(return_statement (identifier) @ref)
+(parenthesized_expression (identifier) @ref)
+(unary_expression argument: (identifier) @ref)
+(await_expression (identifier) @ref)
+(arrow_function body: (identifier) @ref)
+(for_in_statement right: (identifier) @ref)
+(export_statement value: (identifier) @ref)
 """
+# The last eight positions above are round 32 Track 5. They are plain
+# *reads* that were never captured: ``handle.close()``, ``return
+# DEFAULT_PORT``, ``if (status)``, ``!enabled``, ``for (const e of
+# IMAGE_EXTENSIONS)``, ``export default styles``. Nobody noticed,
+# because a module-level ``let knownChannelsVersion`` read only by
+# ``return knownChannelsVersion`` was being kept "alive" by a *false*
+# reference edge from an unrelated file's same-named local. Removing
+# those false edges (``resolver._ref_target_visible``) exposed the
+# gap: ``dekko unused`` newly flagged 53 symbols across three repos
+# and 40 of them were alive through exactly these positions (measured
+# by parsing each file and tallying the parent node of every same-file
+# use). Writes are deliberately absent: an assignment target or
+# ``x++`` is not a use, and a variable that is only ever written is
+# dead. A subscript *index* / computed key (``table[key]``) stays
+# out too: round 23 scoped that pattern to ``object:`` on purpose,
+# since keys are overwhelmingly locals. It costs one known symbol
+# across three repos (cline ``hook-factory.ts::exec``).
 
 # TypeScript-only: ``typeof T`` as a *type* (a ``type_query`` node),
 # e.g. ``type X = typeof TOOL_DEFAULTS;`` or ``const w: typeof T = y;``.
@@ -564,6 +691,9 @@ _JS_REFERENCE_BASE = """
 # scoping discipline.
 _TS_TYPE_REFERENCE_EXTRA = """
 (type_query (identifier) @ref)
+(non_null_expression (identifier) @ref)
+(as_expression (identifier) @ref)
+(satisfies_expression (identifier) @ref)
 """
 
 # JSX attribute/expression values (``<Button onClick={handleClick}
@@ -581,6 +711,40 @@ _JSX_REFERENCE_EXTRA = """
 """
 
 _JS_REFERENCE_QUERY = _JS_REFERENCE_BASE + _JSX_REFERENCE_EXTRA
+
+# Where JS/TS/TSX bind a local name (round 32 Track 5b, see
+# ``LanguageSpec.binding_query``). ``const``/``let`` bind in the
+# nearest block, ``var`` in the nearest function. ``for (x of xs)``
+# with no ``const``/``let``/``var`` assigns to an existing name and
+# binds nothing, hence ``kind: _``. TS wraps each parameter in a
+# ``required_parameter``/``optional_parameter`` and names a class with
+# a ``type_identifier``; both are absorbed by ``(_)`` and
+# ``extractor._pattern_identifiers`` rather than a second query. The
+# two TS-only declaration nodes can't be: naming them against
+# tree-sitter-javascript raises "Invalid node type", the same split
+# ``_TS_TYPE_REFERENCE_EXTRA`` exists for.
+_JS_BINDING_QUERY = """
+(formal_parameters) @params
+(arrow_function parameter: (identifier) @param)
+(lexical_declaration (variable_declarator name: (_) @local))
+(variable_declaration (variable_declarator name: (_) @funclocal))
+(catch_clause parameter: (_) @scoped) @scope
+(for_in_statement kind: _ left: (_) @scoped) @scope
+(function_declaration name: (identifier) @defname)
+(generator_function_declaration name: (identifier) @defname)
+(class_declaration name: (_) @defname)
+"""
+_TS_BINDING_EXTRA = """
+(abstract_class_declaration name: (_) @defname)
+(enum_declaration name: (_) @defname)
+"""
+_JS_BLOCK_SCOPES = (
+    "statement_block",
+    "for_statement",
+    "for_in_statement",
+    "catch_clause",
+    "switch_body",
+)
 
 # JS/TS/TSX throw/catch: ``throw_statement``'s expression is an
 # unfielded first named child (see ``extractor._raise_expr``, shared
@@ -695,12 +859,50 @@ JAVASCRIPT = LanguageSpec(
 
 (import_statement
   . (string) @from_module) @stmt
+
+(variable_declarator
+  name: (object_pattern
+    [(shorthand_property_identifier_pattern) @name
+     (pair_pattern
+       key: (property_identifier) @name
+       value: (identifier) @alias)])
+  value: [
+    (await_expression
+      (call_expression
+        function: (import)
+        arguments: (arguments . (string) @from_module)))
+    (call_expression
+      function: (import)
+      arguments: (arguments . (string) @from_module))
+    (call_expression
+      function: (identifier) @binder
+      arguments: (arguments . (string) @from_module))
+    (await_expression
+      (call_expression
+        function: (identifier) @binder
+        arguments: (arguments . (string) @from_module)))
+  ])
+
+(variable_declarator
+  name: (identifier) @name
+  value: [
+    (await_expression
+      (call_expression
+        function: (import)
+        arguments: (arguments . (string) @from_module)))
+    (call_expression
+      function: (identifier) @binder
+      arguments: (arguments . (string) @from_module))
+  ])
 """,
     container_types={"class_declaration": "name"},
     method_containers=("class_declaration",),
     param_style="js",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY,
+    binding_query=_JS_BINDING_QUERY,
+    binding_function_scopes=_JS_FUNCTION_BOUNDARIES,
+    binding_block_scopes=_JS_BLOCK_SCOPES,
     heritage_query="""
 (class_declaration
   name: (identifier) @classname
@@ -827,19 +1029,49 @@ _TS_TYPE_ALIAS_QUERY = """
 (type_alias_declaration name: (type_identifier) @name)
 """
 
+# TypeScript-only binding form, appended to ``JAVASCRIPT.import_query``
+# for the TS/TSX specs: a CommonJS require wearing a type assertion,
+# ``const { X } = require("./x") as typeof import("./x")``. claude-code
+# has 167 of these (its feature-gated lazy requires). ``as_expression``
+# isn't a node type in the JavaScript grammar, so it can't live in the
+# shared query. Same ``@binder`` contract as the shared patterns: the
+# extractor keeps the match only when the callee is ``require``.
+_TS_IMPORT_EXTRA = """
+(variable_declarator
+  name: (object_pattern
+    [(shorthand_property_identifier_pattern) @name
+     (pair_pattern
+       key: (property_identifier) @name
+       value: (identifier) @alias)])
+  value: (as_expression
+    (call_expression
+      function: (identifier) @binder
+      arguments: (arguments . (string) @from_module))))
+
+(variable_declarator
+  name: (identifier) @name
+  value: (as_expression
+    (call_expression
+      function: (identifier) @binder
+      arguments: (arguments . (string) @from_module))))
+"""
+
 TYPESCRIPT = LanguageSpec(
     name="typescript",
     grammar="typescript",
     extensions=(".ts", ".mts", ".cts"),
     definition_query=_TS_DEFINITIONS,
     call_query=_TS_CALLS,
-    import_query=JAVASCRIPT.import_query,
+    import_query=JAVASCRIPT.import_query + _TS_IMPORT_EXTRA,
     container_types=_TS_CONTAINERS,
     method_containers=tuple(_TS_CONTAINERS),
     param_style="ts",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     # Plain (non-JSX) TypeScript has no jsx_expression node type.
     reference_query=_JS_REFERENCE_BASE + _TS_TYPE_REFERENCE_EXTRA,
+    binding_query=_JS_BINDING_QUERY + _TS_BINDING_EXTRA,
+    binding_function_scopes=_JS_FUNCTION_BOUNDARIES,
+    binding_block_scopes=_JS_BLOCK_SCOPES,
     heritage_query=_TS_HERITAGE,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
@@ -853,12 +1085,15 @@ TSX = LanguageSpec(
     extensions=(".tsx",),
     definition_query=_TS_DEFINITIONS,
     call_query=_TS_CALLS,
-    import_query=JAVASCRIPT.import_query,
+    import_query=JAVASCRIPT.import_query + _TS_IMPORT_EXTRA,
     container_types=_TS_CONTAINERS,
     method_containers=tuple(_TS_CONTAINERS),
     param_style="ts",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY + _TS_TYPE_REFERENCE_EXTRA,
+    binding_query=_JS_BINDING_QUERY + _TS_BINDING_EXTRA,
+    binding_function_scopes=_JS_FUNCTION_BOUNDARIES,
+    binding_block_scopes=_JS_BLOCK_SCOPES,
     heritage_query=_TS_HERITAGE,
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
@@ -1145,6 +1380,31 @@ def exception_handling_supported(language: str) -> bool:
 # to know to pass ``--full`` themselves.
 _HEADER_DISPATCH_HEURISTIC_VERSION = 1
 
+# Bumped whenever ``extractor._heritage_rust_impl``'s subject-recovery
+# logic changes -- round 31 zed coverage pass F2/A3: an ``impl Trait
+# for Type`` block whose ``Type`` isn't defined in the same file used
+# to be silently dropped at extraction (no same-file symbol to attach
+# a ``RawHeritage`` to); it's now emitted with ``subtype_id=""`` and
+# ``subtype_name`` set instead, for ``resolver.resolve_heritage`` to
+# resolve repo-wide. Like ``_HEADER_DISPATCH_HEURISTIC_VERSION`` above,
+# this is Python logic inside ``extractor.py``, not a ``LanguageSpec``
+# field, so the field-hashing loop below is structurally blind to it —
+# without this constant, a ``.dekko`` cache built before this change
+# would keep silently reusing ``FileMap``s missing every
+# cross-file-``impl`` heritage clause after an upgrade.
+_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION = 1
+
+# Bumped whenever ``extractor._collect_rust_macro_calls`` changes what
+# it emits for a call recovered from a macro's token stream -- round
+# 32: those calls used to be rendered ``Type.name`` with no argument
+# count whatever the source said, and now carry their real ``::``/``.``
+# joiner, full path, and a count. Same blind spot as the two constants
+# above (Python logic, not a ``LanguageSpec`` field), and the same
+# failure if it's missed: a ``.dekko`` cache built before the change
+# keeps serving dot-joined ``RawCall``s, so after an upgrade the fix
+# would appear not to work on exactly the repos already mapped.
+_RUST_MACRO_CALL_RECOVERY_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.
@@ -1154,13 +1414,15 @@ def spec_fingerprint() -> str:
     style, and any field added to ``LanguageSpec`` later (the loop is
     driven by ``dataclasses.fields``, not a hand-kept list, so a new
     field is covered automatically) — plus
-    ``_HEADER_DISPATCH_HEURISTIC_VERSION``, which covers the one piece
-    of dispatch logic that lives outside any ``LanguageSpec`` (the
-    C/C++ ``.h`` content-sniffing heuristic — see that constant's
-    comment). Used to invalidate a stale ``.dekko`` cache entry or flag
-    a stale ``map.json`` even when the released package version string
-    hasn't changed — a dev iteration or hotfix that reuses the same
-    version, or an unreleased checkout.
+    ``_HEADER_DISPATCH_HEURISTIC_VERSION``,
+    ``_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION`` and
+    ``_RUST_MACRO_CALL_RECOVERY_VERSION``, which each cover
+    one piece of dispatch/recovery logic that lives outside any
+    ``LanguageSpec`` (see those constants' own comments). Used to
+    invalidate a stale ``.dekko`` cache entry or flag a stale
+    ``map.json`` even when the released package version string hasn't
+    changed — a dev iteration or hotfix that reuses the same version,
+    or an unreleased checkout.
 
     Returns:
         A stable hex digest, unchanged as long as extraction behavior
@@ -1168,6 +1430,9 @@ def spec_fingerprint() -> str:
     """
     parts: list[str] = [
         f"header_dispatch_heuristic={_HEADER_DISPATCH_HEURISTIC_VERSION}",
+        "rust_heritage_impl_subtype_recovery="
+        f"{_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION}",
+        f"rust_macro_call_recovery={_RUST_MACRO_CALL_RECOVERY_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):

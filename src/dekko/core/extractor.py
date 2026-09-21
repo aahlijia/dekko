@@ -3,7 +3,7 @@
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from dekko.core.languages import LanguageSpec
 from dekko.core.model import (
@@ -42,6 +42,7 @@ _CLASSDEF_KIND: dict[str, str] = {
     "struct_type": "struct",
     "trait_item": "trait",
     "type_alias_declaration": "type_alias",
+    "type_item": "type_alias",
 }
 
 
@@ -57,9 +58,10 @@ def _compiled_query(grammar: str, query_str: str) -> Query:
     return Query(get_grammar(grammar), query_str)
 
 
-def _run_query(
-    grammar: str, query_str: str, root: Node
-) -> list[tuple[int, dict[str, list[Node]]]]:
+_QueryMatches = list[tuple[int, dict[str, list[Node]]]]
+
+
+def _run_query(grammar: str, query_str: str, root: Node) -> _QueryMatches:
     """Run a cached compiled query, returning its matches."""
     return QueryCursor(_compiled_query(grammar, query_str)).matches(root)
 
@@ -95,13 +97,21 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         calls.extend(_collect_rust_macro_calls(tree.root_node, rel, defs))
     if spec.name in ("c", "cpp"):
         calls.extend(_collect_cpp_ctor_arg_calls(tree.root_node, rel, defs))
-    refs = _collect_refs(spec, tree.root_node, rel, defs)
+    import_matches = _import_matches(spec, tree.root_node)
+    refs = _collect_refs(
+        spec,
+        tree.root_node,
+        rel,
+        defs,
+        _import_binding_bytes(import_matches),
+    )
     heritage = _collect_heritage(spec, tree.root_node, rel, defs)
     throws = _collect_throws(spec, tree.root_node, rel, defs)
     catches = _collect_catches(spec, tree.root_node, rel, defs)
     env_reads = _collect_env_reads(spec, tree.root_node, rel, defs)
-    imports = _collect_imports(spec, tree.root_node, rel)
+    imports = _collect_imports(spec, rel, import_matches)
     type_aliases = _collect_type_aliases(spec, tree.root_node)
+    enum_variants = _collect_enum_variants(spec, tree.root_node)
     return FileMap(
         path=rel,
         language=spec.name,
@@ -114,6 +124,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         env_reads=env_reads,
         imports=imports,
         type_aliases=type_aliases,
+        enum_variants=enum_variants,
         doc=_module_doc(spec.name, tree.root_node),
     )
 
@@ -188,7 +199,7 @@ def _collect_definitions(
                 def_node,
                 _text(class_name),
                 _CLASSDEF_KIND.get(kind_type, "class"),
-                params=[],
+                params=_tuple_struct_fields(def_node),
                 returns=None,
                 seen=seen,
             )
@@ -1158,9 +1169,10 @@ def _collect_rust_macro_calls(
     finding — see ``round15-macro-extraction-gaps-plan.md`` Track A).
 
     Scans ``_RUST_ASSERT_MACROS`` invocations' token trees for
-    ``identifier(...)``/``identifier.identifier(...)``-shaped
-    subsequences and treats each as a call site. General user-defined
-    macro bodies are out of scope.
+    ``name(...)``, ``recv.name(...)`` and ``a::b::name(...)``-shaped
+    subsequences and treats each as a call site, rendered the way the
+    source wrote it (see ``_rust_token_qualifier`` for why the joiner
+    matters). General user-defined macro bodies are out of scope.
 
     Args:
         root: Parsed file's root node.
@@ -1193,17 +1205,17 @@ def _find_target_macro_invocations(
             and token_tree is not None
             and _text(macro_name) in _RUST_ASSERT_MACROS
         ):
-            for site, name, receiver in _rust_macro_call_sites(token_tree):
-                caller = _enclosing(spans, site.start_byte)
-                text = f"{receiver}.{name}" if receiver else name
+            for found in _rust_macro_call_sites(token_tree):
+                caller = _enclosing(spans, found.node.start_byte)
                 calls.append(
                     RawCall(
                         caller_id=caller.id if caller else None,
                         path=rel,
-                        text=text,
-                        name=name,
-                        receiver=receiver,
-                        line=site.start_point[0] + 1,
+                        text=found.text,
+                        name=found.name,
+                        receiver=found.receiver,
+                        line=found.node.start_point[0] + 1,
+                        arg_count=found.arg_count,
                     )
                 )
 
@@ -1219,9 +1231,37 @@ def _first_child_of_type(node: Node, node_type: str) -> Node | None:
     return None
 
 
-def _rust_macro_call_sites(
-    token_tree: Node,
-) -> list[tuple[Node, str, str | None]]:
+class _MacroCallSite(NamedTuple):
+    """One call recovered from a Rust macro's raw token stream.
+
+    Attributes:
+        node: The callee's own ``identifier`` node.
+        name: Its text (``new``).
+        receiver: What the call is qualified by, or ``None`` for a bare
+            call: the whole ``::`` path (``gpui::Point``), or for a
+            dot-call the one token left of the dot (``buf``,
+            ``iter()``).
+        joiner: ``"::"``, ``"."``, or ``""`` for a bare call.
+        arg_count: Written argument count, or ``None`` when the token
+            stream can't be counted reliably.
+    """
+
+    node: Node
+    name: str
+    receiver: str | None
+    joiner: str
+    arg_count: int | None
+
+    @property
+    def text(self) -> str:
+        """Callee text as the source wrote it, joiner included."""
+        if not self.receiver:
+            return self.name
+
+        return f"{self.receiver}{self.joiner}{self.name}"
+
+
+def _rust_macro_call_sites(token_tree: Node) -> list[_MacroCallSite]:
     """Find identifier-shaped call sites inside a macro's token tree.
 
     Structural, not textual: a call written inside a macro argument
@@ -1237,37 +1277,192 @@ def _rust_macro_call_sites(
         token_tree: A macro invocation's ``token_tree`` argument node.
 
     Returns:
-        ``(identifier_node, name, receiver)`` for each call-shaped
-        site found, in document order.
+        Each call-shaped site found, in document order.
     """
-    found: list[tuple[Node, str, str | None]] = []
+    found: list[_MacroCallSite] = []
     _scan_rust_token_tree(token_tree, found)
     return found
 
 
-def _scan_rust_token_tree(
-    node: Node, found: list[tuple[Node, str, str | None]]
-) -> None:
+def _scan_rust_token_tree(node: Node, found: list[_MacroCallSite]) -> None:
     """Depth-first scan for ``identifier(...)``-shaped subsequences."""
     children = node.children
     for i, child in enumerate(children):
-        if child.type == "identifier":
-            nxt = children[i + 1] if i + 1 < len(children) else None
-            if (
-                nxt is not None
-                and nxt.type == "token_tree"
-                and _text(nxt).startswith("(")
-            ):
-                receiver = None
-                if (
-                    i >= 2
-                    and children[i - 1].type in (".", "::")
-                    and children[i - 2].type == "identifier"
-                ):
-                    receiver = _text(children[i - 2])
-                found.append((child, _text(child), receiver))
-        elif child.type == "token_tree":
+        if child.type == "token_tree":
             _scan_rust_token_tree(child, found)
+            continue
+        if child.type not in _RUST_CALLEE_TOKEN_TYPES or i + 1 >= len(
+            children
+        ):
+            continue
+        args = children[i + 1]
+        if args.type != "token_tree" or not _text(args).startswith("("):
+            continue
+        qualifier = _rust_token_qualifier(children, i)
+        if qualifier is None:
+            continue
+        receiver, joiner = qualifier
+        name = _text(child)
+        found.append(
+            _MacroCallSite(
+                node=child,
+                name=name,
+                receiver=receiver,
+                joiner=joiner,
+                arg_count=_rust_token_arg_count(args),
+            )
+        )
+
+
+# Token node types that can name a callee. ``default`` and ``union``
+# are contextual keywords with node types of their own, so
+# ``assert_eq!(x, Foo::default())``, as common as Rust test idioms
+# get, was never recovered at all before round 32.
+_RUST_CALLEE_TOKEN_TYPES = frozenset({"identifier", "default", "union"})
+
+
+# Token node types that can be a segment of a ``::`` path. ``Self`` is
+# a plain ``identifier`` to tree-sitter-rust; these three are not.
+_RUST_PATH_SEGMENT_TYPES = frozenset({"identifier", "crate", "super", "self"})
+
+
+def _rust_token_qualifier(
+    children: list[Node], i: int
+) -> tuple[str | None, str] | None:
+    """What qualifies the callee at ``children[i]``, read leftwards.
+
+    Round 32 (zed): the joiner used to be matched and then thrown
+    away, every recovered call being rendered ``receiver.name``. So
+    ``assert_eq!(p, Point::new(1, 1))`` reached the resolver as
+    ``Point.new``, and every rule that reads a Rust call's *shape* off
+    its text misread it: the ``Type::name`` owner rule and the
+    unknown-type veto stood down (no ``::``), the dot-call veto fired
+    (a ``.``), and with nothing left to object the ladder took the
+    file's only ``new``. 4,287 such sites on zed, concentrated in
+    tests, which is what ``dekko affected`` reads.
+
+    Returns:
+        ``(None, "")`` for a bare call; ``(receiver, joiner)`` for a
+        qualified one; ``None`` when a joiner is present but what it
+        joins can't be recovered. The caller must then emit nothing: a
+        call known to be qualified, reported as bare, is known-wrong
+        (a bare ``new`` is exactly what takes the lone same-file
+        ``new``), and a missing edge beats a wrong one.
+    """
+    if i < 1 or children[i - 1].type not in (".", "::"):
+        return None, ""
+    joiner = children[i - 1].type
+    if joiner == ".":
+        return _rust_token_dot_receiver(children, i - 2), "."
+
+    segments: list[str] = []
+    j = i - 2
+    while True:
+        j = _rust_skip_generic_args(children, j)
+        if j < 0 or children[j].type not in _RUST_PATH_SEGMENT_TYPES:
+            # ``<Foo as Bar>::make(..)``, or a path head this scan
+            # doesn't understand.
+            return None
+        segments.append(_text(children[j]))
+        if j < 1 or children[j - 1].type != "::":
+            break
+        j -= 2
+
+    return "::".join(reversed(segments)), "::"
+
+
+def _rust_token_dot_receiver(children: list[Node], j: int) -> str:
+    """Receiver text for a recovered dot-call, rebuilt leftwards.
+
+    Walks the method chain back to its head, so ``x.iter().count()``
+    gives ``x.iter()`` for ``count``, the same receiver a parsed call
+    gets (argument text is dropped: ``x.get(k).len()`` reads
+    ``x.get()``; only the chain's first segment is ever looked at
+    downstream, for ``self``, an import binding, or a typed
+    parameter). What matters most is that there IS a receiver, so the
+    call stays a method call. It used to be lost whenever the token
+    left of the dot wasn't an ``identifier`` (here, a ``token_tree``),
+    and the call came out as a bare ``count()``, which the ladder
+    resolves by preferring a free function: the one thing a method
+    call can't be. ``"_"`` stands in for a head this scan can't read
+    (a literal, a parenthesised expression).
+    """
+    pieces: list[str] = []
+    while j >= 0:
+        node = children[j]
+        if node.type in _RUST_PATH_SEGMENT_TYPES:
+            pieces.append(_text(node))
+            j -= 1
+        elif (
+            node.type == "token_tree"
+            and j >= 1
+            and children[j - 1].type == "identifier"
+        ):
+            pieces.append(f"{_text(children[j - 1])}()")
+            j -= 2
+        else:
+            break
+        if j < 0 or children[j].type != ".":
+            break
+        j -= 1
+
+    return ".".join(reversed(pieces)) or "_"
+
+
+def _rust_skip_generic_args(children: list[Node], j: int) -> int:
+    """Step left over one turbofish group, if ``children[j]`` ends one.
+
+    ``Vec :: < u8 > :: new``: from the ``>`` back to the ``Vec``.
+    Generic arguments aren't nested token trees, just a flat run of
+    tokens, so this balances angle brackets by hand (``>>`` closes
+    two). Returns ``j`` unchanged when there is no group, and ``-1``
+    when one is opened but never balances, or isn't introduced by
+    ``::`` (so it was a comparison, not a turbofish).
+    """
+    if j < 0 or not _text(children[j]).startswith(">"):
+        return j
+    depth = 0
+    while j >= 0:
+        token = _text(children[j])
+        if token and set(token) == {">"}:
+            depth += len(token)
+        elif token and set(token) == {"<"}:
+            depth -= len(token)
+        if depth <= 0:
+            break
+        j -= 1
+    if j < 2 or depth != 0 or children[j - 1].type != "::":
+        return -1
+
+    return j - 2
+
+
+# Direct-child tokens that make comma-counting unsafe: closure
+# parameters (``|a, b| ..``) and generic arguments (``Map::<K, V>``)
+# both put their commas at the argument list's own depth.
+_RUST_UNCOUNTABLE_ARG_TOKENS = frozenset({"|", "||", "<", ">", "<<", ">>"})
+
+
+def _rust_token_arg_count(args: Node) -> int | None:
+    """Written argument count of a recovered call, when countable.
+
+    Parenthesised and bracketed sub-expressions are already nested
+    ``token_tree`` nodes, so a top-level comma really is a separator,
+    with the two exceptions in ``_RUST_UNCOUNTABLE_ARG_TOKENS``. Those
+    return ``None`` (this path's behavior before round 32) rather than
+    a guess: arity is used to *reject* a sole candidate
+    (``resolver._sole_candidate_match``), so a wrong count costs a
+    correct edge, where no count costs nothing.
+    """
+    inner = [c for c in args.children if c.type not in ("(", ")")]
+    if any(c.type in _RUST_UNCOUNTABLE_ARG_TOKENS for c in inner):
+        return None
+    if not inner:
+        return 0
+    commas = sum(1 for c in inner if c.type == ",")
+    trailing = 1 if inner[-1].type == "," else 0
+
+    return commas + 1 - trailing
 
 
 def _collect_cpp_ctor_arg_calls(
@@ -1398,7 +1593,11 @@ def _cpp_ctor_arg_callee(param: Node) -> Node | None:
 
 
 def _collect_refs(
-    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+    spec: LanguageSpec,
+    root: Node,
+    rel: str,
+    defs: list[tuple[Node, Symbol]],
+    import_bytes: frozenset[int] = frozenset(),
 ) -> list[RawRef]:
     """Find bare-identifier value references, attributed to enclosing defs.
 
@@ -1409,10 +1608,15 @@ def _collect_refs(
     plain call-expression query structurally cannot see (bug #2b).
     Returns an empty list for languages with no ``reference_query``
     yet.
+
+    Each reference is tagged with what it is lexically bound to
+    (``RawRef.bound``, see ``_local_bindings``); ``import_bytes`` is
+    ``_import_binding_bytes``'s set.
     """
     if spec.reference_query is None:
         return []
     spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    bindings = _local_bindings(spec, root, defs, import_bytes)
     refs: list[RawRef] = []
     for _, caps in _run_query(spec.grammar, spec.reference_query, root):
         ref_node = _one(caps, "ref")
@@ -1428,9 +1632,293 @@ def _collect_refs(
                 path=rel,
                 name=name,
                 line=ref_node.start_point[0] + 1,
+                bound=_bound_kind(spec, ref_node, bindings.get(name)),
             )
         )
     return refs
+
+
+# ---------------------------------------------------------------------
+# Local bindings (round 32 Track 5b)
+#
+# ``reference_query`` captures every bare identifier in value position,
+# and nothing in it knows ``count`` on line 1624 is the ``const count``
+# from line 1623. ``resolver._ref_target_visible`` (Track 5a) vetoes
+# the cross-file cases it can prove from the import table. It cannot
+# see a local that shadows a *same-file* symbol, one that shadows an
+# *imported* name, or any local at all in a file with zero imports
+# (which it has to exempt: an empty table proves nothing). Measured on
+# 0.43.69, that residue was 6.2% of claude-code's reference sites and
+# 4.1% of cline's, two thirds of it in zero-import files.
+#
+# Everything here fails open. A binding shape this table doesn't know
+# yields ``bound=None``, which is exactly the pre-5b behavior: it can
+# leave a false edge standing, never remove a true one.
+
+# One scope's claim on a name: (start byte, end byte, kind, scope node
+# type). ``kind`` is "param" / "local", or ``_BOUND_EXEMPT`` for a
+# binding the map already indexes (a nested def, an import), recorded
+# only so the innermost-scope search stops on it.
+_Binding = tuple[int, int, str, str]
+_BOUND_EXEMPT = ""
+
+# A class body binds names for its own statements only: code inside a
+# method does not see them (Python's one scoping oddity). Such a scope
+# is skipped when a function sits between it and the reference.
+_CLASS_SCOPES = frozenset({"class_definition"})
+
+# Pattern nodes whose named children are all (sub)patterns.
+_PATTERN_CONTAINERS = frozenset(
+    {
+        "formal_parameters",
+        "parameters",
+        "lambda_parameters",
+        "object_pattern",
+        "array_pattern",
+        "rest_pattern",
+        "pattern_list",
+        "tuple_pattern",
+        "list_pattern",
+        "list_splat_pattern",
+        "dictionary_splat_pattern",
+        "as_pattern_target",
+        "tuple",
+        "list",
+    }
+)
+# Pattern nodes that keep the bound name under one field; every other
+# child (a default value, a type annotation) is not a binding.
+_PATTERN_FIELDS = {
+    "pair_pattern": "value",
+    "assignment_pattern": "left",
+    "object_assignment_pattern": "left",
+    "required_parameter": "pattern",
+    "optional_parameter": "pattern",
+    "default_parameter": "name",
+    "typed_default_parameter": "name",
+}
+_PATTERN_LEAVES = frozenset(
+    {"identifier", "shorthand_property_identifier_pattern"}
+)
+
+
+def _pattern_identifiers(node: Node) -> list[Node]:
+    """Every identifier a binding pattern introduces, at any depth.
+
+    Anything that isn't a pattern (``self.x``, ``table[k]``, a TS
+    ``this`` parameter) contributes nothing.
+    """
+    if node.type in _PATTERN_LEAVES:
+        return [node]
+    field_name = _PATTERN_FIELDS.get(node.type)
+    if field_name is not None:
+        inner = node.child_by_field_name(field_name)
+        return _pattern_identifiers(inner) if inner is not None else []
+    if node.type == "typed_parameter":
+        # ``(typed_parameter (identifier) type: (type ..))``: the name
+        # is the first child, and the annotation is full of
+        # identifiers that bind nothing.
+        first = node.named_children[0] if node.named_children else None
+        return _pattern_identifiers(first) if first is not None else []
+    if node.type in _PATTERN_CONTAINERS:
+        return [
+            ident
+            for child in node.named_children
+            for ident in _pattern_identifiers(child)
+        ]
+    return []
+
+
+def _python_import_locals(stmt: Node) -> list[Node]:
+    """Local name nodes a Python import statement binds."""
+    out: list[Node] = []
+    plain = stmt.type == "import_statement"
+    for child in stmt.children_by_field_name("name"):
+        node: Node | None = child
+        if child.type == "aliased_import":
+            node = child.child_by_field_name("alias")
+        elif child.type == "dotted_name" and child.named_children:
+            # ``import a.b`` binds ``a``; ``from m import a`` binds
+            # ``a`` (a one-part dotted_name either way).
+            node = child.named_children[0 if plain else -1]
+        if node is not None and node.type == "identifier":
+            out.append(node)
+    return out
+
+
+def _scope_above(node: Node | None, types: tuple[str, ...]) -> Node | None:
+    """Nearest ancestor-or-self scope of ``types``; ``None`` means the
+    module scope.
+
+    The module scope is "ran out of parents", never a node type: on a
+    file with a syntax error tree-sitter's root is ``ERROR``, not
+    ``program``/``module``.
+    """
+    while node is not None and node.parent is not None:
+        if node.type in types:
+            return node
+        node = node.parent
+    return None
+
+
+def _binding_sites(
+    spec: LanguageSpec, capture: str, node: Node, scope_node: Node | None
+) -> tuple[Node | None, str, list[Node]]:
+    """(scope, kind, identifiers) for one ``binding_query`` capture."""
+    every = spec.binding_function_scopes + spec.binding_block_scopes
+    if capture in ("params", "param"):
+        return node.parent, "param", _pattern_identifiers(node)
+    if capture == "scoped":
+        return scope_node, "local", _pattern_identifiers(node)
+    if capture == "funclocal":
+        scope = _scope_above(node.parent, spec.binding_function_scopes)
+        return scope, "local", _pattern_identifiers(node)
+    if capture == "local":
+        return (
+            _scope_above(node.parent, every),
+            "local",
+            _pattern_identifiers(node),
+        )
+    if capture == "defname":
+        # ``node.parent`` is the definition itself, which is a scope of
+        # its own; the name binds one level out.
+        owner = node.parent.parent if node.parent is not None else None
+        return _scope_above(owner, every), _BOUND_EXEMPT, [node]
+    if capture == "global":
+        scope = _scope_above(node.parent, spec.binding_function_scopes)
+        return scope, _BOUND_EXEMPT, [node]
+    if capture == "import":
+        scope = _scope_above(node.parent, spec.binding_function_scopes)
+        return scope, _BOUND_EXEMPT, _python_import_locals(node)
+    return None, _BOUND_EXEMPT, []
+
+
+_BINDING_CAPTURES = (
+    "params",
+    "param",
+    "local",
+    "funclocal",
+    "scoped",
+    "defname",
+    "global",
+    "import",
+)
+
+
+def _local_bindings(
+    spec: LanguageSpec,
+    root: Node,
+    defs: list[tuple[Node, Symbol]],
+    import_bytes: frozenset[int],
+) -> dict[str, list[_Binding]]:
+    """Every non-module binding in the file, keyed by name.
+
+    Module-level bindings are left out entirely: they are symbols or
+    imports, and the resolver's ladder and visibility veto already own
+    those. A binding whose declarator is one of ``defs`` (a nested
+    ``const helper = () => ..``) or whose name node is in
+    ``import_bytes`` (a function-local lazy import) is recorded as
+    exempt, so it stops the search without tagging the reference.
+    """
+    if spec.binding_query is None:
+        return {}
+    matches = _run_query(spec.grammar, spec.binding_query, root)
+    nonlocal_names = _nonlocal_names(spec, matches)
+    def_bytes = frozenset(node.start_byte for node, _ in defs)
+    out: dict[str, list[_Binding]] = {}
+    for _, caps in matches:
+        scope_node = _one(caps, "scope")
+        for capture in _BINDING_CAPTURES:
+            for node in caps.get(capture, []):
+                scope, kind, idents = _binding_sites(
+                    spec, capture, node, scope_node
+                )
+                if scope is None:
+                    continue
+                for ident in idents:
+                    name = _text(ident)
+                    if (scope.start_byte, name) in nonlocal_names:
+                        continue
+                    if _binds_indexed_name(ident, def_bytes, import_bytes):
+                        kind = _BOUND_EXEMPT
+                    out.setdefault(name, []).append(
+                        (scope.start_byte, scope.end_byte, kind, scope.type)
+                    )
+    return out
+
+
+def _nonlocal_names(
+    spec: LanguageSpec, matches: _QueryMatches
+) -> set[tuple[int, str]]:
+    """(scope start byte, name) for every Python ``nonlocal`` name: an
+    assignment to it in that scope binds nothing there."""
+    out: set[tuple[int, str]] = set()
+    for _, caps in matches:
+        for node in caps.get("nonlocal", []):
+            scope = _scope_above(node.parent, spec.binding_function_scopes)
+            if scope is not None:
+                out.add((scope.start_byte, _text(node)))
+    return out
+
+
+def _binds_indexed_name(
+    ident: Node, def_bytes: frozenset[int], import_bytes: frozenset[int]
+) -> bool:
+    """Whether a local binding is one the map already indexes: a lazy
+    import, or a declarator that is itself a definition (a nested
+    ``const helper = () => ..``)."""
+    if ident.start_byte in import_bytes:
+        return True
+    declarator = ident.parent
+    return (
+        declarator is not None
+        and declarator.type == "variable_declarator"
+        and declarator.start_byte in def_bytes
+    )
+
+
+def _bound_kind(
+    spec: LanguageSpec, ref_node: Node, claims: list[_Binding] | None
+) -> str | None:
+    """``RawRef.bound`` for one reference: the innermost scope that
+    binds its name decides.
+
+    Position inside the scope doesn't matter: ``let``/``const``/``var``
+    and Python locals all bind their whole scope, so a name declared
+    further down is still the local.
+    """
+    if not claims:
+        return None
+    at = ref_node.start_byte
+    inside = sorted(
+        (c for c in claims if c[0] <= at < c[1]),
+        key=lambda c: c[1] - c[0],
+    )
+    for start, _end, kind, scope_type in inside:
+        if scope_type in _CLASS_SCOPES and _function_between(
+            spec, ref_node, start
+        ):
+            continue
+        return kind or None
+    return None
+
+
+def _function_between(
+    spec: LanguageSpec, ref_node: Node, class_start: int
+) -> bool:
+    """Whether a function scope sits between the reference and the
+    class scope starting at ``class_start``."""
+    node = ref_node.parent
+    while node is not None and node.start_byte >= class_start:
+        if node.type in _CLASS_SCOPES and node.start_byte == class_start:
+            return False
+        if (
+            node.type in spec.binding_function_scopes
+            and node.type not in _CLASS_SCOPES
+        ):
+            return True
+        node = node.parent
+    return False
 
 
 _NAME_FIELDS = ("attribute", "property", "field")
@@ -1679,12 +2167,24 @@ def _heritage_rust_impl(
     ``@impl_type``'s name is looked up against this file's own
     already-extracted ``TYPE_KINDS`` symbols by exact name match —
     Rust ``impl`` blocks are almost always in the same file as the
-    type they're for, though not required by the language. When the
-    type isn't defined in this file, or its name is ambiguous within
-    it (same-named types in two different ``mod`` blocks — legal but
-    rare), no symbol id exists to attach a ``RawHeritage`` to
-    (``subtype_id`` is never ``None``), so the impl block is silently
-    skipped rather than guessed at.
+    type they're for, though not required by the language.
+
+    Round 31 zed coverage pass F2: an ordinary Rust layout puts the
+    impl block in a sibling file (``text_finder/render.rs: impl
+    Render for TextFinder``) from the struct it's for
+    (``text_finder.rs: struct TextFinder``) — a normal way to split a
+    type's rendering logic out of its own module, not a rare shape.
+    When same-file lookup finds no unique match, the clause is
+    emitted anyway with ``subtype_id=""`` and ``subtype_name`` set to
+    the written type name, so ``resolver.resolve_heritage`` can
+    resolve the subject itself repo-wide (by name and crate) before
+    resolving the supertype the normal way — see ``RawHeritage``'s
+    own docstring. Only the *zero-match* case gets this recovery; a
+    same-named-in-two-``mod``-blocks collision (2+ matches, legal but
+    rare) still drops the clause outright, unchanged from before —
+    same-file kind/name ambiguity isn't this rule's problem to solve,
+    and guessing between two same-file candidates would be exactly
+    the kind of guess this codebase's resolver avoids elsewhere.
 
     An inherent ``impl Type { ... }`` block (no ``trait:`` field)
     never reaches this function — ``heritage_query``'s ``trait: (_)``
@@ -1699,25 +2199,27 @@ def _heritage_rust_impl(
     _, type_name, _ = _heritage_name_parts(impl_type)
     if not type_name:
         return []
+    text, name, receiver = _heritage_name_parts(impl_trait)
+    if not name:
+        return []
     candidates = [
         sym
         for _, sym in defs
         if sym.kind in TYPE_KINDS and sym.name == type_name
     ]
-    if len(candidates) != 1:
+    if len(candidates) > 1:
         return []
-    text, name, receiver = _heritage_name_parts(impl_trait)
-    if not name:
-        return []
+    subtype_id = candidates[0].id if len(candidates) == 1 else ""
     return [
         RawHeritage(
-            subtype_id=candidates[0].id,
+            subtype_id=subtype_id,
             path=rel,
             text=text,
             name=name,
             receiver=receiver,
             relation="impl",
             line=impl_trait.start_point[0] + 1,
+            subtype_name="" if subtype_id else type_name,
         )
     ]
 
@@ -2581,6 +3083,42 @@ def _collect_env_reads(
 # Type aliases
 
 
+def _tuple_struct_fields(def_node: Node) -> list[Param]:
+    """A Rust tuple struct's positional fields, as its parameters.
+
+    ``struct GroupName(String);`` is constructed by the call-shaped
+    ``GroupName(s)``, so its fields are its signature. They used to be
+    dropped (every type got ``params=[]``), which ``resolver.
+    _arity_plausible`` reads as "takes zero arguments": a counted
+    ``GroupName(s)`` reaching the sole-candidate rung (through a glob
+    import, the norm in Rust test modules) was rejected and filed
+    external (round 32 Track 4). A brace struct and a unit struct keep
+    ``[]``, correctly: neither can be written ``Name(x)``.
+    """
+    if def_node.type != "struct_item":
+        return []
+    body = def_node.child_by_field_name("body")
+    if body is None or body.type != "ordered_field_declaration_list":
+        return []
+    return [
+        Param(name=str(i), type=_text(field_type))
+        for i, field_type in enumerate(body.children_by_field_name("type"))
+    ]
+
+
+def _collect_enum_variants(spec: LanguageSpec, root: Node) -> list[str]:
+    """``"Owner::Variant"`` for every tuple enum variant in this file
+    (see ``LanguageSpec.enum_variant_query``)."""
+    if spec.enum_variant_query is None:
+        return []
+    out: list[str] = []
+    for _, caps in _run_query(spec.grammar, spec.enum_variant_query, root):
+        owner, variant = _one(caps, "enum"), _one(caps, "variant")
+        if owner is not None and variant is not None:
+            out.append(f"{_text(owner)}::{_text(variant)}")
+    return out
+
+
 def _collect_type_aliases(spec: LanguageSpec, root: Node) -> list[str]:
     """Bare names of type-alias declarations in this file.
 
@@ -2605,11 +3143,42 @@ def _collect_type_aliases(spec: LanguageSpec, root: Node) -> list[str]:
 # Imports
 
 
-def _collect_imports(spec: LanguageSpec, root: Node, rel: str) -> list[Import]:
+def _import_matches(spec: LanguageSpec, root: Node) -> _QueryMatches:
+    """Run the import query once; refs and imports both read it."""
+    if spec.import_query is None:
+        return []
+    return _run_query(spec.grammar, spec.import_query, root)
+
+
+def _import_binding_bytes(matches: _QueryMatches) -> frozenset[int]:
+    """Start bytes of every local name an import match binds.
+
+    A function-local ``const { X } = await import("./x")`` is a
+    ``variable_declarator`` like any other local, and
+    ``_local_bindings`` has to know it binds an import, not a shadowing
+    variable (round 32 Track 5b: about 40 true edges on claude-code).
+    The import query already found them, so the answer is read off its
+    matches rather than re-derived a second way. Applies the same
+    ``@binder`` check ``_imports_js`` does: ``const x = t("key")`` is
+    not an import.
+    """
+    out: set[int] = set()
+    for _, caps in matches:
+        binder = _one(caps, "binder")
+        if binder is not None and _text(binder) != "require":
+            continue
+        local = _one(caps, "alias") or _one(caps, "name")
+        if local is not None:
+            out.add(local.start_byte)
+    return frozenset(out)
+
+
+def _collect_imports(
+    spec: LanguageSpec, rel: str, matches: _QueryMatches
+) -> list[Import]:
     """Extract imported names for the resolver, per language."""
     if spec.import_query is None:
         return []
-    matches = _run_query(spec.grammar, spec.import_query, root)
     if spec.name == "python":
         return _imports_python(matches, rel)
     if spec.name == "rust":
@@ -2666,11 +3235,26 @@ def _imports_js(
     matches: list[tuple[int, dict[str, list[Node]]]], rel: str
 ) -> list[Import]:
     """Normalize JS/TS import statements (named, default, namespace,
-    and side-effect/bare)."""
+    and side-effect/bare), plus the two binding forms that aren't
+    ``import`` statements at all: a dynamic ``const { X } = await
+    import("./x")`` and a CommonJS ``const { X } = require("./x")`` /
+    ``const x = require("./x")``.
+
+    Round 32 Track 5: those two bind a cross-file name exactly as a
+    static import does, and the reference-visibility veto
+    (``resolver._ref_target_visible``) needs to see them. Without
+    them it dropped 23 true edges on claude-code, every one a lazily
+    imported component. The query can't spell "a call to ``require``"
+    without a predicate, so it captures any ``f("...")`` initializer as
+    ``@binder`` and the name is checked here.
+    """
     out: list[Import] = []
     for _, caps in matches:
         module = _one(caps, "from_module")
         if module is None:
+            continue
+        binder = _one(caps, "binder")
+        if binder is not None and _text(binder) != "require":
             continue
         source = _strip_quotes(_text(module))
         name = _one(caps, "name")

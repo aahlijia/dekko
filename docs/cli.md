@@ -97,6 +97,11 @@ bare module specifier, not a particular named/default import binding
 with an arbitrary local binding name appended internally, which
 `--exact` strips back off before comparing, so two different named
 imports from the same package both satisfy the same `--exact` match.
+A JS/TS binding doesn't have to be an `import` statement to count:
+`const { X } = await import("./x")`, `const { X } = require("./x")`,
+`const x = require("./x")` and TypeScript's `require("./x") as typeof
+import("./x")` are all recorded as imports, so `importers` and `deps`
+see lazily loaded modules too.
 `peers <symbol>` finds other symbols
 whose outgoing calls overlap the target's by at least `--min-shared`
 callees (default 2 — a single shared callee, like both calling
@@ -107,6 +112,18 @@ callees has no peers by construction (a clean empty result, not an
 error); a symbol with fewer callees than `--min-shared` gets a hint to
 lower the threshold. Small/sparse repos often need `--min-shared 1`
 to find any peers at all under the default threshold of 2.
+
+`query uses <symbol>` (and `unused`, which reads the same edges) only
+credits a value reference the referencing file could actually make. In
+Python and JS/TS that means the symbol lives in the same file, or the
+file imports that name from somewhere inside the repo. A local
+`const count = ...; if (count >= 3)` in a file that never imports
+`count` is not a use of `utils/array.ts::count`, and `os.tmpdir()`
+after `import os from "node:os"` is not a use of a script's own `const
+os`. Two cases keep their edge because the import table can't settle
+them: a JS-family file with no imports at all (script-style globals)
+and a target declared in a `.d.ts`. Known gap: a local that shadows a
+name the same file *does* import or define still counts as a use.
 
 `query supertypes`/`subtypes` cover declared heritage — `extends`/
 `implements` for Python, JavaScript, TypeScript, and Java; `impl`
@@ -239,6 +256,48 @@ between "dekko dropped results" and "dekko excluded declarations."
 The identity holds unless `grep_truncated` is set, in which case the
 sweep hit its safety cap and discarded hits past it by design.
 
+**Comments, value references, Rust constructions.** Four line shapes
+a person classifies at a glance get a named cause instead of
+`unexplained miss`:
+
+- *A comment line, anywhere.* Near the symbol's definition or in its
+  file's header it reads `comment mention ... (near the symbol's own
+  definition, or in its file's leading header comment)`. Everywhere
+  else it reads `comment mention ... (a comment line, away from the
+  symbol's definition)`. A comment that quotes the name
+  (`# "tfrun" commands can't include pipes`) is a comment, not a
+  string literal.
+- *A recorded value reference.* `names.some(isChrome)`,
+  `process.on("exit", cleanup)`, `.map(Src::getSource)`: the map
+  already holds that line as a reference edge to the target (Python,
+  JS/TS, Go, Java), and the row says `passed or stored as a value,
+  not called — dekko has this as a reference`. Only when the file
+  could really have made that reference: it defines the target,
+  imports its name or its declaring type, or is a same-package
+  sibling (Go/Java), and it binds no local of the same name. A
+  `const count = ...; if (count >= 3)` in a file that never imports
+  `count` stays unexplained.
+- *A path-qualified function value in Rust or C++*, where dekko
+  records no reference edges: `.map(ExternalSourcePrompt::as_str)`,
+  `let f = handlers::my_fn;`. The cause says `line-shape match` and
+  names the blind spot. Never fires when a `(`, `::<` or `!` follows
+  the name, so a real missed call can't hide here. Function targets
+  only. A *bare* name (`register(my_fn)`, `handler: my_fn,`) is left
+  alone on purpose: in Rust it is nearly always a same-named local.
+- *Rust struct literals and payloads* for a type target:
+  `let loc = AbortLoc {`, `Variant(AbortLoc),`,
+  `struct Wrapper(pub AbortLoc);` read `type position (annotation,
+  generic argument, construction, or enum payload)`.
+
+Two shapes are left unexplained on purpose. A name *inside* a longer
+string (`"settings.json cleanup complete."`) also matches
+`eval("cleanup()")` and dispatch by string, which are real
+references. And a name in the middle of a multi-line Python docstring
+can't be told from code one line at a time. None of this moves a
+count: `matches`, `dekko-only` and `grep-only` are untouched, only the
+cause on a grep-only row changes. `--fail-on-unexplained` will fail
+less often as a result.
+
 **Receiver-mismatch detection.** When the target is a method (not a
 free function) with exactly one repo-defined symbol sharing its bare
 name and its declaring type resolves unambiguously, `sanity` checks
@@ -280,13 +339,17 @@ cause breakdown per file, largest cluster first) instead of listing
 individual match rows — useful for spotting a single file that
 accounts for a large share of a big "unexplained" count instead of
 reading past `--limit`'s default truncation or reaching for `--json`
-and aggregating by hand. Grouping happens over whatever rows already
-survived `--limit`/`--budget` fitting, not the pre-truncation total —
-pair it with a raised `--limit`/`--budget` when chasing a suspected
-large cluster, or the rollup only reflects a truncated sample. Scoped
-to the grep-only bucket in single-target text mode; has no effect
-under `--json` (already fully groupable by an external consumer) or
-`--all` (which rolls up by symbol, not by file).
+and aggregating by hand. Grouping runs over the *full* grep-only
+bucket — every hit the sweep found — before `--limit`/`--budget` are
+applied; those caps then bound the number of file *groups* printed,
+not the number of rows grouping is allowed to see. (Before round 31,
+`--limit`/`--budget` were applied to rows first and grouping ran only
+over the survivors, which could hide the very clustering the flag
+exists to show — a file with the most real hits could still print
+zero rows if none of them individually made the row cut.) Scoped to
+the grep-only bucket in single-target text mode; has no effect under
+`--json` (already fully groupable by an external consumer) or `--all`
+(which rolls up by symbol, not by file).
 
 Always exits `0` on a completed comparison — a nonempty `grep-only`
 bucket is a finding to relay, not itself an error; this is a spot
@@ -381,6 +444,14 @@ actually justifies and runs fully sequentially when even two workers
 wouldn't pay for themselves. `--jobs 11` legitimately running three
 workers is expected. Small repos and small deltas stay sequential
 automatically regardless of the flag.
+
+`dekko diff`, `dekko affected` and `dekko workset` default to
+`--jobs 0` too. The flag only matters on their slow path: the first
+time one of them is asked about a commit, dekko has to map that old
+commit from scratch, and on a very large repo that is minutes of work
+(it is cached per commit afterwards, so the second call is seconds).
+The MCP `impacted_tests` and `workset` tools make the same choice.
+Pass `--jobs 1` for a sequential run.
 
 ## Mapping a subtree
 
@@ -817,6 +888,13 @@ catch-all noise instead of being interleaved with it by path
 alphabetization; within each group, rows still sort by path/line/
 caller. This matters most when `--limit`/`--budget` truncates: the
 higher-signal exact matches are now what survives the cap.
+
+`query` has two independent caps: `--limit` (rows, default 50) and
+`--budget` (estimated tokens). Passing `--budget N` **without**
+`--limit` lets the budget govern alone, so `query callers X --budget
+20000` returns every row that fits rather than stopping at 50. An
+explicit `--limit` is always honored. The footer names whichever cap
+actually cut the output (`raise --limit` / `raise --budget`).
 
 **`--lang <language>` scopes `throws`/`catches` to one language** —
 cuts cross-language noise on a multi-language repo, e.g. a 99%-Java

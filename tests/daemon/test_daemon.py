@@ -1160,7 +1160,12 @@ def test_try_daemon_defaults_jobs_to_zero_on_a_genuine_miss_when_not_explicit(
     args = cli.build_subcommand_parser().parse_args(
         ["affected", "--root", str(root)]
     )
-    assert args.jobs == 1  # argparse's own default, not user-chosen
+    # Round 31 P4.1: the CLI default is itself all cores now, so a
+    # parsed invocation no longer arrives with an unchosen 1. The
+    # round-25 override still has to cover a programmatic Namespace
+    # that does, which is what this simulates.
+    assert args.jobs == 0
+    args.jobs = 1
 
     daemon.try_daemon(args, jobs_explicit=False)
 
@@ -1229,7 +1234,7 @@ def test_try_daemon_does_not_override_jobs_on_a_revcache_hit(
 
     daemon.try_daemon(args, jobs_explicit=False)
 
-    assert seen_jobs == [1]
+    assert seen_jobs == [0]  # the CLI default, passed through untouched
 
 
 def test_try_daemon_abandoned_error_carries_the_jobs_actually_sent(
@@ -1262,8 +1267,11 @@ def test_try_daemon_abandoned_error_carries_the_jobs_actually_sent(
         daemon.try_daemon(args, jobs_explicit=False)
     assert excinfo.value.jobs == 0  # Fix 1's override was applied
 
+    explicit = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root), "--jobs", "1"]
+    )
     with pytest.raises(daemon.DaemonRequestAbandonedError) as excinfo2:
-        daemon.try_daemon(args, jobs_explicit=True)
+        daemon.try_daemon(explicit, jobs_explicit=True)
     assert excinfo2.value.jobs == 1  # caller's explicit choice kept
 
 
