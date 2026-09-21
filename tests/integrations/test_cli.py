@@ -511,6 +511,13 @@ def test_summary_separates_missing_grammar_from_real_parse_errors() -> None:
     out = repo_ops._summary(files, 0, 0, 0, [], [])
     assert "no grammar installed 1" in out
     assert "parse error 1" in out
+    # Round 31 claude-buddy.md S2: a no-grammar file yields nothing, so
+    # it must not be counted (or listed by language) as "mapped".
+    first = out.splitlines()[0]
+    assert first.startswith("dekko: mapped 2 files (python 2)")
+    assert "kotlin" not in first
+    assert "NOT parsed (no symbols, no edges): kotlin 1" in out
+    assert "dekko[all]" in out
 
 
 def test_output_as_directory(tmp_path: Path) -> None:

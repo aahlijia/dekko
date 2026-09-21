@@ -2,9 +2,11 @@
 
 from pathlib import Path
 
+import pytest
+
 from dekko.core import languages
 from dekko.core.extractor import _parse_rust_use, extract_file
-from dekko.core.model import Symbol
+from dekko.core.model import RawCall, Symbol
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -155,6 +157,153 @@ def test_rust_assert_macro_calls_are_visible(tmp_path: Path) -> None:
         1 for c in fm.calls if c.line in (15, 16) and c.name == "helper"
     )
     assert call_count_from_vec_and_println == 0
+
+
+def _rust_macro_calls(tmp_path: Path, body: str) -> dict[str, RawCall]:
+    spec = languages.spec_for_path("lib.rs")
+    assert spec is not None
+    (tmp_path / "lib.rs").write_text(f"fn t() {{\n{body}}}\n")
+    fm = extract_file(tmp_path, "lib.rs", spec)
+    assert fm.error is None
+    return {c.text: c for c in fm.calls}
+
+
+def test_rust_macro_recovered_calls_keep_their_joiner(tmp_path: Path) -> None:
+    # Round 32 (zed): every recovered call was rendered `recv.name`,
+    # whatever the source said, so `assert_eq!(p, Point::new(1, 1))`
+    # reached the resolver as `Point.new` with no arg count. Every
+    # Rust shape rule reads the joiner off that text: the `Type::name`
+    # owner rule and the unknown-type veto stood down, the dot-call
+    # veto fired, and the ladder took the file's only `new`. 4,287
+    # such sites on zed. Each expectation below is what the SAME call
+    # produces when tree-sitter parses it outside a macro.
+    calls = _rust_macro_calls(
+        tmp_path,
+        "    assert_eq!(gpui::Point::new(1, 1).is_zero(), true);\n"
+        "    assert_eq!(Self::build(a, b), Foo::default());\n"
+        "    assert!(crate::util::normalize(p) == super::helper());\n"
+        "    assert!(buf.len() > helper(1));\n",
+    )
+    assert calls["gpui::Point::new"].receiver == "gpui::Point"
+    assert calls["gpui::Point::new"].arg_count == 2
+    assert calls["Self::build"].receiver == "Self"
+    # `default` is a contextual keyword with its own token type.
+    assert calls["Foo::default"].arg_count == 0
+    assert calls["crate::util::normalize"].receiver == "crate::util"
+    assert calls["super::helper"].arg_count == 0
+    assert calls["buf.len"].receiver == "buf"
+    assert calls["helper"].receiver is None
+    assert calls["helper"].arg_count == 1
+    assert not any("Point.new" in text for text in calls)
+
+
+def test_rust_macro_recovered_method_chain_keeps_a_receiver(
+    tmp_path: Path,
+) -> None:
+    # The token left of the dot is a `token_tree`, not an identifier,
+    # so `count` used to lose its receiver and come out as a BARE
+    # call, which the ladder resolves by preferring a free function:
+    # the one thing a method call can't be.
+    calls = _rust_macro_calls(
+        tmp_path,
+        "    assert_eq!(x.iter().count(), 1);\n"
+        "    assert!((a - b).abs() < 1.0);\n",
+    )
+    assert calls["x.iter().count"].receiver == "x.iter()"
+    assert "count" not in calls
+    # A head this scan can't read still leaves a method call.
+    assert calls["_.abs"].receiver == "_"
+
+
+def test_rust_macro_recovered_turbofish_is_recovered_or_dropped(
+    tmp_path: Path,
+) -> None:
+    calls = _rust_macro_calls(
+        tmp_path,
+        "    assert!(Vec::<u8>::new().is_empty());\n"
+        "    assert!(HashMap::<K, Vec<u8>>::with_capacity(4).is_empty());\n"
+        "    assert_eq!(<Foo as Bar>::make(1), 2);\n"
+        "    assert!(a > b::c(1));\n",
+    )
+    assert calls["Vec::new"].receiver == "Vec"
+    assert calls["HashMap::with_capacity"].receiver == "HashMap"
+    # `>` here is a comparison, not the end of a turbofish.
+    assert calls["b::c"].receiver == "b"
+    # A joiner was seen but the path head is unreadable: emit NOTHING.
+    # A call known to be qualified, reported as bare, is known-wrong.
+    assert not any(c.name == "make" for c in calls.values())
+
+
+def test_rust_macro_recovered_arg_count_is_conservative(
+    tmp_path: Path,
+) -> None:
+    calls = _rust_macro_calls(
+        tmp_path,
+        "    assert_eq!(f(1, g(2, 3),), h());\n"
+        "    assert!(xs.iter().map(|a, b| a + b).len() > 0);\n"
+        "    assert!(k(Map::<A, B>::new()));\n"
+        "    assert_eq!(GroupName(s), other);\n",
+    )
+    assert calls["f"].arg_count == 2  # nested call and trailing comma
+    assert calls["g"].arg_count == 2
+    assert calls["h"].arg_count == 0
+    # Closure params and generic args put commas at the list's own
+    # depth. No count beats a wrong one: arity REJECTS candidates.
+    assert calls["xs.iter().map"].arg_count is None
+    assert calls["k"].arg_count is None
+    # A bare capitalized callee is a tuple-struct/variant construction.
+    # It used to get no count at all: a type symbol had no params, so
+    # any count rejected the struct (zed: 78 correct edges lost when
+    # this was first counted). Round 32 Track 4 fixed the cause: a
+    # tuple struct's fields *are* its params, so the count is safe.
+    assert calls["GroupName"].arg_count == 1
+
+
+def test_rust_tuple_struct_fields_are_its_params(tmp_path: Path) -> None:
+    # Round 32 Track 4. `struct GroupName(String);` is constructed by
+    # the call-shaped `GroupName(s)`, so its fields are its signature.
+    # Every type used to get `params=[]`, which the resolver's arity
+    # check reads as "takes zero arguments".
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    (tmp_path / "a.rs").write_text(
+        "pub struct GroupName(pub String);\n"
+        "struct Pair(u8, Vec<(u8, u8)>);\n"
+        "struct Brace { a: u8 }\n"
+        "struct Unit;\n"
+        "enum Side { Left(u8) }\n"
+    )
+    fm = extract_file(tmp_path, "a.rs", spec)
+    params = {s.name: [(p.name, p.type) for p in s.params] for s in fm.symbols}
+    assert params["GroupName"] == [("0", "String")]
+    assert params["Pair"] == [("0", "u8"), ("1", "Vec<(u8, u8)>")]
+    # Neither can be written `Name(x)`, so neither has a signature.
+    assert params["Brace"] == []
+    assert params["Unit"] == []
+    assert params["Side"] == []
+
+
+def test_rust_tuple_enum_variants_are_registered(tmp_path: Path) -> None:
+    # Variants are not symbols. They are a name registry: with
+    # `enum Side { Left(u8) }` anywhere in the repo, `Left(x)` has a
+    # reading the map can't offer. Tuple variants only: a unit or
+    # struct-like variant can't be written `Name(..)`.
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    (tmp_path / "a.rs").write_text(
+        "enum Side { Left(u8), Right { a: u8 }, Mid, Two(u8, u8) }\n"
+        "pub enum Msg<T> { Text(T) }\n"
+    )
+    fm = extract_file(tmp_path, "a.rs", spec)
+    assert fm.enum_variants == ["Side::Left", "Side::Two", "Msg::Text"]
+    assert [s.name for s in fm.symbols] == ["Side", "Msg"]
+
+
+def test_enum_variants_only_for_rust(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("a.ts")
+    assert spec is not None
+    (tmp_path / "a.ts").write_text("enum Side { Left, Right }\n")
+    assert extract_file(tmp_path, "a.ts", spec).enum_variants == []
 
 
 def test_rust_nested_fn_not_a_method(tmp_path: Path) -> None:
@@ -1133,3 +1282,150 @@ def test_parse_rust_use() -> None:
     ]
     assert _parse_rust_use("a::*") == []
     assert ("e", "x::e") in _parse_rust_use("x::{y::{z}, e}")
+
+
+# --- round 32 Track 5: binding forms that aren't import statements -----
+
+
+@pytest.mark.parametrize("filename", ["lazy.ts", "lazy.tsx", "lazy.js"])
+def test_js_dynamic_import_and_require_bindings_are_imports(
+    tmp_path: Path, filename: str
+) -> None:
+    # claude-code: `const { GroveDialog } = await import("./Grove")`.
+    # These bind a cross-file name exactly as a static import does. The
+    # reference-visibility veto dropped 23 true edges there until they
+    # were recorded.
+    spec = languages.spec_for_path(filename)
+    assert spec is not None
+    (tmp_path / filename).write_text(
+        "async function run() {\n"
+        '  const { GroveDialog, a: renamed } = await import("./Grove");\n'
+        "  const {\n"
+        "    Onboarding\n"
+        "  } = await import('./Onboarding');\n"
+        '  const { x } = require("./c");\n'
+        '  const whole = require("./c");\n'
+        '  const ns = await import("./d");\n'
+        "}\n"
+    )
+    fm = extract_file(tmp_path, filename, spec)
+    imports = {(i.name, i.source) for i in fm.imports}
+    assert ("GroveDialog", "./Grove/GroveDialog") in imports
+    assert ("renamed", "./Grove/a") in imports  # local alias, real name
+    assert ("Onboarding", "./Onboarding/Onboarding") in imports
+    assert ("x", "./c/x") in imports
+    assert ("whole", "./c/whole") in imports
+    assert ("ns", "./d/ns") in imports
+
+
+def test_js_only_require_and_import_bind_not_any_string_call(
+    tmp_path: Path,
+) -> None:
+    # The query can't say "a call to require" without a predicate, so
+    # it captures any `f("...")` initializer; the extractor filters.
+    spec = languages.spec_for_path("notimports.ts")
+    assert spec is not None
+    (tmp_path / "notimports.ts").write_text(
+        'const { y } = loadConfig("./e");\n'
+        'const w = translate("./f");\n'
+        'const { z } = await fetchJson("./g");\n'
+    )
+    fm = extract_file(tmp_path, "notimports.ts", spec)
+    assert fm.imports == []
+
+
+@pytest.mark.parametrize("filename", ["gated.ts", "gated.tsx"])
+def test_ts_require_with_type_assertion_is_an_import(
+    tmp_path: Path, filename: str
+) -> None:
+    # claude-code's feature-gated lazy require, 167 sites:
+    #   const { X } = require("./x") as typeof import("./x")
+    # `as_expression` is TypeScript-only, hence `_TS_IMPORT_EXTRA`.
+    spec = languages.spec_for_path(filename)
+    assert spec is not None
+    (tmp_path / filename).write_text(
+        "const {\n"
+        "  BRIEF_TOOL_NAME,\n"
+        "  LEGACY: legacyName\n"
+        "} = require('./prompt.js') as typeof import('./prompt.js');\n"
+        "const mod = require('./mod.js') as typeof import('./mod.js');\n"
+        "const { nope } = helper('./n.js') as Thing;\n"
+    )
+    fm = extract_file(tmp_path, filename, spec)
+    imports = {(i.name, i.source) for i in fm.imports}
+    assert imports == {
+        ("BRIEF_TOOL_NAME", "./prompt.js/BRIEF_TOOL_NAME"),
+        ("legacyName", "./prompt.js/LEGACY"),
+        ("mod", "./mod.js/mod"),
+    }
+
+
+def test_js_grammar_still_compiles_without_the_ts_extra() -> None:
+    # The shared query must stay free of TS-only node types.
+    js = languages.spec_for_path("a.js")
+    ts = languages.spec_for_path("a.ts")
+    assert js is not None and ts is not None
+    assert "as_expression" not in (js.import_query or "")
+    assert "as_expression" in (ts.import_query or "")
+
+
+@pytest.mark.parametrize("filename", ["reads.ts", "reads.js"])
+def test_js_reference_query_captures_plain_reads(
+    tmp_path: Path, filename: str
+) -> None:
+    # Round 32 Track 5: each of these is a read that was never
+    # captured. A module-level `let version` read only by
+    # `return version` looked alive purely because a false edge from
+    # another file's same-named local was propping it up.
+    spec = languages.spec_for_path(filename)
+    assert spec is not None
+    (tmp_path / filename).write_text(
+        "function f() {\n"
+        "  handle.close();\n"  # 2  member_expression object
+        "  if (status) {}\n"  # 3  parenthesized_expression
+        "  if (!enabled) {}\n"  # 4  unary_expression
+        "  for (const e of EXTENSIONS) {}\n"  # 5  for_in right
+        "  const g = () => fallback;\n"  # 6  arrow body
+        "  await pending;\n"  # 7  await_expression
+        "  return DEFAULT_PORT;\n"  # 8  return_statement
+        "}\n"
+        "export default styles;\n"  # 10 export value
+    )
+    fm = extract_file(tmp_path, filename, spec)
+    refs = {(r.name, r.line) for r in fm.refs}
+    assert {
+        ("handle", 2),
+        ("status", 3),
+        ("enabled", 4),
+        ("EXTENSIONS", 5),
+        ("fallback", 6),
+        ("pending", 7),
+        ("DEFAULT_PORT", 8),
+        ("styles", 10),
+    } <= refs
+
+
+def test_js_reference_query_does_not_count_writes(tmp_path: Path) -> None:
+    # A variable that is only ever assigned or incremented is dead.
+    spec = languages.spec_for_path("writes.ts")
+    assert spec is not None
+    (tmp_path / "writes.ts").write_text(
+        "function f() {\n  counter = 0;\n  counter++;\n  total += 1;\n}\n"
+    )
+    fm = extract_file(tmp_path, "writes.ts", spec)
+    assert {r.name for r in fm.refs} == set()
+
+
+def test_ts_reference_query_captures_ts_only_reads(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("tsreads.ts")
+    assert spec is not None
+    (tmp_path / "tsreads.ts").write_text(
+        "function f() {\n"
+        "  use(overrides!);\n"
+        "  const a = config as Settings;\n"
+        "  const b = theme satisfies Theme;\n"
+        "}\n"
+    )
+    fm = extract_file(tmp_path, "tsreads.ts", spec)
+    names = {r.name for r in fm.refs}
+    assert {"overrides", "config", "theme"} <= names

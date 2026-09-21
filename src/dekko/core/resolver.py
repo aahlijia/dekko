@@ -97,6 +97,7 @@ receiver/arity, ``(g *IDGenerator) Generate(...)`` in ``pkg/markdown``
 tests for a change a same-package unit test directly covered.
 """
 
+import fnmatch
 import gc
 import hashlib
 import json
@@ -111,7 +112,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from multiprocessing.context import BaseContext
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
@@ -399,6 +400,232 @@ def resolve_fingerprint() -> str:
             return ""
         _RESOLVE_FINGERPRINT = hashlib.sha256(source).hexdigest()
     return _RESOLVE_FINGERPRINT
+
+
+@dataclass(frozen=True)
+class _NameGroup:
+    """One bare symbol name's resolution-relevant state in one file.
+
+    Built by ``_group_by_name`` and compared by ``name_delta`` -- see
+    that function's docstring for why grouping (rather than comparing
+    the file's symbol list as a whole) is what makes a *name-scoped*
+    reuse gate provable.
+
+    Attributes:
+        rows: One canonical JSON row per symbol sharing this name
+            (``symbol_projection``'s per-symbol form, not the whole
+            file's). Compared by ``==``/``!=`` only -- a **set**, not a
+            sequence, because within one name unordered comparison is
+            correct here even though whole-file ``symbol_projection``
+            must stay order-sensitive (round 30 risk #2): two entries
+            that swap their ``#N`` collision suffix produce two
+            genuinely different row strings (the suffix lives in
+            ``id``), so the set still changes when a swap changes what
+            the ids mean, and stays equal when it doesn't.
+        kinds: Every ``Symbol.kind`` seen under this name.
+        containers: For ``kind == "method"`` entries, the bare name of
+            the qualname's enclosing type (``Cls.method`` -> ``Cls``).
+            Feeds the constructor-collapse rule in ``name_delta``.
+    """
+
+    rows: frozenset[str]
+    kinds: frozenset[str]
+    containers: frozenset[str]
+
+
+_EMPTY_NAME_GROUP = _NameGroup(
+    rows=frozenset(), kinds=frozenset(), containers=frozenset()
+)
+
+
+def _group_by_name(
+    symbols: list[Symbol] | list[dict],
+) -> dict[str, _NameGroup]:
+    """Bucket a file's resolution-relevant symbol projections by name.
+
+    Args:
+        symbols: A file's symbols, in either form ``symbol_projection``
+            accepts.
+
+    Returns:
+        Bare name -> ``_NameGroup``. A name absent from the input has
+        no entry (callers use ``dict.get(name, _EMPTY_NAME_GROUP)``).
+    """
+    field_names = _projected_symbol_fields()
+    rows: dict[str, set[str]] = {}
+    kinds: dict[str, set[str]] = {}
+    containers: dict[str, set[str]] = {}
+    for sym in symbols:
+        d = asdict(sym) if isinstance(sym, Symbol) else sym
+        name = str(d.get("name", ""))
+        row = {f: d.get(f) for f in field_names}
+        rows.setdefault(name, set()).add(
+            json.dumps(row, sort_keys=True, separators=(",", ":"))
+        )
+        kind = str(d.get("kind", ""))
+        kinds.setdefault(name, set()).add(kind)
+        qualname = str(d.get("qualname", ""))
+        if kind == "method" and "." in qualname:
+            container = qualname.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+            containers.setdefault(name, set()).add(container)
+    return {
+        name: _NameGroup(
+            rows=frozenset(rows.get(name, ())),
+            kinds=frozenset(kinds.get(name, ())),
+            containers=frozenset(containers.get(name, ())),
+        )
+        for name in rows.keys() | kinds.keys()
+    }
+
+
+@dataclass(frozen=True)
+class NameDelta:
+    """A dirty file's symbol-name delta, for the incremental resolve gate.
+
+    ``storage.resolvecache.build_reuse``'s v1 gate falls back to a full
+    repo-wide resolve whenever a dirty file's symbol set changed at
+    all. This is v2: identify exactly which bare *names* changed
+    meaning, so an unchanged file's cached resolution can be trusted
+    unless it actually depends on one of them. See
+    ``.features/fixes/round30/01-incremental-resolution.md``'s "v2"
+    section and ``test-repos/reports/31-tokentest-7repo-post04355/
+    FIX-PLAN-remaining.md`` WP-B for the dependency-class analysis this
+    implements.
+
+    Attributes:
+        blocks_reuse: True when a type-kind symbol (``model.TYPE_KINDS``)
+            is among the changed names. Every one of ``_pick_candidate``'s
+            type-aware steps (``_receiver_type_match``,
+            ``_rust_type_path_receiver``, ``_owned_by_receiver_type``'s
+            trait check, ``_typed_param_match``) reads the *whole*
+            repo-wide index for a type-kind name, not just this file's
+            own calls -- so a type addition/removal/change can affect
+            resolution anywhere a same-named receiver or parameter type
+            is written, which no per-file name scan can bound. When
+            this is set, ``changed``/``newly_defined`` are incomplete
+            and must not be used; the caller falls back to a full
+            resolve instead.
+        changed: Bare names whose grouped entries (``_NameGroup.rows``)
+            differ between the old and new symbol list -- added,
+            removed, or substantively changed (candidate count, kind,
+            qualname, params, ...; never a pure line-number shift, see
+            ``_projected_symbol_fields``). Includes the constructor-
+            collapse extension: when a changed name is constructor-
+            shaped (``_CONSTRUCTOR_NAMES``, e.g. Python's ``__init__``
+            or JS/TS's ``constructor``), its enclosing type's own bare
+            name is added too. Without this, adding an ``__init__`` to
+            an existing class would go undetected by any cached
+            caller's *own* name-scan: ``_constructor_of`` looks up the
+            new method by a name (``__init__``) that never appears in
+            an already-cached ``MyClass()`` edge, whose callee id ends
+            in ``MyClass``, not ``__init__``. Adding the class's own
+            name closes that gap without needing to know which files
+            call the class directly -- the ordinary name-scan finds
+            them once the class's name is itself in the delta.
+        newly_defined: The subset of ``changed`` with *no* entries in
+            the old projection at all -- names the repo did not define
+            before this edit. Only a genuinely new name can flip an
+            import-alias miss (``_alias_candidates``, which recovers a
+            name via ``alias_original_name`` and retries the index
+            lookup under it) from empty to non-empty; a name that
+            already existed already had whatever candidates it was
+            going to have, so it can't newly enable that recovery.
+    """
+
+    blocks_reuse: bool
+    changed: frozenset[str]
+    newly_defined: frozenset[str]
+
+
+def name_delta(
+    old_symbols: list[Symbol] | list[dict],
+    new_symbols: list[Symbol] | list[dict],
+) -> NameDelta:
+    """Compute which symbol names changed meaning between two versions.
+
+    Args:
+        old_symbols: The file's previously cached symbols.
+        new_symbols: The file's freshly extracted symbols.
+
+    Returns:
+        A ``NameDelta``. See its docstring for what each field means
+        and why the constructor-collapse extension is folded into
+        ``changed`` here rather than left to the caller.
+    """
+    old = _group_by_name(old_symbols)
+    new = _group_by_name(new_symbols)
+    changed = {
+        name
+        for name in old.keys() | new.keys()
+        if old.get(name, _EMPTY_NAME_GROUP).rows
+        != new.get(name, _EMPTY_NAME_GROUP).rows
+    }
+    blocks_reuse = any(
+        old.get(name, _EMPTY_NAME_GROUP).kinds & TYPE_KINDS
+        or new.get(name, _EMPTY_NAME_GROUP).kinds & TYPE_KINDS
+        for name in changed
+    )
+    newly_defined = {
+        name for name in changed if not old.get(name, _EMPTY_NAME_GROUP).rows
+    }
+    ctor_containers: set[str] = set()
+    for name in changed & _CONSTRUCTOR_NAME_SET:
+        ctor_containers |= old.get(name, _EMPTY_NAME_GROUP).containers
+        ctor_containers |= new.get(name, _EMPTY_NAME_GROUP).containers
+
+    return NameDelta(
+        blocks_reuse=blocks_reuse,
+        changed=frozenset(changed | ctor_containers),
+        newly_defined=frozenset(newly_defined),
+    )
+
+
+def resolved_id_name(symbol_id: str) -> str:
+    """Bare ``Symbol.name`` a resolved symbol id's qualname ends in.
+
+    Ids are ``relpath::Qualname`` (``extractor._make_symbol``), with an
+    optional ``#N`` collision suffix appended to the *whole* id, never
+    to the qualname itself. Splitting on the first ``"::"`` therefore
+    isolates the qualname cleanly -- a relpath can contain ``.`` and
+    ``/`` but never ``::``, and a qualname (dot-joined containers) never
+    contains ``::`` either (``_make_symbol`` converts any ``::`` in a
+    captured name into dot-joined containers before building the id).
+
+    Used by ``storage.resolvecache``'s name-delta gate to ask "does
+    this cached edge/ambiguous candidate depend on name N" without
+    storing the name redundantly alongside every id.
+
+    Args:
+        symbol_id: A real, resolved ``Symbol.id`` -- never a module
+            pseudo-caller id (``MODULE_CALLER_SUFFIX``), which this
+            function never receives in practice since only genuine
+            *callees*/*candidates* are ever looked up this way.
+
+    Returns:
+        The bare name, with any ``#N`` suffix stripped.
+    """
+    _, _, qualname = symbol_id.partition("::")
+    tail = qualname.rsplit(".", 1)[-1]
+    return tail.partition("#")[0]
+
+
+def alias_original_name(source: str) -> str:
+    """The pre-alias bare name ``_alias_candidates`` recovers from an
+    import's ``source``.
+
+    Factored out of ``_alias_candidates`` so
+    ``storage.resolvecache``'s name-delta gate can replicate exactly
+    what that function would look up for a given import, rather than
+    risking the two derivations drifting apart -- see
+    ``NameDelta.newly_defined``.
+
+    Args:
+        source: An ``Import.source`` string.
+
+    Returns:
+        Its last path-like segment, or ``""`` for an empty source.
+    """
+    return _PATH_SPLIT.split(source)[-1] if source else ""
 
 
 @dataclass(frozen=True)
@@ -877,8 +1104,12 @@ def resolve(
             behavior exactly). See ``_resolve_all`` for how chunking
             and the parallelization threshold work.
         root: Repository root, used only to discover and parse
-            ``tsconfig.json``/``jsconfig.json`` path-alias config for
-            JS/TS import resolution (see ``resolve_imports``). ``None``
+            JS/TS project config: ``tsconfig.json``/``jsconfig.json``
+            path aliases for import resolution (see
+            ``resolve_imports``) and the workspace package table (see
+            ``load_workspace_packages``) the call, reference and
+            heritage passes use to recognize a workspace-package
+            import as in-repo. ``None``
             (the default) skips that discovery entirely — every caller
             that doesn't pass a real root sees byte-identical behavior
             to before this parameter existed.
@@ -897,7 +1128,11 @@ def resolve(
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files)
+    # One discovery pass feeds both the symbol-level passes (name ->
+    # directory) and the module graph (entry-point fields).
+    manifests = _load_workspace_manifests(root) if root is not None else {}
+    workspace_pkgs = {n: m.package_dir for n, m in manifests.items()}
+    imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
 
@@ -956,7 +1191,7 @@ def resolve(
         )
         _build_adjacency(graph)
         graph.referenced, graph.referenced_in, graph.referenced_out = (
-            resolve_refs(files, workers)
+            resolve_refs(files, workers, workspace_pkgs)
         )
         (
             graph.heritage,
@@ -965,8 +1200,11 @@ def resolve(
             graph.heritage_ambiguous,
             graph.heritage_external,
             graph.heritage_synthetic_tiebreak_count,
-        ) = resolve_heritage(files)
-        graph.modules = resolve_imports(files, root=root)
+            graph.heritage_unplaced_subtype_count,
+        ) = resolve_heritage(files, workspace_pkgs)
+        graph.modules = resolve_imports(
+            files, root=root, workspace_manifests=manifests
+        )
         (
             graph.throws,
             graph.throws_out,
@@ -1189,6 +1427,7 @@ def _resolve_refs_chunk(
     by_name_path: dict[tuple[str, str], list[Symbol]],
     imports_by_file: dict[str, dict[str, Import]],
     symbols_by_id: dict[str, Symbol],
+    repo_stems: set[str],
 ) -> dict[tuple[str, str], set[int]]:
     """Resolve every reference in ``files`` into a fresh, local ``edges``
     dict — the reference-resolution analog of ``_resolve_files_chunk``,
@@ -1196,6 +1435,7 @@ def _resolve_refs_chunk(
     edges: dict[tuple[str, str], set[int]] = {}
     for fm in files:
         file_imports = imports_by_file.get(fm.path, {})
+        file_exports = any(sym.exported for sym in fm.symbols)
         for ref in fm.refs:
             _resolve_ref(
                 ref,
@@ -1204,6 +1444,8 @@ def _resolve_refs_chunk(
                 file_imports=file_imports,
                 symbols_by_id=symbols_by_id,
                 edges=edges,
+                repo_stems=repo_stems,
+                file_exports=file_exports,
             )
     return edges
 
@@ -1217,17 +1459,21 @@ def _resolve_refs_chunk_worker(
     analog of ``_resolve_files_chunk_worker``."""
     assert _worker_index is not None  # initializer always runs first
     assert _worker_symbols_by_id is not None
+    assert _worker_repo_stems is not None
     return _resolve_refs_chunk(
         files,
         _worker_index,
         _worker_by_name_path,
         _worker_imports_by_file,
         _worker_symbols_by_id,
+        _worker_repo_stems,
     )
 
 
 def resolve_refs(
-    files: list[FileMap], workers: int = 1
+    files: list[FileMap],
+    workers: int = 1,
+    workspace_pkgs: dict[str, str] | None = None,
 ) -> tuple[list[Edge], dict[str, list[str]], dict[str, list[str]]]:
     """Resolve every raw value reference across the repo.
 
@@ -1246,6 +1492,10 @@ def resolve_refs(
             the default). See ``resolve``'s own ``workers`` parameter
             and ``_resolve_all``'s docstring for the parallelization
             shape this mirrors.
+        workspace_pkgs: JS/TS workspace package name → directory (see
+            ``load_workspace_packages``), or ``None``. Lets a
+            workspace-package import narrow a colliding name to the
+            package it was imported from.
 
     Returns:
         ``(edges, referenced_in, referenced_out)``, the same shape
@@ -1253,8 +1503,9 @@ def resolve_refs(
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files)
+    imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
+    repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
 
     total_refs = sum(len(fm.refs) for fm in files)
     pool_workers = _pool_workers(workers, total_refs)
@@ -1268,7 +1519,12 @@ def resolve_refs(
         )
         if len(chunks) < 2:
             return _resolve_refs_chunk(
-                files, index, by_name_path, imports_by_file, symbols_by_id
+                files,
+                index,
+                by_name_path,
+                imports_by_file,
+                symbols_by_id,
+                repo_stems,
             )
 
         edges: dict[tuple[str, str], set[int]] = {}
@@ -1280,7 +1536,7 @@ def resolve_refs(
                 index,
                 by_name_path,
                 imports_by_file,
-                None,
+                repo_stems,
                 symbols_by_id,
             ),
         )
@@ -1320,6 +1576,8 @@ def _resolve_ref(
     file_imports: dict[str, Import],
     symbols_by_id: dict[str, Symbol],
     edges: dict[tuple[str, str], set[int]],
+    repo_stems: set[str],
+    file_exports: bool = False,
 ) -> None:
     """Resolve one reference; ambiguous/unmatched refs are dropped.
 
@@ -1331,6 +1589,15 @@ def _resolve_ref(
     """
     caller_id = ref.caller_id or f"{ref.path}{MODULE_CALLER_SUFFIX}"
     candidates = index.get(ref.name, [])
+    if ref.bound is not None:
+        # The identifier names a parameter or a local (round 32 Track
+        # 5b). Not the candidate pre-filter ``_pick_candidate`` warns
+        # about: nothing is being narrowed, the reference itself is
+        # impossible, so dropping it can only ever remove an edge.
+        fixture = _fixture_param_target(ref, candidates)
+        if fixture is not None and fixture.id != caller_id:
+            edges.setdefault((caller_id, fixture.id), set()).add(ref.line)
+        return
     if not candidates:
         alias = _alias_candidates(ref, file_imports, index)
         if len(alias) == 1 and alias[0].id != caller_id:
@@ -1346,18 +1613,148 @@ def _resolve_ref(
         by_name_path,
         index,
     )
-    if target is not None and target.id != caller_id:
+    if (
+        target is not None
+        and target.id != caller_id
+        and _ref_target_visible(
+            ref, target, file_imports, repo_stems, file_exports
+        )
+    ):
         edges.setdefault((caller_id, target.id), set()).add(ref.line)
+
+
+_CONFTEST = "conftest.py"
+
+
+def _fixture_param_target(
+    ref: RawRef, candidates: list[Symbol]
+) -> Symbol | None:
+    """The pytest fixture a bound parameter stands for, if any.
+
+    The one bound reference that still earns an edge. ``def
+    test_x(short_root): run(short_root)`` shadows the ``short_root``
+    fixture function lexically, and *is* that fixture semantically:
+    pytest injects by parameter name. 102 of the 119 shadowed
+    reference sites in dekko's own repo are this shape, and without
+    the edge a fixture that is passed along but never called in the
+    test is invisible to ``affected`` and ``query uses``.
+
+    Same file first, then the ``conftest.py`` in the nearest ancestor
+    directory, which is the only cross-file name Python sees without
+    an import (so this path deliberately skips
+    ``_ref_target_visible``, whose Python rule cut 47 such edges in
+    0.43.69). ``decorated`` means *any* decorator, not
+    ``@pytest.fixture`` specifically; inside a test file, against a
+    parameter of the same name, that is close enough. Two candidates
+    at the same distance: no edge.
+    """
+    if ref.bound != "param" or not is_test_path(ref.path):
+        return None
+    fixtures = [
+        c
+        for c in candidates
+        if c.language == "python" and c.kind == "function" and c.decorated
+    ]
+    same_file = [c for c in fixtures if c.path == ref.path]
+    if same_file:
+        return same_file[0] if len(same_file) == 1 else None
+    here = PurePosixPath(ref.path).parent
+    for directory in (here, *here.parents):
+        found = [c for c in fixtures if c.path == str(directory / _CONFTEST)]
+        if found:
+            return found[0] if len(found) == 1 else None
+
+    return None
+
+
+# Languages whose references are bare *value* identifiers, the only
+# kind a local binding can shadow. Java's references are syntactic
+# ``Type::method`` and Go's are type identifiers: a wrong edge there is
+# an ordinary name collision, not this bug, and is left to the ladder.
+_REF_VISIBILITY_LANGUAGES = frozenset(
+    {"python", "javascript", "typescript", "tsx"}
+)
+_JS_FAMILY = _LANGUAGE_FAMILIES["javascript"]
+
+
+def _ref_target_visible(
+    ref: RawRef,
+    target: Symbol,
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+    file_exports: bool = False,
+) -> bool:
+    """Whether the file holding ``ref`` could name ``target`` at all.
+
+    Round 32 Track 5. The ladder ``_resolve_ref`` shares with calls
+    ends in name-only rungs (sole candidate, last resort). For a call
+    that is a fair guess: ``count(x)`` on a local is rare. For a bare
+    value identifier it is not: ``const count = ...; if (count >= 3)``
+    is every other line, and each one became a reference edge to
+    whichever unrelated ``count`` the repo happened to define once.
+    Measured: 35% of claude-code's reference edges and 57% of cline's
+    joined files that cannot see each other (``error``, ``c``,
+    ``value``, ``sessionId``). ``unused`` spared dead code because of
+    them and ``query uses`` listed them.
+
+    In these languages a cross-file name has to be brought into scope,
+    so an edge to another file needs an import binding that name, and
+    that import has to point into this repo. A *veto on the result*,
+    not a pre-filter on the candidates, for the reason
+    ``_pick_candidate`` gives: narrowing a list can turn
+    "honestly ambiguous" into "confidently guessed"; a veto can only
+    ever remove an edge.
+
+    Errs toward keeping the edge wherever the import table can't be
+    trusted to be complete:
+
+    - A JS-family file with no recorded import **and no exported
+      symbol** (``file_exports``). That is a script: it shares one
+      global scope with every other script, which is also exactly how
+      TypeScript treats a file with neither ``import`` nor ``export``.
+      A file that exports something is a module and shares nothing, so
+      a free ``process`` or ``performance`` in it is the runtime
+      global, not ``cronScheduler.ts::process`` (Track 5b: 33 such
+      sites on claude-code, 49 on cline).
+    - A target declared in a ``.d.ts``: ambient types are global.
+
+    Not this function's job: a local that shadows a *same-file* or
+    an *imported* symbol (claude-code ``utils/ide.ts`` imports
+    ``errorMessage`` and rebinds it in a catch block), or any local in
+    a zero-import file. Those never get here since Track 5b: the
+    extractor tags them (``RawRef.bound``) and ``_resolve_ref`` drops
+    them before the ladder runs.
+    """
+    if target.path == ref.path or target.language not in (
+        _REF_VISIBILITY_LANGUAGES
+    ):
+        return True
+    imp = file_imports.get(ref.name)
+    if imp is not None:
+        # Imported, but from where? ``import fs from "node:fs"`` then
+        # ``fs.mkdtempSync(..)`` is the external ``fs``, whatever some
+        # test file's ``const fs = ...`` happens to be called. Calls
+        # have had this guard since ``_shadowed_by_external_import``;
+        # references never did, and capturing ``x.prop`` reads made it
+        # matter (cline: ``fs``, ``os``, vitest's ``expect``).
+        return _import_is_in_repo(imp, repo_stems)
+    if target.language in _JS_FAMILY:
+        is_script = not file_imports and not file_exports
+        return is_script or target.path.endswith(".d.ts")
+
+    return False
 
 
 def resolve_heritage(
     files: list[FileMap],
+    workspace_pkgs: dict[str, str] | None = None,
 ) -> tuple[
     list[HeritageEdge],
     dict[str, list[str]],
     dict[str, list[str]],
     list[tuple[str, str, list[str]]],
     list[ExternalCall],
+    int,
     int,
 ]:
     """Resolve every heritage clause across the repo into a heritage graph.
@@ -1409,36 +1806,49 @@ def resolve_heritage(
 
     Args:
         files: Per-file extraction results.
+        workspace_pkgs: JS/TS workspace package name → directory (see
+            ``load_workspace_packages``), or ``None``. Without it, a
+            clause whose base is imported by package name (``import
+            type { ApiHandler } from "@cline/llms"``) is misfiled as
+            external -- round 31 cline.md §4.1 Bug A.
 
     Returns:
         ``(heritage_edges, heritage_out, heritage_in,
         heritage_ambiguous, heritage_external,
-        synthetic_tiebreak_count)`` — the first five are the same
-        shapes ``resolve()`` assigns onto ``CallGraph.heritage``/
-        ``heritage_out``/``heritage_in``/``heritage_ambiguous``/
-        ``heritage_external``. Built as a plain tuple return (mirroring
-        ``resolve_refs()``'s own return shape) rather than a
-        ``CallGraph`` method, since ``resolve()`` just assigns the
-        pieces onto the graph it already built, exactly as it already
-        does for ``resolve_refs()``'s result. ``synthetic_tiebreak_count``
-        (round 24, ``.features/plans/round24/
-        03-heritage-crate-decoy-tiebreak.md``) is how many of the
-        resolved edges above were resolved via
+        synthetic_tiebreak_count, unplaced_subtype_count)`` — the
+        first five are the same shapes ``resolve()`` assigns onto
+        ``CallGraph.heritage``/``heritage_out``/``heritage_in``/
+        ``heritage_ambiguous``/``heritage_external``. Built as a plain
+        tuple return (mirroring ``resolve_refs()``'s own return shape)
+        rather than a ``CallGraph`` method, since ``resolve()`` just
+        assigns the pieces onto the graph it already built, exactly as
+        it already does for ``resolve_refs()``'s result.
+        ``synthetic_tiebreak_count`` (round 24, ``.features/plans/
+        round24/03-heritage-crate-decoy-tiebreak.md``) is how many of
+        the resolved edges above were resolved via
         ``_prefer_non_synthetic_crate_match`` rather than an
         unambiguous structural match — a convention-based guess about
         which of two same-named crates is "the real one," surfaced to
         ``CallGraph.heritage_synthetic_tiebreak_count`` so ``query
         subtypes``/``supertypes`` can disclose it rather than blending
         it silently into every other, more certain resolution.
+        ``unplaced_subtype_count`` (round 31 A3) is how many clauses
+        with an empty ``subtype_id`` (see ``RawHeritage.subtype_name``)
+        were dropped because ``_resolve_heritage_subtype_id`` found
+        zero or 2+ same-crate candidates for the written type name —
+        surfaced the same way, so a later round can see how many were
+        genuinely unplaceable rather than the count silently vanishing
+        into "clause never happened."
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files)
+    imports_by_file = _imports_by_file(files, workspace_pkgs)
     repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
     crate_roots = _rust_crate_roots_index_all(
         frozenset(fm.path for fm in files)
     )
     tiebreak_hits = [0]
+    unplaced_subtype_count = 0
 
     edges: dict[tuple[str, str], set[int]] = {}
     relations: dict[tuple[str, str], str] = {}
@@ -1450,6 +1860,12 @@ def resolve_heritage(
             fm.imports if fm.language in _WHOLE_FILE_IMPORT_LANGUAGES else None
         )
         for h in fm.heritage:
+            if not h.subtype_id:
+                subtype_id = _resolve_heritage_subtype_id(h, index)
+                if subtype_id is None:
+                    unplaced_subtype_count += 1
+                    continue
+                h = replace(h, subtype_id=subtype_id)
             _resolve_one_heritage(
                 h,
                 index,
@@ -1497,7 +1913,113 @@ def resolve_heritage(
         heritage_ambiguous,
         heritage_external,
         tiebreak_hits[0],
+        unplaced_subtype_count,
     )
+
+
+def _resolve_heritage_subtype_id(
+    h: RawHeritage, index: dict[str, list[Symbol]]
+) -> str | None:
+    """Resolve a cross-file Rust ``impl`` clause's own subject symbol.
+
+    Round 31 zed coverage pass F2/A3: ``extractor._heritage_rust_impl``
+    emits a clause with ``subtype_id=""`` and ``subtype_name`` set
+    when the implementing type isn't defined in the same file as the
+    ``impl`` block — an ordinary Rust layout
+    (``crates/search/src/text_finder/render.rs: impl Render for
+    TextFinder``, the ``struct TextFinder`` itself living in
+    ``text_finder.rs``), not a rare one.
+
+    Narrowed to the clause's own crate (``_rust_crate_dir``), matching
+    this resolver's existing Rust crate-scoping convention elsewhere
+    in this module (``_owned_by_receiver_type``, the crate-decoy
+    tiebreaks): an unqualified struct name repeats across zed's own
+    crates often enough (several same-named ``Editor``, ``View``, ...)
+    that ignoring crate boundaries here would trade one guess for
+    another, not remove the guess.
+
+    Args:
+        h: A heritage clause with an empty ``subtype_id`` and a
+            non-empty ``subtype_name``.
+        index: Bare symbol name to every symbol sharing it.
+
+    Returns:
+        The unique matching symbol's id, or ``None`` when zero or 2+
+        same-crate ``TYPE_KINDS`` symbols share ``h.subtype_name`` —
+        the caller counts this rather than guessing (see
+        ``resolve_heritage``'s ``unplaced_subtype_count``).
+    """
+    own_crate = _rust_crate_dir(h.path)
+    # A ``type`` alias is never the placement (round 31 F6b started
+    # indexing them). ``subtype_name`` is the bare last segment, so
+    # zed's ``impl<T> TideResultExt for tide::Result<T>`` would land on
+    # collab's own unrelated ``pub type Result<T, E = Error>``, the
+    # crate's only ``Result``. An alias names someone else's type by
+    # definition; the impl belongs to that type, not to the alias.
+    matches = [
+        sym
+        for sym in index.get(h.subtype_name, [])
+        if sym.kind in TYPE_KINDS
+        and sym.kind != "type_alias"
+        and _rust_crate_dir(sym.path) == own_crate
+    ]
+    return matches[0].id if len(matches) == 1 else None
+
+
+def _narrow_impl_candidates_to_traits(
+    candidates: list[Symbol],
+) -> list[Symbol]:
+    """Narrow ``impl Trait for Type`` candidates to trait-kind only.
+
+    Round 31 zed coverage pass F8: heritage candidates were filtered
+    only to ``TYPE_KINDS`` (every type kind), but a Rust ``impl X for
+    Y`` clause's ``X`` can only ever name a *trait* — a same-named
+    struct/enum/other type is never a legal candidate (``impl
+    <struct> for Y`` doesn't compile). 66 of zed's 86
+    ``heritage_ambiguous`` entries had exactly one trait candidate
+    alongside an unrelated same-named struct (``Component`` the trait
+    vs. ``extension_api::Component`` the struct, line 364) — the
+    struct half of every one of those pairs was pure noise dragging a
+    resolvable clause into "ambiguous."
+
+    Same shape as ``query._sole_type_candidate`` (round 31 P3.4),
+    applied here at resolve time instead of at query time: only
+    narrows when doing so leaves at least one candidate (rule 0.3 in
+    the round 31 fix design — "no evidence is not negative evidence").
+    A clause whose name matches *no* trait at all keeps its full,
+    unnarrowed candidate list — it may still resolve some other way
+    (same-file, import hint) that this kind filter alone can't rule
+    out with certainty, and an empty result here is not the "no
+    candidate can possibly be the target" proof the ``Type::name``
+    owner rule gets to make.
+
+    Args:
+        candidates: Already ``TYPE_KINDS``-filtered same-named
+            symbols (either the repo-wide index lookup or the
+            same-file lookup — both call sites need this identically).
+
+    Returns:
+        Only the ``trait``-kind entries of ``candidates``, or, when
+        none are traits, ``candidates`` minus any Rust ``type_alias``.
+    """
+    traits = [c for c in candidates if c.kind == "trait"]
+    if traits:
+        return traits
+
+    # No trait by that name. The "keep everything" allowance above is
+    # for kinds that *might* be the target; a Rust ``type`` alias never
+    # is (``impl Alias for Y`` doesn't compile, trait aliases being
+    # unstable). Round 31 F6b started indexing those aliases, and
+    # without this veto zed's ``impl ActionHandler for
+    # A11yActionHandler`` (accesskit's trait) resolved to ``ui``'s
+    # unrelated ``type ActionHandler = Box<dyn Fn(..)>``, its only
+    # same-named in-repo symbol. Path-gated since TS reuses the
+    # ``impl`` relation, and ``implements`` of a type alias is legal.
+    return [
+        c
+        for c in candidates
+        if not (c.kind == "type_alias" and c.path.endswith(".rs"))
+    ]
 
 
 def _resolve_one_heritage(
@@ -1551,6 +2073,8 @@ def _resolve_one_heritage(
         return
 
     candidates = [c for c in index.get(h.name, []) if c.kind in TYPE_KINDS]
+    if h.relation == "impl":
+        candidates = _narrow_impl_candidates_to_traits(candidates)
     if not candidates:
         alias = [
             c
@@ -1571,6 +2095,8 @@ def _resolve_one_heritage(
         for c in by_name_path.get((h.name, h.path), [])
         if c.kind in TYPE_KINDS
     ]
+    if h.relation == "impl":
+        same_file = _narrow_impl_candidates_to_traits(same_file)
     target = _pick_candidate(
         h,
         candidates,
@@ -1590,7 +2116,108 @@ def _resolve_one_heritage(
     if target is not None:
         _add_heritage_edge(h, target.id, edges, relations)
         return
+    decoy_free = _hintless_decoy_tiebreak(h, candidates, tiebreak_hits)
+    if decoy_free is not None:
+        _add_heritage_edge(h, decoy_free.id, edges, relations)
+        return
     _record_ambiguous(h.subtype_id, h.name, candidates, ambiguous)
+
+
+def _hintless_decoy_tiebreak(
+    h: RawHeritage,
+    candidates: list[Symbol],
+    tiebreak_hits: list[int] | None,
+) -> Symbol | None:
+    """Last-resort Rust fixture-decoy tiebreak for a clause with no hint.
+
+    Round 24's ``_prefer_non_synthetic_crate_match`` only ever ran
+    inside the crate-hint steps, i.e. when the file names the crate
+    (``use gpui::Render;`` / ``impl gpui::Render for X``). Round 31
+    zed.md measured what that leaves behind on its own motivating
+    example: 174 of 358 ``impl Render for`` clauses resolved, 184
+    ambiguous -- and **every one of the 184 had the identical two
+    candidates**, the real ``crates/gpui/src/element.rs::Render`` and
+    the ``tooling/lints/test_fixture/gpui`` stand-in. Those files reach
+    ``Render`` through a glob (``use ui::prelude::*;``, 165 of them) or
+    a re-exporting crate (``use ui::Render;``, 19), so there is no
+    crate name to build a hint from, and there never will be short of
+    tracing glob re-exports.
+
+    The same convention answers it without a hint: real code does not
+    implement a test fixture's stand-in trait. Reuses the round-24
+    function whole, so its guarantees carry over unchanged -- a clause
+    written *inside* the fixture crate resolves to the fixture's own
+    trait (the structural self-crate check, tried first), exactly one
+    non-synthetic survivor is required, and every edge resolved this
+    way is counted in ``tiebreak_hits`` and disclosed by ``query
+    subtypes``/``supertypes`` as resting on a convention rather than a
+    structural match. Two real crates defining the same trait name
+    stay ambiguous.
+
+    Rust only: the crate-directory notion the tiebreak reasons about
+    (``_rust_crate_dir``) is Rust-shaped.
+    """
+    if not h.path.endswith(".rs"):
+        return None
+    if _looks_like_synthetic_crate_root(_rust_crate_dir(h.path)):
+        # The clause itself lives in a fixture/vendor tree. "Real code
+        # doesn't implement a fixture's trait" says nothing about
+        # *fixture* code: zed's ``test_fixture/render_consumer`` crate
+        # depends on the sibling ``test_fixture/gpui`` stand-in, not on
+        # the real gpui, and a different crate is not something the
+        # self-crate check can see. Live-testing caught 8 such edges
+        # pointed at the real trait. Stay ambiguous.
+        return None
+    same_language = _language_filtered(h, candidates)
+    if len(same_language) < 2:
+        return None
+    if _nearer_to_a_decoy(h.path, same_language):
+        return None
+    return _prefer_non_synthetic_crate_match(
+        same_language, h.path, tiebreak_hits
+    )
+
+
+def _nearer_to_a_decoy(path: str, candidates: list[Symbol]) -> bool:
+    """Whether ``path`` sits closer to a fixture candidate than a real one.
+
+    The hintless tiebreak's premise is "real code doesn't implement a
+    fixture's trait". Code that lives *beside* a fixture is the
+    exception, and a path marker can't see it: zed's dylint UI tests
+    (``tooling/lints/ui/*.rs``) carry no ``test_fixture`` segment, yet
+    ``tooling/lints/src/lib.rs`` compiles them with
+    ``--extern=gpui=<fixture rlib>``, so their ``use gpui::*;`` is the
+    stand-in. Round 31's zed coverage pass caught 7 such edges this
+    tiebreak had newly pointed at the real trait (they were honestly
+    ambiguous before it existed). The build flag is unknowable
+    statically; shared directory depth is a usable proxy.
+    ``tooling/lints/ui/x.rs`` shares ``tooling/lints`` with the decoy
+    and nothing with ``crates/gpui``, while a real consumer
+    (``crates/editor/...``) shares ``crates`` with the real crate and
+    nothing with the decoy. Ties go to resolving.
+    """
+
+    def shared(other: str) -> int:
+        depth = 0
+        for a, b in zip(path.split("/")[:-1], other.split("/")[:-1]):
+            if a != b:
+                break
+            depth += 1
+        return depth
+
+    decoys = [
+        shared(c.path)
+        for c in candidates
+        if _looks_like_synthetic_crate_root(_rust_crate_dir(c.path))
+    ]
+    real = [
+        shared(c.path)
+        for c in candidates
+        if not _looks_like_synthetic_crate_root(_rust_crate_dir(c.path))
+    ]
+    if not decoys or not real:
+        return False
+    return max(decoys) > max(real)
 
 
 def _add_heritage_edge(
@@ -2173,8 +2800,15 @@ def _is_receiver_param(param: Param, language: str) -> bool:
     if language == "python":
         return param.name in _PYTHON_RECEIVER_PARAM_NAMES
     if language == "rust":
-        normalized = param.name.lstrip("&").replace("mut", "").strip()
-        return normalized == "self"
+        # The last word, not a strip-the-prefix: a lifetimed receiver
+        # (``&'a self``, ``&'a mut self``) used to fall through as an
+        # ordinary parameter, which put the method's arity one too
+        # high and made ``_sole_candidate_match`` reject a correct
+        # lone target (round 32, live-testing on zed:
+        # ``syntax_map.layers(&buffer)`` against ``fn layers<'a>(&'a
+        # self, buffer: ..)``). Rust reserves ``self`` for the
+        # receiver, so a parameter whose name ends in it is one.
+        return param.name.lstrip("&").split()[-1:] == ["self"]
     return False
 
 
@@ -2275,7 +2909,7 @@ class _Noise:
 _NOISE = _Noise()
 
 
-def _pick_candidate(
+def _pick_candidate_ladder(
     call: _Referable,
     candidates: list[Symbol],
     same_file: list[Symbol],
@@ -2366,18 +3000,17 @@ def _pick_candidate(
     same language) as the call site.
     """
     candidates = _language_filtered(call, candidates)
+    candidates, same_file, shape_narrowed = _rust_shape_narrowed_candidates(
+        call, candidates, same_file, index, file_imports, repo_stems
+    )
+    if shape_narrowed and not candidates:
+        return _NOISE if repo_stems is not None else None
 
-    container_match = _container_match(call, caller, same_file)
-    if container_match is not None:
-        return container_match
-
-    receiver_type = _receiver_type_match(call, candidates, index)
-    if receiver_type is not None:
-        return receiver_type
-
-    typed = _typed_param_match(call, candidates, caller)
-    if typed is not None:
-        return typed
+    structural = _structural_match(
+        call, candidates, same_file, caller, index, file_imports
+    )
+    if structural is not None:
+        return structural
 
     if len(same_file) == 1:
         only = same_file[0]
@@ -2405,22 +3038,119 @@ def _pick_candidate(
         return _NOISE
 
     if len(candidates) == 1:
-        if _arity_plausible(candidates[0], call):
-            return candidates[0]
-        # Structural layer 2: the sole candidate's declared arity
-        # doesn't fit this call site's written argument count -- drop
-        # it before the last-resort tail below, rather than returning
-        # it anyway. Emptying `candidates` here (instead of just not
-        # returning) matters: `_last_resort_match` ->
-        # `_bare_call_non_method_match` would otherwise re-derive this
-        # same single candidate for a bare, non-method call (its own
-        # "exactly one non-method candidate left" check is a no-op
-        # when there was only ever one candidate to begin with),
-        # silently undoing this guard for exactly the bare-call shape
-        # it exists to cover.
-        candidates = []
+        return _sole_candidate_match(
+            call, candidates[0], by_name_path, repo_stems is not None, index
+        )
 
     return _last_resort_match(call, candidates, by_name_path)
+
+
+def _pick_candidate(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    file_imports: dict[str, Import],
+    caller: Symbol | None,
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    index: dict[str, list[Symbol]],
+    repo_stems: set[str] | None = None,
+    raw_imports: list[Import] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
+) -> Symbol | _Noise | None:
+    """Run the candidate ladder, then veto a structurally impossible pick.
+
+    See ``_pick_candidate_ladder`` for the ladder itself and every
+    parameter. The one rule applied here: a Rust dot-call
+    (``recv.name(..)``) can never reach a free function (round 31 zed
+    coverage pass F11: ``.px(..)`` landing on ``fn px``, ``x.clone()``
+    on a test module's ``fn clone``).
+
+    It is a *veto on the result*, deliberately not a filter on the
+    candidates going in. The first implementation pre-filtered, and
+    integration review measured what that did on zed: removing a free
+    ``fn or`` left ``EnvVar.or`` as the lone survivor, so 137
+    ``Option::or`` calls (``stdout.or(stderr)``) newly resolved to it;
+    removing a same-file free ``fn focus_handle`` left one same-file
+    method, so ``cx.focus_handle()`` newly took it. Narrowing a
+    candidate list turns "honestly ambiguous" into "confidently
+    guessed" whenever it happens to leave one. A veto can only ever
+    remove an edge.
+    """
+    picked = _pick_candidate_ladder(
+        call,
+        candidates,
+        same_file,
+        file_imports,
+        caller,
+        by_name_path,
+        index,
+        repo_stems,
+        raw_imports,
+        crate_roots,
+        tiebreak_hits,
+    )
+    if (
+        isinstance(picked, Symbol)
+        and _rust_is_dot_call(call)
+        and (not _drop_free_functions([picked]) or picked.kind in TYPE_KINDS)
+    ):
+        # F11's rule, plus its Track 4 sibling: ``recv.Name(..)`` can no
+        # more construct a type than reach a free function
+        # (``handler.Update()``, Windows COM, landing on
+        # ``struct Update``).
+        return _NOISE if repo_stems is not None else None
+
+    return picked
+
+
+def _sole_candidate_match(
+    call: _Referable,
+    only: Symbol,
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    noise_aware: bool,
+    index: dict[str, list[Symbol]],
+) -> "Symbol | _Noise | None":
+    """Resolve, or reject, the single remaining candidate for a call.
+
+    Structural layer 2: when the sole candidate's declared arity
+    doesn't fit the call site's written argument count, it is dropped
+    rather than returned anyway. ``_last_resort_match`` is then run
+    over an *empty* list, not skipped: ``_bare_call_non_method_match``
+    would otherwise re-derive this same single candidate for a bare,
+    non-method call (its own "exactly one non-method candidate left"
+    check is a no-op when there was only ever one), silently undoing
+    this guard for exactly the bare-call shape it exists to cover.
+
+    A rejected sole candidate is **not** ambiguous: a collision needs
+    two live candidates, and this call has none. Round 31 cline.md
+    §4.2: 542 of cline's 6,271 "ambiguous" call entries had exactly one
+    candidate, all of this shape -- ``arr.at(-1)`` (1 arg) against the
+    repo's only ``at``, a local ``at(r, c)``; ``Buffer.byteLength(s,
+    "utf8")`` against a one-parameter ``byteLength(value)``. Filing
+    them as ambiguous made ``query symbol at`` print "+86 additional
+    call site(s) resolved ambiguously" about calls that provably
+    cannot be its own, and showed up in ``dekko ambiguous --by name``
+    as the self-contradictory "avg 1.0 candidates". Same defect class
+    and same remedy as the round 22 ``_NOISE`` split: no plausible
+    repo target means external.
+
+    Args:
+        call: The raw call/reference/heritage clause being resolved.
+        only: The single language-filtered candidate.
+        by_name_path: ``(name, path)`` → same-file symbols.
+        noise_aware: Whether the caller handles ``_NOISE`` (it passed
+            a non-``None`` ``repo_stems`` to ``_pick_candidate``).
+            ``_resolve_ref`` doesn't, and has no external bucket to
+            feed, so it keeps the plain ``None``.
+    """
+    if _arity_plausible(only, call) and not _rust_name_is_also_a_variant(
+        call, only, index
+    ):
+        return only
+    if noise_aware:
+        return _NOISE
+    return _last_resort_match(call, [], by_name_path)
 
 
 def _last_resort_match(
@@ -2601,6 +3331,29 @@ _CHAIN_BUILDER_METHOD_NAMES = frozenset(
 # zed.md`` §3). Not gated by language, matching how
 # ``_BUILTIN_METHOD_NAMES`` (JS/TS-flavored) already isn't — these
 # names are unlikely method names to collide with in other languages.
+# Round 31 zed coverage pass F9: the iterator/Option/Result adaptor
+# vocabulary was missing from this set entirely -- ``.flatten()``
+# (zed's *only* ``fn flatten``, in ``text.rs``) absorbed 454 unrelated
+# std-iterator callers (``x.iter().flatten()``-shaped, per
+# ``query callers``/grep cross-check; 566 total ``.flatten()`` call
+# sites repo-wide). Each addition below was checked against the
+# current zed index first, per the design's own instruction: 12 of
+# the 22 candidate names (``flat_map``, ``filter_map``, ``skip``,
+# ``zip``, ``rev``, ``enumerate``, ``peekable``, ``nth``, ``copied``,
+# ``ok_or``, ``ok_or_else``, ``as_deref``) have *zero* repo-defined
+# methods with that name, so adding them is a pure no-op risk-wise
+# (this guard only ever suppresses a call from reaching a real
+# in-repo candidate, and there is none to suppress). ``flatten`` and
+# ``chain`` each have exactly one repo-defined method; ``chain``'s
+# (``gpui_wgpu/src/cosmic_text_system.rs``) takes no ``self``, so a
+# dot-call could never legitimately reach it anyway. The rest
+# (``any``, ``all``, ``find``, ``position``, ``last``, ``count``,
+# ``sum``, ``cloned``) have 3-27 repo-defined candidates each — this
+# guard only ever suppresses the *no-structural-evidence* single-/
+# pair-candidate fast path (see this function's own docstring), which
+# never applies past 2 candidates, so for these the guard only
+# reclassifies an already-unresolvable call from ambiguous to
+# external, never turns a real resolution into a miss.
 _RUST_STD_METHOD_NAMES = frozenset(
     {
         "then", "then_some", "iter", "iter_mut", "into_iter", "map",
@@ -2610,6 +3363,19 @@ _RUST_STD_METHOD_NAMES = frozenset(
         "to_owned", "to_vec", "borrow", "borrow_mut", "lock", "read",
         "write", "collect", "filter", "for_each", "fold", "is_some",
         "is_none", "is_ok", "is_err", "ok", "err", "take", "replace",
+        "flatten", "flat_map", "filter_map", "skip", "zip", "chain",
+        "rev", "enumerate", "peekable", "any", "all", "find",
+        "position", "last", "nth", "count", "sum", "cloned", "copied",
+        "ok_or", "ok_or_else", "as_deref",
+        # Channel receivers (std mpsc, smol, futures, flume, tokio all
+        # spell it the same). Round 32: zed defines exactly one
+        # ``try_recv`` (gpui's ``PriorityQueueState``), and once the
+        # lifetimed-``self`` arity fix stopped rejecting it by
+        # accident, 66 ``rx.try_recv()`` calls on ordinary channels
+        # took it as their sole candidate. Its one real caller is in
+        # the same file and resolves on that rung, before this guard.
+        # ``try_send`` has no repo definition: a no-op today.
+        "try_recv", "try_send",
     }
 )  # fmt: skip
 
@@ -2792,24 +3558,182 @@ def _shadowed_by_external_import(
     imp = file_imports.get(call.name)
     if imp is None:
         return False
-    return not (_import_segments(imp.source) & repo_stems)
+    return not _import_is_in_repo(imp, repo_stems)
 
 
-# Type-annotation tokens that never name the receiver's own class —
-# generic/optional/collection wrappers and null-like literals a
-# declared type can be dressed in (``Optional[Controller]``,
-# ``Controller | undefined``, ``List<Controller>``, ``Box<Controller>``).
-# Filtered out before trying each remaining identifier token as a
-# candidate bare class name, rather than parsing the type expression
-# properly (best-effort, not a type-language parser).
-_TYPE_NOISE_WORDS = frozenset(
+# Wrapper type names whose own instance methods pass straight through
+# to their inner type ``T`` (Rust ``Box<T>``/``Rc<T>``/``Arc<T>``/
+# ``Ref<T>``/``RefMut<T>``, Python ``Optional[T]``). Every entry here
+# is *tried itself first* (see ``_typed_param_token_candidates``), then
+# the search continues one layer in if that doesn't match — it isn't
+# a claim that the wrapper is *never* the real receiver, only that
+# dekko can't always see when a call is written against the wrapper's
+# *contents* instead (a closure/rebind/destructure local dekko has no
+# way to attribute a declared type to). A genuine collection type
+# (``Vec``, ``List``, ``Array``, ``Promise``, ``HashMap``,
+# ``BTreeMap``, ...) stays *opaque*: the method belongs to the
+# collection itself, and there's no equivalent "same-name rebind to
+# the element type" idiom to protect. Round 31 zed coverage pass F7:
+# ``active_rows: &BTreeMap<DisplayRow, u8>`` then
+# ``active_rows.get(..)`` used to try *every* remaining identifier —
+# including ``DisplayRow``, a generic argument, never the receiver's
+# own type — and land on an unrelated crate's ``DisplayRow.get``.
+# ``_typed_param_token_candidates`` stops descending as soon as it
+# hits the first opaque wrapper, so a collection's own generic
+# arguments are never tried; a reference/mutability qualifier token
+# (``&mut Foo``, ``mut Foo``) is skipped outright, never itself tried
+# or counted as a wrapper.
+#
+# Every entry past ``Optional`` here is a deliberate deviation from
+# the design doc, which named ``Entity<T>`` (and, by the same shape,
+# would have named ``Option``/``Result``/``Mutex``/etc.) as *opaque*
+# examples. Live-measuring the design's literal choice against zed
+# (not just its own worked examples) first showed -3888/+156 edges,
+# two orders of magnitude past the "9 zed edges" this item's own
+# accept criterion expects, with ``ambiguous`` jumping +3207 --
+# treating ``Entity`` as fully opaque broke it. Each addition below is
+# read against source, not guessed:
+#
+# - ``Entity``/``WeakEntity``: gpui's shared-mutable-cell handle
+#   (semantically ``Rc<RefCell<T>>``). Dominant real shape:
+#   ``entity.update(cx, |inner, cx| inner.method())`` -- the closure
+#   parameter is named the same as the outer ``Entity<Buffer>``
+#   parameter, and the method call inside is real, on ``Buffer``
+#   (verified: ``crates/action_log/src/action_log.rs::
+#   ActionLog.reject_edits_in_ranges``).
+# - ``Mutex``: the identical shape via ``let x = x.lock();`` instead
+#   of a closure (verified:
+#   ``crates/agent/src/db.rs::ThreadsDatabase.save_thread_sync``,
+#   ``connection: &Arc<Mutex<Connection>>`` then
+#   ``let connection = connection.lock(); connection.exec_bound(..)``).
+# - ``Option``/``Result``: Rust's own irrefutable-destructure idiom,
+#   ``let Some(x) = x else { .. };``/``let Ok(x) = x else { .. };``,
+#   rebinds the *same name* to the unwrapped inner value -- as
+#   pervasive in real Rust as the ``Entity``/``Mutex`` shapes above
+#   (verified: ``crates/language/src/language_settings.rs::
+#   LanguageSettings.resolve``, ``buffer: Option<&'a Buffer>`` then
+#   ``let Some(buffer) = buffer else { .. }; buffer.file()``). Unlike
+#   a plain collection, there is no way to call a method through an
+#   un-destructured ``Option``/``Result`` at all, so this doesn't
+#   weaken the F7 collection-argument guard the way it might first
+#   appear to.
+#
+# All of the above still have real methods of their own
+# (``Entity::clone``/``downgrade``, ``Mutex::lock``/``try_lock``), so
+# none of them are purely transparent either -- confirmed by
+# re-measuring after the Entity-only fix (still -3708/+158, newly-LOST
+# dominated by ``Entity.clone`` targets). Every entry is tried, outer
+# type first (see ``_typed_param_token_candidates``), and whichever
+# one actually has a matching candidate wins. ``Option``/``Result``
+# themselves never do (no in-repo ``TYPE_KINDS`` symbol names them,
+# since they're foreign) -- ``_typed_param_match``'s own in-repo-type
+# gate for a parameterized token is what keeps a coincidental foreign-
+# type-local-impl match (zed's own ``impl Into<SelectionEffects> for
+# Option<Autoscroll>``) from absorbing an unrelated ``Option<X>``'s
+# ``.into()`` call; that gate is unaffected by adding them here.
+_TRANSPARENT_TYPE_WRAPPERS = frozenset(
     {
-        "Optional", "Promise", "List", "Array", "Vec", "Box", "Rc",
-        "Arc", "Option", "Result", "Ok", "Err", "None", "null",
-        "undefined", "readonly", "const", "mut", "ref",
+        "Box", "Rc", "Arc", "Ref", "RefMut", "Optional",
+        "Entity", "WeakEntity", "Mutex", "Option", "Result",
     }
 )  # fmt: skip
+_TYPE_QUALIFIER_WORDS = frozenset({"mut", "const", "ref", "readonly"})
 _TYPE_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+_OBJECT_TYPE_FIELD = re.compile(r"([A-Za-z_$][\w$]*)\??\s*:\s*([A-Z][\w$]*)")
+
+
+def _object_type_field_tokens(
+    type_text: str, receiver: str
+) -> list[tuple[str, bool]] | None:
+    """Receiver-type tokens for a TS/JS inline object-type parameter.
+
+    ``input: { bot: Chat; client: HubSessionClient; ... }`` is not a
+    wrapper around one type: each field carries its own, and the call
+    site says which one it means (``input.client.getSchedule(..)``).
+    The outermost-token rule in ``_typed_param_token_candidates`` was
+    written for ``Wrapper<T>`` shapes; applied here it stopped at
+    ``Chat``, the first field's type, and integration review found it
+    had dropped 9 correct ``HubSessionClient.*`` edges on cline.
+
+    Args:
+        type_text: The parameter's declared type, as written.
+        receiver: The call's receiver text (``input.client``).
+
+    Returns:
+        ``None`` when ``type_text`` isn't an inline object type, so the
+        caller falls back to the ordinary token chain. Otherwise the
+        single field type the receiver's second segment names, or an
+        empty list when it names none (a call made directly on the
+        object literal, or on a field this type doesn't declare).
+    """
+    if not type_text.lstrip().startswith("{"):
+        return None
+    segments = _PATH_SPLIT.split(receiver)
+    if len(segments) < 2:
+        return []
+    fields = dict(_OBJECT_TYPE_FIELD.findall(type_text))
+    field_type = fields.get(segments[1])
+    return [(field_type, False)] if field_type else []
+
+
+def _typed_param_token_candidates(
+    type_text: str,
+) -> list[tuple[str, bool]]:
+    """Ordered type-name tokens to try as the declared type's own
+    receiver type, outermost first.
+
+    Every transparent wrapper (``_TRANSPARENT_TYPE_WRAPPERS``) is
+    itself tried — it can have real methods of its own — and then the
+    search continues one layer in, since it *also* commonly wraps a
+    type whose methods are reached some other way dekko can't see
+    (Rust's ``Box``/``Rc``/``Arc``/``Ref``/``RefMut`` deref coercion;
+    gpui's ``Entity<T>``/``Mutex<T>``-family shadowing idioms, see
+    ``_TRANSPARENT_TYPE_WRAPPERS``'s own comment). The chain stops
+    the moment it reaches an *opaque* wrapper or a plain type name —
+    that token is tried, but the search never descends into ITS own
+    generic arguments (round 31 zed coverage pass F7: a collection's
+    key/value type parameters are never the receiver).
+
+    A lowercase-leading token is skipped outright — never tried, never
+    counted as a stop — rather than treated as the type itself. Every
+    language dekko indexes names a defined type (class/struct/
+    interface/...) in PascalCase by convention, so a lowercase segment
+    is always a module/namespace qualifier (Rust ``watch::Receiver``,
+    ``std::collections::BTreeMap``), never the type. Without this, a
+    scoped path's own leading module segment (``watch`` in
+    ``watch::Receiver<()>``) would itself become the one token tried
+    — the real type, ``Receiver``, right behind it, never reached
+    (live-testing on zed: ``needs_refresh: watch::Receiver<()>`` then
+    ``needs_refresh.changed()`` regressed exactly this way while this
+    fix was in progress).
+
+    Args:
+        type_text: A declared parameter's type, as written.
+
+    Returns:
+        ``(token, is_parameterized)`` pairs to try, in order — empty
+        when ``type_text`` has no identifier tokens at all.
+        ``is_parameterized`` is True when the token is immediately
+        followed by ``<`` (it takes its own type arguments) — read by
+        ``_typed_param_match`` to decide whether the token needs an
+        in-repo-type check before being tried (see that function's own
+        docstring for why a parameterized token needs it and a bare
+        one doesn't).
+    """
+    tokens: list[tuple[str, bool]] = []
+    for match in _TYPE_TOKEN_RE.finditer(type_text):
+        token = match.group()
+        if token in _TYPE_QUALIFIER_WORDS:
+            continue
+        if not token[:1].isupper():
+            continue
+        is_parameterized = type_text[match.end() : match.end() + 1] == "<"
+        tokens.append((token, is_parameterized))
+        if token not in _TRANSPARENT_TYPE_WRAPPERS:
+            break
+    return tokens
 
 
 def _receiver_type_match(
@@ -2858,8 +3782,367 @@ def _receiver_type_match(
     return None
 
 
+def _structural_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    caller: Symbol | None,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
+) -> Symbol | None:
+    """The ladder's three structural steps, strongest first.
+
+    Self/this container, explicit ``Type::method`` receiver, then a
+    typed parameter of the caller. Grouped only to keep
+    ``_pick_candidate`` under the complexity ceiling; order and
+    behavior are exactly what they were inline.
+    """
+    container_match = _container_match(call, caller, same_file)
+    if container_match is not None:
+        return container_match
+    receiver_type = _receiver_type_match(call, candidates, index)
+    if receiver_type is not None:
+        return receiver_type
+    return _typed_param_match(call, candidates, caller, index, file_imports)
+
+
+def _rust_shape_narrowed_candidates(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
+    repo_stems: set[str] | None = None,
+) -> tuple[list[Symbol], list[Symbol], bool]:
+    """Narrow candidates by Rust call shape, before the rest of
+    ``_pick_candidate``'s ladder runs.
+
+    Three shapes each rule out an entire class of candidate: a
+    ``Type::name`` path can only reach that type's own members
+    (``_owned_by_receiver_type``), the same path rooted at a type the
+    repo doesn't define can reach nothing at all
+    (``_rust_unknown_type_path``, round 31 F6b), and a ``recv.name``
+    dot-call can never reach a free function
+    (``_drop_free_functions``, round 31 F11). Split out of
+    ``_pick_candidate`` purely to keep that function's cyclomatic
+    complexity under the project's Ruff limit
+    (round 31 rule 0.5) — mirrors ``_structural_match``'s own reason
+    for existing. ``_rust_type_path_receiver``/``_rust_is_dot_call``
+    test the same call text for opposite join characters (``::`` vs
+    ``.``), so the two shapes are mutually exclusive by construction
+    and at most one narrowing ever applies (the two ``::`` rules are
+    exclusive too: one needs an in-repo type, the other needs none).
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidates: Every same-named, language-filtered symbol
+            repo-wide.
+        same_file: Same-named symbols in the calling file.
+        index: Bare symbol name to every symbol sharing it.
+        file_imports: The calling file's import bindings by local
+            name, for the unknown-type rule's in-repo ``use`` check.
+        repo_stems: Every repo file's matching stem, same purpose.
+
+    Returns:
+        ``(candidates, same_file, narrowed)`` — the (possibly)
+        narrowed lists, and whether either shape actually applied.
+        ``narrowed`` tells the caller whether an empty ``candidates``
+        here means "this call structurally cannot reach any repo
+        symbol" (worth a ``_NOISE``/external verdict) as opposed to
+        merely having started out empty for an unrelated reason.
+    """
+    if _rust_type_path_receiver(call, index):
+        return (
+            _owned_by_receiver_type(call, candidates, index),
+            _owned_by_receiver_type(call, same_file, index),
+            True,
+        )
+    if _rust_unknown_type_path(
+        call, candidates, index, file_imports, repo_stems
+    ):
+        # Rooted at a type the repo doesn't define (round 31 F6b):
+        # nothing here can be the target.
+        return [], [], True
+    if _rust_is_dot_call(call) and not _drop_free_functions(candidates):
+        # Every candidate is a free function: nothing a dot-call could
+        # mean. Anything less than that is left alone here on purpose,
+        # see ``_pick_candidate``'s veto.
+        return [], [], True
+    return candidates, same_file, False
+
+
+def _rust_is_dot_call(call: _Referable) -> bool:
+    """Whether a Rust call joins its receiver and name with ``.``,
+    not ``::``.
+
+    Round 31 zed coverage pass F11: a Rust *method* call
+    (``recv.name(..)``) can never reach a free (module-level)
+    function — the language simply has no syntax for it, unlike
+    Python/JS/TS's ``module.func()``, a legitimate dot-call on a
+    namespace object (so this check is Rust-only, gated the same way
+    ``_rust_type_path_receiver`` gates itself). ``.px(..)`` on a
+    ``Styled`` trait method resolving to the unrelated free function
+    ``fn px(...)`` (``crates/gpui/src/geometry.rs``) was 28 of zed's
+    dekko-only ``sanity`` rows for that name alone.
+
+    Uses ``call.text`` (via ``getattr``, since ``RawRef`` carries no
+    ``text`` field at all — round 31 rule 0.6; its ``receiver`` field
+    exists but is always ``None``, which already short-circuits this
+    function before ``text`` is ever read) rather than re-deriving the
+    join character: for a genuine method call built by
+    ``extractor._callee_parts``, ``receiver`` is the *full* qualifier
+    expression's text (not just its first segment the way
+    ``call.receiver`` is read elsewhere in this ladder), so ``text``
+    ends in exactly ``.<name>`` for a dot-call and ``::<name>`` for a
+    scoped path — never both.
+
+    Args:
+        call: The raw call or reference being resolved.
+
+    Returns:
+        True when ``call`` is a Rust call whose text ends in
+        ``.<name>``.
+    """
+    if not call.receiver or not call.path.endswith(".rs"):
+        return False
+    text = getattr(call, "text", "") or ""
+    return text.endswith(f".{call.name}")
+
+
+def _drop_free_functions(symbols: list[Symbol]) -> list[Symbol]:
+    """Remove free (containerless) function candidates.
+
+    A free function's ``qualname`` equals its bare ``name`` (no
+    ``.`` — see ``Symbol.qualname``'s own docstring); a method or
+    associated function always has a container prefix. Used by the
+    round 31 F11 dot-call guard in ``_pick_candidate``: only
+    ``kind == "function"`` is dropped, never a variable/type/other
+    kind, and only when it's genuinely containerless.
+
+    Args:
+        symbols: Candidates to filter.
+
+    Returns:
+        ``symbols`` with every free-function entry removed.
+    """
+    return [
+        s
+        for s in symbols
+        if not (s.kind == "function" and "." not in s.qualname)
+    ]
+
+
+def _rust_type_path_receiver(
+    call: _Referable, index: dict[str, list[Symbol]]
+) -> str | None:
+    """The in-repo type a Rust ``Type::name(...)`` path is rooted at.
+
+    Returns the receiver's last path segment when the call is a Rust
+    ``::`` path whose receiver ends in the name of an in-repo type
+    (``Point::new``, ``gpui::Point::new``), else ``None``. ``Self`` and
+    lowercase module paths (``module::func``) never qualify.
+    """
+    last = _rust_type_path_last_segment(call)
+    if last is None:
+        return None
+    # A ``type_alias`` alone doesn't qualify (round 31 F6b): an alias's
+    # members live under the type it aliases, so ``Alias::new()`` has
+    # no ``Alias.new`` to find and the owner rule would veto the real
+    # ``Real.new``. Leave those to the ordinary ladder.
+    if not any(
+        sym.kind in TYPE_KINDS and sym.kind != "type_alias"
+        for sym in index.get(last, [])
+    ):
+        return None
+
+    return last
+
+
+def _rust_type_path_last_segment(call: _Referable) -> str | None:
+    """The type-shaped last receiver segment of a Rust ``::`` path.
+
+    ``gpui::Point::<f32>::new`` gives ``Point``. Purely syntactic, no
+    index lookup: ``None`` for a non-Rust call, a dot-call, ``Self``,
+    and a lowercase module path (``module::func``).
+    """
+    receiver = getattr(call, "receiver", None)
+    if not receiver or not call.path.endswith(".rs"):
+        return None
+    if f"{receiver}::" not in (getattr(call, "text", "") or ""):
+        return None
+    last = receiver.rsplit("::", 1)[-1].split("<", 1)[0].strip()
+    if not last[:1].isupper() or last == "Self":
+        return None
+
+    return last
+
+
+def _rust_unknown_type_path(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None,
+    repo_stems: set[str] | None,
+) -> bool:
+    """Whether a Rust ``Type::name`` path is rooted at a type the repo
+    doesn't define at all.
+
+    Round 31 zed coverage pass F6b: ``Default::default()``,
+    ``Vec::new()``, ``Box::new()`` and a macro-generated
+    ``StyleRefinement::default()`` name a std, third-party, or
+    macro-minted type. No repo symbol can be the target, yet the
+    generic ladder took whatever ``new``/``default`` sat in the
+    caller's file (1,076 wrong edges on zed, 884 of them ``Vec``/
+    ``Box``/``Default``/``String``). ``_owned_by_receiver_type``
+    couldn't veto them because its gate needs an in-repo type to be
+    the owner.
+
+    True only when every way the repo could know the name comes up
+    empty:
+
+    - no in-repo symbol of *any* kind carries it. This is what needed
+      Rust ``type`` aliases indexed first: ``type Alias = Real;`` makes
+      ``Alias::new()`` a real in-repo call, and without the alias
+      symbol this rule would send it external.
+    - no candidate is a member of it. A macro-generated struct with a
+      handwritten ``impl Foo { fn new() }`` has no ``Foo`` symbol but
+      does have ``Foo.new``.
+    - the calling file doesn't ``use`` it from inside the repo. A
+      rename matches no symbol by design, and it needn't be written
+      in this file: ``pub use text::Buffer as TextBuffer;`` in one
+      crate, then ``use language::TextBuffer;`` here (live-testing on
+      zed: a same-file-only ``as`` check lost 2 real
+      ``TextBuffer::new_normalized`` edges).
+    - it isn't an associated-type path. ``T::ProtoRequest::stop()``
+      and ``Self::Output::new()`` name a type only the trait solver
+      knows; the ladder's trait-method guess was right on zed (3 of
+      3), so they stay with the ladder.
+
+    Names of one or two characters are skipped: those are generic
+    parameters (``T::default()``, ``Tx::new()``), which the ladder
+    already treats as unknowable.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidates: Every same-named, language-filtered symbol
+            repo-wide.
+        index: Bare symbol name to every symbol sharing it.
+        file_imports: The calling file's import bindings by local name.
+        repo_stems: Every repo file's matching stem, to tell an in-repo
+            ``use`` from an external one. ``None`` (a caller that
+            can't take a ``_NOISE`` verdict) counts every ``use`` as
+            in-repo.
+
+    Returns:
+        True when no repo candidate can be this path's target.
+    """
+    last = _rust_type_path_last_segment(call)
+    if last is None or len(last) <= 2 or not candidates:
+        return False
+    if index.get(last) or _rust_is_associated_type_path(call):
+        return False
+    if any(_container_name(cand) == last for cand in candidates):
+        return False
+
+    binding = (file_imports or {}).get(last)
+    if binding is None:
+        return True
+
+    return repo_stems is not None and not _import_is_in_repo(
+        binding, repo_stems
+    )
+
+
+def _rust_is_associated_type_path(call: _Referable) -> bool:
+    """Whether a Rust path reaches its type through another type.
+
+    ``T::ProtoRequest::name`` and ``Self::Output::name``: a segment
+    before the last one is itself type-shaped (capitalized, or
+    ``Self``), where a plain module path (``std::collections::
+    HashMap::name``) is lowercase all the way to the type.
+    """
+    receiver = (getattr(call, "receiver", None) or "").strip()
+    if receiver.startswith("<"):
+        # ``<Cmd as LspCommand>::ProtoRequest::name``: the qualified
+        # form of the same thing (live-testing on zed, 1 real edge).
+        return True
+
+    qualifiers = receiver.split("<", 1)[0].split("::")[:-1]
+    return any(seg.strip()[:1].isupper() for seg in qualifiers)
+
+
+def _container_name(sym: Symbol) -> str | None:
+    """Bare name of the type or trait ``sym`` is a member of, if any."""
+    if "." not in sym.qualname:
+        return None
+
+    return sym.qualname.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+
+
+def _owned_by_receiver_type(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> list[Symbol]:
+    """Keep only candidates a ``Type::name`` path could actually mean.
+
+    ``_receiver_type_match`` uses an explicit type receiver as positive
+    evidence only: exactly one ``Type.name`` wins, anything else falls
+    through to the generic ladder *with the full candidate list*. For
+    ``Point::default()`` where ``Default`` is derived (no ``Point.
+    default`` symbol exists), that ladder then picked whatever
+    ``default`` was nearest: ``ScrollHandle.default``, because it is
+    the only ``default`` in the same file. Round 31 zed coverage pass
+    F6 counted 35 such wrong edges that 0.43.61 exposed by no longer
+    short-circuiting ``crate::``-imported receivers to ``external``
+    (they were skipped before, for the wrong reason). The rule was
+    always missing; that release just stopped hiding it.
+
+    A Rust ``Type::name`` path can only name a member of ``Type``, or
+    a default method of a trait ``Type`` implements. So a candidate
+    survives when its container is ``Type`` itself, or is a trait. A
+    free function, an unrelated struct (``Enum::Variant(..)`` landing
+    on a same-named struct), or another type's method cannot be the
+    target. Nothing left means no plausible repo target.
+    """
+    owner = _rust_type_path_receiver(call, index)
+    if owner is None:
+        return candidates
+    own: list[Symbol] = []
+    via_trait: list[Symbol] = []
+    for cand in candidates:
+        if "." not in cand.qualname:
+            continue
+        container_name = cand.qualname.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+        if container_name == owner:
+            own.append(cand)
+        elif any(sym.kind == "trait" for sym in index.get(container_name, [])):
+            via_trait.append(cand)
+    # The type's own members outrank another trait's defaults: the
+    # trait allowance exists for ``Type::method()`` where ``Type``
+    # itself declares no such member, not as a rival to one it does.
+    # Live-testing on zed: ``RangeExt::overlaps(&a, &b)`` drifted to an
+    # unrelated ``AnchorRangeExt.overlaps`` because a UFCS call's extra
+    # explicit ``self`` argument made that one's arity fit better.
+    kept = own or via_trait
+    # One type routinely has two same-named members: an inherent
+    # ``fn zero() -> Self`` and a trait impl's ``fn zero(_cx: ())``.
+    # The written argument count tells them apart, and it has to be
+    # applied *here*: narrowing ``same_file`` to the owner can leave
+    # the wrong one as a lone same-file match, which the ladder takes
+    # without an arity check (live-testing on zed: 7 ``Point::zero()``
+    # calls moved from ``point.rs``'s inherent fn to the ``Dimension``
+    # impl sitting in the caller's own file).
+    plausible = [c for c in kept if _arity_plausible(c, call)]
+    return plausible or kept
+
+
 def _typed_param_match(
-    call: _Referable, candidates: list[Symbol], caller: Symbol | None
+    call: _Referable,
+    candidates: list[Symbol],
+    caller: Symbol | None,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
 ) -> Symbol | None:
     """Resolve a call through one of the caller's own typed parameters.
 
@@ -2872,17 +4155,54 @@ def _typed_param_match(
     same-file candidate existed, straight to ``ambiguous`` whenever
     another same-named method existed anywhere else in the repo.
 
+    Tries each of the declared type's own ordered candidate tokens
+    (``_typed_param_token_candidates``), outermost first, and returns
+    the first one with a unique match — round 31 zed coverage pass F7
+    (see ``_TRANSPARENT_TYPE_WRAPPERS``'s comment): trying every
+    remaining identifier in the type string without regard to nesting,
+    including a generic *argument* buried inside an opaque wrapper,
+    used to land a call on an unrelated type entirely.
+
+    A *parameterized* token (one taking its own type arguments, e.g.
+    ``Option<...>``) is tried only when it also names an in-repo
+    ``TYPE_KINDS`` symbol. Without this, a token that happens to share
+    a name with a well-known foreign/std generic container (``Option``,
+    ``Result``) could still find a *method* candidate with that exact
+    qualname — not because the repo defines such a type, but because
+    Rust allows a local trait impl on a foreign generic instantiated
+    with a local type argument (zed's own ``impl
+    Into<SelectionEffects> for Option<Autoscroll>``, extracted with
+    container name ``Option`` since dekko's impl-block naming strips
+    the generic argument the same way a call's argument list already
+    is). That real symbol — genuinely the *only* thing in the whole
+    repo named ``Option.into`` — then silently absorbed every
+    unrelated ``.into()`` call whose declared parameter type merely
+    mentioned ``Option<...>`` anywhere, caught live-measuring this fix
+    against zed (-3153/+56 before this gate, mostly ``Option``/
+    ``Result``-shaped false positives). A *non*-parameterized token
+    (``WPARAM``, a plain foreign FFI type with no generic slot) gets
+    no such gate: it can never collide across differently-instantiated
+    uses the way a generic container can, so a local extension-trait
+    impl on it (zed's own ``impl HiLoWord for WPARAM``, gpui_windows)
+    is exactly as reliable a signal as it always was — gating it the
+    same way regressed real, correct matches (live-measuring: WPARAM/
+    LPARAM Windows FFI extension methods).
+
     Args:
         call: The raw call or reference being resolved.
         candidates: Every same-named symbol repo-wide (already looked
             up by the caller).
         caller: The enclosing symbol, or ``None`` for module-level
             calls — which have no declared parameters to check.
+        index: Bare symbol name to every symbol sharing it — used both
+            to gate a parameterized candidate token above and by the
+            Rust same-name-in-2+-crates tiebreak below.
 
     Returns:
         The uniquely-matching method, or ``None`` when the receiver
-        isn't one of ``caller``'s declared, typed parameters, or the
-        type doesn't narrow ``candidates`` to exactly one.
+        isn't one of ``caller``'s declared, typed parameters, or no
+        candidate token narrows ``candidates`` to exactly one (after
+        the in-repo-type gate, for a parameterized token).
     """
     if caller is None or not call.receiver:
         return None
@@ -2893,14 +4213,122 @@ def _typed_param_match(
     )
     if not param_type:
         return None
-    for token in _TYPE_TOKEN_RE.findall(param_type):
-        if token in _TYPE_NOISE_WORDS:
+    tokens = _object_type_field_tokens(param_type, call.receiver)
+    if tokens is None:
+        tokens = _typed_param_token_candidates(param_type)
+    for token, is_parameterized in tokens:
+        # A Rust ``type`` alias doesn't open the gate (round 31 F6b
+        # started indexing them): ``type Result<T> = std::result::
+        # Result<T, Error>;`` is the foreign generic container this
+        # gate exists to keep out, under a local name.
+        if is_parameterized and not any(
+            sym.kind in TYPE_KINDS
+            and not (sym.kind == "type_alias" and sym.path.endswith(".rs"))
+            for sym in index.get(token, [])
+        ):
             continue
         target_qual = f"{token}.{call.name}"
         matched = [c for c in candidates if c.qualname == target_qual]
-        if len(matched) == 1:
-            return matched[0]
+        if len(matched) != 1:
+            continue
+        only = matched[0]
+        if call.path.endswith(".rs") and _rust_typed_match_looks_cross_crate(
+            call, only, token, index, file_imports, param_type
+        ):
+            continue
+        return only
     return None
+
+
+def _rust_typed_match_looks_cross_crate(
+    call: _Referable,
+    only: Symbol,
+    outer: str,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
+    type_text: str = "",
+) -> bool:
+    """Whether ``_typed_param_match``'s sole candidate is provably the
+    *wrong* crate's same-named type.
+
+    Round 31 zed coverage pass F7, "second half": a declared type's
+    outer identifier can genuinely name a *different* type in two
+    crates (zed defines its own ``Entity<T>`` in both ``gpui`` and
+    ``workspace``). Bare qualname equality (``"Entity.focus"``) can't
+    tell which one a candidate method belongs to, so a method that
+    exists on the *other* crate's same-named type but not the
+    caller's own can still look like a unique match —
+    ``view.read(cx).focus_handle(cx).focus(cx)`` inside ``gpui``
+    (which cannot depend on ``workspace``) resolved to
+    ``workspace::Entity.focus``.
+
+    Only fires — and only *can* fire — when there's positive evidence
+    of the wrong pick: the outer identifier names a type in 2+ crates
+    *and* one of them is the caller's own crate *and* the sole
+    candidate isn't in that crate. Any one of those missing (no
+    same-name collision at all, or the caller's own crate doesn't
+    define this type either) leaves the match untouched — round 31's
+    rule 0.3, "no evidence is not negative evidence": this function
+    can only disprove a match, never merely fail to confirm one, so a
+    declared type dekko can't independently place (common: many
+    typed-parameter matches target a type only ever seen through this
+    one parameter annotation) is never penalized for that alone.
+
+    Args:
+        call: The raw call or reference being resolved.
+        only: ``_typed_param_match``'s sole qualname-matching
+            candidate.
+        outer: The declared type's outermost identifier.
+        index: Bare symbol name to every symbol sharing it.
+
+    Returns:
+        True only when the caller's own crate defines a same-named
+        type and ``only`` isn't in it.
+    """
+    imp = (file_imports or {}).get(outer)
+    if imp is not None and not imp.source.startswith(_RUST_IN_CRATE_PREFIXES):
+        # The file says where this type comes from, and it isn't here.
+        # zed's ``language`` crate defines its own ``BufferSnapshot``
+        # *and* ``syntax_map.rs`` does ``use text::{BufferSnapshot, ..}``:
+        # "the caller's own crate defines one too" is then no evidence
+        # against ``text::BufferSnapshot.remote_id``. Integration review
+        # of this guard found 37 correct edges it had disproved.
+        return False
+
+    if re.search(
+        rf"\b(?!crate\b|self\b|super\b)[a-z_]\w*::{outer}\b", type_text
+    ):
+        # ``text: &text::BufferSnapshot`` names the foreign crate in the
+        # annotation itself.
+        return False
+
+    outer_types = [s for s in index.get(outer, []) if s.kind in TYPE_KINDS]
+    if len(outer_types) < 2:
+        return False
+    own_crate = _rust_crate_dir(call.path)
+    own = [t for t in outer_types if _rust_crate_dir(t.path) == own_crate]
+    if not own or _rust_crate_dir(only.path) == own_crate:
+        return False
+    # "The caller's crate defines one too" only disproves the match
+    # when that one is actually *in scope here*: imported via
+    # ``crate::``/``super::``/``self::``, or defined in this very file.
+    # zed's ``markdown`` crate has a private ``struct Context<'a>`` in
+    # ``html/html_minifier.rs``; ``markdown.rs`` never imports it and
+    # gets ``gpui::Context`` through a prelude glob, yet the unscoped
+    # version of this check disproved every ``cx.observe_global(..)``
+    # edge in the file (integration review, round 31).
+    #
+    # A ``pub`` own-crate type is the opposite case: it reaches other
+    # modules through ``pub use binding::*;``-style globs dekko can't
+    # trace, so it counts as in scope without an import. ``gpui``'s
+    # ``keymap.rs`` gets ``gpui::KeyBinding`` exactly that way, and
+    # without this its ``binding.name()`` lands on ``ui``'s unrelated
+    # ``KeyBinding.name``, a crate gpui cannot depend on.
+    return (
+        imp is not None
+        or any(t.path == call.path for t in own)
+        or any(t.exported for t in own)
+    )
 
 
 # Constructor method names this resolver recognizes for a class-shaped
@@ -2909,6 +4337,10 @@ def _typed_param_match(
 # class's own bare name (Java's ``constructor_declaration`` has no
 # distinct keyword: its extracted ``name`` field is the class name).
 _CONSTRUCTOR_NAMES = ("constructor", "__init__")
+# Set form for ``name_delta``'s membership test — the class's-own-name
+# case above needs no separate handling there, since that name is
+# already the changed name itself (see ``NameDelta.changed``).
+_CONSTRUCTOR_NAME_SET = frozenset(_CONSTRUCTOR_NAMES)
 
 
 def _constructor_of(
@@ -3078,6 +4510,20 @@ def _import_match(
     how many resolved edges rest on that convention-based tiebreak
     rather than a structural match.
     """
+    # Workspace narrowing runs first on purpose: for a package-shaped
+    # specifier, ``_module_matches``'s stem test below can only ever
+    # hit by coincidence (``@cline/shared/Logger`` "matching" an
+    # unrelated ``Logger.ts`` in another package), so the package
+    # directory is the stronger evidence and gets first say.
+    candidates, narrowed = _workspace_narrowed(call, candidates, file_imports)
+    if narrowed and len(candidates) == 1:
+        return candidates[0]
+    candidates, narrowed = _rust_own_crate_narrowed(
+        call, candidates, file_imports
+    )
+    if narrowed and len(candidates) == 1:
+        return candidates[0]
+
     hints: list[str] = []
     imp = file_imports.get(call.name)
     if imp is not None:
@@ -3223,7 +4669,7 @@ def _alias_candidates(
     imp = file_imports.get(call.name)
     if imp is None:
         return []
-    original = _PATH_SPLIT.split(imp.source)[-1]
+    original = alias_original_name(imp.source)
     return [
         c
         for c in index.get(original, [])
@@ -3332,7 +4778,7 @@ def _receiver_is_external(
     imp = file_imports.get(first)
     if imp is None:
         return False
-    return not (_import_segments(imp.source) & repo_stems)
+    return not _import_is_in_repo(imp, repo_stems)
 
 
 def _import_segments(source: str) -> set[str]:
@@ -3349,6 +4795,34 @@ def _import_segments(source: str) -> set[str]:
         for s in _PATH_SPLIT.split(source)
         if s and s not in ("crate", "super", "self")
     }
+
+
+def _dotted_components(source: str) -> set[str]:
+    """``/``-components of an import source that could name a dotted file.
+
+    ``_import_segments`` splits on ``.`` as well as ``/`` (right for
+    ``pkg.mod.name``, wrong for ``./catalog.generated-access``), so a
+    file whose *stem* contains a dot needs its own comparison set. Each
+    dotted component contributes itself (the extensionless JS/TS
+    spelling) and itself minus one suffix (``./user.service.js``, the
+    ESM spelling of ``user.service.ts``; ``gen/foo.pb.h`` for a C++
+    include). A leading-dot component (``.``, ``..``) is a relative
+    marker, never a file.
+
+    Args:
+        source: Import source string.
+
+    Returns:
+        Candidate stems, possibly empty. Only ever compared against
+        dotted repo stems.
+    """
+    out: set[str] = set()
+    for part in source.split("/"):
+        if "." not in part or part.startswith("."):
+            continue
+        out.add(part)
+        out.add(part.rsplit(".", 1)[0])
+    return out
 
 
 def _repo_stem(path: PurePosixPath) -> str:
@@ -3406,6 +4880,15 @@ def _module_matches(source: str, candidate_path: str) -> bool:
     gate keeps this JS/TS-only, leaving every other language's
     stem-matching untouched.
 
+    A *dotted* stem (``catalog.generated-access.ts``, Angular's
+    ``user.service.ts``, a C++ ``foo.pb.h``) gets a second,
+    component-wise check -- see ``_dotted_components``. Round 31
+    cline.md §4.1 Bug B: ``_import_segments`` splits on ``.``, so such
+    a stem could never appear among the segments, and a plain relative
+    import of a dotted filename silently lost its import hint. Gated
+    on the stem actually containing a dot, so every undotted file
+    matches exactly as before.
+
     Checked against ``source.split("/", 1)[0]``, not the whole
     ``source`` string -- ``extractor._imports_js`` encodes every
     *named* import's ``source`` as ``f"{module}/{name}"`` (e.g.
@@ -3424,7 +4907,9 @@ def _module_matches(source: str, candidate_path: str) -> bool:
     ):
         return False
     stem = _repo_stem(PurePosixPath(candidate_path))
-    return stem in _import_segments(source)
+    if stem in _import_segments(source):
+        return True
+    return "." in stem and stem in _dotted_components(source)
 
 
 _SYNTHETIC_CRATE_DIR_MARKERS = frozenset(
@@ -3720,13 +5205,55 @@ def _rust_crate_hint_matches(
     )
 
 
+# Reserved ``index`` namespace for Rust tuple enum variants: the key
+# for variant ``Left`` holds every enum that declares a ``Left(..)``.
+# It rides in the name index because that is the one repo-wide table
+# already threaded through the whole ladder and into every pool
+# worker; the ``::`` prefix can't collide with an identifier, and the
+# index is only ever read by ``.get(name)``, never iterated.
+_RUST_VARIANT_KEY = "::variant::"
+
+
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
-    """Map bare symbol name → all symbols with that name."""
+    """Map bare symbol name → all symbols with that name, plus the
+    ``_RUST_VARIANT_KEY`` entries for tuple enum variants."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
             index.setdefault(sym.name, []).append(sym)
+        for entry in fm.enum_variants:
+            owner, _, variant = entry.partition("::")
+            index.setdefault(_RUST_VARIANT_KEY + variant, []).extend(
+                s for s in fm.symbols if s.kind == "enum" and s.name == owner
+            )
     return index
+
+
+def _rust_name_is_also_a_variant(
+    call: _Referable, only: Symbol, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether ``Name(..)`` has a second reading the map can't offer:
+    some enum's tuple variant of the same name.
+
+    Round 32 Track 4. dekko indexes enums, not their variants, so
+    ``Left(x)`` from a glob-imported ``enum Side { Left(u8) }`` has
+    exactly one in-repo candidate, an unrelated ``struct Left``, and
+    the sole-candidate rung would take it with full confidence.
+    Measured on zed before tuple structs were given their real arity:
+    252 of 552 newly resolvable ``Name(x)`` calls were this collision
+    (47 names: ``Left``, ``Text``, ``Image``, ``Path``, ``Literal``).
+    Some of those are fine (a variant *payload-named* after the
+    struct), and nothing in the map can tell which, so none resolve.
+
+    Calls only: a heritage clause (``impl Trait for Left``) names a
+    type in a position no variant can occupy.
+    """
+    return (
+        isinstance(call, RawCall)
+        and only.language == "rust"
+        and only.kind in TYPE_KINDS
+        and _RUST_VARIANT_KEY + call.name in index
+    )
 
 
 def _build_name_path_index(
@@ -3745,13 +5272,413 @@ def _build_name_path_index(
     return index
 
 
-def _imports_by_file(files: list[FileMap]) -> dict[str, dict[str, Import]]:
-    """Map file path → local name → import record."""
+# ---------------------------------------------------------------------
+# Workspace packages (JS/TS monorepos)
+#
+# ``import { ApiHandler } from "@cline/llms"`` names a *package*, not a
+# file: nothing in the specifier is a file stem, so the stem-based
+# "does this import point into the repo" test every external guard
+# relied on (``_import_segments(source) & repo_stems``) called it an
+# npm dependency, and the call/heritage clause landed in ``external``
+# before the candidate ladder ever ran. Round 31 cline.md §4.1 Bug A
+# found it as one missing ``query subtypes`` row; measured against
+# cline it was ~900 call edges, 12 heritage edges and 2,610 import
+# bindings across 690 files -- the dominant import shape of the whole
+# TS-monorepo repo class.
+#
+# The table below (package ``name`` -> package directory, declared
+# workspace members only) is the JS/TS analog of
+# ``_rust_crate_roots_index_all``: the import names a package root, so
+# candidates are narrowed to the ones living under it. Membership is
+# attached to the import binding itself (``_WorkspaceImport``) rather
+# than threaded as yet another parameter, so it reaches every ladder
+# step -- and every pool worker, via the already-pickled
+# ``imports_by_file`` -- with no signature changes.
+
+_WORKSPACE_MANIFESTS = frozenset({"package.json", "pnpm-workspace.yaml"})
+
+
+@dataclass
+class _WorkspaceImport(Import):
+    """An import binding whose source names an in-repo workspace package.
+
+    Attributes:
+        package_dir: Repo-relative directory of the workspace package
+            the source resolves into.
+    """
+
+    package_dir: str = ""
+
+
+def load_workspace_packages(root: Path) -> dict[str, str]:
+    """Discover the repo's JS/TS workspace packages.
+
+    Only *declared workspace members* count: a ``package.json`` whose
+    directory matches a ``workspaces`` glob (npm/yarn/bun, array or
+    ``{"packages": [...]}`` form) or a ``pnpm-workspace.yaml``
+    ``packages`` entry of some manifest above it. A bare "any
+    ``package.json`` with a ``name``" rule is unsound -- cline itself
+    ships a stub package literally named ``vscode`` (``apps/vscode/
+    standalone/runtime-files/vscode``) that is no workspace member, and
+    would otherwise capture every real ``import * as vscode from
+    "vscode"`` in the repo.
+
+    Discovery reuses ``walker.find_config_files``, so ``node_modules``
+    and other vendored/ignored trees are excluded exactly as they are
+    for source files. A name claimed by two member directories is
+    dropped: no evidence beats a coin flip.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Package ``name`` → repo-relative package directory. Empty when
+        the repo declares no workspaces, which leaves every resolution
+        path byte-identical to a repo this feature never touched.
+    """
+    manifests = _load_workspace_manifests(root)
+    return {name: m.package_dir for name, m in manifests.items()}
+
+
+@dataclass(frozen=True)
+class _WorkspaceManifest:
+    """One workspace member's directory plus its parsed ``package.json``.
+
+    Attributes:
+        package_dir: Repo-relative package directory.
+        data: The parsed manifest, kept whole: the module graph reads
+            its entry-point fields (``exports``/``main``/``types``/...)
+            to turn a bare package specifier into a source file.
+    """
+
+    package_dir: str
+    data: dict
+
+
+def _load_workspace_manifests(root: Path) -> dict[str, _WorkspaceManifest]:
+    """Package ``name`` → manifest, for every declared workspace member.
+
+    The single discovery pass behind both ``load_workspace_packages``
+    (name → directory, all the symbol-level passes need) and
+    ``resolve_imports`` (which also needs each member's entry-point
+    fields). See ``load_workspace_packages`` for the membership rules.
+    """
+    named: dict[str, list[_WorkspaceManifest]] = {}
+    patterns: list[tuple[str, str]] = []
+    for rel in walker.find_config_files(root, _WORKSPACE_MANIFESTS):
+        base = _dirname(rel)
+        if rel.endswith(".yaml"):
+            globs = _pnpm_workspace_globs(root, rel)
+        else:
+            data = _read_jsonc_config(root, rel)
+            if data is None:
+                continue
+            name = data.get("name")
+            if isinstance(name, str) and name:
+                named.setdefault(name, []).append(
+                    _WorkspaceManifest(package_dir=base, data=data)
+                )
+            globs = _package_json_workspace_globs(data)
+        patterns.extend((base, g) for g in globs)
+
+    if not patterns:
+        return {}
+
+    manifests: dict[str, _WorkspaceManifest] = {}
+    for name, found in named.items():
+        members = [
+            m for m in found if _is_workspace_member(m.package_dir, patterns)
+        ]
+        if len(members) == 1:
+            manifests[name] = members[0]
+    return manifests
+
+
+def workspace_fingerprint(root: Path) -> str:
+    """Digest of the workspace package table, for cache invalidation.
+
+    The cached call pass (``storage.resolvecache``) is gated on the
+    repo's *source* path set and symbols being unchanged, neither of
+    which moves when a ``package.json`` is renamed or a ``workspaces``
+    glob edited -- yet either changes what the ladder resolves.
+
+    Returns:
+        A stable hex digest, or ``""`` for a repo with no workspaces.
+    """
+    packages = load_workspace_packages(root)
+    if not packages:
+        return ""
+    payload = json.dumps(sorted(packages.items())).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _package_json_workspace_globs(data: dict) -> list[str]:
+    """A ``package.json``'s ``workspaces`` globs, either spelling."""
+    spec = data.get("workspaces")
+    if isinstance(spec, dict):
+        spec = spec.get("packages")
+    if not isinstance(spec, list):
+        return []
+    return [g for g in spec if isinstance(g, str) and g]
+
+
+def _pnpm_workspace_globs(root: Path, rel: str) -> list[str]:
+    """The ``packages:`` block-list entries of a ``pnpm-workspace.yaml``.
+
+    A deliberately tiny reader rather than a YAML dependency (dekko
+    ships none): the file's real-world shape is one top-level
+    ``packages:`` key holding a block list of quoted globs. The rarer
+    flow spelling (``packages: ["a", "b"]``) yields nothing, which
+    degrades to "no workspaces declared here", never to a wrong answer.
+    """
+    try:
+        text = (root / rel).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+
+    globs: list[str] = []
+    in_packages = False
+    for raw in text.splitlines():
+        line = raw.split(" #", 1)[0].rstrip()
+        item = line.strip()
+        if not item or item.startswith("#"):
+            continue
+        if item.startswith("-"):
+            if in_packages:
+                globs.append(item[1:].strip().strip("'\""))
+            continue
+        if not raw[0].isspace():
+            in_packages = item.split(":", 1)[0].strip() == "packages"
+    return [g for g in globs if g]
+
+
+def _is_workspace_member(
+    package_dir: str, patterns: list[tuple[str, str]]
+) -> bool:
+    """Whether ``package_dir`` matches a declared workspace glob.
+
+    Args:
+        package_dir: Repo-relative directory holding a ``package.json``.
+        patterns: ``(declaring manifest's directory, glob)`` pairs. A
+            glob is relative to its own manifest; a leading ``!``
+            excludes, and an exclusion from the same manifest wins.
+    """
+    included = False
+    for base, pattern in patterns:
+        if base and not package_dir.startswith(base + "/"):
+            continue
+        rel = package_dir[len(base) + 1 :] if base else package_dir
+        if not rel:
+            continue
+        negated = pattern.startswith("!")
+        glob = pattern.lstrip("!").removeprefix("./").strip("/")
+        if not _glob_segments_match(glob.split("/"), rel.split("/")):
+            continue
+        if negated:
+            return False
+        included = True
+    return included
+
+
+def _glob_segments_match(pattern: list[str], parts: list[str]) -> bool:
+    """Match path segments against glob segments (``**`` spans any)."""
+    if not pattern:
+        return not parts
+    if pattern[0] == "**":
+        return any(
+            _glob_segments_match(pattern[1:], parts[i:])
+            for i in range(len(parts) + 1)
+        )
+    if not parts:
+        return False
+    return fnmatch.fnmatchcase(parts[0], pattern[0]) and _glob_segments_match(
+        pattern[1:], parts[1:]
+    )
+
+
+def _workspace_package_name(source: str) -> str | None:
+    """The package-name prefix of a bare JS/TS import source.
+
+    npm names are ``name`` or ``@scope/name``, so the prefix is read
+    straight off the source in O(1) rather than probing every known
+    package -- this runs once per import binding in the repo.
+    """
+    if not source or source[0] in "./":
+        return None
+    parts = source.split("/")
+    if source[0] != "@":
+        return parts[0]
+    if len(parts) < 2:
+        return None
+    return f"{parts[0]}/{parts[1]}"
+
+
+def _workspace_tagged(
+    imp: Import, workspace_pkgs: dict[str, str] | None
+) -> Import:
+    """``imp``, upgraded to a ``_WorkspaceImport`` when it names one."""
+    if not workspace_pkgs or not imp.path.endswith(_JS_TS_EXTENSIONS):
+        return imp
+    name = _workspace_package_name(imp.source)
+    package_dir = workspace_pkgs.get(name) if name else None
+    if package_dir is None:
+        return imp
+    return _WorkspaceImport(
+        path=imp.path,
+        name=imp.name,
+        source=imp.source,
+        package_dir=package_dir,
+    )
+
+
+_RUST_IN_CRATE_PREFIXES = ("crate::", "super::", "self::")
+
+
+_RELATIVE_SOURCE_PREFIXES = ("./", "../")
+
+
+def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
+    """Whether an import binding plausibly points into this repo.
+
+    True for a workspace-package import (see ``_WorkspaceImport``), or
+    when any segment of the source is a repo file stem -- the original,
+    file-shaped test, which a package-shaped specifier can only ever
+    pass by coincidence. A dotted filename's stem is never a single
+    segment, hence the second, component-wise check (see
+    ``_dotted_components``).
+    """
+    if isinstance(imp, _WorkspaceImport):
+        return True
+    if imp.source.startswith(_RUST_IN_CRATE_PREFIXES):
+        # ``use crate::{AgentTool};`` is in-repo by definition, whatever
+        # the file stems say. The stem test fails it whenever the crate
+        # root merely *re-exports* the name (``pub use thread::*;``):
+        # ``_import_segments`` drops ``crate`` itself, leaving only
+        # ``AgentTool``, which is no file's stem. Round 31 zed coverage
+        # pass F1: 218 of zed's 2,503 ``heritage_external`` entries
+        # named an in-repo trait this way, and ``query subtypes
+        # AgentTool`` showed 11 of 35 implementors with no hint that 24
+        # were missing. A file reaching the same trait through a glob
+        # resolved fine, which was the tell.
+        return True
+    if imp.source.startswith(_RELATIVE_SOURCE_PREFIXES):
+        # ``import { run } from "./index"`` / ``from "."`` / ``from
+        # ".."``: a relative specifier is in-repo by definition, and
+        # the stem test can't see it. An index file's matching stem is
+        # its *directory* name (``acp`` for ``acp/index.ts``, see
+        # ``_repo_stem``), which ``./index`` and ``.`` never spell, so
+        # the binding looked external and ``_shadowed_by_external_
+        # import`` threw the call to noise. Round 32 Track 5 found it:
+        # recording ``await import("./index")`` as an import cost cline
+        # 9 correct test-to-module call edges until this was fixed.
+        return True
+    if _import_segments(imp.source) & repo_stems:
+        return True
+    return bool(_dotted_components(imp.source) & repo_stems)
+
+
+def _workspace_narrowed(
+    call: _Referable,
+    candidates: list[Symbol],
+    file_imports: dict[str, Import],
+) -> tuple[list[Symbol], bool]:
+    """Narrow ``candidates`` to the workspace package the name came from.
+
+    Only the call's *own name* binding is used (``import { X } from
+    "@scope/pkg"`` then ``X(...)`` / ``implements X``). A receiver
+    binding (``Ns.fn()``) is deliberately not: ``Ns`` is routinely a
+    namespace one package re-exports from another, where the imported
+    package's directory says nothing about where ``fn`` lives.
+
+    Within the package, exported candidates are preferred -- a name
+    importable from outside the package is by definition exported, so
+    a same-named private helper or method is not the target.
+
+    Zero in-package candidates means a cross-package re-export (the
+    name is defined elsewhere and re-exported through this package's
+    barrel): that is *no* evidence, not negative evidence, so the
+    candidate list is returned untouched.
+
+    Returns:
+        ``(candidates, narrowed)`` -- ``narrowed`` is True only when
+        the returned list is a strict in-package subset.
+    """
+    imp = file_imports.get(call.name)
+    if not isinstance(imp, _WorkspaceImport):
+        return candidates, False
+    prefix = f"{imp.package_dir}/" if imp.package_dir else ""
+    inside = [c for c in candidates if c.path.startswith(prefix)]
+    if not inside:
+        return candidates, False
+    exported = [c for c in inside if c.exported]
+    return (exported or inside), True
+
+
+def _rust_own_crate_narrowed(
+    call: _Referable,
+    candidates: list[Symbol],
+    file_imports: dict[str, Import],
+) -> tuple[list[Symbol], bool]:
+    """Narrow to the importing file's own crate for a ``crate::`` import.
+
+    The Rust counterpart of ``_workspace_narrowed``. ``use crate::Foo;``
+    says ``Foo`` is reachable from *this* crate's root, so when the
+    repo has two ``Foo``s, the one inside this crate is the one meant
+    (round 31 zed coverage pass F6: ``Foo::build()`` landed on an
+    unrelated crate's ``Foo.build``, a crate that isn't even a
+    dependency). Checked for the call's own name and for its
+    receiver's leading segment.
+
+    Zero in-crate candidates is the common, legitimate case of a crate
+    root re-exporting another crate's type (``editor``: ``pub use
+    multi_buffer::MultiBuffer;``), so it is no evidence and the list is
+    returned untouched.
+    """
+    # A bare call's own name is the imported binding. With a receiver,
+    # the name is a member *of that receiver* and an import of the same
+    # word is a coincidence: ``proto::view::Variant::Editor(..)`` is not
+    # the ``Editor`` this file imported from ``crate::``.
+    # ``RawRef`` carries neither ``receiver`` nor ``text``.
+    receiver = getattr(call, "receiver", None)
+    text = getattr(call, "text", "") or ""
+    names = [] if receiver else [call.name]
+    if receiver and text == f"{receiver}::{call.name}":
+        # Only a pure ``Type::name`` path. For a chained receiver
+        # (``Store::global(cx).read(cx)``) the import says where
+        # ``Store`` lives, which is nothing about ``read``: live-testing
+        # on zed had that landing on the crate's one free ``fn read``.
+        names.append(_PATH_SPLIT.split(receiver)[0])
+    # ``crate::point(..)`` spells the crate root out at the call site
+    # itself: no import needed to know it means this crate.
+    literal = text.startswith(_RUST_IN_CRATE_PREFIXES)
+    if not literal and not any(
+        (imp := file_imports.get(n)) is not None
+        and imp.source.startswith(_RUST_IN_CRATE_PREFIXES)
+        for n in names
+    ):
+        return candidates, False
+    own = _rust_crate_dir(call.path)
+    inside = [c for c in candidates if _rust_crate_dir(c.path) == own]
+    if not inside or len(inside) == len(candidates):
+        return candidates, False
+    return inside, True
+
+
+def _imports_by_file(
+    files: list[FileMap], workspace_pkgs: dict[str, str] | None = None
+) -> dict[str, dict[str, Import]]:
+    """Map file path → local name → import record.
+
+    ``workspace_pkgs`` (see ``load_workspace_packages``), when given,
+    upgrades every JS/TS binding that names a workspace package to a
+    ``_WorkspaceImport``. ``None``/empty leaves every record as-is.
+    """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
         table = out.setdefault(fm.path, {})
         for imp in fm.imports:
-            table.setdefault(imp.name, imp)
+            if imp.name not in table:
+                table[imp.name] = _workspace_tagged(imp, workspace_pkgs)
     return out
 
 
@@ -3835,6 +5762,12 @@ class _ImportResolveContext:
             keeps today's "bare specifier is always external" behavior
             for ``_resolve_import_js`` exactly, since this dict never
             gets populated without a real filesystem root to search.
+        workspace_manifests: JS/TS workspace package name → its
+            directory and parsed ``package.json`` (see
+            ``_load_workspace_manifests``), so a bare ``@scope/pkg``
+            specifier resolves to that package's source entry file
+            instead of reading as an npm dependency. Empty without a
+            root or without declared workspaces.
     """
 
     paths: frozenset[str]
@@ -3842,6 +5775,9 @@ class _ImportResolveContext:
     java_suffix_index: dict[str, list[str]] = field(default_factory=dict)
     cpp_basename_index: dict[str, list[str]] = field(default_factory=dict)
     crate_roots: dict[str, list[str]] = field(default_factory=dict)
+    workspace_manifests: dict[str, "_WorkspaceManifest"] = field(
+        default_factory=dict
+    )
     ts_path_aliases: dict[str, "_TsConfigAliasTable"] = field(
         default_factory=dict
     )
@@ -4557,6 +6493,186 @@ def _resolve_ts_path_alias(
     return None
 
 
+# Build-output directory names a manifest's entry points routinely
+# point into. None of them is source, and none is in the map (build
+# output is gitignored), so each is swapped for ``src`` -- or dropped --
+# to find the file the entry was compiled *from*.
+_JS_BUILD_DIRS = frozenset(
+    {"dist", "build", "lib", "out", "esm", "cjs", "es", "umd", "types"}
+)
+# Manifest fields naming the package's root entry, most source-like
+# first. ``source`` is the (informal, bundler-honored) pointer at real
+# source; the rest normally name build output.
+_JS_ENTRY_FIELDS = ("source", "types", "typings", "module", "main")
+_JS_DECLARATION_SUFFIXES = (".d.ts", ".d.mts", ".d.cts")
+# ``exports`` conditions selecting a specific runtime/bundler target
+# rather than the package's general entry -- tried last.
+_JS_NICHE_EXPORT_CONDITIONS = frozenset(
+    {
+        "browser", "worker", "workerd", "deno", "bun", "react-native",
+        "react-server", "edge-light", "electron", "development",
+    }
+)  # fmt: skip
+
+
+def _resolve_workspace_entry(
+    module_source: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a bare specifier naming a workspace package to a file.
+
+    ``"@cline/llms"`` -> the package's root entry; ``"@cline/llms/
+    browser"`` -> its ``./browser`` subpath. Entry targets come from
+    the manifest (``exports``, then ``source``/``types``/``module``/
+    ``main`` for the root), each mapped from build output back to
+    source (see ``_workspace_source_candidates``), then from the
+    near-universal conventions ``src/<subpath>`` and ``<subpath>``.
+    The first candidate that is a real mapped file wins.
+
+    Returns:
+        The entry file's repo-relative path, or ``None`` when the
+        specifier names no workspace package or none of its candidate
+        entries exists in the map -- which leaves it ``external``,
+        honestly, rather than guessing a file.
+    """
+    if not ctx.workspace_manifests:
+        return None
+    name = _workspace_package_name(module_source)
+    manifest = ctx.workspace_manifests.get(name) if name else None
+    if manifest is None or name is None:
+        return None
+
+    subpath = module_source[len(name) :].strip("/")
+    targets = _manifest_entry_targets(manifest.data, subpath)
+    targets += [f"src/{subpath}" if subpath else "src/index"]
+    targets += [subpath or "index"]
+    for target in targets:
+        for rel in _workspace_source_candidates(target):
+            joined = posixpath.normpath(
+                f"{manifest.package_dir}/{rel}"
+                if manifest.package_dir
+                else rel
+            )
+            found = _first_match(ctx.paths, _js_module_candidates(joined))
+            if found is not None:
+                return found
+    return None
+
+
+def _manifest_entry_targets(data: dict, subpath: str) -> list[str]:
+    """Package-relative entry targets a manifest declares for a subpath.
+
+    Args:
+        data: Parsed ``package.json``.
+        subpath: ``""`` for the package root, else the specifier's
+            remainder (``"browser"`` for ``"@scope/pkg/browser"``).
+
+    Returns:
+        Every string target found, in preference order: the matching
+        ``exports`` entry's leaves (all conditions -- dekko has no
+        "active condition", and every one of them was compiled from
+        the same source), then for the root only the classic
+        single-entry fields.
+    """
+    key = f"./{subpath}" if subpath else "."
+    targets: list[str] = []
+    exports = data.get("exports")
+    if isinstance(exports, str) and not subpath:
+        targets.append(exports)
+    elif isinstance(exports, dict):
+        if not any(k.startswith(".") for k in exports):
+            # A bare conditions object is sugar for {".": {...}}.
+            exports = {".": exports}
+        if key in exports:
+            targets += _export_leaves(exports[key])
+        else:
+            targets += _export_pattern_targets(exports, key)
+    if not subpath:
+        targets += [
+            data[f] for f in _JS_ENTRY_FIELDS if isinstance(data.get(f), str)
+        ]
+    return [t for t in targets if t]
+
+
+def _export_leaves(node: object) -> list[str]:
+    """Every string leaf of an ``exports`` value, conditions flattened.
+
+    General-purpose conditions (``import``/``require``/``default``/
+    ``types``/...) come before environment-specific ones
+    (``_JS_NICHE_EXPORT_CONDITIONS``), whatever order the manifest
+    lists them in. dekko has no "active condition" to evaluate, and a
+    manifest conventionally lists its most specific condition first --
+    cline's ``@cline/llms`` leads with ``browser``, which would send
+    every importer's edge to ``index.browser.ts`` instead of the
+    ``index.ts`` a Node/extension-host consumer actually loads.
+    """
+    general: list[str] = []
+    niche: list[str] = []
+    _collect_export_leaves(node, False, general, niche)
+    return general + niche
+
+
+def _collect_export_leaves(
+    node: object, in_niche: bool, general: list[str], niche: list[str]
+) -> None:
+    """Depth-first walk behind ``_export_leaves``."""
+    if isinstance(node, str):
+        (niche if in_niche else general).append(node)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_export_leaves(item, in_niche, general, niche)
+    elif isinstance(node, dict):
+        for condition, value in node.items():
+            _collect_export_leaves(
+                value,
+                in_niche or condition in _JS_NICHE_EXPORT_CONDITIONS,
+                general,
+                niche,
+            )
+
+
+def _export_pattern_targets(exports: dict, key: str) -> list[str]:
+    """Targets from ``exports`` subpath patterns (``"./*"``) for ``key``."""
+    targets: list[str] = []
+    for pattern, node in exports.items():
+        if pattern.count("*") != 1:
+            continue
+        head, tail = pattern.split("*")
+        if not (key.startswith(head) and key.endswith(tail)):
+            continue
+        if len(key) < len(head) + len(tail):
+            continue
+        middle = key[len(head) : len(key) - len(tail)]
+        targets += [leaf.replace("*", middle) for leaf in _export_leaves(node)]
+    return targets
+
+
+def _workspace_source_candidates(target: str) -> list[str]:
+    """Package-relative source paths a manifest entry target may mean.
+
+    ``./dist/index.js`` -> ``dist/index.js`` as written (a package may
+    point straight at source), then with its leading build-output
+    directories swapped for ``src`` (``src/index.js``) and dropped
+    (``index.js``). A ``.d.ts`` suffix is reduced to its stem first;
+    ``_js_module_candidates`` then re-runs its own extension ladder
+    (including the ``.js`` -> ``.ts`` pass) over each result.
+    """
+    rel = posixpath.normpath(target.removeprefix("./"))
+    for suffix in _JS_DECLARATION_SUFFIXES:
+        if rel.endswith(suffix):
+            rel = rel[: -len(suffix)]
+            break
+
+    candidates = [rel]
+    parts = rel.split("/")
+    stripped = list(parts)
+    while len(stripped) > 1 and stripped[0] in _JS_BUILD_DIRS:
+        stripped = stripped[1:]
+    if stripped != parts:
+        candidates.append("/".join(["src", *stripped]))
+        candidates.append("/".join(stripped))
+    return candidates
+
+
 def _resolve_import_js(
     imp: Import, importer_path: str, ctx: _ImportResolveContext
 ) -> str | None:
@@ -4587,8 +6703,16 @@ def _resolve_import_js(
     single-segment bare specifier (``"react"``, ``"lodash"``) is
     overwhelmingly a real npm package name in practice, so leaving it
     external bounds the false-positive risk of an npm package name
-    coincidentally matching an in-repo path. Only once both attempts
-    miss does the specifier fall through to "external".
+    coincidentally matching an in-repo path. Only once every attempt
+    misses does the specifier fall through to "external".
+
+    Between those two sits the workspace-package attempt (round 31
+    P1.1b, see ``_resolve_workspace_entry``): ``"@cline/llms"`` is an
+    in-repo package in a monorepo that declares it as a workspace
+    member, and resolves to that package's source entry file. After
+    the tsconfig alias (explicit per-scope config outranks a
+    repo-wide convention), before root-relative (a declared package
+    name is stronger evidence than a path that happens to exist).
     """
     module_source = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
     if not (module_source.startswith("./") or module_source.startswith("../")):
@@ -4597,6 +6721,9 @@ def _resolve_import_js(
             resolved = _resolve_ts_path_alias(module_source, scope, ctx.paths)
             if resolved is not None:
                 return resolved
+        workspace_entry = _resolve_workspace_entry(module_source, ctx)
+        if workspace_entry is not None:
+            return workspace_entry
         if "/" in module_source:
             joined = posixpath.normpath(module_source)
             root_relative = _first_match(
@@ -4824,6 +6951,76 @@ def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
     return roots
 
 
+def _rust_local_module_base(
+    seg: str, importer_path: str, paths: frozenset[str]
+) -> str | None:
+    """The base ``seg`` resolves against, when it names a child module
+    of the importer's own module position — shadowing a same-named
+    workspace crate.
+
+    Round 31 zed coverage pass F12: Rust 2018+ resolves a bare
+    leading ``use`` segment against the local scope before a crate
+    name — ``mod localmod;`` (or its per-file sibling directory,
+    ``localmod/``) declared alongside the importing file wins over a
+    workspace crate that happens to share the same name. File
+    existence is used as the evidence (not ``mod`` declaration
+    parsing, out of scope — see ``_resolve_import_rust``'s docstring):
+    a Rust 2018+ per-file submodule either has a matching
+    ``<base>/<seg>.rs`` file or a matching ``<base>/<seg>/mod.rs``
+    (the pre-2018 directory-module shape), and one of those two must
+    exist on disk for the module to be reachable at all — an inline
+    ``mod x { ... }`` block has neither and is correctly not matched
+    here, leaving it to fall through to the crate lookup below
+    unchanged.
+
+    Tries ``_rust_self_base(importer_path)`` first (the ordinary case,
+    and the same base ``self::``/``super::`` already resolve
+    against). ``_rust_self_base`` only recognizes the literal
+    ``lib.rs``/``main.rs``/``mod.rs`` index names as "this file's own
+    base is its own directory", though — a crate whose Cargo ``[lib]
+    path`` override gives its root file a custom name (zed's own
+    ``crates/gpui/src/gpui.rs``, ~216/222 of its crates per
+    ``_rust_crate_root``'s own docstring) is treated as an ordinary
+    leaf module one directory level too deep, exactly the file this
+    rule's own motivating example (``mod util;`` inside ``gpui.rs``
+    itself) needs. Retried against the importer's own directory when
+    the importer's filename is itself a recognized crate-root index
+    name for that directory (``_rust_crate_root_index_names``, which
+    only needs the directory, not a separate crate-root discovery
+    walk — the importer's own directory already *is* the candidate
+    crate root being tested here).
+
+    Args:
+        seg: The ``use`` path's first segment.
+        importer_path: The importing file's repo-relative path.
+        paths: Every known file path.
+
+    Returns:
+        The base ``seg`` resolves against (``_rust_self_base``'s
+        result, or the importer's own directory for the custom-named
+        crate-root case above), or ``None`` when neither shape names
+        an on-disk local module.
+    """
+    self_base = _rust_self_base(importer_path)
+    if (
+        f"{self_base}/{seg}.rs" in paths
+        or f"{self_base}/{seg}/mod.rs" in paths
+    ):
+        return self_base
+    own_dir = _dirname(importer_path)
+    own_name = importer_path.rsplit("/", 1)[-1]
+    if (
+        own_dir
+        and own_name in _rust_crate_root_index_names(own_dir, paths)
+        and (
+            f"{own_dir}/{seg}.rs" in paths
+            or f"{own_dir}/{seg}/mod.rs" in paths
+        )
+    ):
+        return own_dir
+    return None
+
+
 def _resolve_import_rust(
     imp: Import, importer_path: str, ctx: _ImportResolveContext
 ) -> str | None:
@@ -4855,6 +7052,22 @@ def _resolve_import_rust(
     Like Python, the trailing segment is ambiguous between "a
     submodule" and "an item defined in the parent module" — resolved
     the same way, via ``_resolve_two_candidate_lists``.
+
+    Round 31 zed coverage pass F12: a bare first segment was always
+    looked up in ``ctx.crate_roots`` first, but Rust 2018+ resolves a
+    bare path against the *local scope first* — a sibling ``mod
+    localmod;`` declared in (or reachable from) the importing file's
+    own module shadows a same-named workspace crate. Confirmed on zed:
+    ``crates/gpui/src/gpui.rs`` declares ``mod util;`` and does ``pub
+    use util::{FutureExt, Timeout};`` — the bare segment ``util``
+    matched the sibling workspace crate ``crates/util`` (gpui has no
+    such dependency) instead of ``crates/gpui/src/util.rs``, which
+    really exists. 13 such impossible cross-crate module edges were
+    fabricating a 100-file/12-crate false dependency cycle in ``dekko
+    deps --cycles``. Checked before the crate-name lookup, via
+    ``_rust_local_module_base``'s plain file-existence test — no
+    ``mod``-declaration parsing, so an inline ``mod x { ... }`` (no
+    file) is correctly untouched.
     """
     segs = imp.source.split("::")
     if not segs:
@@ -4874,6 +7087,13 @@ def _resolve_import_rust(
         if i < len(segs) and segs[i] == "self":
             i += 1
         rest = segs[i:]
+    elif (
+        local_base := _rust_local_module_base(
+            segs[0], importer_path, ctx.paths
+        )
+    ) is not None:
+        base = local_base
+        rest = segs
     else:
         crate_dirs = ctx.crate_roots.get(segs[0])
         if not crate_dirs:
@@ -5163,7 +7383,9 @@ def _cpp_basename_index(paths: frozenset[str]) -> dict[str, list[str]]:
 
 
 def resolve_imports(
-    files: list[FileMap], root: Path | None = None
+    files: list[FileMap],
+    root: Path | None = None,
+    workspace_manifests: dict[str, _WorkspaceManifest] | None = None,
 ) -> ModuleGraph:
     """Resolve every file's raw imports into a file-to-file dependency
     graph.
@@ -5200,11 +7422,22 @@ def resolve_imports(
             function's own long-standing "pure function of
             already-extracted ``FileMap``s" shape exactly for every
             caller that doesn't opt in — including the entire
-            in-memory-``FileMap`` test suite.
+            in-memory-``FileMap`` test suite. Also used to discover
+            the JS/TS workspace package table, unless the caller
+            already has it.
+        workspace_manifests: Already-loaded workspace manifests (see
+            ``_load_workspace_manifests``), so ``resolve()`` pays for
+            one discovery pass rather than two. ``None`` loads them
+            from ``root`` (or nothing, without a root).
 
     Returns:
         The resolved ``ModuleGraph``.
     """
+    if workspace_manifests is None:
+        workspace_manifests = (
+            _load_workspace_manifests(root) if root is not None else {}
+        )
+
     paths = frozenset(fm.path for fm in files)
     ctx = _ImportResolveContext(
         paths=paths,
@@ -5215,6 +7448,7 @@ def resolve_imports(
         ts_path_aliases=(
             _load_tsconfig_alias_tables(root) if root is not None else {}
         ),
+        workspace_manifests=workspace_manifests,
     )
 
     edge_names: dict[tuple[str, str], set[str]] = {}

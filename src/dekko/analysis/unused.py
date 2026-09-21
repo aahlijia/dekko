@@ -46,9 +46,12 @@ are.
 import fnmatch
 import json
 import re
+from dataclasses import dataclass
+from typing import NamedTuple
 
 from dekko.analysis import ambiguous, query
 from dekko.classify import is_test_path
+from dekko.core.languages import SPEC_BY_NAME
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.textutil import fit_to_budget, signature
@@ -307,6 +310,111 @@ def _used_keys(index: MapIndex) -> set[tuple[str, str]]:
     return _used_keys_callables(index) | _used_keys_types(index)
 
 
+STATUS_FLAGGED = "flagged"
+STATUS_USED = "used"
+STATUS_ROOT = "root"
+STATUS_CALL_BLIND = "call-blind-language"
+
+
+class UnusedStatus(NamedTuple):
+    """Whether ``dekko unused`` lists a symbol, and if not, why.
+
+    Attributes:
+        flagged: True when ``find_unused`` would return the symbol.
+        reason: ``STATUS_FLAGGED``, or the first rule that spares it:
+            ``STATUS_CALL_BLIND`` (its language has no extracted calls
+            at all, so there is no verdict), ``STATUS_USED`` (inbound
+            call, reference, heritage or type-usage evidence), or
+            ``STATUS_ROOT`` (a plausible entry point).
+    """
+
+    flagged: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class _Evidence:
+    """The repo-wide lookups every per-symbol verdict reads.
+
+    Built once per ``find_unused`` sweep (or per ``unused_status``
+    call) so the verdict itself stays a cheap, pure function of one
+    symbol.
+
+    Attributes:
+        reexports: Names re-exported from a package entry point.
+        used: ``(path, qualname)`` keys kept alive by any evidence.
+        container_index: ``(path, qualname)`` to container type symbol.
+        blind: Languages with symbols but not one extracted call.
+    """
+
+    reexports: set[str]
+    used: set[tuple[str, str]]
+    container_index: dict[tuple[str, str], Symbol]
+    blind: set[str]
+
+
+def _gather_evidence(index: MapIndex) -> _Evidence:
+    """Build the lookups ``_status_of`` needs, once."""
+    return _Evidence(
+        reexports=reexported_names(index),
+        used=_used_keys(index),
+        container_index=_container_type_index(index),
+        blind=languages_without_calls(index),
+    )
+
+
+def _status_of(
+    sym: Symbol,
+    evidence: _Evidence,
+    root_globs: tuple[str, ...],
+    index: MapIndex,
+) -> str:
+    """The one place that decides whether a symbol is unused.
+
+    ``find_unused`` and ``unused_status`` both answer from here. Round
+    32: ``sanity --unused`` kept its own private notion of "unused"
+    (no ``calls_in``/``referenced_in``), which is not this question,
+    and told agents that ``SpringApplication.run`` had been flagged
+    dead. Sharing the function is the fix; a second copy of these
+    rules is how the two drift apart again.
+
+    The three sparing rules are independent, so their order changes
+    no verdict, only which reason is reported when several hold.
+    ``used`` outranks ``root`` because most symbols are exported, and
+    "it has 157 callers" is the more useful thing to say.
+    """
+    if sym.language in evidence.blind:
+        return STATUS_CALL_BLIND
+    if (sym.path, sym.qualname) in evidence.used:
+        return STATUS_USED
+    if _is_root(
+        sym, evidence.reexports, root_globs, index, evidence.container_index
+    ):
+        return STATUS_ROOT
+
+    return STATUS_FLAGGED
+
+
+def unused_status(
+    index: MapIndex,
+    sym: Symbol,
+    root_globs: tuple[str, ...] = (),
+) -> UnusedStatus:
+    """Whether ``dekko unused`` would list ``sym``, by the same rules.
+
+    Args:
+        index: Loaded map index.
+        sym: The symbol to check.
+        root_globs: Extra path globs whose symbols are always roots
+            (``dekko unused --roots``).
+
+    Returns:
+        The verdict and the reason behind it.
+    """
+    reason = _status_of(sym, _gather_evidence(index), root_globs, index)
+    return UnusedStatus(flagged=reason == STATUS_FLAGGED, reason=reason)
+
+
 def find_unused(
     index: MapIndex,
     root_globs: tuple[str, ...],
@@ -330,17 +438,70 @@ def find_unused(
     Returns:
         Unused symbols sorted by path then line.
     """
-    reexports = reexported_names(index)
-    used = _used_keys(index)
-    container_index = _container_type_index(index)
+    evidence = _gather_evidence(index)
     found = [
         sym
         for sym in index.symbols_by_id.values()
         if (kinds != "types" or sym.kind in TYPE_KINDS)
-        and (sym.path, sym.qualname) not in used
-        and not _is_root(sym, reexports, root_globs, index, container_index)
+        and _status_of(sym, evidence, root_globs, index) == STATUS_FLAGGED
     ]
     return sorted(found, key=lambda s: (s.path, s.start_line))
+
+
+def languages_without_calls(index: MapIndex) -> set[str]:
+    """Languages with symbols in the map but not one extracted call.
+
+    "No inbound calls" is only evidence of dead code in a language
+    whose calls dekko can see. A Tier-2 (generic-grammar) language is
+    parsed by node-type heuristics, and when its call node doesn't
+    match them, every function in it has fan-in 0 by construction.
+    Round 31's tensorflow coverage pass hit exactly that: bash calls
+    are ``command`` nodes, none were collected, and ``unused`` listed
+    ``tfrun()`` -- 27 real call sites -- with no caveat. Bash itself
+    is fixed at the extractor, but ~55 other generic grammars sit
+    behind the same heuristic, so ``unused`` refuses to judge a
+    language it has zero call evidence for, and says so
+    (``_blind_language_caveat``).
+
+    A caller counts whatever became of its call (resolved, ambiguous,
+    or external): any of the three proves extraction saw calls there.
+
+    Tier-1 languages are never reported: each has a dedicated,
+    tested call query, so a Tier-1 file with no calls really has none,
+    and its fan-in-0 symbols are exactly what ``unused`` is for. The
+    blind spot is a property of the heuristic extractor alone.
+    """
+    lang_of_path = {s.path: s.language for s in index.symbols_by_id.values()}
+    generic = set(lang_of_path.values()) - set(SPEC_BY_NAME)
+    if not generic:
+        return set()
+    callers = set(index.calls_out) | set(index.ambiguous_out)
+    for calls in index.externals_by_name.values():
+        callers.update(call.caller for call in calls)
+    seeing = {lang_of_path.get(c.split("::", 1)[0]) for c in callers}
+    return generic - seeing
+
+
+def _blind_language_caveat(index: MapIndex, kinds: str) -> str | None:
+    """Disclose the symbols ``find_unused`` declined to judge, or ``None``."""
+    blind = languages_without_calls(index)
+    if not blind:
+        return None
+    counts: dict[str, int] = {}
+    for sym in index.symbols_by_id.values():
+        if sym.language in blind and (
+            kinds != "types" or sym.kind in TYPE_KINDS
+        ):
+            counts[sym.language] = counts.get(sym.language, 0) + 1
+    if not counts:
+        return None
+    mix = ", ".join(f"{lang} {n}" for lang, n in sorted(counts.items()))
+    return (
+        f"note: {sum(counts.values())} symbol(s) not evaluated ({mix}) -- "
+        "dekko extracted no calls from any file in that language here, "
+        'so "no callers" would not be evidence of dead code. Check '
+        "those with grep."
+    )
 
 
 def _has_direct_fan_in(sym: Symbol, index: MapIndex) -> bool:
@@ -579,6 +740,40 @@ def _dispatch_caveat(dispatch_candidates: list[Symbol]) -> str | None:
     )
 
 
+# Above this share of dispatch candidates, "run unused, trust the list"
+# is wrong more often than right, and the trailing caveat is too easy
+# to miss under a long listing. A small floor keeps a 3-row listing
+# with 2 candidates from shouting.
+_DISPATCH_MAJORITY_RATIO = 0.5
+_DISPATCH_MAJORITY_MIN = 20
+
+
+def _dispatch_majority_warning(n_dispatch: int, n_found: int) -> str | None:
+    """Leading warning when most flagged symbols are dispatch candidates.
+
+    Round 31 spring-boot.md: 2,323 of 3,281 flagged symbols (70.8%)
+    were also polymorphic-dispatch candidates the resolver can't
+    attribute through interface-typed call sites. ``_dispatch_caveat``
+    fired correctly, but as the *last* line under thousands of rows,
+    on exactly the repo shape (interface-heavy Java/Spring) where the
+    list is mostly not dead code. Printed above the listing instead,
+    so it is read before the rows are.
+    """
+    if n_dispatch < _DISPATCH_MAJORITY_MIN or n_found == 0:
+        return None
+    ratio = n_dispatch / n_found
+    if ratio < _DISPATCH_MAJORITY_RATIO:
+        return None
+    return (
+        f"warning: {n_dispatch} of {n_found} ({ratio:.0%}) flagged "
+        "symbols are polymorphic-dispatch candidates -- on this repo "
+        "most of this list is likely NOT dead code (interface/"
+        "trait-typed call sites the resolver can't attribute). Treat "
+        "it as leads, not a delete list; verify with `dekko sanity "
+        "--unused <name>`."
+    )
+
+
 _C_ABI_CAVEAT = (
     'note: exported/extern "C" symbols may be consumed outside this '
     "repo's call graph — treat top hits on a public C API skeptically"
@@ -640,6 +835,9 @@ def _build_json_doc(
         "kind_totals": _kind_totals(found),
         "caveats": [c_abi_caveat] if c_abi_caveat else [],
         "dispatch_caveat": dispatch_caveat,
+        "dispatch_majority_warning": _dispatch_majority_warning(
+            len(dispatch_candidates), len(found)
+        ),
     }
     if suspect:
         doc["suspects"] = [_suspect_json(s) for s in suspects[:_SUSPECT_LIMIT]]
@@ -657,8 +855,12 @@ def _print_text(
     limit: int,
     c_abi_caveat: str | None,
     dispatch_caveat: str | None,
+    majority_warning: str | None = None,
 ) -> None:
     """Print ``run``'s text-mode listing, footer, and caveats.
+
+    ``majority_warning`` (see ``_dispatch_majority_warning``) is the
+    one caveat printed *above* the rows rather than below them.
 
     Factored out of ``run`` to keep it under the module's cyclomatic-
     complexity cap; prints nothing beyond the "no unused symbols" line
@@ -682,6 +884,8 @@ def _print_text(
     ]
     kept, meter = fit_to_budget(rows, budget, limit, prefix=header)
     print(header)
+    if majority_warning:
+        print(majority_warning)
     for row in kept:
         print(row)
     print(meter.footer())
@@ -743,6 +947,7 @@ def run(
     dispatch_candidates = find_dispatch_candidates(index, root_globs, kinds)
     c_abi_caveat = _c_abi_caveat(found)
     dispatch_caveat = _dispatch_caveat(dispatch_candidates)
+    blind_caveat = _blind_language_caveat(index, kinds)
 
     if as_json:
         doc = _build_json_doc(
@@ -756,10 +961,25 @@ def run(
             budget,
             limit,
         )
+        if blind_caveat:
+            doc["caveats"].append(blind_caveat)
         print(json.dumps(doc, indent=2))
         return EXIT_FOUND if found else EXIT_NONE
 
-    _print_text(found, kinds, budget, limit, c_abi_caveat, dispatch_caveat)
+    _print_text(
+        found,
+        kinds,
+        budget,
+        limit,
+        c_abi_caveat,
+        dispatch_caveat,
+        _dispatch_majority_warning(len(dispatch_candidates), len(found)),
+    )
+    # Printed here, not inside _print_text: it matters most on the
+    # "no unused symbols" early-return path, where a clean-looking
+    # result would otherwise hide that a whole language went unjudged.
+    if blind_caveat:
+        print(blind_caveat)
 
     if suspect:
         _print_suspects_text(suspects)

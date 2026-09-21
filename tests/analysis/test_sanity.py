@@ -178,7 +178,12 @@ def test_classify_miss_comment_mention_near_definition() -> None:
     assert cause == sanity.CAUSE_COMMENT_MENTION
 
 
-def test_classify_miss_comment_far_from_definition_falls_through() -> None:
+def test_classify_miss_comment_far_from_definition_is_comment_elsewhere() -> (
+    None
+):
+    # Round 32 Track 2(b): used to fall through to "unexplained". A
+    # comment line is never a call site wherever it sits; the zone now
+    # only picks the wording.
     cause = sanity.classify_miss(
         "// Helper is a small utility function.",
         "Helper",
@@ -188,7 +193,7 @@ def test_classify_miss_comment_far_from_definition_falls_through() -> None:
         near_own_definition=False,
         looks_like_comment=True,
     )
-    assert cause != sanity.CAUSE_COMMENT_MENTION
+    assert cause == sanity.CAUSE_COMMENT_ELSEWHERE
 
 
 def test_classify_miss_near_definition_but_not_comment_shaped() -> None:
@@ -548,7 +553,11 @@ def test_sanity_no_generic_name_caution_for_non_colliding_name(
     doc = json.loads(capsys.readouterr().out)
     causes = {row["cause"] for row in doc["grep_only"]}
     assert sanity.CAUSE_GENERIC_NAME not in causes
+    # Round 32 Track 2(a): the map does record ``value = name`` as a
+    # reference edge, but b.py never imports the name, so the edge
+    # fails ``_can_see`` and the row stays honestly unexplained.
     assert sanity.CAUSE_UNEXPLAINED in causes
+    assert sanity.CAUSE_VALUE_REFERENCE not in causes
 
 
 def test_sanity_usages_mode_never_sets_collision_signal(
@@ -2144,6 +2153,131 @@ def test_in_leading_header_comment_unreadable_file_is_false(
     assert not sanity._in_leading_header_comment(tmp_path, hit)
 
 
+# --- block-comment continuation lines (round 31 tensorflow.md 5.2) ------
+
+
+def test_block_comment_continuation_true_for_jsdoc_line(
+    tmp_path: Path,
+) -> None:
+    # True positive: a Javadoc/JSDoc-style `` * {@link ...}`` line
+    # sitting inside an open ``/** ... */`` block.
+    (tmp_path / "widget.ts").write_text(
+        "/**\n"
+        " * See also {@link Helper} for details.\n"
+        " */\n"
+        "export function widget() {}\n"
+    )
+    hit = sanity.GrepHit(
+        path="widget.ts",
+        line=2,
+        snippet=" * See also {@link Helper} for details.",
+    )
+    assert sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_false_for_multiplication_trap(
+    tmp_path: Path,
+) -> None:
+    # The documented false-positive trap this design exists to avoid:
+    # a gofmt/rustfmt/clang-format-wrapped ``* Helper(x-1)``
+    # multiplication/dereference continuation line has the exact same
+    # ``* ...`` shape as a doc-comment line, but with NO open ``/*``
+    # above it -- real code, not a comment.
+    (tmp_path / "helper.go").write_text(
+        "func recurse(x int) int {\n\treturn x\n\t\t* Helper(x-1)\n}\n"
+    )
+    hit = sanity.GrepHit(path="helper.go", line=3, snippet="\t\t* Helper(x-1)")
+    assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_false_when_closed_before_hit(
+    tmp_path: Path,
+) -> None:
+    # A `*/` between the hit and the nearest `/*` means the block was
+    # already closed -- the hit line is ordinary code that happens to
+    # start with `*` (e.g. a pointer dereference), not a continuation.
+    (tmp_path / "helper.c").write_text(
+        "/* an unrelated, already-closed comment */\n"
+        "int x = 1;\n"
+        "*Helper = compute(x);\n"
+    )
+    hit = sanity.GrepHit(
+        path="helper.c", line=3, snippet="*Helper = compute(x);"
+    )
+    assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_excludes_bare_close_star_equals_star_star(
+    tmp_path: Path,
+) -> None:
+    # Even genuinely inside an open block comment, a bare `*/`-only
+    # close, a `*=` compound-assignment-shaped line, or a `**` line
+    # (kwargs-unpack/exponent/double-pointer shape) are excluded --
+    # none of them is a doc-comment continuation worth reporting as
+    # CAUSE_COMMENT_MENTION even when they coincidentally sit inside
+    # an unrelated open block.
+    (tmp_path / "widget.c").write_text("/* opens here\n*/\n*= 2;\n**pp;\n")
+    for line, snippet in ((2, "*/"), (3, "*= 2;"), (4, "**pp;")):
+        hit = sanity.GrepHit(path="widget.c", line=line, snippet=snippet)
+        assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_false_past_scan_cap(
+    tmp_path: Path,
+) -> None:
+    lines = ["/* opens here\n"] + ["filler\n"] * (
+        sanity._BLOCK_COMMENT_SCAN_LINES + 1
+    )
+    lines.append(" * continuation line\n")
+    (tmp_path / "big.c").write_text("".join(lines))
+    hit = sanity.GrepHit(
+        path="big.c",
+        line=len(lines),
+        snippet=" * continuation line",
+    )
+    assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_false_for_non_slash_style_grammar(
+    tmp_path: Path,
+) -> None:
+    # A grammar with no `/* */` block-comment family at all (Python's
+    # is hash/docstring-only) can never have this shape.
+    (tmp_path / "helper.py").write_text("/* fake\n * continuation\n")
+    hit = sanity.GrepHit(path="helper.py", line=2, snippet=" * continuation")
+    assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_block_comment_continuation_unreadable_file_is_false(
+    tmp_path: Path,
+) -> None:
+    hit = sanity.GrepHit(path="missing.c", line=2, snippet=" * x")
+    assert not sanity._looks_like_block_comment_continuation(tmp_path, hit)
+
+
+def test_sanity_unused_block_comment_continuation_is_noise(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # End-to-end reproduction of tensorflow.md Observation 5.2: a
+    # JSDoc-style continuation line mentioning the target inside an
+    # open block comment must be filtered as noise, not reported as
+    # unexplained reference evidence.
+    root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
+    (root / "widget.ts").write_text(
+        "/**\n"
+        " * Calls into TARGET_NAME under the hood.\n"
+        " */\n"
+        "export function widget() {}\n"
+    )
+    code = cli.main(
+        ["sanity", "--unused", "TARGET_NAME", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["reference_hits"] == []
+    assert doc["counts"]["filtered_noise"] == 1
+
+
 # --- other same-named symbols' own def lines (round 22 §10) -------------
 
 
@@ -2643,25 +2777,140 @@ def test_sanity_unused_json_reports_counts_and_meta(
     assert shapes == {sanity.SHAPE_SPREAD, sanity.SHAPE_TYPEOF}
 
 
-def test_sanity_unused_reports_evidence_present_when_dekko_has_callers(
-    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+# Round 32, all seven repos: --unused never asked `dekko unused` whether
+# it had flagged the target, so it closed every report with "flagged
+# unused, but N call-shaped references found (possible resolver miss)",
+# for `SpringApplication.run` (4,861 grep hits) as readily as for real
+# dead code. It now asks first, through the same predicate
+# `find_unused` uses, and runs no grep sweep when the answer is no.
+
+_LIVE_REPO = {
+    "a.py": "def target():\n    return 1\n",
+    "b.py": "def other():\n    return target()\n",
+}
+
+
+def _no_grep(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("grep sweep ran for a symbol never flagged")
+
+    monkeypatch.setattr(sanity, "_run_grep", boom)
+
+
+def test_sanity_unused_on_a_live_symbol_says_not_flagged_and_skips_grep(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # sanity --unused doesn't re-run _is_root -- it just reports
-    # calls_in/referenced_in evidence directly, so running it against
-    # a symbol dekko would never actually flag (it has a real caller)
-    # still answers correctly: has_dekko_evidence: true.
-    root = make_mapped_repo(
-        {
-            "a.py": "def target():\n    return 1\n",
-            "b.py": "def other():\n    return target()\n",
-        }
-    )
+    root = make_mapped_repo(_LIVE_REPO)
+    _no_grep(monkeypatch)
+    assert cli.main(["sanity", "--unused", "target", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "not flagged by `dekko unused`" in out
+    assert "fan-in 1" in out
+    assert "dekko sanity <target>" in out
+    assert "flagged unused, but" not in out
+    assert "this is why it was flagged" not in out
+
+
+def test_sanity_unused_on_a_live_symbol_json(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_mapped_repo(_LIVE_REPO)
+    _no_grep(monkeypatch)
     code = cli.main(
         ["sanity", "--unused", "target", "--root", str(root), "--json"]
     )
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["has_dekko_evidence"] is True
+    assert doc["flagged_by_unused"] is False
+    assert doc["unused_status"] == "used"
+    assert doc["reference_hits"] == []
+    assert doc["grep_command"] is None
+    # Every key the flagged document carries is still here.
+    assert doc["counts"]["grep_hits_swept"] == 0
+    assert doc["meta"]["reference_hits"]["total"] == 0
+
+
+def test_sanity_unused_json_says_flagged_when_it_was(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def trulyDeadHelper():\n    return 1\n"})
+    code = cli.main(
+        [
+            "sanity",
+            "--unused",
+            "trulyDeadHelper",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["flagged_by_unused"] is True
+    assert doc["unused_status"] == "flagged"
+
+
+def test_sanity_unused_on_a_root_names_the_root_rule(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No caller anywhere, but `main` is an entry point: `dekko unused`
+    # never lists it, so there is no verdict to cross-check.
+    root = make_mapped_repo({"a.py": "def main():\n    return 1\n"})
+    _no_grep(monkeypatch)
+    assert cli.main(["sanity", "--unused", "main", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "not flagged by `dekko unused`" in out
+    assert "it is a root" in out
+
+
+def test_sanity_unused_roots_flag_matches_dekko_unused_roots(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Flagged by default; rooted by the same glob `unused --roots` takes.
+    root = make_mapped_repo({"plugins/p.py": "def hook():\n    return 1\n"})
+    base = ["sanity", "--unused", "hook", "--root", str(root), "--json"]
+    assert cli.main(base) == 0
+    assert json.loads(capsys.readouterr().out)["flagged_by_unused"] is True
+    assert cli.main([*base, "--roots", "plugins/*"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["flagged_by_unused"] is False
+    assert doc["unused_status"] == "root"
+
+
+def test_sanity_unused_type_used_only_in_type_position_is_not_flagged(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The quieter half of the bug: no calls_in/referenced_in at all, so
+    # the old report said "none -- this is why it was flagged" about a
+    # type `dekko unused` credits with type-usage evidence.
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "class Config:\n    pass\n\n\n"
+                "def _load(c: Config) -> None:\n    return None\n"
+            )
+        }
+    )
+    _no_grep(monkeypatch)
+    code = cli.main(
+        ["sanity", "--unused", "Config", "--root", str(root), "--json"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["has_dekko_evidence"] is False
+    assert doc["flagged_by_unused"] is False
+    assert doc["unused_status"] == "used"
+    assert "other than a direct call" in doc["skipped"]
 
 
 def test_sanity_unused_clean_case_text(
@@ -3581,16 +3830,18 @@ def test_sanity_group_by_file_rolls_up_grep_only(
     # dekko's resolver already records (``ambiguous_in``/``_out``),
     # which round 28's data-driven generic-name signal now correctly
     # surfaces as ``CAUSE_GENERIC_NAME`` rather than leaving it
-    # unexplained. A bare reference (not a call) is dropped rather
-    # than recorded as ambiguous either way, keeping these two hits
-    # genuinely unexplained -- the rendering behavior this test
-    # actually exercises.
+    # unexplained. And since round 32 Track 2(a) a bare value
+    # reference (``value = name``) is explained too, from the map's
+    # own reference edges. A name inside a longer string is the one
+    # shape sanity deliberately refuses to classify, which keeps these
+    # two hits genuinely unexplained -- the rendering behavior this
+    # test actually exercises.
     root = make_mapped_repo(
         {
             "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
             "b.py": (
-                "value = totally_unrelated_wrapper\n"
-                "another = totally_unrelated_wrapper\n"
+                "value = 'see totally_unrelated_wrapper docs'\n"
+                "another = 'or totally_unrelated_wrapper here'\n"
             ),
             "c.py": (
                 "import pkg\n\n\n"
@@ -3629,18 +3880,15 @@ def test_sanity_group_by_file_omitted_keeps_flat_listing(
     # C.3: default behavior (--group-by-file omitted) is unchanged —
     # the existing flat _print_bucket_text rendering still applies.
     #
-    # Bare references (no call parens), not calls -- see the sibling
-    # rollup test above for why: a bare cross-file *call* with no
-    # import is itself a real ambiguous-edge collision round 28's
-    # generic-name signal now surfaces as CAUSE_GENERIC_NAME, but a
-    # bare reference is dropped rather than recorded as ambiguous,
-    # keeping these hits genuinely unexplained.
+    # Names inside longer strings, not calls or bare references --
+    # see the sibling rollup test above for why those two shapes no
+    # longer stay unexplained.
     root = make_mapped_repo(
         {
             "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
             "b.py": (
-                "value = totally_unrelated_wrapper\n"
-                "another = totally_unrelated_wrapper\n"
+                "value = 'see totally_unrelated_wrapper docs'\n"
+                "another = 'or totally_unrelated_wrapper here'\n"
             ),
         }
     )
@@ -3660,9 +3908,15 @@ def test_sanity_group_by_file_respects_limit_truncation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # C.3: grouping happens over whatever rows survived --limit
-    # fitting, not the pre-truncation total — the trailer must report
-    # against the already-truncated row count.
+    # Round 31 C1 (zed.md F10): grouping must run over the FULL
+    # grep-only bucket, then --limit caps the number of file *groups*
+    # printed, not the number of rows before grouping. Updated from
+    # the pre-fix pinning of "grouping happens over whatever rows
+    # survived --limit fitting" -- that was the bug (it hid real
+    # clustering behind an earlier row-count truncation), not the
+    # design. The header total (3) still reflects every grep-only hit;
+    # only the printed groups are capped, and the trailer now counts
+    # in groups, not rows.
     root = make_mapped_repo(
         {
             "a.py": ("def totally_unrelated_wrapper():\n    return 1\n"),
@@ -3686,7 +3940,54 @@ def test_sanity_group_by_file_respects_limit_truncation(
     assert code == 0
     out = capsys.readouterr().out
     assert "grep-only: 3 (grouped by file)" in out
-    assert "... +2 more (outside --limit/budget)" in out
+    assert "... +2 more file groups (outside --limit/budget)" in out
+
+
+def test_sanity_group_by_file_groups_full_bucket_before_limit(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Round 31 C1 (zed.md F10), the actual regression: on zed, a
+    # --limit-200 row cap applied BEFORE grouping meant the two
+    # largest real clusters (139 and 125 hits) never appeared in the
+    # grouped output, because none of their individual rows survived
+    # the row-count cap. Reproduce the shape at small scale: one file
+    # with many hits, several files with one hit each, --limit small
+    # enough that the old (buggy) row-first order would drop the
+    # big file's rows before grouping ever saw them.
+    files = {
+        "a.py": "def totally_unrelated_wrapper():\n    return 1\n",
+        "big.py": "\n".join(
+            f"value{i} = totally_unrelated_wrapper(x)" for i in range(5)
+        )
+        + "\n",
+    }
+    for i in range(3):
+        files[f"small{i}.py"] = "value = totally_unrelated_wrapper(x)\n"
+    root = make_mapped_repo(files)
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(
+        [
+            "sanity",
+            "totally_unrelated_wrapper",
+            "--root",
+            str(root),
+            "--group-by-file",
+            "--limit",
+            "1",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    # 5 + 3*1 = 8 total grep-only hits across 4 files.
+    assert "grep-only: 8 (grouped by file)" in out
+    # big.py's 5-hit cluster must be the one group kept (it is the
+    # largest), not whichever file happened to hold the first row
+    # under a row-count-first cap.
+    assert "big.py: 5" in out
+    assert "small0.py" not in out
+    assert "... +3 more file groups (outside --limit/budget)" in out
 
 
 # --- round 31: buckets must reconcile with the printed grep ---------
@@ -3778,3 +4079,607 @@ def test_sanity_unused_counts_reconcile(
         + counts["filtered_noise"]
         + counts["excluded_declarations"]
     )
+
+
+# Round 31: the member check widened from "exactly one bare name" to a
+# full specifier-list line, and the opener to export/default+named
+# blocks (claude-buddy.md C1 / cline.md §4.1 Bug B's mislabel half).
+
+
+def test_multiline_import_member_packed_several_names_per_line(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "hunt.ts").write_text(
+        "import {\n"
+        "  searchBuddy, renderBuddy, SPECIES,\n"
+        "  type Species, type Rarity,\n"
+        '} from "../server/engine.ts";\n'
+    )
+    packed = sanity.GrepHit(
+        path="hunt.ts", line=2, snippet="  searchBuddy, renderBuddy, SPECIES,"
+    )
+    typed = sanity.GrepHit(
+        path="hunt.ts", line=3, snippet="  type Species, type Rarity,"
+    )
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, packed, "renderBuddy"
+    )
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, typed, "Rarity"
+    )
+    # Whole-word only: "Buddy" is a substring of two members, not one.
+    assert not sanity._looks_like_multiline_import_member(
+        tmp_path, packed, "Buddy"
+    )
+
+
+def test_multiline_import_member_inside_reexport_block(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "index.ts").write_text(
+        "export {\n"
+        "\tgetGeneratedModelsForProvider,\n"
+        "\tgetGeneratedProviderModels,\n"
+        '} from "./catalog/catalog.generated-access";\n'
+    )
+    hit = sanity.GrepHit(
+        path="index.ts", line=2, snippet="\tgetGeneratedModelsForProvider,"
+    )
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "getGeneratedModelsForProvider"
+    )
+
+
+def test_multiline_import_member_default_plus_named_opener(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.tsx").write_text(
+        'import React, {\n  useState,\n  useEffect,\n} from "react";\n'
+    )
+    hit = sanity.GrepHit(path="app.tsx", line=3, snippet="  useEffect,")
+    assert sanity._looks_like_multiline_import_member(
+        tmp_path, hit, "useEffect"
+    )
+
+
+def test_multiline_import_member_rejects_object_literal_and_calls(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "use.ts").write_text(
+        "const handlers = {\n  buildThing,\n};\n"
+        "import {\n  other,\n  buildThing(other),\n"
+    )
+    shorthand = sanity.GrepHit(path="use.ts", line=2, snippet="  buildThing,")
+    call = sanity.GrepHit(
+        path="use.ts", line=6, snippet="  buildThing(other),"
+    )
+    assert not sanity._looks_like_multiline_import_member(
+        tmp_path, shorthand, "buildThing"
+    )
+    assert not sanity._looks_like_multiline_import_member(
+        tmp_path, call, "buildThing"
+    )
+
+
+# --- round 32 Track 2: recognizable lines no longer "unexplained" -----
+#
+# Design: .features/fixes/round31/02-sanity-miss-classification.md.
+# Every positive below is a literal line from that doc's evidence
+# table; every negative pins a shape the classifier must keep
+# admitting it doesn't know.
+
+
+def _cause(snippet: str, name: str = "cleanup", **flags: Any) -> str:
+    return sanity.classify_miss(
+        snippet,
+        name,
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        **flags,
+    )
+
+
+# (c) the comment test runs before the type and string-literal checks.
+
+
+def test_track2c_comment_quoting_the_name_is_a_comment() -> None:
+    # tensorflow: a shell comment that happens to quote the name used
+    # to get the string-literal label, because that check ran first.
+    snippet = '# Therefore, "tfrun" commands cannot include pipes'
+    assert sanity._looks_like_comment_line(snippet, "tools/run.sh")
+    cause = _cause(
+        snippet,
+        "tfrun",
+        looks_like_comment=True,
+        looks_like_local_binding_or_literal=True,
+    )
+    assert cause == sanity.CAUSE_COMMENT_ELSEWHERE
+
+
+def test_track2c_real_string_literal_still_local_or_literal() -> None:
+    snippet = 'x = "tfrun"'
+    assert not sanity._looks_like_comment_line(snippet, "a.py")
+    cause = _cause(
+        snippet,
+        "tfrun",
+        looks_like_local_binding_or_literal=(
+            sanity._looks_like_local_binding_or_literal(snippet, "tfrun")
+        ),
+    )
+    assert cause == sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
+
+
+def test_track2c_comment_beats_type_annotation() -> None:
+    cause = _cause(
+        "// takes a cfg: Output and returns it",
+        "Output",
+        looks_like_comment=True,
+        looks_like_type_annotation=True,
+    )
+    assert cause == sanity.CAUSE_COMMENT_ELSEWHERE
+
+
+# (b) the zone gate is gone; the zone picks the wording.
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ({"near_own_definition": True}, sanity.CAUSE_COMMENT_MENTION),
+        ({"in_leading_header_comment": True}, sanity.CAUSE_COMMENT_MENTION),
+        ({}, sanity.CAUSE_COMMENT_ELSEWHERE),
+    ],
+)
+def test_track2b_comment_cause_wording_by_zone(
+    flags: dict[str, bool], expected: str
+) -> None:
+    # claude-buddy: a banner comment far from the definition.
+    cause = _cause(
+        "// ─── Plugin uninstall cleanup ───",
+        looks_like_comment=True,
+        **flags,
+    )
+    assert cause == expected
+
+
+def test_track2b_neither_comment_cause_counts_as_unexplained() -> None:
+    causes = [sanity.CAUSE_COMMENT_MENTION, sanity.CAUSE_COMMENT_ELSEWHERE]
+    assert sanity._unexplained_count(causes) == 0
+
+
+@pytest.mark.parametrize(
+    ("snippet", "path"),
+    [
+        # `#` opens a comment in Python/shell, a directive in C and an
+        # attribute in Rust. The table is per grammar, so neither fires.
+        ("#include <cleanup.h>", "src/main.c"),
+        ("#[derive(cleanup)]", "src/lib.rs"),
+        # PHP 8 attribute: `#` IS a PHP comment marker, `#[` is not.
+        ("#[cleanup(priority: 1)]", "src/Handler.php"),
+        # A leading block comment that closes with real code after it.
+        ("/* legacy */ cleanup();", "src/main.c"),
+    ],
+)
+def test_track2b_not_comment_lines(snippet: str, path: str) -> None:
+    assert not sanity._looks_like_comment_line(snippet, path)
+
+
+@pytest.mark.parametrize(
+    ("snippet", "path"),
+    [
+        ("# plain php hash comment about cleanup", "src/Handler.php"),
+        ("/* cleanup runs at exit */", "src/main.c"),
+        ("/* cleanup: opening line of a block", "src/main.c"),
+    ],
+)
+def test_track2b_still_comment_lines(snippet: str, path: str) -> None:
+    assert sanity._looks_like_comment_line(snippet, path)
+
+
+def test_track2b_word_inside_a_string_stays_unexplained() -> None:
+    # Deliberate non-decision: "name somewhere inside quotes" also
+    # matches eval("cleanup()") and dispatch-by-string, which are real
+    # references. Pinned so a later round doesn't "fix" it.
+    snippet = 'lines.push("... settings.json cleanup complete.");'
+    assert not sanity._looks_like_local_binding_or_literal(snippet, "cleanup")
+    assert not sanity._looks_like_value_reference(snippet, "cleanup", "a.rs")
+    assert _cause(snippet) == sanity.CAUSE_UNEXPLAINED
+
+
+# (a) tier 1: the map already recorded this line as a value reference.
+
+
+def test_track2a_recorded_reference_flag() -> None:
+    cause = _cause(
+        "if (names.some(cleanup)) {",
+        is_recorded_reference=True,
+    )
+    assert cause == sanity.CAUSE_VALUE_REFERENCE
+
+
+def test_track2a_comment_still_beats_recorded_reference() -> None:
+    cause = _cause(
+        "// cleanup",
+        looks_like_comment=True,
+        is_recorded_reference=True,
+    )
+    assert cause == sanity.CAUSE_COMMENT_ELSEWHERE
+
+
+def test_track2a_tier1_typescript_end_to_end(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # claude-code / claude-buddy shapes: a predicate handed to .some()
+    # inside a function, and a handler registered at module scope (the
+    # `path::<module>` pseudo-caller, which isn't in symbols_by_id).
+    root = make_mapped_repo(
+        {
+            "a.ts": (
+                "export function isChrome(n: string): boolean {\n"
+                "  return n.length > 0;\n"
+                "}\n"
+                "export function cleanupAll(): void {}\n"
+            ),
+            "b.ts": (
+                'import { isChrome, cleanupAll } from "./a";\n'
+                "export function check(names: string[]): boolean {\n"
+                "  return names.some(isChrome);\n"
+                "}\n"
+                'process.on("exit", cleanupAll);\n'
+            ),
+        }
+    )
+    for target, line in (("isChrome", 3), ("cleanupAll", 5)):
+        code = cli.main(["sanity", target, "--root", str(root), "--json"])
+        assert code == 0
+        doc = json.loads(capsys.readouterr().out)
+        rows = {r["line"]: r["cause"] for r in doc["grep_only"]}
+        assert rows.get(line) == sanity.CAUSE_VALUE_REFERENCE
+        # The label moved; the buckets did not. The reference line is
+        # still grep-only, not promoted into matches.
+        assert doc["counts"]["matches"] == 0
+        assert doc["counts"]["grep_only"] == len(doc["grep_only"])
+
+
+def test_track2a_tier1_java_method_reference(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # spring-boot: the design doc assumed Java had no reference edges.
+    # It does (`method_reference`), so this is exact, not a shape guess.
+    root = make_mapped_repo(
+        {
+            "Src.java": (
+                "class Src {\n"
+                "  String getSource() { return null; }\n"
+                "  java.util.List<String> all(java.util.List<Src> xs) {\n"
+                "    return xs.stream()\n"
+                "      .map(Src::getSource)\n"
+                "      .toList();\n"
+                "  }\n"
+                "}\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "getSource", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    rows = {r["line"]: r["cause"] for r in doc["grep_only"]}
+    assert rows.get(5) == sanity.CAUSE_VALUE_REFERENCE
+
+
+def test_track2a_all_sweep_uses_recorded_references(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # --all shares one classification per bare name; it must reach the
+    # same tier-1 answer run() does.
+    root = make_mapped_repo(
+        {
+            "a.py": "def distinctive_handler():\n    return 1\n",
+            "b.py": (
+                "from a import distinctive_handler\n\n\n"
+                "def go():\n"
+                "    return distinctive_handler()\n\n\n"
+                "stored = distinctive_handler\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["aggregate_causes"].get(sanity.CAUSE_VALUE_REFERENCE) == 1
+    assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED) is None
+
+
+# (a) tier 2: the path-qualified shape, Rust/C++ only, never with a
+# `(` after.
+
+
+@pytest.mark.parametrize(
+    ("snippet", "name", "path"),
+    [
+        # zed: prompt.as_ref().map(ExternalSourcePrompt::as_str),
+        (".map(ExternalSourcePrompt::as_str),", "as_str", "src/lib.rs"),
+        ("let f = handlers::my_fn;", "my_fn", "src/lib.rs"),
+        ("    handler: crate::handlers::my_fn,", "my_fn", "src/lib.rs"),
+        ("register(&Widget::on_click);", "on_click", "src/main.cc"),
+    ],
+)
+def test_track2a_tier2_value_shapes(
+    snippet: str, name: str, path: str
+) -> None:
+    assert sanity._looks_like_value_reference(snippet, name, path)
+
+
+@pytest.mark.parametrize(
+    ("snippet", "name", "path"),
+    [
+        # THE safety property: a real call never lands in this bucket.
+        ("outer(inner(x))", "inner", "src/lib.rs"),
+        ("let v = Thing::my_fn(3);", "my_fn", "src/lib.rs"),
+        ("let v = Thing::my_fn::<u8>(3);", "my_fn", "src/lib.rs"),
+        ("log(Thing::my_fn!(x));", "my_fn", "src/lib.rs"),
+        ("let t = crate::buffer::Thing::new();", "buffer", "src/lib.rs"),
+        # Imports share the path shape.
+        ("use crate::handlers::my_fn;", "my_fn", "src/lib.rs"),
+        ("pub(crate) use handlers::my_fn;", "my_fn", "src/lib.rs"),
+        ("    other::thing, handlers::my_fn,", "my_fn", "src/lib.rs"),
+        ("using ns::cleanup;", "cleanup", "src/main.cc"),
+        # Built, measured on zed, removed: a BARE name in argument or
+        # field-init position. ~10,000 rows moved and nearly all were
+        # same-named locals, since Rust names a getter after what it
+        # returns. These are literal zed lines that fooled it.
+        ("indent_guide(buffer_id, 1, 10, 0),", "buffer_id", "src/lib.rs"),
+        ("Some((program, args)) => run(args),", "args", "src/lib.rs"),
+        ("Ok(buffer) => buffer,", "buffer", "src/lib.rs"),
+        ("    drifting: bool,", "bool", "src/lib.rs"),
+        ("    handler: my_fn,", "my_fn", "src/lib.rs"),
+        ("register_handler(my_fn);", "my_fn", "src/lib.rs"),
+        ("signal(SIGINT, cleanup);", "cleanup", "src/main.c"),
+        # zed: a path inside a string, or a lint path in an attribute.
+        ('"std::net::UdpSocket::bind",', "bind", "src/lib.rs"),
+        ('.expect("validated in BenchAppContext::build")', "build", "a.rs"),
+        ("#[warn(clippy::all, clippy::pedantic)]", "all", "src/lib.rs"),
+        # Languages dekko records references for: an unrecorded value
+        # reference is a real miss and must stay visible as one.
+        ("xs.map(Foo::bar)", "bar", "src/x.ts"),
+        (".map(Src::getSource)", "getSource", "Src.java"),
+    ],
+)
+def test_track2a_tier2_not_value_shapes(
+    snippet: str, name: str, path: str
+) -> None:
+    assert not sanity._looks_like_value_reference(snippet, name, path)
+
+
+def test_track2a_tier2_cause_and_ladder_position() -> None:
+    assert (
+        _cause(".map(T::my_fn)", "my_fn", looks_like_value_reference=True)
+        == sanity.CAUSE_VALUE_REFERENCE_UNRESOLVED
+    )
+    # Below the exact checks...
+    assert (
+        _cause(
+            ".map(T::my_fn)",
+            "my_fn",
+            looks_like_value_reference=True,
+            looks_like_type_annotation=True,
+        )
+        == sanity.CAUSE_TYPE_ANNOTATION
+    )
+    # ...above the cross-file-collision heuristic.
+    assert (
+        _cause(
+            ".map(T::my_fn)",
+            "my_fn",
+            looks_like_value_reference=True,
+            looks_like_cross_file_collision=True,
+        )
+        == sanity.CAUSE_VALUE_REFERENCE_UNRESOLVED
+    )
+
+
+def _grep_only_causes(
+    root: Path, target: str, capsys: pytest.CaptureFixture
+) -> dict[int, str]:
+    assert cli.main(["sanity", target, "--root", str(root), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    return {r["line"]: r["cause"] for r in doc["grep_only"]}
+
+
+def test_track2a_tier2_rust_end_to_end_function_target_only(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "src/lib.rs": (
+                "pub struct Prompt;\n"
+                "impl Prompt {\n"
+                "    pub fn as_text(&self) -> u8 { 1 }\n"
+                "}\n"
+                "pub fn all(xs: Vec<Prompt>, flag: bool) -> Vec<u8> {\n"
+                "    let as_text = flag;\n"
+                "    let _ = (as_text, 1);\n"
+                "    xs.iter().map(Prompt::as_text).collect()\n"
+                "}\n"
+            ),
+        }
+    )
+    _force_no_dekko_hits(monkeypatch)
+    rows = _grep_only_causes(root, "as_text", capsys)
+    # The path-qualified line is a value reference. It also matches
+    # the TS-shaped `: name` type template (second colon of `::`) and
+    # used to say "type annotation"; the path reading wins.
+    assert rows.get(8) == sanity.CAUSE_VALUE_REFERENCE_UNRESOLVED
+    # The same-named local two lines up is NOT blessed.
+    assert rows.get(7) != sanity.CAUSE_VALUE_REFERENCE_UNRESOLVED
+
+
+# (d) Rust construction and payload shapes, type targets only.
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "let location = AbortMessageLocation {",
+        "AbortMessageLocation(AbortMessageLocation),",
+        "Moved(Other, AbortMessageLocation),",
+        "pub struct Wrapper(pub AbortMessageLocation);",
+        "struct Wrapper(pub(crate) AbortMessageLocation);",
+        "if let AbortMessageLocation { line, .. } = loc {",
+    ],
+)
+def test_track2d_rust_type_construction_shapes(snippet: str) -> None:
+    name = "AbortMessageLocation"
+    assert sanity._looks_like_type_annotation(
+        snippet, name, "src/abort.rs", target_is_type=True
+    )
+    # Same text, function target: `name {` is a block, `(name)` is a
+    # value. Not this bucket's business.
+    assert not sanity._looks_like_type_annotation(
+        snippet, name, "src/abort.rs", target_is_type=False
+    )
+
+
+@pytest.mark.parametrize(
+    ("snippet", "path"),
+    [
+        # A tuple-struct constructor travelling as a function value is
+        # a real, if indirect, use. Left alone.
+        ("items.into_iter().map(Wrapper)", "src/lib.rs"),
+        # A real construction call.
+        ("let w = Wrapper(3);", "src/lib.rs"),
+        # A same-named declaration dekko didn't index.
+        ("struct Wrapper {", "src/lib.rs"),
+        # Rust-only: the same text in TypeScript proves nothing.
+        ("const w = Wrapper {", "src/lib.ts"),
+    ],
+)
+def test_track2d_not_type_construction(snippet: str, path: str) -> None:
+    assert not sanity._looks_like_type_annotation(
+        snippet, "Wrapper", path, target_is_type=True
+    )
+
+
+def test_track2d_rust_end_to_end_struct_target(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "src/abort.rs": (
+                "pub struct AbortLoc { pub line: u32 }\n"
+                "pub enum Abort {\n"
+                "    AbortLoc(AbortLoc),\n"
+                "}\n"
+                "pub fn make() -> Abort {\n"
+                "    let location = AbortLoc {\n"
+                "        line: 1,\n"
+                "    };\n"
+                "    Abort::AbortLoc(location)\n"
+                "}\n"
+            ),
+        }
+    )
+    rows = _grep_only_causes(root, "AbortLoc", capsys)
+    assert rows.get(3) == sanity.CAUSE_TYPE_ANNOTATION
+    assert rows.get(6) == sanity.CAUSE_TYPE_ANNOTATION
+
+
+def test_track2a_tier1_ignores_edges_the_file_could_not_make(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # claude-code, measured: reference resolution has no notion of a
+    # shadowing local, so `const count = ...; if (count >= 3)` in a
+    # file that never imports `count` is recorded as a reference to an
+    # unrelated utils function. 58% of tier-1 candidates there were
+    # this shape. Sanity must not bless them.
+    root = make_mapped_repo(
+        {
+            "utils/array.ts": (
+                "export function tallyUp(xs: number[]): number {\n"
+                "  return xs.length;\n"
+                "}\n"
+            ),
+            "screen.ts": (
+                "export function render(cfg: { n?: number }): void {\n"
+                "  const tallyUp = cfg.n ?? 0;\n"
+                "  if (tallyUp >= 3) return;\n"
+                "}\n"
+            ),
+        }
+    )
+    rows = _grep_only_causes(root, "utils/array.ts:tallyUp", capsys)
+    assert rows  # the shadowing lines are still reported...
+    assert sanity.CAUSE_VALUE_REFERENCE not in rows.values()  # ...unblessed
+
+
+def test_track2a_tier1_stands_down_in_a_file_that_shadows_the_name(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # claude-code utils/ide.ts: the file imports `errorMessage` AND
+    # binds a local `const errorMessage` in a catch block. The import
+    # makes the edge possible; the local makes this line not it.
+    root = make_mapped_repo(
+        {
+            "errors.ts": (
+                "export function describeErr(e: unknown): string {\n"
+                "  return String(e);\n"
+                "}\n"
+            ),
+            "ide.ts": (
+                'import { describeErr } from "./errors";\n'
+                "export function install(): { error: string } {\n"
+                "  try {\n"
+                "    throw new Error(describeErr(1));\n"
+                "  } catch (error) {\n"
+                "    const describeErr = String(error);\n"
+                "    return { error: describeErr };\n"
+                "  }\n"
+                "}\n"
+            ),
+        }
+    )
+    rows = _grep_only_causes(root, "errors.ts:describeErr", capsys)
+    assert sanity.CAUSE_VALUE_REFERENCE not in rows.values()
+
+
+def test_track5b_tier1_labels_a_true_ref_beside_a_shadowing_local(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # The flip side of the test above. 0.43.68's textual guard
+    # (`_file_shadows_name`) switched tier 1 off for the *whole file*
+    # once any local of the name appeared in it. With scope-aware
+    # extraction the map tells the two lines apart by itself: line 3
+    # is a real reference and gets its label, line 7 is a local and
+    # never becomes an edge.
+    root = make_mapped_repo(
+        {
+            "errors.ts": (
+                "export function describeErr(e: unknown): string {\n"
+                "  return String(e);\n"
+                "}\n"
+            ),
+            "ide.ts": (
+                'import { describeErr } from "./errors";\n'
+                "export function wire(): unknown[] {\n"
+                "  return [describeErr];\n"
+                "}\n"
+                "export function install(error: unknown): string {\n"
+                "  const describeErr = String(error);\n"
+                "  return [describeErr].join();\n"
+                "}\n"
+            ),
+        }
+    )
+    rows = _grep_only_causes(root, "errors.ts:describeErr", capsys)
+    assert rows.get(3) == sanity.CAUSE_VALUE_REFERENCE
+    assert rows.get(7) != sanity.CAUSE_VALUE_REFERENCE

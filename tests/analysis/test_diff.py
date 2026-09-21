@@ -328,14 +328,27 @@ def test_maybe_warn_sequential_silent_below_threshold(
     assert capsys.readouterr().err == ""
 
 
-def test_maybe_warn_sequential_silent_when_parallel(
+def test_maybe_warn_discloses_the_parallel_wait_too(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """``--jobs 0``/``-N`` (resolved to >1 workers) never needs the
-    disclosure -- the whole point is a sequential-only cost."""
+    """Round 31 P4.1: all cores is now the default, and a cold
+    tensorflow-scale snapshot still takes minutes with them. The wait
+    gets a note either way; only the wording (and the now-pointless
+    ``--jobs 0`` hint) differs."""
     monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
     diff._maybe_warn_sequential(4, ["a.py", "b.py", "c.py"])
-    assert capsys.readouterr().err == ""
+    err = capsys.readouterr().err
+    assert "3 git-tracked files with all cores" in err
+    assert "--jobs 0" not in err
+
+
+@pytest.mark.parametrize("command", ["diff", "affected", "workset"])
+def test_cold_rev_commands_default_to_all_cores(command: str) -> None:
+    """Round 31 P4.1: these three kept ``--jobs 1`` after round 29
+    flipped ``map`` to ``0``, so a first-touch call on tensorflow ran
+    single-threaded (754s, vs. 251s with workers)."""
+    args = cli.build_subcommand_parser().parse_args([command])
+    assert args.jobs == 0
 
 
 def test_maybe_warn_sequential_silent_when_candidates_unknown(
@@ -354,7 +367,7 @@ def test_old_snapshot_disclosure_note_on_a_real_cache_miss(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """End-to-end: a real ``dekko diff`` rev-cache miss at the default
+    """End-to-end: a real ``dekko diff`` rev-cache miss at an explicit
     ``--jobs 1`` prints the note when the repo is (per a lowered
     threshold) "large"; a rev-cache *hit* on a second identical call
     prints nothing, since ``old_snapshot`` returns before
@@ -364,7 +377,8 @@ def test_old_snapshot_disclosure_note_on_a_real_cache_miss(
     (root / "a.py").write_text("def f() -> int:\n    return 2\n")
     _commit_all(root, "change f")
 
-    assert cli.main(["diff", "HEAD~1", "--root", str(root)]) == 1
+    sequential = ["diff", "HEAD~1", "--root", str(root), "--jobs", "1"]
+    assert cli.main(sequential) == 1
     first_err = capsys.readouterr().err
     assert "single-threaded resolve" in first_err
     assert "--jobs 0" in first_err

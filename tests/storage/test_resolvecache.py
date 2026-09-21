@@ -112,8 +112,10 @@ def test_ids_are_interned_not_repeated(
         ("callee_comment_only", "a.py", "# trailing comment\n"),
         ("callee_lines_shift", "a.py", "\n\n\n# lines below shift\n"),
         ("callee_body_rewrite", "a.py", "\ndef _unused_local() -> None:\n"),
-        # Gate-closing edits: these must fall back to a full resolve and
-        # still agree. A correct fallback matters as much as correct reuse.
+        # A callee-side symbol addition: under v2 this narrows (a.py
+        # dirty, b.py reused from cache -- see
+        # test_gate_narrows_when_an_unrelated_symbol_is_added below) but
+        # parity must hold either way, so this stays in the matrix.
         (
             "callee_new_symbol",
             "a.py",
@@ -134,6 +136,115 @@ def test_incremental_matches_full_rebuild(
     """The whole point: reuse must never change the answer."""
     root = make_mapped_repo(SRC)
     (root / target).write_text(SRC[target] + edit)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full, label
+
+
+# Five files: a.py/b.py exercise a plain function-name edge, widget.py/
+# user.py exercise a class-constructor edge, and bystander.py references
+# neither -- it must never end up in `dirty` for any of the five shapes
+# below, proving the gate narrows rather than just not-fully-refusing.
+FIVE_SHAPE_SRC = {
+    "a.py": (
+        "def helper() -> int:\n    return 1\n\n"
+        "def other() -> int:\n    return 2\n"
+    ),
+    "b.py": (
+        "from a import helper\n\ndef caller() -> int:\n    return helper()\n"
+    ),
+    "widget.py": "class Widget:\n    pass\n",
+    "user.py": (
+        "from widget import Widget\n\n"
+        "def make() -> Widget:\n    return Widget()\n"
+    ),
+    "bystander.py": "def unrelated() -> int:\n    return 42\n",
+}
+
+
+@pytest.mark.parametrize(
+    ("label", "after", "expect_full_fallback", "expect_dirty"),
+    [
+        (
+            "add_a_function",
+            {
+                "a.py": FIVE_SHAPE_SRC["a.py"]
+                + "def newly_added() -> int:\n    return 9\n"
+            },
+            False,
+            {"a.py"},
+        ),
+        (
+            "remove_a_function",
+            {"a.py": "def helper() -> int:\n    return 1\n"},
+            False,
+            {"a.py"},
+        ),
+        (
+            "rename_a_function",
+            {
+                "a.py": (
+                    "def helper() -> int:\n    return 1\n\n"
+                    "def renamed() -> int:\n    return 2\n"
+                )
+            },
+            False,
+            {"a.py"},
+        ),
+        (
+            "add_a_method_to_an_existing_class",
+            {
+                "widget.py": (
+                    "class Widget:\n"
+                    "    def __init__(self) -> None:\n"
+                    "        pass\n"
+                )
+            },
+            False,
+            {"widget.py", "user.py"},
+        ),
+        (
+            "add_a_struct",
+            {"a.py": FIVE_SHAPE_SRC["a.py"] + "class NewType:\n    pass\n"},
+            True,
+            None,
+        ),
+    ],
+)
+def test_parity_across_symbol_edit_shapes(
+    make_mapped_repo: RepoFactory,
+    label: str,
+    after: dict[str, str],
+    expect_full_fallback: bool,
+    expect_dirty: set[str] | None,
+) -> None:
+    """The acceptance bar: for each of the five required edit shapes
+    (WP-B), an incremental map and a ``--full`` map of the same edited
+    tree must produce identical ``map.json`` -- and the fast path (a
+    narrow ``dirty`` set, never falling back to a full resolve except
+    for the struct/class case) must actually have been taken, not just
+    "not obviously broken". A parity assertion alone is not proof: it
+    would pass identically if every case silently fell back to a full
+    resolve, which is exactly the bug this work package fixes.
+    """
+    root = make_mapped_repo(FIVE_SHAPE_SRC)
+    for name, text in after.items():
+        (root / name).write_text(text)
+
+    reuse = _build(root)
+    if expect_full_fallback:
+        assert reuse is None, label
+    else:
+        assert reuse is not None, label
+        assert reuse.dirty == expect_dirty, label
+        # The fast path only means something if it left files unresolved
+        # (reused, not re-touched) -- assert the complement is non-empty.
+        assert reuse.dirty != set(FIVE_SHAPE_SRC), label
 
     _map(root)
     incremental = _graph_json(root)
@@ -211,24 +322,40 @@ def test_gate_fires_with_nothing_dirty_when_no_file_changed(
     assert reuse.dirty == frozenset()
 
 
-def test_gate_refuses_when_a_symbol_is_added(
+def test_gate_narrows_when_an_unrelated_symbol_is_added(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """A new symbol changes the repo-wide name index, so *other* files'
-    cached resolution can no longer be trusted."""
+    """v2: a new symbol only dirties files that could depend on its
+    *name* (``resolver.name_delta``), not the whole repo.
+
+    ``newly_added`` never appears in b.py's cached call resolution (no
+    edge, ambiguous entry, or import references it), so b.py's cached
+    edge into ``a.helper`` stays trustworthy and only a.py itself needs
+    re-resolving. v1 forced a full re-resolve here; that blanket rule is
+    what this whole work package exists to narrow -- see WP-B in
+    ``test-repos/reports/31-tokentest-7repo-post04355/
+    FIX-PLAN-remaining.md``.
+    """
     root = make_mapped_repo(SRC)
     (root / "a.py").write_text(
         SRC["a.py"] + "def newly_added() -> int:\n    return 9\n"
     )
-    assert _build(root) is None
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"a.py"}
 
 
-def test_gate_refuses_when_a_symbol_is_renamed(
+def test_gate_narrows_when_an_unrelated_symbol_is_renamed(
     make_mapped_repo: RepoFactory,
 ) -> None:
+    """Same as above for a rename (remove ``other``, add ``renamed``):
+    neither bare name appears in b.py's cached resolution, so b.py stays
+    clean."""
     root = make_mapped_repo(SRC)
     (root / "a.py").write_text(SRC["a.py"].replace("other", "renamed"))
-    assert _build(root) is None
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"a.py"}
 
 
 def test_gate_refuses_when_a_file_is_added(
@@ -250,16 +377,90 @@ def test_gate_refuses_when_a_file_is_deleted(
     assert _build(root) is None
 
 
-def test_gate_refuses_when_a_signature_changes(
+def test_gate_widens_when_a_called_symbols_signature_changes(
     make_mapped_repo: RepoFactory,
 ) -> None:
     """``params`` feeds arity gating in the resolution ladder, so it is
-    compared even though the symbol's name and id are unchanged."""
+    compared even though the symbol's name and id are unchanged --
+    and, unlike the unrelated-name cases above, b.py's cached edge
+    *does* name ``helper`` (the changed symbol), so b.py must widen into
+    ``dirty`` alongside a.py rather than staying clean."""
     root = make_mapped_repo(SRC)
     (root / "a.py").write_text(
         SRC["a.py"].replace("def helper() -> int:", "def helper(x, y=1):")
     )
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"a.py", "b.py"}
+
+
+def test_gate_refuses_outright_when_a_type_kind_symbol_changes(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """A type-kind addition/removal/change (``model.TYPE_KINDS``) still
+    forces a full resolve -- the type-aware ladder steps
+    (``_receiver_type_match`` and friends) read the whole repo-wide
+    index for a type name regardless of which file wrote the call, so
+    there is no bounded "affected files" set to compute the way there
+    is for a function/method/variable name."""
+    root = make_mapped_repo(SRC)
+    (root / "a.py").write_text(SRC["a.py"] + "class NewType:\n    pass\n")
     assert _build(root) is None
+
+
+def test_gate_widens_for_a_new_constructor_on_an_existing_class(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Constructor-collapse gap (WP-B dependency audit): adding
+    ``__init__`` to a class never changes the class's own bare name, so
+    a caller's already-cached ``Widget()`` edge doesn't literally
+    mention ``__init__`` anywhere. ``_constructor_of`` would now find
+    the new ``__init__`` and add a second edge to it, so the caller must
+    be marked dirty even though nothing about its own call site's name
+    changed -- ``name_delta`` folds the class's own name into
+    ``changed`` whenever a constructor-shaped method inside it changes.
+    """
+    src = {
+        "widget.py": "class Widget:\n    pass\n",
+        "caller.py": (
+            "from widget import Widget\n\n"
+            "def make() -> Widget:\n    return Widget()\n"
+        ),
+    }
+    root = make_mapped_repo(src)
+    (root / "widget.py").write_text(
+        "class Widget:\n    def __init__(self) -> None:\n        pass\n"
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"widget.py", "caller.py"}
+
+
+def test_gate_widens_for_an_import_alias_newly_resolving(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Import-alias gap (WP-B dependency audit): a call through an
+    import alias whose target doesn't exist yet is cached as
+    ``external``, keyed by the alias text as written -- never by the
+    real name ``_alias_candidates`` looked up
+    (``resolver.alias_original_name``). Defining that real name
+    elsewhere must still widen the aliasing caller into ``dirty``, even
+    though the alias text itself was never a cached dependency name."""
+    src = {
+        "mod.py": "def other() -> int:\n    return 0\n",
+        "caller.py": (
+            "from mod import real as aliased\n\n"
+            "def use() -> int:\n    return aliased()\n"
+        ),
+    }
+    root = make_mapped_repo(src)
+    (root / "mod.py").write_text(
+        "def other() -> int:\n    return 0\n\n"
+        "def real() -> int:\n    return 1\n"
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"mod.py", "caller.py"}
 
 
 # --- invalidation keys ------------------------------------------------

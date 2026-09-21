@@ -9,6 +9,992 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.71] — 2026-09-21
+
+Round 32 Track 4, the last open item of the round. Design and
+measurements: `.features/fixes/round31/04-type-constructor-arity.md`.
+
+### Fixed
+- **`Name(x)` constructs a Rust tuple struct.** Every type symbol
+  carried `params=[]`, because no signature was read off a struct
+  definition, and the resolver's arity check reads `[]` as "takes zero
+  arguments". So a counted `GroupName(s)` was rejected against
+  `struct GroupName(String);` and filed external whenever it reached
+  the sole-candidate rung, which is every construction through a glob
+  import (`use super::*`, the norm in Rust test modules). A tuple
+  struct's positional fields are now its params. Brace and unit
+  structs keep none, correctly: `Brace(1)` against `struct Brace { a:
+  u8 }` is still rejected, now for a real reason. zed: **+424 call
+  edges**, every one a struct target with `Name(` written on the
+  caller's line (`MultiBufferOffset` 78, `DevicePixels` 39,
+  `MultiBufferRow` 35).
+- **A struct that shares its name with an enum's tuple variant is not
+  taken on name alone.** dekko indexes enums, not their variants, so
+  after `use AutoCompactThreshold::*`, `Percentage(0.9)` had exactly
+  one in-repo candidate, gpui's unrelated `struct Percentage`, and
+  took it with full confidence. Tuple variants are now recorded as a
+  name registry (not symbols: nothing in `map.json`, `unused`,
+  `search` or `outline` changes) and the sole-candidate rung stands
+  down on a collision. This is why the obvious fix ("ignore arity for
+  types") was measured and backed out in 0.43.67: 252 of its 552 new
+  edges were this collision. zed: **21 edges removed, all 21 read, all
+  21 wrong** (`End(MarkdownTagEnd::..)` on `sum_tree`'s `struct End`
+  10 times, `Identifier("a")`, `Text(..)`, `Column(..)`).
+- **A Rust dot-call never constructs a type.** `list.CommitList()`
+  (Windows COM) no longer resolves to `struct CommitList`. Same rule
+  as round 31's F11 (`recv.name()` can't reach a free function), one
+  more target kind.
+
+### Changed
+- Calls recovered from `assert_eq!(..)` bodies carry their real
+  argument count for a bare `Name(..)` again. 0.43.67 withheld it to
+  dodge the bug above. Zero edges moved on zed.
+- `map.json`: a Rust tuple struct's `params` is no longer empty.
+  `MAP.md` signatures are unchanged (`struct X`).
+- cline and spring-boot: every edge section identical to 0.43.70.
+
+### Not fixed
+- A bare `Left(x)` whose *only* reading is a variant still goes
+  external, as before. Resolving it to the owning enum is possible
+  (the registry knows the owner) and deliberately not built: it is a
+  new edge class that needs its own measurement, and any enum with an
+  `Ok`/`Some`/`Err` variant would swallow the prelude's. A missing
+  edge, never a wrong one.
+
+## [0.43.70] — 2026-09-21
+
+Round 32 Track 5b, the half of Track 5 the visibility veto can't see.
+Design, measurements and the probe that produced them:
+`.features/fixes/round31/05b-scope-aware-references.md`.
+
+0.43.69 stopped reference edges between files that can't see each
+other. What it could not stop: a local that shadows a symbol in its
+*own* file, a local that shadows a name the file really *does* import
+(claude-code `utils/ide.ts` imports `errorMessage`, then binds `const
+errorMessage` in a catch block), and any local at all in a file with
+zero imports, which the veto has to exempt. Measured on 0.43.69:
+**6.2% of claude-code's reference sites and 4.1% of cline's were still
+locals**, two thirds of them in zero-import files.
+`src/utils/bash/bashParser.ts` imports nothing, so its loop character
+`c` pointed at `src/buddy/types.ts::c` 387 times.
+
+### Fixed
+- **References know what they are bound to.** The extractor now walks
+  scopes for Python and JS/TS/TSX and tags each bare-identifier
+  reference (`RawRef.bound`: a parameter, a local, or nothing).
+  Parameters of every shape, `const`/`let` (block), `var` (function),
+  destructuring to any depth, catch bindings, `for..of` heads, Python
+  assignment targets, `with`/`except .. as`, walrus, comprehension
+  variables, `global`/`nonlocal`. A reference bound to a plain local
+  never reaches the resolver's ladder. Three kinds of binding are
+  deliberately *not* locals: a module-level name, a nested definition
+  the map indexes as a symbol (`const helper = () => ..` inside a
+  function), and a function-local lazy import (`const { X } = await
+  import("./x")`, about 40 true edges on claude-code that a naive
+  scope walk would have cut). Everything fails open: a binding shape
+  the table doesn't know leaves the reference untagged, which is the
+  old behavior, so this can leave a false edge standing and never
+  remove a true one. Reference edges: claude-buddy 695 -> 684,
+  claude-code 10,437 -> 10,121, cline 9,517 -> 9,191, **zero edges
+  added, zero call edges changed**. Every lost edge in the two risky
+  classes (imported-then-shadowed: 30 + 12; same-file function
+  targets) was read against source. All false.
+- **A pytest fixture parameter is the fixture.** `def
+  test_x(short_root): run(short_root)` shadows the `short_root`
+  fixture lexically and *is* that fixture semantically, because pytest
+  injects by parameter name. 102 of the 119 lexically shadowed
+  reference sites in dekko's own repo are this shape, so the tag is a
+  tag and not a filter: the resolver keeps the edge for a bound
+  *parameter* in a test file whose name matches a decorated function
+  in the same file, or in the `conftest.py` of the nearest ancestor
+  directory.
+- **Regression from 0.43.69: conftest fixtures lost every reference
+  edge.** The visibility veto requires an import for a cross-file
+  Python edge, and a conftest fixture is the one cross-file name
+  Python sees without one. dekko's own repo lost all 47 reference
+  edges from tests into `tests/conftest.py`. Call edges survived, so
+  `affected` mostly still worked, but a fixture passed along and never
+  called in the test was invisible. The fixture rule above restores
+  all 47.
+- **A file that exports is a module, not a script.** The veto's
+  zero-import exemption exists for script-style files that share one
+  global scope. A file with no imports *but an exported symbol* is an
+  ES module and shares nothing (this is also exactly how TypeScript
+  reads such a file), so a free `process` or `performance` in it is
+  the runtime global. 21 edges on claude-code and 20 on cline, every
+  one `process`, `performance` or `String` pointing at some file's
+  same-named function. Files with neither import nor export keep the
+  exemption.
+
+### Changed
+- `dekko unused` flags 23 more symbols on claude-code and 8 on cline.
+  None of them has a single unbound use of its name anywhere in its
+  own file (checked by parsing each one). They are object-literal
+  methods on tool definitions (`description()`, `prompt()`, `get
+  state()`) that were being spared by a same-named local elsewhere in
+  the file. 67 of claude-code's 80 such tool methods were already
+  flagged; now 77 are, which is at least consistent. That these are
+  called through a property and never seen as used is a separate,
+  older limit of `unused` on object-literal methods.
+- `sanity`'s textual "does this file bind a local of this name" guard
+  (`_file_shadows_name`, 0.43.68) is gone. It had to switch the
+  "dekko has this as a reference" label off for a whole file, because
+  no regex can tell which scope a line sits in. The map can now, so a
+  true reference next to a shadowing local gets its label back.
+  `_can_see` stays, for maps built by an older dekko.
+- Extraction cost: not measurable. `map --full --jobs 0` on
+  claude-code 4.3s -> 4.2s, cline 5.8s -> 5.7s, tensorflow (the Python
+  walk at scale) 175.5s / 172.4s -> 172.3s / 174.4s, alternating runs
+  on an otherwise idle machine, all inside noise. Bindings are found by one more compiled query per file, and
+  a reference only pays for a scope lookup when its name is bound
+  somewhere in the file.
+
+### Not fixed
+- Post-fix probe: 0 false sites on claude-buddy, 1 on claude-code, 17
+  on cline (0.1%), all explained. 8 are `process` in true scripts
+  (no import, no export: the exemption working as designed). 8 are a
+  bare identifier resolving to a same-named **class member**
+  (`invoke` from a lazily imported external package landing on
+  `DesktopClient.invoke`), which a bare identifier can never name. A
+  three-line veto would take them; the design set a bar of 10 edges
+  for adding it and this is 8, so it is recorded here instead. 2 are
+  module-level destructures that aren't symbols.
+- `def f(text=text)`: the default value is read in the enclosing
+  scope but is tagged as the parameter. Same for JS default values.
+- `table[key]` index reads, still out by the round-23 decision.
+
+## [0.43.69] — 2026-09-21
+
+Round 32 Track 5, found while building Track 2, not by the sweep.
+Design and measurements:
+`.features/fixes/round31/05-reference-edges-shadowed-locals.md`.
+
+Value-reference edges (what `query uses`, MCP `find_usages` and
+`unused` read) were bound by name alone. The ladder references share
+with calls ends in "it's the only symbol with that name, take it".
+For a call that is a fair guess: `count(x)` on a local is rare. For a
+bare identifier it is not: `const count = ...; if (count >= 3)` is
+every other line, and each one became a reference to whichever
+unrelated `count` the repo defined once. **35% of claude-code's
+reference edges and 57% of cline's joined files that cannot see each
+other.** `uses error` on claude-code listed 1,272 sites of local
+`error` variables.
+
+### Fixed
+- **A reference needs a way to see its target.** In Python and
+  JS/TS/TSX, an edge to another file now needs an import binding that
+  name, and the import has to point into this repo (`import os from
+  "node:os"` then `os.tmpdir()` is not a reference to some script's
+  `const os`; calls have had that guard for a long time, references
+  never did). A veto on the ladder's result, not a filter on its
+  candidates: it can only ever remove an edge. Java and Go are left
+  alone on purpose: their references are syntactic (`Type::method`,
+  type identifiers) and can't be a shadowing local. Files that can't
+  see each other: claude-code 35% -> 2.1%, cline 57% -> 2.9%,
+  claude-buddy 10% -> 0%. The residue is deliberate: a JS-family file
+  with no imports at all (script-style globals) and targets declared
+  in a `.d.ts` (ambient) keep their edges.
+- **Dynamic imports and CommonJS requires are imports.** `const { X }
+  = await import("./x")`, `const { X } = require("./x")`, `const x =
+  require("./x")`, and TypeScript's `require("./x") as typeof
+  import("./x")` (167 sites in claude-code) bind a cross-file name
+  exactly as a static import does, and were recorded nowhere. The
+  veto above found this: it dropped 23 true edges on claude-code and
+  12 on cline, every one a lazily imported module, until these were
+  recorded. Hunting the lost edges for such bindings now finds 0 on
+  all three repos. Call resolution gains from it too: claude-code +23
+  call edges, cline +40 (tests reaching the module they `await
+  import`), and `dekko deps` gains 140 and 107 module edges.
+- **A relative import is in-repo, whatever the file stems say.**
+  `import { run } from "./index"` and `from "."` sent `run()` to
+  `external`. An index file's matching stem is its directory name
+  (`acp` for `acp/index.ts`), which `./index` never spells, so the
+  binding looked external and the call was thrown to noise. Static
+  imports had this bug all along; recording dynamic ones exposed more
+  sites (cline lost 9 correct call edges until it was fixed).
+- **Eight plain reads the JS/TS reference query never captured:**
+  `handle.close()`, `return DEFAULT_PORT`, `if (status)`, `!enabled`,
+  `await pending`, `() => fallback`, `for (const e of EXTENSIONS)`,
+  `export default styles`, plus TypeScript's `x!`, `x as T`, `x
+  satisfies T`. Nobody had noticed, because a module-level `let
+  knownChannelsVersion` read only by `return knownChannelsVersion` was
+  being kept alive by a *false* edge from another file's same-named
+  local. Removing the false edges exposed it: `unused` newly flagged
+  53 symbols and 40 of them were alive through exactly these
+  positions (measured by parsing each file and tallying the parent
+  node of every same-file use). Writes stay out: an assignment target
+  or `x++` is not a use. So does a subscript index (`table[key]`), a
+  round-23 decision left standing.
+
+### Changed
+- **`dekko unused` reports far fewer false positives on JS/TS.**
+  claude-buddy 40 -> 19, claude-code 1,956 -> 1,305, cline 2,136 ->
+  1,687. 28 of the symbols that left the list were sampled against
+  source and all 28 are alive (`loggedExposures.has(feature)`, `for
+  (const t of LINUX_TERMINALS)`, `export default meta`). Going the
+  other way, 9 and 7 symbols are newly flagged: object-literal methods
+  called through a receiver dekko can't type (`conn.isConnected()`),
+  which a false edge used to hide. That is `unused`'s documented
+  call-blind limit, now visible instead of masked.
+- `query uses` / `find_usages` return fewer, truer rows on JS/TS and
+  Python. `dekko deps` and `query importers` see dynamic imports and
+  requires.
+- Every lost call edge was read: claude-code lost 3, all wrong
+  (`axios.patch(..)` -> a repo `fn patch`; `getNativeModule()` from
+  the external `image-processor-napi` -> an unrelated in-repo port).
+  cline lost 0.
+
+### Not fixed
+- A local that shadows a *same-file* or an *imported* symbol
+  (claude-code `utils/ide.ts` imports `errorMessage`, then `const
+  errorMessage = ...` in a catch block). That needs the extractor to
+  know scopes. `sanity` keeps its own read-side guard for it.
+
+Spring-boot (Java), awesome-go and tensorflow's C/C++ (0 relative
+includes) are unaffected; Rust has no reference edges and no `./`
+import sources. Tests: +28 (2,330 passed).
+
+## [0.43.68] — 2026-09-21
+
+Round 32 Track 2. `dekko sanity` labels every grep-only row with a
+cause, and "unexplained miss" is the label that costs an agent tokens:
+it means "go read this line". Six repos had rows a person classifies
+at a glance landing there, or worse, in a confidently wrong bucket.
+Design: `.features/fixes/round31/02-sanity-miss-classification.md`.
+No count moves. `matches`, `dekko-only` and `grep-only` are identical
+before and after on every repo measured; only the cause string on a
+grep-only row changes.
+
+### Changed
+- **A comment is a comment wherever it sits.** The comment cause used
+  to require the line to be within 3 lines of the symbol's definition
+  or in its file's header. That gate protected nothing: a comment line
+  is never a call site. Far-away comments now read `comment mention —
+  not a call site (a comment line, away from the symbol's
+  definition)`; the two trusted zones keep their old wording. The
+  comment check also moved above the type and string-literal checks,
+  so `# Therefore, "tfrun" commands cannot include pipes` stops being
+  called a string literal. With the zone gate gone the prefix test had
+  to get stricter: a PHP 8 `#[Attribute]` line and a `/* note */
+  realCall();` line are no longer comment-shaped.
+- **Value references get a name, when they are real.** A row at a
+  line the map already holds as a reference edge to the target
+  (`names.some(isChrome)`, `process.on("exit", cleanup)` at module
+  scope, Java's `.map(Src::getSource)`) reads `passed or stored as a
+  value, not called — dekko has this as a reference`. The design
+  called this tier "exact, not a guess" and scoped it to JS/TS. Both
+  were wrong. Python, Go and Java record references too, so they are
+  covered. And reading the rows that moved on claude-code showed the
+  first screen full of `if (count >= 3) return;` one line below
+  `const count = ...`: reference resolution has no notion of a
+  shadowing local, and 58% of the candidate rows sat in files that
+  neither define nor import the name. So a recorded edge only counts
+  when the file could have made it (defines the target, imports its
+  name or its declaring type, or is a same-package sibling in
+  Go/Java) and binds no local of that name. claude-code: 1,507
+  candidate rows became 166, and every one sampled is true
+  (`instanceof ShellError`, `.sort(byIdAsc)`, `setTimeout(doRefresh,
+  ...)`). The polluted edges themselves are a resolver bug, written up
+  as Track 5 (`05-reference-edges-shadowed-locals.md`), not fixed here.
+- **Rust and C++ get a shape-matched fallback, for one shape.** dekko
+  records no reference edges for them, so `.map(Prompt::as_str)` and
+  `let f = handlers::my_fn;` get a cause that says "line-shape match"
+  and names the blind spot. It refuses a `(`, `::<` or `!` after the
+  name, so a real missed call can never land in this bucket. Function
+  targets only. The design also wanted a bare name in argument
+  position (`register(my_fn)`) and a field init (`handler: my_fn,`).
+  Both were built, measured on zed, and removed: they moved about
+  10,000 rows and nearly all were same-named locals (`Some(buffer)`,
+  `(program, args)`, `indent_guide(buffer_id, 1)`), because Rust names
+  a getter after what it returns. A `::` in front of the name is the
+  one thing a local can never have.
+- **Rust struct literals and enum payloads read as type positions**
+  for a type target: `let location = AbortMessageLocation {`,
+  `AbortMessageLocation(AbortMessageLocation),`, `struct W(pub T);`.
+  The type-position cause text widened to say so.
+- `--fail-on-unexplained` fails less often. That is the point, but it
+  is CI-visible, which is why this is under Changed.
+
+### Fixed
+- Rust `.map(Prompt::as_str)` with a *function* target was labelled
+  "type annotation": the TS-shaped `: name` template matches the
+  second colon of `::`. With the target's kind now known to the
+  classifier, the path-value reading wins.
+
+### Not classified, on purpose
+- A name inside a longer string (`"settings.json cleanup
+  complete."`). The same shape matches `eval("cleanup()")` and
+  dispatch by string, which are real references. A classifier that
+  admits it doesn't know beats one that guesses.
+- A name mid-way through a multi-line Python docstring.
+- A bare function name passed or stored as a value in Rust, C or C++
+  (see above). Needs scope analysis, not a regex.
+
+### Measured
+Every row's cause snapshotted before and after over the `--all` sweep
+(2,000-name cap), then the rows that moved were read, not just
+counted. That reading is what caught both the shadowed-local edges and
+the bare-name locals; the unit tests were green with each of them in.
+
+| repo | matches / dekko-only / grep-only | unexplained before | after | |
+|---|---|---|---|---|
+| claude-code | 6,256 / 298 / 41,171, identical | 11,305 | 5,083 | −55% |
+| spring-boot | 5,449 / 366 / 108,183, identical | 29,411 | 22,755 | −23% |
+| zed | 9,811 / 1,202 / 492,810, identical | 27,361 | 22,518 | −18% |
+
+Nearly all of the drop is comments (4,600 rows on claude-code, 4,052
+Javadoc rows on spring-boot, 3,280 on zed). Recorded value references
+account for 166 rows on claude-code; zed's Rust construction shapes
+for 470 (`Edit {`, `SectionHeader(SharedString),`) and its
+path-qualified values for 90 (`.map(String::as_str)`,
+`cx.listener(Self::backspace)`). spring-boot's method references sit
+past the sweep's alphabetical name cap, so that one was checked
+directly: `dekko sanity getConfigurationPropertySource` labels
+`.map(ConfigDataEnvironmentContributor::getConfigurationPropertySource)`
+as a recorded reference.
+
+## [0.43.67] — 2026-09-21
+
+Round 32's one resolver finding (zed). Design:
+`.features/fixes/round31/03-rust-macro-path-calls.md`. The agent that
+found it blamed the `Type::name` owner rule; tracing its two repros
+through the ladder showed one was already fixed by 0.43.64 and the
+other was never a resolver bug. Verified by diffing zed's edge sets
+before and after, classifying every lost edge against the call the
+source actually wrote, and reading every new one. That diff turned up
+two more defects, both fixed here.
+
+### Fixed
+- **Rust calls recovered from `assert!`/`assert_eq!` bodies keep the
+  shape the source wrote.** tree-sitter doesn't parse macro arguments,
+  so dekko scans their token stream for calls. It matched the `::` or
+  `.` joining a call to its receiver and then threw it away, rendering
+  every recovered call `receiver.name` with no argument count. So
+  `assert_eq!(p, Point::new(1, 1))` reached the resolver as `Point.new`,
+  and every rule that reads a Rust call's shape off its text misread
+  it: the `Type::name` owner rule (0.43.62) and the unknown-type veto
+  (0.43.64) stood down, the dot-call veto (0.43.63) fired on a call
+  that wasn't one, and the ladder took the file's only `new`. 4,287
+  such sites on zed, concentrated in tests, which is what `dekko
+  affected` reads. Recovered calls now carry their real joiner, the
+  whole `::` path (`gpui::Point`, `crate::util`, `Self`), a turbofish
+  stepped over (`Vec::<u8>::new` reads `Vec::new`), the method chain
+  as receiver (`x.iter().count()` was a *bare* `count()`, which the
+  ladder resolves by preferring a free function), and an argument
+  count where one can be counted safely. A joiner whose path head
+  can't be read (`<Foo as Bar>::make(..)`) emits nothing: a call known
+  to be qualified, reported as bare, is known-wrong. Each of these now
+  matches what the same call yields when parsed outside a macro.
+  `default` and `union` are keyword tokens, so `assert_eq!(x,
+  Foo::default())` was never recovered at all; it is now.
+  **zed: 866 edges removed, 363 added.** Of the 866: 165 `Type::name`
+  paths credited to another type, 275 method chains credited to a free
+  function, 419 method calls on a std or foreign value credited to the
+  repo's only same-named method (364 of them five names: `.map()` →
+  a test module's `map`, `.all()`, `.success()`, `.is_ok()`,
+  `.try_recv()`). All four sites in the report are fixed
+  (`SelectionsCollection.new` lost its two `Point::new` test callers).
+  cline unchanged; spring-boot has no Rust.
+- **A lifetimed Rust receiver (`&'a self`, `&'a mut self`) is the
+  receiver.** It was read as an ordinary parameter, putting the
+  method's arity one too high, so a correct lone target was rejected
+  as arity-implausible: `syntax_map.layers(&buffer)` against `fn
+  layers<'a>(&'a self, buffer: ..)`. Parsed calls had been losing these
+  all along; it surfaced when recovered calls gained an argument
+  count. zed: +325 edges, every one to a method with a lifetimed
+  `self`, 385 of 391 checked with `.name(` written in the caller, all
+  distinctive names (`Connection.exec_bound`,
+  `BufferDiffSnapshot.hunks_intersecting_range`,
+  `TestClient.build_workspace`).
+- **`try_recv`/`try_send` join the Rust std-method denylist.** zed
+  defines one `try_recv`. The arity bug above had been rejecting it by
+  accident; with that fixed, 66 `rx.try_recv()` calls on ordinary
+  channels took it as their sole candidate. Its one real caller is in
+  the same file and resolves on that rung, before the guard.
+
+### Known, not fixed
+- **`Name(x)` tuple-struct constructions don't resolve when the struct
+  is reached without an import hint**, because a type symbol has no
+  parameter list and the arity check reads that as "takes zero
+  arguments". Treating a type's arity as unknown was tried in this
+  change and backed out: it adds 552 edges on zed, and 252 of them go
+  to a struct whose name is also an enum variant somewhere (`Left`,
+  `Text`, `Image`, `Path`). dekko doesn't index variants, so
+  `Left(x)` from a glob-imported enum would land on an unrelated
+  `struct Left`. Needs variant indexing first. Recovered macro calls of
+  this shape deliberately carry no argument count, so they resolve
+  exactly as they did before. Recorded as Track 4 in the design folder.
+
+## [0.43.66] — 2026-09-21
+
+Round 32 (7-repo sweep of 0.43.63) came back clean except for one
+defect every agent reproduced, in the command whose job is telling an
+agent when to trust dekko. Design:
+`.features/fixes/round31/01-sanity-unused-membership.md`.
+
+### Fixed
+- **`dekko sanity --unused NAME` checks that NAME was actually flagged
+  before saying so.** It ran its full grep sweep for any symbol and
+  closed with "flagged unused, but N call-shaped references found
+  (possible resolver miss)", for `SpringApplication.run` (4,861 grep
+  hits) or zed's `px` (876 callers) as readily as for real dead code.
+  An agent reading that concludes the resolver missed thousands of
+  calls. It computed `has_dekko_evidence` and then never branched on
+  it, and that wasn't even the right question: `dekko unused` also
+  spares roots, call-blind languages, and types kept alive by
+  heritage or type-position use, so a struct used only as an
+  annotation was told "none, this is why it was flagged" about a flag
+  that never existed. Both directions are fixed the same way: one
+  predicate, `unused.unused_status`, built on the very function
+  `find_unused` now runs per symbol, so the two cannot drift apart (a
+  parity test walks every symbol in a fixture to pin that). A symbol
+  that isn't flagged gets three lines saying why and pointing at plain
+  `dekko sanity <target>`, and **no grep sweep**: the sweep's volume
+  is what made the false report look authoritative. zed's `px` now
+  answers in 2.6s, nearly all of it loading the map. `dekko unused`'s
+  own output is byte-identical before and after the refactor on
+  claude-code (1,956 results) and zed (11,147).
+
+### Added
+- `dekko sanity --unused` takes `--roots GLOB` (repeatable), the same
+  flag as `dekko unused`, so a symbol you rooted there doesn't read as
+  flagged here.
+- `sanity --unused --json` gains `flagged_by_unused` and
+  `unused_status` on every path (and `skipped`/`advice` when not
+  flagged). Additive: every existing key is still present.
+
+## [0.43.65] — 2026-09-21
+
+Round 31's one open performance question (P4.1): cold-rev-cache `diff`
+on tensorflow took 754s, against 274s in round 29. It sat open for
+three days as "needs a machine with disk headroom". It was never the
+disk.
+
+### Changed
+- **`diff`, `affected` and `workset` default to `--jobs 0` (all
+  cores), like `map` has since 0.43.53.** The first time one of them is
+  asked about a commit, dekko maps that old commit from scratch, and
+  these three were still doing it single-threaded. Round 29 flipped
+  `map` and left them behind, so the two P4.1 timings were never the
+  same configuration: the follow-up pass had already shown the default
+  running past 585s unfinished where `--jobs 6` finished in 251s.
+  tensorflow, cold `diff HEAD~1`, same session on 0.43.63 (round 32's
+  tensorflow agent): **720s sequential**, 277s at `--jobs 4`, 226s at
+  `--jobs 6`, **181s / 194s at `--jobs 0`**, so ~3.8x, and more workers
+  never ran slower. The new default measured on this build: 325.7s idle
+  / 355.6s contended, both taken right after an extraction-cache
+  invalidation, so they overstate the steady-state cost. spring-boot, interleaved same-session: 18.9s / 19.0s
+  all cores vs. 22.2s / 19.9s sequential, so a mid-size repo is a wash
+  with a slight edge, never a loss (0.43.54's pool sizing is what makes
+  that safe: workers scale to the work, small repos stay sequential).
+  `--jobs 1` still forces a sequential run. A warm call (the rev is
+  cached after the first) is unaffected.
+- **The "may take a while" note now covers the parallel wait too.**
+  It used to stay silent whenever workers were in play. Five minutes of
+  nothing on tensorflow is the same "is it hung?" problem round 15
+  added the note for, so it prints either way, with its own wording
+  and without the now-pointless `--jobs 0` hint.
+
+### Fixed
+- **MCP `impacted_tests` and `workset` no longer resolve a cold rev
+  single-threaded.** They called `affected.run`/`workset.run` without
+  a `jobs` argument at all, so they got the functions' own sequential
+  default whatever the CLI did: **718.6s** on a first-touch tensorflow
+  call (round 32, measured over stdio), with zero output to the client
+  the whole time. No MCP client waits for that. This is the path an agent
+  actually hits. They now use all cores.
+
+### Verified
+- **0.43.63's name-delta incremental map, re-timed on tensorflow**
+  (the one number that release couldn't take, for lack of disk). Same
+  files, probe and `--jobs 6` as the round-31 measurement: adding a
+  function **223.4s → 46.3s**, removing it **290.6s → 42.8s**, now the
+  same cost as a comment edit (40.5s); `--full` is 231.1s. The
+  incremental `map.json` after the add equals a `--full` of the same
+  tree.
+
+## [0.43.64] — 2026-09-21
+
+Round 31's last silently-wrong-answer item (zed F6b / A6), from the
+two-step design in
+`test-repos/reports/31-tokentest-7repo-post04355/FIX-PLAN-remaining.md`.
+Verified the round-31 way: re-map zed and cline with the old and new
+builds, diff edge *sets* (`scripts/map_edge_diff.py`), and check every
+lost edge against the source, not a sample.
+
+### Fixed
+- **A Rust `Type::name()` path rooted at a type the repo doesn't
+  define no longer lands on a repo symbol** (zed F6b). `Vec::new()`,
+  `Box::new()`, `Default::default()`, `String::new()` and a
+  macro-generated `StyleRefinement::default()` name a std,
+  third-party, or macro-minted type, so no repo symbol can be the
+  target. The ladder took whatever `new`/`default` sat in the caller's
+  file anyway: `Vec::new()` inside `MultiWorkspace` became a call to
+  `MultiWorkspace.new`. 0.43.62's owner rule couldn't veto these
+  because it needs an in-repo type to name as the owner. The estimate
+  going in was ~35 edges. It was **962 on zed**: `Vec` 366, `Box` 229,
+  `Default` 141, `String` 126, then 67 other external types. All 962
+  were matched to the receiver the caller actually wrote, 0 of them
+  name the lost target's own type, and none of the 71 receiver names
+  has a `struct`/`enum`/`trait`/`type`/`union` definition or a `use ..
+  as` rename anywhere in zed. 0 call edges added. cline's two Tauri
+  `main.rs` files: 6 of 6 lost edges wrong (`tauri::Builder::default()`
+  → `UpdateStatus.default`), TS untouched. The rule stands down
+  whenever the repo could know the name: any in-repo symbol carries
+  it, a candidate is a member of it (a macro-generated struct with a
+  handwritten `impl`), the file `use`s it from inside the repo, it is
+  one or two characters (`T::default()`), or it is an associated-type
+  path (`T::ProtoRequest::stop()`, `<Cmd as LspCommand>::ProtoRequest
+  ::stop()`). The last two guards came from the same edge diff: a
+  first cut that only looked for `as` renames in the calling file lost
+  6 *correct* zed edges, because `pub use text::Buffer as TextBuffer;`
+  lives in another crate.
+
+### Added
+- **Rust `type X = ...;` aliases are indexed as `type_alias` symbols.**
+  The prerequisite for the fix above: without an `Alias` symbol,
+  `Alias::new()` would read as an unknown type and go external.
+  Module-level aliases only (file scope or a `mod` body). The same
+  node inside an `impl` block is an *associated type* (`type Output =
+  Foo;`) and is deliberately not indexed. Extraction caches rebuild
+  themselves on upgrade (the spec fingerprint covers the query).
+  Aliases show up in `outline`, `search`, `query symbol` and
+  `unused --types` like TS aliases already do. Indexing them exposed
+  three places that treated "any type kind" as "a type you can hang
+  members or impls on", each now excludes a Rust alias: the owner
+  rule's gate (an alias's members live under the aliased type), `impl
+  X for Y`'s supertype (zed's `impl ActionHandler for ..`, accesskit's
+  trait, resolved to `ui`'s unrelated `type ActionHandler = Box<dyn
+  Fn(..)>`), cross-file impl placement (`impl<T> TideResultExt for
+  tide::Result<T>` landed on collab's own `pub type Result<..>`), and
+  the typed-parameter gate for generic containers (`type Result<T>`
+  is the foreign container under a local name). Net heritage change on
+  zed: +1, a same-file `impl Dimension for TabStopCount` that is
+  literally what the source says.
+
+## [0.43.63] — 2026-09-18
+
+The rest of round 31's open list, from the design in
+`test-repos/reports/31-tokentest-7repo-post04355/FIX-PLAN-remaining.md`.
+Implemented as three parallel work packages, then integrated and
+re-verified on zed, cline and claude-code by diffing edge sets against
+the previous maps (`scripts/map_edge_diff.py`, new). That review
+changed three of the packages' own rules; each is noted below.
+
+### Fixed
+- **`use localmod::X` resolves to the local module, not a same-named
+  workspace crate** (zed F12). Rust 2018 resolves a bare first segment
+  against local scope first; dekko went straight to the crate table.
+  zed: 26 impossible module edges removed, 340 correct ones added, and
+  `deps --cycles`' headline cycle shrank from **100 files across 12
+  crates to 38 files in 1 crate**. The 100-file cycle was an artifact.
+- **A Rust `impl X for Y` can only name a trait** (zed F8). Heritage
+  candidates were filtered to "any type kind"; a same-named struct is
+  not a legal target. zed `heritage_ambiguous` 86 → 32; `Component`
+  subtypes 7 → 66 of 66, matching grep. All 30 lost edges targeted a
+  struct.
+- **`impl Trait for X` in a different file from `struct X` gets its
+  edge** (zed F2). The extractor dropped the clause when the type
+  wasn't in the same file; it now emits it with a `subtype_name`, and
+  the resolver places it within the same crate (exactly one match, or
+  it is counted as unplaced, never guessed). zed +49 heritage edges,
+  0 lost. `map.json` gains `heritage_unplaced_subtype_count`.
+- **The receiver-type guess no longer reads a generic *argument* as
+  the receiver's type** (zed F7). `rows: &BTreeMap<DisplayRow, u8>`
+  then `rows.get(..)` resolved to `DisplayRow.get`. Transparent
+  wrappers (`Box`/`Rc`/`Arc`/`Ref`, `Optional`, `T | undefined`) still
+  pass through; the chain stops at the first opaque type. zed: 138
+  guessed edges removed. *Integration review* found the package's
+  cross-crate guard also disproved correct edges and fixed it: an
+  explicit `use text::BufferSnapshot` or a `text::BufferSnapshot`
+  annotation now outranks "this crate defines one too", and a
+  *private* same-named struct elsewhere in the crate no longer counts
+  as in scope (45 correct zed edges recovered). It also found the rule
+  breaking TypeScript inline object types: `input: { bot: Chat;
+  client: HubSessionClient }` stopped at `Chat`, dropping 9 correct
+  edges on cline. The receiver's own field (`input.client`) now picks
+  the type.
+- **A Rust dot-call can never reach a free function** (zed F11:
+  `.px(..)` → `fn px`, `x.clone()` → a test module's `fn clone`), and
+  the std-method denylist gained the iterator/`Option` adaptor names
+  that were resolving to repo symbols (zed F9: `.flatten()` →
+  `Edit.flatten`, 454 callers; `.chain()` 217). zed: 860 wrong edges
+  removed. *Integration review* turned the dot-call rule from a
+  candidate pre-filter into a veto on the result: pre-filtering
+  removed a free `fn or`, left `EnvVar.or` as the lone survivor, and
+  137 `Option::or` calls newly resolved to it. A veto can only remove
+  an edge. The widened denylist also stopped `Promise.all(..)`
+  resolving to a repo function named `all` (196 wrong edges on
+  claude-code).
+- **`sanity --group-by-file` groups the full bucket, then applies
+  `--limit` to the groups** (zed F10). It used to group whatever rows
+  survived truncation, hiding exactly the clustering it exists to show.
+  `docs/cli.md` had documented that as intended; corrected.
+- `sanity` recognizes ` * ...` JSDoc/Javadoc continuation lines as
+  comments, only when a bounded backward scan finds an unclosed `/*`
+  (a wrapped `* x` multiplication line must not match).
+- `ambiguous`: the "path+qualname alone can't disambiguate" hint no
+  longer prints under a single candidate (zed F5).
+- MCP `outline` on a directory capped its rows but forwarded one
+  sparse-file note per file uncapped: ~59K tokens on claude-code's
+  `src/`, now ~3.6K with the omitted count disclosed. `outline` also
+  follows the budget-governs-alone rule from 0.43.59.
+
+### Performance
+- **Incremental `dekko map` no longer pays full price for adding,
+  removing, renaming or re-signing a function.** The round-30 gate
+  re-resolved the whole repo on any symbol-set change (tensorflow:
+  41s for a body edit, 223-291s for adding or removing one function).
+  It is now a name delta: an unchanged file is re-resolved only if one
+  of its recorded calls names a changed symbol. Any change to a *type*
+  still takes the full path, because receiver- and parameter-type
+  lookups consult the index for type kinds only, and excluding type
+  deltas removes that whole class of question rather than answering
+  it. An audit of every index read the ladder makes found two the
+  design had missed, both closed: an added constructor is invisible to
+  name scanning (callers call the class), and an aliased import
+  resolves under a different name than the call's. Parity (incremental
+  `map.json` identical to `--full`) is tested for add / remove /
+  rename / re-sign / add-method / add-struct, and held live on
+  spring-boot and cline, including an `export`-flag flip that changes
+  workspace-package narrowing in *other* files.
+
+### Added
+- `scripts/map_edge_diff.py`: compares two `map.json` files by
+  `(caller, callee)` pairs. Raw section equality is useless because
+  ids are interned ints that shift with the symbol table.
+
+### Known limits
+- `Default::default()` / `Vec::default()` and calls on
+  macro-generated types still take a same-file `default` (~35 edges on
+  zed). Fixing it safely needs Rust `type` aliases indexed first
+  (designed as A6, not implemented).
+- The std-method denylist is not language-gated. That is what fixed
+  `Promise.all`, and it only ever suppresses a single-candidate guess
+  with no structural evidence, but a repo method named `find`/`count`
+  called on an untyped receiver now reads as external.
+- `heritage_unplaced_subtype_count` is in `map.json` only; no query
+  output discloses it yet.
+
+## [0.43.62] — 2026-09-18
+
+A regression 0.43.61 exposed, caught the same day by the zed coverage
+follow-up's A/B against the previous build (finding F6 in
+`test-repos/reports/31-tokentest-7repo-post04355/coverage-followup/zed.md`).
+
+### Fixed
+- **A Rust `Type::name(..)` path can only resolve to a member of
+  `Type`** (or a default method of a trait). The ladder used an
+  explicit type receiver as *positive* evidence only: exactly one
+  `Type.name` won, and anything else fell through to the generic
+  ladder with the full candidate list. So `Point::default()` where
+  `Default` is derived (no `Point.default` symbol exists) took the
+  file's only other `default`, `ScrollHandle.default`. 0.43.61 made
+  this visible by no longer short-circuiting `crate::`-imported
+  receivers to `external`; the missing rule was older than that. Now
+  candidates are narrowed to `Type`'s own members, which outrank trait
+  defaults, with the written argument count breaking ties between an
+  inherent `fn zero()` and a trait impl's `fn zero(_cx)`. Nothing left
+  means no plausible repo target: `external`. A free function, an
+  unrelated struct (`Enum::Variant(..)` landing on a same-named
+  struct), or another type's method can no longer be chosen.
+  zed vs. 0.43.61: **952 call edges removed, 3,612 added**. Every
+  removed edge was checked mechanically against its source line: 950
+  name a different receiver type than the resolved owner, and the
+  other 2 moved to the right crate's `Key.new`. Of the added edges,
+  2,226 have receiver == owner and 1,169 are trait default/UFCS
+  methods (`TitleBarSettings::get_global(cx)` → `Settings.get_global`);
+  zero name a mismatched non-trait owner.
+- **`use crate::Foo;` prefers the importing file's own crate** when
+  the repo has two `Foo`s. `Foo::build()` had landed on an unrelated
+  crate that isn't even a dependency. Zero in-crate candidates (a
+  crate root re-exporting another crate's type, e.g. `editor`'s `pub
+  use multi_buffer::MultiBuffer;`) is no evidence and changes nothing.
+  Applies to bare imported names and pure `Type::name` paths only.
+
+Three regressions in these fixes themselves were caught by
+re-mapping zed before any unit test existed, and each is now a test:
+`Point::zero()` drifting to a same-file trait impl, a UFCS
+`RangeExt::overlaps(&a, &b)` drifting to a rival trait whose arity
+fit the explicit `self`, and `Store::global(cx).read(cx)` landing on
+the crate's one free `fn read`.
+
+### Known limits (found, not fixed)
+- `Default::default()`, `Vec::default()`, `FxHashMap::default()` and
+  calls on macro-generated types still take a same-file `default`
+  when one exists (~35 edges on zed). The receiver names no in-repo
+  type, and Rust `type` aliases aren't indexed, so "unknown type ⇒
+  external" would also drop real `Alias::new()` edges. Needs alias
+  indexing first.
+
+## [0.43.61] — 2026-09-18
+
+Found by round 31's zed coverage follow-up
+(`test-repos/reports/31-tokentest-7repo-post04355/coverage-followup/zed.md`),
+which was asked to attack 0.43.59's heritage tiebreak and did.
+
+### Fixed
+- **Rust `use crate::…` / `super::…` / `self::…` imports are in-repo
+  by definition.** `use crate::{AgentTool};` names a trait the crate
+  root merely re-exports (`pub use thread::*;`). The "does this import
+  point into the repo" test compares the source's segments against
+  file stems, drops `crate` itself, and was left with `AgentTool`,
+  which is no file's stem. So the clause was filed `external`, and
+  because external is not ambiguous, the row vanished from `query
+  subtypes` with no hint: **`AgentTool` showed 11 of 35
+  implementors.** A file reaching the same trait through a glob
+  (`use crate::prelude::*;`) resolved fine, which was the tell. The
+  same short-circuit hit receiver-qualified calls (`use crate::{Vim};`
+  then `Vim::take_forced_motion(cx)`). zed: **+213 heritage edges
+  (`AgentTool` 35 of 35), +2,388 resolved call edges, 0 lost in
+  either**; `heritage_external` 2,503 → 2,289. Same defect class as
+  0.43.57's workspace-package fix, in a different language.
+- **0.43.59's hintless fixture-decoy tiebreak no longer resolves code
+  that lives beside the fixture.** It pointed 7 clauses in zed's
+  dylint UI tests (`tooling/lints/ui/*.rs`) at the real `gpui` trait.
+  Their paths carry no `test_fixture` marker, but they are compiled
+  with `--extern=gpui=<fixture rlib>`, so their `use gpui::*;` *is*
+  the stand-in. They were honestly ambiguous before 0.43.59, so this
+  was a regression that release introduced. The build flag is
+  unknowable statically; shared directory depth is a usable proxy. A
+  clause whose file shares a deeper directory prefix with a fixture
+  candidate than with the real one now stays ambiguous. zed after
+  both changes in this round: `Render` 349 resolved, 9 ambiguous (all
+  9 beside the fixture), versus 174 / 184 before 0.43.59. **This
+  corrects 0.43.59's "355 of 358" figure**, 6 of which were these
+  wrong edges.
+
+### Known limits (found, not fixed)
+- An `impl Trait for X` block in a *different file* from `struct X`
+  (`text_finder/render.rs` implementing for a struct in
+  `text_finder.rs`) produces no heritage edge at all: Rust heritage
+  resolves its subtype side by same-file name lookup. 3 of zed's 396
+  `impl Render for` blocks. Tracked in the round-31 OPEN-ISSUES.
+
+## [0.43.60] — 2026-09-18
+
+Found by round 31's tensorflow coverage follow-up
+(`test-repos/reports/31-tokentest-7repo-post04355/coverage-followup/tensorflow.md`).
+
+### Fixed
+- **Shell function calls are extracted, so bash functions stop
+  reading as dead code.** tree-sitter-bash's call node is `command`,
+  which the generic (Tier-2) extractor's call heuristic never matched.
+  Not one call was extracted from any `.sh` file, so every bash
+  function had fan-in 0, `query callers` came back empty, and `dekko
+  unused` listed live functions with no caveat: tensorflow's `tfrun()`
+  (27 call sites), and on claude-buddy 5 of 5 flagged bash functions
+  were false positives (`pick_reaction` alone has 27 call sites).
+  `command` nodes are now collected, including inside `$(...)` and at
+  script top level. Only an identifier-shaped command name is kept: a
+  path, an expansion or a flag in command position (`./build.sh`,
+  `"$TOOL"`) can never be a call to a repo-defined function, and
+  keeping them would add an `external` entry per script path.
+  Requires the `[all]` extra, like all shell parsing. Re-map to pick
+  it up (the version bump invalidates the extraction cache).
+- **`dekko unused` no longer judges a language it extracted no calls
+  from.** The bash bug was one instance of a general blind spot: ~55
+  generic-grammar languages share the same node-type heuristic, and
+  wherever it misses a grammar's call node, every function in that
+  language is "unused" by construction. `unused` now skips symbols in
+  any generic-tier language with zero extracted calls repo-wide and
+  says so: `note: N symbol(s) not evaluated (lang N) -- dekko
+  extracted no calls from any file in that language here ...`, also
+  on the "no unused symbols" path and in `--json` `caveats`. Tier-1
+  languages are never skipped: each has a dedicated call query, so a
+  Tier-1 file with no calls really has none.
+- MCP: a required argument sent with the wrong type reports
+  `argument 'symbol' must be a string, got int` instead of `missing
+  required argument`, which sent callers hunting for a key they had
+  already supplied.
+
+## [0.43.59] — 2026-09-18
+
+Round 31 close-out: the remaining P2/P3 items from
+`test-repos/reports/31-tokentest-7repo-post04355/OPEN-ISSUES.md`.
+Two of these change which bucket a call or heritage clause lands in;
+**no existing resolved call edge changes** (verified identical on
+cline, claude-code and zed).
+
+### Fixed
+- **A call whose only same-named repo symbol is rejected is `external`,
+  not `ambiguous`** (round 31 cline.md §4.2, the `at` entry).
+  `arr.at(-1)` against the repo's only `at`, a local two-parameter
+  `at(r, c)`, is correctly refused by the arity guard. But it was then
+  filed as ambiguous, against a candidate list of one. A collision
+  needs two live candidates; this call has none. It showed up as the
+  self-contradictory `ambiguous --by name` row "86 sites, avg 1.0
+  candidates" and made `query symbol at` claim "+86 additional call
+  site(s) resolved ambiguously" about calls that provably cannot be
+  its own. Same defect class, and same remedy, as the round-22
+  `_NOISE` split. cline: 542 of 6,271 ambiguous entries had exactly
+  one candidate, now 20; claude-code: 990 → 0. A sample of 14 was
+  checked by hand: all 14 rejections were right
+  (`Buffer.byteLength(s, "utf8")`, `vscode.commands.executeCommand`,
+  a zero-arg call to a local closure). The 20 left on cline are the
+  cross-*language* sole-candidate case, which stays ambiguous by an
+  earlier, deliberate design decision.
+- **Rust heritage: the fixture-decoy tiebreak no longer needs the file
+  to name the crate** (round 31 zed.md / OPEN-ISSUES P2.1). On zed's
+  motivating example only 174 of 358 `impl Render for` clauses
+  resolved. All 184 ambiguous ones had the *identical* two candidates,
+  the real `crates/gpui/src/element.rs::Render` and the
+  `tooling/lints/test_fixture/gpui` stand-in, and reached `Render`
+  through a glob (`use ui::prelude::*;`) or a re-exporting crate
+  (`use ui::Render;`), so there was never a crate name to build the
+  round-24 hint from. The same convention now applies as a last
+  resort: real code doesn't implement a test fixture's stand-in
+  trait. Exactly one non-synthetic survivor is still required, two
+  real crates sharing a name stay ambiguous, and every edge resolved
+  this way is counted in the already-disclosed
+  `heritage_synthetic_tiebreak_count`. A clause written *inside* a
+  fixture tree is left ambiguous: live-testing caught 8 edges from
+  zed's `test_fixture/render_consumer` wrongly pointed at the real
+  trait before that guard existed. zed: **+306 heritage edges, 0
+  lost, heritage-ambiguous 384 → 78; `Render` 355 of 358 resolved**
+  (the other 3 are that fixture consumer).
+- **`dekko map` no longer counts unparsed files as mapped** (round 31
+  claude-buddy.md S2). Without the `[all]` extra, a repo's bash files
+  yield no symbols, yet the summary read `mapped 57 files (... bash
+  12 ...)`. The top line now counts and lists only what was parsed,
+  and a new line names the unparsed languages with the fix:
+  `NOT parsed (no symbols, no edges): bash 12 -- grammar not
+  installed; ... pip install 'dekko[all]'`. The existing `skipped: no
+  grammar installed N` line is unchanged.
+
+### Changed
+- **`query --budget N` with no `--limit` lets the budget govern**
+  (round 31 claude-code.md). `--limit` (rows, default 50) and
+  `--budget` (tokens) are independent caps, and both bound by default:
+  `query callers getGlobalConfig --budget 20000` returned 51 of 203
+  rows. An explicit budget without an explicit limit now lifts the row
+  default; an explicit `--limit` is always honored; neither flag keeps
+  the 50-row default. The MCP query-backed tools follow the same rule
+  for an explicit `budget` argument.
+- **`query supertypes`/`subtypes` pick the one type among an
+  ambiguous name's candidates** (round 31 spring-boot.md). A bare name
+  shared by a class and its own constructors isn't ambiguous for a
+  heritage query, since only the type is a valid target. The choice is
+  printed to stderr. Two or more type candidates stay ambiguous, and
+  every other action is unchanged.
+- **`dekko unused` leads with a warning when most of the list is
+  dispatch candidates** (round 31 spring-boot.md: 2,323 of 3,281,
+  71%). The existing caveat fired correctly, but as the last line
+  under thousands of rows, on exactly the interface-heavy repo shape
+  where the list is mostly *not* dead code. At ≥50% (and ≥20
+  candidates) a `warning:` now prints directly under the header;
+  `--json` carries it as `dispatch_majority_warning`.
+
+## [0.43.58] — 2026-09-18
+
+The rest of round 31's P1 list, plus one P3 that turned out to share
+a classifier with it. Analysis:
+`test-repos/reports/31-tokentest-7repo-post04355/P1.1-workspace-package-imports.md`.
+
+### Fixed
+- **`dekko deps` / the module graph resolve workspace-package imports
+  to a source file** (round 31 P1.1b, the module-graph half of
+  0.43.57's fix). `import ... from "@cline/llms"` was still listed
+  under `external`. A declared workspace member's bare specifier now
+  resolves to the package's *source* entry: the manifest's `exports`
+  (subpaths and single-`*` patterns included) and
+  `source`/`types`/`module`/`main` fields, each mapped from build
+  output back to source (`./dist/index.js` → `src/index.ts`; the
+  `dist/` tree is gitignored and never in the map), then the
+  `src/<subpath>` / `<subpath>` conventions. General `exports`
+  conditions are tried before environment-specific ones (`browser`,
+  `worker`, `react-server`, ...) regardless of manifest order, so a
+  manifest that lists `browser` first doesn't send every importer to
+  `index.browser.ts`. An entry that can't be found stays `external`
+  rather than guessing. On cline: **+347 module edges, −347
+  externals, zero `@cline/*` specifiers left external**; call and
+  heritage graphs untouched.
+- **A relative import of a dotted filename keeps its import hint**
+  (round 31 cline.md §4.1 Bug B). Import sources are split on `.` as
+  well as `/` (right for `pkg.mod.name`), so the stem of
+  `catalog.generated-access.ts` could never appear among the segments
+  and `import { x } from "./catalog.generated-access"` told the
+  resolver nothing. A name defined twice in the repo then went
+  ambiguous even though the file's own import was unambiguous, and the
+  target read as fan-in 0. Dotted stems now get a component-wise
+  comparison (extensionless, ESM `.js`-for-`.ts`, and C/C++
+  `foo.pb.h` spellings); the two external-import guards use it too.
+  Gated on the stem containing a dot, so undotted files match exactly
+  as before. cline's reported case: fan-in 0 → 7, `sanity` matches
+  0 → 9. This is why three other repos couldn't reproduce it: it takes
+  a dotted non-test source file *and* a colliding name. It is **not**
+  the same root cause as P1.1, contrary to the round-31 guess.
+- **`dekko sanity` recognizes multi-line `export { ... }` lists and
+  packed specifier lines as import statements.** Two misclassifications
+  with one cause: the multi-line member check only accepted a line
+  that was exactly one bare `name,` under an `import {` opener. A
+  barrel's re-export list (`export {` + `getGeneratedModelsForProvider,`)
+  fell through to "generic name in a dense repo", which told an agent
+  a specific 30-character identifier was a common word (the mislabel
+  half of cline Bug B). And a line packing several specifiers
+  (`searchBuddy, renderBuddy, SPECIES,` / `type Species, type Rarity,`)
+  fell through to "unexplained miss" (round 31 claude-buddy C1 /
+  OPEN-ISSUES P3.6, which two one-name-per-line repos could not
+  reproduce, for exactly that reason). The opener now also accepts
+  `export {`, `export type {` and `import Default, {`; the member
+  line is any pure specifier list naming the symbol as a whole word.
+  Object-literal shorthand and call-shaped lines still don't match.
+
+## [0.43.57] — 2026-09-18
+
+Round 31 P1.1. Unlike 0.43.56's two disclosure fixes, this one
+**changes what dekko resolves**, on JS/TS monorepos that declare
+workspaces. Every other repo is byte-identical. Analysis and numbers:
+`test-repos/reports/31-tokentest-7repo-post04355/P1.1-workspace-package-imports.md`.
+
+### Fixed
+- **Workspace-package imports are no longer mistaken for npm
+  dependencies** (round 31 cline.md §4.1 Bug A). `import type {
+  ApiHandler } from "@cline/llms"` names a *package*, not a file, so
+  the resolver's "does this import point into the repo" test, which
+  only ever compared the specifier's segments against repo file
+  stems, called it external. The call or heritage clause landed in
+  `external` before the candidate ladder ran. Reported as one missing
+  `query subtypes ApiHandler` row; measured on cline it was 2,610
+  import bindings across 690 files. dekko now reads the repo's
+  declared workspaces (npm/yarn/bun `workspaces`, array or
+  `{"packages": [...]}`; `pnpm-workspace.yaml`; `**` and `!negation`
+  globs) into a package-name → directory table, treats a matching
+  import as in-repo, and narrows a colliding name to the candidates
+  living under the imported package (exported ones preferred). Zero
+  in-package candidates means a cross-package re-export, which is no
+  evidence, so the rest of the ladder runs untouched. Only *declared
+  members* count: cline ships a stub package literally named `vscode`
+  that is no workspace member and must not capture real `from
+  "vscode"` imports. On cline: **+975 resolved call edges, +14
+  heritage edges, −882 false externals**.
+- **12 confidently wrong edges on cline now point at the right
+  package.** The old stem test could also pass by coincidence:
+  `import { ClineAccountService } from "@cline/core"` "resolved" into
+  `apps/vscode/.../ClineAccountService.ts` purely because that file's
+  stem equals the imported name. Package-scoped narrowing now runs
+  before the stem hints, so the package the name was actually
+  imported from wins.
+
+### Changed
+- `.dekko/resolved-calls.json.gz` carries a `workspace_hash`. A
+  renamed `package.json` or edited `workspaces` glob changes which
+  imports count as in-repo without touching any source file, which
+  the incremental call-resolution cache's path-set and symbol gates
+  can't see. A mismatch is a cache miss (one full re-resolve). Caches
+  written by earlier builds were already invalidated by the version
+  bump.
+
+### Known limits
+- The module graph (`dekko deps`, `query importers`) still reports a
+  workspace package as `external`. Entry-point resolution
+  (`exports`/`main` point at `dist/`, not source) is a separate
+  change, tracked as round-31 P1.1b.
+- A receiver-qualified call through an imported namespace
+  (`Llms.getProvider()`) is un-blocked from `external` but not
+  narrowed: the namespace is routinely re-exported from another
+  package, so its import says nothing about where the member lives.
+
 ## [0.43.56] — 2026-09-18
 
 Round 31's two cross-language disclosure defects, both found by the

@@ -311,14 +311,20 @@ def test_rust_multiple_supertrait_bounds_lifetime_filtered(
     assert all(h.relation == "extends" for h in by_subtype["a.rs::Sub"])
 
 
-def test_rust_impl_for_type_defined_elsewhere_is_skipped(
+def test_rust_impl_for_type_defined_elsewhere_carries_subtype_name(
     tmp_path: Path,
 ) -> None:
     # `impl Bar for External {}` where `External` is only imported,
     # not defined in this file — there's no same-file symbol to attach
-    # a `RawHeritage` to (`subtype_id` is never `None`), so the impl
-    # block is silently skipped rather than guessed at. Cross-file
-    # `impl` blocks are a real, documented limitation, not a bug.
+    # a `RawHeritage.subtype_id` to. Round 31 zed coverage pass F2/A3:
+    # a cross-file `impl` block is ordinary Rust layout (a sibling
+    # `render.rs` implementing a trait for a type defined in the
+    # module's own file), not a rare shape worth silently dropping at
+    # extraction — the clause is emitted anyway, with `subtype_id=""`
+    # and `subtype_name` set to the written type name, so
+    # `resolver.resolve_heritage` can resolve the subject itself
+    # repo-wide (scoped to the clause's own crate) before this
+    # single-file view of the world ever gets a say.
     spec = languages.spec_for_path("a.rs")
     assert spec is not None
     (tmp_path / "a.rs").write_text(
@@ -329,7 +335,10 @@ def test_rust_impl_for_type_defined_elsewhere_is_skipped(
         "impl Bar for External {}\n"
     )
     fm = extract_file(tmp_path, "a.rs", spec)
-    assert fm.heritage == []
+    [h] = fm.heritage
+    assert h.subtype_id == ""
+    assert h.subtype_name == "External"
+    assert h.name == "Bar"
 
 
 def test_rust_impl_for_ambiguous_same_file_name_is_skipped(

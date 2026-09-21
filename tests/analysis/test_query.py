@@ -1220,6 +1220,63 @@ def test_overload_ambiguous_report_hints_line_qualifier(
     assert "Foo.java:Foo.run:2" in err
 
 
+def test_render_candidates_no_hint_for_single_candidate() -> None:
+    """Round 31 zed.md F5: ``render_candidates``'s overload-set check
+    (``len({(path, qualname) for s in candidates}) == 1``) is trivially
+    true for a SINGLE candidate too -- a one-element set still has
+    length 1 -- so the "path+qualname alone can't disambiguate these"
+    hint fired under a row with nothing to disambiguate. Reproduced on
+    zed: ``ambiguous --name print`` listed Python's builtin ``print()``
+    against exactly one same-named Rust method (the cross-language
+    sole-candidate case, kept ``ambiguous`` on purpose, F4) and printed
+    the nonsense hint under it. The hint is only meaningful for an
+    actual 2+-candidate overload set; this is the shared function both
+    ``query.report_unresolved`` and ``ambiguous.py``'s ``--name``
+    drill-down render through, so it is exercised directly here rather
+    than through a real cross-language collision fixture."""
+    sole = Symbol(
+        id="bench_context.rs::BenchReport.print",
+        name="print",
+        qualname="BenchReport.print",
+        kind="method",
+        path="bench_context.rs",
+        language="rust",
+        start_line=144,
+        end_line=146,
+    )
+    rows = "\n".join(query.render_candidates([sole]))
+    assert "can't disambiguate" not in rows
+
+
+def test_render_candidates_disambiguate_hint_for_real_overload_set() -> None:
+    """Sibling to the single-candidate test above: 2+ candidates
+    sharing (path, qualname) is the genuine overload-set case, and the
+    hint must still fire for it -- the fix adds a candidate-count
+    guard, it doesn't remove the check."""
+    first = Symbol(
+        id="Foo.java::Foo.run#1",
+        name="run",
+        qualname="Foo.run",
+        kind="method",
+        path="Foo.java",
+        language="java",
+        start_line=2,
+        end_line=3,
+    )
+    second = Symbol(
+        id="Foo.java::Foo.run#2",
+        name="run",
+        qualname="Foo.run",
+        kind="method",
+        path="Foo.java",
+        language="java",
+        start_line=5,
+        end_line=6,
+    )
+    rows = "\n".join(query.render_candidates([first, second]))
+    assert "can't disambiguate" in rows
+
+
 def test_truncation_hint_not_duplicated_for_qualified_overload_target(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

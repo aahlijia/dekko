@@ -7,6 +7,7 @@ import pytest
 
 from dekko.integrations import cli
 from dekko.analysis import unused
+from dekko.render import mapfile
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import ExternalCall, Import, Param, Symbol
 
@@ -1507,3 +1508,97 @@ def test_unused_dispatch_caveat_absent_for_unrelated_dead_code(
     assert code == 1
     doc = json.loads(capsys.readouterr().out)
     assert doc["dispatch_caveat"] is None
+
+
+# --- _dispatch_majority_warning (round 31 spring-boot.md, P3.1) -------
+
+
+def test_dispatch_majority_warning_fires_above_half() -> None:
+    warning = unused._dispatch_majority_warning(2323, 3281)
+    assert warning is not None
+    assert warning.startswith("warning: 2323 of 3281 (71%)")
+    assert "NOT dead code" in warning
+
+
+def test_dispatch_majority_warning_quiet_below_ratio_or_floor() -> None:
+    assert unused._dispatch_majority_warning(40, 100) is None
+    # 2 of 3 is a majority, but far too small a sample to shout about.
+    assert unused._dispatch_majority_warning(2, 3) is None
+    assert unused._dispatch_majority_warning(0, 0) is None
+
+
+def test_dispatch_majority_warning_prints_above_the_rows(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    found = [_sym(f"f{i}", "a.py") for i in range(3)]
+    unused._print_text(
+        found, "callables", None, 50, None, "note: x", "warning: y"
+    )
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1] == "warning: y"
+    assert lines.index("note: x") > lines.index("warning: y") + 3
+
+
+# --- languages_without_calls (round 31 tensorflow coverage pass) -----
+
+
+def test_unused_does_not_judge_a_language_with_no_extracted_calls() -> None:
+    # Python has call evidence (an external call is enough); "bash"
+    # has symbols but not one call of any kind, so fan-in 0 there
+    # proves nothing.
+    py_dead = _sym("dead", "a.py")
+    py_caller = _sym("main", "a.py")
+    sh_fn = _sym("tfrun", "run.sh", language="bash")
+    index = _index(
+        [py_dead, py_caller, sh_fn],
+        externals_by_name={
+            "print": [ExternalCall(caller=py_caller.id, callee="print")]
+        },
+    )
+    assert unused.languages_without_calls(index) == {"bash"}
+    names = {s.name for s in unused.find_unused(index, ())}
+    assert "tfrun" not in names
+    assert "dead" in names
+    caveat = unused._blind_language_caveat(index, "callables")
+    assert caveat is not None
+    assert caveat.startswith("note: 1 symbol(s) not evaluated (bash 1)")
+
+
+def test_no_blind_language_caveat_when_every_language_has_calls() -> None:
+    caller = _sym("main", "a.py")
+    index = _index(
+        [caller],
+        externals_by_name={
+            "print": [ExternalCall(caller=caller.id, callee="print")]
+        },
+    )
+    assert unused.languages_without_calls(index) == set()
+    assert unused._blind_language_caveat(index, "callables") is None
+
+
+def test_unused_status_agrees_with_find_unused_for_every_symbol(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # The drift guard. `sanity --unused` answers "was this flagged?"
+    # through `unused_status`; round 32's bug was that it used to
+    # answer from a private, different notion of "unused".
+    root = make_mapped_repo(
+        {
+            "a.py": (
+                "class Config:\n    def load(self):\n        return 1\n\n\n"
+                "def _uses(c: Config):\n    return c.load()\n\n\n"
+                "def _dead():\n    return 2\n\n\n"
+                "def main():\n    return _uses(Config())\n"
+            ),
+            "tests/test_a.py": "def test_x():\n    return 1\n",
+            "run.sh": "helper() {\n  echo hi\n}\n",
+        }
+    )
+    index = mapfile.load_map(root)
+    for globs in ((), ("a.py",)):
+        flagged = {s.id for s in unused.find_unused(index, globs, "all")}
+        assert flagged or globs, "fixture must flag something"
+        for sym in index.symbols_by_id.values():
+            status = unused.unused_status(index, sym, globs)
+            assert status.flagged == (sym.id in flagged), sym.id
+            assert (status.reason == unused.STATUS_FLAGGED) == status.flagged

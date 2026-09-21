@@ -922,3 +922,112 @@ def test_cpp_multiple_inheritance_resolves(tmp_path: Path) -> None:
         "shapes.cpp::Base2",
     ]
     assert all(e.relation == "extends" for e in graph.heritage)
+
+
+# Round 31 zed coverage pass F2/A3: an ``impl Trait for Type`` block
+# in a different file than ``struct Type`` itself -- an ordinary Rust
+# layout (a sibling ``render.rs`` implementing a trait for a type
+# defined in the module's own file), not a rare one. Previously
+# dropped at extraction (no same-file symbol to attach the clause to)
+# before the resolver ever saw it.
+
+
+def test_rust_impl_trait_resolves_when_struct_in_different_file(
+    tmp_path: Path,
+) -> None:
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "crates" / "search" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "search" / "src" / "text_finder.rs").write_text(
+        "pub struct TextFinder;\n"
+    )
+    (tmp_path / "crates" / "search" / "src" / "text_finder").mkdir(
+        parents=True
+    )
+    (
+        tmp_path / "crates" / "search" / "src" / "text_finder" / "render.rs"
+    ).write_text(
+        "use super::TextFinder;\n"
+        "use gpui::Render;\n"
+        "\n"
+        "impl Render for TextFinder {}\n"
+    )
+    (tmp_path / "crates" / "gpui" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "gpui" / "src" / "gpui.rs").write_text(
+        "pub trait Render {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    rel_paths = [
+        "crates/search/src/text_finder.rs",
+        "crates/search/src/text_finder/render.rs",
+        "crates/gpui/src/gpui.rs",
+    ]
+    files = [extract_file(tmp_path, p, spec) for p in rel_paths]
+    graph = resolve(files)
+    assert graph.heritage_out[
+        "crates/search/src/text_finder.rs::TextFinder"
+    ] == ["crates/gpui/src/gpui.rs::Render"]
+    assert graph.heritage[0].relation == "impl"
+    assert graph.heritage_ambiguous == []
+    assert graph.heritage_unplaced_subtype_count == 0
+
+
+def test_rust_impl_trait_cross_file_struct_scoped_to_own_crate(
+    tmp_path: Path,
+) -> None:
+    # Two same-named structs across two crates -- the subject-recovery
+    # step must pick the one in the impl block's own crate, not guess
+    # repo-wide.
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "crates" / "a" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "a" / "src" / "widget.rs").write_text(
+        "pub struct Widget;\n"
+    )
+    (tmp_path / "crates" / "a" / "src" / "render.rs").write_text(
+        "use crate::widget::Widget;\n"
+        "pub trait Render {}\n"
+        "impl Render for Widget {}\n"
+    )
+    (tmp_path / "crates" / "b" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "b" / "src" / "widget.rs").write_text(
+        "pub struct Widget;\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    rel_paths = [
+        "crates/a/src/widget.rs",
+        "crates/a/src/render.rs",
+        "crates/b/src/widget.rs",
+    ]
+    files = [extract_file(tmp_path, p, spec) for p in rel_paths]
+    graph = resolve(files)
+    assert graph.heritage_out["crates/a/src/widget.rs::Widget"] == [
+        "crates/a/src/render.rs::Render"
+    ]
+    assert "crates/b/src/widget.rs::Widget" not in graph.heritage_out
+
+
+def test_rust_impl_trait_cross_file_struct_unplaceable_is_dropped(
+    tmp_path: Path,
+) -> None:
+    # Zero same-crate candidates for the written type name -- dropped
+    # and counted, never guessed and never reaching heritage_out with
+    # an empty subtype id.
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "crates" / "a" / "src").mkdir(parents=True)
+    (tmp_path / "crates" / "a" / "src" / "render.rs").write_text(
+        "pub trait Render {}\nimpl Render for Ghost {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    files = [extract_file(tmp_path, "crates/a/src/render.rs", spec)]
+    graph = resolve(files)
+    assert graph.heritage_out == {}
+    assert graph.heritage_ambiguous == []
+    assert graph.heritage_unplaced_subtype_count == 1

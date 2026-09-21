@@ -2,6 +2,8 @@
 
 import io
 import json
+import os
+import sys
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
@@ -1106,6 +1108,74 @@ def test_outline_tool_defaults_budget(
     assert seen["budget"] == 9000
 
 
+def test_outline_tool_limit_budget_precedence(
+    monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
+) -> None:
+    # Round 31 tensorflow.md Observation 4.3, the limit/budget half of
+    # the fix: mirrors _limit_arg's precedence (query.effective_limit)
+    # onto outline's own row-count default (200), not the relation
+    # tools' (50) -- neither default is being changed, only which one
+    # wins when the caller gives an explicit budget but no limit.
+    ctx = _ctx(make_mapped_repo(SRC))
+    seen: dict = {}
+
+    def fake_run(index, target, *, root, budget, limit, as_json):  # noqa: ANN001, ANN202
+        seen["limit"] = limit
+        print("outline")
+        return 0
+
+    monkeypatch.setattr(server.outline_mod, "run", fake_run)
+
+    # Neither given: outline's own 200-row default.
+    assert _call(ctx, "outline", {"target": "a.py"})["isError"] is False
+    assert seen["limit"] == 200
+
+    # Explicit budget alone: budget governs, rows unbounded.
+    assert (
+        _call(ctx, "outline", {"target": "a.py", "budget": 9000})["isError"]
+        is False
+    )
+    assert seen["limit"] == query.NO_ROW_LIMIT
+
+    # Explicit limit always wins, budget or not.
+    assert (
+        _call(
+            ctx,
+            "outline",
+            {"target": "a.py", "budget": 9000, "limit": 5},
+        )["isError"]
+        is False
+    )
+    assert seen["limit"] == 5
+
+
+def test_outline_tool_caps_directory_sparse_notes(
+    monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
+) -> None:
+    # Round 31 tensorflow.md Observation 4.3, the actual measured
+    # regression: outline.py's per-file sparse-file caveat is written
+    # to stderr once per file in the target DIRECTORY, independent of
+    # outline's own row-level --limit/--budget fit -- on claude-code's
+    # 1900-file src/, this alone produced a ~237k-char MCP response.
+    # _with_notes forwards ALL of stderr unconditionally, so the cap
+    # has to happen before that call.
+    ctx = _ctx(make_mapped_repo(SRC))
+
+    def fake_run(index, target, *, root, budget, limit, as_json):  # noqa: ANN001, ANN202
+        print("outline: many-files — 30 files")
+        for i in range(30):
+            print(f"  note: file_{i}.ts — sparse", file=sys.stderr)
+        return 0
+
+    monkeypatch.setattr(server.outline_mod, "run", fake_run)
+    result = _call(ctx, "outline", {"target": "."})
+    assert result["isError"] is False
+    text = result["content"][0]["text"]
+    note_lines = [ln for ln in text.splitlines() if "— sparse" in ln]
+    assert len(note_lines) == server._MAX_OUTLINE_NOTES
+    assert "10 more sparse-file note(s) omitted" in text
+
+
 def test_summary_tool_defaults_budget(
     monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
 ) -> None:
@@ -1171,14 +1241,18 @@ def test_impacted_tests_tool_defaults_budget(
         as_json,  # noqa: ANN001
         limit,  # noqa: ANN001
         budget=None,  # noqa: ANN001
+        jobs=None,  # noqa: ANN001
     ) -> int:
         seen["budget"] = budget
+        seen["jobs"] = jobs
         print("impacted")
         return 0
 
     monkeypatch.setattr(server.affected, "run", fake_run)
     assert _call(ctx, "impacted_tests", {})["isError"] is False
     assert seen["budget"] == server.affected.DEFAULT_BUDGET
+    # Round 31 P4.1: never the function's own sequential default.
+    assert seen["jobs"] == (os.cpu_count() or 1)
 
     assert _call(ctx, "impacted_tests", {"budget": 9000})["isError"] is False
     assert seen["budget"] == 9000
@@ -1592,3 +1666,12 @@ def test_check_ambiguous_tool_schema_has_no_drilldown_params() -> None:
     tool = next(t for t in server.TOOLS if t["name"] == "check_ambiguous")
     props = set(tool["inputSchema"]["properties"])
     assert props == {"top", "budget", "root"}
+
+
+def test_require_distinguishes_wrong_type_from_missing() -> None:
+    with pytest.raises(server.ToolError, match="must be a string, got int"):
+        server._require({"symbol": 42}, "symbol")
+    with pytest.raises(server.ToolError, match="missing required argument"):
+        server._require({}, "symbol")
+    with pytest.raises(server.ToolError, match="missing required argument"):
+        server._require({"symbol": ""}, "symbol")
