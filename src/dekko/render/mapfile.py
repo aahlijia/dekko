@@ -15,12 +15,11 @@ import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
+from dekko import selfcheck
 from dekko.core import walker
 from dekko.classify import is_test_path
-from dekko.core.languages import spec_fingerprint
 from dekko.core.model import (
     CallGraph,
     CatchSite,
@@ -566,8 +565,11 @@ def compute_provenance(
     """
     denom = len(graph.edges) + len(graph.ambiguous)
     return {
-        "tool_version": _pkg_version("dekko"),
-        "spec_hash": spec_fingerprint(),
+        # The *loaded* identity, not a live dist-info read: a
+        # long-lived process must never stamp a version it isn't
+        # running (round 33 Track 1, see ``selfcheck``).
+        "tool_version": selfcheck.loaded_version(),
+        "spec_hash": selfcheck.loaded_spec(),
         "git_commit": _git_commit(root),
         "subpath": subpath,
         "excludes": list(excludes),
@@ -790,6 +792,10 @@ class MapIndex:
             itself changed underneath them" (round-15 plan: a
             ``MAP_DOC_VERSION`` bump alone, with no package version
             bump, would otherwise be invisible to that no-op check).
+        map_stat: ``[mtime_ns, size]`` of the ``map.json`` this index
+            was parsed from, or ``None`` for an index built in memory.
+            Read by ``index_matches_disk`` so a long-lived cache can
+            tell its copy was replaced on disk.
     """
 
     root_label: str
@@ -854,6 +860,11 @@ class MapIndex:
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
     doc_version: int = MAP_DOC_VERSION
+    # ``[mtime_ns, size]`` of the ``map.json`` this index was parsed
+    # from (``load_map`` only; ``None`` for an index built in memory).
+    # Lets a long-lived cache notice the file was replaced on disk --
+    # see ``index_matches_disk``.
+    map_stat: list[int] | None = None
 
     def degree(self, sym_id: str) -> int:
         """Total fan-in + fan-out of a symbol id."""
@@ -1160,6 +1171,16 @@ class Freshness:
         running_spec_hash: The checking process's own computed
             ``languages.spec_fingerprint()``, or ``None`` unless
             ``reason == "version"``.
+        process_outdated: True when a long-lived process found that
+            *it*, not the map, is the out-of-date party (or couldn't
+            prove otherwise) — see ``selfcheck.classify``. Such a
+            process must never regenerate in-process: a consumer that
+            needs a rebuild delegates it to the installed dekko
+            (``repo_ops.regen_map``). Can be True alongside
+            ``fresh=True``: the map on disk was built by the
+            *installed* code and its sources are unchanged, so it is
+            served as-is (round 33 Track 1). Always False in a
+            one-shot CLI process.
     """
 
     fresh: bool
@@ -1173,6 +1194,32 @@ class Freshness:
     running_version: str | None = None
     built_spec_hash: str | None = None
     running_spec_hash: str | None = None
+    process_outdated: bool = False
+
+
+def _same_version_explanation(fresh: Freshness) -> str:
+    """Parenthetical for "spec differs, version string doesn't".
+
+    Until round 33 this always blamed the reader ("this is a
+    long-lived process running older code; restart it"), including
+    when the reader was a fresh CLI process looking at a map an
+    outdated server had just rewritten — the exact opposite of the
+    truth, and the reason two round-33 reports contradicted each other
+    about which spec was current. Now it only says what is proven.
+    """
+    same = f"same version string {fresh.running_version} on both sides"
+    if fresh.process_outdated:
+        return (
+            f" ({same} — this long-lived process is running "
+            "older/different extractor code than what's on disk; "
+            "restart it)"
+        )
+
+    return (
+        f" ({same} — the map was written by a different dekko build: "
+        "a dev rebuild, or an outdated long-lived dekko process "
+        "rewriting it; if this repeats, run `dekko doctor`)"
+    )
 
 
 def describe_version_stale(fresh: Freshness) -> str:
@@ -1221,12 +1268,7 @@ def describe_version_stale(fresh: Freshness) -> str:
             f"this process is running spec {running_hash}"
         )
         if not fresh.version_stale:
-            spec_detail += (
-                f" (same version string {fresh.running_version} on "
-                "both sides — this is a long-lived process running "
-                "older/different extractor code than what's on disk; "
-                "restart it)"
-            )
+            spec_detail += _same_version_explanation(fresh)
         parts.append(spec_detail)
     return f"stale ({which}): " + "; ".join(parts)
 
@@ -1344,6 +1386,12 @@ def load_map(root: Path) -> MapIndex | None:
             the same reason as ``MapFormatTooNewError`` above.
     """
     path = root / _MAP_DIR / "map.json"
+    # Stat *before* the read. If the file is replaced in between, this
+    # records the old signature against the new content and the next
+    # ``index_matches_disk`` check costs one harmless extra reload; the
+    # other order would record the new signature against old content
+    # and serve it forever.
+    map_stat = _stat_sig(path)
     try:
         doc = _json_loads(path.read_bytes())
     except (OSError, ValueError):
@@ -1356,6 +1404,7 @@ def load_map(root: Path) -> MapIndex | None:
         provenance=doc.get("provenance"),
         notes=_load_notes(root),
         doc_version=doc_version,
+        map_stat=map_stat or None,
     )
     for entry in doc.get("files", []):
         fpath = entry["path"]
@@ -1737,6 +1786,35 @@ def _index_env_reads(index: MapIndex, graph: CallGraph) -> None:
         index.env_reads_by_key.setdefault(read.key, []).append(read)
 
 
+def index_matches_disk(root: Path, index: MapIndex) -> bool:
+    """Whether a cached index is still the ``map.json`` on disk.
+
+    ``check_freshness(root, index)`` compares the index's *own*
+    provenance against the source tree. For an index a long-lived
+    process has been holding in memory, that answers "was my copy
+    right when I loaded it and has the source moved since" -- never
+    "is my copy still the map". So when another process replaces
+    ``map.json`` without the sources changing (a newer dekko
+    rebuilding it after an upgrade is the case that matters: round 33
+    Track 1), a cache validated by ``check_freshness`` alone keeps
+    answering from the old extractor's index indefinitely. One
+    ``stat`` closes that. A same-content rewrite costs one reload.
+
+    Args:
+        root: Repository root.
+        index: A previously loaded index.
+
+    Returns:
+        ``False`` only when ``index`` came from ``load_map`` and
+        ``map.json``'s ``(mtime, size)`` has changed since. An index
+        built in memory (``map_stat is None``) always matches.
+    """
+    if index.map_stat is None:
+        return True
+
+    return index.map_stat == _stat_sig(root / _MAP_DIR / "map.json")
+
+
 def check_freshness(root: Path, index: MapIndex) -> Freshness:
     """Compare an index's provenance against the current tree.
 
@@ -1790,13 +1868,36 @@ def check_freshness_provenance(
 
 
 def _freshness_from_provenance(root: Path, prov: dict) -> Freshness:
-    """Shared comparison body for both freshness-check entry points."""
+    """Shared comparison body for both freshness-check entry points.
+
+    An identity mismatch (``tool_version``/``spec_hash``) means
+    "different", never "older". A one-shot process is current by
+    construction, so for it a mismatch still means the map is stale. A
+    long-lived process asks the disk who is out of date
+    (``selfcheck.classify``): only when the installed code agrees with
+    *this process* is the map the stale party. Otherwise this process
+    is the outdated one (or can't prove it isn't), the identity leg is
+    skipped, and only source content decides freshness — with
+    ``process_outdated`` set so nobody regenerates in-process
+    (round 33 Track 1: two processes with different specs used to
+    rewrite each other's map forever).
+    """
     built_version = prov.get("tool_version")
-    running_version = _pkg_version("dekko")
+    running_version = selfcheck.loaded_version()
     built_spec_hash = prov.get("spec_hash")
-    running_spec_hash = spec_fingerprint()
+    running_spec_hash = selfcheck.loaded_spec()
     version_stale = built_version != running_version
     spec_stale = built_spec_hash != running_spec_hash
+    process_outdated = False
+    if (version_stale or spec_stale) and selfcheck.is_long_lived():
+        verdict = selfcheck.classify(built_version, built_spec_hash)
+        process_outdated = verdict != selfcheck.MAP_OLD
+        if verdict in (selfcheck.PROCESS_OUTDATED, selfcheck.UNPROVEN):
+            # The map is (or may well be) the installed code's own
+            # output. Judge it on source content alone.
+            fresh = _content_freshness(root, prov)
+            fresh.process_outdated = True
+            return fresh
     if version_stale or spec_stale:
         # The map was built by a different dekko (or an unreleased
         # extractor change under the same version string). Source
@@ -1819,8 +1920,14 @@ def _freshness_from_provenance(root: Path, prov: dict) -> Freshness:
             running_version=running_version,
             built_spec_hash=built_spec_hash,
             running_spec_hash=running_spec_hash,
+            process_outdated=process_outdated,
         )
 
+    return _content_freshness(root, prov)
+
+
+def _content_freshness(root: Path, prov: dict) -> Freshness:
+    """The source-content leg: were files added, removed, or changed?"""
     recorded: dict[str, str] = prov.get("files", {})
     recorded_stat: dict[str, list[int]] = prov.get("stat", {})
     current_paths, _ = walker.discover(

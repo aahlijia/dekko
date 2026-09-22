@@ -190,13 +190,16 @@ For a standalone registration: `dekko --mcp-install` (runs
 `claude mcp add dekko -- dekko serve --mcp`).
 
 **Note:** a running `dekko serve --mcp` process holds its code in memory
-for its whole lifetime — restart it after any dekko upgrade or source
-change, or its output can silently disagree with the CLI. `/doctor`
-(above) surfaces a currently-running server as an active finding, not
-just this doc note — it just can't tell you whether that process's
-loaded code is actually stale (no way to introspect that from outside
-without an MCP round trip), so it always reports "restart if you
-upgraded since it started" rather than a definitive verdict.
+for its whole lifetime, so restart it after a dekko upgrade. Since
+0.43.72 it knows when that has happened: an outdated server answers
+from the map on disk, hands any regeneration to the installed dekko
+instead of extracting with its own stale code, and appends a `note:
+this dekko server is running outdated code ... restart` line to every
+reply until you do. Before 0.43.72 an outdated server would call the
+current map stale and rewrite it with its older extractor, and a
+current CLI would then do the same back, indefinitely. `/doctor`
+(above) reports a running server as `stale` when it started before
+the installed dekko code last changed, naming the pids to restart.
 
 ## Cline
 

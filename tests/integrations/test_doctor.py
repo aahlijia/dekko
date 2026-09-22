@@ -10,6 +10,7 @@ fixture use.
 
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -278,6 +279,90 @@ def test_mcp_server_running_degrades_when_pgrep_missing(
     finding = doctor._check_mcp_server_running()
     assert finding.status == "unknown"
     assert finding.fix is None
+
+
+def _fake_pgrep_and_ps(
+    monkeypatch: pytest.MonkeyPatch, ps_stdout: str, installed_at: float | None
+) -> None:
+    """``pgrep`` finds pids 100 and 200; ``ps`` prints ``ps_stdout``."""
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
+
+    def fake_run(
+        cmd: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess:
+        if cmd[0] == "pgrep":
+            out = "100 dekko serve --mcp\n200 dekko serve --mcp\n"
+            return subprocess.CompletedProcess(cmd, 0, out, "")
+        return subprocess.CompletedProcess(cmd, 0, ps_stdout, "")
+
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        doctor.selfcheck, "install_mtime", lambda: installed_at
+    )
+
+
+_PS_TWO = "  100 Mon Sep 21 07:28:28 2026\n  200 Mon Sep 21 18:00:00 2026\n"
+
+
+def _epoch(text: str) -> float:
+    return datetime.strptime(text, "%Y-%m-%d %H:%M").timestamp()
+
+
+def test_mcp_server_predating_the_install_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Round 33 Track 1: three servers held an older extractor all day
+    # and this row said "unknown, can't tell" on all seven eval repos.
+    # A process that started before the installed code last changed
+    # is, by definition, not running the installed code.
+    _fake_pgrep_and_ps(monkeypatch, _PS_TWO, _epoch("2026-09-21 16:09"))
+    finding = doctor._check_mcp_server_running()
+    assert finding.status == "stale"
+    assert "pid 100 " in finding.detail
+    assert "200" not in finding.detail
+    assert "2026-09-21 16:09" in finding.detail
+    assert finding.fix is not None and "restart" in finding.fix
+
+
+def test_mcp_servers_started_after_the_install_are_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_pgrep_and_ps(monkeypatch, _PS_TWO, _epoch("2026-09-21 06:00"))
+    finding = doctor._check_mcp_server_running()
+    assert finding.status == "ok"
+    assert finding.fix is None
+
+
+def test_mcp_server_age_unknown_when_a_start_time_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``ps`` only reported one of the two pids: don't guess.
+    _fake_pgrep_and_ps(
+        monkeypatch,
+        "  100 Mon Sep 21 07:28:28 2026\n",
+        _epoch("2026-09-21 16:09"),
+    )
+    finding = doctor._check_mcp_server_running()
+    assert finding.status == "unknown"
+    assert finding.fix == "restart Claude Code"
+
+
+def test_pid_start_times_handles_single_digit_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``ps`` space-pads the day ("Sep  1"); splitting on whitespace
+    # must still see six fields.
+    def fake_run(
+        cmd: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(
+            cmd, 0, "   42 Tue Sep  1 09:05:00 2026\ngarbage line\n", ""
+        )
+
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+    assert doctor._pid_start_times(["42"]) == {
+        "42": datetime(2026, 9, 1, 9, 5).timestamp()
+    }
 
 
 # --- hooks / CLAUDE.md opt-in layers ------------------------------------

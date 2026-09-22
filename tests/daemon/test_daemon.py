@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from dekko import selfcheck
 from dekko.integrations import cli
 from dekko.daemon import daemon
 from dekko.daemon import daemon_transport as dt
@@ -680,6 +681,52 @@ def test_status_json_shape_when_running(
     assert "uptime_seconds" in data
     assert data["cache"] is None
     assert data["busy"] is False
+
+
+def test_status_reports_outdated_without_spawning_the_identity_child(
+    daemon_thread_root: Path,
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 33 Track 1: a daemon whose dekko was upgraded underneath
+    it says so in ``status``. The status reply is built on a side
+    thread under a short probe timeout (round 14), so it may only
+    *read* an existing verdict -- it must never spawn the
+    child-interpreter arbiter itself.
+    """
+
+    def no_child() -> None:
+        raise AssertionError("status must not spawn the identity child")
+
+    monkeypatch.setattr(selfcheck, "_ask_child", no_child)
+    assert daemon.status(daemon_thread_root, as_json=True) == 0
+    assert _json.loads(capsys.readouterr().out)["outdated"] is False
+
+    # The main loop proved it (as it does after any routed command).
+    selfcheck._identity_memo = (
+        selfcheck.install_signature(),
+        ("99.0.0", "newer-spec"),
+    )
+    assert daemon.status(daemon_thread_root, as_json=True) == 0
+    assert _json.loads(capsys.readouterr().out)["outdated"] is True
+
+    assert daemon.status(daemon_thread_root, as_json=False) == 0
+    text = capsys.readouterr().out
+    assert "outdated: yes" in text
+    assert "dekko daemon stop" in text
+
+
+def test_routed_command_stderr_carries_the_outdated_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert daemon._with_outdated_note("warn\n") == "warn\n"  # one-shot
+
+    selfcheck.mark_long_lived()
+    monkeypatch.setattr(selfcheck, "_ask_child", lambda: ("99.0.0", "new"))
+    noted = daemon._with_outdated_note("warn")
+    assert noted.startswith("warn\nnote: this dekko daemon is running")
+    assert noted.endswith("\n")
+    assert daemon._with_outdated_note("").startswith("note: ")
 
 
 def test_status_probe_timeout_reports_confirmed_false_not_not_running(

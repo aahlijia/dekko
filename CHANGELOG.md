@@ -9,6 +9,71 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.72] — 2026-09-21
+
+Round 33 Track 1. Design, measurements, and the real-process A/B:
+`.features/fixes/round33/01-stale-process-map-overwrite.md`.
+
+### Fixed
+- **An outdated long-lived process no longer rewrites the map.** A
+  `dekko serve --mcp` or daemon process keeps the code it imported;
+  when dekko was upgraded underneath it, that process and a fresh CLI
+  each read the other's `map.json` as stale (a spec-hash mismatch says
+  "different", never "older") and regenerated it with their own
+  extractor, alternately, forever: every flip a cold remap that also
+  threw away the other side's caches (~3 minutes per flip on
+  tensorflow). Found live: three servers started before the day's
+  reinstall rewrote maps on all seven eval repos and dekko's own
+  tracked map. A long-lived process now asks the on-disk code who is
+  outdated (a ~30 ms child interpreter, memoized on the install's stat
+  signature, consulted only on a mismatch). If it is the outdated
+  party it serves the on-disk map untouched, judges freshness on
+  source content alone, hands any regeneration to the installed dekko
+  (`repo_ops._delegated_regen`) instead of extracting in-process, and
+  appends `note: this dekko server is running outdated code ...
+  restart` to every reply until restarted. A process that can't prove
+  it's current never writes. A one-shot CLI process pays nothing and
+  behaves exactly as before.
+- **`tool_version` was a live read.** `importlib.metadata.version`
+  reads dist-info from disk at call time, so an outdated server
+  reported, and stamped into provenance, whichever version was
+  installed *now*. That is why every round-33 staleness message read
+  "same version string 0.43.71 on both sides" and why the
+  `tool_version` signal could never fire for the one kind of process
+  it existed to catch. The loaded version is now frozen at import
+  (`dekko.selfcheck`) and used for provenance, cache stamps, MCP
+  `serverInfo`, and freshness checks.
+- **A held index now notices `map.json` was replaced.** The MCP
+  server's and daemon's caches validated a cached index with
+  `check_freshness` alone, which compares the *cached copy's*
+  provenance to the source tree. A newer dekko rebuilding the map with
+  no source change was invisible, so an outdated server kept answering
+  from its old extractor's index. `mapfile.index_matches_disk` (one
+  `stat` of `map.json`) closes it.
+- **The `spec_hash`-only staleness message stopped blaming the reader.**
+  It told every process "this is a long-lived process running older
+  code; restart it", including a fresh CLI looking at a map an outdated
+  server had just rewritten, which had two eval reports contradicting
+  each other about which spec was current. It now says "restart it"
+  only when the process is proven outdated, and otherwise that the map
+  was written by a different dekko build. MCP `map_status`'s advice
+  splits the same way: an outdated server says restart; a current one
+  looking at an old map says regenerate. `refresh_map`'s round-23
+  "rebuilt with stale code" caveat is gone because the case is.
+- **`dekko doctor` names outdated servers.** `mcp-server-running` was
+  always `unknown`. It now compares each server's start time against
+  the installed code's mtime: `stale` naming the pids that predate the
+  install, `ok` otherwise, `unknown` only when `ps` can't say.
+
+### Added
+- `dekko.selfcheck`: loaded vs. installed identity, the three-way
+  verdict (`classify`), and the outdated-process note.
+- `daemon status` reports `outdated` (JSON) / `outdated: yes` (text)
+  for a daemon whose dekko was upgraded underneath it, and routed
+  commands carry the note on stderr.
+- `mapfile.Freshness.process_outdated`, `MapIndex.map_stat`,
+  `mapfile.index_matches_disk`.
+
 ## [0.43.71] — 2026-09-21
 
 Round 32 Track 4, the last open item of the round. Design and

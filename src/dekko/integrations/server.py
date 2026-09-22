@@ -18,11 +18,11 @@ from collections.abc import Callable
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
-from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any
 
 from dekko import repo_ops
+from dekko import selfcheck
 from dekko.analysis import affected
 from dekko.analysis import ambiguous
 from dekko.analysis import contextpack
@@ -343,6 +343,9 @@ def _index_for(
     out-of-band (another process, or this session's own
     ``refresh_map``) is never served stale: correctness comes from
     re-checking on every access, not from catching invalidation events.
+    ``check_freshness`` alone can't see a regen that didn't follow a
+    source change (a newer dekko rebuilding the map after an upgrade),
+    so ``index_matches_disk`` checks that too: one ``stat``.
 
     Args:
         ctx: Server-wide settings.
@@ -359,7 +362,11 @@ def _index_for(
     """
     root = _root_of(ctx, args)
     cached = ctx.index_cache.get(root)
-    if cached is not None and mapfile.check_freshness(root, cached).fresh:
+    if (
+        cached is not None
+        and mapfile.index_matches_disk(root, cached)
+        and mapfile.check_freshness(root, cached).fresh
+    ):
         index = cached
     else:
         index, code = repo_ops.load_or_regen(root, ctx.no_regen)
@@ -895,14 +902,12 @@ def _version_stale_action(fresh: mapfile.Freshness) -> str:
     ``refresh_map`` regenerates *in-process*, using whatever extractor
     code this same MCP server process already has loaded — Python
     doesn't hot-reload imported modules, so if *this* process is the
-    stale party (``spec_stale``, or even just ``version_stale`` — a
-    reinstall doesn't change what code this process is running
-    either), calling ``refresh_map`` from inside it cannot pick up the
-    newer code. It would silently re-stamp the map "fresh" using the
-    same stale logic that made it stale in the first place (round-23
-    §12: zed.md/cline.md). Restarting the server is the only fix for
-    either sub-signal here; ``refresh_map`` remains correct only for
-    ``reason == "content"`` (genuine source drift, handled elsewhere).
+    stale party, an in-process regen cannot pick up the newer code
+    (round-23 §12: zed.md/cline.md). Until round 33 nothing could tell
+    which party was stale, so this always said "restart". Now
+    ``fresh.process_outdated`` carries the answer (``selfcheck.
+    classify`` asked the disk): an outdated process says restart, and
+    a current process looking at a genuinely old map says regenerate.
 
     Args:
         fresh: A freshness verdict with ``reason == "version"``.
@@ -910,8 +915,13 @@ def _version_stale_action(fresh: mapfile.Freshness) -> str:
     Returns:
         A short "next step" suffix, no leading punctuation.
     """
-    del fresh  # Same advice regardless of which sub-signal fired.
-    return "restart the dekko MCP server process"
+    if fresh.process_outdated:
+        return "restart the dekko MCP server process"
+
+    # Round 33 Track 1: the installed code agrees with this process,
+    # so the *map* is the stale party and a regen is the real fix.
+    # Any read tool will do it automatically; ``refresh_map`` forces it.
+    return "call refresh_map (any read tool also regenerates it)"
 
 
 def tool_map_status(ctx: Context, args: dict) -> str:
@@ -945,40 +955,23 @@ def tool_map_status(ctx: Context, args: dict) -> str:
 def tool_refresh_map(ctx: Context, args: dict) -> str:
     """Regenerate the map (optionally a full, uncached rebuild).
 
-    Captures this process's own freshness verdict *before* the regen
-    runs. If it shows ``reason == "version"`` (this same process is
-    already known-stale relative to its own map), the regen that's
-    about to happen will re-extract using this process's stale
-    in-memory extractor code and re-stamp the result "fresh" —
-    self-consistent but wrong (round-23 §12). This doesn't block the
-    regen (a hard refusal risks false positives — see the design doc);
-    it discloses the caveat in the response so the caller knows a
-    restart, not another ``refresh_map`` call, is the real fix.
+    Round-23 §12 found that an outdated server's in-process regen
+    re-extracts with stale code and re-stamps the result "fresh", and
+    settled for disclosing it. Round 33 Track 1 removes the problem
+    instead: ``repo_ops.regen_map`` hands the whole regen to the
+    installed dekko whenever this process is outdated
+    (``selfcheck.process_outdated``), so the map is always built by
+    current code. The standing outdated-server note on every reply
+    (``_with_outdated_note``) covers the disclosure.
     """
     root = _root_of(ctx, args)
-    pre_index = mapfile.load_map(root)
-    pre_fresh = (
-        mapfile.check_freshness(root, pre_index)
-        if pre_index is not None
-        else None
-    )
-    self_stale = bool(pre_fresh and pre_fresh.reason == "version")
     full = bool(args.get("full", False))
     code, out, err = _capture(
         lambda: repo_ops.regen_map(root, full=full, quiet=False)
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    result = _with_notes(out, err, fallback="map refreshed")
-    if self_stale:
-        result += (
-            "\nnote: this server process was itself running stale "
-            "extractor code (spec/version drift) before this regen — "
-            "the map was rebuilt with that same stale code and will "
-            "self-report fresh; restart the dekko MCP server process "
-            "to pick up current code"
-        )
-    return result
+    return _with_notes(out, err, fallback="map refreshed")
 
 
 _ROOT_PROP = {
@@ -1563,7 +1556,7 @@ def _handle_initialize(req_id: Any, params: dict) -> dict:
             "capabilities": {"tools": {}, "resources": {}},
             "serverInfo": {
                 "name": SERVER_NAME,
-                "version": _pkg_version("dekko"),
+                "version": selfcheck.loaded_version(),
             },
         },
     )
@@ -1686,8 +1679,30 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         text, is_error = f"dekko: internal error: {exc}", True
     return _ok(
         req_id,
-        {"content": [{"type": "text", "text": text}], "isError": is_error},
+        {
+            "content": [{"type": "text", "text": _with_outdated_note(text)}],
+            "isError": is_error,
+        },
     )
+
+
+def _with_outdated_note(text: str) -> str:
+    """Append the "this server is outdated" note when it is.
+
+    On every reply, success or error, for as long as the condition
+    holds: it is abnormal, the fix is one action (restart), and an
+    agent that saw it once forty calls ago has forgotten. Costs two
+    ``stat`` calls when nothing changed on disk (``selfcheck``'s memo).
+    Never lets a failure in the check itself break a tool reply.
+    """
+    try:
+        outdated = selfcheck.process_outdated()
+    except Exception:  # the note is advisory; the reply is not
+        return text
+    if not outdated:
+        return text
+
+    return f"{text}\nnote: {selfcheck.outdated_note('server')}"
 
 
 def _handle_resources_list(req_id: Any) -> dict:
@@ -1759,6 +1774,10 @@ def serve(root: Path, no_regen: bool = False) -> int:
     Returns:
         Process exit code (0 on clean shutdown).
     """
+    # Long-lived by definition: from here on, an identity mismatch
+    # with a map means "ask the disk who is outdated", and an outdated
+    # verdict means never extracting in-process again (``selfcheck``).
+    selfcheck.mark_long_lived()
     ctx = Context(default_root=root.resolve(), no_regen=no_regen)
     for raw in sys.stdin:
         raw = raw.strip()
