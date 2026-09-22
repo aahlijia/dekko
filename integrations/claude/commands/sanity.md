@@ -1,6 +1,6 @@
 ---
 description: Cross-check a dekko callers/uses result against a targeted grep before trusting a low/zero count
-argument-hint: "<target> [--usages] [--include-tests]"
+argument-hint: "<target> [--usages] [--include-tests] | --unused NAME"
 allowed-tools: Bash(dekko:*)
 ---
 
@@ -19,3 +19,7 @@ NOT re-derive any of it yourself, and do not re-grep the repo by hand.
 3. If everything matched (`clean: no grep-only misses`), say so
    plainly; this is a spot check, not a verdict that something is
    wrong.
+4. In `--unused NAME` mode the report is reference evidence for a
+   symbol `dekko unused` flagged dead, each hit tagged by shape
+   (`spread`/`typeof`/`subscript`/`call`/`other`). Any evidence means
+   "not safe to delete on dekko's word alone" — relay it as such.

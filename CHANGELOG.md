@@ -9,6 +9,42 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.78] — 2026-09-22
+
+Claude Code plugin refresh: stale references fixed and the skills
+reinforced so Claude reaches for the map more often. No CLI or MCP
+behavior change.
+
+### Changed
+- **Claude Code plugin refresh** (`integrations/claude/`). Stale
+  references fixed: the `dekko-orient` skill called bare `dekko
+  summary` unbounded (it has defaulted to `--budget 5000` for a while;
+  only the raw `dekko://summary` MCP resource is uncapped by design);
+  `dekko-verify` said `get_callees` hides test callers by default
+  (only `get_callers` does); `dekko-daemon`'s routed-command list was
+  missing `ambiguous`, `deps`, and `ledger`; `dekko-review-context`
+  said "`dekko` equivalent" where it meant `dekko ambiguous`;
+  `plugin.json`/`marketplace.json` still described the plugin as "a
+  /map command" though it ships `/map`, `/doctor`, `/sanity`, an
+  18-tool MCP server, and five skills; `/sanity`'s argument hint
+  omitted `--unused NAME`.
+- **`dekko-orient` skill reinforced** so Claude reaches for the map
+  more often and more cheaply: a five-rung default ladder (orient,
+  locate, shape, relate, read only the lines to edit); an explicit
+  "edits never stale you out, don't run `dekko map` by hand" rule; a
+  table of Read/Grep impulses and the dekko call that replaces each;
+  a "get more out of each call" section (`budget`, `sites`,
+  `with_source`, `task`, `include_tests`, `hops`, `:LINE`
+  disambiguation); rows for the four MCP tools the skill never
+  mentioned (`find_type_usages`, `get_supertypes`/`get_subtypes`,
+  `check_ambiguous`) and for `dekko diff`/`dekko ambiguous`; both MCP
+  tool-name prefixes (`mcp__dekko__*`, `mcp__plugin_dekko_dekko__*`).
+  `dekko-verify` now leads with `dekko sanity`/`/sanity` and keeps
+  the hand grep as the fallback for the heritage/throws cases
+  `sanity` doesn't cover. `dekko-review-context` gained `task=` and
+  `type_impact` guidance. `TESTING-GUIDE.md` §5a gained verification
+  bullets for `dekko-orient` and `dekko-verify`.
+
 ## [0.43.77] — 2026-09-21
 
 Round 33 Track 6: seven small fixes from the round's Low tail, one

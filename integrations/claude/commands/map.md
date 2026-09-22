@@ -20,15 +20,18 @@ NOT parse any source files yourself.
 1. If the output above shows an error, explain the problem to the user
    and how to fix it. In particular, if the `dekko` command was not
    found, tell them to install it with `pip install dekko` (or
-   `uv tool install dekko`). Otherwise:
+   `uv tool install dekko`); for any other install/environment error,
+   point them at `/doctor`. Otherwise:
 2. Relay the digest to the user: the file/symbol/edge counts and
    language mix, the largest directories and what they do, the
    load-bearing and orchestrating symbols, and any parse errors.
 3. Tell the user the full map is at `.dekko/MAP.md` (human-readable)
    and `.dekko/map.json` (machine-readable), and that they can query it
-   without re-reading source via `dekko query|context|affected` or the
-   dekko MCP tools (`query_symbol`, `get_context_pack`, `outline`,
-   `workset`, `impacted_tests`, ...) — see the `dekko-orient` skill.
+   without re-reading source via `dekko search|query|context|affected`
+   or the dekko MCP tools (`search_code`, `query_symbol`,
+   `get_context_pack`, `outline`, `workset`, `impacted_tests`, ...) —
+   see the `dekko-orient` skill, and use those tools yourself for
+   every follow-up question in this session instead of Grep/Read.
 4. Do not read `.dekko/MAP.md` back into context (it can be large) —
    prefer the query commands for follow-up questions.
 5. If `$ARGUMENTS` included `--exclude GLOB`, mention that the

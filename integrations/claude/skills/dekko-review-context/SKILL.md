@@ -19,7 +19,8 @@ bottom-up.
 |---|---|
 | What changed and what calls it | `mcp__dekko__workset [rev]` (or `dekko workset [REV]`) |
 | What tests should run | `mcp__dekko__impacted_tests [rev]` (or `dekko affected [REV]`) |
-| Where the resolver itself is unsure | `mcp__dekko__check_ambiguous` (or `dekko` equivalent) |
+| Where the resolver itself is unsure | `mcp__dekko__check_ambiguous` (or `dekko ambiguous`) |
+| Just the changed-symbol list with callers, no outlines | `dekko diff [REV]` (CLI only) |
 
 1. **Determine the diff scope.** A git rev range, or the same default
    `workset`/`impacted_tests` already use: the commit the map was
@@ -28,7 +29,12 @@ bottom-up.
 2. **Call `workset [rev]`.** Bundles touched-file outlines plus
    call-graph packs for the most central touched symbols under one
    token budget — this becomes the "what changed and what calls it"
-   section of the review context.
+   section of the review context. Pass `task="<what the PR claims to
+   do>"` so ranking favors the symbols the description is about. If
+   a touched symbol is a class/interface/struct/trait whose shape
+   changed, follow up with `workset symbol=<Type> type_impact=true`
+   (CLI `--symbol <Type> --type-impact`) to pull in every type-usage
+   site and implementor, not just direct callers.
 3. **Call `impacted_tests [rev]`.** Reverse call-graph reachability
    from the changed symbols, more reliable than grepping test files
    for the changed symbol's name — this becomes the "what tests

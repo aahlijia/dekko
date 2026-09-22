@@ -16,8 +16,14 @@ syntax (bare name, `Class.method`, `file.py:name`, or the tolerated
 
 Whenever you pull a symbol's context, read any `note:` lines first —
 they record rationale, gotchas, and constraints the code alone does
-not show. Call the `list_notes` MCP tool (or `dekko note list <sym>`)
-directly if you need to see a symbol's notes outside a context pack.
+not show. Treat a note as settled context: don't re-derive what it
+already tells you by reading the code again. Call the `list_notes`
+MCP tool (or `dekko note list <sym>`) directly if you need to see a
+symbol's notes outside a context pack, or `dekko note list` with no
+target to see every note in the repo before a large change.
+
+If a note turns out to be wrong or obsolete, fix it (`note rm` then
+`note add`) rather than leaving it to mislead the next reader.
 
 ## Write a note after a non-obvious change
 
@@ -56,3 +62,7 @@ alters a symbol's qualified name.
 - Do not edit `.dekko/notes.json` by hand; use the `note` commands or
   the `add_note` / `list_notes` tools so the file stays valid and
   git-tracked.
+- `.dekko/.gitignore` ignores the generated map but keeps
+  `notes.json` tracked on purpose — a modified `notes.json` in
+  `git status` after adding a note is expected and belongs in the
+  commit with the change it explains.

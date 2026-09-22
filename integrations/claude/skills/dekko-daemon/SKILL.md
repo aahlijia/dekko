@@ -30,9 +30,9 @@ the trouble either way.
 
 Read-only subcommands route through it transparently once running
 (`query`, `search`, `workset`, `diff`, `affected`, `outline`,
-`context`, `trace`, `stats`, `summary`, `lean`, `unused`, `status`,
-`note list`, `export`) — same output and exit code, just without the
-reload. Write-path commands (`map`, `note add`/`note rm`, `hooks ...`)
+`context`, `trace`, `stats`, `summary`, `lean`, `unused`, `ambiguous`,
+`deps`, `status`, `ledger`, `note list`, `export`) — same output and
+exit code, just without the reload. Write-path commands (`map`, `note add`/`note rm`, `hooks ...`)
 always run directly regardless. Pass `--no-daemon` on any command to
 force direct execution for that one call.
 
