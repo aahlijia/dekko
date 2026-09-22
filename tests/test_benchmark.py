@@ -66,6 +66,7 @@ _FILES = {"src/mod.py": _build_module()}
 _TASKS = (
     measure.Task("outline", "src/mod.py", "outline mod.py"),
     measure.Task("context", "target", "context target"),
+    measure.Task("workset", "target", "workset target"),
     measure.Task("lean", "", "lean"),
 )
 
@@ -79,8 +80,13 @@ def test_dekko_beats_whole_file_baseline(
     # The whole point: the structural tool is cheaper than reading source.
     assert by_kind["outline"].dekko < by_kind["outline"].baseline
     assert by_kind["context"].dekko < by_kind["context"].baseline
+    # workset was not exercised here until 2026-09-22, and the harness
+    # had silently drifted from workset._render_text's signature; keep
+    # every comparative measurer under test.
+    assert by_kind["workset"].dekko < by_kind["workset"].baseline
     assert by_kind["outline"].reduction > 0
     assert by_kind["context"].reduction > 0
+    assert by_kind["workset"].reduction > 0
 
 
 def test_lean_is_coverage_only(make_mapped_repo: RepoFactory) -> None:
@@ -100,6 +106,18 @@ def test_report_renders_with_aggregate(
     lines = measure.render_report(measure.run_all(root, _TASKS))
     assert lines[0].startswith("dekko context-layer benchmark")
     assert any(line.startswith("overall:") for line in lines)
+
+
+def test_outline_of_missing_file_is_unresolved(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A target path that moved in a refactor must not report a 0 -> N
+    # row that looks like a negative saving.
+    root = make_mapped_repo(_FILES)
+    task = measure.Task("outline", "src/moved.py", "outline moved.py")
+    (result,) = measure.run_all(root, (task,))
+    assert result.covers == "unresolved"
+    assert result.baseline == 0 and result.dekko == 0
 
 
 def test_run_all_without_map_raises(tmp_path: Path) -> None:

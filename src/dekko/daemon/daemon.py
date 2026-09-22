@@ -43,6 +43,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from dekko import repo_ops
+from dekko import selfcheck
 from dekko.analysis import diff as diff_mod
 from dekko.render import mapfile
 from dekko.storage import cache as cache_mod
@@ -473,7 +474,15 @@ class _WarmCache:
         """
         with self._lock:
             if self._index is not None and self._root == root:
-                if mapfile.check_freshness(root, self._index).fresh:
+                # ``index_matches_disk`` first: a map another process
+                # rebuilt without a source change (a newer dekko after
+                # an upgrade) is invisible to ``check_freshness``,
+                # which only compares this cached copy's own
+                # provenance to the tree (round 33 Track 1).
+                if (
+                    mapfile.index_matches_disk(root, self._index)
+                    and mapfile.check_freshness(root, self._index).fresh
+                ):
                     self.hits += 1
                     return self._index
             self.misses += 1
@@ -492,7 +501,10 @@ class _WarmCache:
             if self._index is None or self._root is None:
                 return None
             root, index = self._root, self._index
-        fresh = mapfile.check_freshness(root, index).fresh
+        fresh = (
+            mapfile.index_matches_disk(root, index)
+            and mapfile.check_freshness(root, index).fresh
+        )
         return {
             "cached_root": str(root),
             "fresh": fresh,
@@ -570,7 +582,34 @@ def _status_payload(
         # cache; a dict with the cached root, its current freshness,
         # and cumulative hit/miss counts afterward.
         "cache": cache.snapshot(),
+        # Round 33 Track 1: dekko was upgraded underneath this daemon.
+        # It still answers (from the on-disk map, regens delegated to
+        # the installed dekko) but should be restarted. Memo-only
+        # (``known_outdated``): this runs on the status side thread
+        # under a short probe timeout, so it must never spawn the
+        # identity child. The main loop refreshes the verdict after
+        # every routed command (``_with_outdated_note``).
+        "outdated": selfcheck.known_outdated(),
     }
+
+
+def _is_outdated() -> bool:
+    """``selfcheck.process_outdated``, never raising into a reply."""
+    try:
+        return selfcheck.process_outdated()
+    except Exception:  # advisory: a failed check must not fail status
+        return False
+
+
+def _with_outdated_note(err: str) -> str:
+    """Append the outdated-daemon note to a routed command's stderr."""
+    if not _is_outdated():
+        return err
+    note = f"note: {selfcheck.outdated_note('daemon')}\n"
+    if err and not err.endswith("\n"):
+        err += "\n"
+
+    return err + note
 
 
 def _handle_connection(
@@ -659,7 +698,12 @@ def _handle_connection(
         finally:
             busy_event.clear()
         _send_line(
-            conn, {"exit_code": exit_code, "stdout": out, "stderr": err}
+            conn,
+            {
+                "exit_code": exit_code,
+                "stdout": out,
+                "stderr": _with_outdated_note(err),
+            },
         )
     except OSError:
         # A client that disconnects mid-request (or a transient
@@ -842,6 +886,10 @@ def serve_daemon(
     dispatch = _dispatch_table()
     cache = _WarmCache()
     repo_ops.set_daemon_cache_hook(cache.get, cache.put)
+    # Long-lived by definition: an identity mismatch with a map now
+    # means "ask the disk who is outdated" instead of "rewrite it"
+    # (round 33 Track 1, see ``selfcheck``).
+    selfcheck.mark_long_lived()
     start_time = time.monotonic()
     busy_event = threading.Event()
     status_stop = threading.Event()
@@ -1042,7 +1090,7 @@ def _timeout_and_args_for_command(
     if candidates is not None:
         resolved_jobs = getattr(args, "jobs", 1)
         message = diff_mod.sequential_disclosure_message(
-            len(candidates), all_cores=resolved_jobs != 1
+            len(candidates), workers=resolved_jobs
         )
         if message is not None:
             print(message, file=sys.stderr)
@@ -1556,8 +1604,13 @@ def status(root: Path, as_json: bool = False) -> int:
     print(f"  pid: {data.get('pid')}")
     print(f"  uptime: {data.get('uptime_seconds', 0):.1f}s")
     if "busy" in data:
-        print(f"  busy: {data.get('busy')}")
+        print(f"  busy: {'yes' if data.get('busy') else 'no'}")
     print(f"  transport: {data.get('transport')}")
+    if data.get("outdated"):
+        print(
+            "  outdated: yes -- dekko was upgraded since this daemon "
+            "started; run `dekko daemon stop` then `dekko daemon start`"
+        )
     cache = data.get("cache")
     if cache is None:
         print("  cache: empty (no daemon-routed read yet)")

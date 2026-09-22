@@ -18,11 +18,11 @@ from collections.abc import Callable
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
-from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Any
 
 from dekko import repo_ops
+from dekko import selfcheck
 from dekko.analysis import affected
 from dekko.analysis import ambiguous
 from dekko.analysis import contextpack
@@ -343,6 +343,9 @@ def _index_for(
     out-of-band (another process, or this session's own
     ``refresh_map``) is never served stale: correctness comes from
     re-checking on every access, not from catching invalidation events.
+    ``check_freshness`` alone can't see a regen that didn't follow a
+    source change (a newer dekko rebuilding the map after an upgrade),
+    so ``index_matches_disk`` checks that too: one ``stat``.
 
     Args:
         ctx: Server-wide settings.
@@ -359,7 +362,11 @@ def _index_for(
     """
     root = _root_of(ctx, args)
     cached = ctx.index_cache.get(root)
-    if cached is not None and mapfile.check_freshness(root, cached).fresh:
+    if (
+        cached is not None
+        and mapfile.index_matches_disk(root, cached)
+        and mapfile.check_freshness(root, cached).fresh
+    ):
         index = cached
     else:
         index, code = repo_ops.load_or_regen(root, ctx.no_regen)
@@ -505,7 +512,11 @@ def _heritage_tool(
 
     Returns:
         Rendered text result, or a placeholder when there are none.
+        Same silent-default disclosure rule as ``_relation_tool``: when
+        ``include_tests`` was defaulted to false for this tool and the
+        caller didn't say so, a trailing ``note:`` line discloses it.
     """
+    explicit_include_tests = "include_tests" in args
     include_tests = bool(args.get("include_tests", default_include_tests))
     index = _index_for(ctx, args, include_tests=include_tests)
     target = _require(args, "symbol")
@@ -519,7 +530,7 @@ def _heritage_tool(
             action,
             target,
             as_json=False,
-            limit=int(args.get("limit", 50)),
+            limit=_limit_arg(args),
             budget=budget,
             transitive=transitive,
             relation=relation,
@@ -527,7 +538,13 @@ def _heritage_tool(
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return _with_notes(out, err, fallback=f"(no {action} for {target})")
+    result = _with_notes(out, err, fallback=f"(no {action} for {target})")
+    if not include_tests and not explicit_include_tests:
+        result += (
+            f"\n\nnote: test-file {action} excluded by default for "
+            "this tool; pass include_tests=true to see them."
+        )
+    return result
 
 
 def tool_get_supertypes(ctx: Context, args: dict) -> str:
@@ -818,9 +835,13 @@ def tool_add_note(ctx: Context, args: dict) -> str:
     text = _require(args, "text")
     sym, candidates = query.resolve_target(index, target)
     if sym is None:
-        if candidates:
-            raise ToolError(f"'{target}' is ambiguous ({len(candidates)})")
-        raise ToolError(f"no symbol matches '{target}'")
+        # Same reply the CLI gives: the candidate rows (with the
+        # ':LINE' form that picks one) or the closest-match list, not
+        # a bare count the agent can't act on without a second call.
+        _, _, err = _capture(
+            lambda: query.report_unresolved(target, candidates, index)
+        )
+        raise ToolError(err.strip() or f"no symbol matches '{target}'")
     notes_mod.add(_root_of(ctx, args), sym.id, text)
     return f"noted {sym.id} ({sym.path}:{sym.start_line})"
 
@@ -895,14 +916,12 @@ def _version_stale_action(fresh: mapfile.Freshness) -> str:
     ``refresh_map`` regenerates *in-process*, using whatever extractor
     code this same MCP server process already has loaded — Python
     doesn't hot-reload imported modules, so if *this* process is the
-    stale party (``spec_stale``, or even just ``version_stale`` — a
-    reinstall doesn't change what code this process is running
-    either), calling ``refresh_map`` from inside it cannot pick up the
-    newer code. It would silently re-stamp the map "fresh" using the
-    same stale logic that made it stale in the first place (round-23
-    §12: zed.md/cline.md). Restarting the server is the only fix for
-    either sub-signal here; ``refresh_map`` remains correct only for
-    ``reason == "content"`` (genuine source drift, handled elsewhere).
+    stale party, an in-process regen cannot pick up the newer code
+    (round-23 §12: zed.md/cline.md). Until round 33 nothing could tell
+    which party was stale, so this always said "restart". Now
+    ``fresh.process_outdated`` carries the answer (``selfcheck.
+    classify`` asked the disk): an outdated process says restart, and
+    a current process looking at a genuinely old map says regenerate.
 
     Args:
         fresh: A freshness verdict with ``reason == "version"``.
@@ -910,20 +929,43 @@ def _version_stale_action(fresh: mapfile.Freshness) -> str:
     Returns:
         A short "next step" suffix, no leading punctuation.
     """
-    del fresh  # Same advice regardless of which sub-signal fired.
-    return "restart the dekko MCP server process"
+    if fresh.process_outdated:
+        return "restart the dekko MCP server process"
+
+    # Round 33 Track 1: the installed code agrees with this process,
+    # so the *map* is the stale party and a regen is the real fix.
+    # Any read tool will do it automatically; ``refresh_map`` forces it.
+    return "call refresh_map (any read tool also regenerates it)"
 
 
 def tool_map_status(ctx: Context, args: dict) -> str:
-    """Whether the map on disk is fresh, with what changed if stale."""
+    """Whether the map on disk is fresh, with what changed if stale.
+
+    Reads the small provenance sidecar first (``mapfile.
+    load_provenance``), the same cheap path ``dekko status`` and
+    ``dekko doctor`` take: this tool's whole point is the staleness
+    fact *without* paying for anything else, and a full ``load_map``
+    parses the entire ``map.json`` (hundreds of MB on a large repo) to
+    answer a question the sidecar already holds. Falls back to the
+    full load only for a map written before the sidecar existed.
+    ``check_version=True`` keeps the too-new / malformed ``map.json``
+    detection ``load_map`` gave this tool: those errors propagate to
+    ``_handle_tools_call``, which already turns them into the restart
+    and regenerate instructions.
+    """
     root = _root_of(ctx, args)
-    index = mapfile.load_map(root)
-    if index is None:
-        return f"no map.json under {root} (call refresh_map)"
-    fresh = mapfile.check_freshness(root, index)
-    note = mapfile.format_unsupported(index.provenance)
+    prov = mapfile.load_provenance(root, check_version=True)
+    if prov is not None:
+        fresh = mapfile.check_freshness_provenance(root, prov)
+    else:
+        index = mapfile.load_map(root)
+        if index is None:
+            return f"no map.json under {root} (call refresh_map)"
+        fresh = mapfile.check_freshness(root, index)
+        prov = index.provenance
+    note = mapfile.format_unsupported(prov)
     if fresh.fresh:
-        prov = index.provenance or {}
+        prov = prov or {}
         commit = (prov.get("git_commit") or "no git")[:12]
         n = len(prov.get("files", {}))
         status = f"fresh ({n} files, commit {commit})"
@@ -945,40 +987,23 @@ def tool_map_status(ctx: Context, args: dict) -> str:
 def tool_refresh_map(ctx: Context, args: dict) -> str:
     """Regenerate the map (optionally a full, uncached rebuild).
 
-    Captures this process's own freshness verdict *before* the regen
-    runs. If it shows ``reason == "version"`` (this same process is
-    already known-stale relative to its own map), the regen that's
-    about to happen will re-extract using this process's stale
-    in-memory extractor code and re-stamp the result "fresh" —
-    self-consistent but wrong (round-23 §12). This doesn't block the
-    regen (a hard refusal risks false positives — see the design doc);
-    it discloses the caveat in the response so the caller knows a
-    restart, not another ``refresh_map`` call, is the real fix.
+    Round-23 §12 found that an outdated server's in-process regen
+    re-extracts with stale code and re-stamps the result "fresh", and
+    settled for disclosing it. Round 33 Track 1 removes the problem
+    instead: ``repo_ops.regen_map`` hands the whole regen to the
+    installed dekko whenever this process is outdated
+    (``selfcheck.process_outdated``), so the map is always built by
+    current code. The standing outdated-server note on every reply
+    (``_with_outdated_note``) covers the disclosure.
     """
     root = _root_of(ctx, args)
-    pre_index = mapfile.load_map(root)
-    pre_fresh = (
-        mapfile.check_freshness(root, pre_index)
-        if pre_index is not None
-        else None
-    )
-    self_stale = bool(pre_fresh and pre_fresh.reason == "version")
     full = bool(args.get("full", False))
     code, out, err = _capture(
         lambda: repo_ops.regen_map(root, full=full, quiet=False)
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    result = _with_notes(out, err, fallback="map refreshed")
-    if self_stale:
-        result += (
-            "\nnote: this server process was itself running stale "
-            "extractor code (spec/version drift) before this regen — "
-            "the map was rebuilt with that same stale code and will "
-            "self-report fresh; restart the dekko MCP server process "
-            "to pick up current code"
-        )
-    return result
+    return _with_notes(out, err, fallback="map refreshed")
 
 
 _ROOT_PROP = {
@@ -1010,6 +1035,16 @@ _INCLUDE_TESTS_PROP = {
     "test-file callers are usually noise for impact analysis; set "
     "true to include them)",
 }
+# get_supertypes defaults the other way: a type's own declared
+# heritage is the same whether or not test files are in the index, so
+# there is nothing to filter and no reason to surprise a caller by
+# dropping a test-only base class. Only the tools that walk *inbound*
+# relations (get_callers, get_subtypes) default to excluding tests.
+_INCLUDE_TESTS_DEFAULT_TRUE_PROP = {
+    "type": "boolean",
+    "description": "Include results from test files (default: true; "
+    "set false to drop test-path types from the index first)",
+}
 _TASK_PROP = {
     "type": "string",
     "description": "Rank output by relevance to this task description, "
@@ -1020,8 +1055,10 @@ _TASK_PROP = {
 # every schema below is sent to the model on each session, so each entry
 # pays rent in context tokens. trace_path / find_unused / stats / lean /
 # ledger are CLI-only — diagnostic/operator surface with no observed
-# agent usage (2026-07-10 eval transcripts) — their handlers remain
-# callable and `dekko <cmd>` unaffected.
+# agent usage (2026-07-10 eval transcripts). Their ``tool_*`` handler
+# functions above are kept and exercised directly by tests, but they
+# are not registered in ``_HANDLERS`` (built from this list), so an
+# MCP client cannot reach them; `dekko <cmd>` is unaffected.
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "search_code",
@@ -1129,19 +1166,24 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "find_usages",
-        "description": "List the symbols that reference an external "
-        "(out-of-repo) name, e.g. a stdlib or third-party function, "
-        "with call sites — one call gets every real call site across "
-        "the repo, where grepping the bare name also pulls in imports, "
-        "comments, and unrelated same-named locals you'd have to "
-        "hand-filter.",
+        "description": "List the symbols that call into an external "
+        "(out-of-repo) name, with call sites and a summary line "
+        "(site/file counts, top members used, importing-file count). "
+        "Ask by function ('run' finds subprocess.run), by import "
+        "binding ('chalk' finds every chalk.red/chalk.dim call; 'np' "
+        "finds np.array), or by module ('numpy', 'node:path', 'fs' "
+        "find calls through whatever the file bound them to). Calls "
+        "only: type-position, JSX and property reads are not recorded, "
+        "and the summary says how many files import the name so a low "
+        "count isn't read as the whole story.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Base identifier of the external "
-                    "reference (e.g. 'run' for subprocess.run, 'Path')",
+                    "description": "An external name: a function's "
+                    "own name ('run'), an imported binding ('chalk', "
+                    "'np', 'React'), or a module ('numpy', 'node:path')",
                 },
                 "limit": {
                     "type": "integer",
@@ -1220,7 +1262,7 @@ TOOLS: list[dict[str, Any]] = [
                     "results)",
                 },
                 "budget": _BUDGET_PROP,
-                "include_tests": _INCLUDE_TESTS_PROP,
+                "include_tests": _INCLUDE_TESTS_DEFAULT_TRUE_PROP,
                 "root": _ROOT_PROP,
             },
             "required": ["symbol"],
@@ -1353,7 +1395,12 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Max impacted symbols per test file "
                     "(default 8)",
                 },
-                "budget": _BUDGET_PROP,
+                "budget": {
+                    "type": "integer",
+                    "description": "Approximate token budget (default "
+                    f"{affected.DEFAULT_BUDGET}); weakest-tier test files "
+                    "are dropped first to fit",
+                },
                 "root": _ROOT_PROP,
             },
         },
@@ -1563,7 +1610,7 @@ def _handle_initialize(req_id: Any, params: dict) -> dict:
             "capabilities": {"tools": {}, "resources": {}},
             "serverInfo": {
                 "name": SERVER_NAME,
-                "version": _pkg_version("dekko"),
+                "version": selfcheck.loaded_version(),
             },
         },
     )
@@ -1622,7 +1669,13 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         text = _with_default_root_note(ctx, args, handler(ctx, args))
         is_error = False
     except ToolError as exc:
-        text, is_error = _prefixed(str(exc)), True
+        # Round 33 Track 6f: the root line used to be applied only to
+        # successful replies. The likeliest outcome of asking one
+        # repo's question of another repo's map is a not-found error
+        # with plausible closest-matches from the wrong repo -- the
+        # one reply shape that carried no root.
+        text = _with_default_root_note(ctx, args, _prefixed(str(exc)))
+        is_error = True
     except mapfile.MapFormatTooNewError:
         # This MCP server process has been running since before the
         # map.json on disk was regenerated in a newer on-disk format
@@ -1686,8 +1739,30 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         text, is_error = f"dekko: internal error: {exc}", True
     return _ok(
         req_id,
-        {"content": [{"type": "text", "text": text}], "isError": is_error},
+        {
+            "content": [{"type": "text", "text": _with_outdated_note(text)}],
+            "isError": is_error,
+        },
     )
+
+
+def _with_outdated_note(text: str) -> str:
+    """Append the "this server is outdated" note when it is.
+
+    On every reply, success or error, for as long as the condition
+    holds: it is abnormal, the fix is one action (restart), and an
+    agent that saw it once forty calls ago has forgotten. Costs two
+    ``stat`` calls when nothing changed on disk (``selfcheck``'s memo).
+    Never lets a failure in the check itself break a tool reply.
+    """
+    try:
+        outdated = selfcheck.process_outdated()
+    except Exception:  # the note is advisory; the reply is not
+        return text
+    if not outdated:
+        return text
+
+    return f"{text}\nnote: {selfcheck.outdated_note('server')}"
 
 
 def _handle_resources_list(req_id: Any) -> dict:
@@ -1759,6 +1834,10 @@ def serve(root: Path, no_regen: bool = False) -> int:
     Returns:
         Process exit code (0 on clean shutdown).
     """
+    # Long-lived by definition: from here on, an identity mismatch
+    # with a map means "ask the disk who is outdated", and an outdated
+    # verdict means never extracting in-process again (``selfcheck``).
+    selfcheck.mark_long_lived()
     ctx = Context(default_root=root.resolve(), no_regen=no_regen)
     for raw in sys.stdin:
         raw = raw.strip()

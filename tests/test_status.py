@@ -92,7 +92,14 @@ def test_status_stale_on_spec_hash_only(
     assert "stale (spec_hash)" in out
     assert "tool_version:" not in out
     assert "deadbeef" in out
-    assert "long-lived process" in out
+    # Round 33 Track 1: the CLI is a one-shot process, current by
+    # construction. It used to tell the reader "this is a long-lived
+    # process running older code; restart it" -- about itself, which
+    # was exactly backwards and had two eval agents contradicting each
+    # other about which spec was current. It now blames the map's
+    # writer, the only thing it can prove.
+    assert "written by a different dekko build" in out
+    assert "restart it" not in out
     assert "run `dekko map`" in out
 
     assert cli.main(["status", "--root", str(root), "--json"]) == 1

@@ -12,10 +12,27 @@ hands-on evaluation rounds (see this repo's own
 callers" more than it should. This skill exists to catch that before
 it leads to deleting live code or missing a real impact.
 
+## How to check
+
+Run `dekko sanity <target>` (the `/sanity` command) first. It does the
+exact comparison this skill describes — dekko's answer vs. one targeted
+grep sweep, bucketed into matches / dekko-only / grep-only, with a
+likely cause named for every grep-only miss — deterministically and
+without you hand-rolling the grep:
+
+```
+dekko sanity <symbol>              # a get_callers result
+dekko sanity <name> --usages       # a find_usages result
+dekko sanity --unused <symbol>     # a `dekko unused` "dead" verdict
+```
+
+Fall back to one targeted `grep -rn <name>` (not a full re-read) only
+for the heritage/throws-provenance cases below, which `sanity` doesn't
+cover yet.
+
 ## When to double-check before trusting a result
 
-Reach for one targeted `grep -rn <name>` (not a full re-read) as a
-sanity check — not a full re-verification — when any of these apply:
+Spot-check — not a full re-verification — when any of these apply:
 
 - **A cross-package/cross-module qualified call is involved.**
   `pkg.Func()`-style calls (Go), `namespace::func()` (C++), or any
@@ -36,10 +53,11 @@ sanity check — not a full re-verification — when any of these apply:
   note. Files dekko can't parse are tracked (not silently dropped),
   but a symbol only ever called from an unparsed file will still read
   as zero-caller.
-- **`get_callers`/`get_callees` used their default `--no-tests`
-  filter.** An empty result may just mean "no *non-test* callers" —
-  check whether `include_tests`/`--include-tests` was applied before
-  concluding dead code.
+- **`get_callers` used its default test filter.** It hides test-file
+  callers by default (and says so in a footer); `get_callees` does
+  not filter. An empty callers result may just mean "no *non-test*
+  callers" — pass `include_tests=true` (CLI: leave `--no-tests` off)
+  before concluding dead code.
 - **A dense-repo common short method name** (`new`, `then`, `map`,
   `iter_mut`, or similarly generic names in a 10k+-symbol repo) —
   resolver precision degrades under high symbol density; treat a
@@ -80,21 +98,16 @@ blanket "always grep after dekko."
   symbol's own shape. `outline`/`query_symbol`/`search_code` describe
   what's in the repo, not a resolved relationship to something else,
   and don't share this failure mode the same way.
-- One grep, scoped to the symbol name, is enough to sanity-check —
-  don't fall back to reading whole files or re-deriving the call
-  graph by hand; that defeats the point of using dekko at all. See
-  `dekko-orient` for the general "reach for dekko before grep" guidance
-  this skill is a narrow exception to.
-- For the call-graph relation tools specifically, `dekko sanity
-  <target>` (`dekko sanity <target> --usages` for a `find_usages`-style
-  check) automates the exact grep sweep this skill describes — same
-  comparison, same blind-spot causes, run deterministically instead of
-  by hand. It doesn't cover heritage/throws-provenance mislabeling yet;
-  the `query symbol <name>` check above is still manual for that case.
-- Before deleting/renaming based on `dekko unused`'s dead-code list,
-  `dekko sanity --unused <name>` automates that check too — it starts
-  from `unused`'s own zero-evidence claim and reports every grep hit
-  outside the symbol's own definition/import/comment as reference
-  evidence, tagged by shape (`spread`/`typeof`/`subscript`/`call`/
-  `other`), so a resolver blind spot in *any* language surfaces
-  without hand-rolling the grep yourself.
+- One `sanity` run (or one grep scoped to the symbol name) is enough
+  to sanity-check — don't fall back to reading whole files or
+  re-deriving the call graph by hand; that defeats the point of using
+  dekko at all. See `dekko-orient` for the general "reach for dekko
+  before grep" guidance this skill is a narrow exception to.
+- `dekko sanity` covers the call-graph relation tools (`callers`,
+  `--usages`, `--unused`). `--unused` starts from `unused`'s own
+  zero-evidence claim and reports every grep hit outside the symbol's
+  own definition/import/comment as reference evidence, tagged by shape
+  (`spread`/`typeof`/`subscript`/`call`/`other`), so a resolver blind
+  spot in *any* language surfaces. It doesn't cover heritage/throws
+  provenance mislabeling yet; the `query symbol <name>` check above is
+  still manual for that case.

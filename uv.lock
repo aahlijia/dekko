@@ -265,7 +265,7 @@ toml = [
 
 [[package]]
 name = "dekko"
-version = "0.43.71"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "pathspec" },
@@ -282,6 +282,7 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "orjson" },
     { name = "tree-sitter-language-pack" },
 ]
 fastjson = [
@@ -301,11 +302,13 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "numpy", marker = "extra == 'search'", specifier = ">=1.24" },
+    { name = "orjson", marker = "extra == 'all'", specifier = ">=3.9" },
     { name = "orjson", marker = "extra == 'fastjson'", specifier = ">=3.9" },
     { name = "pathspec", specifier = ">=0.12" },
     { name = "tiktoken", marker = "extra == 'tokenizer'", specifier = ">=0.7" },
@@ -327,6 +330,7 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-cov", specifier = ">=5" },
     { name = "ruff", specifier = ">=0.8" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2" },
 ]
 
 [[package]]

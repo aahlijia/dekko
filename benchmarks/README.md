@@ -1,9 +1,10 @@
 # Benchmarks — Active Context Layer
 
 Measurement harness for the overarching goal **G★** of the Active Context
-Layer (see `.dev/design-active-context-layer.md` §7): dekko's context
-layer must **reduce the tokens an agent spends to work a task**, at equal
-task success. If it doesn't, the feature failed.
+Layer (the design note behind hooks/orient/ledger, §7; a local `.dev/`
+document, not tracked in git): dekko's context layer must **reduce the
+tokens an agent spends to work a task**, at equal task success. If it
+doesn't, the feature failed.
 
 This directory is **not** part of the installed package (the wheel only
 ships `src/dekko`). It is a benchmark, run by hand or in CI.
@@ -32,15 +33,25 @@ python benchmarks/measure.py --root .
 python benchmarks/measure.py --root . --json
 ```
 
-Representative output (dekko mapping its own source):
+Representative output (dekko 0.43.79 mapping its own source, 2026-09-22):
 
 ```
-  outline cli.py (large file): 12827 → 1335  (-90%)
-  context fit_to_budget (hot symbol): 16614 → 742  (-96%)
-  workset --symbol blended_scores: 9830 → 685  (-93%)
-  lean (whole-repo map): 4019 tok — 88 files, 954 symbols
-overall: 56003 → 4507 tokens across 5 tasks (-92%)
+  outline integrations/cli.py (large file): 22812 → 1551  (-93%)
+  outline render/render_lean.py: 7955 → 1381  (-83%)
+  context fit_to_budget (hot symbol): 130555 → 783  (-99%)
+  context build_pack: 24678 → 813  (-97%)
+  workset --symbol blended_scores: 87698 → 1352  (-98%)
+  lean (whole-repo map): 5015 tok — 170 files, 4283 symbols
+overall: 273698 → 5880 tokens across 5 tasks (-98%)
 ```
+
+The `context` and `workset` baselines are large because their naive
+equivalent is "read the symbol's file plus every file that calls it";
+`fit_to_budget` and `blended_scores` are hot symbols with many callers,
+so that baseline grows with the codebase while the pack does not. The
+default task list in `measure.py` names paths under `src/dekko/`, so
+it needs updating when a targeted module moves; a stale path reports
+as `unresolved` rather than a bogus ratio.
 
 ## The live half (session-start / prompt-submit hooks)
 
@@ -68,11 +79,14 @@ stays falsifiable and is checked on every test run.
 ## Real-world repos
 
 The harness above runs on a small synthetic repo, by design (fast,
-deterministic, checked on every test run). For a one-time look at how
-the same value proposition holds up on large, real, unmodified
-open-source codebases, see
-[`real-world-repos/`](real-world-repos/README.md) — a 7-repo
+deterministic, checked on every test run). For how the same value
+proposition holds up on large, real, unmodified open-source codebases,
+see [`real-world-repos/`](real-world-repos/README.md) — a 7-repo
 token-cost comparison (dekko vs. Read/Grep) across awesome-go,
-claude-buddy, claude-code, cline, spring-boot, tensorflow, and zed,
-including where the win is biggest, where it's smallest, and a few
-correctness caveats worth reading before trusting a ratio.
+claude-buddy, claude-code, cline, spring-boot, tensorflow, and zed.
+It carries two measurements: the original 2026-08-03 study on a
+0.20-era dekko (kept as the methodology and the "where it's smallest"
+analysis), and the 2026-09-21/22 re-measurement on 0.43.77 from the
+same repos, which is the current headline. The correctness caveats
+the original study raised were all fixed in the intervening rounds;
+that section says which and where.

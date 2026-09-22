@@ -132,11 +132,13 @@ dekko hooks uninstall                      # remove all dekko hooks
   surfaces `permissionDecision: "ask"` with the dekko-equivalent
   command — a real interruption, not ignorable text. `--strict`
   escalates matches to `"deny"` instead. Matching is deliberately
-  conservative (a targeted, non-recursive `grep pattern one_file.py` or
-  a `cat` on an unmapped file like `package.json` never matches) to
-  keep false positives low; `grep`/`cat` remain correct for string
-  literals, comments, config/data files, and anything outside dekko's
-  language coverage.
+  conservative (a non-recursive `grep pattern one_file.py`, an `rg` or
+  `grep -r` whose every path argument is an existing file, or a `cat`
+  on an unmapped file like `package.json` never matches) to keep false
+  positives low; `grep`/`cat` remain correct for string literals,
+  comments, config/data files, and anything outside dekko's language
+  coverage. Recursive short flags are read letter by letter, so
+  `-rli`, `-nR`, and `-rnE` all count, not just a bare `-r`.
 
 Installing writes to `.claude/settings.json` (restart Claude Code to
 activate). Every handler is fail-silent — a stale map or hook error
@@ -173,7 +175,7 @@ full guidance.
 | `search_code` | free-text relevance search over every symbol (BM25 by default; `scorer: "embedding"` opt-in with `dekko[search]`) |
 | `query_symbol` | signature, doc, fan-in/out, notes |
 | `get_callers` / `get_callees` | callers/callees, with call sites |
-| `find_usages` | references to an external name |
+| `find_usages` | calls into an external name: by function (`run`), import binding (`chalk`, `np`), or module (`numpy`, `node:path`), with a members histogram |
 | `find_type_usages` | functions/methods taking or returning a type |
 | `get_supertypes` / `get_subtypes` | a type's extends/implements heritage, one hop or transitive |
 | `get_context_pack` | a symbol's neighborhood, budget-capped |
@@ -189,14 +191,30 @@ full guidance.
 For a standalone registration: `dekko --mcp-install` (runs
 `claude mcp add dekko -- dekko serve --mcp`).
 
+**Every tool call that omits `root` says so.** `root` (the repo
+containing `map.json`) defaults to the server's own working directory
+when a call doesn't pass one — often not the repo an agent meant to
+query, and a wrong-repo answer otherwise looks identical in shape to a
+correct one. Any reply that used the default is prefixed with
+`(root: <path> — no 'root' argument was given; pass one to target a
+different repo)`, so a wrong-repo answer is visually obvious
+immediately rather than discovered later. Since 0.43.77 this covers
+error replies too, not just successful ones — the likeliest outcome of
+asking one repo's question against another repo's map is a not-found
+error with plausible closest-matches pulled from the wrong repo, which
+is exactly the reply shape that used to carry no root line at all.
+
 **Note:** a running `dekko serve --mcp` process holds its code in memory
-for its whole lifetime — restart it after any dekko upgrade or source
-change, or its output can silently disagree with the CLI. `/doctor`
-(above) surfaces a currently-running server as an active finding, not
-just this doc note — it just can't tell you whether that process's
-loaded code is actually stale (no way to introspect that from outside
-without an MCP round trip), so it always reports "restart if you
-upgraded since it started" rather than a definitive verdict.
+for its whole lifetime, so restart it after a dekko upgrade. Since
+0.43.72 it knows when that has happened: an outdated server answers
+from the map on disk, hands any regeneration to the installed dekko
+instead of extracting with its own stale code, and appends a `note:
+this dekko server is running outdated code ... restart` line to every
+reply until you do. Before 0.43.72 an outdated server would call the
+current map stale and rewrite it with its older extractor, and a
+current CLI would then do the same back, indefinitely. `/doctor`
+(above) reports a running server as `stale` when it started before
+the installed dekko code last changed, naming the pids to restart.
 
 ## Cline
 

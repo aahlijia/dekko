@@ -519,11 +519,17 @@ class ExternalCall:
             calls use the ``path::<module>`` convention.
         callee: Callee text as written (``mod.func``, ``Path``).
         lines: Sorted, deduplicated 1-based call-site lines.
+        relation: For a ``heritage_external`` entry only: the clause's
+            ``extends``/``implements``/``impl``/``embeds`` (round 33
+            Track 6e -- the parser always knew it, and an external
+            base used to lose it while a resolved one kept it). Always
+            ``None`` for call and throws externals.
     """
 
     caller: str
     callee: str
     lines: list[int] = field(default_factory=list)
+    relation: str | None = None
 
 
 @dataclass

@@ -45,6 +45,12 @@ _POLICY_BODY = (
     "matches)\n"
     "- Work a whole change -> `workset [REV]`, one bundle instead of "
     "N reads\n"
+    "- Pick tests to run -> `impacted_tests [REV]` / `dekko affected`, "
+    "not grepping test files or running the whole suite\n"
+    "\n"
+    "Keep using them after your own edits: every tool regenerates a "
+    "stale map itself, so never run `dekko map` by hand mid-task or "
+    'fall back to grep because the map "might be stale".\n'
     "\n"
     "`grep`/`cat`/reading a file whole is still correct for string "
     "literals, comments, config/data files, and anything outside "

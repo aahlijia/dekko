@@ -109,11 +109,17 @@ def render_json(
             }
             for subtype, name, cands in graph.heritage_ambiguous
         ],
+        # ``relation`` only when set (round 33 Track 6e) so the
+        # ``external``/``throws_external`` sections, which share the
+        # ``ExternalCall`` type, stay byte-identical. Additive and
+        # optional: no ``MAP_DOC_VERSION`` bump, old readers ignore
+        # it, new readers tolerate its absence.
         "heritage_external": [
             {
                 "caller": id_index[ext.caller],
                 "callee": id_index[ext.callee],
                 "lines": ext.lines,
+                **({"relation": ext.relation} if ext.relation else {}),
             }
             for ext in graph.heritage_external
         ],

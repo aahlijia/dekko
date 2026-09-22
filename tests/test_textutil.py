@@ -10,6 +10,7 @@ they're out of scope here.
 """
 
 from dekko.core.model import Param, Symbol
+from dekko import textutil
 from dekko.textutil import dir_of, oneline, signature
 
 
@@ -157,3 +158,48 @@ def test_dir_of_single_level_nesting() -> None:
 
 def test_dir_of_path_with_no_slash() -> None:
     assert dir_of("README.md") == "."
+
+
+# --- round 33 Track 4: rows that outrun the budget ------------------------
+
+
+def test_clip_middle_identity_when_it_fits() -> None:
+    assert textutil.clip_middle("subprocess.run") == "subprocess.run"
+
+
+def test_clip_middle_collapses_whitespace() -> None:
+    assert textutil.clip_middle("z\n  .object") == "z .object"
+
+
+def test_clip_middle_keeps_head_tail_and_says_how_much_went() -> None:
+    chain = "program.name('claude')" + ".option(x)" * 500 + ".version"
+    out = textutil.clip_middle(chain)
+    assert len(out) <= textutil.LABEL_CHAR_CAP
+    assert out.startswith("program.name('claude')")
+    assert out.endswith(".version")
+    dropped = len(chain) - textutil.LABEL_CHAR_CAP
+    assert f"…[+{dropped:,} chars]…" in out
+
+
+def test_clip_middle_tiny_limit_degrades_to_right_truncate() -> None:
+    out = textutil.clip_middle("abcdefghijklmnop", limit=6)
+    assert out == "abcde…"
+
+
+def test_fit_to_budget_flags_a_first_row_that_alone_exceeds_budget() -> None:
+    kept, meter = textutil.fit_to_budget(
+        ["x" * 4000, "y"], budget=100, limit=None
+    )
+    assert kept == ["x" * 4000]  # the "always keep one row" rule holds
+    assert meter.over_budget is True
+    assert "over --budget 100: first row alone exceeds it" in meter.footer()
+    assert meter.as_dict()["over_budget"] is True
+
+
+def test_fit_to_budget_normal_path_is_not_flagged() -> None:
+    kept, meter = textutil.fit_to_budget(
+        ["a", "b", "c"], budget=100, limit=None
+    )
+    assert kept == ["a", "b", "c"]
+    assert meter.over_budget is False
+    assert "over --budget" not in meter.footer()

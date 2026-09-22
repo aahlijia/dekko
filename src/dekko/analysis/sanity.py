@@ -101,6 +101,7 @@ from dekko.core import languages
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.core.walker import DEFAULT_EXCLUDE_DIRS
 from dekko.render.mapfile import MapIndex
+from dekko.source import read_lines
 from dekko.storage.cache import CACHE_DIR
 from dekko.textutil import Meter, fit_to_budget
 
@@ -249,6 +250,23 @@ CAUSE_CROSS_FILE_COLLISION = (
     "elsewhere in the repo — not a miss on the target"
 )
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
+# Round 33 Track 5 tier 2: a value-position use of a same-named local
+# declared earlier in the enclosing function (``const errorMessage =
+# ...`` four lines above ``error: errorMessage,``). Measured on the 100
+# most-flagged non-type claude-code targets: 759 of 4,104 unexplained
+# rows (18.5%), led by ``errorMessage``, ``count``, ``action`` -- the
+# testing guide's own repros. Applied as a post-pass that can only
+# upgrade an "unexplained" row, never override a specific cause.
+# The cause string carries no line number on purpose: ``--all``
+# aggregates by cause, and a per-line variant fragmented cline's sweep
+# into 110 one-row buckets. The declaration line rides on the row
+# instead (``decl_line`` in JSON, appended in text) via
+# ``_shadow_decl_lines``.
+CAUSE_SHADOWING_LOCAL = (
+    "use of a same-named local declared earlier in the enclosing "
+    "function — not a reference to the target; scope heuristic, not "
+    "a parse"
+)
 
 # Generous top-of-file import/using-block scan window for
 # ``_receiver_mismatch``'s cheap textual proxy check -- see that
@@ -547,9 +565,24 @@ _TYPE_ANNOTATION_GRAMMARS = frozenset(
     {"typescript", "tsx", "javascript", "rust"}
 )
 _TS_IMPORT_TYPE_TEMPLATE = r"^import\s+type\s+.*\b{name}\b"
+# Round 33 Track 5 (claude-code.md Finding 2): the colon half matches
+# ``identifier: identifier``, which in TS is a type annotation, an
+# object-literal value (``error: errorMessage,``), a ternary else-branch
+# or a ``case`` label -- a regex can't tell them apart, but the
+# *target's kind* can: a function's name after a colon is never a type
+# annotation. So the colon half is consulted only for a type target;
+# the generic-argument and ``import type`` shapes are unambiguous
+# syntax whatever the target is and stay ungated. Measured on the 100
+# most-flagged non-type claude-code targets: 145 of 186 "type position"
+# rows were the colon half firing on a value. Those now fall to
+# "unexplained", on purpose -- a wrong explanation closes an
+# investigation that should stay open.
+# `x: Output`, not `x: Output()`
+_TS_TYPE_COLON_TEMPLATE = r":\s*{name}\b(?!\s*\()"
+# `Foo<Output>`, `Foo<Output, Bar>`
+_TS_TYPE_GENERIC_TEMPLATE = r"<\s*{name}\s*[,>]"
 _TS_TYPE_POSITION_TEMPLATE = (
-    r":\s*{name}\b(?!\s*\()"  # `x: Output`, not `x: Output()`
-    r"|<\s*{name}\s*[,>]"  # `Foo<Output>`, `Foo<Output, Bar>`
+    f"{_TS_TYPE_COLON_TEMPLATE}|{_TS_TYPE_GENERIC_TEMPLATE}"
 )
 # Round 28 zed.md §3.4: Rust's type-position idioms have no TS
 # equivalent and need their own templates, even with "rust" now
@@ -648,7 +681,7 @@ def _looks_like_rust_type_construction(stripped: str, name: str) -> bool:
 
 
 def _looks_like_type_annotation(
-    snippet: str, bare_name: str, path: str, target_is_type: bool = False
+    snippet: str, bare_name: str, path: str, *, target_is_type: bool
 ) -> bool:
     """Whether a grep-matched line uses ``bare_name`` in a TS/JS or
     Rust type position (an ``import type`` statement, a parameter/
@@ -670,9 +703,10 @@ def _looks_like_type_annotation(
 
     ``target_is_type`` (round 32 Track 2(d)) additionally admits Rust
     struct literals and enum/tuple-struct payloads -- see
-    ``_looks_like_rust_type_construction``. Computed by the caller from
-    the target symbol's kind; ``False`` keeps the pre-round-32
-    behavior.
+    ``_looks_like_rust_type_construction`` -- and, since round 33
+    Track 5, is what admits the ``x: Name`` colon shape at all (see
+    ``_TS_TYPE_COLON_TEMPLATE``). Keyword-only and required so every
+    caller decides it explicitly.
     """
     grammar = _grammar_for_path(path)
     if grammar not in _TYPE_ANNOTATION_GRAMMARS:
@@ -681,7 +715,11 @@ def _looks_like_type_annotation(
     stripped = snippet.strip()
     if re.search(_TS_IMPORT_TYPE_TEMPLATE.format(name=name), stripped):
         return True
-    if re.search(_TS_TYPE_POSITION_TEMPLATE.format(name=name), stripped):
+    if re.search(_TS_TYPE_GENERIC_TEMPLATE.format(name=name), stripped):
+        return True
+    if target_is_type and re.search(
+        _TS_TYPE_COLON_TEMPLATE.format(name=name), stripped
+    ):
         return True
     if grammar == "rust" and any(
         re.search(template.format(name=name), stripped)
@@ -1694,6 +1732,7 @@ def _classify_grep_hits(
     is_known_collision_name: bool = False,
     ref_sites: frozenset[tuple[str, int]] = frozenset(),
     target_kinds: frozenset[str] = frozenset(),
+    symbols_by_path: dict[str, list[Symbol]] | None = None,
 ) -> dict[tuple[str, int], str]:
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
@@ -1808,7 +1847,10 @@ def _classify_grep_hits(
             looks_like_type_annotation=(
                 not looks_like_value
                 and _looks_like_type_annotation(
-                    h.snippet, bare_name, h.path, target_is_type
+                    h.snippet,
+                    bare_name,
+                    h.path,
+                    target_is_type=target_is_type,
                 )
             ),
             looks_like_local_binding_or_literal=(
@@ -1837,7 +1879,117 @@ def _classify_grep_hits(
             is_recorded_reference=is_recorded_reference,
             looks_like_value_reference=looks_like_value,
         )
+    if symbols_by_path:
+        _explain_shadowing_locals(
+            causes, hits, bare_name, root, own_def_locs, symbols_by_path
+        )
     return causes
+
+
+# ``(path, line)`` of a grep hit → the line of the same-named local
+# that explains it. Filled by ``_explain_shadowing_locals``, read by
+# ``_grep_row``. Process-global rather than threaded through the
+# half-dozen call layers between them: a hit's location is unique
+# within a run and the value is purely presentational.
+_shadow_decl_lines: dict[tuple[str, int], int] = {}
+
+
+# --- tier 2: same-named locals ----------------------------------------
+
+# JS/TS only, like every other shape rule in this module: Python's
+# scoping would mostly work too, but round 33's evidence was TS.
+_SHADOW_GRAMMARS = frozenset({"typescript", "tsx", "javascript"})
+_SHADOW_DECL_TEMPLATE = (
+    r"\b(?:const|let|var)\s+(?:{name}\b|[{{\[][^=]*\b{name}\b[^=]*[}}\]]\s*=)"
+    r"|\bcatch\s*\(\s*{name}\b"
+)
+
+
+def _enclosing_symbol(symbols: list[Symbol], line: int) -> Symbol | None:
+    """Innermost symbol whose line range contains ``line``."""
+    best: Symbol | None = None
+    for s in symbols:
+        if s.start_line <= line <= s.end_line and (
+            best is None
+            or (s.end_line - s.start_line) < (best.end_line - best.start_line)
+        ):
+            best = s
+    return best
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _shadowing_decl_line(
+    root: Path,
+    hit: GrepHit,
+    bare_name: str,
+    sym: Symbol,
+    own_def_locs: frozenset[tuple[str, int]],
+) -> int | None:
+    """Line of a same-named local in scope for ``hit``, or ``None``.
+
+    Four guards, each closing a specific way this could lie:
+
+    1. Never on a call-shaped line -- a call dekko has no edge for is
+       exactly what ``sanity`` exists to surface (checked by the
+       caller, which only feeds value-position rows).
+    2. The declaration must not be the target's own definition (a
+       nested recursive function matched itself in the first probe).
+    3. The declaration's indent must be ``<=`` the hit's: a ``const``
+       nested deeper than the use can't be in scope for it.
+    4. A parameter of the enclosing symbol is index-backed and in
+       scope for the whole body: no regex, no indent rule.
+    """
+    if any(p.name == bare_name for p in sym.params):
+        return sym.start_line
+    lines = read_lines(root, hit.path)
+    if not lines:
+        return None
+    decl = re.compile(_SHADOW_DECL_TEMPLATE.format(name=re.escape(bare_name)))
+    hit_indent = _indent(lines[hit.line - 1]) if hit.line <= len(lines) else 0
+    for ln in range(sym.start_line, hit.line):
+        if ln > len(lines):
+            break
+        text = lines[ln - 1]
+        if (hit.path, ln) in own_def_locs:
+            continue
+        if decl.search(text) and _indent(text) <= hit_indent:
+            return ln
+    return None
+
+
+def _explain_shadowing_locals(
+    causes: dict[tuple[str, int], str],
+    hits: list[GrepHit],
+    bare_name: str,
+    root: Path,
+    own_def_locs: frozenset[tuple[str, int]],
+    symbols_by_path: dict[str, list[Symbol]],
+) -> None:
+    """Upgrade ``CAUSE_UNEXPLAINED`` rows that use a same-named local.
+
+    Only value-position hits in JS/TS files whose enclosing symbol
+    binds ``bare_name`` above the hit. Never rewrites a row that
+    already carries a specific cause.
+    """
+    call = re.compile(_BARE_CALL_TEMPLATE.format(name=re.escape(bare_name)))
+    for h in hits:
+        loc = (h.path, h.line)
+        if causes.get(loc) != CAUSE_UNEXPLAINED:
+            continue
+        if _grammar_for_path(h.path) not in _SHADOW_GRAMMARS:
+            continue
+        if call.search(h.snippet):
+            continue
+        sym = _enclosing_symbol(symbols_by_path.get(h.path, []), h.line)
+        if sym is None:
+            continue
+        decl_line = _shadowing_decl_line(root, h, bare_name, sym, own_def_locs)
+        if decl_line is not None:
+            causes[loc] = CAUSE_SHADOWING_LOCAL
+            _shadow_decl_lines[loc] = decl_line
 
 
 # --- dekko-side comparison set ----------------------------------------
@@ -1968,6 +2120,9 @@ def _grep_row(hit: GrepHit, cause: str | None = None) -> dict:
     }
     if cause is not None:
         row["cause"] = cause
+    decl = _shadow_decl_lines.get((hit.path, hit.line))
+    if decl is not None and cause == CAUSE_SHADOWING_LOCAL:
+        row["decl_line"] = decl
     return row
 
 
@@ -2184,7 +2339,10 @@ def _print_bucket_text(title: str, rows: list[dict], meter: Meter) -> None:
     for row in rows:
         loc = f"{row['file']}:{row['line']}"
         if "cause" in row:
-            print(f"    {loc}  [{row['cause']}]")
+            cause = row["cause"]
+            if "decl_line" in row:
+                cause = f"{cause} (declared at line {row['decl_line']})"
+            print(f"    {loc}  [{cause}]")
             print(f"      {row['snippet']}")
         else:
             print(f"    {loc}")
@@ -2972,6 +3130,7 @@ def run(
         is_known_collision_name=is_known_collision_name,
         ref_sites=ref_sites,
         target_kinds=target_kinds,
+        symbols_by_path=query_index.symbols_by_path,
     )
     grep_only_rows = [
         _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits
@@ -3088,6 +3247,7 @@ def _sweep_bare_name(
     is_known_collision_name: bool = False,
     ref_sites: frozenset[tuple[str, int]] = frozenset(),
     target_kinds: frozenset[str] = frozenset(),
+    symbols_by_path: dict[str, list[Symbol]] | None = None,
 ) -> tuple[GrepSweepResult, dict[tuple[str, int], str]]:
     """One grep + classify pass for ``bare_name``, shared across every
     symbol in its fan-in group — the sweep's whole cost-saving
@@ -3137,6 +3297,7 @@ def _sweep_bare_name(
         other_candidate_files=other_candidate_files,
         ref_sites=ref_sites,
         target_kinds=target_kinds,
+        symbols_by_path=symbols_by_path,
     )
     return sweep, causes
 
@@ -3397,6 +3558,7 @@ def _run_all_sweeps(
             is_known_collision_name=name in collision,
             ref_sites=_reference_sites(query_index, symbols_for_name),
             target_kinds=frozenset(s.kind for s in symbols_for_name),
+            symbols_by_path=query_index.symbols_by_path,
         )
         return name, sweep, causes
 

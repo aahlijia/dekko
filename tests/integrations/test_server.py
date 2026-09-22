@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from dekko import repo_ops
+from dekko import selfcheck
 from dekko.analysis import query
 from dekko.core.resolver import PoolStalledError
 from dekko.integrations import cli
@@ -794,7 +795,24 @@ def test_not_found_is_tool_error_not_doubled(
     result = _call(ctx, "query_symbol", {"symbol": "ghost"})
     text = result["content"][0]["text"]
     assert result["isError"] is True
-    assert text.startswith("dekko: no symbol matches")  # single prefix
+    # Round 33 Track 6f: an error reply that defaulted the root now
+    # carries the root line first, like a success reply always did --
+    # a wrong-repo query's likeliest outcome IS a not-found error.
+    assert text.startswith("(root: ")
+    body = text.split("\n", 1)[1]
+    assert body.startswith("dekko: no symbol matches")  # single prefix
+    assert body.count("dekko:") == 1
+
+
+def test_error_with_explicit_root_has_no_root_line(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    result = _call(
+        _ctx(root), "query_symbol", {"symbol": "ghost", "root": str(root)}
+    )
+    assert result["isError"] is True
+    assert result["content"][0]["text"].startswith("dekko: no symbol")
 
 
 def test_query_symbol_tool_reports_unsupported_coverage_gap(
@@ -847,27 +865,81 @@ def test_map_status_and_refresh(make_mapped_repo: RepoFactory) -> None:
     assert "fresh" in _call(ctx, "map_status", {})["content"][0]["text"]
 
 
-def test_refresh_map_discloses_self_staleness(
-    make_mapped_repo: RepoFactory,
+def _as_long_lived(
+    monkeypatch: pytest.MonkeyPatch, installed: tuple[str, str] | None
 ) -> None:
-    # round-23 §12: if this process's own pre-regen freshness check
-    # shows reason == "version" (this same process is the stale
-    # party), refresh_map's in-process regen re-extracts with this
-    # process's own stale extractor code and re-stamps "fresh" —
-    # self-consistent but wrong. The response must disclose that a
-    # restart, not another refresh_map call, is the real fix.
-    root = make_mapped_repo(SRC)
+    """Make this test process a long-lived server whose *installed*
+    dekko (what the child-interpreter arbiter reports) is ``installed``.
+    """
+    selfcheck.mark_long_lived()
+    monkeypatch.setattr(selfcheck, "_ask_child", lambda: installed)
+
+
+def _stamp_spec(root: Path, spec_hash: str) -> bytes:
+    """Rewrite the map's recorded spec_hash; return the new bytes."""
     map_path = root / ".dekko" / "map.json"
     doc = json.loads(map_path.read_text())
-    doc["provenance"]["spec_hash"] = "deadbeef"
+    doc["provenance"]["spec_hash"] = spec_hash
     map_path.write_text(json.dumps(doc))
+    return map_path.read_bytes()
 
-    ctx = _ctx(root)
-    refreshed = _call(ctx, "refresh_map", {})
+
+def test_refresh_map_delegates_when_process_outdated(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # round-23 §12 found that an outdated server's in-process regen
+    # re-extracts with stale code and re-stamps "fresh", and settled
+    # for a caveat. Round 33 Track 1 removes the cause: an outdated
+    # process hands the regen to the installed dekko and never
+    # extracts in-process.
+    root = make_mapped_repo(SRC)
+    _stamp_spec(root, "deadbeef")
+    _as_long_lived(monkeypatch, (selfcheck.loaded_version(), "deadbeef"))
+    delegated: list[tuple[Path, bool]] = []
+
+    def fake_delegated(root: Path, full: bool, quiet: bool) -> int:
+        delegated.append((root, full))
+        return 0
+
+    def no_in_process(*_a: object, **_k: object) -> int:
+        raise AssertionError("outdated process must not extract in-process")
+
+    monkeypatch.setattr(repo_ops, "_delegated_regen", fake_delegated)
+    monkeypatch.setattr(repo_ops, "run_map", no_in_process)
+
+    refreshed = _call(_ctx(root), "refresh_map", {"full": True})
+    assert refreshed["isError"] is False
+    assert delegated == [(root, True)]
+    text = refreshed["content"][0]["text"]
+    assert "running outdated code" in text
+    assert "restart the dekko MCP server" in text
+
+
+def test_refresh_map_regens_in_process_when_map_is_the_stale_party(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The installed code agrees with this server: the *map* is old.
+    # Regenerate in-process as always, and don't tell anyone to
+    # restart a server that is perfectly current.
+    root = make_mapped_repo(SRC)
+    _stamp_spec(root, "deadbeef")
+    _as_long_lived(
+        monkeypatch, (selfcheck.loaded_version(), selfcheck.loaded_spec())
+    )
+
+    def no_delegation(*_a: object, **_k: object) -> int:
+        raise AssertionError("a current process must regen in-process")
+
+    monkeypatch.setattr(repo_ops, "_delegated_regen", no_delegation)
+    refreshed = _call(_ctx(root), "refresh_map", {})
     assert refreshed["isError"] is False
     text = refreshed["content"][0]["text"]
-    assert "restart the dekko MCP server process" in text
-    assert "stale extractor code" in text
+    assert "restart" not in text
+    assert "outdated" not in text
+    prov = json.loads((root / ".dekko" / "map.json").read_text())["provenance"]
+    assert prov["spec_hash"] == selfcheck.loaded_spec()
 
 
 def test_refresh_map_no_caveat_when_not_self_stale(
@@ -915,38 +987,153 @@ def test_map_status_reports_version_stale(
     text = _call(ctx, "map_status", {})["content"][0]["text"]
     assert "stale (version)" in text
     assert "built by dekko 0.0.0-stale, running" in text
-    # round-23 §12: `refresh_map` regens in-process using this same
-    # process's (possibly stale) loaded extractor code, so it cannot
-    # fix a version-stale process — only a restart can.
-    assert "restart the dekko MCP server process" in text
-    assert "call refresh_map" not in text
+    # Round 33 Track 1: nothing says this process is outdated, so the
+    # map is the stale party and regenerating is the real fix. (It
+    # used to say "restart" unconditionally, because nothing could
+    # tell the two cases apart.)
+    assert "call refresh_map" in text
+    assert "restart the dekko MCP server process" not in text
 
 
-def test_map_status_reports_spec_hash_stale_distinctly(
+def test_map_status_both_old_says_restart(
     make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # round-09 §2.3: a long-lived ``dekko serve`` process can have an
-    # identical ``tool_version`` string on both sides while still
-    # running stale extractor code — the old message only ever
-    # printed ``tool_version``, so this case read as the
-    # self-contradictory "built by dekko 0.21.3, running 0.21.3" with
-    # no explanation. The message must name ``spec_hash`` explicitly
-    # and must not claim a ``tool_version`` mismatch that didn't
-    # happen.
+    # round-09 §2.3: identical ``tool_version`` on both sides while
+    # the extractor spec drifted must name ``spec_hash`` explicitly.
+    # Here the installed dekko matches neither this process nor the
+    # map: the process IS outdated (restart it) and the map is old too.
     root = make_mapped_repo(SRC)
-    map_path = root / ".dekko" / "map.json"
-    doc = json.loads(map_path.read_text())
-    doc["provenance"]["spec_hash"] = "deadbeef"
-    map_path.write_text(json.dumps(doc))
+    _stamp_spec(root, "deadbeef")
+    _as_long_lived(monkeypatch, (selfcheck.loaded_version(), "feedface"))
 
-    ctx = _ctx(root)
-    text = _call(ctx, "map_status", {})["content"][0]["text"]
+    text = _call(_ctx(root), "map_status", {})["content"][0]["text"]
     assert "stale (spec_hash)" in text
     assert "tool_version:" not in text
     assert "deadbeef" in text
     assert "same version string" in text
     assert "restart the dekko MCP server process" in text
     assert "call refresh_map" not in text
+    assert "running outdated code" in text
+
+
+def test_outdated_server_serves_the_installed_codes_map_untouched(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # THE round-33 Track 1 regression (tensorflow.md §4.2, and what
+    # rewrote dekko's own tracked map mid-eval). A current CLI built
+    # this map (spec "deadbeef" stands in for the installed spec);
+    # this server is older. It used to call the map stale, re-extract
+    # with its old code, and stamp its old spec over it -- which the
+    # CLI then called stale and rewrote, forever. It must now leave
+    # every byte alone, answer from it, and say it needs a restart.
+    root = make_mapped_repo(SRC)
+    before = _stamp_spec(root, "deadbeef")
+    _as_long_lived(monkeypatch, (selfcheck.loaded_version(), "deadbeef"))
+
+    def no_regen(*_a: object, **_k: object) -> int:
+        raise AssertionError("must not regenerate a map that is current")
+
+    monkeypatch.setattr(repo_ops, "regen_map", no_regen)
+    ctx = _ctx(root)
+
+    status = _call(ctx, "map_status", {})["content"][0]["text"]
+    assert "\nfresh (" in status  # after the default-root line
+    assert "stale" not in status
+    assert "running outdated code" in status
+
+    summary = _call(ctx, "summary", {})
+    assert summary["isError"] is False
+    assert "running outdated code" in summary["content"][0]["text"]
+
+    assert (root / ".dekko" / "map.json").read_bytes() == before
+
+
+def test_outdated_server_drops_its_cached_index_for_the_rebuilt_map(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The server loaded this root *before* dekko was upgraded, so it
+    # holds an index whose provenance is its own. A newer CLI then
+    # rebuilds the map. The held copy still looks "fresh" against the
+    # source tree; it must be dropped for the map that is now on disk.
+    root = make_mapped_repo(SRC)
+    ctx = _ctx(root)
+    assert _call(ctx, "summary", {})["isError"] is False
+    held = ctx.index_cache[root]
+
+    _stamp_spec(root, "deadbeef")  # "rebuilt by the newer dekko"
+    _as_long_lived(monkeypatch, (selfcheck.loaded_version(), "deadbeef"))
+    monkeypatch.setattr(
+        repo_ops,
+        "regen_map",
+        lambda *_a, **_k: pytest.fail("must not regenerate"),
+    )
+
+    assert _call(ctx, "summary", {})["isError"] is False
+    assert ctx.index_cache[root] is not held
+    assert ctx.index_cache[root].provenance["spec_hash"] == "deadbeef"
+
+
+def test_outdated_server_delegates_regen_on_real_content_change(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An outdated server still has to notice edited source. It does,
+    # via the content leg -- and hands the rebuild to the installed
+    # dekko rather than extracting with its own stale code.
+    root = make_mapped_repo(SRC)
+    _stamp_spec(root, "deadbeef")
+    _as_long_lived(monkeypatch, (selfcheck.loaded_version(), "deadbeef"))
+    (root / "a.py").write_text("def f() -> int:\n    return 2\nY = 1\n")
+    delegated: list[Path] = []
+
+    def fake_delegated(root: Path, full: bool, quiet: bool) -> int:
+        delegated.append(root)
+        return 1  # the child failed: the old map must still be served
+
+    monkeypatch.setattr(repo_ops, "_delegated_regen", fake_delegated)
+    summary = _call(_ctx(root), "summary", {})
+    assert delegated == [root]
+    assert summary["isError"] is False
+
+
+def test_unprovable_identity_never_writes(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The arbiter child failed (broken install, timeout). A server
+    # that can't prove it is current must not author shared state.
+    root = make_mapped_repo(SRC)
+    before = _stamp_spec(root, "deadbeef")
+    _as_long_lived(monkeypatch, None)
+
+    summary = _call(_ctx(root), "summary", {})
+    assert summary["isError"] is False
+    assert "could not be identified" in summary["content"][0]["text"]
+    assert (root / ".dekko" / "map.json").read_bytes() == before
+
+
+def test_one_shot_process_never_consults_the_arbiter(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Not long-lived (no ``serve()``): current by construction. The
+    # child interpreter must never be spawned, and a mismatched map is
+    # regenerated in-process exactly as before round 33.
+    root = make_mapped_repo(SRC)
+    _stamp_spec(root, "deadbeef")
+
+    def no_child() -> None:
+        raise AssertionError("a one-shot process must not spawn the arbiter")
+
+    monkeypatch.setattr(selfcheck, "_ask_child", no_child)
+    summary = _call(_ctx(root), "summary", {})
+    assert summary["isError"] is False
+    assert "outdated" not in summary["content"][0]["text"]
+    prov = json.loads((root / ".dekko" / "map.json").read_text())["provenance"]
+    assert prov["spec_hash"] == selfcheck.loaded_spec()
 
 
 def test_tool_call_reports_too_new_doc_version_clearly(

@@ -59,14 +59,24 @@ its own source. See `README.md` and `docs/` (`docs/install.md`,
   behavior change isn't done until this guide reflects it; don't leave it
   to whoever tests next to discover the gap.
 - `.dekko/MAP.md` / `.dekko/map.json` at the repo root are dekko's own
-  generated map of itself, regenerated on demand — expect them to show as
-  modified after running `dekko map`; they're git-ignored by default but
-  this repo tracks its own for dogfooding, so check whether a given change
-  is worth including before committing it alongside unrelated work.
+  generated map of itself; the map is git-ignored by default but this
+  repo tracks its own for dogfooding. **Always regenerate the map before
+  committing and commit the refreshed `.dekko/` files with the change:**
+  run `dekko map` (or `uv run dekko map`) after your last source edit,
+  then `git add .dekko/`. A checkout's map must match its source, so a
+  source commit with a stale map is a bug. The `dekko-map` pre-commit
+  hook runs `dekko map --if-stale` but only when hooks are installed and
+  it does not stage the result, so it is not a substitute for doing this
+  yourself.
 - Follow the branch/PR conventions in `CONTRIBUTING.md`: one conceptual
-  change per PR, `feat:`/`fix:`/`perf:`/`docs:`/`chore:`-style commit
-  prefixes (see `git log` for the house style), releases cut by pushing a
-  `v*` tag.
+  change per PR, Conventional-Commits-style commit prefixes (`feat`/
+  `fix`/`docs`/`style`/`refactor`/`perf`/`test`/`chore`/`build`/`ci`/
+  `revert` — CONTRIBUTING.md's "Commit messages" section has the full
+  table and what each one means here), dekko's versioning rules
+  (CONTRIBUTING.md's "Versioning" section: major is maintainer-only,
+  minor closes out a testing round's fix cycle or ships a new
+  top-level capability, patch is everything else), releases cut by
+  pushing a `v*` tag.
 
 ## Evaluation reports: `test-repos/reports/`
 

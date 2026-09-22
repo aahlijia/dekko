@@ -24,6 +24,7 @@ callers``/``callees``.
 import json
 import re
 import sys
+from collections import deque
 from pathlib import Path
 
 from dekko.analysis.query import paths_matching
@@ -166,6 +167,37 @@ def _import_resolution_coverage_note(index: MapIndex) -> str | None:
     )
 
 
+def _file_import_scope_note(index: MapIndex, path: str) -> str | None:
+    """Scope-gap disclosure for one file in an unresolved-import language.
+
+    Round 33 Track 6a (awesome-go.md §3.1): the bare ``dekko deps``
+    summary has carried ``_import_resolution_coverage_note`` since
+    round 29, but ``--file`` on a Go file printed ``imports (0):`` /
+    ``imported by (0):`` and listed the repo's own packages under
+    ``external`` with no explanation. The second half matters more:
+    ``imported by (0)`` reads as "nothing depends on this", a claim
+    dekko can't make for a language whose imports it never resolves.
+
+    Args:
+        index: Loaded map index.
+        path: The mapped file being reported.
+
+    Returns:
+        A one-line note, or ``None`` when the file's language has real
+        import resolution.
+    """
+    lang = index.languages_by_path.get(path)
+    if lang is None or import_resolution_supported(lang):
+        return None
+
+    return (
+        f"{path} is {lang}: dekko does not resolve {lang} imports to "
+        "in-repo files by design -- entries under external may be this "
+        "repo's own packages, and imported-by is always empty for this "
+        "language"
+    )
+
+
 def _dynamic_import_constructs(
     root: Path | None, path: str, lang: str | None
 ) -> list[tuple[str, int]]:
@@ -252,8 +284,10 @@ def _print_summary_text(doc: dict, coverage: str | None = None) -> None:
     if doc["cycles"] or doc["self_cycles"]:
         parts = []
         if doc["cycles"]:
+            n = doc["cycles"]
             parts.append(
-                f"{doc['cycles']} cycles ({doc['cycle_files']} files)"
+                f"{n} circular-import cluster{'s' if n != 1 else ''} "
+                f"({doc['cycle_files']} files)"
             )
         if doc["self_cycles"]:
             parts.append(f"{doc['self_cycles']} self-import(s)")
@@ -330,6 +364,7 @@ def _run_file(
         root, path, index.languages_by_path.get(path)
     )
     dynamic_note = _dynamic_import_note(dynamic, len(imports))
+    scope_note = _file_import_scope_note(index, path)
 
     if as_json:
         doc = {
@@ -338,6 +373,8 @@ def _run_file(
             "imported_by": imported_by,
             "external": external,
         }
+        if scope_note:
+            doc["import_scope_note"] = scope_note
         if dynamic_note:
             doc["dynamic_imports"] = [
                 {"construct": label, "occurrences": count}
@@ -347,6 +384,8 @@ def _run_file(
         print(json.dumps(doc, indent=2))
         return EXIT_OK
 
+    if scope_note:
+        print(f"note: {scope_note}", file=sys.stderr)
     _print_file_text(
         imports,
         imported_by,
@@ -395,35 +434,157 @@ def _print_file_text(
         print("external (0):")
 
 
-def _cycle_label(cycle: list[str]) -> str:
-    """One text block for a single cycle (multi-file or self-import)."""
-    if len(cycle) == 1:
-        return f"  {cycle[0]}  (self-import)"
-    chain = " -> ".join([*cycle, cycle[0]])
-    return f"  {chain}"
+# Round 33 Track 2 (claude-buddy.md §1): ``find_cycles`` returns each
+# strongly-connected cluster as its members *sorted*, and the renderer
+# joined that list with ``->`` arrows -- an alphabetical listing dressed
+# up as an import path. Measured on the eval repos, 0 of 4 printed arrows
+# were real edges on claude-buddy, 159 of 1,175 on claude-code, 226 of
+# 433 on zed; a chain was only ever right for a two-file cluster. An
+# agent asking "which import do I cut" was pointed at edges that don't
+# exist. Now: members are listed without arrows, the one arrow chain
+# printed is a BFS-verified shortest real loop, and the cluster's actual
+# internal edges are listed when there are few enough to read.
+_CYCLE_EDGE_LIST_CAP = 12
+_CYCLE_MEMBER_LIST_CAP = 12
+
+
+def _internal_edges(
+    members: list[str], deps_out: dict[str, list[str]]
+) -> list[tuple[str, str]]:
+    """Every real import edge with both ends inside one cluster."""
+    inside = set(members)
+    return [
+        (a, b) for a in members for b in deps_out.get(a, ()) if b in inside
+    ]
+
+
+def _shortest_loop(
+    members: list[str], deps_out: dict[str, list[str]]
+) -> list[str]:
+    """Shortest real import loop inside one strongly-connected cluster.
+
+    BFS from each member over edges that stay inside the cluster,
+    pruned at the best length found so far, stopping outright at a
+    two-file loop since nothing beats it. Every consecutive pair in
+    the result is a real ``deps_out`` edge and the last file imports
+    the first. A loop always exists: that is what strongly connected
+    means, so there is no not-found branch. Deterministic: ``members``
+    and each ``deps_out`` list are sorted.
+
+    Args:
+        members: The cluster's files (``find_cycles`` output).
+        deps_out: File path to the sorted paths it imports.
+
+    Returns:
+        The loop's files in import order, without repeating the first.
+    """
+    inside = set(members)
+    best: list[str] = []
+    for start in members:
+        loop = _bfs_loop(start, inside, deps_out, len(best))
+        if loop and (not best or len(loop) < len(best)):
+            best = loop
+            if len(best) == 2:
+                break
+    return best
+
+
+def _bfs_loop(
+    start: str, inside: set[str], deps_out: dict[str, list[str]], bound: int
+) -> list[str]:
+    """Shortest loop through ``start``, or ``[]`` if none shorter than
+    ``bound`` (``0`` = unbounded) exists."""
+    prev: dict[str, str | None] = {start: None}
+    depth = {start: 0}
+    queue = deque([start])
+    while queue:
+        node = queue.popleft()
+        if bound and depth[node] + 1 >= bound:
+            return []
+        for nxt in deps_out.get(node, ()):
+            if nxt == start:
+                path = [node]
+                back = prev[node]
+                while back is not None:
+                    path.append(back)
+                    back = prev[back]
+                return path[::-1]
+            if nxt in inside and nxt not in prev:
+                prev[nxt] = node
+                depth[nxt] = depth[node] + 1
+                queue.append(nxt)
+    return []
+
+
+def _cycle_entry(cluster: list[str], deps_out: dict[str, list[str]]) -> dict:
+    """The JSON document for one cluster; also feeds the text block.
+
+    ``files`` and ``self_import`` are the pre-round-33 keys, unchanged.
+    ``edges`` is present only under ``_CYCLE_EDGE_LIST_CAP`` (a
+    7,046-pair array is not a default payload); ``internal_edges`` is
+    always present so a consumer knows what it isn't seeing.
+    """
+    entry: dict = {"files": cluster, "self_import": len(cluster) == 1}
+    if len(cluster) == 1:
+        return entry
+    edges = _internal_edges(cluster, deps_out)
+    entry["internal_edges"] = len(edges)
+    entry["shortest_loop"] = _shortest_loop(cluster, deps_out)
+    entry["two_file_loops"] = sum(
+        1 for a, b in edges if a < b and a in deps_out.get(b, ())
+    )
+    if len(edges) <= _CYCLE_EDGE_LIST_CAP:
+        entry["edges"] = [list(e) for e in edges]
+    return entry
+
+
+def _cycle_text(i: int, entry: dict) -> str:
+    """One text block for a single cluster (multi-file or self-import)."""
+    files = entry["files"]
+    if entry["self_import"]:
+        return f"cycle {i} (1 file):\n  {files[0]}  (self-import)"
+    loop = entry["shortest_loop"]
+    chain = " -> ".join([*loop, loop[0]])
+    lines = [
+        f"cluster {i} ({len(files)} files, {entry['internal_edges']} "
+        "import edges among them):"
+    ]
+    if len(files) > 2:
+        shown = files[:_CYCLE_MEMBER_LIST_CAP]
+        more = len(files) - len(shown)
+        members = ", ".join(shown) + (f", +{more:,} more" if more else "")
+        lines.append(f"  {members}")
+    lines.append(f"  shortest loop: {chain}")
+    if len(files) > 2:
+        if "edges" in entry:
+            lines.append("  edges:")
+            lines.extend(f"    {a} -> {b}" for a, b in entry["edges"])
+        else:
+            lines.append(
+                f"  edges: {entry['internal_edges']:,} (see `dekko deps "
+                f"--file <member>`, or --json); two-file loops inside: "
+                f"{entry['two_file_loops']:,}"
+            )
+    return "\n".join(lines)
 
 
 def _run_cycles(
     index: MapIndex, limit: int, budget: int | None, as_json: bool
 ) -> int:
     """Handle ``--cycles``: every detected circular-import cluster."""
-    cycles = find_cycles(index.module_deps_out)
+    deps_out = index.module_deps_out
+    entries = [_cycle_entry(c, deps_out) for c in find_cycles(deps_out)]
     if as_json:
-        entries = [{"files": c, "self_import": len(c) == 1} for c in cycles]
         serialized = [json.dumps(e) for e in entries]
         kept_ser, meter = fit_to_budget(serialized, budget, limit)
         doc = {"results": entries[: len(kept_ser)], "meta": meter.as_dict()}
         print(json.dumps(doc, indent=2))
         return EXIT_OK
 
-    if not cycles:
+    if not entries:
         print("dekko: no circular imports detected")
         return EXIT_OK
-    rows = [
-        f"cycle {i} ({len(c)} file{'s' if len(c) != 1 else ''}):\n"
-        f"{_cycle_label(c)}"
-        for i, c in enumerate(cycles, start=1)
-    ]
+    rows = [_cycle_text(i, e) for i, e in enumerate(entries, start=1)]
     kept, meter = fit_to_budget(rows, budget, limit)
     for row in kept:
         print(row)

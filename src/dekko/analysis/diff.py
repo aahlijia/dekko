@@ -16,6 +16,7 @@ instead of paying the export/re-parse cost again.
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -428,7 +429,7 @@ def _build_and_cache_old_snapshot(
 
 
 def sequential_disclosure_message(
-    tracked_count: int, *, all_cores: bool
+    tracked_count: int, *, workers: int
 ) -> str | None:
     """Build the "no rev-cache ... may take a while" note text.
 
@@ -445,10 +446,14 @@ def sequential_disclosure_message(
             ``_maybe_warn_sequential``'s ``candidates`` docstring for
             why this is a ``git ls-tree`` count, not the mapped-file
             count).
-        all_cores: Whether the resolve about to run will actually
-            engage all cores (the daemon-routed round-25 override
-            applied) rather than run single-threaded (the direct-
-            execution default, or an explicit ``--jobs 1``).
+        workers: The resolved worker count the resolve will run with:
+            ``1`` is sequential, ``0`` means every core, any other
+            value is an explicit ``--jobs N``. Round 33 Track 6d
+            (tensorflow.md §4.1): this used to be a bool that read
+            every ``N > 1`` as "with all cores", which was true when
+            the only parallel path *was* the daemon's all-cores
+            override and stopped being true once round 31 made
+            ``--jobs N`` a real choice on these commands.
 
     Returns:
         The note text (no trailing newline, not yet routed to
@@ -457,10 +462,16 @@ def sequential_disclosure_message(
     """
     if tracked_count < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
         return None
-    if all_cores:
+    if workers != 1:
+        cores = os.cpu_count() or 1
+        with_what = (
+            f"all {cores} cores"
+            if workers <= 0 or workers >= cores
+            else f"{workers} workers (of {cores} cores)"
+        )
         return (
             f"note: no rev-cache for this commit; resolving "
-            f"{tracked_count} git-tracked files with all cores may "
+            f"{tracked_count} git-tracked files with {with_what} may "
             f"take a while"
         )
     return (
@@ -506,9 +517,7 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     # into thinking the wait scales with the mapped set. Naming it
     # "git-tracked" makes that distinction explicit instead of
     # implying it's the same count `dekko map`'s own summary reports.
-    message = sequential_disclosure_message(
-        len(candidates), all_cores=jobs > 1
-    )
+    message = sequential_disclosure_message(len(candidates), workers=jobs)
     if message is None:
         return
     print(message, file=sys.stderr)

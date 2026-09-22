@@ -5,8 +5,9 @@ knows to ask. This module is the thin **push** layer that orients a
 fresh agent and nudges it toward dekko's structural tools before it
 over-reads. It is pure orchestration of the existing pull tools
 (``summary``, ``outline``): it adds no extraction, no schema, and no
-state, and it is inert until a user wires it into a hook (see the README
-"Proactive orientation" section) or the bundled ``dekko-orient`` skill.
+state, and it is inert until a user wires it into a hook (``dekko hooks
+install``, see the "Push hooks" section of ``docs/claude-code.md``) or
+the bundled ``dekko-orient`` skill.
 
 Two modes behind one command:
 

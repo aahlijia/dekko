@@ -18,18 +18,19 @@ directly at the top level instead of doing a function-local
 
 import argparse
 import os
+import subprocess
 import sys
 import time
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
-from importlib.metadata import version as _pkg_version
 from multiprocessing.context import BaseContext
 from pathlib import Path
 
 from dekko.storage import cache as cache_mod
 from dekko.storage import resolvecache
 from dekko import classify
+from dekko import selfcheck
 from dekko.core import grammars
 from dekko.core import resolver as resolver_mod
 from dekko.render import mapfile
@@ -473,8 +474,8 @@ def _map_run_is_noop(
         == getattr(args, "follow_symlinks", False)
     )
     version_match = (
-        prov.get("tool_version") == _pkg_version("dekko")
-        and prov.get("spec_hash") == languages.spec_fingerprint()
+        prov.get("tool_version") == selfcheck.loaded_version()
+        and prov.get("spec_hash") == selfcheck.loaded_spec()
         and index.doc_version == mapfile.MAP_DOC_VERSION
     )
     if not (options_match and version_match):
@@ -972,7 +973,8 @@ def load_or_regen(
             return cached, 0
 
     index = mapfile.load_map(root)
-    if index is not None and mapfile.check_freshness(root, index).fresh:
+    fresh = mapfile.check_freshness(root, index) if index is not None else None
+    if index is not None and fresh is not None and fresh.fresh:
         if _daemon_cache_put is not None:
             _daemon_cache_put(root, index)
         return index, 0
@@ -984,7 +986,46 @@ def load_or_regen(
         )
         return None, 5
 
-    return _locked_regen(root)
+    _note_foreign_build(fresh)
+    regenerated, code = _locked_regen(root)
+    if regenerated is None and index is not None and fresh.process_outdated:
+        # An outdated long-lived process whose delegated regen failed
+        # (broken install, timeout). It must not fall back to
+        # extracting with its own stale code; the map on disk is the
+        # best honest answer it has.
+        print(
+            "note: could not regenerate via the installed dekko "
+            f"(exit {code}) -- serving the existing map, which may be "
+            "stale",
+            file=sys.stderr,
+        )
+        return index, 0
+
+    return regenerated, code
+
+
+def _note_foreign_build(fresh: mapfile.Freshness | None) -> None:
+    """Flag a map written by same-version, different-code dekko.
+
+    A one-shot process about to regenerate a map whose ``tool_version``
+    matches its own but whose ``spec_hash`` doesn't is looking at one
+    of two things: a dev rebuild, or an outdated long-lived dekko
+    process (one predating round 33 Track 1) that keeps rewriting the
+    map with older extractor code. This process can't stop the second
+    case, but it can stop it being invisible: without this note the
+    only symptom is every other command being mysteriously slow.
+    """
+    if fresh is None or selfcheck.is_long_lived():
+        return
+    if fresh.reason != "version" or fresh.version_stale:
+        return
+    print(
+        "note: map.json was last written by a different dekko build "
+        f"(spec {(fresh.built_spec_hash or 'unknown')[:12]}) under the "
+        "same version string. If this repeats, an outdated long-lived "
+        "dekko process is rewriting it: run `dekko doctor`.",
+        file=sys.stderr,
+    )
 
 
 def load_current_index_no_regen(root: Path) -> mapfile.MapIndex | None:
@@ -1046,6 +1087,69 @@ def load_current_index_no_regen(root: Path) -> mapfile.MapIndex | None:
     return index
 
 
+# Generous: the child is a full `dekko map` on the largest repo this
+# process can be pointed at (tensorflow cold: ~190s, ~500s contended).
+_DELEGATED_REGEN_TIMEOUT = 1800.0
+_DELEGATED_REGEN_SNIPPET = (
+    "import sys;"
+    "from pathlib import Path;"
+    "from dekko import repo_ops;"
+    "sys.exit(repo_ops.regen_map("
+    "Path(sys.argv[1]), full=sys.argv[2] == '1', quiet=sys.argv[3] == '1'))"
+)
+
+
+def _delegated_regen(root: Path, full: bool, quiet: bool) -> int:
+    """Regenerate via the installed dekko, not this process's stale code.
+
+    Called when a long-lived process has found itself outdated
+    (``selfcheck.process_outdated``). Extracting in-process would stamp
+    the map with this process's older spec, which the next current
+    process would call stale and rewrite, which this process would
+    then call stale and rewrite... (round 33 Track 1). A child
+    interpreter imports whatever is on disk *now*, so its map and its
+    caches carry the current identity, and this process becomes a
+    client of the current code instead of a competitor to it.
+
+    The child runs the same ``regen_map`` (it is one-shot, so it takes
+    the in-process branch), so recorded provenance options are honored
+    identically. The caller's regen lock, if held, stays held around
+    it. Output is captured and relayed rather than inherited: inside
+    the MCP server, the real stdout is the protocol channel.
+
+    Args:
+        root: Repository root to map.
+        full: Ignore the ``.dekko`` cache and re-parse every file.
+        quiet: Suppress the one-line summary on stdout.
+
+    Returns:
+        The child's exit code, or 1 if it couldn't be run at all.
+    """
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _DELEGATED_REGEN_SNIPPET,
+                str(root),
+                "1" if full else "0",
+                "1" if quiet else "0",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_DELEGATED_REGEN_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"dekko: delegated regen failed to run: {exc}", file=sys.stderr)
+        return 1
+    if result.stdout:
+        sys.stdout.write(result.stdout)
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    return result.returncode
+
+
 def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
     """Re-generate the map at ``root`` with its recorded options.
 
@@ -1061,6 +1165,9 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
     Returns:
         Process exit code from ``run_map``.
     """
+    if selfcheck.process_outdated():
+        return _delegated_regen(root, full=full, quiet=quiet)
+
     index = mapfile.load_map(root)
     prov = (index.provenance if index else None) or {}
     regen_args = argparse.Namespace(

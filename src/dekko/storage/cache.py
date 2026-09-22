@@ -17,9 +17,9 @@ track.
 """
 
 from dataclasses import asdict
-from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
+from dekko import selfcheck
 from dekko.core.languages import spec_fingerprint
 from dekko.render.mapfile import (
     _file_hash,
@@ -56,8 +56,13 @@ _LEGACY_INNER_GITIGNORE = "*\n"
 
 
 def _tool_version() -> str:
-    """Current dekko version, used to invalidate stale extractions."""
-    return _pkg_version("dekko")
+    """This process's dekko version, used to invalidate stale extractions.
+
+    The *loaded* version (``selfcheck``), not a live dist-info read: a
+    long-lived process must stamp its caches with the code that
+    actually produced them.
+    """
+    return selfcheck.loaded_version()
 
 
 def _filemap_to_dict(fm: FileMap) -> dict:

@@ -18,8 +18,13 @@ Four events, each individually opt-in (``dekko hooks install``):
   context* (relevance ⋈ ledger dedup), with the list tightening as the
   session's token budget fills (FR-C3).
 * **PreToolUse / Read** (``pre-read``) — a non-blocking advisory to
-  outline a large file first (``permissionDecision: "defer"`` — never
-  denies the read; Resolved Q5).
+  outline a large file first, injected through ``additionalContext``
+  with no ``permissionDecision`` at all, so the read proceeds through
+  the normal permission flow untouched (Resolved Q5). It used to send
+  ``permissionDecision: "defer"``, which is not an advisory: Claude
+  Code defines ``defer`` as "hand this decision to an Agent SDK
+  wrapper" in non-interactive mode, and the reason text of a non-ask
+  decision is never shown to the model.
 * **PreToolUse / Bash** (``pre-bash``) — the enforcement tier: a
   ``grep``/``rg``/``ag`` repo-wide search, a ``find -name`` hunt, or a
   ``cat``/``head``/``sed`` on a large mapped file surfaces
@@ -42,9 +47,9 @@ from pathlib import Path
 from dekko import repo_ops
 from dekko.storage import ledger
 from dekko.analysis import ambiguous, outline, relevance, summary
-from dekko.render import render_lean
+from dekko.render import mapfile, render_lean
 from dekko.render.mapfile import MapIndex
-from dekko.integrations.orient import _PREAMBLE
+from dekko.integrations import orient
 
 EXIT_OK = 0
 
@@ -96,8 +101,6 @@ def _root_from(payload: dict) -> Path:
 
 def _load_index(root: Path, *, allow_regen: bool) -> MapIndex | None:
     """Load the map; optionally auto-regenerate a stale one."""
-    from dekko.render import mapfile
-
     if not allow_regen:
         return mapfile.load_map(root)
     index, _ = repo_ops.load_or_regen(root, no_regen=False)
@@ -128,7 +131,10 @@ def session_start(payload: dict) -> dict | None:
     )
     if report.total_symbols == 0 and not index.languages_by_path:
         return None
-    parts = [_PREAMBLE]
+    # ``orient._preamble()``, not the raw constant: it drops the
+    # ``search`` line when that subcommand isn't usable in this install,
+    # and the hook should never steer toward a command that then fails.
+    parts = [orient._preamble()]
     note = ambiguous.high_rate_note(index)
     if note:
         parts.append(note)
@@ -291,13 +297,11 @@ def pre_read(payload: dict) -> dict | None:
         f"≈ {outline_tokens} tok ({pct}%); outline first if you only "
         "need its shape."
     )
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "defer",
-            "permissionDecisionReason": reason,
-        }
-    }
+    # Advisory only: ``additionalContext`` reaches the model, and the
+    # absence of ``permissionDecision`` leaves the Read on its normal
+    # permission path. See the module docstring for why ``defer`` was
+    # the wrong field here.
+    return _additional_context("PreToolUse", reason)
 
 
 def _rel_to_root(file_path: str, root: Path) -> str | None:
@@ -321,10 +325,48 @@ _SHELL_SEPARATORS = {";", "&&", "||", "|"}
 _GREP_CMDS = {"grep", "egrep", "fgrep", "rgrep", "rg", "ag"}
 _CAT_CMDS = {"cat", "head", "sed"}
 # Recursive/repo-wide flags for the grep family. `rg`/`ag` are recursive
-# by default, so any invocation of those two counts; the plain `grep`
-# family only counts once one of these explicit flags is present —
+# by default, so an invocation of those two counts unless every path it
+# names is an existing file (see ``_targets_are_files``); the plain
+# `grep` family only counts once a recursive flag is present —
 # `grep somepattern one_file.py` is a targeted read, not a blind search.
-_RECURSIVE_FLAGS = {"-r", "-R", "-rn", "-nr", "-Rn", "-nR", "--recursive"}
+# Short flags combine (`-rn`, `-rli`, `-nRE`, ...), so
+# ``_is_recursive_flag`` reads the letters rather than matching whole
+# tokens: eval transcripts show `-rn`, `-rln`, `-rl`, `-rnE`, `-rli`
+# and `-rnw` all in live use.
+_RECURSIVE_LONG_FLAGS = {"--recursive", "--dereference-recursive"}
+
+
+def _is_recursive_flag(tok: str) -> bool:
+    """Whether one grep-family token asks for a recursive search."""
+    if tok in _RECURSIVE_LONG_FLAGS:
+        return True
+    if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+        return False
+    return "r" in tok[1:] or "R" in tok[1:]
+
+
+def _targets_are_files(stmt: list[str], root: Path) -> bool:
+    """Whether a search names paths and every one is an existing file.
+
+    ``rg login src/auth.py`` is a targeted read of one file, not the
+    repo-wide search this hook exists to redirect, even though ``rg``
+    is recursive by default. The first non-flag token is the pattern;
+    every later non-flag token is taken as a path. A flag's own
+    argument (``-t py``, ``-g '*.py'``) also lands here and fails the
+    file check, which keeps the exemption conservative: it only ever
+    silences a nudge, never adds one.
+    """
+    positionals = [tok for tok in stmt[1:] if not tok.startswith("-")]
+    paths = positionals[1:]
+    if not paths:
+        return False
+    for raw in paths:
+        p = Path(raw)
+        if not p.is_absolute():
+            p = root / p
+        if not p.is_file():
+            return False
+    return True
 
 
 def _split_statements(command: str) -> list[list[str]]:
@@ -349,14 +391,14 @@ def _split_statements(command: str) -> list[list[str]]:
     return [s for s in statements if s]
 
 
-def _grep_reason(stmt: list[str]) -> str | None:
+def _grep_reason(stmt: list[str], root: Path) -> str | None:
     """Nudge for a repo-wide grep/rg/ag search, or None."""
     if stmt[0] not in _GREP_CMDS:
         return None
     recursive = stmt[0] in {"rg", "ag"} or any(
-        tok in _RECURSIVE_FLAGS for tok in stmt[1:]
+        _is_recursive_flag(tok) for tok in stmt[1:]
     )
-    if not recursive:
+    if not recursive or _targets_are_files(stmt, root):
         return None
     return (
         "dekko: this looks like a repo-wide text search — "
@@ -403,7 +445,7 @@ def _bash_reason(command: str, index: MapIndex, root: Path) -> str | None:
     """The first dekko-equivalent nudge for a shell command, or None."""
     for stmt in _split_statements(command):
         reason = (
-            _grep_reason(stmt)
+            _grep_reason(stmt, root)
             or _find_reason(stmt)
             or _cat_reason(stmt, index, root)
         )
@@ -420,8 +462,9 @@ def pre_bash(payload: dict, *, strict: bool = False) -> dict | None:
     annotating it — ``"ask"`` forces a confirmation, ``"deny"`` (opt-in
     via ``--strict``) rejects the call outright and hands Claude the
     dekko-equivalent command to retry with. Matching is deliberately
-    conservative (favor false negatives): a plain ``cat config.json``
-    or a non-recursive, single-file ``grep`` never matches.
+    conservative (favor false negatives): a plain ``cat config.json``,
+    a non-recursive ``grep``, or an ``rg``/``grep -r`` whose every path
+    argument is an existing file never matches.
 
     Args:
         payload: The ``PreToolUse``/``Bash`` hook JSON.

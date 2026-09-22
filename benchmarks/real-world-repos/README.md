@@ -1,14 +1,77 @@
 # Real-world token-efficiency benchmarks
 
-This is a one-time, hands-on benchmark: dekko's MCP tools vs. a plain
-`Read`/`Grep` workflow ("the old way"), run against **7 real,
-unmodified open-source repositories** under `test-repos/` — no
-synthetic fixtures. Each repo got an independent pass over a handful of
-realistic tasks (repo orientation, outlining a large file, tracing a
-symbol's callers/callees, searching for an external API's usage sites,
-bundling a change's context). Both sides were measured in tokens
-(`chars/4`, cross-checked against dekko's own self-reported estimates,
-which consistently matched within a few percent).
+A hands-on benchmark: dekko's MCP tools vs. a plain `Read`/`Grep`
+workflow ("the old way"), run against **7 real, unmodified open-source
+repositories** under `test-repos/` — no synthetic fixtures. Each repo
+got an independent pass over a handful of realistic tasks (repo
+orientation, outlining a large file, tracing a symbol's callers/callees,
+searching for an external API's usage sites, bundling a change's
+context). Both sides were measured in tokens (`chars/4`, cross-checked
+against dekko's own self-reported estimates, which consistently matched
+within a few percent).
+
+This page carries two measurements:
+
+- **Current numbers (dekko 0.43.77)**, the next section: the
+  2026-09-21/22 re-measurement from evaluation rounds 33 and 34, on the
+  same seven repos at their current size. This is the headline.
+- **The original 2026-08-03 study** (everything from "Repos tested"
+  down, and the seven per-repo write-ups linked there): run on a
+  0.20-era dekko, before the fixes of eval rounds 07 through 34. Kept
+  because its "where the win is smallest" and "what predicts the ratio"
+  analysis still holds, and because its correctness caveats document
+  failure shapes worth knowing. Its numbers are that snapshot, not the
+  current state.
+
+## Current numbers (dekko 0.43.77)
+
+Measured in rounds 33 (0.43.71) and 34 (0.43.77) of the evaluation
+program, 2026-09-21/22, one independent agent per repo, `chars/4`
+tokens, same task shapes as the original study. Repo scale at the time
+of measurement:
+
+| Repo | Language | Files | Symbols |
+|---|---|---:|---:|
+| awesome-go | Go | 10 | 89 |
+| claude-buddy | TypeScript | 57 | 687 |
+| claude-code | TypeScript/TSX | 1,900 | 17,779 |
+| cline | TypeScript (monorepo) | 2,730 | 21,884 |
+| spring-boot | Java (monorepo) | 9,942 | 69,423 |
+| tensorflow | Polyglot (Python/C++/…) | 14,285 | 171,706 |
+| zed | Rust (workspace) | 2,177 | 60,406 |
+
+| Task type | Repo | dekko tokens | Read/Grep tokens | Ratio |
+|---|---|---:|---:|---:|
+| Repo orientation (`summary`) | awesome-go | 359 | ~16,328 (read every `.go` file) | ~45x |
+| Repo orientation (`summary`) | claude-buddy | ~349 | ~113,514 (read every source file) | ~325x (extreme baseline; a disciplined agent reading 5-6 entrypoints lands at 15-30x) |
+| Repo orientation (`summary`) | cline | ~839 | thousands, still no hotspot/fan-in data | order of magnitude |
+| Repo orientation (`summary`) | tensorflow | 917 | 5,000+, incomplete | qualitative: hotspots, entry points, and the 46%-ambiguous caveat in one call |
+| Outline a large file | awesome-go (`main.go`) | 492 | 4,671 | ~9.5x |
+| Outline a large file | claude-buddy (`cli/buddy-shell.ts`) | ~672 | ~7,328 | ~10.9x |
+| Outline a large file | claude-code (`src/screens/REPL.tsx`, 5,005 lines) | ~1,154 | ~223,963 | **~194x** |
+| Outline a large file | cline (`SdkController.ts`, 84 KB) | 1,803 | ~21,023 | ~11.7x |
+| Outline a large file | spring-boot (`SpringApplication.java`, full outline) | 4,193 | 17,580 | ~4.2x (76%; round 33's "89%" was a budget-truncated outline) |
+| Outline a large file | tensorflow (`direct_session.cc`, 2,186 lines) | 1,711 | ~21,112 | ~12.3x |
+| Outline a large file | tensorflow (`eager/backprop.py`, 1,345 lines) | 946 | ~12,574 | ~13.3x |
+| Outline a large file | zed (`gpui/src/window.rs`, 425 symbols) | ~4,756 | ~69,753 | ~14.7x |
+| Outline a directory | zed (`crates/git_ui/src`, 32 files) | ~5,219 | ~418,520 | ~80x |
+| Callers of a symbol (`--sites`) | awesome-go (`Generate`, same-named method nearby) | 79 | 5,227 | ~66x, and correct where grep conflates |
+| Callers of a symbol (`--sites`) | claude-buddy (`generateBones`) | ~298 | ~756 (grep, 39 raw hits) | ~2.5x, plus separating 6 real calls from 23 test assertions |
+| Callers of a symbol (`--sites`) | claude-code (`errors.ts:errorMessage`) | ~602 | ~18,521 (grep, 323+ raw hits) | ~30.8x |
+| Callers of a symbol | cline (`Controller.postStateToWebview`, fan-in 77) | 786 default / 2,762 all 77 rows | ~6,563 (grep, 245 raw hits) | ~8x / ~2.4x |
+| Callers of a symbol | tensorflow (`convert_to_tensor`, one of two overloads) | 89 | ~64,563 (grep, 2,328 raw hits) | ~700x, not like-for-like: dekko answers "which overload" and grep cannot |
+| Callers of a symbol (`--sites`) | zed (`MultiWorkspace.new`, 22 sites in 8 files) | ~809 | ~381,446 (read the 8 caller files) / ~636 (naive grep) | ~471x vs. reading; parity vs. grep, but call-graph-correct |
+| External-API usage | claude-code (`chalk`, namespace-style import) | ~798 | ~8,099 (grep `chalk.`) | ~10.2x; before 0.43.75 this query returned nothing at all |
+| Bundled context (`workset`) | awesome-go (`ToHTML`) | 263 | 4,104 (file + 4 impacted tests) | ~15.6x |
+| Bundled context (`context`) | cline (`postStateToWebview`, 1 hop) | ~770 | unbounded (the 84 KB file plus several caller files) | — |
+
+Round 33 summarized the range as roughly 80-98% savings on small repos
+and 16-275x on large ones; round 34 as 10x-325x depending on task and
+repo. The shape from the original study holds: outline ratios scale with
+file size, call-graph ratios scale with how noisy the same-named grep
+is, and the floor is a small, grep-friendly local symbol (about 2.5x).
+Full per-task detail, timings, and the six Low findings of round 34 are
+in `test-repos/reports/33-*/` and `34-*/` (local, not tracked in git).
 
 This is distinct from `benchmarks/measure.py` (the synthetic
 regression harness that runs on every `pytest` invocation, `benchmarks/README.md`
@@ -19,7 +82,12 @@ messy codebases, several orders of magnitude bigger than anything the
 regression suite touches.
 
 
-## Repos tested
+## The original study (2026-08-03, dekko 0.20-era)
+
+Everything below is the first measurement, kept for its analysis. Read
+the numbers as a historical snapshot; the current ones are above.
+
+### Repos tested
 
 | Repo | Language | Files | Symbols |
 |---|---|---:|---:|
@@ -167,12 +235,24 @@ consequential were:
 
 Both failure modes shared the same signature: no error, no truncation
 footer, no low-confidence flag — indistinguishable in shape from a
-correct, complete answer. As of the fix-status pass on 2026-08-02
-(recorded in `test-repos/reports/05-tokentest-7repo-retest/fable-synthesis-analysis.md` §1.4),
-9 of the 13 issues are fixed and 2 are partially fixed, including both
-of the above — but any number in this write-up that traces back to one
-of these tasks predates those fixes and should be read as a
-before-fix data point, not a current guarantee.
+correct, complete answer.
+
+**Status as of 0.43.77 (2026-09-22):** all of the above is fixed and
+re-verified on the same repos. The typed-variable / `new X(...)` caller
+gap and the `workset` budget bypass were closed in the 2026-08-02 pass
+(rounds 02-05). `find_usages` went through several rounds: shadowing
+now attaches a caveat or refuses with a clear error instead of returning
+a small wrong set; round 33's Track 3 (0.43.75) made it match import
+bindings and module paths, which turned claude-code's `chalk` query
+from "no matches" into the ~10x row above; round 34 re-verified it on
+zed (`anyhow`, `Vec::new`/`Box::new` external paths) and tensorflow
+(correctly rejecting a shadowed in-repo name). The `outline` blind spot
+on anonymous-callback files is disclosed rather than silent: a file
+that is anomalously thin for its size gets a `note:` line. Round 34
+found zero new High/Medium/Critical issues across all seven repos.
+Any number in the original study that traces back to one of these
+tasks is a before-fix data point; the table at the top of this page is
+the current one.
 
 See each repo's own write-up for the task-level detail and, where
 relevant, the specific bug that shaped that repo's numbers.

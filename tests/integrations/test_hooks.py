@@ -250,8 +250,14 @@ def test_pre_read_advises_on_large_file(
     )
     assert out is not None
     hso = out["hookSpecificOutput"]
-    assert hso["permissionDecision"] == "defer"  # never denies (Q5)
-    assert "outline" in hso["permissionDecisionReason"]
+    assert hso["hookEventName"] == "PreToolUse"
+    # Advisory only (Q5): text reaches the model via additionalContext
+    # and no permissionDecision is emitted at all -- "defer" is not an
+    # advisory in Claude Code's hook contract, it hands the decision to
+    # an Agent SDK wrapper, and a non-ask decision's reason text is
+    # never shown to the model.
+    assert "permissionDecision" not in hso
+    assert "outline" in hso["additionalContext"]
 
 
 def test_pre_read_silent_on_small_file(
@@ -304,6 +310,43 @@ def test_pre_bash_rg_always_counts_as_recursive(
     assert (
         "search_code" in out["hookSpecificOutput"]["permissionDecisionReason"]
     )
+
+
+def test_pre_bash_asks_on_combined_short_recursive_flags(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # `-r` combined with other short flags (`-rli`, `-nR`, `-rnE`) is
+    # how a recursive grep is actually typed in the eval transcripts;
+    # matching whole tokens only caught the handful spelled out.
+    root = make_mapped_repo(_FILES)
+    for cmd in ("grep -rli login .", "grep -nR login src", "grep -rnE 'a|b'"):
+        out = hooks.pre_bash(
+            {"cwd": str(root), "tool_input": {"command": cmd}}
+        )
+        assert out is not None, cmd
+        assert out["hookSpecificOutput"]["permissionDecision"] == "ask"
+    # Short flags without r/R, and long flags other than --recursive,
+    # are still not recursive.
+    for cmd in ("grep -ni login src/auth.py", "grep --color=auto login x"):
+        assert hooks._grep_reason(cmd.split(), root) is None, cmd
+
+
+def test_pre_bash_silent_on_rg_against_existing_files(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # `rg` is recursive by default, but naming only existing files is a
+    # targeted read, not the blind repo-wide search this hook redirects.
+    root = make_mapped_repo(_FILES)
+    out = hooks.pre_bash(
+        {"cwd": str(root), "tool_input": {"command": "rg login src/auth.py"}}
+    )
+    assert out is None
+    # A directory target, or a path that doesn't exist, still nudges.
+    for cmd in ("rg login src", "rg login src/missing.py"):
+        out = hooks.pre_bash(
+            {"cwd": str(root), "tool_input": {"command": cmd}}
+        )
+        assert out is not None, cmd
 
 
 def test_pre_bash_silent_on_targeted_grep(

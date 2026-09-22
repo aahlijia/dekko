@@ -1,5 +1,9 @@
 # zed
 
+> Measured 2026-08-03 on a 0.20-era dekko, before the fixes of eval
+> rounds 07-34; the numbers and caveats below are that snapshot. The
+> 2026-09-21/22 re-measurement on 0.43.77 is in
+> [README.md](README.md#current-numbers-dekko-04377).
 
 Huge real Rust workspace: **2,178 mapped files, ~60,000 symbols**.
 
@@ -52,4 +56,8 @@ Huge real Rust workspace: **2,178 mapped files, ~60,000 symbols**.
   incomplete — see `benchmarks/real-world-repos/README.md`'s
   "Correctness caveats." The underlying Rust stdlib-path recognition
   gap in `find_usages` (`std::thread::spawn`, `.read_dir()` method-call
-  form, etc.) was not part of that fix pass and remains open.
+  form, etc.) was not part of that fix pass. It was addressed later:
+  round 33's Track 3 (0.43.75) made `query uses`/`find_usages` match
+  import bindings and module paths, and round 34 re-verified it on this
+  repo (`find_usages anyhow`, and `Vec::new()`/`Box::new()` resolving as
+  external paths rather than in-repo constructors).

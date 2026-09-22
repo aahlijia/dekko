@@ -1,16 +1,17 @@
 """Measurement harness for the Active Context Layer (design §7, step 3).
 
 This establishes the **falsifiable baseline** for the overarching goal
-G★: dekko's context layer must reduce the tokens an agent spends to work
-a task, at equal task success. It is deliberately *not* part of the wheel
-(it lives outside ``src/``) — it is a benchmark, run by hand or in CI.
+G★ (from the Active Context Layer design note, a local ``.dev/`` document
+not tracked in git): dekko's context layer must reduce the tokens an
+agent spends to work a task, at equal task success. It is deliberately
+*not* part of the wheel (it lives outside ``src/``) — it is a benchmark,
+run by hand or in CI.
 
-It measures the value proposition that exists **today**, before the hooks
-land: for a fixed set of representative tasks against a repo, the token
-cost of the naive **whole-file-read baseline** versus the **dekko tool**
-that delivers equivalent navigational/editing context. Both costs use the
-same :func:`dekko.textutil.estimate_tokens` so the comparison is apples to
-apples under the ``chars4`` pin.
+It measures the *strategy* cost: for a fixed set of representative tasks
+against a repo, the token cost of the naive **whole-file-read baseline**
+versus the **dekko tool** that delivers equivalent navigational/editing
+context. Both costs use the same :func:`dekko.textutil.estimate_tokens`
+so the comparison is apples to apples under the ``chars4`` pin.
 
 Two task families:
 
@@ -20,10 +21,10 @@ Two task families:
   whole-repo map, so we report absolute cost against what it covers
   (files + symbols), the FR-D3 density view.
 
-When the hooks layer (step 4) lands, the same harness gains the *live*
-half of G★ via :func:`session_cost`, which reads the real per-session
-token tally straight from the transcript ledger — letting an operator
-diff "hooks off" against "hooks on" on identical work.
+The *live* half of G★ is :func:`session_cost`, which reads the real
+per-session token tally straight from the transcript ledger — letting an
+operator diff "hooks off" against "hooks on" (``dekko hooks install``) on
+identical work.
 """
 
 import argparse
@@ -104,8 +105,16 @@ class Result:
 # exercise large files and well-connected symbols where the savings — or
 # their absence — show clearly. Override with a custom list in tests.
 TASKS: tuple[Task, ...] = (
-    Task("outline", "src/dekko/cli.py", "outline cli.py (large file)"),
-    Task("outline", "src/dekko/render_lean.py", "outline render_lean.py"),
+    Task(
+        "outline",
+        "src/dekko/integrations/cli.py",
+        "outline integrations/cli.py (large file)",
+    ),
+    Task(
+        "outline",
+        "src/dekko/render/render_lean.py",
+        "outline render/render_lean.py",
+    ),
     Task("context", "fit_to_budget", "context fit_to_budget (hot symbol)"),
     Task("context", "build_pack", "context build_pack"),
     Task("workset", "blended_scores", "workset --symbol blended_scores"),
@@ -144,7 +153,14 @@ def _caller_paths(index: MapIndex, sym_id: str) -> set[str]:
 
 
 def _measure_outline(index: MapIndex, root: Path, task: Task) -> Result:
-    """Whole-file read vs ``dekko outline`` for one file."""
+    """Whole-file read vs ``dekko outline`` for one file.
+
+    A target that isn't a file under ``root`` (a path that moved in a
+    refactor, say) reports ``unresolved`` instead of a bogus ``0 → N``
+    row, the same way the symbol-seeded measurers do.
+    """
+    if not (root / task.target).is_file():
+        return Result(task, 0, 0, covers="unresolved")
     baseline = _file_tokens(root, task.target)
     dekko = _capture_tokens(
         lambda: outline_mod.run(
@@ -197,7 +213,9 @@ def _measure_workset(index: MapIndex, root: Path, task: Task) -> Result:
     paths |= {imp.path for imp in seed.impacts}
     baseline = sum(_file_tokens(root, p) for p in paths)
     bundle = workset_mod.build(index, seed, workset_mod.DEFAULT_PACKS)
-    dekko = _capture_tokens(lambda: workset_mod._render_text(bundle, None))
+    dekko = _capture_tokens(
+        lambda: workset_mod._render_text(bundle, None, root)
+    )
     return Result(task, baseline, dekko, covers=f"{len(paths)} files")
 
 
