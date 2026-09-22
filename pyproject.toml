@@ -95,6 +95,10 @@ dev = [
     "pytest>=8",
     "pytest-cov>=5",
     "ruff>=0.8",
+    # tomllib is stdlib only from 3.11; dekko supports 3.10 (see
+    # requires-python above) and CI tests it, so test-only TOML
+    # parsing (test_round33_small_fixes.py) needs the backport there.
+    "tomli>=2; python_version < '3.11'",
 ]
 
 [tool.pytest.ini_options]

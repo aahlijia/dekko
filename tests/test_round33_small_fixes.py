@@ -7,8 +7,13 @@ in test_server; 6g the json-backend doctor row and the [all] extra.
 """
 
 import json
-import tomllib
+import sys
 from pathlib import Path
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 import pytest
 
