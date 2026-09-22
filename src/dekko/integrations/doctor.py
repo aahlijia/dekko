@@ -464,6 +464,26 @@ def _server_age_finding(pids: list[str]) -> Finding:
     )
 
 
+def _check_json_backend() -> Finding:
+    """Whether ``map.json`` is parsed with ``orjson`` or stdlib ``json``.
+
+    Round 33 Track 6g: the extra named ``all`` did not include orjson,
+    so every eval round's load timings were measured on stdlib json
+    without anyone noticing -- the difference is only visible in a
+    profile. Advisory: dekko is correct either way, just slower.
+    """
+    if mapfile.orjson is not None:
+        return Finding("json-backend", "ok", "orjson", None)
+
+    return Finding(
+        "json-backend",
+        "advisory",
+        "stdlib json (map.json loads ~2x and writes ~6x slower than "
+        "with orjson on large repos)",
+        "pip install 'dekko[fastjson]' (or reinstall with [all])",
+    )
+
+
 def _check_hooks(root: Path) -> list[Finding]:
     """One row per hook event, reusing ``hooks``'s own install-state read."""
     settings = hooks_mod._load_settings(hooks_mod.settings_path(root))
@@ -560,6 +580,7 @@ def collect(root: Path) -> list[Finding]:
     findings += _safe("plugin-installed", lambda: _check_plugin_installed(exe))
     findings += _safe("hooks", lambda: _check_hooks(root))
     findings += _safe("claude-md-policy", lambda: _check_claude_md(root))
+    findings += _safe("json-backend", _check_json_backend)
     return findings
 
 

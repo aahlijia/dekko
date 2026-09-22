@@ -2998,6 +2998,7 @@ def _print_heritage_json(
             "external": True,
             "text": ext.callee,
             "lines": ext.lines,
+            "relation": ext.relation,
             "unresolved_local": (
                 _heritage_external_label(index, sym, ext.callee)
                 == "unresolved"
@@ -3121,7 +3122,10 @@ def _run_heritage(
         label = _heritage_external_label(index, sym, ext.callee)
         for line in ext.lines or [sym.start_line]:
             callee = clip_middle(ext.callee)
-            lines.append(f"  {sym.path}:{line}  ({label}) {callee}")
+            # A pre-0.43.77 map has no relation for external rows;
+            # ``None`` prints exactly what it always did.
+            rel = f"  [{ext.relation}]" if ext.relation else ""
+            lines.append(f"  {sym.path}:{line}  ({label}) {callee}{rel}")
     if ambig_out:
         print(
             f"  note: {ambig_out} additional supertype name(s) "

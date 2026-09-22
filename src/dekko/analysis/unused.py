@@ -635,7 +635,44 @@ def _suspect_row_text(sym: Symbol) -> str:
     )
 
 
-def _print_suspects_text(suspects: list[Symbol]) -> None:
+def _section_caps(
+    section_cap: int, limit: int | None, budget: int | None
+) -> tuple[int, int | None]:
+    """``(limit, budget)`` for a supplemental section.
+
+    Round 33 Track 6c (cline.md §3.1): each section has always had its
+    own flat cap so it can't steal budget from the main list, but it
+    printed that cap's worth of rows in silence -- a header saying 258,
+    twenty rows, and nothing about the 238 dropped -- and ignored an
+    explicit ``--limit`` and ``--budget`` alike. Now an explicit lower
+    ``--limit`` binds, ``--budget`` applies to the section on its own
+    (the same number, independently, the way ``sanity`` applies it
+    per bucket), and ``fit_to_budget``'s footer says what was dropped.
+    """
+    return (min(section_cap, limit) if limit else section_cap, budget)
+
+
+def _print_section(
+    header: str,
+    rows: list[str],
+    section_cap: int,
+    limit: int | None,
+    budget: int | None,
+) -> None:
+    """Print a supplemental section: header, capped rows, footer."""
+    print()
+    print(header)
+    cap, section_budget = _section_caps(section_cap, limit, budget)
+    kept, meter = fit_to_budget(rows, section_budget, cap)
+    for row in kept:
+        print(row)
+    if meter.omitted:
+        print(f"  {meter.footer()}")
+
+
+def _print_suspects_text(
+    suspects: list[Symbol], limit: int | None = None, budget: int | None = None
+) -> None:
     """Print the ``--suspect`` section after the main unused listing.
 
     A separate, independent section from the main list — printed even
@@ -643,16 +680,14 @@ def _print_suspects_text(suspects: list[Symbol]) -> None:
     "suspiciously alive" regardless of how many other symbols are
     genuinely dead.
     """
-    print()
     header = (
         f"suspects: {len(suspects)} excluded symbols share a name with "
         "1+ ambiguous call site(s) elsewhere in the repo -- their inbound "
         "fan-in may be misattributed, not genuine. Run `dekko ambiguous "
         "--name <name>` on each to check."
     )
-    print(header)
-    for sym in suspects[:_SUSPECT_LIMIT]:
-        print(_suspect_row_text(sym))
+    rows = [_suspect_row_text(s) for s in suspects]
+    _print_section(header, rows, _SUSPECT_LIMIT, limit, budget)
 
 
 # Independent, flat row cap for the `--dispatch` section -- same
@@ -696,14 +731,17 @@ def _dispatch_row_text(sym: Symbol) -> str:
     )
 
 
-def _print_dispatch_text(dispatch_candidates: list[Symbol]) -> None:
+def _print_dispatch_text(
+    dispatch_candidates: list[Symbol],
+    limit: int | None = None,
+    budget: int | None = None,
+) -> None:
     """Print the ``--dispatch`` section after the main unused listing.
 
     A separate, independent section from the main list and from
     ``--suspect``'s own section — printed even when ``find_unused``
     reported nothing, matching ``_print_suspects_text``'s shape.
     """
-    print()
     header = (
         f"dispatch candidates: {len(dispatch_candidates)} of these "
         "unused-flagged symbols are unresolved-ambiguous-call "
@@ -712,9 +750,8 @@ def _print_dispatch_text(dispatch_candidates: list[Symbol]) -> None:
         "resolver can't attribute. Run `dekko sanity --unused <name>` "
         "on each before deleting."
     )
-    print(header)
-    for sym in dispatch_candidates[:_DISPATCH_LIMIT]:
-        print(_dispatch_row_text(sym))
+    rows = [_dispatch_row_text(s) for s in dispatch_candidates]
+    _print_section(header, rows, _DISPATCH_LIMIT, limit, budget)
 
 
 def _dispatch_caveat(dispatch_candidates: list[Symbol]) -> str | None:
@@ -840,11 +877,21 @@ def _build_json_doc(
         ),
     }
     if suspect:
-        doc["suspects"] = [_suspect_json(s) for s in suspects[:_SUSPECT_LIMIT]]
+        cap, _ = _section_caps(_SUSPECT_LIMIT, limit, budget)
+        doc["suspects"] = [_suspect_json(s) for s in suspects[:cap]]
+        doc["suspects_meta"] = {
+            "returned": len(doc["suspects"]),
+            "total": len(suspects),
+        }
     if dispatch:
+        cap, _ = _section_caps(_DISPATCH_LIMIT, limit, budget)
         doc["dispatch_candidates"] = [
-            _dispatch_json(s) for s in dispatch_candidates[:_DISPATCH_LIMIT]
+            _dispatch_json(s) for s in dispatch_candidates[:cap]
         ]
+        doc["dispatch_meta"] = {
+            "returned": len(doc["dispatch_candidates"]),
+            "total": len(dispatch_candidates),
+        }
     return doc
 
 
@@ -982,8 +1029,8 @@ def run(
         print(blind_caveat)
 
     if suspect:
-        _print_suspects_text(suspects)
+        _print_suspects_text(suspects, limit, budget)
     if dispatch:
-        _print_dispatch_text(dispatch_candidates)
+        _print_dispatch_text(dispatch_candidates, limit, budget)
 
     return EXIT_FOUND if found else EXIT_NONE

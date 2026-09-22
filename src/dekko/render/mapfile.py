@@ -1549,6 +1549,7 @@ def _load_heritage(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
             caller=_resolve_ref(d.get("caller"), ids),
             callee=_resolve_ref(d.get("callee", ""), ids),
             lines=d.get("lines", []),
+            relation=d.get("relation"),
         )
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
     index.heritage_synthetic_tiebreak_count = doc.get(

@@ -795,7 +795,24 @@ def test_not_found_is_tool_error_not_doubled(
     result = _call(ctx, "query_symbol", {"symbol": "ghost"})
     text = result["content"][0]["text"]
     assert result["isError"] is True
-    assert text.startswith("dekko: no symbol matches")  # single prefix
+    # Round 33 Track 6f: an error reply that defaulted the root now
+    # carries the root line first, like a success reply always did --
+    # a wrong-repo query's likeliest outcome IS a not-found error.
+    assert text.startswith("(root: ")
+    body = text.split("\n", 1)[1]
+    assert body.startswith("dekko: no symbol matches")  # single prefix
+    assert body.count("dekko:") == 1
+
+
+def test_error_with_explicit_root_has_no_root_line(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    result = _call(
+        _ctx(root), "query_symbol", {"symbol": "ghost", "root": str(root)}
+    )
+    assert result["isError"] is True
+    assert result["content"][0]["text"].startswith("dekko: no symbol")
 
 
 def test_query_symbol_tool_reports_unsupported_coverage_gap(

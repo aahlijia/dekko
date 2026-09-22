@@ -9,6 +9,54 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.77] — 2026-09-21
+
+Round 33 Track 6: seven small fixes from the round's Low tail, one
+version. Design: `.features/fixes/round33/06-small-fixes.md`.
+
+### Fixed
+- **`deps --file` on a Go file explains its zeros** (awesome-go). The
+  bare summary has carried the language-scope note since round 29;
+  `--file` printed `imports (0):` / `imported by (0):` and listed the
+  repo's own packages under `external` with no explanation. Now a
+  `note:` on stderr (`import_scope_note` in JSON), gated on the file's
+  own language, saying that `imported by` is always empty there.
+- **`daemon status` prints `busy: no`, not `busy: False`** (claude-buddy).
+- **`unused --dispatch` / `--suspect` sections say what they dropped**
+  (cline). Each section has always had a flat 20-row cap so it can't
+  steal budget from the main list, but it printed those 20 in silence
+  under a header saying 258, and ignored `--limit` and `--budget`
+  alike (the report said `--budget` capped it; it didn't). Now: a
+  `(N of M omitted · raise --limit)` footer, an explicit lower
+  `--limit` binds, `--budget` applies to the section independently,
+  and JSON carries `dispatch_meta`/`suspects_meta` totals.
+- **"with all cores" only when it is** (tensorflow). The cold-rev-cache
+  note took a bool that read every `--jobs N > 1` as all cores; it now
+  takes the worker count and says `with 4 workers (of 11 cores)` or
+  `with all 11 cores`.
+- **External heritage rows keep `extends`/`implements`** (spring-boot).
+  The parser always knew it and resolved edges kept it; the three
+  external exits in `_resolve_one_heritage` dropped it. `ExternalCall`
+  gains an optional `relation`, written on `heritage_external` rows
+  only (the `external`/`throws_external` sections are byte-identical;
+  no `MAP_DOC_VERSION` bump). `(external) Ordered  [implements]` after
+  the next regen; a pre-0.43.77 map renders as before.
+- **MCP error replies carry the default-root line** (spring-boot). The
+  report said omitting `root` was silent; it wasn't on success replies
+  (that line has been there since bug #1/B1). It *was* silent on
+  errors, and a wrong-repo query's likeliest outcome is a not-found
+  error with plausible closest-matches from the wrong repo.
+
+### Changed
+- **`dekko[all]` now includes `orjson`.** The extra named `all` held
+  only the grammar pack, so the eval tool (installed as `dekko[all]`)
+  ran every `map.json` load and write on stdlib `json` through every
+  round to date: measured 2.0-2.6x slower parse and 6.0-6.8x slower
+  serialize on the real maps. `tokenizer` and `search` stay separate
+  on purpose (each changes what a command's numbers mean). `dekko
+  doctor` gains a `json-backend` row so the state is visible instead
+  of inferable from a profile. Reinstall with `[all]` to pick it up.
+
 ## [0.43.76] — 2026-09-21
 
 Round 33 Track 5. Design and measurements:

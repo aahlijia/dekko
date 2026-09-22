@@ -167,6 +167,37 @@ def _import_resolution_coverage_note(index: MapIndex) -> str | None:
     )
 
 
+def _file_import_scope_note(index: MapIndex, path: str) -> str | None:
+    """Scope-gap disclosure for one file in an unresolved-import language.
+
+    Round 33 Track 6a (awesome-go.md §3.1): the bare ``dekko deps``
+    summary has carried ``_import_resolution_coverage_note`` since
+    round 29, but ``--file`` on a Go file printed ``imports (0):`` /
+    ``imported by (0):`` and listed the repo's own packages under
+    ``external`` with no explanation. The second half matters more:
+    ``imported by (0)`` reads as "nothing depends on this", a claim
+    dekko can't make for a language whose imports it never resolves.
+
+    Args:
+        index: Loaded map index.
+        path: The mapped file being reported.
+
+    Returns:
+        A one-line note, or ``None`` when the file's language has real
+        import resolution.
+    """
+    lang = index.languages_by_path.get(path)
+    if lang is None or import_resolution_supported(lang):
+        return None
+
+    return (
+        f"{path} is {lang}: dekko does not resolve {lang} imports to "
+        "in-repo files by design -- entries under external may be this "
+        "repo's own packages, and imported-by is always empty for this "
+        "language"
+    )
+
+
 def _dynamic_import_constructs(
     root: Path | None, path: str, lang: str | None
 ) -> list[tuple[str, int]]:
@@ -333,6 +364,7 @@ def _run_file(
         root, path, index.languages_by_path.get(path)
     )
     dynamic_note = _dynamic_import_note(dynamic, len(imports))
+    scope_note = _file_import_scope_note(index, path)
 
     if as_json:
         doc = {
@@ -341,6 +373,8 @@ def _run_file(
             "imported_by": imported_by,
             "external": external,
         }
+        if scope_note:
+            doc["import_scope_note"] = scope_note
         if dynamic_note:
             doc["dynamic_imports"] = [
                 {"construct": label, "occurrences": count}
@@ -350,6 +384,8 @@ def _run_file(
         print(json.dumps(doc, indent=2))
         return EXIT_OK
 
+    if scope_note:
+        print(f"note: {scope_note}", file=sys.stderr)
     _print_file_text(
         imports,
         imported_by,

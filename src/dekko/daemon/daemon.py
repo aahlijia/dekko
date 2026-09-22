@@ -1090,7 +1090,7 @@ def _timeout_and_args_for_command(
     if candidates is not None:
         resolved_jobs = getattr(args, "jobs", 1)
         message = diff_mod.sequential_disclosure_message(
-            len(candidates), all_cores=resolved_jobs != 1
+            len(candidates), workers=resolved_jobs
         )
         if message is not None:
             print(message, file=sys.stderr)
@@ -1604,7 +1604,7 @@ def status(root: Path, as_json: bool = False) -> int:
     print(f"  pid: {data.get('pid')}")
     print(f"  uptime: {data.get('uptime_seconds', 0):.1f}s")
     if "busy" in data:
-        print(f"  busy: {data.get('busy')}")
+        print(f"  busy: {'yes' if data.get('busy') else 'no'}")
     print(f"  transport: {data.get('transport')}")
     if data.get("outdated"):
         print(

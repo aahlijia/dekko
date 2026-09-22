@@ -1620,7 +1620,13 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         text = _with_default_root_note(ctx, args, handler(ctx, args))
         is_error = False
     except ToolError as exc:
-        text, is_error = _prefixed(str(exc)), True
+        # Round 33 Track 6f: the root line used to be applied only to
+        # successful replies. The likeliest outcome of asking one
+        # repo's question of another repo's map is a not-found error
+        # with plausible closest-matches from the wrong repo -- the
+        # one reply shape that carried no root.
+        text = _with_default_root_note(ctx, args, _prefixed(str(exc)))
+        is_error = True
     except mapfile.MapFormatTooNewError:
         # This MCP server process has been running since before the
         # map.json on disk was regenerated in a newer on-disk format

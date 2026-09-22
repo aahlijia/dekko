@@ -336,10 +336,17 @@ def test_maybe_warn_discloses_the_parallel_wait_too(
     gets a note either way; only the wording (and the now-pointless
     ``--jobs 0`` hint) differs."""
     monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
+    monkeypatch.setattr(diff.os, "cpu_count", lambda: 11)
+    diff._maybe_warn_sequential(0, ["a.py", "b.py", "c.py"])
+    err = capsys.readouterr().err
+    assert "3 git-tracked files with all 11 cores" in err
+    assert "--jobs 0" not in err
+
+    # Round 33 Track 6d: an explicit smaller --jobs is not "all cores".
     diff._maybe_warn_sequential(4, ["a.py", "b.py", "c.py"])
     err = capsys.readouterr().err
-    assert "3 git-tracked files with all cores" in err
-    assert "--jobs 0" not in err
+    assert "with 4 workers (of 11 cores)" in err
+    assert "all" not in err
 
 
 @pytest.mark.parametrize("command", ["diff", "affected", "workset"])

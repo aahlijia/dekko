@@ -1355,7 +1355,7 @@ def test_timeout_and_args_discloses_all_cores_wording_when_override_applies(
     assert new_args.jobs == 0
     err = capsys.readouterr().err
     assert err.count("note:") == 1
-    assert "with all cores" in err
+    assert "with all " in err and " cores" in err  # round 33 6d wording
     assert "6000" in err
 
 
