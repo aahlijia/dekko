@@ -9,6 +9,44 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.76] — 2026-09-21
+
+Round 33 Track 5. Design and measurements:
+`.features/fixes/round33/05-sanity-colon-template-non-type-target.md`.
+
+### Fixed
+- **`sanity` no longer calls a function's name after a colon a "type
+  position".** The `x: Name` template matches `identifier: identifier`,
+  which in TS is a type annotation, an object-literal value, a ternary
+  else-branch or a `case` label; a regex can't tell them apart but the
+  target's kind can, and the caller already computed `target_is_type`
+  without the colon check consulting it. `error: errorMessage,`
+  (claude-code `ide.ts:617`, a function target) read "type position".
+  The colon shape now applies to type targets only; `Foo<Name>` and
+  `import type` stay ungated. Heavy-tailed: 0 of 659 rows on a random
+  150-symbol sample were affected, 145 of 186 on the 100 most-flagged
+  names (`action`, `count`, `errorMessage`). Those 145 now fall to
+  "unexplained", on purpose: a wrong explanation closes an
+  investigation that should stay open.
+
+### Added
+- **A same-named local is explained.** A value-position use of a local
+  declared earlier in the enclosing function (`const errorMessage =
+  ...` four lines above `error: errorMessage,`) reads `use of a
+  same-named local declared earlier in the enclosing function`, with
+  the declaration line on the row (`(declared at line N)` in text,
+  `decl_line` in JSON). A post-pass that only upgrades "unexplained"
+  rows, under four guards: never on a call-shaped line (a call dekko
+  has no edge for is what `sanity` exists to surface), never when the
+  declaration is the target's own definition, never when it is
+  indented deeper than the use, JS/TS only. Parameters are index-backed
+  (`Symbol.params`), no regex. Measured on claude-code's 100
+  most-flagged non-type targets: unexplained 3,918 → 3,301, 733 rows
+  explained, led by `errorMessage`, `count`, `action`; 50 read by hand,
+  0 real references to the target. cline `--all`: 343 rows. The
+  round-32 note that `REPL.tsx:1624` "correctly" lands in unexplained
+  is retired: it reads as a local declared at 1623.
+
 ## [0.43.75] — 2026-09-21
 
 Round 33 Track 3. Design and measurements:
