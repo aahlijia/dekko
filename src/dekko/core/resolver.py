@@ -1903,7 +1903,12 @@ def resolve_heritage(
         for (subtype, name), cands in sorted(ambiguous.items())
     ]
     heritage_external = [
-        ExternalCall(caller=s, callee=t, lines=sorted(lns))
+        ExternalCall(
+            caller=s,
+            callee=t,
+            lines=sorted(lns),
+            relation=relations.get((s, t)),
+        )
         for (s, t), lns in sorted(external.items())
     ]
     return (
@@ -1915,6 +1920,24 @@ def resolve_heritage(
         tiebreak_hits[0],
         unplaced_subtype_count,
     )
+
+
+def _record_external_heritage(
+    h: RawHeritage,
+    external: dict[tuple[str, str], set[int]],
+    relations: dict[tuple[str, str], str],
+) -> None:
+    """File an unresolvable heritage clause under ``external``.
+
+    Mirrors ``_add_heritage_edge``: the ``relations`` table is keyed
+    on ``(subtype_id, target)`` for resolved edges (target = supertype
+    id) and for external ones (target = the clause text), which never
+    collide since a symbol id always contains ``::``/``:`` and a bare
+    clause text of that shape would have resolved. Round 33 Track 6e.
+    """
+    key = (h.subtype_id, h.text)
+    external.setdefault(key, set()).add(h.line)
+    relations.setdefault(key, h.relation)
 
 
 def _resolve_heritage_subtype_id(
@@ -2069,7 +2092,7 @@ def _resolve_one_heritage(
     guess.
     """
     if _receiver_is_external(h, file_imports, repo_stems):
-        external.setdefault((h.subtype_id, h.text), set()).add(h.line)
+        _record_external_heritage(h, external, relations)
         return
 
     candidates = [c for c in index.get(h.name, []) if c.kind in TYPE_KINDS]
@@ -2087,7 +2110,7 @@ def _resolve_one_heritage(
         if len(alias) > 1:
             _record_ambiguous(h.subtype_id, h.name, alias, ambiguous)
             return
-        external.setdefault((h.subtype_id, h.text), set()).add(h.line)
+        _record_external_heritage(h, external, relations)
         return
 
     same_file = [
@@ -2111,7 +2134,7 @@ def _resolve_one_heritage(
         tiebreak_hits,
     )
     if target is _NOISE:
-        external.setdefault((h.subtype_id, h.text), set()).add(h.line)
+        _record_external_heritage(h, external, relations)
         return
     if target is not None:
         _add_heritage_edge(h, target.id, edges, relations)

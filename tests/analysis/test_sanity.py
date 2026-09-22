@@ -1603,25 +1603,37 @@ def test_sanity_multiline_import_member_with_unrelated_import_above(
 
 def test_looks_like_type_annotation_import_type() -> None:
     assert sanity._looks_like_type_annotation(
-        "import type Output from './output.js';", "Output", "a.ts"
+        "import type Output from './output.js';",
+        "Output",
+        "a.ts",
+        target_is_type=True,
     )
 
 
 def test_looks_like_type_annotation_variable_annotation() -> None:
     assert sanity._looks_like_type_annotation(
-        "function run(output: Output): void {", "Output", "a.ts"
+        "function run(output: Output): void {",
+        "Output",
+        "a.ts",
+        target_is_type=True,
     )
 
 
 def test_looks_like_type_annotation_generic_argument() -> None:
     assert sanity._looks_like_type_annotation(
-        "const results: Array<Output> = [];", "Output", "a.ts"
+        "const results: Array<Output> = [];",
+        "Output",
+        "a.ts",
+        target_is_type=True,
     )
 
 
 def test_looks_like_type_annotation_generic_argument_multiple() -> None:
     assert sanity._looks_like_type_annotation(
-        "const pair: Map<Output, Error> = new Map();", "Output", "a.ts"
+        "const pair: Map<Output, Error> = new Map();",
+        "Output",
+        "a.ts",
+        target_is_type=True,
     )
 
 
@@ -1630,7 +1642,10 @@ def test_looks_like_type_annotation_call_not_annotation() -> None:
     # the negative lookahead must keep this off the type-annotation
     # path.
     assert not sanity._looks_like_type_annotation(
-        "const output: someFunc() = run();", "someFunc", "a.ts"
+        "const output: someFunc() = run();",
+        "someFunc",
+        "a.ts",
+        target_is_type=True,
     )
 
 
@@ -1639,13 +1654,16 @@ def test_looks_like_type_annotation_gated_to_ts_grammars() -> None:
     # check is deliberately TS/JS-scoped only -- a Python file must
     # never trigger it.
     assert not sanity._looks_like_type_annotation(
-        "output: Output", "Output", "a.py"
+        "output: Output", "Output", "a.py", target_is_type=True
     )
 
 
 def test_looks_like_type_annotation_javascript_generic() -> None:
     assert sanity._looks_like_type_annotation(
-        "const results: Array<Output> = [];", "Output", "a.js"
+        "const results: Array<Output> = [];",
+        "Output",
+        "a.js",
+        target_is_type=True,
     )
 
 
@@ -1657,25 +1675,34 @@ def test_looks_like_type_annotation_rust_field_annotation() -> None:
     # `x: Output` -- the already-generic template, reachable for Rust
     # once the grammar gate is open, needs no new template of its own.
     assert sanity._looks_like_type_annotation(
-        "    handle: NavHistory,", "NavHistory", "a.rs"
+        "    handle: NavHistory,", "NavHistory", "a.rs", target_is_type=True
     )
 
 
 def test_looks_like_type_annotation_rust_param_annotation() -> None:
     assert sanity._looks_like_type_annotation(
-        "fn resolve(history: NavHistory) -> bool {", "NavHistory", "a.rs"
+        "fn resolve(history: NavHistory) -> bool {",
+        "NavHistory",
+        "a.rs",
+        target_is_type=True,
     )
 
 
 def test_looks_like_type_annotation_rust_impl_for() -> None:
     assert sanity._looks_like_type_annotation(
-        "impl SomeTrait for NavHistory {", "NavHistory", "a.rs"
+        "impl SomeTrait for NavHistory {",
+        "NavHistory",
+        "a.rs",
+        target_is_type=True,
     )
 
 
 def test_looks_like_type_annotation_rust_impl_for_generic() -> None:
     assert sanity._looks_like_type_annotation(
-        "impl<T> SomeTrait<T> for NavHistory<T> {", "NavHistory", "a.rs"
+        "impl<T> SomeTrait<T> for NavHistory<T> {",
+        "NavHistory",
+        "a.rs",
+        target_is_type=True,
     )
 
 
@@ -1687,18 +1714,25 @@ def test_looks_like_type_annotation_rust_impl_for_multi_bound() -> None:
         "impl<T: Clone + Send> Trait<T> for NavHistory<T> where T: Debug {",
         "NavHistory",
         "a.rs",
+        target_is_type=True,
     )
 
 
 def test_looks_like_type_annotation_rust_turbofish_type() -> None:
     assert sanity._looks_like_type_annotation(
-        "let x = Container::<NavHistory>::new();", "NavHistory", "a.rs"
+        "let x = Container::<NavHistory>::new();",
+        "NavHistory",
+        "a.rs",
+        target_is_type=True,
     )
 
 
 def test_looks_like_type_annotation_rust_turbofish_func() -> None:
     assert sanity._looks_like_type_annotation(
-        "let x = parse::<NavHistory>();", "NavHistory", "a.rs"
+        "let x = parse::<NavHistory>();",
+        "NavHistory",
+        "a.rs",
+        target_is_type=True,
     )
 
 
@@ -1706,7 +1740,10 @@ def test_looks_like_type_annotation_rust_where_clause_generic() -> None:
     # Non-turbofish generic use inside a trait bound -- already caught
     # by the existing, now-Rust-gated `<\s*{name}\s*[,>]` template.
     assert sanity._looks_like_type_annotation(
-        "fn f<T>(x: T) where T: SomeTrait<NavHistory> {", "NavHistory", "a.rs"
+        "fn f<T>(x: T) where T: SomeTrait<NavHistory> {",
+        "NavHistory",
+        "a.rs",
+        target_is_type=True,
     )
 
 
@@ -1716,13 +1753,13 @@ def test_looks_like_type_annotation_rust_inherent_impl() -> None:
     # `impl...for` template alone left this exact line (the master
     # report's own motivating example) unclassified.
     assert sanity._looks_like_type_annotation(
-        "impl NavHistory {", "NavHistory", "a.rs"
+        "impl NavHistory {", "NavHistory", "a.rs", target_is_type=True
     )
 
 
 def test_looks_like_type_annotation_rust_inherent_impl_generic() -> None:
     assert sanity._looks_like_type_annotation(
-        "impl<T> NavHistory<T> {", "NavHistory", "a.rs"
+        "impl<T> NavHistory<T> {", "NavHistory", "a.rs", target_is_type=True
     )
 
 
@@ -1733,12 +1770,16 @@ def test_looks_like_type_annotation_rust_return_type() -> None:
         "pub fn fork_nav_history(&self) -> NavHistory {",
         "NavHistory",
         "a.rs",
+        target_is_type=True,
     )
 
 
 def test_looks_like_type_annotation_rust_return_type_ref() -> None:
     assert sanity._looks_like_type_annotation(
-        "pub fn nav_history(&self) -> &NavHistory {", "NavHistory", "a.rs"
+        "pub fn nav_history(&self) -> &NavHistory {",
+        "NavHistory",
+        "a.rs",
+        target_is_type=True,
     )
 
 
@@ -1747,6 +1788,7 @@ def test_looks_like_type_annotation_rust_return_type_ref_mut() -> None:
         "pub fn nav_history_mut(&mut self) -> &mut NavHistory {",
         "NavHistory",
         "a.rs",
+        target_is_type=True,
     )
 
 
@@ -1760,6 +1802,7 @@ def test_looks_like_type_annotation_rust_ref_type_nested_param() -> None:
         "-> Option<NavigationEntry>,",
         "NavHistory",
         "a.rs",
+        target_is_type=True,
     )
 
 
@@ -1767,7 +1810,7 @@ def test_looks_like_type_annotation_rust_ref_call_not_annotation() -> None:
     # A reference to a freshly-constructed tuple struct is a real call,
     # not a bare type mention.
     assert not sanity._looks_like_type_annotation(
-        "let x = &NavHistory(a, b);", "NavHistory", "a.rs"
+        "let x = &NavHistory(a, b);", "NavHistory", "a.rs", target_is_type=True
     )
 
 
@@ -1775,7 +1818,10 @@ def test_looks_like_type_annotation_rust_ref_qual_call_not_annotation() -> (
     None
 ):
     assert not sanity._looks_like_type_annotation(
-        "let x = &NavHistory::new();", "NavHistory", "a.rs"
+        "let x = &NavHistory::new();",
+        "NavHistory",
+        "a.rs",
+        target_is_type=True,
     )
 
 
@@ -1783,7 +1829,7 @@ def test_looks_like_type_annotation_rust_call_not_annotation() -> None:
     # A real call -- tuple-struct construction -- must not be
     # misclassified as a type annotation.
     assert not sanity._looks_like_type_annotation(
-        "let x = NavHistory(a, b);", "NavHistory", "a.rs"
+        "let x = NavHistory(a, b);", "NavHistory", "a.rs", target_is_type=True
     )
 
 
@@ -1791,7 +1837,7 @@ def test_looks_like_type_annotation_rust_qualified_call_not_annotation() -> (
     None
 ):
     assert not sanity._looks_like_type_annotation(
-        "let x = NavHistory::new();", "NavHistory", "a.rs"
+        "let x = NavHistory::new();", "NavHistory", "a.rs", target_is_type=True
     )
 
 
@@ -1808,7 +1854,7 @@ def test_classify_miss_rust_qualified_call_wins_over_type_annotation() -> None:
         unsupported_language=False,
         tests_excluded=True,
         looks_like_type_annotation=sanity._looks_like_type_annotation(
-            snippet, "new", "a.rs"
+            snippet, "new", "a.rs", target_is_type=True
         ),
     )
     assert cause == sanity.CAUSE_QUALIFIED_CALL

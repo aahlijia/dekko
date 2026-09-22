@@ -113,8 +113,10 @@ def test_uses_text_and_json(
             "caller": "src/app.py::main",
             "callee": "external_thing",
             "lines": [12],
+            "match": "base",
         }
     ]
+    assert doc["summary"]["sites"] == 1
 
 
 def test_uses_unknown_name_not_found(

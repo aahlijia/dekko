@@ -9,6 +9,275 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.77] — 2026-09-21
+
+Round 33 Track 6: seven small fixes from the round's Low tail, one
+version. Design: `.features/fixes/round33/06-small-fixes.md`.
+
+### Fixed
+- **`deps --file` on a Go file explains its zeros** (awesome-go). The
+  bare summary has carried the language-scope note since round 29;
+  `--file` printed `imports (0):` / `imported by (0):` and listed the
+  repo's own packages under `external` with no explanation. Now a
+  `note:` on stderr (`import_scope_note` in JSON), gated on the file's
+  own language, saying that `imported by` is always empty there.
+- **`daemon status` prints `busy: no`, not `busy: False`** (claude-buddy).
+- **`unused --dispatch` / `--suspect` sections say what they dropped**
+  (cline). Each section has always had a flat 20-row cap so it can't
+  steal budget from the main list, but it printed those 20 in silence
+  under a header saying 258, and ignored `--limit` and `--budget`
+  alike (the report said `--budget` capped it; it didn't). Now: a
+  `(N of M omitted · raise --limit)` footer, an explicit lower
+  `--limit` binds, `--budget` applies to the section independently,
+  and JSON carries `dispatch_meta`/`suspects_meta` totals.
+- **"with all cores" only when it is** (tensorflow). The cold-rev-cache
+  note took a bool that read every `--jobs N > 1` as all cores; it now
+  takes the worker count and says `with 4 workers (of 11 cores)` or
+  `with all 11 cores`.
+- **External heritage rows keep `extends`/`implements`** (spring-boot).
+  The parser always knew it and resolved edges kept it; the three
+  external exits in `_resolve_one_heritage` dropped it. `ExternalCall`
+  gains an optional `relation`, written on `heritage_external` rows
+  only (the `external`/`throws_external` sections are byte-identical;
+  no `MAP_DOC_VERSION` bump). `(external) Ordered  [implements]` after
+  the next regen; a pre-0.43.77 map renders as before.
+- **MCP error replies carry the default-root line** (spring-boot). The
+  report said omitting `root` was silent; it wasn't on success replies
+  (that line has been there since bug #1/B1). It *was* silent on
+  errors, and a wrong-repo query's likeliest outcome is a not-found
+  error with plausible closest-matches from the wrong repo.
+
+### Changed
+- **`dekko[all]` now includes `orjson`.** The extra named `all` held
+  only the grammar pack, so the eval tool (installed as `dekko[all]`)
+  ran every `map.json` load and write on stdlib `json` through every
+  round to date: measured 2.0-2.6x slower parse and 6.0-6.8x slower
+  serialize on the real maps. `tokenizer` and `search` stay separate
+  on purpose (each changes what a command's numbers mean). `dekko
+  doctor` gains a `json-backend` row so the state is visible instead
+  of inferable from a profile. Reinstall with `[all]` to pick it up.
+
+## [0.43.76] — 2026-09-21
+
+Round 33 Track 5. Design and measurements:
+`.features/fixes/round33/05-sanity-colon-template-non-type-target.md`.
+
+### Fixed
+- **`sanity` no longer calls a function's name after a colon a "type
+  position".** The `x: Name` template matches `identifier: identifier`,
+  which in TS is a type annotation, an object-literal value, a ternary
+  else-branch or a `case` label; a regex can't tell them apart but the
+  target's kind can, and the caller already computed `target_is_type`
+  without the colon check consulting it. `error: errorMessage,`
+  (claude-code `ide.ts:617`, a function target) read "type position".
+  The colon shape now applies to type targets only; `Foo<Name>` and
+  `import type` stay ungated. Heavy-tailed: 0 of 659 rows on a random
+  150-symbol sample were affected, 145 of 186 on the 100 most-flagged
+  names (`action`, `count`, `errorMessage`). Those 145 now fall to
+  "unexplained", on purpose: a wrong explanation closes an
+  investigation that should stay open.
+
+### Added
+- **A same-named local is explained.** A value-position use of a local
+  declared earlier in the enclosing function (`const errorMessage =
+  ...` four lines above `error: errorMessage,`) reads `use of a
+  same-named local declared earlier in the enclosing function`, with
+  the declaration line on the row (`(declared at line N)` in text,
+  `decl_line` in JSON). A post-pass that only upgrades "unexplained"
+  rows, under four guards: never on a call-shaped line (a call dekko
+  has no edge for is what `sanity` exists to surface), never when the
+  declaration is the target's own definition, never when it is
+  indented deeper than the use, JS/TS only. Parameters are index-backed
+  (`Symbol.params`), no regex. Measured on claude-code's 100
+  most-flagged non-type targets: unexplained 3,918 → 3,301, 733 rows
+  explained, led by `errorMessage`, `count`, `action`; 50 read by hand,
+  0 real references to the target. cline `--all`: 343 rows. The
+  round-32 note that `REPL.tsx:1624` "correctly" lands in unexplained
+  is retired: it reads as a local declared at 1623.
+
+## [0.43.75] — 2026-09-21
+
+Round 33 Track 3. Design and measurements:
+`.features/fixes/round33/03-uses-receiver-and-module-match.md`.
+
+### Fixed
+- **`query uses chalk` said "no external reference matches" while 283
+  `chalk.*` call sites sat in the map.** Reported (claude-code.md
+  Finding 1, as HIGH) as `chalk.<method>()` calls being "simply absent
+  from the call graph", with the fix pointed at the extractor. They
+  were never absent: `externals_by_name` keys on the *last* callee
+  segment (which is what `find_usages`'s schema documented), so every
+  `chalk.red(...)` was filed under `red`. Not TS-specific either:
+  `uses subprocess` failed the same way on dekko's own repo. Read-side
+  fix, no spec bump, no edge movement. `uses` now matches three ways
+  and labels each row: `base` (the old behavior, unchanged), `binding`
+  (first segment is an import binding in the calling file: `chalk`,
+  `React`, `np`, `subprocess`), and `module` (the bare import source:
+  `numpy`, `fs`, `node:path`, reaching bare named imports too). The
+  binding match is import-gated on purpose: ungated, `uses path` on
+  claude-code returned 48 parameters named `path` (42% noise). Now 0
+  of 50 sampled binding rows on cline sit under a local rebind.
+- **Multi-line chains were invisible to any head match.** Chains are
+  whitespace-normalized to `z .object` before storage, so 979 of
+  claude-code's `z.*` externals (39%) had a head of `"z "`. Segments
+  are stripped (`mapfile.callee_segments`).
+- **The not-found message stopped claiming absence it couldn't prove.**
+  A name that appears as a receiver but is never imported (`uses
+  result`: 356 sites on claude-code) now says so: "appears as a
+  receiver in N call sites, but never as an import binding; those are
+  local variables, not a module". Closest-name suggestions draw from
+  bases, heads and bare import sources, so `uses Chalk` suggests
+  `chalk`.
+
+### Added
+- A summary header before the rows: `chalk: 284 call sites in 44
+  files`, `top members: dim 73, bold 67, red 50, ...`, and `imported by
+  47 files; type-position, JSX, and property reads are not recorded
+  (calls only)`. That last line is the honest denominator: 520
+  claude-code files import `React` and 212 call sites are recorded,
+  because `React.FC` in type position and JSX never reach the call
+  bucket. `--json` carries the same numbers under `summary` and a
+  per-row `match`.
+- `MapIndex.externals_by_head`, built lazily on first `uses` call
+  (189 ms on zed's 197K externals; `query symbol` timing unchanged).
+- MCP `find_usages`'s description and `name` schema text describe the
+  three shapes.
+
+## [0.43.74] — 2026-09-21
+
+Round 33 Track 4, found during Tracks 2 and 3 rather than by any eval
+agent. Design: `.features/fixes/round33/04-rows-that-outrun-the-budget.md`.
+
+### Fixed
+- **One row could be 122,327 characters, and the budget couldn't cut
+  it.** `fit_to_budget` drops whole rows and always keeps one, which is
+  right, but rests on rows being small. An external callee text is the
+  whole receiver expression, nested function bodies included, so
+  claude-code's commander builder (`program.name(...)...version`) made
+  `query uses version` print ~30.5K tokens against an 800-token
+  default, with a footer that didn't say anything was wrong. `uses`,
+  `throws` and `supertypes` labels are now elided in the middle at 120
+  characters (`head…[+122,009 chars]…tail`, receiver and method both
+  kept); `--json` marks such entries `callee_truncated`. That row is
+  now 44 tokens. Clipping happens at render, after lookup, so a row
+  still matches by its base name.
+- **The footer now admits an overrun.** When the kept output exceeds
+  `--budget` anyway (only possible when the first row alone is bigger
+  than the budget), the footer says `over --budget N: first row alone
+  exceeds it` and `meta.over_budget` is true. It should never fire now;
+  it exists so the next producer that breaks the small-rows assumption
+  shows up in a terminal instead of an eval round.
+- **Generated `map/` pages cap inline link lists at 25.** A `called by`
+  line was one link per caller with no cap: claude-code's
+  `logForDebugging` made a 102,113-character line, and 191 lines over
+  2,000 characters were 13% of that repo's pages. Now `+975 more
+  (\`dekko query callers <symbol>\`)`. claude-code's pages: 8.5 MB to
+  7.4 MB, longest line 102K to 3.3K.
+
+### Added
+- `textutil.clip_middle`, `ROW_CHAR_CAP`/`LABEL_CHAR_CAP`, and
+  `tests/test_row_size.py`: a parametrized test that runs 13 read
+  commands over a fixture seeded with a 5,000-character chain and a
+  40-caller symbol and asserts no printed line exceeds the cap (long
+  signatures are the one named exemption).
+
+## [0.43.73] — 2026-09-21
+
+Round 33 Track 2. Design and measurements:
+`.features/fixes/round33/02-deps-cycles-fabricated-path.md`.
+
+### Fixed
+- **`deps --cycles` no longer draws an import path that doesn't
+  exist.** `find_cycles` returns each strongly-connected cluster as its
+  members *sorted*; the renderer joined that list with `->` arrows, so
+  an alphabetical listing read as an import chain. Audited on the eval
+  repos: 0 of 4 printed arrows were real on claude-buddy, 159 of 1,175
+  on claude-code, 226 of 433 on zed, and a chain was only ever right for
+  a two-file cluster. An agent asking "which import do I cut" was
+  pointed at edges that weren't there. A cluster now prints its members
+  comma-separated, one `shortest loop:` chain (BFS, every arrow a
+  verified direct import; 0.1 ms on claude-code's 1,156-file cluster),
+  and its internal edges when there are at most 12, otherwise a count
+  and the number of two-file loops inside it. After: 360 of 360 arrows
+  real on zed, 105/105 cline, 28/28 claude-code, 7/7 claude-buddy.
+- **The 1,156-file cluster was one 44,914-character row.** `--budget
+  500` printed ~11,500 tokens because the budget can't cut a row it
+  must keep (Track 4's general case). Members clip at 12 with `+N
+  more`; the default output on claude-code went from ~11,500 tokens to
+  ~740 and `--budget 500` now binds at ~460.
+- The summary line says `N circular-import cluster(s)` instead of
+  `N cycles`, since a cluster is usually several overlapping loops.
+
+### Added
+- `--cycles --json` entries carry `internal_edges`, `shortest_loop`
+  (import order, first file not repeated), `two_file_loops`, and
+  `edges` (only when at most 12). `files`/`self_import` unchanged.
+
+## [0.43.72] — 2026-09-21
+
+Round 33 Track 1. Design, measurements, and the real-process A/B:
+`.features/fixes/round33/01-stale-process-map-overwrite.md`.
+
+### Fixed
+- **An outdated long-lived process no longer rewrites the map.** A
+  `dekko serve --mcp` or daemon process keeps the code it imported;
+  when dekko was upgraded underneath it, that process and a fresh CLI
+  each read the other's `map.json` as stale (a spec-hash mismatch says
+  "different", never "older") and regenerated it with their own
+  extractor, alternately, forever: every flip a cold remap that also
+  threw away the other side's caches (~3 minutes per flip on
+  tensorflow). Found live: three servers started before the day's
+  reinstall rewrote maps on all seven eval repos and dekko's own
+  tracked map. A long-lived process now asks the on-disk code who is
+  outdated (a ~30 ms child interpreter, memoized on the install's stat
+  signature, consulted only on a mismatch). If it is the outdated
+  party it serves the on-disk map untouched, judges freshness on
+  source content alone, hands any regeneration to the installed dekko
+  (`repo_ops._delegated_regen`) instead of extracting in-process, and
+  appends `note: this dekko server is running outdated code ...
+  restart` to every reply until restarted. A process that can't prove
+  it's current never writes. A one-shot CLI process pays nothing and
+  behaves exactly as before.
+- **`tool_version` was a live read.** `importlib.metadata.version`
+  reads dist-info from disk at call time, so an outdated server
+  reported, and stamped into provenance, whichever version was
+  installed *now*. That is why every round-33 staleness message read
+  "same version string 0.43.71 on both sides" and why the
+  `tool_version` signal could never fire for the one kind of process
+  it existed to catch. The loaded version is now frozen at import
+  (`dekko.selfcheck`) and used for provenance, cache stamps, MCP
+  `serverInfo`, and freshness checks.
+- **A held index now notices `map.json` was replaced.** The MCP
+  server's and daemon's caches validated a cached index with
+  `check_freshness` alone, which compares the *cached copy's*
+  provenance to the source tree. A newer dekko rebuilding the map with
+  no source change was invisible, so an outdated server kept answering
+  from its old extractor's index. `mapfile.index_matches_disk` (one
+  `stat` of `map.json`) closes it.
+- **The `spec_hash`-only staleness message stopped blaming the reader.**
+  It told every process "this is a long-lived process running older
+  code; restart it", including a fresh CLI looking at a map an outdated
+  server had just rewritten, which had two eval reports contradicting
+  each other about which spec was current. It now says "restart it"
+  only when the process is proven outdated, and otherwise that the map
+  was written by a different dekko build. MCP `map_status`'s advice
+  splits the same way: an outdated server says restart; a current one
+  looking at an old map says regenerate. `refresh_map`'s round-23
+  "rebuilt with stale code" caveat is gone because the case is.
+- **`dekko doctor` names outdated servers.** `mcp-server-running` was
+  always `unknown`. It now compares each server's start time against
+  the installed code's mtime: `stale` naming the pids that predate the
+  install, `ok` otherwise, `unknown` only when `ps` can't say.
+
+### Added
+- `dekko.selfcheck`: loaded vs. installed identity, the three-way
+  verdict (`classify`), and the outdated-process note.
+- `daemon status` reports `outdated` (JSON) / `outdated: yes` (text)
+  for a daemon whose dekko was upgraded underneath it, and routed
+  commands carry the note on stderr.
+- `mapfile.Freshness.process_outdated`, `MapIndex.map_stat`,
+  `mapfile.index_matches_disk`.
+
 ## [0.43.71] — 2026-09-21
 
 Round 32 Track 4, the last open item of the round. Design and

@@ -83,4 +83,5 @@ def test_as_dict_shape() -> None:
         "tokens_per_signal": None,
         "related_total": 0,
         "related_label": "",
+        "over_budget": False,
     }

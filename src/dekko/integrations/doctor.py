@@ -26,15 +26,18 @@ auto-fixes anything; it only reports and names the command that would.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
+from dekko import selfcheck
 from dekko.analysis import ambiguous
 from dekko.integrations import claude_md as claude_md_mod
 from dekko.integrations import hooks as hooks_mod
@@ -366,13 +369,118 @@ def _check_mcp_server_running() -> Finding:
             None,
         )
     pids = [ln.split(None, 1)[0] for ln in lines]
+    return _server_age_finding(pids)
+
+
+def _pid_start_times(pids: list[str]) -> dict[str, float]:
+    """Process start times (epoch seconds) via ``ps``, best-effort.
+
+    Args:
+        pids: Process ids to look up.
+
+    Returns:
+        Pid to start time, for every pid ``ps`` reported in a
+        parseable form. Empty when ``ps`` is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "pid=,lstart=", "-p", ",".join(pids)],
+            capture_output=True,
+            text=True,
+            timeout=_PGREP_TIMEOUT,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    starts: dict[str, float] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 6:
+            continue
+        try:
+            started = datetime.strptime(
+                " ".join(fields[1:]), "%a %b %d %H:%M:%S %Y"
+            )
+        except ValueError:
+            continue
+        starts[fields[0]] = started.timestamp()
+    return starts
+
+
+def _server_age_finding(pids: list[str]) -> Finding:
+    """Say which running servers predate the installed dekko code.
+
+    A server can't be asked for its loaded spec (no IPC round trip
+    through MCP, out of scope), but it doesn't need to be: a process
+    that started *before* the installed code last changed is running
+    code that is no longer on disk. Round 33 Track 1: three such
+    servers rewrote maps with an older extractor all day while this
+    row said "unknown, can't tell" on all seven eval repos.
+
+    Compares against ``selfcheck.install_mtime`` of the dekko this
+    ``doctor`` runs from. A server launched from a *different* install
+    (another venv) is judged against the wrong clock; the wording says
+    "predates" rather than claiming to have read the server's code.
+
+    Args:
+        pids: Pids of the running ``dekko serve`` processes.
+
+    Returns:
+        ``stale`` naming the outdated pids, ``ok`` when every server
+        started after the install last changed, or the pre-round-33
+        ``unknown`` caveat when start times can't be read.
+    """
+    starts = _pid_start_times(pids)
+    installed_at = selfcheck.install_mtime()
+    if installed_at is None or any(pid not in starts for pid in pids):
+        return Finding(
+            "mcp-server-running",
+            "unknown",
+            f"dekko MCP server running (pid {', '.join(pids)}); it holds "
+            "its code in memory for its whole lifetime — if you upgraded "
+            "dekko since it started, this won't be reflected",
+            "restart Claude Code",
+        )
+    outdated = [pid for pid in pids if starts[pid] < installed_at]
+    if not outdated:
+        return Finding(
+            "mcp-server-running",
+            "ok",
+            f"dekko MCP server running (pid {', '.join(pids)}), started "
+            "after the installed dekko code last changed",
+            None,
+        )
+
+    when = datetime.fromtimestamp(installed_at).strftime("%Y-%m-%d %H:%M")
     return Finding(
         "mcp-server-running",
-        "unknown",
-        f"dekko MCP server running (pid {', '.join(pids)}); it holds "
-        "its code in memory for its whole lifetime — if you upgraded "
-        "dekko since it started, this won't be reflected",
-        "restart Claude Code",
+        "stale",
+        f"dekko MCP server pid {', '.join(outdated)} predates the "
+        f"installed dekko code (last changed {when}) and is running "
+        "outdated code; servers from before 0.43.72 can rewrite "
+        "map.json with their older extractor",
+        "restart the Claude Code sessions that own those servers "
+        "(or reconnect dekko via /mcp)",
+    )
+
+
+def _check_json_backend() -> Finding:
+    """Whether ``map.json`` is parsed with ``orjson`` or stdlib ``json``.
+
+    Round 33 Track 6g: the extra named ``all`` did not include orjson,
+    so every eval round's load timings were measured on stdlib json
+    without anyone noticing -- the difference is only visible in a
+    profile. Advisory: dekko is correct either way, just slower.
+    """
+    if mapfile.orjson is not None:
+        return Finding("json-backend", "ok", "orjson", None)
+
+    return Finding(
+        "json-backend",
+        "advisory",
+        "stdlib json (map.json loads ~2x and writes ~6x slower than "
+        "with orjson on large repos)",
+        "pip install 'dekko[fastjson]' (or reinstall with [all])",
     )
 
 
@@ -472,6 +580,7 @@ def collect(root: Path) -> list[Finding]:
     findings += _safe("plugin-installed", lambda: _check_plugin_installed(exe))
     findings += _safe("hooks", lambda: _check_hooks(root))
     findings += _safe("claude-md-policy", lambda: _check_claude_md(root))
+    findings += _safe("json-backend", _check_json_backend)
     return findings
 
 

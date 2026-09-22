@@ -113,6 +113,27 @@ error); a symbol with fewer callees than `--min-shared` gets a hint to
 lower the threshold. Small/sparse repos often need `--min-shared 1`
 to find any peers at all under the default threshold of 2.
 
+`query uses <name>` matches an external name three ways, and labels
+each row (`match` in `--json`): **base**, the callee's own last segment
+(`uses run` finds `subprocess.run`); **binding**, an import binding
+used through member calls (`uses chalk` finds every `chalk.red(...)`,
+`uses np` finds `np.array(...)`), gated on the name actually being
+imported in the calling file so a parameter named `path` is never
+counted; and **module**, the bare import source (`uses numpy`, `uses
+fs`, `uses node:path`) reaching calls through whatever the file bound
+it to, including bare named imports (`existsSync(...)` after
+`import { existsSync } from 'fs'`). Output leads with a summary
+(`chalk: 284 call sites in 44 files`, the top members used, and
+`imported by 47 files`). That last number is the honest denominator:
+`uses` sees *calls*, and a name used only in type position, JSX, or
+as a property read never lands in the call bucket, so on a React
+codebase the importing-file count is much larger than the call-site
+count. A name that appears as a receiver but is never imported is
+reported as such rather than as "no match" (it is a local variable).
+Before 0.43.75 only the base match existed, and `uses chalk` said "no
+external reference matches" while hundreds of `chalk.*` calls sat in
+the map under `red`/`dim`/`bold`.
+
 `query uses <symbol>` (and `unused`, which reads the same edges) only
 credits a value reference the referencing file could actually make. In
 Python and JS/TS that means the symbol lives in the same file, or the
@@ -152,7 +173,15 @@ in current output. An external base class or trait (`class MyModel
 Foo`) shows as a labeled `(external)` row in `supertypes` output
 rather than being silently dropped — a type extending/impl'ing a
 framework base is a common, expected case, not a corner case worth
-hiding. Rust's `impl` heritage resolves the `Type` side by same-file
+hiding. The row also carries its relation, `(external) Ordered
+[implements]`, matching the label an in-repo heritage row already
+gets — the parser and resolver always knew the relation for an
+external clause, but before 0.43.77 the three external exit paths
+dropped it on the way to the row. A map written before 0.43.77 has no
+stored relation for these rows and renders them exactly as before,
+with no `[relation]` suffix, until the next `dekko map`.
+
+Rust's `impl` heritage resolves the `Type` side by same-file
 name lookup (an `impl` block's own file, not cross-file) — an `impl`
 block for a type defined in a different file, or a same-named type
 appearing twice in one file (two `mod` blocks), produces no heritage
@@ -297,6 +326,35 @@ can't be told from code one line at a time. None of this moves a
 count: `matches`, `dekko-only` and `grep-only` are untouched, only the
 cause on a grep-only row changes. `--fail-on-unexplained` will fail
 less often as a result.
+
+**Same-named locals (JS/TS only), since 0.43.76.** A second pass over
+whatever is still `unexplained` after every shape above: a value-
+position use of a local (a `const`/`let`/`var`, a destructured
+binding, a `catch (e)` parameter, or a function parameter) declared
+earlier in the enclosing function reads as `use of a same-named local
+declared earlier in the enclosing function — not a reference to the
+target; scope heuristic, not a parse`, with the declaration's own line
+riding on the row (`decl_line` in `--json`, `(declared at line N)` in
+text) — never a per-hit line in the cause string itself, so `--all`
+keeps this in one bucket instead of fragmenting by line number. Four
+guards keep it from ever overriding a real miss: never a call-shaped
+line (a genuinely missed call stays a miss), never the target's own
+definition, never a declaration indented deeper than the use (out of
+scope), and the check only ever *upgrades* an `unexplained` row, never
+a row a more specific cause already claimed. On claude-code's own
+worst-case sample this closed 759 of 4,104 unexplained rows (18.5%).
+
+Also since 0.43.76: the `x: Name` colon-annotation shape (an object
+literal's `error: errorMessage,`, a variable's `let x: Name`) counts
+toward `type position` only when the *target itself* is a type. Before
+0.43.76 it fired for any target, so a grep-only hit on a function
+whose name happened to match an object-literal key or value —
+`error: errorMessage,` when `errorMessage` is a function — was
+mislabeled `type position` instead of the value reference it actually
+is; it now falls out to a more accurate cause (often `unexplained`, or
+the same-named-local cause above). The `import type` statement and
+generic-type-argument shapes were never gated this way and are
+unaffected.
 
 **Receiver-mismatch detection.** When the target is a method (not a
 free function) with exactly one repo-defined symbol sharing its bare
@@ -644,6 +702,20 @@ text section, independent of and composable with `--suspect`. As with
 sanity --unused` before deleting any flagged symbol this catches,
 especially on inheritance-heavy OOP codebases.
 
+Both `--suspect` and `--dispatch` cap their own section at 20 rows,
+deliberately independent of the main list's `--limit`/`--budget` so
+neither section can silently steal budget from it. Before 0.43.77 that
+cap applied in silence — a header could say 258 candidates and print
+20 with no word about the other 238, and an explicit `--limit`/
+`--budget` had no effect on either section. Now each section binds its
+own `--limit` (only when it's *lower* than the 20-row cap) and its own
+`--budget` independently, and a truncated section ends with a
+`(N of M omitted · raise --limit ...)` footer — the same
+`fit_to_budget` footer shape every other capped dekko output uses.
+`--json` carries the true totals as `suspects_meta`/`dispatch_meta`
+(`{"returned": N, "total": M}`), regardless of how many rows are
+capped into `suspects`/`dispatch_candidates`.
+
 ## Interpreting `dekko ambiguous`
 
 `ambiguous` aggregates every call site where a bare name matched 2+
@@ -742,12 +814,32 @@ edges, it just stops presenting an incomplete zero as a confident
 one. The note appears only when such a construct is actually present,
 never on every zero.
 
+**Languages `deps` never resolves imports for** (Go today) get a
+second, independent disclosure. The bare `dekko deps` summary already
+carries a coverage note (since round 29) when the repo-wide edge count
+is zero and that gap would actually explain it. `dekko deps --file` on
+one such file goes further and always explains itself: a `note:` on
+stderr (`import_scope_note` in `--json`) says the file's language
+isn't import-resolved by design, so entries listed under `external`
+may in fact be this repo's own packages, and `imported by` is always
+empty for that language — not "nothing depends on this file," which
+isn't a claim dekko can make there.
+
 Cycle detection groups files into strongly-connected components
 (Tarjan's SCC): a reported cycle is every file mutually reachable from
 every other file in that group via resolved imports, not necessarily
 a single walked chain — a group of 2+ files means those files can't be
-split apart without addressing the cycle first. A file that imports
-itself (a re-export pattern gone wrong, or simply unusual code) is
+split apart without addressing the cycle first. Each multi-file
+cluster prints its members (comma-separated, no order implied), one
+`shortest loop:` chain in which every `->` is a verified direct import
+(the only arrows on the page), and its internal import edges when there
+are at most 12, or a count plus the number of two-file loops inside it
+otherwise. Before 0.43.73 the member list itself was joined with arrows,
+which read as an import path and usually wasn't one. `--json` adds
+`internal_edges`, `shortest_loop`, `two_file_loops`, and (under the
+same cap) `edges` next to the unchanged `files`/`self_import`. A file
+that imports itself (a re-export pattern gone wrong, or simply unusual
+code) is
 reported as its own distinct 1-file cycle, labeled `(self-import)`,
 never merged into a real multi-file group's count. On Rust repos
 specifically, an inline submodule referencing an earlier item in the
@@ -895,6 +987,19 @@ higher-signal exact matches are now what survives the cap.
 20000` returns every row that fits rather than stopping at 50. An
 explicit `--limit` is always honored. The footer names whichever cap
 actually cut the output (`raise --limit` / `raise --budget`).
+
+A budget can only drop whole rows, and always keeps at least one, so
+it is a promise only while rows are small. Labels that could grow
+without bound (an external callee text is the whole receiver
+expression, arguments included, so a fluent builder chain can run to
+100K+ characters) are elided in the middle at 120 characters,
+`head…[+N chars]…tail`, keeping the receiver and the method; `--json`
+marks such an entry `callee_truncated: true` and the full text stays
+in `map.json`. If a single row ever exceeds the budget on its own, the
+footer says so (`over --budget N: first row alone exceeds it`) rather
+than reporting the overrun as if it were fine. Generated `map/` pages
+cap inline `calls`/`called by` link lists at 25 with a pointer to the
+`dekko query` that lists the rest.
 
 **`--lang <language>` scopes `throws`/`catches` to one language** —
 cuts cross-language noise on a multi-language repo, e.g. a 99%-Java

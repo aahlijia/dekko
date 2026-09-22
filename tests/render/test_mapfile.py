@@ -464,6 +464,28 @@ def test_describe_version_stale_spec_only() -> None:
     assert "tool_version:" not in text
     assert "deadbeef0000" in text
     assert "cafef00dbaad" in text
+    # Round 33 Track 1: nothing here proves the *reader* is the stale
+    # party, so the message must not say so.
+    assert "written by a different dekko build" in text
+    assert "restart it" not in text
+
+
+def test_describe_version_stale_spec_only_process_outdated() -> None:
+    # The same drift, but the verdict carries proof that this
+    # long-lived process is the outdated one (``selfcheck.classify``
+    # asked the disk): now, and only now, "restart it" is right.
+    fresh = mapfile.Freshness(
+        fresh=False,
+        reason="version",
+        version_stale=False,
+        spec_stale=True,
+        built_version="0.43.20",
+        running_version="0.43.20",
+        built_spec_hash="deadbeef0000",
+        running_spec_hash="cafef00dbaad",
+        process_outdated=True,
+    )
+    text = mapfile.describe_version_stale(fresh)
     assert "long-lived process" in text
     assert "restart it" in text
 

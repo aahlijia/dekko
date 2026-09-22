@@ -17,6 +17,7 @@ import pytest
 
 os.environ["DEKKO_TOKENIZER"] = "chars4"
 
+from dekko import selfcheck as _selfcheck_mod
 from dekko.core import resolver as _resolver_mod
 from dekko.integrations import cli
 
@@ -36,6 +37,21 @@ def _reset_pool_mp_context_cache() -> Iterator[None]:
     _resolver_mod._pool_ctx_cache = None
     yield
     _resolver_mod._pool_ctx_cache = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_selfcheck() -> Iterator[None]:
+    """Clear ``selfcheck``'s process-level state per test.
+
+    ``mark_long_lived`` and the installed-identity memo are process
+    globals: right for a real server, but one test calling
+    ``server.serve``/marking itself long-lived would otherwise turn
+    every later test in the run into "a long-lived process" and send
+    their freshness checks to the child-interpreter arbiter.
+    """
+    _selfcheck_mod._reset_for_tests()
+    yield
+    _selfcheck_mod._reset_for_tests()
 
 
 RepoFactory = Callable[[dict[str, str]], Path]

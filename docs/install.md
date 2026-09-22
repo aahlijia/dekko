@@ -18,7 +18,12 @@ in the extras set.** Without `[all]`, every `.sh` file in a repo is
 discovered but not parsed (no symbols, no edges). `dekko map` says so
 on its own `NOT parsed (...)` line and tells you the fix. For a `uv`
 install that is `uv tool install 'dekko[all]'`, or from a checkout,
-`uv tool install '.[all]'`.
+`uv tool install '.[all]'`. `[all]` also includes `orjson` (fast JSON:
+roughly 2x faster `map.json` loads and 6x faster writes on 100 MB
+maps; `dekko doctor`'s `json-backend` row says which one is active).
+`[all]` is every language plus fast JSON; token counting
+(`[tokenizer]`) and embedding search (`[search]`) stay separate
+extras, because each changes what a command's numbers mean.
 
 `dekko search` works out of the box (BM25 lexical scoring, no
 dependencies). For its optional embedding-based scorer
