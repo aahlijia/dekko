@@ -1,5 +1,10 @@
 # cline
 
+> Measured 2026-08-03 on a 0.20-era dekko, before the fixes of eval
+> rounds 07-34; the numbers and caveats below are that snapshot (the
+> headline `get_callers` and `find_usages` bugs here were fixed in the
+> rounds that followed). The 2026-09-21/22 re-measurement on 0.43.77
+> is in [README.md](README.md#current-numbers-dekko-04377).
 
 Large real TypeScript monorepo (VS Code extension + CLI + SDK):
 **2,730 mapped files, 19,542 symbols**, effectively ~4 sub-projects

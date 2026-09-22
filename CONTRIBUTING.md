@@ -27,6 +27,14 @@ tests skip on a default install (same as a user install). CI runs across
 - Keep PRs focused: one conceptual change per PR.
 - `ruff` is the linter/formatter and `pytest` the test runner; CI will fail if
   either does.
+- **Regenerate dekko's own map before every commit** and commit the
+  refreshed `.dekko/MAP.md` / `.dekko/map.json` alongside the change:
+  run `uv run dekko map` after your last source edit, then
+  `git add .dekko/`. This repo tracks its own map (dogfooding), and a
+  checkout's map must match its source — `uv run dekko status` on a
+  fresh clone should report the map fresh. The `dekko-map` pre-commit
+  hook regenerates a stale map but does not stage the result, so
+  `pre-commit install` alone does not cover this.
 - Tests live in `tests/`, mirroring `src/dekko/`'s subpackages
   (`core/`, `render/`, `analysis/`, `daemon/`, `integrations/`,
   `storage/`) where a test maps cleanly to one moved module;

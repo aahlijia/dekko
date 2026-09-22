@@ -1,5 +1,10 @@
 # spring-boot
 
+> Measured 2026-08-03 on a 0.20-era dekko, before the fixes of eval
+> rounds 07-34; the numbers and caveats below are that snapshot. The
+> 2026-09-21/22 re-measurement on 0.43.77 is in
+> [README.md](README.md#current-numbers-dekko-04377).
+
 Large real Java monorepo: **9,647 mapped files, 66,458 symbols**.
 
 ## Results

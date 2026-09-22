@@ -46,9 +46,11 @@ It ships as a **CLI**, a **Claude Code `/map` plugin + MCP server**
 ([Model Context Protocol](https://modelcontextprotocol.io/)), and
 works with **Cline** too.
 
-**The result: 3x-200x fewer tokens** than a plain Read/Grep workflow
-for the same task, measured across 7 real, unmodified open-source
-repos. The full breakdown is right below.
+**The result: 10x-300x fewer tokens** than a plain Read/Grep workflow
+on the everyday tasks (orientation, outlining a large file, a symbol's
+callers), measured across 7 real, unmodified open-source repos on dekko
+0.43.77. The floor, a small grep-friendly local symbol, is about 2.5x.
+The full breakdown is right below.
 
 ## Why dekko?
 
@@ -57,33 +59,35 @@ across a repo — expensive, and it throws away structure (who calls
 what, what a function's fan-in/fan-out looks like). dekko instead
 parses the repo once into a call graph and answers targeted questions
 against it. Measured across 7 real, unmodified open-source repos
-(Go, TypeScript, Java, Rust, Python/C++ — up to 14k files), dekko's
-structured queries used **3x–200x fewer tokens** than the equivalent
-`Read`/`Grep` workflow for the same task (repo orientation, outlining a
-large file, tracing a symbol's callers/callees).
+(Go, TypeScript, Java, Rust, Python/C++ — up to 14k files, 172k
+symbols) on dekko 0.43.77, dekko's structured queries used **10x–300x
+fewer tokens** than the equivalent `Read`/`Grep` workflow for the same
+task (repo orientation, outlining a large file, tracing a symbol's
+callers).
 
 | Task | Example repo (scale) | dekko | Read/Grep | Savings |
 |---|---|---:|---:|---:|
-| Repo orientation (`summary`) | awesome-go (10 files) | 308 tok | ~15,271 tok | ~50x |
-| Repo orientation (`summary`) | cline (2,730 files) | 1,202 tok | ~4,020 tok | ~3.3x |
-| Outline a large file | claude-code `main.tsx` (4,683 lines) | 1,017 tok | 200,981 tok | ~197x |
-| Outline a large file | zed `editor.rs` (12,554 lines) | 1,996 tok | 115,109 tok | ~58x |
-| Symbol lookup (`query_symbol` + callers/callees) | tensorflow `Graph` class | ~811 tok | 61,656 tok | ~76x |
-| Symbol lookup (`query_symbol` + callers/callees) | spring-boot `prepareContext` | 759 tok | ~18,460 tok | ~24x |
-| Bundled context (`workset`) | zed | 2,984 tok | ~5,903+ tok (targeted) / ~164,571 tok (whole file) | ~2x / ~55x |
-| Bundled context (`workset`) | awesome-go | 617 tok | ~6,136 tok | ~10x |
+| Repo orientation (`summary`) | awesome-go (10 files) | 359 tok | ~16,328 tok | ~45x |
+| Repo orientation (`summary`) | claude-buddy (57 files) | ~349 tok | ~113,514 tok (every source file) | ~325x |
+| Outline a large file | claude-code `REPL.tsx` (5,005 lines) | ~1,154 tok | ~223,963 tok | ~194x |
+| Outline a large file | cline `SdkController.ts` (84 KB) | 1,803 tok | ~21,023 tok | ~11.7x |
+| Outline a directory | zed `crates/git_ui/src` (32 files) | ~5,219 tok | ~418,520 tok | ~80x |
+| Callers of a symbol | claude-code `errorMessage` | ~602 tok | ~18,521 tok (323+ grep hits) | ~31x |
+| Callers of a symbol | zed `MultiWorkspace.new` (22 sites, 8 files) | ~809 tok | ~381,446 tok (read the caller files) | ~471x |
+| External-API usage | claude-code `chalk` | ~798 tok | ~8,099 tok | ~10x |
+| Bundled context (`workset`) | awesome-go `ToHTML` | 263 tok | 4,104 tok | ~16x |
 
 dekko's cost stays roughly flat per query while `Read`/`Grep` scales
-with file/repo size, so the ratio grows with scale. It's fast in wall-clock
-terms too: mapping dekko's own ~3,500-symbol codebase from a cold
-cache takes about 1.8 seconds; queries against the resulting map
-return instantly. The win isn't
-universal — small,
-self-contained files and already-grep-friendly local symbols see
-little to no benefit, and a few cases in the raw data are void because
-the cheap answer was also an incomplete one. See
+with file/repo size, so the ratio grows with scale. It's fast in
+wall-clock terms too: mapping dekko's own ~4,300-symbol codebase from a
+cold cache takes about 5 seconds on all cores, an incremental remap
+after an edit is well under a second, and queries against the resulting
+map return instantly. The win isn't universal — small, self-contained
+files and already-grep-friendly local symbols see little benefit (the
+floor measured was about 2.5x). See
 [`benchmarks/real-world-repos/`](benchmarks/real-world-repos/README.md)
-for the full per-task breakdown, methodology, and correctness caveats.
+for the full per-task breakdown, methodology, the original 2026-08
+study, and the correctness caveats it raised and how they were closed.
 
 Compared to tag-index tools like `ctags`/`gtags`, dekko resolves actual
 call edges (not just definitions), ranks files by load-bearing-ness,

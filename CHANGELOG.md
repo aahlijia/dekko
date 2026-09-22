@@ -9,6 +9,35 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+### Fixed
+- **`benchmarks/measure.py` ran again.** The harness crashed on its
+  `workset` task (`workset._render_text` gained a `root` parameter the
+  harness never passed), and its two `outline` targets still named
+  `src/dekko/cli.py` and `src/dekko/render_lean.py`, which moved into
+  subpackages in 0.31.1. A target that is not a file now reports
+  `unresolved` instead of a `0 → N` row, and `tests/test_benchmark.py`
+  exercises the `workset` measurer so the drift cannot recur silently.
+
+### Changed
+- **Benchmark docs refreshed to the latest evaluation rounds.**
+  `benchmarks/README.md`'s representative output is from 0.43.79 on
+  the current 170-file / 4,283-symbol source (it showed an 88-file
+  snapshot). `benchmarks/real-world-repos/README.md` gained a "Current
+  numbers (dekko 0.43.77)" section with the round 33/34 (2026-09-21/22)
+  cross-repo table and current repo sizes; the 2026-08-03 study on a
+  0.20-era dekko is kept below it as the methodology and analysis, with
+  a dated provenance note on each per-repo write-up, and its
+  correctness-caveats section now records that every caveat it raised
+  was fixed and re-verified (round 34: zero new High/Medium/Critical
+  findings). The root README's headline moved from "3x-200x" to
+  "10x-300x" with the ~2.5x floor stated, its table uses round-34 rows,
+  and the cold-map timing was re-measured (about 5 s for ~4,300 symbols
+  on all cores, not 1.8 s for ~3,500).
+- **`CLAUDE.md` and `CONTRIBUTING.md` now require regenerating dekko's
+  own map before every commit** and committing the refreshed `.dekko/`
+  files with the change. The `dekko-map` pre-commit hook regenerates a
+  stale map but does not stage it, so the rule is explicit.
+
 ## [0.43.79] — 2026-09-22
 
 Review pass over `src/dekko/integrations/` (cli, server, hooks,
