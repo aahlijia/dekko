@@ -746,8 +746,17 @@ Cycle detection groups files into strongly-connected components
 (Tarjan's SCC): a reported cycle is every file mutually reachable from
 every other file in that group via resolved imports, not necessarily
 a single walked chain — a group of 2+ files means those files can't be
-split apart without addressing the cycle first. A file that imports
-itself (a re-export pattern gone wrong, or simply unusual code) is
+split apart without addressing the cycle first. Each multi-file
+cluster prints its members (comma-separated, no order implied), one
+`shortest loop:` chain in which every `->` is a verified direct import
+(the only arrows on the page), and its internal import edges when there
+are at most 12, or a count plus the number of two-file loops inside it
+otherwise. Before 0.43.73 the member list itself was joined with arrows,
+which read as an import path and usually wasn't one. `--json` adds
+`internal_edges`, `shortest_loop`, `two_file_loops`, and (under the
+same cap) `edges` next to the unchanged `files`/`self_import`. A file
+that imports itself (a re-export pattern gone wrong, or simply unusual
+code) is
 reported as its own distinct 1-file cycle, labeled `(self-import)`,
 never merged into a real multi-file group's count. On Rust repos
 specifically, an inline submodule referencing an earlier item in the

@@ -9,6 +9,38 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.73] — 2026-09-21
+
+Round 33 Track 2. Design and measurements:
+`.features/fixes/round33/02-deps-cycles-fabricated-path.md`.
+
+### Fixed
+- **`deps --cycles` no longer draws an import path that doesn't
+  exist.** `find_cycles` returns each strongly-connected cluster as its
+  members *sorted*; the renderer joined that list with `->` arrows, so
+  an alphabetical listing read as an import chain. Audited on the eval
+  repos: 0 of 4 printed arrows were real on claude-buddy, 159 of 1,175
+  on claude-code, 226 of 433 on zed, and a chain was only ever right for
+  a two-file cluster. An agent asking "which import do I cut" was
+  pointed at edges that weren't there. A cluster now prints its members
+  comma-separated, one `shortest loop:` chain (BFS, every arrow a
+  verified direct import; 0.1 ms on claude-code's 1,156-file cluster),
+  and its internal edges when there are at most 12, otherwise a count
+  and the number of two-file loops inside it. After: 360 of 360 arrows
+  real on zed, 105/105 cline, 28/28 claude-code, 7/7 claude-buddy.
+- **The 1,156-file cluster was one 44,914-character row.** `--budget
+  500` printed ~11,500 tokens because the budget can't cut a row it
+  must keep (Track 4's general case). Members clip at 12 with `+N
+  more`; the default output on claude-code went from ~11,500 tokens to
+  ~740 and `--budget 500` now binds at ~460.
+- The summary line says `N circular-import cluster(s)` instead of
+  `N cycles`, since a cluster is usually several overlapping loops.
+
+### Added
+- `--cycles --json` entries carry `internal_edges`, `shortest_loop`
+  (import order, first file not repeated), `two_file_loops`, and
+  `edges` (only when at most 12). `files`/`self_import` unchanged.
+
 ## [0.43.72] — 2026-09-21
 
 Round 33 Track 1. Design, measurements, and the real-process A/B:

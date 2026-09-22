@@ -2,6 +2,8 @@
 CLI wiring, and its deliberate CLI-only (no MCP tool) surface."""
 
 import json
+from itertools import pairwise
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +22,20 @@ CYCLE_REPO = {
     "c.py": "from .a import afunc\ndef cfunc():\n    return afunc()\n",
     "standalone.py": "import os\ndef main():\n    return os.getcwd()\n",
     "quiet.py": "x = 1\n",
+}
+
+# Round 33 Track 2, claude-buddy's exact shape: two loops sharing one
+# file (state). art -> theme -> state -> art and state -> xp -> state.
+# One strongly-connected cluster, four files, five edges, and NOT the
+# ring the sorted member list (art, state, theme, xp) would suggest.
+SHARED_NODE_REPO = {
+    "art.py": "from .theme import t\ndef a():\n    return t()\n",
+    "theme.py": "from .state import s\ndef t():\n    return s()\n",
+    "state.py": (
+        "from .art import a\nfrom .xp import x\n"
+        "def s():\n    return a() + x()\n"
+    ),
+    "xp.py": "from .state import s\ndef x():\n    return s()\n",
 }
 
 TWO_CYCLE_REPO = {
@@ -53,7 +69,7 @@ def test_deps_summary_text(
     out = capsys.readouterr().out
     assert "5 files" in out
     assert "resolved import edges" in out
-    assert "1 cycles (3 files)" in out
+    assert "1 circular-import cluster (3 files)" in out
     assert "most-depended-on files:" in out
 
 
@@ -259,6 +275,25 @@ def test_deps_file_zero_symbol_barrel_file_still_resolves(
     assert "imported by (0):" in out
 
 
+def _assert_every_arrow_is_a_real_edge(out: str, root: Path) -> int:
+    """The invariant round 33 Track 2 exists to establish: every ``->``
+    on the page is a direct import in ``module_deps_out``. Returns the
+    number of arrows checked so a test can assert it saw some."""
+    index = mapfile.load_map(root)
+    assert index is not None
+    deps_out = index.module_deps_out
+    checked = 0
+    for line in out.splitlines():
+        if " -> " not in line:
+            continue
+        body = line.split("shortest loop:", 1)[-1]
+        chain = [p.strip() for p in body.split(" -> ")]
+        for a, b in pairwise(chain):
+            assert b in deps_out.get(a, ()), f"fabricated edge {a} -> {b}"
+            checked += 1
+    return checked
+
+
 def test_deps_cycles_text(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
@@ -266,8 +301,85 @@ def test_deps_cycles_text(
     code = cli.main(["deps", "--root", str(root), "--cycles"])
     assert code == 0
     out = capsys.readouterr().out
-    assert "cycle 1 (3 files):" in out
-    assert "a.py -> b.py -> c.py -> a.py" in out
+    assert "cluster 1 (3 files, 3 import edges among them):" in out
+    assert "  a.py, b.py, c.py" in out
+    assert "shortest loop: a.py -> b.py -> c.py -> a.py" in out
+    assert (
+        "  edges:\n    a.py -> b.py\n    b.py -> c.py\n    c.py -> a.py" in out
+    )
+    assert _assert_every_arrow_is_a_real_edge(out, root) == 6
+
+
+def test_deps_cycles_shared_node_prints_a_real_loop_not_the_sorted_list(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Before: "art.py -> state.py -> theme.py -> xp.py -> art.py", four
+    # arrows, zero of them real edges (claude-buddy.md §1).
+    root = make_mapped_repo(SHARED_NODE_REPO)
+    assert cli.main(["deps", "--root", str(root), "--cycles"]) == 0
+    out = capsys.readouterr().out
+    assert "cluster 1 (4 files, 5 import edges among them):" in out
+    assert "art.py, state.py, theme.py, xp.py" in out
+    assert "art.py -> state.py" not in out
+    assert "shortest loop: state.py -> xp.py -> state.py" in out
+    assert _assert_every_arrow_is_a_real_edge(out, root) == 7
+
+
+def test_deps_cycles_large_cluster_clips_members_and_counts_edges(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # 20 files in one ring plus every pair mutually importing: 20 + 380
+    # edges, well over the list cap. Members clip, edges become a
+    # count, and no row is allowed to grow with the cluster.
+    n = 20
+    files = {}
+    for i in range(n):
+        imports = "".join(
+            f"from .m{j} import f{j}\n" for j in range(n) if j != i
+        )
+        files[f"m{i}.py"] = f"{imports}def f{i}():\n    return 1\n"
+    root = make_mapped_repo(files)
+    assert cli.main(["deps", "--root", str(root), "--cycles"]) == 0
+    out = capsys.readouterr().out
+    assert "cluster 1 (20 files, 380 import edges among them):" in out
+    assert ", +8 more" in out
+    assert "  edges: 380 (see `dekko deps --file <member>`" in out
+    assert "two-file loops inside: 190" in out
+    assert "    m" not in out  # no per-edge rows
+    assert _assert_every_arrow_is_a_real_edge(out, root) == 2
+    assert max(len(line) for line in out.splitlines()) < 400
+
+    assert cli.main(["deps", "--root", str(root), "--cycles", "--json"]) == 0
+    entry = json.loads(capsys.readouterr().out)["results"][0]
+    assert entry["internal_edges"] == 380
+    assert entry["two_file_loops"] == 190
+    assert len(entry["shortest_loop"]) == 2
+    assert "edges" not in entry
+
+
+def test_deps_cycles_self_import_block_unchanged(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {"loop.py": "from .loop import f\ndef f():\n    return 1\n"}
+    )
+    assert cli.main(["deps", "--root", str(root), "--cycles"]) == 0
+    out = capsys.readouterr().out
+    assert "cycle 1 (1 file):\n  loop.py  (self-import)" in out
+    assert cli.main(["deps", "--root", str(root), "--cycles", "--json"]) == 0
+    entry = json.loads(capsys.readouterr().out)["results"][0]
+    assert entry == {"files": ["loop.py"], "self_import": True}
+
+
+def test_deps_cycles_output_is_deterministic(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SHARED_NODE_REPO)
+    runs = []
+    for _ in range(2):
+        assert cli.main(["deps", "--root", str(root), "--cycles"]) == 0
+        runs.append(capsys.readouterr().out)
+    assert runs[0] == runs[1]
 
 
 def test_deps_cycles_json(
@@ -278,8 +390,19 @@ def test_deps_cycles_json(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     assert len(doc["results"]) == 1
-    assert set(doc["results"][0]["files"]) == {"a.py", "b.py", "c.py"}
-    assert doc["results"][0]["self_import"] is False
+    entry = doc["results"][0]
+    # pre-round-33 keys, unchanged
+    assert set(entry["files"]) == {"a.py", "b.py", "c.py"}
+    assert entry["self_import"] is False
+    # round-33 keys
+    assert entry["internal_edges"] == 3
+    assert entry["shortest_loop"] == ["a.py", "b.py", "c.py"]
+    assert entry["two_file_loops"] == 0
+    assert entry["edges"] == [
+        ["a.py", "b.py"],
+        ["b.py", "c.py"],
+        ["c.py", "a.py"],
+    ]
 
 
 def test_deps_cycles_none_detected(
@@ -298,8 +421,12 @@ def test_deps_two_file_cycle(
     code = cli.main(["deps", "--root", str(root), "--cycles"])
     assert code == 0
     out = capsys.readouterr().out
-    assert "cycle 1 (2 files):" in out
-    assert "x.py -> y.py -> x.py" in out
+    # A two-file cluster prints only the loop line: members and edges
+    # would say the same thing three times.
+    assert "cluster 1 (2 files, 2 import edges among them):" in out
+    assert "shortest loop: x.py -> y.py -> x.py" in out
+    assert "  x.py, y.py" not in out
+    assert "edges:" not in out
 
 
 def test_deps_export_mermaid(
