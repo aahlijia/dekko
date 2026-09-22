@@ -9,6 +9,78 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.79] — 2026-09-22
+
+Review pass over `src/dekko/integrations/` (cli, server, hooks,
+doctor, cline, orient, claude_md): stale references, wrong schema
+text, and a few cheap wins. No new commands or tools.
+
+### Fixed
+- **`pre-read` hook actually reaches the model.** It emitted
+  `permissionDecision: "defer"` with the advisory in
+  `permissionDecisionReason`. In Claude Code's hook contract `defer`
+  is not an advisory: it hands the decision to an Agent SDK wrapper
+  in `-p` mode, and the reason text of a non-`ask` decision is never
+  shown to the model, so the "outline this first" nudge was invisible
+  in interactive sessions. It now emits `additionalContext` with no
+  `permissionDecision` (the documented non-blocking channel), so the
+  Read proceeds normally and the nudge lands in context.
+- **`pre-bash` sees combined short flags.** `grep -rli x .`, `grep
+  -nR x src`, `grep -rnE ...` never matched (only six spelled-out
+  tokens did); eval transcripts show those forms in live use. Flags
+  are now read letter by letter. In the other direction, `rg pattern
+  src/one_file.py` (every path an existing file) no longer pauses for
+  confirmation: that is a targeted read, and a false interruption is
+  the worst outcome for a hook designed to favor false negatives.
+- **`session-start` hook respects the search-availability guard.** It
+  used the raw `_PREAMBLE` constant and so always recommended
+  `search`, bypassing `orient._preamble()`'s drop-the-line-when-
+  unusable check that `dekko orient` already applied.
+- **MCP schema text was wrong in two places.** `impacted_tests`
+  advertised a default budget of 800 (it is 6000, `affected.
+  DEFAULT_BUDGET`); `get_supertypes` advertised `include_tests` as
+  "default: false, test-file callers are noise" when its default is
+  true and it has no callers. `get_subtypes` now also appends the
+  same "test-file subtypes excluded by default" note `get_callers`
+  does, and both heritage tools honor the shared budget/limit
+  precedence (`_limit_arg`) instead of a fixed 50-row cap.
+- **`add_note` on an ambiguous target lists the candidates.** It said
+  `'X' is ambiguous (3)` and stopped; it now returns the same
+  candidate rows (with the `:LINE` form that picks one) or
+  closest-match list the CLI prints, so the agent can retry without a
+  second lookup.
+- **`dekko sanity --all` error text** pointed at "the design doc's
+  Scope section", a gitignored `.features/` file no user has.
+- **`dekko --claude-install` / `--claude-uninstall`** said the restart
+  activates or drops `/map`; the plugin also ships `/doctor`,
+  `/sanity`, the MCP tools, and five skills.
+- `orient.py`'s module docstring pointed at a README "Proactive
+  orientation" section that no longer exists (now `docs/claude-code.md`
+  "Push hooks"); `server.py`'s tool-list comment claimed the five
+  unregistered handlers "remain callable" (they are reachable only
+  from tests, not from an MCP client).
+
+### Changed
+- **`map_status` reads the provenance sidecar, not `map.json`.** The
+  tool exists to give the staleness fact *without* paying for a
+  regen, yet it parsed the whole map (hundreds of MB on a large repo)
+  to answer it. It now takes the same cheap path `dekko status` and
+  `doctor` do, falling back to the full parse only for a pre-sidecar
+  map. `mapfile.load_provenance` gained an opt-in `check_version`
+  flag so that fallback still raises the too-new / malformed
+  `map.json` errors the tool's call path translates into restart or
+  regenerate instructions.
+- **CLAUDE.md usage-policy block** (`dekko --claude-md-install`) gained
+  two lines: pick tests with `impacted_tests`/`dekko affected`, and
+  keep using the tools after your own edits (every tool regenerates a
+  stale map itself; never run `dekko map` by hand mid-task). Re-run
+  the install to pick up the new wording.
+- `doctor` reuses `selfcheck.loaded_version()` instead of a private
+  `importlib.metadata` copy, and drops an unused `_STATUSES` constant;
+  `diff`/`affected`/`workset` handlers' `getattr` fallback for `jobs`
+  now matches the parser default (0, all cores) instead of the
+  pre-round-31 sequential 1.
+
 ## [0.43.78] — 2026-09-22
 
 Claude Code plugin refresh: stale references fixed and the skills

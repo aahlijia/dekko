@@ -1642,7 +1642,11 @@ def claude_install(dry_run: bool = False) -> int:
         print(installed.stderr.strip(), file=sys.stderr)
         return 1
 
-    print("dekko: plugin installed. Restart Claude Code to activate /map.")
+    print(
+        "dekko: plugin installed. Restart Claude Code to activate "
+        "/map, /doctor, /sanity, the dekko MCP tools, and the bundled "
+        "skills."
+    )
     return 0
 
 
@@ -1686,7 +1690,10 @@ def claude_uninstall(dry_run: bool = False) -> int:
                 file=sys.stderr,
             )
 
-    print("dekko: plugin removed. Restart Claude Code to drop /map.")
+    print(
+        "dekko: plugin removed. Restart Claude Code to drop its "
+        "commands, MCP tools, and skills."
+    )
     return 0
 
 
@@ -1957,7 +1964,7 @@ def run_diff(args: argparse.Namespace) -> int:
         args.rev,
         as_json=args.as_json,
         limit=args.limit,
-        jobs=repo_ops.resolve_workers(getattr(args, "jobs", 1)),
+        jobs=repo_ops.resolve_workers(getattr(args, "jobs", 0)),
     )
 
 
@@ -1970,7 +1977,7 @@ def run_affected(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         limit=args.limit,
         budget=args.budget,
-        jobs=repo_ops.resolve_workers(getattr(args, "jobs", 1)),
+        jobs=repo_ops.resolve_workers(getattr(args, "jobs", 0)),
     )
 
 
@@ -1997,7 +2004,7 @@ def run_workset(args: argparse.Namespace) -> int:
         as_json=args.as_json,
         no_regen=args.no_regen,
         task=task,
-        jobs=repo_ops.resolve_workers(getattr(args, "jobs", 1)),
+        jobs=repo_ops.resolve_workers(getattr(args, "jobs", 0)),
         type_impact=args.type_impact,
     )
 
@@ -2521,15 +2528,15 @@ def run_sanity(args: argparse.Namespace) -> int:
     if args.all:
         if args.usages:
             print(
-                "dekko: --all doesn't support --usages mode; see the "
-                "design doc's Scope section",
+                "dekko: --all sweeps callers only; it doesn't support "
+                "--usages mode",
                 file=sys.stderr,
             )
             return 2
         if args.unused:
             print(
-                "dekko: --all doesn't support --unused mode; see the "
-                "design doc's Scope section",
+                "dekko: --all sweeps callers only; it doesn't support "
+                "--unused mode",
                 file=sys.stderr,
             )
             return 2

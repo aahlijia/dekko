@@ -132,11 +132,13 @@ dekko hooks uninstall                      # remove all dekko hooks
   surfaces `permissionDecision: "ask"` with the dekko-equivalent
   command — a real interruption, not ignorable text. `--strict`
   escalates matches to `"deny"` instead. Matching is deliberately
-  conservative (a targeted, non-recursive `grep pattern one_file.py` or
-  a `cat` on an unmapped file like `package.json` never matches) to
-  keep false positives low; `grep`/`cat` remain correct for string
-  literals, comments, config/data files, and anything outside dekko's
-  language coverage.
+  conservative (a non-recursive `grep pattern one_file.py`, an `rg` or
+  `grep -r` whose every path argument is an existing file, or a `cat`
+  on an unmapped file like `package.json` never matches) to keep false
+  positives low; `grep`/`cat` remain correct for string literals,
+  comments, config/data files, and anything outside dekko's language
+  coverage. Recursive short flags are read letter by letter, so
+  `-rli`, `-nR`, and `-rnE` all count, not just a bare `-r`.
 
 Installing writes to `.claude/settings.json` (restart Claude Code to
 activate). Every handler is fail-silent — a stale map or hook error

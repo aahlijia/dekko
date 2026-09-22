@@ -512,7 +512,11 @@ def _heritage_tool(
 
     Returns:
         Rendered text result, or a placeholder when there are none.
+        Same silent-default disclosure rule as ``_relation_tool``: when
+        ``include_tests`` was defaulted to false for this tool and the
+        caller didn't say so, a trailing ``note:`` line discloses it.
     """
+    explicit_include_tests = "include_tests" in args
     include_tests = bool(args.get("include_tests", default_include_tests))
     index = _index_for(ctx, args, include_tests=include_tests)
     target = _require(args, "symbol")
@@ -526,7 +530,7 @@ def _heritage_tool(
             action,
             target,
             as_json=False,
-            limit=int(args.get("limit", 50)),
+            limit=_limit_arg(args),
             budget=budget,
             transitive=transitive,
             relation=relation,
@@ -534,7 +538,13 @@ def _heritage_tool(
     )
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
-    return _with_notes(out, err, fallback=f"(no {action} for {target})")
+    result = _with_notes(out, err, fallback=f"(no {action} for {target})")
+    if not include_tests and not explicit_include_tests:
+        result += (
+            f"\n\nnote: test-file {action} excluded by default for "
+            "this tool; pass include_tests=true to see them."
+        )
+    return result
 
 
 def tool_get_supertypes(ctx: Context, args: dict) -> str:
@@ -825,9 +835,13 @@ def tool_add_note(ctx: Context, args: dict) -> str:
     text = _require(args, "text")
     sym, candidates = query.resolve_target(index, target)
     if sym is None:
-        if candidates:
-            raise ToolError(f"'{target}' is ambiguous ({len(candidates)})")
-        raise ToolError(f"no symbol matches '{target}'")
+        # Same reply the CLI gives: the candidate rows (with the
+        # ':LINE' form that picks one) or the closest-match list, not
+        # a bare count the agent can't act on without a second call.
+        _, _, err = _capture(
+            lambda: query.report_unresolved(target, candidates, index)
+        )
+        raise ToolError(err.strip() or f"no symbol matches '{target}'")
     notes_mod.add(_root_of(ctx, args), sym.id, text)
     return f"noted {sym.id} ({sym.path}:{sym.start_line})"
 
@@ -925,15 +939,33 @@ def _version_stale_action(fresh: mapfile.Freshness) -> str:
 
 
 def tool_map_status(ctx: Context, args: dict) -> str:
-    """Whether the map on disk is fresh, with what changed if stale."""
+    """Whether the map on disk is fresh, with what changed if stale.
+
+    Reads the small provenance sidecar first (``mapfile.
+    load_provenance``), the same cheap path ``dekko status`` and
+    ``dekko doctor`` take: this tool's whole point is the staleness
+    fact *without* paying for anything else, and a full ``load_map``
+    parses the entire ``map.json`` (hundreds of MB on a large repo) to
+    answer a question the sidecar already holds. Falls back to the
+    full load only for a map written before the sidecar existed.
+    ``check_version=True`` keeps the too-new / malformed ``map.json``
+    detection ``load_map`` gave this tool: those errors propagate to
+    ``_handle_tools_call``, which already turns them into the restart
+    and regenerate instructions.
+    """
     root = _root_of(ctx, args)
-    index = mapfile.load_map(root)
-    if index is None:
-        return f"no map.json under {root} (call refresh_map)"
-    fresh = mapfile.check_freshness(root, index)
-    note = mapfile.format_unsupported(index.provenance)
+    prov = mapfile.load_provenance(root, check_version=True)
+    if prov is not None:
+        fresh = mapfile.check_freshness_provenance(root, prov)
+    else:
+        index = mapfile.load_map(root)
+        if index is None:
+            return f"no map.json under {root} (call refresh_map)"
+        fresh = mapfile.check_freshness(root, index)
+        prov = index.provenance
+    note = mapfile.format_unsupported(prov)
     if fresh.fresh:
-        prov = index.provenance or {}
+        prov = prov or {}
         commit = (prov.get("git_commit") or "no git")[:12]
         n = len(prov.get("files", {}))
         status = f"fresh ({n} files, commit {commit})"
@@ -1003,6 +1035,16 @@ _INCLUDE_TESTS_PROP = {
     "test-file callers are usually noise for impact analysis; set "
     "true to include them)",
 }
+# get_supertypes defaults the other way: a type's own declared
+# heritage is the same whether or not test files are in the index, so
+# there is nothing to filter and no reason to surprise a caller by
+# dropping a test-only base class. Only the tools that walk *inbound*
+# relations (get_callers, get_subtypes) default to excluding tests.
+_INCLUDE_TESTS_DEFAULT_TRUE_PROP = {
+    "type": "boolean",
+    "description": "Include results from test files (default: true; "
+    "set false to drop test-path types from the index first)",
+}
 _TASK_PROP = {
     "type": "string",
     "description": "Rank output by relevance to this task description, "
@@ -1013,8 +1055,10 @@ _TASK_PROP = {
 # every schema below is sent to the model on each session, so each entry
 # pays rent in context tokens. trace_path / find_unused / stats / lean /
 # ledger are CLI-only — diagnostic/operator surface with no observed
-# agent usage (2026-07-10 eval transcripts) — their handlers remain
-# callable and `dekko <cmd>` unaffected.
+# agent usage (2026-07-10 eval transcripts). Their ``tool_*`` handler
+# functions above are kept and exercised directly by tests, but they
+# are not registered in ``_HANDLERS`` (built from this list), so an
+# MCP client cannot reach them; `dekko <cmd>` is unaffected.
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "search_code",
@@ -1218,7 +1262,7 @@ TOOLS: list[dict[str, Any]] = [
                     "results)",
                 },
                 "budget": _BUDGET_PROP,
-                "include_tests": _INCLUDE_TESTS_PROP,
+                "include_tests": _INCLUDE_TESTS_DEFAULT_TRUE_PROP,
                 "root": _ROOT_PROP,
             },
             "required": ["symbol"],
@@ -1351,7 +1395,12 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "Max impacted symbols per test file "
                     "(default 8)",
                 },
-                "budget": _BUDGET_PROP,
+                "budget": {
+                    "type": "integer",
+                    "description": "Approximate token budget (default "
+                    f"{affected.DEFAULT_BUDGET}); weakest-tier test files "
+                    "are dropped first to fit",
+                },
                 "root": _ROOT_PROP,
             },
         },

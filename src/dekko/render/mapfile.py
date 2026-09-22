@@ -2005,7 +2005,7 @@ def _content_freshness(root: Path, prov: dict) -> Freshness:
     )
 
 
-def load_provenance(root: Path) -> dict | None:
+def load_provenance(root: Path, *, check_version: bool = False) -> dict | None:
     """Freshness-only load: read the provenance sidecar, not the map.
 
     ``dekko status`` (and any other caller that only needs to answer
@@ -2027,6 +2027,15 @@ def load_provenance(root: Path) -> dict | None:
 
     Args:
         root: Repository root.
+        check_version: On the parse-``map.json`` fallback, validate the
+            document's ``"version"`` the way ``load_map`` does, so a
+            long-lived process reading a map written by a newer dekko
+            gets the same typed error instead of a silently "fresh"
+            provenance dict. Off by default: ``dekko status`` and
+            ``doctor`` don't catch these errors and would traceback.
+            The MCP ``map_status`` tool turns it on, since its call
+            path already translates both errors into a restart or
+            regenerate instruction.
 
     Returns:
         The provenance dict, or ``None`` when ``map.json`` itself is
@@ -2036,6 +2045,12 @@ def load_provenance(root: Path) -> dict | None:
         still cheaper than ``load_map``, since it skips building the
         symbol/call tables — when the sidecar is missing, stale, or
         unreadable.
+
+    Raises:
+        MapFormatTooNewError: Only with ``check_version``, on the
+            fallback path, when ``map.json`` is newer than this build.
+        MapFormatInvalidError: Only with ``check_version``, on the
+            fallback path, when its ``"version"`` field is malformed.
     """
     map_path = root / _MAP_DIR / "map.json"
     current_sig = _stat_sig(map_path)
@@ -2054,7 +2069,11 @@ def load_provenance(root: Path) -> dict | None:
         full_doc = _json_loads(map_path.read_bytes())
     except (OSError, ValueError):
         return None
-    prov = full_doc.get("provenance") if isinstance(full_doc, dict) else None
+    if not isinstance(full_doc, dict):
+        return None
+    if check_version:
+        _check_doc_version(full_doc.get("version", 1))
+    prov = full_doc.get("provenance")
     return prov if isinstance(prov, dict) else None
 
 

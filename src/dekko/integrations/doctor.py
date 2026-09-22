@@ -33,8 +33,6 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from dekko import selfcheck
@@ -44,13 +42,6 @@ from dekko.integrations import hooks as hooks_mod
 from dekko.render import mapfile
 
 EXIT_OK = 0
-
-# Statuses a Finding can carry. "unknown" covers both "couldn't check"
-# and "found but can't be verified further" (e.g. a live MCP server
-# whose loaded version can't be introspected from outside). "advisory"
-# covers a check that succeeded and found nothing broken, but has real
-# information worth a glance (e.g. a high ambiguous-call rate).
-_STATUSES = ("ok", "missing", "stale", "unknown", "advisory")
 
 # Best-effort subprocess timeouts: doctor must stay fast even when a
 # shelled-out CLI hangs or a process listing is slow.
@@ -66,7 +57,11 @@ class Finding:
         name: Short machine-stable identifier for the check, e.g.
             ``"binary-resolution"`` or ``"hook:pre-bash"``.
         status: One of ``"ok"``, ``"missing"``, ``"stale"``,
-            ``"unknown"``, or ``"advisory"``.
+            ``"unknown"``, or ``"advisory"``. ``"unknown"`` covers
+            both "couldn't check" and "found but can't be verified
+            further"; ``"advisory"`` is a check that found nothing
+            broken but has information worth a glance (e.g. a high
+            ambiguous-call rate).
         detail: One-line human-readable explanation.
         fix: The exact command to run to fix a ``"missing"``/``"stale"``/
             ``"advisory"`` finding, or ``None`` (always ``None`` on
@@ -85,11 +80,8 @@ def _running_binary() -> Path:
 
 
 def _running_version() -> str:
-    """This process's installed ``dekko`` version, or ``"unknown"``."""
-    try:
-        return _pkg_version("dekko")
-    except PackageNotFoundError:
-        return "unknown"
+    """The ``dekko`` version this process imported (``selfcheck``)."""
+    return selfcheck.loaded_version()
 
 
 def _which_version(which_path: str) -> str | None:
@@ -299,14 +291,13 @@ def _check_claude_registration(
         return Finding(
             name, "unknown", "can't check (claude CLI not found)", None
         )
+    cmd = " ".join(["claude", *args])
     result = _run_claude(exe, *args)
     if result is None or result.returncode != 0:
-        cmd = " ".join(["claude", *args])
         return Finding(name, "unknown", f"can't check ('{cmd}' failed)", None)
     if "dekko" in result.stdout.lower():
-        cmd = " ".join(["claude", *args])
         return Finding(name, "ok", f"found in '{cmd}'", None)
-    cmd = " ".join(["claude", *args])
+
     return Finding(name, "missing", f"not found in '{cmd}'", fix)
 
 
