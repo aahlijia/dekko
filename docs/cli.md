@@ -113,6 +113,27 @@ error); a symbol with fewer callees than `--min-shared` gets a hint to
 lower the threshold. Small/sparse repos often need `--min-shared 1`
 to find any peers at all under the default threshold of 2.
 
+`query uses <name>` matches an external name three ways, and labels
+each row (`match` in `--json`): **base**, the callee's own last segment
+(`uses run` finds `subprocess.run`); **binding**, an import binding
+used through member calls (`uses chalk` finds every `chalk.red(...)`,
+`uses np` finds `np.array(...)`), gated on the name actually being
+imported in the calling file so a parameter named `path` is never
+counted; and **module**, the bare import source (`uses numpy`, `uses
+fs`, `uses node:path`) reaching calls through whatever the file bound
+it to, including bare named imports (`existsSync(...)` after
+`import { existsSync } from 'fs'`). Output leads with a summary
+(`chalk: 284 call sites in 44 files`, the top members used, and
+`imported by 47 files`). That last number is the honest denominator:
+`uses` sees *calls*, and a name used only in type position, JSX, or
+as a property read never lands in the call bucket, so on a React
+codebase the importing-file count is much larger than the call-site
+count. A name that appears as a receiver but is never imported is
+reported as such rather than as "no match" (it is a local variable).
+Before 0.43.75 only the base match existed, and `uses chalk` said "no
+external reference matches" while hundreds of `chalk.*` calls sat in
+the map under `red`/`dim`/`bold`.
+
 `query uses <symbol>` (and `unused`, which reads the same edges) only
 credits a value reference the referencing file could actually make. In
 Python and JS/TS that means the symbol lives in the same file, or the

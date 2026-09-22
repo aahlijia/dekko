@@ -15,6 +15,7 @@ import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 
 from dekko import selfcheck
@@ -866,6 +867,30 @@ class MapIndex:
     # see ``index_matches_disk``.
     map_stat: list[int] | None = None
 
+    @cached_property
+    def externals_by_head(self) -> dict[str, list[ExternalCall]]:
+        """First callee segment (stripped) → external calls through it.
+
+        Only multi-segment callees (a single-segment callee is already
+        its own base). Built on first use, not at load: tensorflow has
+        302,397 externals and every other command would pay for an
+        index only ``query uses`` reads (round 33 Track 3).
+        ``without_tests`` builds a fresh index, so a filtered view
+        never inherits an unfiltered head table.
+        """
+        out: dict[str, list[ExternalCall]] = {}
+        seen: set[tuple[str, str]] = set()
+        for exts in self.externals_by_name.values():
+            for ext in exts:
+                key = (ext.caller, ext.callee)
+                if key in seen:
+                    continue
+                seen.add(key)
+                parts = callee_segments(ext.callee)
+                if len(parts) >= 2:
+                    out.setdefault(parts[0], []).append(ext)
+        return out
+
     def degree(self, sym_id: str) -> int:
         """Total fan-in + fan-out of a symbol id."""
         return len(self.calls_in.get(sym_id, [])) + len(
@@ -1315,12 +1340,25 @@ def _load_notes(root: Path) -> dict[str, list[str]]:
     }
 
 
+def callee_segments(text: str) -> list[str]:
+    """Path segments of an external callee text, whitespace-stripped.
+
+    ``subprocess.run`` → ``["subprocess", "run"]``. Multi-line chains
+    are whitespace-normalized to a single space before storage, so
+    ``z\n  .object`` is stored as ``z .object`` and a naive split
+    leaves ``"z "`` as the head; 979 of claude-code's ``z.*`` externals
+    (39%) had that trailing space (round 33 Track 3). Stripping here
+    is what makes a head-segment match see them.
+    """
+    return [s for s in (p.strip() for p in _BASE_SPLIT.split(text)) if s]
+
+
 def _callee_base(text: str) -> str:
     """Base identifier of an external callee text.
 
     ``subprocess.run`` → ``run``; ``a::b`` → ``b``; ``Path`` → ``Path``.
     """
-    parts = [p for p in _BASE_SPLIT.split(text) if p]
+    parts = callee_segments(text)
     return parts[-1] if parts else ""
 
 

@@ -173,7 +173,7 @@ full guidance.
 | `search_code` | free-text relevance search over every symbol (BM25 by default; `scorer: "embedding"` opt-in with `dekko[search]`) |
 | `query_symbol` | signature, doc, fan-in/out, notes |
 | `get_callers` / `get_callees` | callers/callees, with call sites |
-| `find_usages` | references to an external name |
+| `find_usages` | calls into an external name: by function (`run`), import binding (`chalk`, `np`), or module (`numpy`, `node:path`), with a members histogram |
 | `find_type_usages` | functions/methods taking or returning a type |
 | `get_supertypes` / `get_subtypes` | a type's extends/implements heritage, one hop or transitive |
 | `get_context_pack` | a symbol's neighborhood, budget-capped |

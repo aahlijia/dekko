@@ -13,6 +13,7 @@ plain ``path:qualname`` can't narrow the set.
 import difflib
 import io
 import json
+from collections import Counter
 import re
 import sys
 from collections import deque
@@ -20,7 +21,11 @@ from collections.abc import Iterable
 from contextlib import redirect_stdout
 
 from dekko.classify import is_test_path, relevance_key
-from dekko.render.mapfile import MapIndex, format_unsupported
+from dekko.render.mapfile import (
+    MapIndex,
+    callee_segments,
+    format_unsupported,
+)
 from dekko.core import languages
 from dekko.core.model import (
     TYPE_KINDS,
@@ -2105,6 +2110,161 @@ def _shadow_note(index: MapIndex, target: str) -> str | None:
     )
 
 
+# Round 33 Track 3 (claude-code.md Finding 1): ``externals_by_name`` is
+# keyed on the *last* callee segment, which is what ``find_usages``'s
+# schema documented, and which cannot answer the most natural question
+# an agent asks -- "who uses chalk?" -- because every ``chalk.red(..)``
+# is filed under ``red``. Reported as an extractor gap; it wasn't (283
+# chalk sites were in the map). ``uses`` now matches three ways.
+MATCH_BASE = "base"
+MATCH_BINDING = "binding"
+MATCH_MODULE = "module"
+_NODE_PREFIX = "node:"
+_TOP_MEMBERS = 5
+
+
+def _bare_source(index: MapIndex, path: str, imp: Import) -> str:
+    """``bare_import_source`` with a leading ``node:`` stripped."""
+    lang = index.languages_by_path.get(path, "")
+    return bare_import_source(imp, lang).removeprefix(_NODE_PREFIX)
+
+
+def _uses_matches(
+    index: MapIndex, target: str
+) -> tuple[list[ExternalCall], dict[tuple[str, str], str]]:
+    """Every external call that ``uses <target>`` should list, and how.
+
+    Three match kinds, first one wins per row:
+
+    - ``base``: last segment == target (``uses run`` -> ``subprocess.
+      run``; the pre-round-33 behavior, unchanged).
+    - ``binding``: first segment == target *and* target is an import
+      binding in the calling file (``uses chalk`` -> ``chalk.red``).
+      The import gate is what keeps ``uses path`` from returning 48
+      local variables named ``path`` (42% of the ungated hits on
+      claude-code): the same test ``resolver._receiver_is_external``
+      applies at resolve time, re-run here against ``imports_by_path``.
+    - ``module``: the calling file imports some binding ``b`` from a
+      source whose bare form == target, and the row's first segment (or
+      its only segment) == ``b`` (``uses numpy`` -> ``np.array``;
+      ``uses fs`` -> a bare ``existsSync(..)`` from ``import
+      {existsSync} from 'fs'``).
+
+    Args:
+        index: Loaded map index.
+        target: The name as typed.
+
+    Returns:
+        The matched rows (deduplicated by ``(caller, callee)``) and a
+        map from that key to the match kind.
+    """
+    want = target.removeprefix(_NODE_PREFIX)
+    kinds: dict[tuple[str, str], str] = {}
+    rows: list[ExternalCall] = []
+
+    def take(ext: ExternalCall, kind: str) -> None:
+        key = (ext.caller, ext.callee)
+        if key not in kinds:
+            kinds[key] = kind
+            rows.append(ext)
+
+    for ext in index.externals_by_name.get(target, []):
+        take(ext, MATCH_BASE)
+    for ext in index.externals_by_head.get(target, []):
+        path = ext.caller.split("::", 1)[0]
+        if any(i.name == target for i in index.imports_by_path.get(path, [])):
+            take(ext, MATCH_BINDING)
+    for ext in _module_bound_externals(index, want):
+        take(ext, MATCH_MODULE)
+    return rows, kinds
+
+
+def _module_bindings(index: MapIndex, source: str) -> dict[str, set[str]]:
+    """File path → local names imported from bare source ``source``."""
+    out: dict[str, set[str]] = {}
+    for path, imps in index.imports_by_path.items():
+        names = {
+            i.name for i in imps if _bare_source(index, path, i) == source
+        }
+        if names:
+            out[path] = names
+    return out
+
+
+def _module_bound_externals(
+    index: MapIndex, source: str
+) -> list[ExternalCall]:
+    """External calls whose head is a binding imported from ``source``."""
+    bindings = _module_bindings(index, source)
+    if not bindings:
+        return []
+    found: list[ExternalCall] = []
+    for exts in index.externals_by_name.values():
+        for ext in exts:
+            names = bindings.get(ext.caller.split("::", 1)[0])
+            if not names:
+                continue
+            parts = callee_segments(ext.callee)
+            if parts and parts[0] in names:
+                found.append(ext)
+    return found
+
+
+def _uses_numbers(
+    index: MapIndex, target: str, exts: list[ExternalCall]
+) -> tuple[int, int, int, Counter[str]]:
+    """``(sites, files, importing_files, member_histogram)`` for a
+    ``uses`` result -- shared by the text header and the JSON summary
+    so the two can't disagree."""
+    sites = sum(len(e.lines) or 1 for e in exts)
+    files = {e.caller.split("::", 1)[0] for e in exts}
+    members: Counter[str] = Counter()
+    for e in exts:
+        parts = callee_segments(e.callee)
+        if len(parts) >= 2:
+            members[parts[1].split("(", 1)[0]] += len(e.lines) or 1
+    want = target.removeprefix(_NODE_PREFIX)
+    importing = sum(
+        1
+        for path, imps in index.imports_by_path.items()
+        if any(
+            i.name == target or _bare_source(index, path, i) == want
+            for i in imps
+        )
+    )
+    return sites, len(files), importing, members
+
+
+def _uses_summary(
+    index: MapIndex, target: str, exts: list[ExternalCall]
+) -> str:
+    """The header lines for a non-empty ``uses`` result.
+
+    A module-level question deserves a module-level answer before the
+    rows: site and file counts, the member histogram (usually the real
+    question behind "who uses chalk": what *of* chalk), and the honest
+    denominator -- 520 claude-code files import ``React`` and 212 call
+    sites are recorded, because ``external`` is a *call* bucket and
+    ``React.FC`` in type position or JSX never lands in it.
+    """
+    sites, files, importing, members = _uses_numbers(index, target, exts)
+    lines = [f"{target}: {sites} call sites in {files} files"]
+    if members:
+        top = ", ".join(
+            f"{m} {n}" for m, n in members.most_common(_TOP_MEMBERS)
+        )
+        rest = len(members) - _TOP_MEMBERS
+        lines.append(
+            f"  top members: {top}" + (f", +{rest} more" if rest > 0 else "")
+        )
+    if importing:
+        lines.append(
+            f"  imported by {importing} files; type-position, JSX, and "
+            "property reads are not recorded (calls only)"
+        )
+    return "\n".join(lines)
+
+
 def _run_uses_not_found(index: MapIndex, target: str) -> int:
     """Report a ``uses`` target with zero external matches."""
     internal = index.symbols_by_name.get(
@@ -2120,9 +2280,24 @@ def _run_uses_not_found(index: MapIndex, target: str) -> int:
         )
         return EXIT_NOT_FOUND
     print(f"dekko: no external reference matches '{target}'", file=sys.stderr)
-    close = _close_names(
-        target, list(index.externals_by_name), exclude_verbatim=True
+    unbound = index.externals_by_head.get(target, [])
+    if unbound:
+        n = sum(len(e.lines) or 1 for e in unbound)
+        print(
+            f"  note: '{target}' appears as a receiver in {n} call "
+            "site(s), but never as an import binding in those files; "
+            "those are local variables, not a module",
+            file=sys.stderr,
+        )
+    sources = {
+        _bare_source(index, path, i)
+        for path, imps in index.imports_by_path.items()
+        for i in imps
+    }
+    pool = sorted(
+        set(index.externals_by_name) | set(index.externals_by_head) | sources
     )
+    close = _close_names(target, pool, exclude_verbatim=True)
     if close:
         print("closest external names: " + ", ".join(close), file=sys.stderr)
     coverage = _coverage_note(index)
@@ -2135,16 +2310,24 @@ def _print_uses_json(
     index: MapIndex,
     target: str,
     exts: list[ExternalCall],
+    kinds: dict[tuple[str, str], str],
     shadow: str | None,
     budget: int | None,
     limit: int,
 ) -> None:
     """JSON rendering for a non-empty ``uses`` result."""
-    entries = [_uses_entry(e) for e in exts]
+    entries = [_uses_entry(e, kinds[(e.caller, e.callee)]) for e in exts]
     kept, meter = _fit_entries(entries, budget, limit)
+    sites, files, importing, members = _uses_numbers(index, target, exts)
     doc = {
         "action": "uses",
         "name": target,
+        "summary": {
+            "sites": sites,
+            "files": files,
+            "importing_files": importing,
+            "members": members.most_common(),
+        },
         "results": kept,
         "meta": meter.as_dict(),
     }
@@ -2156,7 +2339,7 @@ def _print_uses_json(
     print(json.dumps(doc, indent=2))
 
 
-def _uses_entry(ext: ExternalCall) -> dict:
+def _uses_entry(ext: ExternalCall, kind: str) -> dict:
     """One JSON entry for a ``uses`` hit.
 
     Round 33 Track 4: an external callee text is the whole receiver
@@ -2167,7 +2350,12 @@ def _uses_entry(ext: ExternalCall) -> dict:
     says so; the full text stays in ``map.json``.
     """
     callee = clip_middle(ext.callee)
-    entry = {"caller": ext.caller, "callee": callee, "lines": ext.lines}
+    entry = {
+        "caller": ext.caller,
+        "callee": callee,
+        "lines": ext.lines,
+        "match": kind,
+    }
     if callee != ext.callee:
         entry["callee_truncated"] = True
     return entry
@@ -2198,7 +2386,7 @@ def _run_uses(
     budget: int | None,
 ) -> tuple[int, Meter | None]:
     """Execute the uses action: who references an external name."""
-    exts = index.externals_by_name.get(target, [])
+    exts, kinds = _uses_matches(index, target)
     if not exts:
         return _run_uses_not_found(index, target), None
     exts = sorted(
@@ -2206,11 +2394,16 @@ def _run_uses(
     )
     shadow = _shadow_note(index, target)
     if as_json:
-        _print_uses_json(index, target, exts, shadow, budget, limit)
+        _print_uses_json(index, target, exts, kinds, shadow, budget, limit)
         return EXIT_OK, None
     if shadow:
         print(f"  note: {shadow}", file=sys.stderr)
-    return EXIT_OK, _emit_lines(_uses_rows(index, exts), budget, limit)
+    return EXIT_OK, _emit_lines(
+        _uses_rows(index, exts),
+        budget,
+        limit,
+        prefix=_uses_summary(index, target, exts),
+    )
 
 
 def _source_matches(

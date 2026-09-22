@@ -9,6 +9,54 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.75] — 2026-09-21
+
+Round 33 Track 3. Design and measurements:
+`.features/fixes/round33/03-uses-receiver-and-module-match.md`.
+
+### Fixed
+- **`query uses chalk` said "no external reference matches" while 283
+  `chalk.*` call sites sat in the map.** Reported (claude-code.md
+  Finding 1, as HIGH) as `chalk.<method>()` calls being "simply absent
+  from the call graph", with the fix pointed at the extractor. They
+  were never absent: `externals_by_name` keys on the *last* callee
+  segment (which is what `find_usages`'s schema documented), so every
+  `chalk.red(...)` was filed under `red`. Not TS-specific either:
+  `uses subprocess` failed the same way on dekko's own repo. Read-side
+  fix, no spec bump, no edge movement. `uses` now matches three ways
+  and labels each row: `base` (the old behavior, unchanged), `binding`
+  (first segment is an import binding in the calling file: `chalk`,
+  `React`, `np`, `subprocess`), and `module` (the bare import source:
+  `numpy`, `fs`, `node:path`, reaching bare named imports too). The
+  binding match is import-gated on purpose: ungated, `uses path` on
+  claude-code returned 48 parameters named `path` (42% noise). Now 0
+  of 50 sampled binding rows on cline sit under a local rebind.
+- **Multi-line chains were invisible to any head match.** Chains are
+  whitespace-normalized to `z .object` before storage, so 979 of
+  claude-code's `z.*` externals (39%) had a head of `"z "`. Segments
+  are stripped (`mapfile.callee_segments`).
+- **The not-found message stopped claiming absence it couldn't prove.**
+  A name that appears as a receiver but is never imported (`uses
+  result`: 356 sites on claude-code) now says so: "appears as a
+  receiver in N call sites, but never as an import binding; those are
+  local variables, not a module". Closest-name suggestions draw from
+  bases, heads and bare import sources, so `uses Chalk` suggests
+  `chalk`.
+
+### Added
+- A summary header before the rows: `chalk: 284 call sites in 44
+  files`, `top members: dim 73, bold 67, red 50, ...`, and `imported by
+  47 files; type-position, JSX, and property reads are not recorded
+  (calls only)`. That last line is the honest denominator: 520
+  claude-code files import `React` and 212 call sites are recorded,
+  because `React.FC` in type position and JSX never reach the call
+  bucket. `--json` carries the same numbers under `summary` and a
+  per-row `match`.
+- `MapIndex.externals_by_head`, built lazily on first `uses` call
+  (189 ms on zed's 197K externals; `query symbol` timing unchanged).
+- MCP `find_usages`'s description and `name` schema text describe the
+  three shapes.
+
 ## [0.43.74] — 2026-09-21
 
 Round 33 Track 4, found during Tracks 2 and 3 rather than by any eval

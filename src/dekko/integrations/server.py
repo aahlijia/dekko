@@ -1122,19 +1122,24 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "find_usages",
-        "description": "List the symbols that reference an external "
-        "(out-of-repo) name, e.g. a stdlib or third-party function, "
-        "with call sites — one call gets every real call site across "
-        "the repo, where grepping the bare name also pulls in imports, "
-        "comments, and unrelated same-named locals you'd have to "
-        "hand-filter.",
+        "description": "List the symbols that call into an external "
+        "(out-of-repo) name, with call sites and a summary line "
+        "(site/file counts, top members used, importing-file count). "
+        "Ask by function ('run' finds subprocess.run), by import "
+        "binding ('chalk' finds every chalk.red/chalk.dim call; 'np' "
+        "finds np.array), or by module ('numpy', 'node:path', 'fs' "
+        "find calls through whatever the file bound them to). Calls "
+        "only: type-position, JSX and property reads are not recorded, "
+        "and the summary says how many files import the name so a low "
+        "count isn't read as the whole story.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Base identifier of the external "
-                    "reference (e.g. 'run' for subprocess.run, 'Path')",
+                    "description": "An external name: a function's "
+                    "own name ('run'), an imported binding ('chalk', "
+                    "'np', 'React'), or a module ('numpy', 'node:path')",
                 },
                 "limit": {
                     "type": "integer",
