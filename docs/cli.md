@@ -905,6 +905,19 @@ higher-signal exact matches are now what survives the cap.
 explicit `--limit` is always honored. The footer names whichever cap
 actually cut the output (`raise --limit` / `raise --budget`).
 
+A budget can only drop whole rows, and always keeps at least one, so
+it is a promise only while rows are small. Labels that could grow
+without bound (an external callee text is the whole receiver
+expression, arguments included, so a fluent builder chain can run to
+100K+ characters) are elided in the middle at 120 characters,
+`head…[+N chars]…tail`, keeping the receiver and the method; `--json`
+marks such an entry `callee_truncated: true` and the full text stays
+in `map.json`. If a single row ever exceeds the budget on its own, the
+footer says so (`over --budget N: first row alone exceeds it`) rather
+than reporting the overrun as if it were fine. Generated `map/` pages
+cap inline `calls`/`called by` link lists at 25 with a pointer to the
+`dekko query` that lists the rest.
+
 **`--lang <language>` scopes `throws`/`catches` to one language** —
 cuts cross-language noise on a multi-language repo, e.g. a 99%-Java
 repo carrying a handful of vendored JS files whose untyped catch-alls

@@ -560,14 +560,36 @@ def _relations(
     for name, count in ambiguous_by_caller.get(sym.id, []):
         out_links.append(f"`{name}` *(ambiguous: {count} candidates)*")
     if out_links:
-        lines.append(f"- **calls:** {', '.join(out_links)}")
+        lines.append(_link_list("calls", out_links, sym, "callees"))
     in_links = [
         _link(caller, symbols_by_id, links)
         for caller in graph.calls_in.get(sym.id, [])
     ]
     if in_links:
-        lines.append(f"- **called by:** {', '.join(in_links)}")
+        lines.append(_link_list("called by", in_links, sym, "callers"))
     return lines
+
+
+# Round 33 Track 4: a "called by" line was one markdown link per caller
+# with no cap. claude-code's ``logForDebugging`` has ~1,000, making a
+# 102,113-character line; 191 lines over 2,000 characters made up 13%
+# of that repo's ``map/`` pages. The pages exist to be read, by people
+# and by agents that ``Read`` them, and the full list is one budgeted
+# command away.
+_LINK_LIST_CAP = 25
+
+
+def _link_list(label: str, items: list[str], sym: Symbol, action: str) -> str:
+    """A ``- **label:** a, b, c`` bullet, capped with a pointer to the
+    query that lists the rest."""
+    shown = items[:_LINK_LIST_CAP]
+    more = len(items) - len(shown)
+    tail = (
+        f", +{more:,} more (`dekko query {action} {sym.path}:{sym.qualname}`)"
+        if more
+        else ""
+    )
+    return f"- **{label}:** {', '.join(shown)}{tail}"
 
 
 def _link(sym_id: str, symbols_by_id: dict[str, Symbol], links: _Links) -> str:

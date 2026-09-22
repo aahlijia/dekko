@@ -1,6 +1,7 @@
 """Small shared text helpers for the read-command renderers."""
 
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -51,6 +52,48 @@ def oneline(text: str, limit: int = 80) -> str:
     if len(first) > limit:
         first = first[: limit - 1].rstrip() + "…"
     return first
+
+
+# Round 33 Track 4: every read command's ``--budget`` assumes rows are
+# small -- ``fit_to_budget`` can only drop whole rows, and always keeps
+# at least one. Three producers broke that assumption (an external
+# callee text that is a 122,327-character builder chain; a 1,156-file
+# cycle cluster as one row; a "called by" list of ~1,000 links). This is
+# the bound a rendered row is expected to stay under, enforced by a
+# parametrized test over the read commands; long real signatures are
+# the one allowed exception.
+ROW_CHAR_CAP = 400
+LABEL_CHAR_CAP = 120
+_WS = re.compile(r"\s+")
+
+
+def clip_middle(text: str, limit: int = LABEL_CHAR_CAP) -> str:
+    """Collapse whitespace and elide the middle of an overlong label.
+
+    Keeps the head and the tail because, for a call chain, those are
+    the receiver and the method: the two parts a reader needs to know
+    what the row is. A right-truncate would keep 120 characters of
+    builder boilerplate and drop the one segment that made the row
+    match. The elision states how much was dropped.
+
+    Args:
+        text: Label text (a callee chain, a type expression).
+        limit: Maximum length of the result.
+
+    Returns:
+        ``text`` (whitespace-collapsed) when it fits, otherwise
+        ``head…[+N chars]…tail`` of at most ``limit`` characters.
+    """
+    flat = _WS.sub(" ", text).strip()
+    if len(flat) <= limit:
+        return flat
+    marker = f"…[+{len(flat) - limit:,} chars]…"
+    room = limit - len(marker)
+    if room < 8:
+        return flat[: max(limit - 1, 0)] + "…"
+    head = room * 2 // 3
+    tail = room - head
+    return flat[:head] + marker + flat[-tail:]
 
 
 def dir_of(path: str) -> str:
@@ -174,6 +217,13 @@ class Meter:
     signals: int = 0
     related_total: int = 0
     related_label: str = ""
+    # Round 33 Track 4: set by ``fit_to_budget`` when the kept output
+    # exceeds ``budget`` anyway, which can only happen when the first
+    # row alone is bigger than the budget (the "always keep one row"
+    # rule). Should never fire once every producer bounds its rows;
+    # it exists so the next producer that doesn't shows up as a footer
+    # in someone's terminal instead of as a discovery three rounds on.
+    over_budget: bool = False
 
     @property
     def omitted(self) -> int:
@@ -209,16 +259,21 @@ class Meter:
     def footer(self) -> str:
         """One-line text footer, stable enough to parse."""
         row_noun = " sites" if self.related_label else ""
+        over = (
+            f" · over --budget {self.budget}: first row alone exceeds it"
+            if self.over_budget
+            else ""
+        )
         if self.omitted == 0:
             return (
                 f"(~{self.tokens} tokens{self._density()}"
-                f"{self._related_suffix()})"
+                f"{self._related_suffix()}{over})"
             )
         raise_hint = f"raise --{self.truncated_by}"
         return (
             f"(~{self.tokens} tokens{self._density()}"
             f"{self._related_suffix()} · {self.omitted} of "
-            f"{self.total}{row_noun} omitted · {raise_hint})"
+            f"{self.total}{row_noun} omitted · {raise_hint}{over})"
         )
 
     def as_dict(self) -> dict:
@@ -234,6 +289,7 @@ class Meter:
             "tokens_per_signal": self.per_signal,
             "related_total": self.related_total,
             "related_label": self.related_label,
+            "over_budget": self.over_budget,
         }
 
 
@@ -279,12 +335,14 @@ def fit_to_budget(
             break
         running = candidate
         kept.append(line)
+    tokens = estimate_tokens(running)
     return kept, Meter(
-        tokens=estimate_tokens(running),
+        tokens=tokens,
         returned=len(kept),
         total=total,
         budget=budget,
         limit=limit,
         related_total=related_total,
         related_label=related_label,
+        over_budget=budget is not None and bool(kept) and tokens > budget,
     )

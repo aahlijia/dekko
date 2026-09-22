@@ -9,6 +9,44 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [0.43.74] — 2026-09-21
+
+Round 33 Track 4, found during Tracks 2 and 3 rather than by any eval
+agent. Design: `.features/fixes/round33/04-rows-that-outrun-the-budget.md`.
+
+### Fixed
+- **One row could be 122,327 characters, and the budget couldn't cut
+  it.** `fit_to_budget` drops whole rows and always keeps one, which is
+  right, but rests on rows being small. An external callee text is the
+  whole receiver expression, nested function bodies included, so
+  claude-code's commander builder (`program.name(...)...version`) made
+  `query uses version` print ~30.5K tokens against an 800-token
+  default, with a footer that didn't say anything was wrong. `uses`,
+  `throws` and `supertypes` labels are now elided in the middle at 120
+  characters (`head…[+122,009 chars]…tail`, receiver and method both
+  kept); `--json` marks such entries `callee_truncated`. That row is
+  now 44 tokens. Clipping happens at render, after lookup, so a row
+  still matches by its base name.
+- **The footer now admits an overrun.** When the kept output exceeds
+  `--budget` anyway (only possible when the first row alone is bigger
+  than the budget), the footer says `over --budget N: first row alone
+  exceeds it` and `meta.over_budget` is true. It should never fire now;
+  it exists so the next producer that breaks the small-rows assumption
+  shows up in a terminal instead of an eval round.
+- **Generated `map/` pages cap inline link lists at 25.** A `called by`
+  line was one link per caller with no cap: claude-code's
+  `logForDebugging` made a 102,113-character line, and 191 lines over
+  2,000 characters were 13% of that repo's pages. Now `+975 more
+  (\`dekko query callers <symbol>\`)`. claude-code's pages: 8.5 MB to
+  7.4 MB, longest line 102K to 3.3K.
+
+### Added
+- `textutil.clip_middle`, `ROW_CHAR_CAP`/`LABEL_CHAR_CAP`, and
+  `tests/test_row_size.py`: a parametrized test that runs 13 read
+  commands over a fixture seeded with a 5,000-character chain and a
+  40-caller symbol and asserts no printed line exceeds the cap (long
+  signatures are the one named exemption).
+
 ## [0.43.73] — 2026-09-21
 
 Round 33 Track 2. Design and measurements:

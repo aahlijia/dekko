@@ -30,7 +30,13 @@ from dekko.core.model import (
     Import,
     Symbol,
 )
-from dekko.textutil import Meter, fit_to_budget, signature, token_footer
+from dekko.textutil import (
+    Meter,
+    clip_middle,
+    fit_to_budget,
+    signature,
+    token_footer,
+)
 from dekko.core.resolver import MODULE_CALLER_SUFFIX, bare_import_source
 
 EXIT_OK = 0
@@ -1227,7 +1233,7 @@ def _throws_row(sym: Symbol, lines: list[int]) -> str:
 def _throws_external_row(ext: ExternalCall) -> str:
     """One text row for an external (stdlib/third-party) throw hit."""
     site = ",".join(str(n) for n in ext.lines) if ext.lines else "?"
-    return f"  L{site}  (external) {ext.callee}"
+    return f"  L{site}  (external) {clip_middle(ext.callee)}"
 
 
 def _throws_lang_filter(
@@ -2134,10 +2140,7 @@ def _print_uses_json(
     limit: int,
 ) -> None:
     """JSON rendering for a non-empty ``uses`` result."""
-    entries = [
-        {"caller": e.caller, "callee": e.callee, "lines": e.lines}
-        for e in exts
-    ]
+    entries = [_uses_entry(e) for e in exts]
     kept, meter = _fit_entries(entries, budget, limit)
     doc = {
         "action": "uses",
@@ -2153,6 +2156,23 @@ def _print_uses_json(
     print(json.dumps(doc, indent=2))
 
 
+def _uses_entry(ext: ExternalCall) -> dict:
+    """One JSON entry for a ``uses`` hit.
+
+    Round 33 Track 4: an external callee text is the whole receiver
+    expression, arguments and nested function bodies included, so a
+    fluent builder chain can run to 122,327 characters (claude-code's
+    ``program.name(...)...version``). The label is clipped in the
+    middle -- receiver and method survive -- and ``callee_truncated``
+    says so; the full text stays in ``map.json``.
+    """
+    callee = clip_middle(ext.callee)
+    entry = {"caller": ext.caller, "callee": callee, "lines": ext.lines}
+    if callee != ext.callee:
+        entry["callee_truncated"] = True
+    return entry
+
+
 def _uses_rows(index: MapIndex, exts: list[ExternalCall]) -> list[str]:
     """Text rows for a non-empty ``uses`` result, one per call site."""
     rows: list[str] = []
@@ -2163,9 +2183,10 @@ def _uses_rows(index: MapIndex, exts: list[ExternalCall]) -> list[str]:
         else:
             s = index.symbols_by_id.get(ext.caller)
             label = signature(s) if s else ext.caller
+        callee = clip_middle(ext.callee)
         for line in ext.lines or [0]:
             loc = f"{path}:{line}" if line else path
-            rows.append(f"{loc}  {label}  [{ext.callee}]")
+            rows.append(f"{loc}  {label}  [{callee}]")
     return rows
 
 
@@ -2906,7 +2927,8 @@ def _run_heritage(
     for ext in externals:
         label = _heritage_external_label(index, sym, ext.callee)
         for line in ext.lines or [sym.start_line]:
-            lines.append(f"  {sym.path}:{line}  ({label}) {ext.callee}")
+            callee = clip_middle(ext.callee)
+            lines.append(f"  {sym.path}:{line}  ({label}) {callee}")
     if ambig_out:
         print(
             f"  note: {ambig_out} additional supertype name(s) "
