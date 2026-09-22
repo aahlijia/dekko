@@ -9,6 +9,50 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-09-22
+
+dekko 1.0. This is a milestone promotion, not a rewrite: the code is
+0.43.79 plus the benchmark refresh below. It marks the point where the
+surfaces agents and scripts depend on are stable enough to promise
+semver on, after 34 evaluation rounds against seven real repositories
+(awesome-go, claude-buddy, claude-code, cline, spring-boot, tensorflow,
+zed) and a final round (34, dekko 0.43.77) that found zero new High,
+Medium, or Critical issues across all of them.
+
+### Breaking
+
+Nothing breaks in this release. This section states what 1.0 commits
+to, so that a future MAJOR bump has a defined meaning:
+
+- **The CLI surface is stable.** Every subcommand and flag documented in
+  `docs/cli.md` keeps its name, argument shape, exit codes, and `--json`
+  output keys. Removing or renaming one is a MAJOR change. New
+  subcommands and flags are MINOR/PATCH as before. The legacy
+  flag-form aliases (`dekko --map`, `dekko --claude-install`, ...) stay
+  supported.
+- **The MCP surface is stable.** The 18 tools `dekko serve --mcp`
+  exposes keep their names, required arguments, and argument names
+  (including the `name` alias for `symbol`). Removing a tool or
+  renaming an argument is a MAJOR change; new optional arguments and
+  new tools are not.
+- **`map.json` is versioned and backward-readable.** The document
+  carries `"version"` (currently 11). A dekko 1.x reads every 1.x map;
+  a map written by a newer dekko than the reader is refused with a
+  clear "restart or upgrade" error, never misread. A schema change that
+  a 1.x reader cannot load is a MAJOR change.
+- **`.dekko/notes.json`** keeps its symbol-id keyed shape, so committed
+  notes survive upgrades.
+- **Python 3.10 is the floor** for the 1.x line; dropping it is MAJOR.
+- **Hook, plugin, and Cline installers stay idempotent and reversible.**
+  `install` then `uninstall` restores the edited file.
+
+Outside those promises: the exact text of human-readable output
+(row wording, footers, notes) may still change in PATCH releases, and
+the resolver's precision keeps improving, which means caller counts
+and `unused` verdicts can shift between versions as more code becomes
+resolvable. Use `--json` and the documented keys for anything a script
+depends on.
+
 ### Fixed
 - **`benchmarks/measure.py` ran again.** The harness crashed on its
   `workset` task (`workset._render_text` gained a `root` parameter the
