@@ -64,9 +64,14 @@ its own source. See `README.md` and `docs/` (`docs/install.md`,
   this repo tracks its own for dogfooding, so check whether a given change
   is worth including before committing it alongside unrelated work.
 - Follow the branch/PR conventions in `CONTRIBUTING.md`: one conceptual
-  change per PR, `feat:`/`fix:`/`perf:`/`docs:`/`chore:`-style commit
-  prefixes (see `git log` for the house style), releases cut by pushing a
-  `v*` tag.
+  change per PR, Conventional-Commits-style commit prefixes (`feat`/
+  `fix`/`docs`/`style`/`refactor`/`perf`/`test`/`chore`/`build`/`ci`/
+  `revert` — CONTRIBUTING.md's "Commit messages" section has the full
+  table and what each one means here), dekko's versioning rules
+  (CONTRIBUTING.md's "Versioning" section: major is maintainer-only,
+  minor closes out a testing round's fix cycle or ships a new
+  top-level capability, patch is everything else), releases cut by
+  pushing a `v*` tag.
 
 ## Evaluation reports: `test-repos/reports/`
 
