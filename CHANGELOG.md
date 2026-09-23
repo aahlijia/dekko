@@ -9,6 +9,16 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-09-23
+
+### Fixed
+- **Daemon-routed `diff`/`affected`/`workset` no longer print the
+  cold rev-cache note twice.** The client prints it before dispatch
+  so you see it before the wait, and the daemon's replayed stderr
+  carried the same line again. The client now drops that one replayed
+  copy. Works against an already-running older daemon too; direct
+  mode is unchanged.
+
 ## [1.0.1] — 2026-09-23
 
 Source cleanup. The code no longer points at internal evaluation

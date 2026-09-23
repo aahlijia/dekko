@@ -1341,7 +1341,7 @@ def test_timeout_and_args_discloses_all_cores_wording_when_override_applies(
     args = cli.build_subcommand_parser().parse_args(
         ["affected", "--root", str(short_root)]
     )
-    _, new_args = daemon._timeout_and_args_for_command(
+    _, new_args, _ = daemon._timeout_and_args_for_command(
         "affected", args, short_root, jobs_explicit=False
     )
 
@@ -1372,7 +1372,7 @@ def test_timeout_and_args_discloses_sequential_wording_when_jobs_explicit(
     args = cli.build_subcommand_parser().parse_args(
         ["affected", "--root", str(short_root), "--jobs", "1"]
     )
-    _, new_args = daemon._timeout_and_args_for_command(
+    _, new_args, _ = daemon._timeout_and_args_for_command(
         "affected", args, short_root, jobs_explicit=True
     )
 
@@ -1459,6 +1459,104 @@ def test_timeout_and_args_silent_on_a_revcache_hit(
 
     assert called is False
     assert capsys.readouterr().err == ""
+
+
+def _route_cold_affected(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    daemon_stderr: str,
+) -> tuple[int, str, str] | None:
+    """Route a cold-rev-cache ``affected`` through the live test daemon,
+    with the daemon's reply replaced by one carrying ``daemon_stderr``.
+    """
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    candidates = [f"f{i}.py" for i in range(6000)]
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_recv_daemon_response",
+        lambda sock: (0, "out\n", daemon_stderr),
+    )
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+    return daemon.try_daemon(args, jobs_explicit=False)
+
+
+def _cold_note(workers: int = 0) -> str:
+    """The note ``_timeout_and_args_for_command`` prints for 6000 files."""
+    message = daemon.diff_mod.sequential_disclosure_message(
+        6000, workers=workers
+    )
+    assert message is not None
+    return message
+
+
+def test_try_daemon_drops_the_replayed_copy_of_the_disclosed_note(
+    daemon_thread_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The client prints the cold-rev-cache note before dispatch and the
+    daemon prints it again in-process; the replayed copy is dropped so
+    the user sees it exactly once, and the daemon's other lines stay."""
+    note = _cold_note()
+    routed = _route_cold_affected(
+        daemon_thread_root, monkeypatch, f"{note}\nother line\n"
+    )
+
+    assert routed == (0, "out\n", "other line\n")
+    assert capsys.readouterr().err.count(note) == 1
+
+
+def test_try_daemon_leaves_stderr_without_the_note_unchanged(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daemon reply that never printed the note (or worded it
+    differently) comes back untouched."""
+    routed = _route_cold_affected(
+        daemon_thread_root, monkeypatch, "other line\n"
+    )
+
+    assert routed == (0, "out\n", "other line\n")
+
+
+def test_try_daemon_drops_only_one_copy_of_a_repeated_note(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daemon that genuinely hit the miss twice keeps its second
+    note: only the copy the client already showed is removed."""
+    note = _cold_note()
+    routed = _route_cold_affected(
+        daemon_thread_root, monkeypatch, f"{note}\n{note}\n"
+    )
+
+    assert routed == (0, "out\n", f"{note}\n")
+
+
+def test_try_daemon_keeps_stderr_when_nothing_was_disclosed(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rev-cache hit discloses nothing client-side, so a note in the
+    daemon's reply is the only copy and must survive."""
+    note = _cold_note()
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: True)
+    monkeypatch.setattr(
+        daemon,
+        "_recv_daemon_response",
+        lambda sock: (0, "", f"{note}\n"),
+    )
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(daemon_thread_root)]
+    )
+
+    assert daemon.try_daemon(args, jobs_explicit=False) == (
+        0,
+        "",
+        f"{note}\n",
+    )
 
 
 def test_jobs_flag_explicit_detects_bare_and_equals_forms() -> None:

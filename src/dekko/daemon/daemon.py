@@ -1021,7 +1021,7 @@ def _timeout_and_args_for_command(
     root: Path,
     *,
     jobs_explicit: bool,
-) -> tuple[float, argparse.Namespace]:
+) -> tuple[float, argparse.Namespace, str | None]:
     """Client timeout and (possibly ``--jobs``-overridden) request args.
 
     Isolates ``try_daemon``'s rev-cache-miss-aware timeout selection
@@ -1036,12 +1036,14 @@ def _timeout_and_args_for_command(
             name.
 
     Returns:
-        ``(timeout, args)``. ``args`` is returned unchanged unless the
-        ``--jobs 0`` override applies, in which case it's a *copy* with
-        ``jobs`` set to ``0`` -- the caller's original ``Namespace``
-        is never mutated in place, so a fallback to direct execution
-        (if the daemon turns out to be unreachable) still sees the
-        caller's original, un-overridden choice.
+        ``(timeout, args, disclosed)``. ``args`` is returned unchanged
+        unless the ``--jobs 0`` override applies, in which case it's a
+        *copy* with ``jobs`` set to ``0`` -- the caller's original
+        ``Namespace`` is never mutated in place, so a fallback to
+        direct execution (if the daemon turns out to be unreachable)
+        still sees the caller's original, un-overridden choice.
+        ``disclosed`` is the note this call printed, or ``None``, so
+        the caller can drop the daemon's replayed copy of it.
 
     Before returning, prints the same cold-rev-cache disclosure note
     ``diff._maybe_warn_sequential`` would print in-process -- but
@@ -1051,11 +1053,11 @@ def _timeout_and_args_for_command(
     arrives too late to be useful for a daemon-routed call).
     """
     if command not in _REVCACHE_TIMEOUT_COMMANDS:
-        return _scaled_client_timeout(root), args
+        return _scaled_client_timeout(root), args, None
 
     target_rev = _target_rev_for(command, args)
     if target_rev is None or revcache.has_entry(root, target_rev):
-        return _scaled_client_timeout(root), args
+        return _scaled_client_timeout(root), args, None
 
     candidates = diff_mod.tracked_at_rev(root, target_rev)
     timeout = _scaled_client_timeout_for_revcache_miss(candidates)
@@ -1073,6 +1075,7 @@ def _timeout_and_args_for_command(
         # successful one.
         args = argparse.Namespace(**vars(args))
         args.jobs = 0
+    message = None
     if candidates is not None:
         resolved_jobs = getattr(args, "jobs", 1)
         message = diff_mod.sequential_disclosure_message(
@@ -1080,7 +1083,32 @@ def _timeout_and_args_for_command(
         )
         if message is not None:
             print(message, file=sys.stderr)
-    return timeout, args
+
+    return timeout, args, message
+
+
+def _drop_disclosed_note(stderr: str, disclosed: str | None) -> str:
+    """Remove the daemon's replayed copy of a note already printed.
+
+    The daemon prints the same cold-rev-cache note in-process, and its
+    captured stderr only replays after the response arrives, so a
+    routed call would otherwise show the note twice. Only one
+    occurrence is removed: a second one means the daemon genuinely hit
+    the miss twice. A daemon whose wording differs (an older version)
+    leaves its line in place, which is honest, just redundant.
+
+    Args:
+        stderr: The daemon's captured stderr for this request.
+        disclosed: The note :func:`_timeout_and_args_for_command`
+            printed before dispatch, or ``None``.
+
+    Returns:
+        ``stderr`` with one ``disclosed`` line removed, if present.
+    """
+    if disclosed is None:
+        return stderr
+
+    return stderr.replace(disclosed + "\n", "", 1)
 
 
 def try_daemon(
@@ -1145,7 +1173,7 @@ def try_daemon(
     if not transport.exists():
         return None
 
-    timeout, args = _timeout_and_args_for_command(
+    timeout, args, disclosed = _timeout_and_args_for_command(
         command, args, root, jobs_explicit=jobs_explicit
     )
 
@@ -1157,12 +1185,14 @@ def try_daemon(
     try:
         if not _send_daemon_request(sock, transport, command, args):
             return None
-        return _recv_daemon_response(sock)
+        exit_code, stdout, stderr = _recv_daemon_response(sock)
     except DaemonRequestAbandonedError as exc:
         exc.jobs = getattr(args, "jobs", None)
         raise
     finally:
         sock.close()
+
+    return exit_code, stdout, _drop_disclosed_note(stderr, disclosed)
 
 
 def _query_pid(transport: DaemonTransport) -> int | None:
