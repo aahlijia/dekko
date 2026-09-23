@@ -1076,7 +1076,13 @@ def _timeout_and_args_for_command(
         args = argparse.Namespace(**vars(args))
         args.jobs = 0
     message = None
-    if candidates is not None:
+    # A clean tree at the target rev skips the export entirely (see
+    # diff.snapshot_pair), so there's no wait to warn about. The long
+    # timeout stays: if the map turns out stale, the daemon still
+    # builds, and a short timeout would abandon that request.
+    if candidates is not None and not diff_mod.worktree_matches_rev(
+        root, target_rev
+    ):
         resolved_jobs = getattr(args, "jobs", 1)
         message = diff_mod.sequential_disclosure_message(
             len(candidates), workers=resolved_jobs

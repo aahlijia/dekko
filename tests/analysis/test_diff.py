@@ -57,6 +57,17 @@ def _repo(root: Path, files: dict[str, str]) -> Path:
     return root
 
 
+def _add_untracked_and_remap(root: Path) -> None:
+    """Dirty the tree so the old side is actually built from git.
+
+    A clean tree at the target rev skips the old-side export, so tests
+    of that path need a real change; an untracked file keeps the
+    committed sources intact and the re-map keeps the index fresh.
+    """
+    (root / "extra.py").write_text("def extra() -> int:\n    return 3\n")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+
+
 def test_diff_clean_tree_is_empty(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
@@ -228,8 +239,9 @@ def test_diff_run_reuses_index_for_new_side_when_fresh(
         calls.append(Path(root_arg))
         return real_snapshot(root_arg, *args, **kwargs)
 
+    _add_untracked_and_remap(root)
     monkeypatch.setattr(diff, "snapshot", spy)
-    assert cli.main(["diff", "--root", str(root)]) == 0
+    assert cli.main(["diff", "--root", str(root)]) == diff.EXIT_DIFFERENT
     assert len(calls) == 1
     assert calls[0] != root
 
@@ -287,6 +299,7 @@ def test_diff_jobs_flag_reaches_old_snapshot(
     count (``0`` maps to "all cores" via ``repo_ops.resolve_workers``,
     same as ``map``)."""
     root = _repo(tmp_path, BASE)
+    _add_untracked_and_remap(root)
 
     seen_jobs: list[int] = []
     real_old_snapshot = diff.old_snapshot
@@ -296,7 +309,10 @@ def test_diff_jobs_flag_reaches_old_snapshot(
         return real_old_snapshot(*args, **kwargs)
 
     monkeypatch.setattr(diff, "old_snapshot", spy)
-    assert cli.main(["diff", "--root", str(root), "--jobs", "0"]) == 0
+    assert (
+        cli.main(["diff", "--root", str(root), "--jobs", "0"])
+        == diff.EXIT_DIFFERENT
+    )
     assert len(seen_jobs) == 1
     assert seen_jobs[0] == (os.cpu_count() or 1)
 

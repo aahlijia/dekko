@@ -567,3 +567,130 @@ def test_affected_jobs_flag_reaches_old_snapshot(
         1,
     )
     assert seen_jobs == [2]
+
+
+# ---------------------------------------------------------------------
+# Clean tree at the target rev: both sides are the working tree, so the
+# old-side export is skipped.
+# ---------------------------------------------------------------------
+
+
+def _forbid_old_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("old_snapshot should have been skipped")
+
+    monkeypatch.setattr(diff, "old_snapshot", _fail)
+
+
+def _count_old_snapshot(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    real = diff.old_snapshot
+
+    def spy(*args: object, **kwargs: object) -> diff.Snapshot | None:
+        calls.append(str(args[1]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(diff, "old_snapshot", spy)
+    return calls
+
+
+def test_clean_tree_at_head_skips_the_old_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The only untracked entry is the map's own ``.dekko/`` dir, which
+    doesn't count as a change."""
+    root = _repo(tmp_path, BASE)
+    status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert status.strip() == "?? .dekko/"
+    _forbid_old_snapshot(monkeypatch)
+
+    outcome = affected.changes(root, None)
+
+    assert outcome is not None
+    impacts, result, *_ = outcome
+    assert impacts == []
+    assert result.empty()
+    assert not (root / ".dekko" / "rev-cache").exists()
+
+
+def test_modified_tracked_file_builds_the_old_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    calls = _count_old_snapshot(monkeypatch)
+
+    outcome = affected.changes(root, None)
+
+    assert outcome is not None
+    assert len(calls) == 1
+    assert not outcome[1].empty()
+
+
+def test_untracked_source_file_builds_the_old_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path, BASE)
+    (root / "src/extra.py").write_text("def extra() -> int:\n    return 3\n")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    calls = _count_old_snapshot(monkeypatch)
+
+    outcome = affected.changes(root, None)
+
+    assert outcome is not None
+    assert len(calls) == 1
+    assert [d.symbol.name for d in outcome[1].added] == ["extra"]
+
+
+def test_explicit_older_rev_on_a_clean_tree_builds_the_old_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    _commit_all(root, "second")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    calls = _count_old_snapshot(monkeypatch)
+
+    outcome = affected.changes(root, "HEAD~1")
+
+    assert outcome is not None
+    assert calls == ["HEAD~1"]
+    assert [d.symbol.name for d in outcome[1].changed] == ["core"]
+
+
+def test_stale_map_on_a_clean_tree_builds_the_old_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit after mapping leaves the tree clean but the map stale;
+    the shortcut needs a fresh index, so it isn't taken."""
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    _commit_all(root, "second")
+    calls = _count_old_snapshot(monkeypatch)
+
+    outcome = affected.changes(root, "HEAD")
+
+    assert outcome is not None
+    assert calls == ["HEAD"]
+    assert outcome[1].empty()
+
+
+def test_diff_head_on_a_clean_tree_skips_the_old_side(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _forbid_old_snapshot(monkeypatch)
+
+    code = cli.main(["diff", "HEAD", "--root", str(root), "--json"])
+
+    assert code == diff.EXIT_SAME
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["added"] == doc["removed"] == doc["changed"] == []

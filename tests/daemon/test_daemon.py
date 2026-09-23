@@ -1383,6 +1383,41 @@ def test_timeout_and_args_discloses_sequential_wording_when_jobs_explicit(
     assert "--jobs 0" in err
 
 
+def test_timeout_and_args_silent_when_the_tree_matches_the_rev(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A clean tree at the target rev skips the old-side build, so the
+    "may take a while" note would be false. The generous revcache-miss
+    timeout is kept, in case the map turns out stale and the daemon
+    builds after all."""
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    candidates = [f"f{i}.py" for i in range(6000)]
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
+    )
+    monkeypatch.setattr(
+        daemon.diff_mod, "worktree_matches_rev", lambda r, rev: True
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda c: 999.0,
+    )
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(short_root)]
+    )
+    timeout, _, disclosed = daemon._timeout_and_args_for_command(
+        "affected", args, short_root, jobs_explicit=False
+    )
+
+    assert disclosed is None
+    assert timeout == 999.0
+    assert capsys.readouterr().err == ""
+
+
 def test_timeout_and_args_silent_below_the_disclosure_threshold(
     short_root: Path,
     monkeypatch: pytest.MonkeyPatch,

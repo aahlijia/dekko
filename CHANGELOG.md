@@ -9,6 +9,26 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.0.5] — 2026-09-23
+
+### Performance
+- **A bare `workset`/`affected`/`diff` on a clean tree no longer
+  rebuilds the commit it's already sitting on.** With no rev given,
+  these compare against the map's own commit, usually `HEAD`. The
+  first call after a new commit exported that commit with `git
+  archive`, re-parsed and re-resolved all of it, and cached the
+  result, only to compare it against an identical working tree and
+  report nothing changed. Now, when the target rev is `HEAD`, the tree
+  has no changes or untracked files outside `.dekko/`, and the map is
+  fresh, both sides come from the current map and nothing is exported.
+  Cold bare `workset` on tensorflow: 265 s -> 10 s; cline: 6.7 s ->
+  1.0 s. No rev-cache entry is written on that path, and a routed
+  call no longer prints the "no rev-cache ... may take a while" note
+  for it. Any change, untracked file, older rev, or stale map takes
+  the full path exactly as before. Before shipping, a cold clean-tree
+  `diff HEAD` on the full path was confirmed empty on all seven
+  evaluation repos, so the shortcut returns what the full path did.
+
 ## [1.0.4] — 2026-09-23
 
 ### Fixed

@@ -23,10 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from dekko import repo_ops
-from dekko.storage import cache as cache_mod
 from dekko.analysis import diff
 from dekko.render import mapfile
-from dekko.core import walker
 from dekko.classify import is_test_path
 from dekko.core.model import Import, Symbol
 from dekko.textutil import fit_to_budget, signature
@@ -466,32 +464,12 @@ def changes(
     if index is None:
         index = repo_ops.load_current_index_no_regen(root)
     prov = (index.provenance if index else None) or {}
-    subpath = prov.get("subpath")
-    excludes = tuple(prov.get("excludes", []))
-    max_file_size = prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE)
     target_rev = rev or prov.get("git_commit") or "HEAD"
-
-    old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
-    old = diff.old_snapshot(
-        root,
-        target_rev,
-        subpath,
-        excludes,
-        max_file_size,
-        old_cache,
-        jobs=jobs,
-    )
-    if old is None:
-        print(
-            f"dekko: cannot export git rev '{target_rev}' "
-            f"(unknown rev or not a git repo)",
-            file=sys.stderr,
-        )
+    pair = diff.snapshot_pair(root, target_rev, index, jobs=jobs)
+    if pair is None:
         return None
 
-    new = diff.snapshot_new_side(
-        root, subpath, excludes, max_file_size, index, jobs=jobs
-    )
+    old, new = pair
     result = diff.compare(target_rev, old, new)
     impacts = analyze(result, new)
     return impacts, result, new, target_rev, prov

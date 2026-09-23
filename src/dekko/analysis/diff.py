@@ -349,6 +349,120 @@ def old_snapshot(
     )
 
 
+def _worktree_clean(root: Path) -> bool:
+    """Whether ``git status`` shows nothing outside dekko's own dir.
+
+    Untracked files count (a new mappable file changes the new side);
+    ``.dekko/`` doesn't, since it holds the map, not source. Any git
+    failure reads as "not clean", which only costs the shortcut.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+                "--",
+                ":(exclude).dekko",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    return proc.returncode == 0 and not proc.stdout.strip()
+
+
+def worktree_matches_rev(root: Path, rev: str) -> bool:
+    """Whether the working tree is exactly ``rev``'s tree.
+
+    True when ``rev`` resolves to the same commit as ``HEAD`` and the
+    working tree has no changes or untracked files outside ``.dekko/``.
+    The old side of a diff against such a rev is then the working tree
+    itself, so there's nothing to export.
+
+    Args:
+        root: Repository root.
+        rev: Git rev the old side would be built from.
+
+    Returns:
+        ``True`` only when both conditions provably hold.
+    """
+    head = revcache.resolve_sha(root, "HEAD")
+    if head is None or revcache.resolve_sha(root, rev) != head:
+        return False
+
+    return _worktree_clean(root)
+
+
+def snapshot_pair(
+    root: Path,
+    target_rev: str,
+    index: mapfile.MapIndex | None,
+    jobs: int = 1,
+) -> tuple[Snapshot, Snapshot] | None:
+    """Old- and new-side snapshots for working tree vs. ``target_rev``.
+
+    Shared by ``diff.run`` and ``affected.changes``. When the working
+    tree provably equals ``target_rev`` (see
+    :func:`worktree_matches_rev`) and ``index`` is fresh, both sides are
+    the same snapshot built from ``index``, and the export + re-parse
+    of ``target_rev`` is skipped: it could only rebuild what is
+    already on disk. No rev-cache entry is written on that path, since
+    the rev-cache only holds snapshots built from the commit itself.
+
+    Args:
+        root: Repository root (its working tree is the new side).
+        target_rev: Git rev for the old side, already defaulted.
+        index: The current-tree index, or ``None``.
+        jobs: Worker count for a rev-cache-miss old side or a
+            stale-index new side; see ``snapshot``.
+
+    Returns:
+        ``(old, new)``, or ``None`` when ``target_rev`` can't be
+        exported (the reason is printed to stderr first).
+    """
+    if (
+        index is not None
+        and worktree_matches_rev(root, target_rev)
+        and mapfile.check_freshness(root, index).fresh
+    ):
+        same = snapshot_from_index(index, root)
+        return same, same
+
+    prov = (index.provenance if index else None) or {}
+    subpath = prov.get("subpath")
+    excludes = tuple(prov.get("excludes", []))
+    max_file_size = prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE)
+    old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
+    old = old_snapshot(
+        root,
+        target_rev,
+        subpath,
+        excludes,
+        max_file_size,
+        old_cache,
+        jobs=jobs,
+    )
+    if old is None:
+        print(
+            f"dekko: cannot export git rev '{target_rev}' "
+            f"(unknown rev or not a git repo)",
+            file=sys.stderr,
+        )
+        return None
+
+    new = snapshot_new_side(
+        root, subpath, excludes, max_file_size, index, jobs=jobs
+    )
+    return old, new
+
+
 def _wait_for_other_rev_cache_build(root: Path, sha: str) -> Snapshot | None:
     """Poll for another process's in-flight old-snapshot build to land.
 
@@ -760,32 +874,12 @@ def run(
     """
     index = repo_ops.load_current_index_no_regen(root)
     prov = (index.provenance if index else None) or {}
-    subpath = prov.get("subpath")
-    excludes = tuple(prov.get("excludes", []))
-    max_file_size = prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE)
     target_rev = rev or prov.get("git_commit") or "HEAD"
-
-    old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
-    old = old_snapshot(
-        root,
-        target_rev,
-        subpath,
-        excludes,
-        max_file_size,
-        old_cache,
-        jobs=jobs,
-    )
-    if old is None:
-        print(
-            f"dekko: cannot export git rev '{target_rev}' "
-            f"(unknown rev or not a git repo)",
-            file=sys.stderr,
-        )
+    pair = snapshot_pair(root, target_rev, index, jobs=jobs)
+    if pair is None:
         return EXIT_ERROR
 
-    new = snapshot_new_side(
-        root, subpath, excludes, max_file_size, index, jobs=jobs
-    )
+    old, new = pair
     result = compare(target_rev, old, new)
     render(result, as_json, limit)
     return EXIT_SAME if result.empty() else EXIT_DIFFERENT

@@ -1184,7 +1184,12 @@ alike, keyed by resolved commit SHA) makes a *repeat* comparison
 against the same rev faster. A daemon-routed `diff`/`affected` against
 a rev it hasn't seen before pays the same old-side reparse cost a
 direct invocation would — daemon routing speeds up the current-tree
-side only.
+side only. The exception is a working tree that is exactly the rev
+being compared (no changes, no untracked files outside `.dekko/`) with
+a fresh map, which is what a bare `workset`/`affected`/`diff` sees
+right after a commit or checkout: the old side would only rebuild
+what's already on disk, so both sides come from the current map, no
+old-side reparse runs, and no rev-cache entry is written.
 
 Even for the current-tree side, the warm cache's win is specifically
 skipping map *loading* (re-parsing `map.json` into an in-memory
