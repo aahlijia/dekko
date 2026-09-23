@@ -26,7 +26,8 @@ This page carries two measurements:
 ## Current numbers (dekko 0.43.77)
 
 Measured in rounds 33 (0.43.71) and 34 (0.43.77) of the evaluation
-program, 2026-09-21/22, one independent agent per repo, `chars/4`
+program (round 34 is now numbered round 1.1, the first round of the 1.x
+series), 2026-09-21/22, one independent agent per repo, `chars/4`
 tokens, same task shapes as the original study. Repo scale at the time
 of measurement:
 
@@ -71,7 +72,8 @@ repo. The shape from the original study holds: outline ratios scale with
 file size, call-graph ratios scale with how noisy the same-named grep
 is, and the floor is a small, grep-friendly local symbol (about 2.5x).
 Full per-task detail, timings, and the six Low findings of round 34 are
-in `test-repos/reports/33-*/` and `34-*/` (local, not tracked in git).
+in `test-repos/reports/v0/33-*/` and `test-repos/reports/v1/round1.1/`
+(local, not tracked in git).
 
 This is distinct from `benchmarks/measure.py` (the synthetic
 regression harness that runs on every `pytest` invocation, `benchmarks/README.md`

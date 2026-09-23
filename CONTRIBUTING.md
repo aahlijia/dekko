@@ -94,8 +94,9 @@ trigger — see "Releasing" below for the mechanics of applying a bump:
      for what "closed" means for a round). Individual fixes within
      the round land as PATCH bumps under the *current* minor version
      as each track is built; the MINOR bump happens once, at the
-     point the round is verified closed, so the *next* round's first
-     commit starts a fresh minor line at `.0`.
+     point the round is verified closed, so the *next* round's fixes
+     start on the new minor line at `.1` (see "Testing rounds and the
+     version line" below).
   2. **A genuinely new top-level capability ships** outside of a
      round: a new CLI subcommand, a new MCP tool, or a new top-level
      output format — not a new flag or option on an existing command
@@ -106,7 +107,50 @@ trigger — see "Releasing" below for the mechanics of applying a bump:
   command (a new flag, an expanded output section, a new detection
   rule inside an existing analysis) bumps PATCH. This is the workhorse
   number for day-to-day commits — most commits bump this and nothing
-  else.
+  else. One exception: a `docs:` commit that only changes process or
+  contributor docs (this file, `CLAUDE.md`, benchmark write-ups) and
+  ships no code or user-facing docs takes no bump, so it can't eat a
+  round's reserved patch numbers.
+
+### Testing rounds and the version line
+
+Evaluation rounds are numbered `<MAJOR>.<N>`, and the round counter
+**resets at every MAJOR release**: the first round of the 1.x series
+is round 1.1, the first round after 2.0.0 is round 2.1. (Round 1.1 is
+the former round 34; pre-1.0 rounds 01-33 keep their old numbers.)
+
+Round numbers and MINOR versions move together:
+
+- **One fix track = one commit = one PATCH bump.** Each design in a
+  round's fix folder (e.g. `.features/fixes/v1/round1.1/01-*.md`) is
+  implemented, tested, and committed on its own, with its own PATCH
+  bump in that same commit. No batching two tracks into one commit,
+  no track split across commits. (A design doc that explicitly
+  batches several one-liners into one track, like a "small fixes"
+  track, is still one track: one commit, one bump.)
+- Round `X.N`'s fixes land as `X.(N-1).1`, `X.(N-1).2`, ... in the
+  order they are committed (not necessarily the design docs' file
+  numbering). Round 1.1's first fix is **1.0.1**, its second
+  **1.0.2**.
+- When every track in the round is implemented and verified, the
+  round is closed with the MINOR release **`X.N.0`**: round 1.1
+  closes as **1.1.0**, round 1.2 as **1.2.0**. That release goes
+  through the normal "Releasing" steps below (develop → main PR, tag).
+- If a capability MINOR (trigger 2 above) ships mid-round, it takes
+  the next MINOR number and the round closes on the one after it; say
+  so in the round's README section. Otherwise round `X.N` always
+  closes as `X.N.0`.
+- A round whose findings need no fixes gets no MINOR bump. The round
+  counter still advances for the next evaluation, and the next round's
+  README section says the version line skipped it.
+
+Where things go (both directories are local and gitignored):
+
+- Eval reports: `test-repos/reports/v<MAJOR>/round<MAJOR>.<N>/`,
+  indexed in `test-repos/reports/README.md`.
+- Fix designs: `.features/fixes/v<MAJOR>/round<MAJOR>.<N>/`, same
+  round number as the reports that motivated them.
+- Everything from before 1.0.0 lives under `v0/` in both places.
 
 When in doubt between MINOR and PATCH for a given change, default to
 PATCH — it's the more reversible mistake, and the CHANGELOG narrative

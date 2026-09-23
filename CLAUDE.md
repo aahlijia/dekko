@@ -75,41 +75,74 @@ its own source. See `README.md` and `docs/` (`docs/install.md`,
   table and what each one means here), dekko's versioning rules
   (CONTRIBUTING.md's "Versioning" section: major is maintainer-only,
   minor closes out a testing round's fix cycle or ships a new
-  top-level capability, patch is everything else), releases cut by
-  pushing a `v*` tag.
+  top-level capability, patch is everything else; each round fix
+  track is its own commit with its own patch bump, see "Evaluation
+  rounds" below), releases cut by pushing a `v*` tag.
 
-## Evaluation reports: `test-repos/reports/`
+## Evaluation rounds: reports, fix designs, and versions
 
 When dekko itself is evaluated against real repos (token-cost comparisons
-vs. Read/grep, bug hunts, regression checks after a fix), the write-ups go
-in `test-repos/reports/`, organized into **numbered round folders**
-(`01-initial-eval/`, `02-followup-fixes/`, ... `07-tokentest-7repo-fixcycle/`,
-...), each described in `test-repos/reports/README.md`. Read that README
-first — it's the index and explains what's in each round and why.
+vs. Read/grep, bug hunts, regression checks after a fix), the work is
+organized into **rounds**, grouped by dekko major version. Read
+`test-repos/reports/README.md` first: it's the index for every round and
+documents the layout. `CONTRIBUTING.md`'s "Testing rounds and the version
+line" section is the authority on the version rules below.
 
-**Organize new rounds by the dekko version/commit under test, not just by
-date.** Multiple rounds can share a version (dekko doesn't rev its version
-string on every commit), so the precise signal is the branch + commit
-range, not just `dekko --version`. When starting a new evaluation round:
+**Round numbering resets at every major release.** Rounds are named
+`round<MAJOR>.<N>`: round 1.1 is the first round of the 1.x series (it
+is the former round 34), the next is 1.2, and after 2.0.0 the counter
+starts again at 2.1. Pre-1.0 rounds 01-33 keep their old names under
+`v0/`.
 
-1. Create a new folder: `test-repos/reports/NN-short-slug/` (next sequential
-   number, short descriptive slug — see existing folders for the pattern).
-2. Note the dekko version being tested near the top of each report in that
-   round, e.g.:
+**Where things go** (both trees are gitignored, local-only):
+
+| What | Where |
+|---|---|
+| Eval reports for round X.N | `test-repos/reports/vX/roundX.N/` |
+| Fix designs for round X.N | `.features/fixes/vX/roundX.N/` (start with `00-overview.md`) |
+| Everything from before 1.0.0 | `test-repos/reports/v0/`, `.features/fixes/v0/` |
+
+Older source comments, tests, and CHANGELOG entries cite the pre-move
+flat paths (`test-repos/reports/NN-slug/`, `.features/fixes/roundNN/`).
+Those now live under `v0/`, except round 34, which is `v1/round1.1/`.
+
+**Versions follow rounds:**
+
+- **One fix track = one commit = one patch bump.** Implement each design
+  in the round's fix folder on its own, bump the patch version in that
+  same commit (`scripts/sync_plugin_version.py` after editing
+  `pyproject.toml`), regenerate the map, commit. Never batch two tracks
+  into one commit.
+- Round X.N's fixes are `X.(N-1).1`, `X.(N-1).2`, ... in commit order:
+  round 1.1's fixes are 1.0.1, 1.0.2, ...
+- When every track is implemented and verified, the round closes with
+  the minor release `X.N.0` (round 1.1 → **1.1.0**), cut through the
+  normal release process.
+- Mark each design doc's status line as tracks land (e.g. `**Status:
+  IMPLEMENTED as 1.0.3 (<commit>)**`) and update the round's README
+  section when the round closes.
+
+**When starting a new evaluation round:**
+
+1. Pick the next round number for the current major version (look at
+   the highest `roundX.N` under `test-repos/reports/vX/`) and create
+   `test-repos/reports/vX/roundX.N/`.
+2. Note the dekko version being tested near the top of each report in
+   that round, e.g.:
    ```
-   dekko version: 0.21.3 (branch feature/semantic-search, commit 7da9367)
+   dekko version: 1.1.0 (branch develop, commit 7da9367)
    ```
    If the version drifts mid-round (e.g. the CLI got reinstalled from a
    newer commit partway through), say so explicitly rather than picking
    one — this has caused real confusion before (see round 07's
-   `awesome-go.md`, which flags exactly this).
+   `awesome-go.md` under `v0/`, which flags exactly this).
 3. Add a section for the round to `test-repos/reports/README.md`: what's
-   in it, one line per file/subfolder, and add a row to that README's
-   "dekko version per round" table.
-4. If a round's findings lead to an implementation plan and fixes (as in
-   round 07), keep the plan/analysis/investigation/verification docs in
-   the *same* round folder as the reports that motivated them — don't
-   split a single bug-hunt-to-fix cycle across multiple round numbers.
+   in it, one line per file, and a row in its "dekko version per round"
+   table.
+4. Fix designs for the round go in `.features/fixes/vX/roundX.N/`, same
+   round number as the reports that motivated them. Post-fix
+   verification write-ups go back in the round's reports folder. Don't
+   split one bug-hunt-to-fix cycle across round numbers.
 
 This lets a regression get traced to *what changed in dekko between the
 round that missed it and the round that caught it*, not just to when the
