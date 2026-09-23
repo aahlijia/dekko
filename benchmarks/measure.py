@@ -1,11 +1,10 @@
-"""Measurement harness for the Active Context Layer (design §7, step 3).
+"""Measurement harness for the Active Context Layer.
 
 This establishes the **falsifiable baseline** for the overarching goal
-G★ (from the Active Context Layer design note, a local ``.dev/`` document
-not tracked in git): dekko's context layer must reduce the tokens an
-agent spends to work a task, at equal task success. It is deliberately
-*not* part of the wheel (it lives outside ``src/``) — it is a benchmark,
-run by hand or in CI.
+G★: dekko's context layer must reduce the tokens an agent spends to
+work a task, at equal task success. It is deliberately *not* part of
+the wheel (it lives outside ``src/``) — it is a benchmark, run by hand
+or in CI.
 
 It measures the *strategy* cost: for a fixed set of representative tasks
 against a repo, the token cost of the naive **whole-file-read baseline**
@@ -19,7 +18,7 @@ Two task families:
   dekko cost, so the reduction is a real ratio.
 * **coverage** (``lean``) — no naive baseline maps cleanly to a
   whole-repo map, so we report absolute cost against what it covers
-  (files + symbols), the FR-D3 density view.
+  (files + symbols), the density view.
 
 The *live* half of G★ is :func:`session_cost`, which reads the real
 per-session token tally straight from the transcript ledger — letting an

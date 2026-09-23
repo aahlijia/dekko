@@ -25,18 +25,17 @@ def render_json(
     Returns:
         Compact JSON bytes. ``map.json`` has no human reader — only
         ``mapfile.load_map()`` parses it, and ``MAP.md``
-        (``render_md.py``) is the actual human-facing artifact — so
-        this is written densely instead of pretty-printed
-        (round-15 plan). Caller/callee/candidate id strings that
-        repeat across ``"edges"``/``"ambiguous"``/``"external"``/
-        ``"referenced"``/``"heritage"``/``"heritage_ambiguous"``/
-        ``"heritage_external"``/``"throws"``/``"throws_ambiguous"``/
-        ``"throws_external"``/``"throws_bare"``/``"catches"`` are
-        interned once into a top-level
-        ``"ids"`` table (``mapfile.build_id_table``) and referenced
-        there by integer index instead of being spelled out at every
-        occurrence. ``"module_graph"``'s file paths share that same
-        table (a path string never collides with a symbol id, which
+        (``render_md.py``) is the actual human-facing artifact — so this
+        is written densely instead of pretty-printed.
+        Caller/callee/candidate id strings that repeat across
+        ``"edges"``/``"ambiguous"``/``"external"``/``"referenced"``/
+        ``"heritage"``/``"heritage_ambiguous"``/``"heritage_external"``/
+        ``"throws"``/``"throws_ambiguous"``/``"throws_external"``/
+        ``"throws_bare"``/``"catches"`` are interned once into a
+        top-level ``"ids"`` table (``mapfile.build_id_table``) and
+        referenced there by integer index instead of being spelled out
+        at every occurrence. ``"module_graph"``'s file paths share that
+        same table (a path string never collides with a symbol id, which
         always contains ``"::"``).
     """
     when = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -109,7 +108,7 @@ def render_json(
             }
             for subtype, name, cands in graph.heritage_ambiguous
         ],
-        # ``relation`` only when set (round 33 Track 6e) so the
+        # ``relation`` only when set so the
         # ``external``/``throws_external`` sections, which share the
         # ``ExternalCall`` type, stay byte-identical. Additive and
         # optional: no ``MAP_DOC_VERSION`` bump, old readers ignore
@@ -123,14 +122,13 @@ def render_json(
             }
             for ext in graph.heritage_external
         ],
-        # Round 24 heritage crate-decoy tiebreak (``.features/plans/
-        # round24/03-heritage-crate-decoy-tiebreak.md``): a scalar
+        # Heritage crate-decoy tiebreak: a scalar
         # count, not id-interned like the sections above, since it
         # names no symbol ids of its own.
         "heritage_synthetic_tiebreak_count": (
             graph.heritage_synthetic_tiebreak_count
         ),
-        # Round 31 A3: same shape as the tiebreak count above -- a
+        # Same shape as the tiebreak count above -- a
         # cross-file Rust ``impl Trait for Type`` clause whose
         # ``Type`` couldn't be placed uniquely within its own crate,
         # dropped rather than guessed (see

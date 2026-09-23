@@ -121,7 +121,7 @@ def test_resolve_sha_unknown_rev_returns_none(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------
-# Round 27 finding H2: entries are stamped with the extractor's
+# Entries are stamped with the extractor's
 # ``spec_fingerprint()`` and invalidated on mismatch, so a cache entry
 # built by a different dekko binary is never served forever as if it
 # were still valid.
@@ -168,7 +168,7 @@ def test_load_returns_snapshot_when_spec_hash_matches(
 
 
 # ---------------------------------------------------------------------
-# Round-24 §2 fix: has_entry() -- a resolvable-rev/on-disk-cache-file
+# has_entry() -- a resolvable-rev/on-disk-cache-file
 # composition, used by try_daemon() to pick a rev-cache-miss-aware
 # client timeout instead of guessing every request is a fast hit.
 # ---------------------------------------------------------------------
@@ -196,10 +196,10 @@ def test_has_entry_false_for_unresolvable_rev(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------
-# Round 28 layer 1: refuse to persist a snapshot whose body map is
+# Refuse to persist a snapshot whose body map is
 # all-empty-string across every symbol -- the known signature of
 # diff._body_hashes_for_path's silent OSError fallback having fired
-# for every mapped file (tensorflow finding: a corrupted entry saved
+# for every mapped file (seen on tensorflow: a corrupted entry saved
 # this way was then served forever, since a rev-cache hit needs no
 # freshness check by design).
 # ---------------------------------------------------------------------

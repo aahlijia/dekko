@@ -156,8 +156,7 @@ def test_search_excludes_tests_by_default(
     assert "test_retries_on_500" in quals2
 
 
-# --- round-08 §2.2: exclusion hint when test filtering may have hidden
-# the real match --------------------------------------------------------
+# --- exclusion hint when test filtering may have hidden the real match -
 
 
 def test_search_exclusion_note_fires_on_weak_top_hit(
@@ -230,10 +229,9 @@ def test_search_exclusion_note_absent_with_include_tests(
 def test_search_discloses_unsupported_file_coverage_gap(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round-29 Track 4b: `search` never disclosed skipped-file
-    # coverage at all -- a symbol living only in a file dekko can't
-    # parse is invisible to search the same way it's invisible to
-    # query, but only query carried the caveat.
+    # `search` never disclosed skipped-file coverage at all -- a symbol living
+    # only in a file dekko can't parse is invisible to search the same way it's
+    # invisible to query, but only query carried the caveat.
     root = make_mapped_repo(
         dict(SRC, **{"Card.astro": "---\nconst x = 1;\n---\n"})
     )
@@ -439,7 +437,7 @@ def test_search_cli_dispatches(
     assert cli.main(["search", "retry", "--root", str(root)]) == 0
 
 
-# --- --scorer selection (Phase 2: optional embedding scorer) -----------
+# --- --scorer selection (optional embedding scorer) --------------------
 
 
 def test_scorer_default_is_lexical() -> None:
@@ -486,8 +484,8 @@ def test_search_default_scorer_unaffected_when_embedding_unavailable(
     make_mapped_repo: RepoFactory,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # The base (lexical) path must be completely untouched by Phase 2:
-    # simulate "extra not installed" and confirm a plain `dekko search`
+    # The base (lexical) path must be completely untouched by the embedding
+    # scorer: simulate "extra not installed" and confirm a plain `dekko search`
     # (no --scorer flag) still works exactly as before.
     monkeypatch.setattr(search.embedding, "available", lambda: False)
     root = make_mapped_repo(SRC)
@@ -588,7 +586,7 @@ def test_search_embedding_scorer_reuses_cache_on_second_run(
 
 # --- 2.5: per-index candidate-list cache (search/BM25 performance) ---
 #
-# Track F: ``_build_candidates`` used to rebuild the full candidate
+# ``_build_candidates`` used to rebuild the full candidate
 # list (one entry per symbol) from scratch on every ``rank()`` call.
 # Attaching the cache to the ``MapIndex`` instance means a repeated
 # ``rank()`` against the *same* already-loaded index — e.g. multiple
@@ -661,8 +659,7 @@ def test_search_rank_still_deterministic_across_repeated_calls(
     assert [h.symbol.id for h in first] == [h.symbol.id for h in second]
 
 
-# --- round-08 §2.3: a common term shouldn't crowd out a distinctive
-# one ------------------------------------------------------------------
+# --- a common term shouldn't crowd out a distinctive one --------------
 
 
 def test_coverage_adjusted_scorer_flips_common_term_domination() -> None:
@@ -671,8 +668,8 @@ def test_coverage_adjusted_scorer_flips_common_term_domination() -> None:
     A candidate that only covers the common query term ("integration")
     scores higher than a candidate covering both distinctive terms
     under the raw (unadjusted) scorer -- the shape reported for
-    claude-code's "sandbox escape" and cline's "slack integration"
-    (round-08 §2.3). Wrapping the scorer in
+    claude-code's "sandbox escape" and cline's "slack integration".
+    Wrapping the scorer in
     :class:`search._CoverageAdjustedScorer` should flip the order.
     """
     task = TaskContext(terms=("slack", "integration"))
@@ -788,7 +785,7 @@ def test_search_coverage_multiplier_discounts_common_term_only_matches(
     assert ceiling_with_fix < ceiling_without_fix
 
 
-# --- round-12 §3.13: golden-query regression -- a lexically-common
+# --- golden-query regression -- a lexically-common
 # term shouldn't let a generic match outrank a lexically-narrower but
 # semantically-correct one. Reproduces spring-boot's reported shape
 # ("parse yaml configuration properties" ranking a generic ``*Parser.
@@ -796,9 +793,8 @@ def test_search_coverage_multiplier_discounts_common_term_only_matches(
 # across the corpus, "yaml" is rare -- a candidate missing the rare
 # term should no longer tie-and-then-lose to one missing the common
 # term on raw magnitude alone. Uses a relative-ordering assertion
-# between two known symbols (not "must be #1"), per the design doc's
-# own framing -- more robust across future retuning than an exact-rank
-# pin.
+# between two known symbols (not "must be #1") -- more robust across
+# future retuning than an exact-rank pin.
 # --------------------------------------------------------------------
 
 
@@ -808,8 +804,8 @@ def test_search_specific_match_not_buried_by_generic_common_term_match(
     """ "yaml" (rare) missing should cost the ranking more than "parse"
     (common) missing, once both candidates cover the same number of
     the query's distinct terms. Comparing against the same ranking
-    with the coverage discount forced flat (round-08's original,
-    unweighted behavior) proves the IDF-weighting actually engages --
+    with the coverage discount forced flat (the original, unweighted
+    behavior) proves the IDF-weighting actually engages --
     not just that the specific match already happened to win here for
     unrelated reasons -- by showing its margin over the generic match
     widens once the discount is weighted.
@@ -882,23 +878,21 @@ def test_search_specific_match_not_buried_by_generic_common_term_match(
     assert margin_with_fix > margin_without_fix
 
 
-# --- round-13 §3: held-out multi-query golden corpus. Items 1-2 above
+# --- held-out multi-query golden corpus. Items 1-2 above
 # (yaml/sandbox-escape) already cover coverage-tie / common-term-
-# dominance and weak-field renormalization. Items 3-6 below add the
-# four new shapes the round-13 relevance-tuning plan asked for --
-# corpus-size batch consistency (§1's own bug class), rare-term IDF
-# sanity on a non-Python identifier shape, length-normalization bias,
-# and the sparse-candidate/no-lexical-connection shape (§2, documented
-# but not asserted). See
-# .features/plans/round13/search-relevance-tuning-plan.md §3.
+# dominance and weak-field renormalization. Items 3-6 below add four
+# more shapes -- corpus-size batch consistency, rare-term IDF sanity on
+# a non-Python identifier shape, length-normalization bias, and the
+# sparse-candidate/no-lexical-connection shape (documented but not
+# asserted).
 # --------------------------------------------------------------------
 
 
 def test_search_batch_size_consistency_cline_shaped(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """Round-13 §1's own bug, reproduced at fixture scale (TS/camelCase,
-    modeled on cline's reported "cancel task execution" miss).
+    """The batch-consistency bug, reproduced at fixture scale
+    (TS/camelCase, modeled on cline's "cancel task execution" miss).
 
     ``cancelTask`` is a short, no-doc candidate matching two of the
     three query terms ("cancel", "task") by name alone.
@@ -910,13 +904,12 @@ def test_search_batch_size_consistency_cline_shaped(
     at all, makes ``len(candidates)`` and ``len(survivors)`` differ
     enough that BM25's batch-relative IDF/avgdl diverge between the
     full-corpus pass and a re-scored survivor-only pass -- exactly the
-    mechanism §1 fixed. Pre-fix, this flips the ranking
+    mechanism the fix addressed. Pre-fix, this flips the ranking
     (``captureHookExecution`` outranks ``cancelTask``); post-fix,
     ``cancelTask`` stays on top, matching the raw full-corpus number
     that was correct all along. The distractor counts here (600
-    unrelated, 150 "task"-matching) were tuned empirically per the
-    plan's own note that this number "needs empirical tuning during
-    implementation" -- confirmed via ``git stash``/``stash pop`` against
+    unrelated, 150 "task"-matching) were tuned empirically --
+    confirmed via ``git stash``/``stash pop`` against
     pre-fix ``HEAD`` to actually fail before the fix and pass after.
     """
     from dekko.render.mapfile import load_map
@@ -987,7 +980,7 @@ def test_search_rare_term_beats_common_term_repetition_go_naming(
     """Rare-term IDF sanity on a non-Python, non-camelCase identifier
     shape.
 
-    Same shape as the round-12 yaml fixture above (a rare, distinctive
+    Same shape as the yaml fixture above (a rare, distinctive
     term should out-discriminate a common term repeated across many
     generic candidates), but on Go-style package-qualified
     identifiers, so ``idf_term_weights``/``weighted_term_coverage`` are
@@ -1139,7 +1132,7 @@ def test_search_length_normalization_favors_short_precise_match_rust(
 def test_search_sparse_candidate_no_lexical_connection_documented_zed(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """Round-13 §2's shape (Rust trait/impl naming modeled on zed),
+    """The sparse-candidate shape (Rust trait/impl naming modeled on zed),
     documented as a known limitation and NOT asserted on ordering.
 
     ``Item.save``'s indexed text (name + short trait-default
@@ -1147,15 +1140,15 @@ def test_search_sparse_candidate_no_lexical_connection_documented_zed(
     "disk") -- the coverage/IDF machinery correctly discounts it hard,
     and a partial-coverage distractor (``DiskState``, whose qualname's
     "Disk" prefix covers "disk" and whose method covers "file"'s
-    stem-adjacent tokens) wins instead. This is not a bug this round
-    fixed (§2 was deferred -- see the plan's §2 for why: no lexical
-    scorer change can manufacture a signal that isn't in the indexed
-    text). A hard ordering assertion here would either fail immediately
+    stem-adjacent tokens) wins instead. This is not a bug the lexical scorer
+    can fix (no lexical scorer change can manufacture a signal that isn't in
+    the indexed text). A hard ordering assertion here would either fail
+    immediately
     as a "known failure" (noisy, easy to ignore) or silently pin
     today's arbitrary distractor-wins ordering as if it were intended
     behavior. So this fixture only pins the shape (it doesn't crash,
     it returns a non-empty ranked result) for whoever eventually builds
-    §2's candidate-text-enrichment fix.
+    a candidate-text-enrichment fix.
     """
     from dekko.render.mapfile import load_map
 
@@ -1191,9 +1184,9 @@ def test_search_sparse_candidate_no_lexical_connection_documented_zed(
     assert hits  # doesn't crash, returns a ranked (non-empty) result
 
 
-# --- round-13 §4: --scorer both (reciprocal rank fusion) ---------------
+# --- --scorer both (reciprocal rank fusion) ----------------------------
 #
-# §2's fix, designed and implemented: run BM25Scorer and
+# Run BM25Scorer and
 # EmbeddingScorer independently and fuse their rankings by rank
 # position (not raw score -- the two scorers' scores aren't
 # scale-comparable). Opt-in only; --scorer lexical/--scorer embedding
@@ -1257,7 +1250,7 @@ def test_search_scorer_both_fuses_lexical_and_embedding_picks(
 def test_search_scorer_both_surfaces_item_save_zed_shaped(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """Round-13 §4's motivating case: reuses item 6's exact fixture
+    """The motivating case: reuses item 6's exact fixture
     (``test_search_sparse_candidate_no_lexical_connection_documented_
     zed``, above) with ``--scorer both`` instead of the default
     lexical scorer.
@@ -1273,8 +1266,7 @@ def test_search_scorer_both_surfaces_item_save_zed_shaped(
     improvement -- ``Item.save`` buried at rank 133 of 1,548 survivors
     under the default scorer on the actual zed repo, promoted to rank
     35 of 23,667 under the embedding scorer -- is validated live
-    against ``test-repos/zed``, not by this small synthetic fixture;
-    see the plan doc's §4 Implementation notes for the exact numbers.
+    against the real zed repo, not by this small synthetic fixture.
     """
     pytest.importorskip("numpy")
     files = {
@@ -1321,9 +1313,9 @@ def test_search_scorer_both_does_not_demote_correct_lexical_top_hit(
     the default lexical scorer, ``--scorer both`` must not demote that
     top hit while promoting a previously-missed one elsewhere.
 
-    Two shapes, both modeled on round-13 §1's already-validated
-    controls (cline's "cancel task execution" and zed's "resolve
-    diagnostics", both confirmed correctly ranked post-§1-fix): a
+    Two shapes, both modeled on already-validated controls (cline's
+    "cancel task execution" and zed's "resolve diagnostics", both
+    confirmed correctly ranked after the batch-consistency fix): a
     short, precise, no-doc match competing against a doc/signature-
     heavy distractor that repeats one query term many times. RRF
     fusion's fused top-1 must land on the same on-target symbol the
@@ -1425,12 +1417,11 @@ def test_search_scorer_both_does_not_demote_correct_lexical_top_hit(
 def test_search_scorer_both_scale_note_fires_unconditionally(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    """Round-14 master report (cline §4.3, claude-code §2.2, LOW):
-    ``--scorer both``'s fused score is a reciprocal-rank-fusion value
+    """``--scorer both``'s fused score is a reciprocal-rank-fusion value
     on a different scale than ``lexical``/``embedding`` scores, with
     no in-band explanation. ``_scale_note`` fixes this: it must fire
     on every ``--scorer both`` call, JSON and text alike, regardless
-    of whether the round-08 §2.2 exclusion note also fires.
+    of whether the test-exclusion note also fires.
     """
     pytest.importorskip("numpy")
     root = make_mapped_repo(SRC)
@@ -1527,13 +1518,12 @@ def test_search_scorer_both_combines_scale_note_with_exclusion_note(
 def test_search_scorer_both_exclusion_note_uses_underlying_top_score(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    """Implementation divergence from §4's design, not in the plan's own
-    spec: ``SearchHit.score`` under ``--scorer both`` is a reciprocal
+    """``SearchHit.score`` under ``--scorer both`` is a reciprocal
     rank fusion value (max ``~1/k`` with ``k=60``, i.e. well under
     0.02) rather than a blended ``[0, 1]`` score --
     ``LOW_CONFIDENCE_THRESHOLD`` (0.4) was calibrated against the
     latter, so comparing a fused score against it directly would make
-    the round-08 §2.2 "low-confidence" note fire on *every* --scorer
+    the "low-confidence" exclusion note fire on *every* --scorer
     both call with any excluded test symbols, confident result or not.
     ``run()`` instead passes ``_exclusion_note`` the better of the two
     underlying scorers' own top blended score. This fixture's top hit
@@ -1586,12 +1576,12 @@ def test_search_scorer_both_exclusion_note_uses_underlying_top_score(
 def test_blended_scores_precomputed_relevance_matches_subset_call() -> None:
     """``precomputed_relevance`` must make ``blended_scores`` agree with
     itself when the same candidates are scored via two different-sized
-    batches -- the exact inconsistency round-13 found in
+    batches -- the exact inconsistency once found in
     ``search.rank`` (a candidate's relevance changing depending on
     which other candidates happen to be in the batch it's scored
-    against). Corpus-size-independent unit test of the property §1's
-    fix restores, complementing the four end-to-end shape fixtures
-    above.
+    against). Corpus-size-independent unit test of the property the
+    batch-consistency fix restores, complementing the four end-to-end shape
+    fixtures above.
     """
     task = TaskContext(terms=("cancel", "task", "execution"))
     target = Candidate(

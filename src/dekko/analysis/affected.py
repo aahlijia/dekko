@@ -40,8 +40,8 @@ EXIT_ERROR = 2
 _TIERS = ("direct", "transitive", "import")
 
 # Mirrors workset.DEFAULT_BUDGET: without a cap, a single large-repo
-# commit can render an unbounded report (round-08 eval: ~124K tokens
-# for one tensorflow commit) — a sane default keeps `affected` cheap
+# commit can render an unbounded report (~124K tokens for one
+# tensorflow commit) — a sane default keeps `affected` cheap
 # by default like every other read command, while `--budget 0`/a large
 # explicit value still opts back out.
 DEFAULT_BUDGET = 6000
@@ -194,7 +194,7 @@ def impacts_from_symbol(
     This closes a real false-negative for languages (C++ in particular)
     whose whole-file-include model leaves same-named cross-file calls
     unresolved as ``ambiguous`` in the resolver, never reaching
-    ``calls_in`` at all — see investigation-1.5-cpp-gtest-affected.md.
+    ``calls_in`` at all.
     It is narrower than ``analyze()``'s tier (a whole diff's changed
     files vs. one seed's own file), since a bare symbol seed has no
     diff to draw a broader changed-file set from.
@@ -300,8 +300,8 @@ def render(
 # Cap on how many paths a "ready to paste" test-runner invocation
 # embeds per language group. Without this, the hint is unbounded
 # regardless of budget — a real ~1,500-impact repo embedded every path
-# in this one line, blowing a workset budget 3.6x over its stated cap
-# (bug #6/B6). A command holding hundreds/thousands of paths also
+# in this one line, blowing a workset budget 3.6x over its stated
+# cap. A command holding hundreds/thousands of paths also
 # stops being "ready to paste" long before it stops being technically
 # valid.
 _MAX_HINT_PATHS = 20
@@ -451,10 +451,9 @@ def changes(
             callers with no index to hand in (``affected.run``).
         jobs: Resolved worker count passed through to
             ``diff.old_snapshot``/``diff.snapshot_new_side`` — see
-            ``diff.snapshot``. Round-12 master report §3.3: this is
-            the dominant cost on a first-touch/cold-rev-cache call, a
-            separate code path ``dekko map --full``'s own ``--jobs``
-            fix never reached.
+            ``diff.snapshot``. This is the dominant cost on a
+            first-touch/cold-rev-cache call, a separate code path
+            ``dekko map --full``'s own ``--jobs`` fix never reached.
 
     Returns:
         ``(impacts, result, new, target_rev, provenance)``, or ``None``

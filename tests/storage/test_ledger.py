@@ -1,6 +1,6 @@
-"""Pillar C read side: the transcript-projected session ledger.
+"""Read side: the transcript-projected session ledger.
 
-Anchored on a static golden transcript fixture (the R1 schema-drift
+Anchored on a static golden transcript fixture (a schema-drift
 guard): a mix of whole/partial reads, a subagent read, an out-of-root
 read, a dekko emission, real usage tokens, and deliberate junk lines.
 The fixture uses a fixed ``/repo`` root, decoupled from the tmp map.
@@ -108,7 +108,7 @@ def test_remaining_budget(make_mapped_repo: RepoFactory) -> None:
     assert view.remaining(1000) == 0  # floored, never negative
 
 
-# --- robustness: the R1 guard ----------------------------------------
+# --- robustness: the schema-drift guard ------------------------------
 
 
 def test_peak_survives_trailing_zero_usage(tmp_path: Path) -> None:

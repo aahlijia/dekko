@@ -9,6 +9,31 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-09-23
+
+Source cleanup. The code no longer points at internal evaluation
+reports, fix plans, or design documents, none of which ship with
+dekko. No behavior changes.
+
+### Changed
+- **Comments and docstrings say why, not where it came from.**
+  Citations of internal evaluation rounds, fix-plan items, report
+  sections, and design-spec labels (e.g. `FR1`, `NFR2`) are gone from
+  `src/`, `tests/`, and `scripts/`. The reasoning they carried stays.
+  Where a label named a concept, the concept's plain name replaces it.
+- **CLI help text** for `--scorer`, `--relation`, and dense output no
+  longer mentions internal round or phase labels.
+- **`dekko-verify` skill and `docs/`** no longer reference
+  maintainer-local files that don't exist in a clone.
+- **Test names** carry what they test rather than which round found
+  it (`tests/test_round33_small_fixes.py` is now
+  `tests/test_small_output_fixes.py`, among a few function renames).
+
+### Fixed
+- **`RawHeritage.relation` docstring** said Rust `impl` edges weren't
+  produced by any extractor; they are. It now says only Go `embeds`
+  is not yet produced.
+
 ## [1.0.0] — 2026-09-22
 
 dekko 1.0. This is a milestone promotion, not a rewrite: the code is

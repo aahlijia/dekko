@@ -218,8 +218,7 @@ def seed_from_rev(
         root: Repository root.
         rev: Git rev for the old side, or ``None`` to derive a default.
         jobs: Resolved worker count for a rev-cache-miss old-side
-            re-parse/resolve — see ``diff.snapshot``. Round-12 master
-            report §3.3.
+            re-parse/resolve — see ``diff.snapshot``.
     """
     outcome = affected.changes(root, rev, index=index, jobs=jobs)
     if outcome is None:
@@ -408,7 +407,7 @@ def _rows(ws: Workset) -> list[_Row]:
     tight budget" guarantee those three tiers already give. They used
     to bypass budget-fitting entirely: a real ~1,500-impact repo
     dumped every path verbatim via the (unbudgeted) pytest hint,
-    blowing 3.6x past the stated budget (bug #6/B6). The manifest's
+    blowing 3.6x past the stated budget. The manifest's
     impacted-test count and the (separately capped) pytest hint are
     unaffected by this tier's own trimming.
     """
@@ -546,8 +545,8 @@ def _render_json(ws: Workset, budget: int | None, root: Path) -> int:
             seed_doc["blast_radius_note"] = br.note
     doc = {
         "seed": seed_doc,
-        # `tests` is the budget-fitted subset (bug #6/B6 — this used
-        # to be every impacted path unconditionally, regardless of
+        # `tests` is the budget-fitted subset (this used to be
+        # every impacted path unconditionally, regardless of
         # budget); `impacted_tests_total` is the true count so a
         # caller can tell the two apart.
         "impacted_tests": [affected._impact_json(i) for i in tests],

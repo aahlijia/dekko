@@ -570,8 +570,8 @@ def _relations(
     return lines
 
 
-# Round 33 Track 4: a "called by" line was one markdown link per caller
-# with no cap. claude-code's ``logForDebugging`` has ~1,000, making a
+# A "called by" line used to be one markdown link per caller with no
+# cap. claude-code's ``logForDebugging`` has ~1,000, making a
 # 102,113-character line; 191 lines over 2,000 characters made up 13%
 # of that repo's ``map/`` pages. The pages exist to be read, by people
 # and by agents that ``Read`` them, and the full list is one budgeted

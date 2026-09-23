@@ -20,27 +20,24 @@ Heritage/type-usage evidence for any type-kind symbol is credited
 under every ``--kinds`` value, not just ``"types"``/``"all"``; only
 the *scanned population* differs by kind.
 
-``--suspect`` (opt-in, off by default) cross-references excluded
-symbols against ``dekko ambiguous``'s collision list: a symbol kept
-off this report only by inbound call-graph fan-in is a suspect when
-its bare name is also one `dekko ambiguous` independently proved
-collision-prone (2+ repo-defined candidates, unresolved) somewhere
-else in the repo — see ``find_suspects`` and round-23 design doc
-``.features/plans/round23/21-unused-ambiguous-crossref.md``. This
-does not catch every misattribution (a name colliding with exactly
-one non-repo builtin never appears in ``ambiguous`` either), only the
-subset that also collides 2+ ways somewhere else in the repo.
+``--suspect`` (opt-in, off by default) cross-references excluded symbols
+against ``dekko ambiguous``'s collision list: a symbol kept off this
+report only by inbound call-graph fan-in is a suspect when its bare name
+is also one `dekko ambiguous` independently proved collision-prone (2+
+repo-defined candidates, unresolved) somewhere else in the repo — see
+``find_suspects``. This does not catch every misattribution (a name
+colliding with exactly one non-repo builtin never appears in
+``ambiguous`` either), only the subset that also collides 2+ ways
+somewhere else in the repo.
 
 A mirror-image caveat is always on (no flag needed): a symbol *is*
-reported unused, but its own id is one of the unresolved candidates
-of some ambiguous call site elsewhere in the repo -- the shape a
+reported unused, but its own id is one of the unresolved candidates of
+some ambiguous call site elsewhere in the repo -- the shape a
 `this.method()`/`self.method()` polymorphic-dispatch call through an
-abstract base produces when 2+ concrete overrides exist and the
-resolver can't attribute the base's call to any single one of them.
-See ``find_dispatch_candidates`` and round-24 design doc
-``.features/plans/round24/04-unused-dispatch-shaped-candidate-flag.md``.
-``--dispatch`` (opt-in) additionally lists which flagged symbols these
-are.
+abstract base produces when 2+ concrete overrides exist and the resolver
+can't attribute the base's call to any single one of them. See
+``find_dispatch_candidates``. ``--dispatch`` (opt-in) additionally lists
+which flagged symbols these are.
 """
 
 import fnmatch
@@ -67,9 +64,8 @@ KINDS_CHOICES = ("callables", "types", "all")
 # ``for``, operator overloads via ``+``/``==``/indexing, etc.). A
 # curated allowlist, same maintenance model as
 # ``resolver._RUST_STD_METHOD_NAMES`` (extended opportunistically as
-# future rounds find gaps), applied here to trait names rather than
-# method names. See round-23 design doc
-# ``03-rust-trait-dispatch-unused-false-positive.md``.
+# gaps are found), applied here to trait names rather than method
+# names.
 _RUST_STD_TRAIT_NAMES = frozenset(
     {
         "Display",
@@ -178,10 +174,9 @@ def _implements_std_trait(
     implements external trait T" evidence) rather than tracking which
     specific ``impl`` block a method came from -- a type-level
     approximation, exact for the common case of one relevant
-    ``impl <StdTrait> for X`` block per type. See round-23 design doc
-    ``03-rust-trait-dispatch-unused-false-positive.md`` for the
-    known narrow false-negative this trades for (a same-named
-    inherent method sitting alongside a trait impl).
+    ``impl <StdTrait> for X`` block per type. It trades for a known
+    narrow false-negative (a same-named inherent method sitting
+    alongside a trait impl).
     """
     parts = sym.qualname.split(".")
     if len(parts) < 2:
@@ -244,8 +239,7 @@ def _used_keys_callables(index: MapIndex) -> set[tuple[str, str]]:
     when one of its methods is called). A symbol referenced as a
     value — a callback wired up by name and never itself called (see
     ``model.RawRef``) — counts as used the same way: it is not dead
-    code just because nothing *calls* it directly (bug #2b /
-    Performance #3's false positives).
+    code just because nothing *calls* it directly.
     """
     used: set[tuple[str, str]] = set()
     for table in (index.calls_in, index.referenced_in):
@@ -294,9 +288,7 @@ def _used_keys(index: MapIndex) -> set[tuple[str, str]]:
     (``_used_keys_types``) was gated behind ``kinds in ("types",
     "all")``, so a type-kind symbol used only in type position (never
     called or subclassed) was false-positive-flagged as unused under
-    the default ``"callables"`` kind — see round-27 Track 4 design doc
-    ``test-repos/reports/27-round27-tokentest-7repo/
-    TRACK4-OPTION-B-DESIGN.md``. Since ``_used_keys_types`` only ever
+    the default ``"callables"`` kind. Since ``_used_keys_types`` only ever
     adds evidence, never removes candidates, always including it can
     only shrink ``find_unused``'s result, never grow it, for any
     ``kinds`` value.
@@ -455,7 +447,7 @@ def languages_without_calls(index: MapIndex) -> set[str]:
     whose calls dekko can see. A Tier-2 (generic-grammar) language is
     parsed by node-type heuristics, and when its call node doesn't
     match them, every function in it has fan-in 0 by construction.
-    Round 31's tensorflow coverage pass hit exactly that: bash calls
+    Tensorflow hit exactly that: bash calls
     are ``command`` nodes, none were collected, and ``unused`` listed
     ``tfrun()`` -- 27 real call sites -- with no caveat. Bash itself
     is fixed at the extractor, but ~55 other generic grammars sit
@@ -614,7 +606,7 @@ def _sym_json(sym: Symbol) -> dict:
 # Independent, flat row cap for the `--suspect` section — deliberately
 # not routed through the primary list's `--limit`/`--budget` so the
 # suspects section never silently steals budget from the main unused
-# list (round-23 design doc `21-unused-ambiguous-crossref.md`).
+# list.
 _SUSPECT_LIMIT = 20
 
 
@@ -640,10 +632,10 @@ def _section_caps(
 ) -> tuple[int, int | None]:
     """``(limit, budget)`` for a supplemental section.
 
-    Round 33 Track 6c (cline.md §3.1): each section has always had its
-    own flat cap so it can't steal budget from the main list, but it
-    printed that cap's worth of rows in silence -- a header saying 258,
-    twenty rows, and nothing about the 238 dropped -- and ignored an
+    Each section has always had its own flat cap so it can't steal
+    budget from the main list, but it printed that cap's worth of rows
+    in silence -- a header saying 258, twenty rows, and nothing about
+    the 238 dropped -- and ignored an
     explicit ``--limit`` and ``--budget`` alike. Now an explicit lower
     ``--limit`` binds, ``--budget`` applies to the section on its own
     (the same number, independently, the way ``sanity`` applies it
@@ -704,9 +696,9 @@ def _dispatch_check_command(sym: Symbol) -> str:
     ``qualname`` — an overloaded target (2+ symbols sharing the same
     ``(path, qualname)``) needs the trailing ``:line`` to disambiguate,
     matching the exact hint ``resolve_target``'s own ambiguous-target
-    error message already tells the user to append (round 25 finding
-    #13: the row already carries ``sym.start_line``, so there's no
-    reason to make the copy-pasted command hit that error at all).
+    error message already tells the user to append (the row already
+    carries ``sym.start_line``, so there's no reason to make the
+    copy-pasted command hit that error at all).
     """
     return f"dekko sanity --unused {sym.path}:{sym.qualname}:{sym.start_line}"
 
@@ -762,8 +754,7 @@ def _dispatch_caveat(dispatch_candidates: list[Symbol]) -> str | None:
     ``dict.get()`` per already-computed ``found`` row, this doesn't
     need ``--suspect``'s opt-in gating, which exists for that
     feature's costlier per-name lookup across a large collision-name
-    set. See round-24 design doc
-    ``.features/plans/round24/04-unused-dispatch-shaped-candidate-flag.md``.
+    set.
     """
     n = len(dispatch_candidates)
     if n == 0:
@@ -788,7 +779,7 @@ _DISPATCH_MAJORITY_MIN = 20
 def _dispatch_majority_warning(n_dispatch: int, n_found: int) -> str | None:
     """Leading warning when most flagged symbols are dispatch candidates.
 
-    Round 31 spring-boot.md: 2,323 of 3,281 flagged symbols (70.8%)
+    On spring-boot, 2,323 of 3,281 flagged symbols (70.8%)
     were also polymorphic-dispatch candidates the resolver can't
     attribute through interface-typed call sites. ``_dispatch_caveat``
     fired correctly, but as the *last* line under thousands of rows,
@@ -828,9 +819,7 @@ def _c_abi_caveat(found: list[Symbol]) -> str | None:
     Python-heavy repo with one incidental ``.c`` file that produces
     zero unused hits stays silent, while a repo where C/C++ symbols
     make up the noisy tail gets the caveat exactly when it's relevant.
-    Layer 1 of round-23 design doc
-    ``.features/plans/round23/22-unused-extern-c-caveat.md`` -- purely
-    advisory text, no change to which symbols are reported.
+    Purely advisory text, no change to which symbols are reported.
     """
     if any(sym.language in ("c", "cpp") for sym in found):
         return _C_ABI_CAVEAT

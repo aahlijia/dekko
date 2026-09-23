@@ -1,6 +1,6 @@
 """Process identity (``dekko.selfcheck``) and delegated regen.
 
-Round 33 Track 1: an outdated long-lived process and a current CLI
+An outdated long-lived process and a current CLI
 used to rewrite each other's ``map.json`` forever, because a spec
 mismatch says "different", never "older". These tests pin the pieces
 that let a process find out *which* side it is.
@@ -35,7 +35,7 @@ def test_loaded_version_ignores_a_later_install(
 ) -> None:
     # ``importlib.metadata.version`` reads dist-info from disk at call
     # time. A server started under 0.43.63 used to report, and stamp,
-    # whatever got installed afterwards -- which is why every round-33
+    # whatever got installed afterwards -- which is why every
     # staleness message said "same version string on both sides".
     before = selfcheck.loaded_version()
     monkeypatch.setattr(selfcheck, "_pkg_version", lambda _name: "99.0.0")

@@ -4,9 +4,8 @@ A long-lived process (``dekko serve --mcp``, the daemon) keeps whatever
 code it imported at startup for its whole lifetime. When dekko is
 upgraded underneath it, that process and a freshly started CLI disagree
 about what a correct map looks like, and before this module existed
-each treated the other's ``map.json`` as stale and rewrote it, forever
-(round 33 Track 1: ``.features/fixes/round33/
-01-stale-process-map-overwrite.md``). A hash mismatch says "different",
+each treated the other's ``map.json`` as stale and rewrote it, forever.
+A hash mismatch says "different",
 never "older", so neither side could tell it was the outdated one.
 
 This module answers that question by asking the disk. Two halves:
@@ -202,8 +201,8 @@ def known_outdated() -> bool:
     Reads the memo only: ``True`` when an earlier check already proved
     this process outdated and the install hasn't changed since. For
     latency-sensitive paths (``daemon status`` answers from a side
-    thread under a short probe timeout, and round 14 was all about
-    that probe timing out under CPU contention) where "not known yet"
+    thread under a short probe timeout, and that probe has timed out
+    under CPU contention before) where "not known yet"
     is an acceptable answer and a ~30 ms child process is not.
     """
     if not _long_lived or _identity_memo is None:

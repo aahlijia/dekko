@@ -1,10 +1,10 @@
 """``dekko query supertypes``/``subtypes``: heritage graph queries.
 
 ``RUST_HERITAGE``/``CPP_HERITAGE`` and their CLI tests near the end of
-this file cover Phase 2 (Rust ``impl Trait for Type``, C++
-``base_class_clause``) end to end through the same ``query
-supertypes``/``subtypes`` surface Phase 1's Python/Java fixtures
-already exercise — no query.py/CLI code changed for Phase 2, so these
+this file cover Rust ``impl Trait for Type`` and C++
+``base_class_clause`` end to end through the same ``query
+supertypes``/``subtypes`` surface the Python/Java fixtures already
+exercise. No query.py/CLI code changed for Rust/C++, so these
 confirm the read surface really is language-agnostic as designed, not
 just assumed.
 """
@@ -294,8 +294,7 @@ def test_external_supertype_shown_as_labeled_row(
 def test_heritage_synthetic_tiebreak_disclosed_as_note(
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # Round 24 (``.features/plans/round24/
-    # 03-heritage-crate-decoy-tiebreak.md``): a nonzero repo-wide
+    # A nonzero repo-wide
     # tiebreak count must surface as an advisory note on both
     # ``supertypes`` and ``subtypes`` text output, not just get
     # silently dropped.
@@ -340,7 +339,7 @@ def test_heritage_synthetic_tiebreak_omitted_from_json_when_0(
     assert "heritage_synthetic_tiebreak_count" not in doc
 
 
-# round-18 claude-code finding: a TS object-type alias (``type X =
+# A TS object-type alias (``type X =
 # {...}``) used with ``implements`` isn't extracted as a heritage-
 # eligible symbol, so the resolver's terminal fallback previously
 # labeled it ``(external)`` -- identical to a genuine out-of-repo
@@ -348,11 +347,11 @@ def test_heritage_synthetic_tiebreak_omitted_from_json_when_0(
 # `query symbol` lookup away, imported from a relative path in the
 # same repo.
 #
-# Round 26 gave ``type_alias_declaration`` a real ``Symbol`` (kind
+# ``type_alias_declaration`` now has a real ``Symbol`` (kind
 # "type_alias", in ``TYPE_KINDS``), so the resolver's heritage
 # candidate filtering (``resolver.py``, ``c.kind in TYPE_KINDS``) now
 # resolves ``ShellCommand`` as a genuine cross-file supertype edge
-# instead of falling through to the round-18/19 ``(unresolved)``
+# instead of falling through to the older ``(unresolved)``
 # presentation fallback below -- a strictly better outcome than the
 # workaround these tests originally pinned.
 TS_TYPE_ALIAS_HERITAGE = {
@@ -405,7 +404,7 @@ def test_type_alias_implements_target_json_resolves_no_external_flag(
     assert hit["kind"] == "type_alias"
 
 
-# round-19 claude-code finding: the round-18 fix above only catches
+# The cross-file fix above only catches
 # the cross-file case (a same-named relative import exists to check
 # against) -- a *same-file* type alias needs no import statement at
 # all, so that loop never even had a candidate for ``ShellCommand``
@@ -413,9 +412,9 @@ def test_type_alias_implements_target_json_resolves_no_external_flag(
 # ``(external)``. Same repro shape as claude-code's own
 # ``src/utils/ShellCommand.ts``, just collapsed into one file.
 #
-# Round 26 (see cross-file variant above) makes this resolve as a real
-# same-file supertype edge too, superseding the round-19
-# ``(unresolved)`` presentation fallback.
+# Real type-alias symbols (see cross-file variant above) make this
+# resolve as a real same-file supertype edge too, superseding the
+# older ``(unresolved)`` presentation fallback.
 TS_SAME_FILE_TYPE_ALIAS_HERITAGE = {
     "shell_command.ts": (
         "export type ShellCommand = {\n"
@@ -498,7 +497,7 @@ def test_json_result_shape_has_relation_and_depth(
 
 
 # ---------------------------------------------------------------------
-# Phase 2: Rust / C++
+# Rust / C++
 
 
 def test_rust_supertypes_shows_impl_relation(
@@ -565,7 +564,7 @@ def test_cpp_subtypes_finds_derived(
     assert "Derived" in out
 
 
-# Round 31 spring-boot.md (P3.4): a bare name shared by a class and its
+# A bare name shared by a class and its
 # own constructors is not ambiguous *for a heritage query* -- only the
 # type is a valid target.
 
@@ -619,7 +618,7 @@ def test_sole_type_candidate_needs_exactly_one_type() -> None:
     assert query._sole_type_candidate("X", [sym("method", 3)]) is None
 
 
-# Round 31 claude-code.md (P3.2): --limit and --budget are independent
+# --limit and --budget are independent
 # caps; an explicit budget with no explicit limit lets the budget govern.
 
 

@@ -167,8 +167,8 @@ def _sparse_note(
     app's ``router.get(...)``) — has almost no *named* symbols for
     the extractor to find, so its outline can look like an extreme
     (and perfectly legitimate-looking) token-savings ratio while
-    actually hiding nearly the entire file's real content (bug #9/B9
-    — claude-buddy's 1,344-line MCP server entrypoint outlined to 5
+    actually hiding nearly the entire file's real content (e.g.
+    claude-buddy's 1,344-line MCP server entrypoint outlined to 5
     rows/43 tokens, ~0.2% of the full file). This doesn't detect the
     callback pattern itself (that needs new extraction work) — it
     flags the precondition (large file, almost no named symbols, and
@@ -182,13 +182,13 @@ def _sparse_note(
             untrimmed outline (see ``_file_outline_tokens``).
         symbol_count: Number of symbols the outline lists.
         error: The file's ``FileOutline.error``, if any. A file that
-            failed to parse at all (round-12 master report §3.9: most
-            often an unsupported/uninstalled grammar — Kotlin/Groovy
-            without ``pip install dekko[all]``) always has 0 symbols,
-            which used to trip this heuristic en masse even though
-            the real cause is already shown in the file's own
-            ``(parse error: ...)`` header line, not a callback-heavy
-            file the outline is silently missing content from.
+            failed to parse at all (most often an unsupported/
+            uninstalled grammar — Kotlin/Groovy without ``pip install
+            dekko[all]``) always has 0 symbols, which used to trip this
+            heuristic en masse even though the real cause is already
+            shown in the file's own ``(parse error: ...)`` header line,
+            not a callback-heavy file the outline is silently missing
+            content from.
 
     Returns:
         A one-line caveat, or ``None`` when the file doesn't look

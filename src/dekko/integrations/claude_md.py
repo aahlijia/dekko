@@ -1,13 +1,12 @@
 """Idempotent dekko usage-policy block in a project's ``CLAUDE.md``.
 
-Tier 1 of the "enforce dekko usage" plan
-(``.features/plans/usages/enforce-dekko-usage.md``): every other push
-lever dekko has (``hooks.py``'s ``additionalContext`` injections,
-``orient.py``'s ``_PREAMBLE``) is per-turn *context* an agent is free to
-weigh against convenience and drop. Project ``CLAUDE.md`` content is
-documented as overriding default agent behavior instead — a materially
-stronger lever, loaded once per session rather than competing for
-attention against everything else stuffed into the transcript.
+Every other push lever dekko has (``hooks.py``'s ``additionalContext``
+injections, ``orient.py``'s ``_PREAMBLE``) is per-turn *context* an
+agent is free to weigh against convenience and drop. Project
+``CLAUDE.md`` content is documented as overriding default agent behavior
+instead — a materially stronger lever, loaded once per session rather
+than competing for attention against everything else stuffed into the
+transcript.
 
 This module writes/removes a short, marker-bounded block, mirroring the
 idempotent read/merge/write shape :mod:`dekko.hooks` already uses for

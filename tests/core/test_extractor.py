@@ -115,7 +115,7 @@ def test_rust_calls_and_receivers() -> None:
 
 
 def test_rust_assert_macro_calls_are_visible(tmp_path: Path) -> None:
-    # Round 15 (zed): tree-sitter-rust never parses a macro's
+    # tree-sitter-rust never parses a macro's
     # arguments as expression syntax, so a call made only as a direct
     # argument to assert!/assert_eq!/etc — an everyday Rust test
     # idiom — used to be entirely invisible to the call graph. This
@@ -169,7 +169,7 @@ def _rust_macro_calls(tmp_path: Path, body: str) -> dict[str, RawCall]:
 
 
 def test_rust_macro_recovered_calls_keep_their_joiner(tmp_path: Path) -> None:
-    # Round 32 (zed): every recovered call was rendered `recv.name`,
+    # Every recovered call was rendered `recv.name`,
     # whatever the source said, so `assert_eq!(p, Point::new(1, 1))`
     # reached the resolver as `Point.new` with no arg count. Every
     # Rust shape rule reads the joiner off that text: the `Type::name`
@@ -254,13 +254,13 @@ def test_rust_macro_recovered_arg_count_is_conservative(
     # A bare capitalized callee is a tuple-struct/variant construction.
     # It used to get no count at all: a type symbol had no params, so
     # any count rejected the struct (zed: 78 correct edges lost when
-    # this was first counted). Round 32 Track 4 fixed the cause: a
+    # this was first counted). A later fix addressed the cause: a
     # tuple struct's fields *are* its params, so the count is safe.
     assert calls["GroupName"].arg_count == 1
 
 
 def test_rust_tuple_struct_fields_are_its_params(tmp_path: Path) -> None:
-    # Round 32 Track 4. `struct GroupName(String);` is constructed by
+    # `struct GroupName(String);` is constructed by
     # the call-shaped `GroupName(s)`, so its fields are its signature.
     # Every type used to get `params=[]`, which the resolver's arity
     # check reads as "takes zero arguments".
@@ -307,7 +307,7 @@ def test_enum_variants_only_for_rust(tmp_path: Path) -> None:
 
 
 def test_rust_nested_fn_not_a_method(tmp_path: Path) -> None:
-    # Bug #2(a): a fn nested inside another fn's body is a closure-
+    # A fn nested inside another fn's body is a closure-
     # local helper, not a member of whatever impl block contains the
     # outer fn — it must not climb past the outer fn to inherit
     # Point's qualname/kind.
@@ -334,7 +334,7 @@ def test_rust_nested_fn_not_a_method(tmp_path: Path) -> None:
 
 
 def test_rust_inline_test_module_marks_symbol_test(tmp_path: Path) -> None:
-    # Master report #7 (round 11, zed): Rust's idiomatic
+    # Rust's idiomatic
     # ``#[cfg(test)] mod tests { ... }`` co-locates unit tests inside
     # the same file as the production code they test, so the
     # file-level `is_test_path` pass in `repo_ops.map_repository` never
@@ -385,7 +385,7 @@ def test_rust_non_test_mod_named_something_else_stays_untested(
 def test_rust_impl_std_path_receiver_flattened_to_bare_token(
     tmp_path: Path,
 ) -> None:
-    # Round 27 finding M3 / post-fix finding POST-3: pins the exact
+    # Pins the exact
     # extraction-side behavior that made the resolver's std-namespace
     # check unreachable -- `.receiver` for a fully-qualified `impl`
     # trait path is flattened to a single bare token (the first
@@ -500,7 +500,7 @@ def test_ts_binary_expression_operand_captured_as_ref(
     (a guard condition, a string-concatenation operand) is a bare
     reference.
 
-    Round-18 claude-buddy finding: ``dekko unused`` false-flagged live
+    ``dekko unused`` false-flagged live
     module-level ``const`` variables read this way (``biomeArgIdx >= 0
     ? ... : undefined``, ``moveTo() + clearLine``) as dead code,
     because ``_JS_REFERENCE_BASE`` had no pattern for
@@ -528,7 +528,7 @@ def test_ts_ternary_branch_and_condition_captured_as_ref(
     """A module-level ``const`` read as a ternary's condition or
     either branch is a bare reference.
 
-    Round-18 claude-buddy finding: ``panelFocus ? ... : CYAN`` false-
+    ``panelFocus ? ... : CYAN`` false-
     flagged both ``panelFocus`` (the condition) and ``CYAN`` (the
     alternative branch) as unused.
     """
@@ -546,7 +546,7 @@ def test_ts_ternary_branch_and_condition_captured_as_ref(
 
 
 def test_go_struct_type_positions_captured_as_refs(tmp_path: Path) -> None:
-    """Track G / bug #1.1a: Go struct types used only as *types*.
+    """Go struct types used only as *types*.
 
     A struct referenced solely as a parameter type, an unnamed pointer
     return type, a ``var`` declaration's type, and a composite-literal
@@ -579,7 +579,7 @@ def test_go_struct_type_positions_captured_as_refs(tmp_path: Path) -> None:
 
 
 def test_go_struct_field_type_captured_as_ref(tmp_path: Path) -> None:
-    """Follow-up to Track G / bug #1.1a: a struct field's own type.
+    """A struct field's own type.
 
     A struct used only as another struct's field type (``Meta
     RepoMeta``), and a struct embedded anonymously (no separate field
@@ -636,7 +636,7 @@ def test_cpp_include_derives_header_stem_as_import_name(
 def test_cpp_macro_invocation_not_emitted_as_garbled_symbol(
     tmp_path: Path,
 ) -> None:
-    """Round 15 (tensorflow): an unexpanded, function-like macro
+    """An unexpanded, function-like macro
     invocation at file scope (dekko never runs a preprocessor) can
     land tree-sitter's error recovery on a genuine
     ``function_definition`` node whose "name" is the macro's own name
@@ -668,7 +668,7 @@ def test_cpp_macro_invocation_not_emitted_as_garbled_symbol(
 
 
 def test_tsx_jsx_tag_name_captured_as_ref(tmp_path: Path) -> None:
-    """Track G / bug #1.1b: a TSX component used only as ``<Foo />``.
+    """A TSX component used only as ``<Foo />``.
 
     ``_JS_REFERENCE_QUERY`` already captured JSX *attribute* expression
     values (``onClick={handleClick}``); it must also capture the JSX
@@ -688,7 +688,7 @@ def test_tsx_jsx_tag_name_captured_as_ref(tmp_path: Path) -> None:
 
 
 def test_java_method_reference_captured_as_ref(tmp_path: Path) -> None:
-    """Round-19 (spring-boot) finding: Java 8 method references.
+    """Java 8 method references.
 
     ``this::configureBuildInfoTask``/``Foo::staticMethod``/
     ``java.util.Objects::requireNonNull`` are never call-shaped (no
@@ -796,7 +796,7 @@ def test_ts_destructured_const_shorthand_not_captured_as_ref(
 def test_ts_destructured_parameter_shorthand_not_captured_as_ref(
     tmp_path: Path,
 ) -> None:
-    """Round-12 §3.11/§4.5's exact reported shape: a destructured
+    """A destructured
     function parameter must not be attributed as a reference.
 
     ``function f({ description }) {}`` declares a new parameter named
@@ -815,8 +815,8 @@ def test_ts_destructured_parameter_shorthand_not_captured_as_ref(
     fm = extract_file(tmp_path, "data.ts", spec)
     # The parameter's own declaration site must never surface as a
     # @ref. (The bare `return description;` inside the function body
-    # is a separate, still-open shadowing gap — Phase B of round-12
-    # §3's design, real lexical scope tracking — since no query-level
+    # is a separate, still-open shadowing gap needing real lexical
+    # scope tracking, since no query-level
     # pattern in `_JS_REFERENCE_BASE` matches a standalone identifier
     # in `return` position at all, so it isn't asserted either way
     # here.)
@@ -834,7 +834,7 @@ def test_ts_array_destructuring_not_captured_as_ref(
     The existing ``(array (identifier) @ref)`` pattern is already
     parent-scoped, so ``const [a, b] = pair`` (an ``array_pattern``,
     not an ``array``) was never captured — verified here rather than
-    assumed, per round-12 §3's own verification-plan ask.
+    assumed.
     """
     spec = languages.spec_for_path("data.ts")
     assert spec is not None
@@ -850,7 +850,7 @@ def test_ts_array_destructuring_not_captured_as_ref(
 def test_python_keyword_argument_value_captured_as_ref(
     tmp_path: Path,
 ) -> None:
-    """Round-22 (tensorflow) finding: a function passed by name as a
+    """A function passed by name as a
     call's keyword-argument value.
 
     ``configure.py``'s exact shape: ``check_success=valid_ndk_path``
@@ -907,7 +907,7 @@ def test_python_dict_value_and_default_parameter_captured_as_refs(
 
 
 def test_ts_spread_element_object_captured_as_ref(tmp_path: Path) -> None:
-    """Round-23 (claude-code) finding: object-spread of a symbol.
+    """Object-spread of a symbol.
 
     ``{...TOOL_DEFAULTS, ...def}`` never reaches
     ``(object (shorthand_property_identifier) @ref)`` or ``(pair
@@ -945,7 +945,7 @@ def test_ts_spread_element_call_argument_captured_as_ref(
 
 
 def test_ts_subscript_object_captured_as_ref(tmp_path: Path) -> None:
-    """Round-23 (claude-code) finding: bracket-subscript access.
+    """Bracket-subscript access.
 
     ``TASK_ID_PREFIXES[type]`` never reached any existing
     ``_JS_REFERENCE_BASE`` pattern -- nothing read a
@@ -969,7 +969,7 @@ def test_ts_subscript_object_captured_as_ref(tmp_path: Path) -> None:
 
 
 def test_ts_typeof_type_query_captured_as_ref(tmp_path: Path) -> None:
-    """Round-23 (claude-code) finding: ``typeof T`` as a *type*.
+    """``typeof T`` as a *type*.
 
     Both ``type X = typeof T;`` and ``const w: typeof T = y;`` parse
     as ``type_query``, a TS-only node type no existing pattern read.
@@ -1019,7 +1019,7 @@ def test_js_type_query_fragment_not_wired_and_js_still_compiles(
     assert "obj" in ref_names
 
 
-# --- round 25 finding #15: module-doc skips license boilerplate ------
+# --- module-doc skips license boilerplate ----------------------------
 
 
 def test_module_doc_skips_apache_license_header_cpp(tmp_path: Path) -> None:
@@ -1104,7 +1104,7 @@ def test_module_doc_skips_boilerplate_python_docstring(
 def test_module_doc_skips_full_apache_license_header(
     tmp_path: Path,
 ) -> None:
-    # Round 27 finding H1: the pre-fix regex only covered the first
+    # The pre-fix regex only covered the first
     # three lines of a standard Apache-2.0 header, so the fourth line
     # onward ("You may obtain a copy of the License at" -- the line
     # actually hit by both live repros -- plus the "AS IS" disclaimer
@@ -1146,15 +1146,15 @@ def test_module_doc_skips_full_apache_license_header(
 def test_module_doc_skips_apache_header_with_divider_close(
     tmp_path: Path,
 ) -> None:
-    # Round 27 finding H1 (post-fix regression, POST-2): TensorFlow's
+    # TensorFlow's
     # actual header convention -- a single `/* ... */` block comment,
     # not per-line `//` comments -- appends a bare row of `=` characters
-    # right before the closing `*/`. None of Track 1's added
+    # right before the closing `*/`. None of the added
     # ``_BOILERPLATE_HEADER_RE`` alternatives match a punctuation-only
     # divider (correctly so -- it isn't license text), so the old skip
     # loop stopped there and surfaced the divider itself as the file's
-    # "purpose". Verbatim text from
-    # test-repos/tensorflow/tensorflow/core/kernels/gpu_device_array.h.
+    # "purpose". Verbatim text from tensorflow's
+    # tensorflow/core/kernels/gpu_device_array.h.
     spec = languages.spec_for_path("gpu_device_array.h")
     assert spec is not None
     (tmp_path / "gpu_device_array.h").write_text(
@@ -1284,7 +1284,7 @@ def test_parse_rust_use() -> None:
     assert ("e", "x::e") in _parse_rust_use("x::{y::{z}, e}")
 
 
-# --- round 32 Track 5: binding forms that aren't import statements -----
+# --- binding forms that aren't import statements ----------------------
 
 
 @pytest.mark.parametrize("filename", ["lazy.ts", "lazy.tsx", "lazy.js"])
@@ -1373,7 +1373,7 @@ def test_js_grammar_still_compiles_without_the_ts_extra() -> None:
 def test_js_reference_query_captures_plain_reads(
     tmp_path: Path, filename: str
 ) -> None:
-    # Round 32 Track 5: each of these is a read that was never
+    # Each of these is a read that was never
     # captured. A module-level `let version` read only by
     # `return version` looked alive purely because a false edge from
     # another file's same-named local was propping it up.

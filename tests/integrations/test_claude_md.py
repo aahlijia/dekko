@@ -81,7 +81,7 @@ def test_install_then_uninstall_round_trips_cleanly(tmp_path: Path) -> None:
 def test_uninstall_deletes_file_it_created_from_nothing(
     tmp_path: Path,
 ) -> None:
-    # round-19 claude-buddy finding: uninstall previously left a 0-byte
+    # Uninstall previously left a 0-byte
     # CLAUDE.md instead of deleting it when install had created the file
     # from nothing -- a full install/uninstall round trip should restore
     # the pre-install state exactly (no file at all).

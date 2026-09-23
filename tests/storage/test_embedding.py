@@ -1,4 +1,4 @@
-"""Phase 2: the optional hashing-trick embedding scorer (dekko[search]).
+"""The optional hashing-trick embedding scorer (dekko[search]).
 
 Split like test_tokenizer.py: the graceful-degradation contract
 (``available()`` False, a clear ``RuntimeError``/CLI error, base tests

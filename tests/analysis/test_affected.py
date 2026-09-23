@@ -58,8 +58,7 @@ BASE = {
 }
 
 
-# Round 22 claude-buddy.md §2.1 (carried unfixed from rounds 20/21): a
-# repo-local ``server/path.ts`` collides by stem with Node's builtin
+# A repo-local ``server/path.ts`` collides by stem with Node's builtin
 # ``path`` module -- five unrelated files merely do ``import { join }
 # from "path"`` (Node's core module), and one genuinely imports the
 # repo's own ``path.ts`` via a relative specifier.
@@ -151,9 +150,7 @@ def test_tiers_direct_transitive_import(
 def test_node_builtin_module_name_collision_not_falsely_impacted(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    # The single most-repeated, longest-standing correctness gap in
-    # dekko's own eval history (3 consecutive rounds, per round 22's
-    # implementation guide item 3): a change to a repo-local
+    # A long-standing correctness gap: a change to a repo-local
     # ``server/path.ts`` must impact only the file that genuinely
     # imports it (``./path``), not every unrelated file that happens
     # to import Node's builtin ``path`` module by its bare specifier.
@@ -173,7 +170,7 @@ def test_node_builtin_module_name_collision_not_falsely_impacted(
 def test_affected_rev_cache_hit_skips_reexport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-08 §2.6: a second ``affected`` call against the same rev
+    """A second ``affected`` call against the same rev
     must reuse the cached old-side snapshot (``diff.old_snapshot``)
     instead of re-exporting and re-parsing the rev from scratch."""
     root = _repo(tmp_path, BASE)
@@ -300,7 +297,7 @@ VENDORED_ONLY = {
 def test_no_impact_on_vendored_only_change_carries_coverage_note(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    # Track E's optional item, closed as a follow-up: a diff that only
+    # A diff that only
     # touches vendored-excluded files (e.g. tensorflow's
     # ``third_party/xla``) is invisible to the diff pipeline entirely
     # (the walker never mapped it, so it produces no symbol delta), so
@@ -451,7 +448,7 @@ def _sym(path: str, name: str) -> Symbol:
 
 
 def test_impacts_from_symbol_falls_back_to_import_tier() -> None:
-    """investigation-1.5-cpp-gtest-affected.md: a C++-style
+    """A C++-style
     cross-file call that the resolver drops as ``ambiguous`` never
     reaches ``calls_in``, so a pure call-edge walk sees zero impacted
     tests despite a real, direct test call. ``impacts_from_symbol``
@@ -548,7 +545,7 @@ def test_changes_reuses_provided_index_no_reload(
 def test_affected_jobs_flag_reaches_old_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-12 master report §3.3: ``dekko affected`` shares
+    """``dekko affected`` shares
     ``diff``'s rev-cache-miss old-side re-parse/resolve path
     (``diff.old_snapshot``), which used to always run single-threaded
     regardless of core count because ``dekko affected`` never had a

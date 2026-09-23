@@ -243,7 +243,7 @@ TS_CALLBACK = {
 def test_unused_does_not_flag_pass_by_reference_callback(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # End-to-end repro of bug #2(b): handleClick is never *called*
+    # End-to-end repro: handleClick is never *called*
     # anywhere, only wired up as an object-literal property value in
     # wire.ts — before the referenced_in plumbing, this was
     # indistinguishable from genuinely dead code.
@@ -274,7 +274,7 @@ TS_GUARD_AND_CONCAT_ONLY = {
 def test_unused_does_not_flag_const_read_as_binary_or_ternary_operand(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # round-18 claude-buddy finding: module-level `const`s read only
+    # Module-level `const`s read only
     # as a guard-condition/ternary operand or a string-concatenation
     # operand (never called, never a value in one of the previously
     # covered reference shapes) were false-flagged as unused.
@@ -299,7 +299,7 @@ PY_KEYWORD_ARGUMENT_CALLBACK = {
 def test_unused_does_not_flag_python_keyword_argument_callback(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round-22 (tensorflow) finding: valid_ndk_path is never *called*
+    # tensorflow's valid_ndk_path is never *called*
     # anywhere, only wired up as a call's keyword-argument value in
     # configure.py — before Python's reference_query, this was
     # indistinguishable from genuinely dead code.
@@ -325,7 +325,7 @@ GO_TYPE_ONLY = {
 def test_unused_does_not_flag_go_struct_used_only_as_param_type(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # End-to-end repro of Track G / bug #1.1a: prEvent is never
+    # End-to-end repro: prEvent is never
     # *called* (structs aren't invoked), only used as a parameter
     # type and constructed via a composite literal — before the Go
     # reference_query, this was indistinguishable from dead code.
@@ -352,8 +352,8 @@ GO_FIELD_TYPE_ONLY = {
 def test_unused_does_not_flag_go_struct_used_only_as_field_type(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # End-to-end repro of the deliberately-uncovered case documented in
-    # Track G's STATUS block: RepoMeta is used only as another
+    # End-to-end repro of a once deliberately-uncovered case: RepoMeta
+    # is used only as another
     # struct's field type, never as a parameter/return/var type —
     # before ``field_declaration type:`` was added to
     # ``_GO_REFERENCE_QUERY``, this was indistinguishable from dead
@@ -381,7 +381,7 @@ JAVA_METHOD_REFERENCE_ONLY = {
 def test_unused_does_not_flag_java_method_only_used_via_method_reference(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # round-19 spring-boot finding: this::configureBuildInfoTask (a
+    # spring-boot's this::configureBuildInfoTask (a
     # Java 8 method reference passed as a callback) was invisible to
     # both call_query (no argument list) and Java's reference_query
     # (didn't exist) -- ~15% of the repo's .java files use `::`.
@@ -408,7 +408,7 @@ TSX_COMPONENT_ONLY = {
 def test_unused_does_not_flag_tsx_component_used_only_as_jsx_tag(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # End-to-end repro of Track G / bug #1.1b: Sidebar is never called
+    # End-to-end repro: Sidebar is never called
     # as a plain function, only rendered as <Sidebar /> — before the
     # jsx_opening_element/jsx_self_closing_element ref capture, this
     # read as dead code.
@@ -434,7 +434,7 @@ def test_unused_json(
 def test_kinds_help_text_does_not_claim_callables_restricts_scan(
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # Round 25 finding #12: --help described 'callables' as scanning
+    # --help described 'callables' as scanning
     # only functions/methods, but find_unused only ever restricts the
     # *scan* by kind for 'types' -- 'callables' (the default) and
     # 'all' both scan every symbol kind, differing only in which
@@ -449,7 +449,7 @@ def test_kinds_help_text_does_not_claim_callables_restricts_scan(
 
 
 def test_kinds_default_now_honors_heritage_and_type_usage_evidence() -> None:
-    # Round-27 Track 4 (Option B): heritage/type-usage evidence is no
+    # Heritage/type-usage evidence is no
     # longer gated behind --kinds types/all -- it's always folded into
     # _used_keys(), so a type-kind symbol kept alive only by heritage
     # or type-usage is excluded under the default ("callables") kind
@@ -470,8 +470,8 @@ def test_kinds_default_now_honors_heritage_and_type_usage_evidence() -> None:
 
 
 def test_kinds_default_kept_alive_by_type_usage() -> None:
-    # Round-27 Track 4 (Option B): the exact false-positive class the
-    # claude-buddy eval found -- a type used only in type position
+    # The exact false-positive class seen on claude-buddy -- a type
+    # used only in type position
     # (never subclassed, never called) must not be flagged under the
     # default kind just because it has no calls_in/referenced_in.
     config = _sym("Config", "a.py", kind="class")
@@ -527,8 +527,7 @@ def test_kinds_types_restricts_scan_to_type_symbols() -> None:
 
 
 def test_kinds_types_still_honors_construction_call_evidence() -> None:
-    # Deviation from the design doc's literal pseudocode (see
-    # unused.py's _used_keys docstring): callables evidence
+    # See unused.py's _used_keys docstring: callables evidence
     # (calls_in/referenced_in) is always consulted, even for
     # --kinds types, so a class that's only ever *constructed* isn't
     # wrongly flagged just because it has no heritage/type-usage
@@ -592,7 +591,7 @@ def test_unused_kinds_types_keeps_heritage_implemented_class(
 def test_unused_default_keeps_heritage_implemented_class(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round-27 Track 4 (Option B): the same heritage evidence that
+    # The same heritage evidence that
     # --kinds types already honored is now credited under the default
     # ("callables") kind too -- no --kinds flag needed.
     root = make_mapped_repo(HERITAGE_FIXTURE)
@@ -730,7 +729,7 @@ def test_unused_kinds_types_generic_no_false_negative(
 ) -> None:
     # Foo extending Generic[T] resolves as Foo's own heritage_out, not
     # evidence that anything else uses Foo — must not spuriously keep
-    # Foo alive (per type-heritage-graph-design.md's own edge case).
+    # Foo alive.
     root = make_mapped_repo(GENERIC_FIXTURE)
     code = cli.main(["unused", "--root", str(root), "--kinds", "types"])
     out = capsys.readouterr().out
@@ -769,7 +768,7 @@ def test_kinds_types_at_scale_stays_fast() -> None:
 
 
 def test_kinds_default_at_scale_stays_fast() -> None:
-    # Round-27 Track 4 (Option B): the default kind now always pays
+    # The default kind now always pays
     # _used_keys_types()'s cost too (previously only types/all did) --
     # confirm the common-path default invocation doesn't regress at
     # the same scale test_kinds_types_at_scale_stays_fast covers.
@@ -827,7 +826,7 @@ def _rust_method(container: str, method: str) -> Symbol:
 
 
 def test_rust_trait_dispatch_std_trait_keeps_method_alive() -> None:
-    # Round-23 (zed) finding: impl Display for MyError { fn fmt ... }
+    # zed shape: impl Display for MyError { fn fmt ... }
     # has no explicit callers -- Display::fmt is invoked implicitly
     # via `{}`/`.to_string()`, invisible to a call-expression walk.
     struct = _sym("MyError", "m.rs", kind="struct", language="rust")
@@ -967,13 +966,12 @@ RUST_TRAIT_DISPATCH_KNOWN_LIMITATION_FIXTURE = {
 def test_unused_rust_trait_dispatch_known_limitation(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Documented, accepted false negative (see round-23 design doc
-    # 03-rust-trait-dispatch-unused-false-positive.md): the fix is
+    # Documented, accepted false negative: the fix is
     # type-level, not per-impl-block. Widget::dead_helper is a
     # genuinely dead inherent method unrelated to Display, but because
     # Widget implements a std trait somewhere, every method on Widget
-    # -- not just fmt -- reads as a plausible root. Broader than the
-    # design doc's own "same-name collision" framing of this risk;
+    # -- not just fmt -- reads as a plausible root. Broader than a
+    # pure "same-name collision" framing of this risk;
     # noted explicitly here so it's visible, not silently uncovered.
     root = make_mapped_repo(RUST_TRAIT_DISPATCH_KNOWN_LIMITATION_FIXTURE)
     code = cli.main(["unused", "--root", str(root)])
@@ -1043,7 +1041,7 @@ def test_unused_does_not_flag_ts_const_referenced_via_subscript(
     assert "no unused symbols" in capsys.readouterr().out
 
 
-TS_ROUND23_REGRESSION_FIXTURE = {
+TS_TYPEOF_SUBSCRIPT_REGRESSION_FIXTURE = {
     "Tool.ts": (
         "export const TOOL_DEFAULTS = { foo: 1 };\n\n"
         "type ToolDefaultsType = typeof TOOL_DEFAULTS;\n\n"
@@ -1062,23 +1060,23 @@ TS_ROUND23_REGRESSION_FIXTURE = {
 }
 
 
-def test_unused_ts_round23_two_symbol_regression(
+def test_unused_ts_typeof_subscript_two_symbol_regression(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Literal repro of round-23 claude-code.md §2.3: TOOL_DEFAULTS
+    # Literal repro of claude-code's TOOL_DEFAULTS
     # (Tool.ts:757, referenced via typeof + spread) and
     # TASK_ID_PREFIXES (Task.ts:79, referenced via subscript) both
     # previously read `fan-in: 0` and surfaced as unused.
     #
-    # Round 26 gave TS `type X = ...` aliases real Symbol entries
+    # TS `type X = ...` aliases now have real Symbol entries
     # (kind "type_alias", see model.TYPE_KINDS), so the fixture's
     # `ToolDefaultsType` -- only ever referenced via `typeof
     # TOOL_DEFAULTS`, never in a param/return/heritage position any
     # reference query captures -- now correctly surfaces as unused
     # too. That's accurate, not a regression: unlike TOOL_DEFAULTS and
     # TASK_ID_PREFIXES it genuinely has zero structural references.
-    # The two original round-23 symbols must still be clean.
-    root = make_mapped_repo(TS_ROUND23_REGRESSION_FIXTURE)
+    # The two original symbols must still be clean.
+    root = make_mapped_repo(TS_TYPEOF_SUBSCRIPT_REGRESSION_FIXTURE)
     assert cli.main(["unused", "--root", str(root)]) == 1
     out = capsys.readouterr().out
     assert "ToolDefaultsType" in out
@@ -1089,7 +1087,7 @@ def test_unused_ts_round23_two_symbol_regression(
 def test_unused_top_flag_aliases_limit(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # --top is a same-dest alias for --limit (round 22 item B): unused
+    # --top is a same-dest alias for --limit: unused
     # has no separate ranked-summary view, so the two flags are
     # interchangeable here, unlike stats/ambiguous where they differ.
     root = make_mapped_repo(DEAD_FUNCS)
@@ -1183,7 +1181,7 @@ def test_unused_no_suspect_json_omits_key(
     assert "suspects" not in doc
 
 
-# --- C/C++ ABI caveat (round-23 design doc 22, layer 1) --------------
+# --- C/C++ ABI caveat (layer 1) ---------------------------------------
 
 
 def test_c_abi_caveat_none_when_no_c_cpp_symbols() -> None:
@@ -1272,8 +1270,7 @@ def test_unused_caveat_absent_when_no_unused_symbols_found(
 
 
 # --- find_dispatch_candidates: unit-level tests over hand-built
-# MapIndex fixtures (round-24 design doc
-# 04-unused-dispatch-shaped-candidate-flag.md) ------------------------
+# MapIndex fixtures ---------------------------------------------------
 
 
 def test_find_dispatch_candidates_flags_own_id_ambiguous_candidate() -> None:
@@ -1375,7 +1372,7 @@ def test_dispatch_caveat_present_with_expected_count() -> None:
 # --- --dispatch: end-to-end fixtures through the real parse pipeline -
 #
 # Mirrors the cline `ConnectorBase`/`DiscordConnector`/`SlackConnector`
-# shape from round-24's report: an abstract base whose own method body
+# shape: an abstract base whose own method body
 # calls `this.createCommand()`, never itself defining `createCommand`,
 # overridden by 2 concrete subclasses. Neither override has any direct
 # fan-in (the resolver can't attribute the base's call to either), so
@@ -1431,7 +1428,7 @@ def test_unused_dispatch_flag_adds_section(
     section = out.split("dispatch candidates:")[1]
     assert "DiscordConnector.createCommand" in section
     assert "SlackConnector.createCommand" in section
-    # Round 25 finding #13: the hint uses the full path:qualname:line
+    # The hint uses the full path:qualname:line
     # target form so a copy-paste works even on an overloaded target,
     # not the bare qualname alone.
     assert (
@@ -1510,7 +1507,7 @@ def test_unused_dispatch_caveat_absent_for_unrelated_dead_code(
     assert doc["dispatch_caveat"] is None
 
 
-# --- _dispatch_majority_warning (round 31 spring-boot.md, P3.1) -------
+# --- _dispatch_majority_warning ---------------------------------------
 
 
 def test_dispatch_majority_warning_fires_above_half() -> None:
@@ -1539,7 +1536,7 @@ def test_dispatch_majority_warning_prints_above_the_rows(
     assert lines.index("note: x") > lines.index("warning: y") + 3
 
 
-# --- languages_without_calls (round 31 tensorflow coverage pass) -----
+# --- languages_without_calls -----------------------------------------
 
 
 def test_unused_does_not_judge_a_language_with_no_extracted_calls() -> None:
@@ -1580,7 +1577,7 @@ def test_unused_status_agrees_with_find_unused_for_every_symbol(
     make_mapped_repo: RepoFactory,
 ) -> None:
     # The drift guard. `sanity --unused` answers "was this flagged?"
-    # through `unused_status`; round 32's bug was that it used to
+    # through `unused_status`; the bug was that it used to
     # answer from a private, different notion of "unused".
     root = make_mapped_repo(
         {

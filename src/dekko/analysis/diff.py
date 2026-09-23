@@ -38,22 +38,21 @@ EXIT_SAME = 0
 EXIT_DIFFERENT = 1
 EXIT_ERROR = 2
 
-# Round-15 finding (round15-jobs-default-latency-plan.md): a bare
-# `diff`/`affected`/`workset` invocation with no rev-cache entry for
+# A bare `diff`/`affected`/`workset` invocation with no rev-cache entry for
 # its target commit falls into old_snapshot()'s cache-miss path,
 # which -- at the default `--jobs 1` -- re-parses and resolves every
 # tracked file at that rev single-threaded. On the fleet's largest
 # repos this produced several minutes of zero-feedback silence
 # indistinguishable from a hang (tensorflow, 14,285 files: 5+ minutes
 # sequential vs. ~35s with `--jobs 0`). Chosen empirically from
-# round-15's own per-repo file counts: comfortably above cline/zed/
+# measured per-repo file counts: comfortably above cline/zed/
 # claude-code (up to ~2,730 files, none flagged as slow) and well
 # below spring-boot/tensorflow (9,942/14,285 files, the two repos
 # where this was actually noticeable), so the note only fires where
 # it's likely to matter.
 _SEQUENTIAL_DISCLOSURE_THRESHOLD = 5000
 
-# Round 28 layer 2: how often to re-check the rev-cache while another
+# How often to re-check the rev-cache while another
 # process is already building the old-side snapshot for the same SHA,
 # and how long to wait before giving up and building an uncoordinated
 # copy locally. Mirrors repo_ops._REGEN_LOCK_POLL_INTERVAL/
@@ -181,16 +180,15 @@ def snapshot(
             *real* repo, which does have ``.git/``) here instead.
         jobs: Resolved worker count (1 = sequential) for both file
             extraction (``repo_ops.map_repository``) and call-graph
-            resolution (``resolve``). Round-12 master report §3.3:
-            this call used to always run both single-threaded
-            regardless of ``dekko map --full``'s own ``--jobs``
-            fix — a separate, unparallelized code path that made a
-            first-touch/cold-rev-cache ``diff``/``affected``/
-            ``workset`` call minutes slower than it needed to be on
-            a large repo. Callers pass an already-resolved concrete
-            count (see ``repo_ops.resolve_workers``), not the raw
-            ``--jobs`` CLI value (which allows ``0`` for "all
-            cores").
+            resolution (``resolve``). This call used to always run
+            both single-threaded regardless of ``dekko map --full``'s
+            own ``--jobs`` fix — a separate, unparallelized code path
+            that made a first-touch/cold-rev-cache ``diff``/
+            ``affected``/``workset`` call minutes slower than it
+            needed to be on a large repo. Callers pass an
+            already-resolved concrete count (see
+            ``repo_ops.resolve_workers``), not the raw ``--jobs`` CLI
+            value (which allows ``0`` for "all cores").
     """
     files, _ = repo_ops.map_repository(
         root,
@@ -286,8 +284,8 @@ def old_snapshot(
 
     Shared by ``diff.run`` and ``affected.changes`` — both need the
     identical old-side snapshot (export + re-map of a historical git
-    rev), the dominant cost of either command on a large repo (round-08
-    §2.6). ``target_rev`` is resolved to its full commit SHA first; a
+    rev), the dominant cost of either command on a large repo.
+    ``target_rev`` is resolved to its full commit SHA first; a
     commit's tree is immutable once it exists, so a cache hit here is
     unconditionally safe to reuse without any freshness check (unlike
     the working tree's own map). Falls back to the always-correct
@@ -438,8 +436,7 @@ def sequential_disclosure_message(
     single-threaded by the time it's called) and the daemon client's
     pre-dispatch disclosure (``daemon.py::_timeout_and_args_for_
     command``, which knows *before sending the request* whether the
-    round-25 ``--jobs 0`` override will apply) -- can't drift apart in
-    wording (round-29 Track 2).
+    ``--jobs 0`` override will apply) -- can't drift apart in wording.
 
     Args:
         tracked_count: Git-tracked file count at the target rev (see
@@ -448,12 +445,11 @@ def sequential_disclosure_message(
             count).
         workers: The resolved worker count the resolve will run with:
             ``1`` is sequential, ``0`` means every core, any other
-            value is an explicit ``--jobs N``. Round 33 Track 6d
-            (tensorflow.md §4.1): this used to be a bool that read
-            every ``N > 1`` as "with all cores", which was true when
-            the only parallel path *was* the daemon's all-cores
-            override and stopped being true once round 31 made
-            ``--jobs N`` a real choice on these commands.
+            value is an explicit ``--jobs N``. This used to be a
+            bool that read every ``N > 1`` as "with all cores", which
+            was true when the only parallel path *was* the daemon's
+            all-cores override and stopped being true once ``--jobs
+            N`` became a real choice on these commands.
 
     Returns:
         The note text (no trailing newline, not yet routed to
@@ -484,13 +480,13 @@ def sequential_disclosure_message(
 def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     """Disclose a slow rev-cache-miss re-parse/resolve before it starts.
 
-    Round 31 P4.1 flipped ``diff``/``affected``/``workset`` to all
-    cores by default, which makes the sequential case below an explicit
+    ``diff``/``affected``/``workset`` now default to all cores,
+    which makes the sequential case below an explicit
     ``--jobs 1`` choice. The note still fires for the parallel path,
     with its own wording: a cold tensorflow snapshot is a four-minute
     silence even with every core busy. The name predates that.
 
-    Round-15 finding: at the default ``--jobs 1``, a first-touch
+    At the old default ``--jobs 1``, a first-touch
     ``diff``/``affected``/``workset`` call on a large repo re-parses
     and resolves every tracked file at the target rev single-threaded
     with no progress output -- on the largest repos in the fleet this
@@ -509,7 +505,7 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     """
     if candidates is None:
         return
-    # round-18 tensorflow finding: `candidates` is `git ls-tree`'s full
+    # `candidates` is `git ls-tree`'s full
     # tracked-file count at the target rev -- before `walker.discover`
     # excludes vendored/no-parser/too-large files -- so it can read
     # much larger than the repo's actual mapped file count (36,518
@@ -621,7 +617,7 @@ def _callers_of(snap: Snapshot, sym_id: str) -> list[str]:
     ]
 
 
-# Round 28 finding: a corrupted rev-cache entry (every old-side symbol
+# A corrupted rev-cache entry (every old-side symbol
 # hashed to an empty body, see revcache._is_all_empty_body) makes
 # every shared symbol report as "changed" with nothing added or
 # removed -- exactly the tensorflow repro (171706 changed, 0 added, 0

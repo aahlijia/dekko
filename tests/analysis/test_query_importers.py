@@ -56,8 +56,7 @@ def test_importers_relative_import_source(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     # "from .. import contextpack" -> raw source "..contextpack" (the
-    # exact shape confirmed against this repo's own real imports in
-    # the design doc).
+    # exact shape confirmed against this repo's own real imports).
     root = make_mapped_repo(PY_IMPORTERS)
     code = cli.main(["query", "importers", "contextpack", "--root", str(root)])
     assert code == 0
@@ -81,7 +80,7 @@ def test_importers_not_found_suggests_closest_sources(
 def test_importers_not_found_suggestions_use_bare_source(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round 25 finding #11: the "closest import sources" suggestion list
+    # The "closest import sources" suggestion list
     # must show the same bare form _importers_row/_importers_entry
     # render on a match, not the raw resolver-internal
     # "module/localName" encoding (which doesn't exist on disk and
@@ -101,7 +100,7 @@ def test_importers_not_found_suggestions_use_bare_source(
 def test_importers_not_found_hints_deps_file_for_path_shaped_needle(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round 22 item C: a needle shaped like a file path (out of habit
+    # A needle shaped like a file path (out of habit
     # from `deps --file`, which does take a path) gets a hint pointing
     # at the right command instead of a silent "no imports match".
     root = make_mapped_repo(PY_IMPORTERS)
@@ -244,7 +243,7 @@ def test_importers_side_effect_import_displays_without_as_clause(
 def test_importers_exact_js_matches_bare_module_specifier(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # I2 fix: --exact for JS/TS compares against the bare module
+    # --exact for JS/TS compares against the bare module
     # specifier, not the raw "module/localName" stored source.
     root = make_mapped_repo(
         {
@@ -274,7 +273,7 @@ def test_importers_exact_js_does_not_substring_match_similar_package(
 def test_importers_default_strips_js_named_import_suffix(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round-22 item 6: default (non-exact) `importers` output must
+    # Default (non-exact) `importers` output must
     # also display the bare module specifier, not the resolver-
     # internal "module/localName" encoding (see the identical fix for
     # --exact matching in _source_matches / bare_import_source).
@@ -346,14 +345,14 @@ def test_source_matches_exact_trailing_slash_normalized() -> None:
 def test_source_matches_exact_js_strips_appended_name() -> None:
     # JS/TS named/default imports store "module/localName" — --exact
     # must compare against the bare module specifier, not the raw
-    # compound string (I2 fix).
+    # compound string.
     imp = _imp("React", "react/React")
     assert _source_matches(imp, "javascript", "react", exact=True)
     assert not _source_matches(imp, "javascript", "react/React", exact=True)
 
 
 def test_source_matches_exact_js_side_effect_import_already_bare() -> None:
-    # A side-effect import's source is already bare (I1 fix) —
+    # A side-effect import's source is already bare —
     # bare_import_source must not try to strip a nonexistent suffix.
     imp = _imp("", "opentui-spinner/react")
     assert _source_matches(

@@ -1,4 +1,4 @@
-"""Regression guard for the context-layer benchmark (design §7, step 3).
+"""Regression guard for the context-layer benchmark.
 
 Keeps G★ falsifiable on every test run: against a synthetic repo, the
 dekko strategy must cost strictly less than the whole-file baseline for

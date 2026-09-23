@@ -6,7 +6,7 @@ ints that shift whenever the symbol table does. This compares
 ``(caller, callee)`` string pairs instead, so a resolver change can be
 judged by what it actually added and removed.
 
-The workflow that caught every resolver regression in round 31::
+The workflow for checking a resolver change::
 
     cp repo/.dekko/map.json /tmp/before.json
     # ...change the resolver, then re-map with the dev build...

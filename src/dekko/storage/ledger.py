@@ -1,13 +1,13 @@
-"""Session ledger: what is already in the agent's context (Pillar C).
+"""Session ledger: what is already in the agent's context.
 
 The hooks layer (and the ``dekko ledger`` command) needs to know what an
 agent has *already* loaded this session — so dekko can stop re-spending
-tokens on context the model already holds (FR-C2 dedup) and adapt its
-budget to what remains (FR-C3). Per the design's resolved decisions, the
-single source of truth is the Claude Code **transcript** (the session
-JSONL that every hook receives via ``transcript_path``): dekko persists
-no authoritative session state of its own, so this module is a pure,
-best-effort *projection* over that file.
+tokens on context the model already holds (dedup) and adapt its
+budget to what remains. The single source of truth is the Claude Code
+**transcript** (the session JSONL that every hook receives via
+``transcript_path``): dekko persists no authoritative session state of
+its own, so this module is a pure, best-effort *projection* over that
+file.
 
 Reconstructing from the transcript — rather than from dekko's own
 emission log — is what makes dedup honest: it sees the files the agent
@@ -24,8 +24,7 @@ signals carry most of the weight:
 
 Every record is parsed defensively: an unknown ``type``, a malformed
 line, or a missing field is skipped, never raised, so a transcript schema
-change degrades the ledger to *empty* rather than *wrong* (NFR-3, the R1
-guard).
+change degrades the ledger to *empty* rather than *wrong*.
 """
 
 import json
@@ -97,7 +96,7 @@ class LedgerView:
         return out
 
     def has_symbol(self, sym_id: str) -> bool:
-        """Whether a symbol is already in context (FR-C2 dedup check)."""
+        """Whether a symbol is already in context (dedup check)."""
         return any(sym_id in s.symbols_seen for s in self.files.values())
 
     def has_file(self, path: str) -> bool:
@@ -403,7 +402,7 @@ def run(
     budget: int | None,
     as_json: bool,
 ) -> int:
-    """Inspect what the session has put in context (FR-C4).
+    """Inspect what the session has put in context.
 
     Args:
         root: Repository root (for the map and transcript discovery).

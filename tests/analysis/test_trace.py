@@ -97,7 +97,7 @@ def test_no_path_is_clean(
 def test_no_path_through_ambiguous_hop_discloses_it(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # round-13 spring-boot.md: when the only route to the destination
+    # When the only route to the destination
     # runs through a call that resolved ambiguously (not absent, just
     # unresolved), a bare "no call path" reads as a false ground-truth
     # negative — `query callees` on the same edge honestly discloses

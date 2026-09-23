@@ -1,7 +1,6 @@
 """Shared repo-mapping pipeline: discover, extract, resolve, render.
 
-Extracted out of ``integrations/cli.py`` (see the sc:analyze
-post-0.31.1 fixes plan, item 2) as a fourth top-level "shared kernel"
+Extracted out of ``integrations/cli.py`` as a fourth top-level "shared kernel"
 module alongside ``classify.py``/``textutil.py``/``source.py`` --
 this is the one contiguous "discover, extract, resolve, render, and
 persist a repo map" pipeline that used to live inside ``cli.py``
@@ -87,9 +86,7 @@ def _resolve_header_spec(
     Parsing a genuine C++ header with the C grammar silently drops
     every ``class``/``namespace``/``template`` construct instead of
     erroring, producing confidently wrong call/heritage resolution
-    downstream instead of just a coverage gap (round 18's tensorflow
-    finding -- see ``test-repos/reports/18-tokentest-7repo-post0404/
-    IMPLEMENTATION-PLAN-h-header-cpp-c-grammar.md``). Sniff the file's
+    downstream instead of just a coverage gap. Sniff the file's
     own content, not the extension, by parsing it with the C++ grammar
     and checking for a real C++ construct.
 
@@ -137,10 +134,10 @@ def _extract_misses(
 
     A ``BrokenProcessPool`` on the parallel path (e.g. sibling
     multiprocessing contention from another concurrent ``dekko``
-    process on this machine — round 17) gets one bounded retry at
+    process on this machine) gets one bounded retry at
     reduced parallelism via ``run_pooled_with_retry`` before
     propagating. A worker that never returns a result at all within
-    ``POOL_RESULT_TIMEOUT_S`` (round 21 Track A: a spawned worker
+    ``POOL_RESULT_TIMEOUT_S`` (e.g. a spawned worker
     resolving a completely different Python interpreter than its own
     parent, hanging indefinitely at 0% CPU with no error) surfaces as
     ``resolver.PoolStalledError`` instead of hanging forever — see
@@ -304,21 +301,19 @@ def _write_pages(md_path: Path, pages: list[tuple[str, str]]) -> list[Path]:
             stale.unlink()
 
     written = [md_path]
-    # round-13 spring-boot.md: a `FileNotFoundError` writing MAP.md was
-    # seen once, immediately after `test-repos/reset.sh` (which removes
-    # `.dekko/` entirely), and claude-buddy.md's report independently
-    # saw the softer, non-crashing shape of the same thing (a write
-    # reporting success before `.dekko/` was visible on disk). This
-    # function already re-asserts `page_path.parent.mkdir(...)` for
-    # every *subsequent* page below, guarding against exactly this --
-    # the index page was the one write in this function that instead
-    # relied entirely on `run_map`'s much-earlier `md_path.parent.mkdir`
-    # call (well before the potentially long `resolve()`/`render_map`
-    # call in between) still holding by the time this line runs. This
-    # call is idempotent (`exist_ok=True`) and effectively free, so
-    # there's no reason the index write should be the only one in this
-    # function not self-sufficient against the directory transiently
-    # not existing yet.
+    # A `FileNotFoundError` writing MAP.md was seen once, immediately
+    # after a script removed `.dekko/` entirely, and a separate run
+    # independently saw the softer, non-crashing shape of the same thing (a
+    # write reporting success before `.dekko/` was visible on disk). This
+    # function already re-asserts `page_path.parent.mkdir(...)` for every
+    # *subsequent* page below, guarding against exactly this -- the index page
+    # was the one write in this function that instead relied entirely on
+    # `run_map`'s much-earlier `md_path.parent.mkdir` call (well before the
+    # potentially long `resolve()`/`render_map` call in between) still holding
+    # by the time this line runs. This call is idempotent (`exist_ok=True`) and
+    # effectively free, so there's no reason the index write should be the only
+    # one in this function not self-sufficient against the directory
+    # transiently not existing yet.
     md_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.write_text(pages[0][1], encoding="utf-8")
     for name, content in pages[1:]:
@@ -338,7 +333,7 @@ def _summary(
     outputs: list[Path],
 ) -> str:
     """Build the human-readable run summary."""
-    # Round 31 claude-buddy.md S2: a file whose grammar isn't installed
+    # A file whose grammar isn't installed
     # yields zero symbols, yet used to be counted in "mapped N files
     # (... bash 12 ...)" -- which reads as "these 12 bash files were
     # mapped". They are reported on their own line instead, with the
@@ -364,7 +359,7 @@ def _summary(
     variables = sum(
         1 for fm in files for s in fm.symbols if s.kind == "variable"
     )
-    # round-12 master report §3.10/§3.16: a missing *optional* grammar
+    # A missing *optional* grammar
     # (``pip install dekko[all]``) and a genuine parse failure used to
     # share one alarming "parse error N" bucket, even though the
     # per-file detail line already named the missing grammar
@@ -433,12 +428,12 @@ def _map_run_is_noop(
     The ``tool_version``/``spec_hash`` check exists because ``cache.
     parsed == 0`` alone is not quite sufficient: it is trustworthy for
     *the cache itself* (a cache from a different dekko build never
-    survives to be reused — see bug #1's fix in ``cache.py``), but
+    survives to be reused — see ``cache.py``), but
     ``.dekko/cache.json`` and ``.dekko/map.json`` are two independent
     files, and a hand-edited or otherwise desynced map.json could
     still be stale even when the cache looks fully warm. The
     ``doc_version`` check exists for the same reason but a distinct
-    axis: ``MAP_DOC_VERSION`` (the on-disk *format*, e.g. the round-15
+    axis: ``MAP_DOC_VERSION`` (the on-disk *format*, e.g. the
     id-interning change) can bump independently of a package release
     — ``tool_version``/``spec_hash`` alone would call an old-format
     map.json "fresh" forever on an unchanged source tree, since
@@ -494,7 +489,7 @@ def _maybe_block_scoped_overwrite(
 ) -> bool:
     """Refuse to silently narrow an existing broader map.
 
-    Round 22 cline.md §3.2: ``dekko map DIR SUBPATH`` (or its legacy
+    ``dekko map DIR SUBPATH`` (or its legacy
     ``dekko --map DIR SUBPATH`` alias) used to overwrite a full
     N-file map with a 1-file scoped one at the same default ``.dekko/``
     location, with the same success-message shape as an ordinary run
@@ -581,7 +576,7 @@ def _reuse_plan(
 ) -> resolver_mod.ResolveReuse | None:
     """Cached call resolution this run may reuse, if any.
 
-    Round 30 Track 1: an incremental run used to re-resolve the whole
+    An incremental run used to re-resolve the whole
     repo, so it only ever saved tree-sitter extraction. This lets
     unchanged files keep their previously resolved call edges.
 
@@ -800,9 +795,8 @@ def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
     return True
 
 
-# Optional daemon-installed warm-cache hook (Phase 3 of
-# ``.features/daemon-mode/``). ``load_or_regen`` is the single
-# chokepoint essentially every read subcommand funnels through
+# Optional daemon-installed warm-cache hook. ``load_or_regen`` is the
+# single chokepoint essentially every read subcommand funnels through
 # directly or via ``_read_index`` (``query``/``outline``/``context``/
 # ``trace``/``unused``/``stats``/``summary``/``lean``), or calls
 # directly (``run_search``, ``run_export``, ``workset.run``) — caching
@@ -845,7 +839,7 @@ def set_daemon_cache_hook(
 
 
 # Regen-lock wait: how often to re-check freshness while another
-# process holds the ``.dekko/regen.lock`` (round-12 §4.1b), and how
+# process holds the ``.dekko/regen.lock``, and how
 # long to wait before giving up and fail-opening into a redundant
 # local regen anyway. The cap matches daemon.py's own "generous but
 # bounded" convention (_CLIENT_TIMEOUT/_REQUEST_TIMEOUT, both 30s) —
@@ -863,12 +857,12 @@ def _wait_for_other_regen(root: Path) -> mapfile.MapIndex | None:
     interval for that process's regen to finish and re-check
     freshness.
 
-    Round-23 §14: this wait used to print nothing at all -- on a large
-    repo (tensorflow.md §2.2: 14,285 files) a command blocked here for
+    This wait used to print nothing at all -- on a large repo
+    (tensorflow, 14,285 files) a command blocked here for
     up to ``_REGEN_LOCK_WAIT_CAP`` seconds read as indistinguishable
     from a hang, reintroducing for the concurrent-process case exactly
-    the "long silent wait with no diagnostic" experience round 15
-    already fixed for the single-command case
+    the "long silent wait with no diagnostic" experience already
+    fixed for the single-command case
     (``diff._maybe_warn_sequential``). Mirrors that same pattern: one
     stderr ``note:`` line, printed once, before the poll loop starts.
 
@@ -897,7 +891,7 @@ def _wait_for_other_regen(root: Path) -> mapfile.MapIndex | None:
 
 def _locked_regen(root: Path) -> tuple[mapfile.MapIndex | None, int]:
     """Regenerate ``root``'s map, coordinating via the advisory regen
-    lock (round-12 §4.1b).
+    lock.
 
     A best-effort advisory lock (``filelock.try_regen_lock``)
     coordinates against other processes (bare CLI, daemon-triggered
@@ -924,7 +918,7 @@ def _locked_regen(root: Path) -> tuple[mapfile.MapIndex | None, int]:
             # -- fail open, fall through to a local regen below. This
             # is an *uncoordinated*, independent regen running
             # alongside whatever the other process is still doing
-            # (round-23 §14) -- disclosed here so a caller watching
+            # -- disclosed here so a caller watching
             # stderr sees "still not landed, proceeding with my own
             # regen" rather than the silence that used to follow the
             # first note straight into more silence.
@@ -953,12 +947,12 @@ def load_or_regen(
     has installed a hook), a still-fresh cached index is returned
     outright, skipping ``map.json``'s JSON parse and the full symbol/
     call-graph index rebuild entirely — the dominant cost of a reload
-    (Phase 3 of ``.features/daemon-mode/``, mirroring ``server.py``'s
-    ``Context.index_cache``/``_index_for``). A direct CLI invocation
+    (mirroring ``server.py``'s ``Context.index_cache``/
+    ``_index_for``). A direct CLI invocation
     never installs this hook, so its behavior here is unchanged.
 
     On a missing/stale map, the regen itself is coordinated with other
-    concurrent processes via ``_locked_regen`` (round-12 §4.1b).
+    concurrent processes via ``_locked_regen``.
 
     Args:
         root: Repo root containing map.json.
@@ -1010,7 +1004,7 @@ def _note_foreign_build(fresh: mapfile.Freshness | None) -> None:
     A one-shot process about to regenerate a map whose ``tool_version``
     matches its own but whose ``spec_hash`` doesn't is looking at one
     of two things: a dev rebuild, or an outdated long-lived dekko
-    process (one predating round 33 Track 1) that keeps rewriting the
+    process (an older dekko build) that keeps rewriting the
     map with older extractor code. This process can't stop the second
     case, but it can stop it being invisible: without this note the
     only symptom is every other command being mysteriously slow.
@@ -1033,9 +1027,7 @@ def load_current_index_no_regen(root: Path) -> mapfile.MapIndex | None:
 
     ``diff.run``/``affected.changes`` are the one partial exception to
     ``load_or_regen`` being the single daemon-cache chokepoint every
-    other read subcommand funnels through (see
-    ``.features/daemon-mode/daemon-mode-cli-plan.md`` §2.4's last
-    bullet and Phase 4 of ``.features/daemon-mode/TRACKER.md``): their
+    other read subcommand funnels through: their
     current-tree side calls ``mapfile.load_map`` directly, so a
     daemon-routed ``diff``/``affected`` request previously always paid
     a full JSON-parse/index-rebuild, even with a warm cache populated
@@ -1106,7 +1098,7 @@ def _delegated_regen(root: Path, full: bool, quiet: bool) -> int:
     (``selfcheck.process_outdated``). Extracting in-process would stamp
     the map with this process's older spec, which the next current
     process would call stale and rewrite, which this process would
-    then call stale and rewrite... (round 33 Track 1). A child
+    then call stale and rewrite... A child
     interpreter imports whatever is on disk *now*, so its map and its
     caches carry the current identity, and this process becomes a
     client of the current code instead of a competitor to it.
@@ -1189,7 +1181,7 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
         # resolution (resolve()/resolve_refs(), see resolver.py's
         # ``_resolve_all``) is O(the whole repo's calls) regardless of
         # diff size, and was previously left sequential here even on a
-        # many-core machine. See round 11 §1: a one-file edit's
+        # many-core machine: a one-file edit's
         # auto-regen on tensorflow (14,285 files) took *longer* than a
         # from-scratch --full remap because of exactly this.
         jobs=0,

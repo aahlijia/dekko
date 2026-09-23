@@ -25,11 +25,10 @@ status`, `dekko hooks install --help`, and manually checking `command
 
 - **PATH shadowing** — whether the `dekko` a bare `dekko` invocation
   resolves to on `$PATH` is the same binary this process is actually
-  running. This is the single most-repeated friction point across past
-  eval rounds: a stale globally-installed `dekko` silently answering
-  from the wrong build, with no "command not found"-style error to
-  flag it. This is the automated version of the manual `command -v
-  dekko` check in `test-repos/TESTING-GUIDE.md` §0.
+  running. This is the most common install problem: a stale
+  globally-installed `dekko` silently answering from the wrong build,
+  with no "command not found"-style error to flag it. This is the
+  automated version of a manual `command -v dekko` check.
 - **Map freshness** — the same signal `dekko status` reports.
 - **MCP registration** (`claude mcp list`) and whether a `dekko serve
   --mcp` process is currently running (best-effort, POSIX only).

@@ -1,6 +1,5 @@
 """``dekko query cohesion``: intra-file connected-components (weak
-signal — connectivity only, not real clustering; see the design doc
-in ``.features/plans/post-indexing-tooling/``).
+signal — connectivity only, not real clustering).
 """
 
 import json
@@ -79,8 +78,8 @@ def test_cohesion_splits_two_groups_and_an_isolate(
 def test_cohesion_note_is_the_verbatim_weak_signal_disclosure(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # The design doc calls this note "load-bearing, not decorative" —
-    # it must always ship, never be dropped by budget/limit capping.
+    # This note is load-bearing, not decorative — it must always ship,
+    # never be dropped by budget/limit capping.
     root = make_mapped_repo(TWO_GROUPS)
     code = cli.main(["query", "cohesion", "app.py", "--root", str(root)])
     assert code == 0
@@ -92,7 +91,7 @@ def test_cohesion_note_is_the_verbatim_weak_signal_disclosure(
 def test_cohesion_budget_below_floor_discloses_note(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round 25 finding #18: a --budget tighter than even the first
+    # A --budget tighter than even the first
     # kept connected-component row (rows are never split mid-row) was
     # silently exceeded with no visible sign, unlike `lean --budget`'s
     # own floor-exceeded disclosure.
@@ -153,7 +152,7 @@ def test_cohesion_all_isolated_when_no_intra_file_edges(
 def test_cohesion_single_connected_component_has_no_isolated_line(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # The common (and, per the design doc, unhelpful) case: a fully
+    # The common (and unhelpful) case: a fully
     # connected file gets one big cluster and no useful split signal.
     root = make_mapped_repo(ONE_COMPONENT)
     code = cli.main(["query", "cohesion", "app.py", "--root", str(root)])

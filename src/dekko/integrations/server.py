@@ -48,8 +48,8 @@ PROTOCOL_VERSION = "2025-06-18"
 # caller passes no budget. Their output scales with repo size — a large
 # monorepo's un-capped summary renders ~30k chars, and because agents
 # call these tools FIRST, that cost is re-read as cache on every later
-# turn (2026-07-10 eval: the zed net-negative was mostly this). Callers
-# can always pass a larger budget explicitly.
+# turn (on zed, the token net-negative was mostly this). Callers can
+# always pass a larger budget explicitly.
 DEFAULT_ORIENT_BUDGET = 2000
 
 # Default token cap for the relation/usage/pack tools (get_callers,
@@ -58,8 +58,8 @@ DEFAULT_ORIENT_BUDGET = 2000
 # shape than an outline, so half of DEFAULT_ORIENT_BUDGET is a
 # reasonable starting cap — a symbol with dozens of call sites (or
 # test-file callers included) otherwise renders unbounded output that
-# can exceed a naive grep for the same question (2026-07-31 eval:
-# get_callers/find_usages both lost to grep on uncapped output).
+# can exceed a naive grep for the same question (get_callers and
+# find_usages both lost to grep on uncapped output).
 # Callers can always pass a larger budget explicitly. Sourced from
 # ``query.DEFAULT_RELATION_BUDGET`` (which the CLI's ``dekko query``
 # now also falls back to) so the two surfaces can't drift apart again
@@ -86,7 +86,7 @@ class Context:
     (no ``try_daemon``/socket round trip), so an MCP session and a
     ``dekko daemon start``-ed background process for the same root each
     hold their own separate warm copy of the index in memory, with no
-    shared invalidation between them (round-12 master report §3.7/§4.4).
+    shared invalidation between them.
     That's a deliberate, self-contained design for MCP's own
     already-long-lived process, not a stub someone forgot to wire up to
     the daemon — but it does mean ``dekko daemon status``'s cache
@@ -102,8 +102,8 @@ class Context:
             server session. A long-lived MCP session used to pay the
             full ``map.json`` parse + index-rebuild cost
             (``mapfile.load_map``) on *every single* tool call, even
-            back-to-back calls against an unchanged map (round-08
-            §2.6) — this cache is checked, and only refreshed on a
+            back-to-back calls against an unchanged map — this cache
+            is checked, and only refreshed on a
             ``mapfile.check_freshness`` miss, so a warm session skips
             straight to the cheap freshness check instead.
     """
@@ -114,7 +114,7 @@ class Context:
 
 
 # Worker count for a rev-cache-miss old-side re-parse/resolve behind
-# ``impacted_tests``/``workset`` (round 31 P4.1). These tools used to
+# ``impacted_tests``/``workset``. These tools used to
 # call ``affected.run``/``workset.run`` without ``jobs`` at all, so they
 # inherited the functions' own sequential default: a first-touch call
 # on tensorflow ran single-threaded for 12+ minutes, far past any MCP
@@ -146,7 +146,7 @@ def _with_notes(out: str, err: str, fallback: str = "") -> str:
     otherwise-successful (exit 0) run — the CLI shows a human both
     streams, so this loses nothing there. An MCP tool result is
     stdout-only, so without this call every one of those notes
-    silently vanished (round-12 master report §3.1): a "47 callers"
+    silently vanished: a "47 callers"
     answer looked identical whether or not another 1,385 call sites
     were resolved ambiguously and excluded.
 
@@ -168,8 +168,7 @@ def _with_notes(out: str, err: str, fallback: str = "") -> str:
 
 
 # Cap on the sparse-file caveats a directory ``outline`` forwards
-# through ``_with_notes``. Round 31 tensorflow.md Observation 4.3:
-# ``outline``'s row content is already budget-capped
+# through ``_with_notes``. ``outline``'s row content is already budget-capped
 # (``DEFAULT_ORIENT_BUDGET``/``_outline_limit_arg``), but
 # ``outline.py``'s per-file "few named symbols" caveat
 # (``_sparse_note``) is emitted to stderr once per file in the
@@ -243,8 +242,7 @@ def _require(args: dict, key: str) -> str:
     value = args.get(key)
     if value is not None and not isinstance(value, str):
         # Present but mistyped is a different mistake from absent, and
-        # "missing" sends the caller hunting for a key it already sent
-        # (round 31 tensorflow coverage pass, finding 4.1).
+        # "missing" sends the caller hunting for a key it already sent.
         raise ToolError(
             f"argument '{key}' must be a string, got {type(value).__name__}"
         )
@@ -288,7 +286,7 @@ def _limit_arg(args: dict) -> int:
 def _resolve_symbol_alias(tool_name: str, args: dict) -> dict:
     """Accept ``name`` as an alias for ``symbol`` on tools that need it.
 
-    Two independent round-24 evaluators guessed ``name`` instead of
+    Agents repeatedly guessed ``name`` instead of
     ``symbol`` on ``query_symbol``/``get_callers``/``get_supertypes``,
     since ``find_usages`` uses ``name`` for its own equivalent
     argument -- this closes that first-guess gap without renaming
@@ -337,7 +335,7 @@ def _index_for(
     Checks ``ctx.index_cache`` first: a cached index for this root that
     ``mapfile.check_freshness`` still reports fresh is reused outright,
     skipping ``map.json``'s JSON parse and the full symbol/call-graph
-    index rebuild — the dominant cost of a reload, per round-08 §2.6.
+    index rebuild — the dominant cost of a reload.
     ``check_freshness`` itself still runs on every call (a cheap
     provenance/mtime comparison, not a reload), so a map regenerated
     out-of-band (another process, or this session's own
@@ -676,7 +674,7 @@ def tool_search_code(ctx: Context, args: dict) -> str:
     include_tests = bool(args.get("include_tests", False))
     # Load unfiltered first so a not-``include_tests`` call can report
     # how many test-path symbols ``.without_tests()`` dropped before
-    # ranking ever saw them (round-08 §2.2's exclusion hint) — mirrors
+    # ranking ever saw them (the exclusion hint) — mirrors
     # ``cli.run_search``'s own before/after count.
     index = _index_for(ctx, args, include_tests=True)
     excluded_test_count = 0
@@ -916,12 +914,12 @@ def _version_stale_action(fresh: mapfile.Freshness) -> str:
     ``refresh_map`` regenerates *in-process*, using whatever extractor
     code this same MCP server process already has loaded — Python
     doesn't hot-reload imported modules, so if *this* process is the
-    stale party, an in-process regen cannot pick up the newer code
-    (round-23 §12: zed.md/cline.md). Until round 33 nothing could tell
-    which party was stale, so this always said "restart". Now
-    ``fresh.process_outdated`` carries the answer (``selfcheck.
-    classify`` asked the disk): an outdated process says restart, and
-    a current process looking at a genuinely old map says regenerate.
+    stale party, an in-process regen cannot pick up the newer code.
+    Previously nothing could tell which party was stale, so this
+    always said "restart". Now ``fresh.process_outdated`` carries the
+    answer (``selfcheck.classify`` asked the disk): an outdated process
+    says restart, and a current process looking at a genuinely old map
+    says regenerate.
 
     Args:
         fresh: A freshness verdict with ``reason == "version"``.
@@ -932,7 +930,7 @@ def _version_stale_action(fresh: mapfile.Freshness) -> str:
     if fresh.process_outdated:
         return "restart the dekko MCP server process"
 
-    # Round 33 Track 1: the installed code agrees with this process,
+    # The installed code agrees with this process,
     # so the *map* is the stale party and a regen is the real fix.
     # Any read tool will do it automatically; ``refresh_map`` forces it.
     return "call refresh_map (any read tool also regenerates it)"
@@ -987,14 +985,14 @@ def tool_map_status(ctx: Context, args: dict) -> str:
 def tool_refresh_map(ctx: Context, args: dict) -> str:
     """Regenerate the map (optionally a full, uncached rebuild).
 
-    Round-23 §12 found that an outdated server's in-process regen
-    re-extracts with stale code and re-stamps the result "fresh", and
-    settled for disclosing it. Round 33 Track 1 removes the problem
-    instead: ``repo_ops.regen_map`` hands the whole regen to the
-    installed dekko whenever this process is outdated
-    (``selfcheck.process_outdated``), so the map is always built by
-    current code. The standing outdated-server note on every reply
-    (``_with_outdated_note``) covers the disclosure.
+    An outdated server's in-process regen re-extracts with stale code
+    and re-stamps the result "fresh", which dekko used to settle for
+    disclosing. This removes the problem instead:
+    ``repo_ops.regen_map`` hands the whole regen to the installed dekko
+    whenever this process is outdated (``selfcheck.process_outdated``),
+    so the map is always built by current code. The standing
+    outdated-server note on every reply (``_with_outdated_note``)
+    covers the disclosure.
     """
     root = _root_of(ctx, args)
     full = bool(args.get("full", False))
@@ -1055,7 +1053,7 @@ _TASK_PROP = {
 # every schema below is sent to the model on each session, so each entry
 # pays rent in context tokens. trace_path / find_unused / stats / lean /
 # ledger are CLI-only — diagnostic/operator surface with no observed
-# agent usage (2026-07-10 eval transcripts). Their ``tool_*`` handler
+# agent usage in real agent transcripts. Their ``tool_*`` handler
 # functions above are kept and exercised directly by tests, but they
 # are not registered in ``_HANDLERS`` (built from this list), so an
 # MCP client cannot reach them; `dekko <cmd>` is unaffected.
@@ -1628,15 +1626,14 @@ def _handle_tools_list(req_id: Any) -> dict:
 def _with_default_root_note(ctx: Context, args: dict, text: str) -> str:
     """Prefix a successful reply with the root it actually resolved to.
 
-    Four independent evaluators (2026 fable token-usage tests, bug
-    #1/B1) hit the same failure on four different repos/languages:
+    Agents on four different repos/languages hit the same failure:
     omitting ``root`` silently resolves against the server's cwd —
     often dekko's own project, not the repo an agent meant to query —
     and a wrong-repo answer otherwise looks identical in shape to a
     correct one. Requiring ``root`` on every call would be a bigger
     ergonomics regression, and guessing "does this answer plausibly
     belong to the target repo" has its own false-negative risk, so
-    this takes the report's own minimum-viable fix: echo the resolved
+    this takes the minimum-viable fix: echo the resolved
     root on every reply that used the default, so a wrong-repo answer
     is visually obvious immediately instead of only discovered later.
 
@@ -1669,7 +1666,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         text = _with_default_root_note(ctx, args, handler(ctx, args))
         is_error = False
     except ToolError as exc:
-        # Round 33 Track 6f: the root line used to be applied only to
+        # The root line used to be applied only to
         # successful replies. The likeliest outcome of asking one
         # repo's question of another repo's map is a not-found error
         # with plausible closest-matches from the wrong repo -- the
@@ -1683,8 +1680,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         # predates that format and can't safely read it. Restarting
         # the process (not the repo) is the fix, so say that plainly
         # instead of surfacing whatever opaque shape-mismatch error
-        # would otherwise fire first (see
-        # .features/fixes/stale-map-json-mcp-crash.md).
+        # would otherwise fire first.
         text, is_error = (
             "dekko: this MCP server process was started before "
             "map.json was last regenerated in a newer format (e.g. "
@@ -1698,8 +1694,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         # non-numeric, ...) — the document is corrupted or was read
         # mid-write, not merely newer than this process understands.
         # Restarting the server won't fix a broken file, so point at
-        # regenerating the map instead (see
-        # .features/fixes/stale-map-json-mcp-crash.md).
+        # regenerating the map instead.
         text, is_error = (
             'dekko: map.json\'s "version" field is missing or '
             "invalid, so it can't be read. The file may be "
@@ -1709,7 +1704,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         )
     except BrokenProcessPool:
         # A process pool broke twice in a row (once on the first
-        # attempt, once on round 17's reduced-parallelism retry —
+        # attempt, once on the reduced-parallelism retry —
         # see resolver.py's run_pooled_with_retry) -- persistent, not
         # transient, contention. Most often another concurrent
         # ``dekko`` process on this machine (e.g. a heavy `dekko map
@@ -1727,7 +1722,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
         )
     except PoolStalledError as exc:
         # A process-pool worker never returned a result within
-        # resolver.POOL_RESULT_TIMEOUT_S (round 21 Track A: a spawned
+        # resolver.POOL_RESULT_TIMEOUT_S (a spawned
         # worker resolving a completely different Python interpreter
         # than its own parent hung indefinitely at 0% CPU with no
         # error). Same "point at the fix" shape as the

@@ -2,19 +2,19 @@
 
 Built in layers off the shared ``MapIndex`` (extract once, render many):
 
-- **FR1 backbone** — every in-scope file, one line + purpose, grouped by
+- **Backbone** — every in-scope file, one line + purpose, grouped by
   directory. Production paths are the never-elided *floor*.
-- **FR2/FR4 atoms** — each symbol's name and signature, ranked by Q1
+- **Atoms** — each symbol's name and signature, ranked by
   centrality (fan-in x churn).
-- **FR3 module edges** — the coarse directory dependency shape.
+- **Module edges** — the coarse directory dependency shape.
 
-The **NFR2 degradation ladder** (:func:`render`) composes these under a
+The **degradation ladder** (:func:`render`) composes these under a
 hard, repo-scaled cap (:func:`effective_cap`), shedding depth in a fixed
 preservation order — mermaid, collapse tests, signatures, names, module
 edges, purpose width, then the path-only floor — until the document
-fits, and reports what it dropped (:class:`LeanReport`, NFR5). Every step
+fits, and reports what it dropped (:class:`LeanReport`). Every step
 is a pure, deterministic function of the map so the same input yields
-byte-stable output (NFR3).
+byte-stable output.
 """
 
 import json
@@ -32,7 +32,7 @@ from dekko.analysis.relevance import TaskContext
 from dekko.textutil import count_lines, dir_of, oneline, signature
 
 # Default (and maximum) purpose width. The render layer may narrow this
-# toward 0 as the budget tightens (the FR1 floor sub-ladder); it never
+# toward 0 as the budget tightens (the floor sub-ladder); it never
 # widens past what was captured at compute time.
 LEAN_PURPOSE_WIDTH = 72
 # Separator between a file's basename and its purpose. Two spaces, no
@@ -42,20 +42,21 @@ SEP = "  "
 # Indent for a symbol atom rendered under its file row.
 ATOM_INDENT = "    "
 
-# Cap scaling (Q3): cap = max(min(MAX, BASE + PER_FILE * files), floor).
+# Cap scaling: cap = max(min(MAX, BASE + PER_FILE * files), floor).
 # Scaling grows the map with the repo; MAX keeps "lean" lean; the floor
-# (path-only backbone) guarantees the cap is never below what FR1 needs.
+# (path-only backbone) guarantees the cap is never below what the
+# backbone needs.
 LEAN_CAP_BASE = 3000
 LEAN_CAP_PER_FILE = 12
 LEAN_CAP_MAX = 12000
 # Tokens reserved for the self-describing header so the body fit leaves
-# room for it (NFR5). Generous: the header is at most a few lines.
+# room for it. Generous: the header is at most a few lines.
 _HEADER_RESERVE_TOK = 64
-# FR6/Q5: cap the mermaid block by directory-node count. Independent of
+# Cap the mermaid block by directory-node count. Independent of
 # the token budget — it stops an unreadable hairball even when the
 # budget would allow it. The block is the ladder's first drop regardless.
 LEAN_MERMAID_MAX_NODES = 40
-# FR-D1 dense mode: keep signatures only on this many most-central atoms
+# Dense mode: keep signatures only on this many most-central atoms
 # (names for the rest), regardless of budget headroom. The tersest skin.
 LEAN_DENSE_SIGNATURES = 30
 
@@ -71,7 +72,7 @@ class BackboneRow:
             module doc.
         demotable: True for test/fixture/vendored files. The ladder may
             collapse these to a per-directory line; production rows
-            never collapse (the FR1 floor guarantee).
+            never collapse (the floor guarantee).
     """
 
     path: str
@@ -96,7 +97,7 @@ class BackboneGroup:
 
 
 def compute_backbone(index: MapIndex) -> list[BackboneGroup]:
-    """Build the deterministic file backbone (the FR1 floor).
+    """Build the deterministic file backbone (the floor).
 
     Reads only the in-scope file set (``languages_by_path``), each
     file's purpose (``docs_by_path``), and its test classification. No
@@ -179,12 +180,12 @@ def _collapsed_line(group: BackboneGroup) -> str:
     return f"{group.directory}/  ({n} {noun})"
 
 
-# --- FR2/FR4: per-symbol atoms + Q1 centrality -----------------------
+# --- Per-symbol atoms + centrality ----------------------------------
 
 
 @dataclass(frozen=True)
 class SymbolAtom:
-    """A sheddable per-symbol unit: its FR2 name and FR4 signature.
+    """A sheddable per-symbol unit: its name and signature.
 
     The degradation ladder drops a symbol's signature, then its name,
     lowest ``centrality`` first — so this carries both renderings plus
@@ -192,12 +193,12 @@ class SymbolAtom:
 
     Attributes:
         sym_id: Stable symbol id (``path::Qualified.name``).
-        name: Bare name — the FR2 atom (the cheaper rendering).
-        signature: One-line ``name(params) -> ret`` — the FR4 atom.
-        centrality: Fan-in weighted by file churn (Q1); higher survives
+        name: Bare name (the cheaper rendering).
+        signature: One-line ``name(params) -> ret``.
+        centrality: Fan-in weighted by file churn; higher survives
             longer. Degrades to plain fan-in without churn data.
         path: Repo-relative POSIX path of the defining file.
-        demotable: True for test/fixture/vendored code (FR5).
+        demotable: True for test/fixture/vendored code.
     """
 
     sym_id: str
@@ -209,7 +210,7 @@ class SymbolAtom:
 
 
 def _centrality(fan_in: int, churn_count: int, max_churn: int) -> float:
-    """Fan-in weighted by normalized file churn (Q1, ladder §5).
+    """Fan-in weighted by normalized file churn.
 
     Degrades to plain fan-in when there is no churn signal (non-git
     root, churn disabled), so the ranking always has a stable meaning.
@@ -230,7 +231,7 @@ def _centrality(fan_in: int, churn_count: int, max_churn: int) -> float:
 def build_atoms(
     index: MapIndex, churn: Counter[str]
 ) -> dict[str, list[SymbolAtom]]:
-    """Build per-file FR2/FR4 atoms with Q1 centrality.
+    """Build per-file symbol atoms with centrality.
 
     Pure in ``churn``: pass ``summary.file_churn(root)`` for the real
     signal, or an empty counter to rank on fan-in alone. Atoms stay in
@@ -272,16 +273,16 @@ def centrality_key(atom: SymbolAtom) -> tuple[float, str]:
     """Drop-order key for the ladder: shed lowest centrality first.
 
     Ascending order puts the least central atoms first (dropped first);
-    ``sym_id`` breaks ties for byte-stable output (NFR3).
+    ``sym_id`` breaks ties for byte-stable output.
     """
     return (atom.centrality, atom.sym_id)
 
 
-# --- FR3: module-edge text -------------------------------------------
+# --- Module-edge text ------------------------------------------------
 
 
 def module_edges(index: MapIndex) -> list[tuple[str, str]]:
-    """The coarse directory-level dependency edges (FR3).
+    """The coarse directory-level dependency edges.
 
     A thin accessor over ``export.dir_graph`` — the same generator that
     backs MAP.md's mermaid and (later) the lean map's mermaid block, so
@@ -300,7 +301,7 @@ def module_edges(index: MapIndex) -> list[tuple[str, str]]:
 
 
 def render_module_edges(edges: list[tuple[str, str]]) -> list[str]:
-    """Render module edges as dense per-source lines (FR3).
+    """Render module edges as dense per-source lines.
 
     One line per source directory, its targets joined on that line, so
     the dependency shape reads top-to-bottom without a table::
@@ -325,7 +326,7 @@ def render_module_edges(edges: list[tuple[str, str]]) -> list[str]:
     return lines
 
 
-# --- NFR2: the model, the cap, the degradation ladder ----------------
+# --- The model, the cap, the degradation ladder ----------------------
 
 
 @dataclass
@@ -333,10 +334,10 @@ class LeanModel:
     """Everything the ladder can render, at full fidelity.
 
     Attributes:
-        groups: FR1 backbone groups.
-        atoms_by_path: FR2/FR4 symbol atoms, per file.
-        module_edges: FR3 directory dependency edges.
-        mermaid: FR6 pre-rendered mermaid lines (empty until FR6 lands).
+        groups: Backbone groups.
+        atoms_by_path: Symbol atoms, per file.
+        module_edges: Directory dependency edges.
+        mermaid: Pre-rendered mermaid lines (empty when omitted).
     """
 
     groups: list[BackboneGroup]
@@ -347,7 +348,7 @@ class LeanModel:
 
 @dataclass(frozen=True)
 class CapConfig:
-    """Cap-scaling knobs (Q3); ``override`` is the ``--budget`` flag."""
+    """Cap-scaling knobs; ``override`` is the ``--budget`` flag."""
 
     base: int = LEAN_CAP_BASE
     per_file: int = LEAN_CAP_PER_FILE
@@ -357,9 +358,9 @@ class CapConfig:
 
 @dataclass
 class LeanReport:
-    """What the ladder shed, for the self-describing header (NFR5).
+    """What the ladder shed, for the self-describing header.
 
-    The Meter's richer cousin: F1's ``Meter`` tracks one omission axis;
+    The Meter's richer cousin: ``Meter`` tracks one omission axis;
     the ladder sheds along several, each with its own recovery path.
     """
 
@@ -377,7 +378,7 @@ class LeanReport:
 
     @property
     def per_signal(self) -> float | None:
-        """Tokens spent per signal covered (FR-D3), or ``None``."""
+        """Tokens spent per signal covered, or ``None``."""
         if self.signals <= 0:
             return None
         return round(self.tokens / self.signals, 1)
@@ -462,14 +463,14 @@ class _LeanState:
 def build_mermaid(
     index: MapIndex, max_nodes: int = LEAN_MERMAID_MAX_NODES
 ) -> list[str]:
-    """A fenced mermaid block of the directory graph (FR6/Q5).
+    """A fenced mermaid block of the directory graph.
 
-    The visual skin of the same ``export.dir_graph`` that FR3 renders as
-    text, so the diagram and the module-edge lines never disagree.
-    Capped by directory-node count (not the token budget); above the cap
-    it is omitted, since FR3 text still carries the edges and
-    ``dekko export --format mermaid`` draws the full graph. The ladder
-    drops this block first under budget pressure.
+    The visual skin of the same ``export.dir_graph`` that the module
+    edges render as text, so the diagram and the module-edge lines never
+    disagree. Capped by directory-node count (not the token budget);
+    above the cap it is omitted, since the module-edge text still carries
+    the edges and ``dekko export --format mermaid`` draws the full graph.
+    The ladder drops this block first under budget pressure.
 
     Args:
         index: Loaded map index.
@@ -488,7 +489,7 @@ def build_mermaid(
 def build_model(index: MapIndex, root: Path) -> LeanModel:
     """Assemble the full-fidelity lean model from the map.
 
-    Captures git churn once (best-effort) for the Q1 centrality of the
+    Captures git churn once (best-effort) for the centrality of the
     symbol atoms. The ladder treats the mermaid block as its first,
     optional drop.
 
@@ -508,10 +509,10 @@ def build_model(index: MapIndex, root: Path) -> LeanModel:
 
 
 def effective_cap(model: LeanModel, config: CapConfig) -> int:
-    """The hard token cap (Q3): repo-scaled and floor-aware.
+    """The hard token cap: repo-scaled and floor-aware.
 
     ``--budget`` (``config.override``) replaces the scaled target, but
-    the result is never below the cost of the path-only floor — FR1's
+    the result is never below the cost of the path-only floor — the
     backbone must always be renderable, so the cap bends, not the floor.
 
     Args:
@@ -542,7 +543,7 @@ def render(
     dense: bool = False,
     seen: set[str] | None = None,
 ) -> tuple[list[str], LeanReport]:
-    """Render the lean map under ``cap`` via the NFR2 ladder (§3).
+    """Render the lean map under ``cap`` via the degradation ladder.
 
     Sheds depth in fixed preservation order, re-measuring after each
     action and stopping at the first shape that fits, so the richest
@@ -554,9 +555,9 @@ def render(
         cap: Token budget from :func:`effective_cap`.
         scores: Optional per-symbol survival scores (task-aware, higher
             survives longer); ``None`` sheds by plain centrality.
-        dense: FR-D1 — keep signatures only on the most-central atoms
+        dense: Keep signatures only on the most-central atoms
             (names for the rest) regardless of budget headroom.
-        seen: FR-D2 — symbol ids already in the agent's context; these
+        seen: Symbol ids already in the agent's context; these
             atoms are omitted and counted, so a re-surfaced map carries
             only what is new.
 
@@ -601,7 +602,7 @@ def render(
 
 
 def _force_dense_sigs(state: _LeanState, live: list[SymbolAtom]) -> None:
-    """FR-D1: drop signatures for all but the top-K central atoms.
+    """Drop signatures for all but the top-K central atoms.
 
     ``live`` is ascending by survival score, so the most-central atoms
     are its tail; everything before the last ``LEAN_DENSE_SIGNATURES``
@@ -615,7 +616,7 @@ def _force_dense_sigs(state: _LeanState, live: list[SymbolAtom]) -> None:
 def _count_signals(
     model: LeanModel, state: _LeanState, live: list[SymbolAtom]
 ) -> int:
-    """Files + symbols actually rendered (FR-D3 density numerator)."""
+    """Files + symbols actually rendered (density numerator)."""
     rendered_syms = sum(
         1
         for a in live
@@ -641,8 +642,8 @@ def generate(
 
     When ``task`` carries a signal, the symbol atoms are shed in a
     task-aware order (relevant atoms survive the ladder longer); without
-    it the order is plain Q1 centrality and output is unchanged. ``dense``
-    (FR-D1) and ``seen`` (FR-D2) tune the density independently of budget.
+    it the order is plain centrality and output is unchanged. ``dense``
+    and ``seen`` tune the density independently of budget.
     """
     config = config or CapConfig()
     model = build_model(index, root)
@@ -655,7 +656,7 @@ def generate(
 
 
 def _relevance_scores(model: LeanModel, task: TaskContext) -> dict[str, float]:
-    """Blend task relevance with Q1 centrality over the live atoms.
+    """Blend task relevance with centrality over the live atoms.
 
     Scores only the atoms the ladder can shed (those in expanded,
     non-demotable groups); demotable atoms are collapsed wholesale and
@@ -700,7 +701,7 @@ def run(
             optionally-committed artifact (e.g. ``.dekko/LEAN.md``).
         task: Optional task context; when set, the symbol atoms are shed
             in a task-aware order so relevant code survives the ladder.
-        dense: Keep signatures only on the most-central atoms (FR-D1).
+        dense: Keep signatures only on the most-central atoms.
 
     Returns:
         Always ``0``.
@@ -710,10 +711,10 @@ def run(
     )
     if budget is not None and report.cap > budget:
         # ``effective_cap`` never lets the cap fall below the
-        # path-only floor (FR1's backbone must always be renderable —
+        # path-only floor (the backbone must always be renderable —
         # "the cap bends, not the floor"), so a tight ``--budget`` can
         # be silently overridden with no visible difference from an
-        # unbudgeted run on a large repo (round-09 §2.4: claude-code's
+        # unbudgeted run on a large repo (claude-code's
         # ``--budget 500`` produced the same ~9,944 tokens as the
         # default run). ``report.cap`` is exactly what the ladder
         # actually rendered against, so a mismatch against the
@@ -808,10 +809,10 @@ def _live_atoms(
 
     These are the only atoms the ladder sheds: demotable groups are
     collapsed wholesale at rung 2, so their atoms never render. Without
-    ``scores`` the order is ascending Q1 centrality; with task-aware
+    ``scores`` the order is ascending centrality; with task-aware
     ``scores`` it is ascending blended score, so relevant atoms sort to
     the tail and are shed last. ``sym_id`` breaks ties for byte-stable
-    output (NFR3).
+    output.
     """
     live: list[SymbolAtom] = []
     for group in model.groups:
@@ -864,7 +865,7 @@ def _atom_lines(model: LeanModel, path: str, state: _LeanState) -> list[str]:
 
 def _atom_form(state: _LeanState, atom: SymbolAtom) -> str | None:
     """Rendering of an atom: ``sig``, ``name``, or dropped (``None``)."""
-    if atom.sym_id in state.seen:  # FR-D2: already in context
+    if atom.sym_id in state.seen:  # already in context
         return None
     if atom.sym_id in state.dropped_names:
         return None
@@ -874,7 +875,7 @@ def _atom_form(state: _LeanState, atom: SymbolAtom) -> str | None:
 
 
 def _edge_block(model: LeanModel, state: _LeanState) -> list[str]:
-    """The FR3 module-edge section, or nothing when shed/empty."""
+    """The module-edge section, or nothing when shed/empty."""
     if not state.module_edges:
         return []
     edge_lines = render_module_edges(model.module_edges)
@@ -886,7 +887,7 @@ def _edge_block(model: LeanModel, state: _LeanState) -> list[str]:
 def _assemble(
     report: LeanReport, body: list[str]
 ) -> tuple[list[str], LeanReport]:
-    """Prepend the NFR5 header, recording the final token count.
+    """Prepend the self-describing header, recording the final token count.
 
     Uses the same ``count_lines`` measure as the fit decision so the
     reported figure never contradicts the cap the ladder fit to.
@@ -896,7 +897,7 @@ def _assemble(
 
 
 def _header_lines(report: LeanReport) -> list[str]:
-    """The self-describing header (NFR5): budget, drops, recovery."""
+    """The self-describing header: budget, drops, recovery."""
     lines = [report.footer()]
     if report.dropped_any:
         lines.append(

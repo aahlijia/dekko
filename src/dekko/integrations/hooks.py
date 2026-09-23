@@ -1,4 +1,4 @@
-"""Claude Code hook entrypoints: the opt-in push layer (Pillar A).
+"""Claude Code hook entrypoints: the opt-in push layer.
 
 Every other dekko surface is *pull* — it helps only when the agent knows
 to ask. This module is the **push** wiring: thin handlers that Claude Code
@@ -16,11 +16,11 @@ Four events, each individually opt-in (``dekko hooks install``):
 * **UserPromptSubmit** (``prompt-submit``) — for the submitted prompt,
   a short pointer to the most task-relevant files *not already in
   context* (relevance ⋈ ledger dedup), with the list tightening as the
-  session's token budget fills (FR-C3).
+  session's token budget fills.
 * **PreToolUse / Read** (``pre-read``) — a non-blocking advisory to
   outline a large file first, injected through ``additionalContext``
   with no ``permissionDecision`` at all, so the read proceeds through
-  the normal permission flow untouched (Resolved Q5). It used to send
+  the normal permission flow untouched. It used to send
   ``permissionDecision: "defer"``, which is not an advisory: Claude
   Code defines ``defer`` as "hand this decision to an Agent SDK
   wrapper" in non-interactive mode, and the reason text of a non-ask
@@ -35,7 +35,7 @@ Four events, each individually opt-in (``dekko hooks install``):
 
 Every handler is **fail-silent**: any error, missing map, or empty signal
 yields no output and a clean exit, so a hook can never break or hijack a
-session (NFR-3, NFR-4). State is read from the transcript Claude Code
+session. State is read from the transcript Claude Code
 already maintains; dekko persists none of its own.
 """
 
@@ -58,10 +58,10 @@ EXIT_OK = 0
 SESSION_MAP_BUDGET = 2000
 # Hard ceiling on SessionStart's own payload, independent of
 # `render_lean.effective_cap()`'s floor guarantee (which never returns
-# less than the path-only floor, however large that is). Round 25
-# spring-boot.md finding 1: on a 9,942-file repo, the floor itself was
-# ~113K tok -- ~56x SESSION_MAP_BUDGET -- and `session_start` rendered
-# it anyway (disclosed, per the round-13 note below, but still injected
+# less than the path-only floor, however large that is). On a
+# 9,942-file repo like spring-boot, the floor itself was ~113K tok --
+# ~56x SESSION_MAP_BUDGET -- and `session_start` rendered it anyway
+# (disclosed, per the note below, but still injected
 # unconditionally into every new session). When even the floor exceeds
 # this ceiling, `session_start` drops the map body entirely rather than
 # inject an unboundedly large payload automatically; a wider map is
@@ -121,7 +121,7 @@ def _additional_context(event_name: str, text: str) -> dict:
 
 
 def session_start(payload: dict) -> dict | None:
-    """Inject a steering preamble + budget-capped lean map (FR-A1)."""
+    """Inject a steering preamble + budget-capped lean map."""
     root = _root_from(payload)
     index = _load_index(root, allow_regen=True)
     if index is None:
@@ -139,15 +139,13 @@ def session_start(payload: dict) -> dict | None:
     if note:
         parts.append(note)
     if report.cap > SESSION_MAP_HARD_CEILING:
-        # round-25 spring-boot.md finding 1: on a repo whose path-only
-        # floor exceeds even this hard ceiling (spring-boot: ~113K tok,
-        # ~56x SESSION_MAP_BUDGET), rendering the floor anyway -- the
-        # round-13 behavior below -- means a hook that fires
-        # automatically, with zero user choice, on every new session
-        # costs more than the whole session's context is worth
-        # protecting. There is currently no rung between the full
-        # path-only floor and "nothing" for `render_lean` to fall back
-        # to (see the design doc), so this drops the map body entirely
+        # On a repo whose path-only floor exceeds even this hard ceiling
+        # (spring-boot: ~113K tok, ~56x SESSION_MAP_BUDGET), rendering the
+        # floor anyway -- the behavior below -- means a hook that fires
+        # automatically, with zero user choice, on every new session costs more
+        # than the whole session's context is worth protecting. There is
+        # currently no rung between the full path-only floor and "nothing" for
+        # `render_lean` to fall back to, so this drops the map body entirely
         # rather than inject an unboundedly large payload.
         parts.append(
             f"note: this repo's path-only floor (~{report.cap} tok) is "
@@ -159,8 +157,8 @@ def session_start(payload: dict) -> dict | None:
         )
     else:
         if report.cap > SESSION_MAP_BUDGET:
-            # round-13 tensorflow.md: on a repo whose path-only floor
-            # alone exceeds SESSION_MAP_BUDGET (a large monorepo can
+            # On a repo whose path-only floor alone exceeds
+            # SESSION_MAP_BUDGET (a large monorepo can
             # need ~80K tokens just to list every file), `effective_cap`
             # bends the cap upward the same way `render_lean.run()`'s
             # `--budget` floor already does for the `lean` CLI command
@@ -187,7 +185,7 @@ def session_start(payload: dict) -> dict | None:
 
 
 def _adaptive_top(view: ledger.LedgerView) -> int:
-    """Fewer files as the session's token budget fills (FR-C3)."""
+    """Fewer files as the session's token budget fills."""
     remaining = view.remaining(SESSION_TOKEN_BUDGET)
     scaled = PROMPT_TOP_FILES * remaining // SESSION_TOKEN_BUDGET
     return max(1, min(PROMPT_TOP_FILES, scaled))
@@ -202,7 +200,7 @@ def _file_candidates(
     for path in index.languages_by_path:
         state = view.files.get(path)
         if state is not None and state.fully_read:
-            continue  # dedup (FR-C2)
+            continue  # dedup
         doc = index.docs_by_path.get(path) or ""
         names = " ".join(
             s.name for s in index.symbols_by_path.get(path, [])[:_NAME_SAMPLE]
@@ -237,7 +235,7 @@ def _relevant_files(
 
 
 def prompt_submit(payload: dict) -> dict | None:
-    """Point at the files most relevant to the new prompt (FR-A2)."""
+    """Point at the files most relevant to the new prompt."""
     prompt = payload.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return None
@@ -273,7 +271,7 @@ def _view(payload: dict, index: MapIndex, root: Path) -> ledger.LedgerView:
 
 
 def pre_read(payload: dict) -> dict | None:
-    """Advise outlining a large file first — non-blocking (FR-A3, Q5)."""
+    """Advise outlining a large file first — non-blocking."""
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
         return None
@@ -331,7 +329,7 @@ _CAT_CMDS = {"cat", "head", "sed"}
 # `grep somepattern one_file.py` is a targeted read, not a blind search.
 # Short flags combine (`-rn`, `-rli`, `-nRE`, ...), so
 # ``_is_recursive_flag`` reads the letters rather than matching whole
-# tokens: eval transcripts show `-rn`, `-rln`, `-rl`, `-rnE`, `-rli`
+# tokens: agent transcripts show `-rn`, `-rln`, `-rl`, `-rnE`, `-rli`
 # and `-rnw` all in live use.
 _RECURSIVE_LONG_FLAGS = {"--recursive", "--dereference-recursive"}
 
@@ -560,7 +558,7 @@ def _load_settings(path: Path) -> dict:
 def _detect_indent(path: Path) -> int | str:
     """Best-effort guess of an existing settings file's indent style.
 
-    Round 25 finding #17: rewriting always hard-coded 2-space indent
+    Rewriting used to always hard-code 2-space indent
     even when the file already on disk used a different width (or
     tabs), producing unnecessary whitespace-only diff noise for anyone
     tracking that file. Reads the first indented line above the file's
@@ -710,8 +708,7 @@ def uninstall(root: Path) -> int:
         # Nothing left to keep -- remove the file (and the now-empty
         # .claude/ dir it lived in, if nothing else uses it) rather
         # than leaving a stray `{}` behind, matching --claude-md-
-        # install/uninstall's own byte-identical restoration (round 25
-        # finding #16).
+        # install/uninstall's own byte-identical restoration.
         path.unlink()
         try:
             path.parent.rmdir()

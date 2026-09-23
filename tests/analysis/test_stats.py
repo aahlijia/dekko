@@ -47,7 +47,7 @@ def test_stats_json_shape_and_hotspot(
 def test_stats_discloses_unsupported_file_coverage_gap(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round-29 Track 4b: unlike status/summary/orient/query, `stats`
+    # Unlike status/summary/orient/query, `stats`
     # never surfaced the "N files unparsed" coverage note at all --
     # not gated behind an empty result the way query's is (stats has
     # no such branch), always shown when the map skipped something.
@@ -69,7 +69,7 @@ def test_stats_json_discloses_unsupported_file_coverage_gap(
 def test_hotspots_exclude_noise_names() -> None:
     # A symbol named ``String``/``expect``/etc. must never surface in
     # a fan-in/fan-out ranking, even with a very high adjacency count
-    # — see investigation-1.2-resolver-fanin.md: these names collide
+    # because these names collide
     # with JS/TS built-ins/globals often enough that even after the
     # resolver-level fix, a residual high count here is still a red
     # flag, not a real hotspot worth surfacing.

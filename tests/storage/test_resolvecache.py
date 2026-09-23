@@ -1,12 +1,10 @@
-"""The .dekko per-file call-resolution cache (round 30, Track 1).
+"""The .dekko per-file call-resolution cache.
 
 The load-bearing property is parity: an incremental map that reuses
 cached resolution must produce the same map.json as a full rebuild of the
 same tree. A parity assertion alone is not enough, though — it passes
 trivially if the reuse gate never fires — so these tests also assert
 *when* the gate fires and when it correctly refuses to.
-
-See ``.features/fixes/round30/01-incremental-resolution.md``.
 """
 
 import gzip
@@ -223,8 +221,8 @@ def test_parity_across_symbol_edit_shapes(
     expect_full_fallback: bool,
     expect_dirty: set[str] | None,
 ) -> None:
-    """The acceptance bar: for each of the five required edit shapes
-    (WP-B), an incremental map and a ``--full`` map of the same edited
+    """The acceptance bar: for each of the five required edit shapes,
+    an incremental map and a ``--full`` map of the same edited
     tree must produce identical ``map.json`` -- and the fast path (a
     narrow ``dirty`` set, never falling back to a full resolve except
     for the struct/class case) must actually have been taken, not just
@@ -332,9 +330,7 @@ def test_gate_narrows_when_an_unrelated_symbol_is_added(
     edge, ambiguous entry, or import references it), so b.py's cached
     edge into ``a.helper`` stays trustworthy and only a.py itself needs
     re-resolving. v1 forced a full re-resolve here; that blanket rule is
-    what this whole work package exists to narrow -- see WP-B in
-    ``test-repos/reports/31-tokentest-7repo-post04355/
-    FIX-PLAN-remaining.md``.
+    what this change exists to narrow.
     """
     root = make_mapped_repo(SRC)
     (root / "a.py").write_text(
@@ -411,7 +407,7 @@ def test_gate_refuses_outright_when_a_type_kind_symbol_changes(
 def test_gate_widens_for_a_new_constructor_on_an_existing_class(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """Constructor-collapse gap (WP-B dependency audit): adding
+    """Constructor-collapse gap (dependency audit): adding
     ``__init__`` to a class never changes the class's own bare name, so
     a caller's already-cached ``Widget()`` edge doesn't literally
     mention ``__init__`` anywhere. ``_constructor_of`` would now find
@@ -439,7 +435,7 @@ def test_gate_widens_for_a_new_constructor_on_an_existing_class(
 def test_gate_widens_for_an_import_alias_newly_resolving(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """Import-alias gap (WP-B dependency audit): a call through an
+    """Import-alias gap (dependency audit): a call through an
     import alias whose target doesn't exist yet is cached as
     ``external``, keyed by the alias text as written -- never by the
     real name ``_alias_candidates`` looked up

@@ -201,9 +201,9 @@ def test_load_map_raises_on_malformed_doc_version(
 def test_provenance_records_unsupported_files(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # A repo with an unparseable file type (Astro, the confirmed
-    # 2026-07-31 eval gap) must not map "clean" — the skip has to
-    # survive into map.json so read commands can warn about it.
+    # A repo with an unparseable file type (Astro) must not map "clean"
+    # — the skip has to survive into map.json so read commands can warn
+    # about it.
     root = make_mapped_repo(
         dict(CHAIN, **{"Card.astro": "---\nconst x = 1;\n---\n<div/>\n"})
     )
@@ -230,7 +230,7 @@ def test_format_unsupported_none_when_fully_covered(
 def test_provenance_records_vendored_excluded_files(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # Track E / 1.5: files under a default-excluded dir that sometimes
+    # Files under a default-excluded dir that sometimes
     # holds first-party code (tensorflow's third_party/xla is the
     # motivating case) must be aggregated into the map's provenance so
     # `status`/`summary` can surface a coverage note, distinct from
@@ -300,7 +300,7 @@ def test_vendored_excluded_none_when_no_vendored_dirs_present(
 def test_provenance_records_too_large_files_with_paths(
     tmp_path: Path,
 ) -> None:
-    # round-18 zed finding: a real, first-party file skipped only for
+    # On zed, a real, first-party file skipped only for
     # exceeding --max-file-size vanished with zero disclosure ("no
     # mapped file or directory", no hint a size cap was the reason).
     # The path itself (not just a count) must survive into provenance
@@ -345,7 +345,7 @@ def test_too_large_none_when_no_files_exceed_cap(
 def test_provenance_records_symlink_excluded_files_with_paths(
     tmp_path: Path,
 ) -> None:
-    # round-28 §3.2: a symlinked source file skipped by default must
+    # A symlinked source file skipped by default must
     # be disclosed like a too-large skip -- the actual path is the
     # useful signal, not just a count.
     (tmp_path / "real_module.py").write_text("def f() -> None:\n    pass\n")
@@ -376,7 +376,7 @@ def test_symlink_excluded_none_when_no_symlinks_present(
 def test_version_stamp_stale_even_with_unchanged_source(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # Bug #1: a map whose provenance predates the running dekko build
+    # A map whose provenance predates the running dekko build
     # must read as stale even when every file's content hash still
     # matches — content-only diffing can never catch an extractor
     # change (or a real version bump) on an untouched source tree.
@@ -393,7 +393,7 @@ def test_version_stamp_stale_even_with_unchanged_source(
     assert fresh.reason == "version"
     # No file-hash diff was attempted for a version mismatch.
     assert fresh.added == fresh.removed == fresh.changed == []
-    # round-09 §2.3: the raw signal that fired must be readable off
+    # The raw signal that fired must be readable off
     # the verdict itself, not just re-derivable by the caller.
     assert fresh.version_stale is True
     assert fresh.built_version == "0.0.0-stale"
@@ -402,9 +402,9 @@ def test_version_stamp_stale_even_with_unchanged_source(
 def test_spec_hash_stale_even_with_matching_tool_version(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # The finer-grained half of bug #1: an extraction-logic change
-    # under an unchanged (or unreleased) version string must still
-    # invalidate, not just a released version bump.
+    # The finer-grained half of the staleness check: an extraction-logic
+    # change under an unchanged (or unreleased) version string must
+    # still invalidate, not just a released version bump.
     root = make_mapped_repo(CHAIN)
     map_path = root / ".dekko" / "map.json"
     doc = json.loads(map_path.read_text())
@@ -416,7 +416,7 @@ def test_spec_hash_stale_even_with_matching_tool_version(
     fresh = mapfile.check_freshness(root, index)
     assert not fresh.fresh
     assert fresh.reason == "version"
-    # round-09 §2.3: this is exactly the "same tool_version, different
+    # This is exactly the "same tool_version, different
     # spec_hash" shape a long-lived ``dekko serve`` process can hit
     # silently — ``version_stale`` alone must not claim this fired,
     # and the raw hash values must be available to build a message
@@ -445,7 +445,7 @@ def test_describe_version_stale_version_only() -> None:
 
 
 def test_describe_version_stale_spec_only() -> None:
-    # round-09 §2.3: identical tool_version on both sides, only
+    # Identical tool_version on both sides, only
     # spec_hash drifted — the message must name spec_hash and carry
     # the long-lived-process caveat, not repeat the (identical, thus
     # self-contradictory-looking) version string as the differentiator.
@@ -464,7 +464,7 @@ def test_describe_version_stale_spec_only() -> None:
     assert "tool_version:" not in text
     assert "deadbeef0000" in text
     assert "cafef00dbaad" in text
-    # Round 33 Track 1: nothing here proves the *reader* is the stale
+    # Nothing here proves the *reader* is the stale
     # party, so the message must not say so.
     assert "written by a different dekko build" in text
     assert "restart it" not in text
@@ -668,7 +668,7 @@ def _intern(doc: dict, value: str) -> int:
 
     Hand-edited map.json fixtures below inject new caller/callee/
     candidate entries; since v5+ documents store those as integer
-    indices into the top-level ``"ids"`` table (round-15 plan) rather
+    indices into the top-level ``"ids"`` table rather
     than raw strings, a fixture that wants to add
     ``{"caller": "a.py::main", ...}`` must add ``"a.py::main"`` to
     ``doc["ids"]`` (or reuse its existing index) and reference the
@@ -683,7 +683,7 @@ def _intern(doc: dict, value: str) -> int:
 def test_load_map_reads_referenced_edge_lines(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # Package B: the reference-site lines already round-trip through
+    # The reference-site lines already round-trip through
     # map.json's "referenced" edges (render_json.py already writes
     # them); load_map() must not silently drop them on the read side.
     root = make_mapped_repo(CHAIN)
@@ -742,7 +742,7 @@ def test_without_tests_drops_ref_lines_touching_test_paths() -> None:
 
 
 def test_index_from_maps_builds_ambiguous_out() -> None:
-    # round-09 §2.1 part A's disclosure fix: ``ambiguous_out`` is the
+    # ``ambiguous_out`` is the
     # outgoing-side counterpart of ``ambiguous_in`` — for a given
     # caller, which names it called ambiguously — so ``query callees``
     # can disclose the same kind of gap ``query callers`` already
@@ -803,14 +803,13 @@ def test_without_tests_drops_ambiguous_out_from_test_callers() -> None:
 
 
 def test_without_tests_drops_symbol_test_flag_not_just_path() -> None:
-    # round-12 master report §3.4 / §2: the round-11 fix taught the
-    # Rust extractor to set ``Symbol.test = True`` for definitions
-    # nested in an inline ``#[cfg(test)] mod tests { ... }`` block
-    # (a file path that is *not* itself a test path, e.g. plain
-    # ``src/lib.rs``), but ``without_tests()`` only ever consulted
-    # ``classify.is_test_path`` and never read the flag — so nothing
-    # was actually excluded. This reproduces that shape without a
-    # real Rust parse: a symbol living at a non-test path with
+    # An earlier fix taught the Rust extractor to set ``Symbol.test =
+    # True`` for definitions nested in an inline ``#[cfg(test)] mod
+    # tests { ... }`` block (a file path that is *not* itself a test
+    # path, e.g. plain ``src/lib.rs``), but ``without_tests()`` only
+    # ever consulted ``classify.is_test_path`` and never read the flag —
+    # so nothing was actually excluded. This reproduces that shape
+    # without a real Rust parse: a symbol living at a non-test path with
     # ``test=True`` set directly, alongside an ordinary production
     # symbol at the same path.
     prod = _sym("src/lib.rs", "real_fn")
@@ -876,7 +875,7 @@ def test_atomic_write_bytes_never_exposes_partial_content(
 ) -> None:
     """A reader never sees a half-written file, only old-or-new.
 
-    Round-12 master report §4.1b: a concurrent reader that opened
+    A concurrent reader that opened
     ``map.json``/``cache.json`` mid-``write_text`` could observe
     however many bytes had been flushed so far. Since ``os.replace``
     is atomic on the same filesystem, a reader opening ``target`` at
@@ -997,10 +996,10 @@ def test_load_map_reads_heritage(make_mapped_repo: RepoFactory) -> None:
 def test_load_map_reads_heritage_rust_and_cpp(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # Phase 2 round-trip: write via render_json, read back via
+    # Heritage round-trip: write via render_json, read back via
     # load_map, on a repo mixing Rust's `impl` relation and C++'s
     # multi-base `extends` relation in the same map.json — confirms
-    # MAP_DOC_VERSION 6 and id-interning (round 15's own concern)
+    # MAP_DOC_VERSION 6 and id-interning
     # extend to the new languages without any render_json.py/
     # mapfile.py changes, exactly as the design predicted.
     root = make_mapped_repo(

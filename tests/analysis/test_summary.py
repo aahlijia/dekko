@@ -164,7 +164,7 @@ def test_cross_dir_edges_counted(
 def test_entrypoints_exclude_test_methods_and_noncallable_exports(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # 3.5: a decorated, uncalled pytest-style fixture under tests/ and
+    # A decorated, uncalled pytest-style fixture under tests/ and
     # an uncalled exported (non-callable) constant used to both pass
     # the old, too-permissive entrypoints heuristic.
     root = make_mapped_repo(
@@ -191,13 +191,13 @@ def test_entrypoints_exclude_test_methods_and_noncallable_exports(
 
 
 def test_parse_errors_capped_with_language_breakdown() -> None:
-    # 2.3: an uncapped grammar gap used to make one repeated message
+    # An uncapped grammar gap used to make one repeated message
     # dominate the whole digest (spring-boot/tensorflow/zed: 97%+ of
     # `summary`'s output). Built directly against a MapIndex, since
     # reproducing a real Tier-1-grammar-missing error needs no actual
     # source files, just the resulting error/language records. This
     # index has a genuine parse failure, not a missing-grammar skip, so
-    # it belongs in the "parse errors:" section (see the round-13
+    # it belongs in the "parse errors:" section (see the
     # no-grammar-vs-real-error test below for that distinction).
     index = MapIndex(root_label="repo")
     for i in range(20):
@@ -217,12 +217,12 @@ def test_parse_errors_capped_with_language_breakdown() -> None:
 
 
 def test_no_grammar_skips_are_not_labeled_parse_errors() -> None:
-    # round-13 tensorflow.md/zed.md: `summary`'s "parse errors:" section
+    # On tensorflow/zed, `summary`'s "parse errors:" section
     # (and its `--json` parse_errors*/fields) used to lump genuine parse
     # failures together with "grammar not in the offline Tier-1 set"
     # skips under one alarming "parse error" label, even though
     # `dekko map`'s own top-line summary already told the two apart
-    # (round-12's cli.py fix). A repo whose only `errors_by_path`
+    # (a cli.py fix). A repo whose only `errors_by_path`
     # entries are missing-grammar skips should report zero parse
     # errors and a separate "grammars not installed" bucket instead.
     index = MapIndex(root_label="repo")

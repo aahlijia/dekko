@@ -72,18 +72,17 @@ ACTIONS = (
 
 # Valid ``--relation``/``relation=`` filter values for supertypes/
 # subtypes. ``"impl"`` (Rust) and ``"embeds"`` (Go) are accepted here
-# for forward compatibility with Phase 2 (not yet implemented — no
-# Phase 1 extractor ever produces them), matching the design doc's
-# documented CLI/MCP shape; filtering by either today always yields an
-# empty result set, same as filtering by any other relation a repo's
-# languages simply don't produce.
+# for forward compatibility (not every extractor produces them),
+# matching the documented CLI/MCP shape; filtering by either today
+# always yields an empty result set, same as filtering by any other relation a
+# repo's languages simply don't produce.
 HERITAGE_RELATIONS = ("extends", "implements", "impl", "embeds")
 
 # Default token cap for relation-shaped actions (callers/callees/uses)
 # when the caller passes no budget. Without this, a high-fan-in
 # symbol's full caller/callee list (or an external name's every
 # reference) renders unbounded text capped only by --limit's row
-# count — the 2026-07-31 eval measured ~3,524 tokens on a 469-caller
+# count — ~3,524 tokens were measured on a 469-caller
 # symbol with no budget passed, over 4x the advertised default.
 # Callers can always pass a larger budget explicitly.
 DEFAULT_RELATION_BUDGET = 800
@@ -96,10 +95,10 @@ DEFAULT_MIN_SHARED = 2
 # Default ``throws --transitive`` walk depth: call-graph reachability
 # can be very deep, and "everything this function's entire call tree
 # might raise" degrades toward "every exception type in the repo" on a
-# sufficiently connected codebase — see the design doc's own "hard
-# depth cap" requirement. Callers can raise this via ``--depth``; a
-# capped walk always discloses truncation rather than silently
-# stopping (mirrors ``_MAX_AMBIGUOUS_CANDIDATES``'s discipline).
+# sufficiently connected codebase, hence a hard depth cap. Callers
+# can raise this via ``--depth``; a capped walk always discloses truncation
+# rather than silently stopping (mirrors ``_MAX_AMBIGUOUS_CANDIDATES``'s
+# discipline).
 DEFAULT_THROWS_DEPTH = 2
 
 _BUDGETED_ACTIONS = (
@@ -161,7 +160,7 @@ def effective_limit(limit: int | None, budget: int | None) -> int:
     ``--limit`` and ``--budget`` are independent caps, and both used
     to bind by default: ``query callers X --budget 20000`` returned 51
     of 203 rows because the *row* default (50) cut in long before the
-    token budget did (round 31 claude-code.md). An explicit budget
+    token budget did. An explicit budget
     with no explicit limit now means "the budget governs": the caller
     has already said how much output they can take, in the unit that
     actually matters to them. An explicit ``--limit`` is always
@@ -220,7 +219,7 @@ def _resolve_exact(
     digits is read as ``path:qualname:line`` — the line qualifier an
     agent copies verbatim from a candidate row printed by
     ``report_unresolved`` to disambiguate same-file, same-qualname
-    overloads (Java/C++ overload sets, round-08 §2.5) that plain
+    overloads (Java/C++ overload sets) that plain
     ``path:qualname`` can never tell apart, since the resolution key
     is identical across every overload. Matched by exact
     ``start_line`` only — no fuzzy "nearest line". A stale or
@@ -256,7 +255,7 @@ def _resolve_exact(
         # the shared bare name of several unrelated nested methods
         # (whose qualnames are `Foo.name`/`Bar.name`, never bare
         # `name`) — picking only the qualname hit silently ignores the
-        # real collision (bug #1.4).
+        # real collision.
         qual = index.symbols_by_qualname.get(target) or []
         name = index.symbols_by_name.get(target) or []
         candidates = list({s.id: s for s in (*qual, *name)}.values())
@@ -386,7 +385,7 @@ def _fit_entries(
 
 
 _MAX_SUGGESTIONS = 5
-# Edit-distance fuzzy-suggestion tuning (bug #3.4b): a name shorter
+# Edit-distance fuzzy-suggestion tuning: a name shorter
 # than this floor is only ever eligible via the exact/prefix/substring
 # tiers, never the fuzzy edit-distance tier, and the cutoff itself is
 # raised from difflib's permissive 0.6 default to trim genuinely
@@ -394,7 +393,7 @@ _MAX_SUGGESTIONS = 5
 # against claude-buddy's `buddyStateDr` case).
 _MIN_FUZZY_NAME_LEN = 3
 _FUZZY_CUTOFF = 0.72
-# round-13 claude-buddy.md: a single-character candidate name (a
+# A single-character candidate name (a
 # throwaway loop variable like `B`/`D`) is a coincidental substring of
 # almost any sufficiently long, unrelated needle -- `totallyMade
 # UpSymbolXYZ123` contains a "b" (from "symbol") and a "d" (from
@@ -411,7 +410,7 @@ _MIN_SUBSTRING_CANDIDATE_LEN = 2
 # Cap on how many ambiguous candidates ``report_unresolved`` prints
 # unconditionally. Without this, a very-high-cardinality bare-name
 # collision (zed's 99 same-named ``fn main`` candidates across a Rust
-# workspace — bug #10/B10) dumps every candidate path unconditionally,
+# workspace) dumps every candidate path unconditionally,
 # ~1,110 tokens for a list an agent almost never reads past the first
 # handful of before narrowing the target with a ``path:`` qualifier.
 _MAX_AMBIGUOUS_CANDIDATES = 20
@@ -428,8 +427,8 @@ def _close_names(
     character identical to ``needle`` — useful only when ``needle`` is
     itself the literal string a lookup already failed on, so a
     verbatim candidate would just echo the input back with no new
-    information (round 23 §16: ``query type --exact``'s not-found
-    path). It defaults to ``False`` because not every caller's
+    information (``query type --exact``'s not-found path). It
+    defaults to ``False`` because not every caller's
     ``needle`` has that shape: ``_suggest_symbols`` passes a *derived*
     bare qualname (stripped of a wrong/stale path qualifier), where a
     verbatim match in ``names`` is precisely the useful "right name,
@@ -488,7 +487,7 @@ def _is_qualname_near_miss(qual: str, sym: Symbol) -> bool:
     True when the symbol's real qualname *is* the requested qualname,
     or ends with it after a ``.`` segment separator — the exact shape
     of a C++ "forgot the namespace" or a Rust/Java "forgot the outer
-    module" guess (master report #8, round 11: ``ClientSession.Run``
+    module" guess (e.g. ``ClientSession.Run``
     failing to resolve when the real qualname is
     ``tensorflow.ClientSession.Run``). Requiring a preceding ``.``
     (not a bare substring) avoids matching an unrelated qualname that
@@ -564,8 +563,7 @@ def render_candidates(candidates: list[Symbol]) -> list[str]:
         # ``target`` string — ``target`` may already be a
         # ``path:qualname[:LINE]`` form (e.g. when path+qualname alone
         # still matched an overload set), and prepending ``sample.path``
-        # to an already-qualified target duplicated the path segment
-        # (round-15 finding).
+        # to an already-qualified target duplicated the path segment.
         rows.append(
             f"  … +{more} more (qualify with "
             f"`{sample.path}:{sample.qualname}` to narrow)"
@@ -574,17 +572,17 @@ def render_candidates(candidates: list[Symbol]) -> list[str]:
         len(candidates) >= 2
         and len({(s.path, s.qualname) for s in candidates}) == 1
     ):
-        # Round 31 zed.md F5: a *single* candidate trivially forms a
+        # A *single* candidate trivially forms a
         # one-element (path, qualname) set too, so the bare set-size
         # check fired this "can't disambiguate" hint under a row that
         # has nothing to disambiguate (``ambiguous --name print``
         # showing Python's builtin ``print`` matched against exactly
         # one same-named Rust method, kept "ambiguous" on purpose --
-        # the cross-language sole-candidate case, F4 -- but with a
+        # the cross-language sole-candidate case -- but with a
         # nonsense hint attached). The hint is only meaningful for an
         # actual overload SET: 2+ candidates a plain `file.py:qualname`
         # qualifier can never narrow, since that's exactly the key they
-        # collide on. The line-number qualifier (round-08 §2.5) is the
+        # collide on. The line-number qualifier is the
         # only escape hatch; point at it directly with a real
         # candidate's own line as an example.
         sample = ranked[0]
@@ -607,11 +605,10 @@ def report_unresolved(
     last (presentation only — resolution itself is unchanged). When an
     ``index`` is given, a not-found reply names the closest symbols so
     the caller can retry inside the map instead of falling back to
-    grep (the 2026-07-10 eval transcripts show a bare not-found ejects
-    agents into reading whole files).
+    grep (a bare not-found ejects agents into reading whole files).
 
     Always prints plain text to stderr, regardless of ``--json`` —
-    this is a deliberate, project-wide contract (round-12 §3.15/§6),
+    this is a deliberate, project-wide contract,
     not an oversight specific to this function. Every CLI error path
     behaves the same way (see ``docs/cli.md``'s ``--json`` section):
     ``--json`` governs the shape of successful (exit 0) output only. A
@@ -691,7 +688,7 @@ def _module_rows(
     distinct anonymous-callback call sites in the same file is
     genuinely ambiguous in a way the named-caller default isn't, and
     the real per-line data is already sitting in ``index.edge_lines``
-    whenever it was recorded — round 22 claude-buddy.md §2.3. Falls
+    whenever it was recorded. Falls
     back to the bare form only when the map predates per-site line
     tracking, or this specific edge has no recorded site line.
     """
@@ -730,7 +727,7 @@ def _coverage_note(index: MapIndex) -> str | None:
     Qualifies a "no results" answer as "no results among parsed
     files" rather than unconditional truth — a symbol only used in a
     file dekko can't parse (e.g. ``.astro``) would otherwise read as a
-    confident false negative (2026-07-31 eval, gitaustin/Astro repo).
+    confident false negative.
 
     Args:
         index: Loaded map index.
@@ -903,8 +900,8 @@ def _run_relation(
     # ambig_in is meaningful for "who calls this" (candidates this
     # symbol could have been ambiguously called as); ambig_out is the
     # outgoing-side counterpart for "what does this call" (names this
-    # symbol itself called ambiguously) — round-09 §2.1 part A flagged
-    # that only the callers direction disclosed this gap.
+    # symbol itself called ambiguously). Only the callers direction
+    # used to disclose this gap.
     raw_ambig_in, raw_ambig_out = ambiguous_counts(index, sym)
     ambig_in = raw_ambig_in if action == "callers" else 0
     ambig_out = raw_ambig_out if action == "callees" else 0
@@ -1120,8 +1117,8 @@ def _run_peers(
 
 
 # ---------------------------------------------------------------------
-# Throws/catches (exception/error-flow tracing — a scoped pilot per
-# the design doc: Python/Java/C++/JS/TS only, Rust/Go/C permanently
+# Throws/catches (exception/error-flow tracing — a scoped pilot:
+# Python/Java/C++/JS/TS only, Rust/Go/C permanently
 # out of scope; see ``languages.LanguageSpec.throw_query``'s
 # docstring).
 
@@ -1304,7 +1301,7 @@ def _throws_gather(
         depth, lines)`` triples (``depth`` always ``0`` for a
         one-level query); ``truncated``/non-zero ``ambiguous_count``
         only ever apply to a transitive walk / a one-level query
-        respectively (the design doc scopes ambiguous-name disclosure
+        respectively (ambiguous-name disclosure is scoped
         to the target itself, the same way ``_run_heritage`` already
         does for supertypes); ``lang_filtered_out`` is the count of
         hits ``lang`` excluded (always ``0`` when ``lang`` is
@@ -1578,7 +1575,7 @@ def _run_throws(
 
 # JS/TS catch clauses are never type-discriminated at the syntax level
 # (see ``languages.LanguageSpec.catch_query``'s docstring) — a real,
-# disclosed precision gap the design doc requires stating in the
+# disclosed precision gap worth stating in the
 # command's own output, not just ``--help`` text, so an agent running
 # this against a JS/TS-heavy repo doesn't over-trust a near-empty
 # result.
@@ -1800,9 +1797,8 @@ def _run_catches(
     excluded, total, excluded_langs = _catches_excluded_file_count(index)
     lang_list = "/".join(excluded_langs) if excluded_langs else "Rust/Go/C"
     # The JS/TS caveat only applies to a repo that actually has JS/TS
-    # files -- printing it unconditionally (round 22 awesome-go.md
-    # §3.1) is noise on a 100%-Go/C++/Python repo, where it can never
-    # be relevant.
+    # files -- printing it unconditionally is noise on a
+    # 100%-Go/C++/Python repo, where it can never be relevant.
     has_jsts = any(
         site_lang in {"javascript", "typescript", "tsx"}
         for site_lang in index.languages_by_path.values()
@@ -1850,9 +1846,9 @@ def _run_catches(
 
 # Caveat surfaced in ``env``'s own output (not just ``--help``),
 # matching ``catches``'/``throws``' precedent of disclosing scope
-# limits in the command's own result, not only reference docs — see
-# the design doc's own "disclose the scope boundary in the same
-# document a user would read to learn the command exists" discipline.
+# limits in the command's own result, not only reference docs: disclose
+# the scope boundary in the same document a user would read to learn
+# the command exists.
 _ENV_CAVEAT = (
     "detects statically-known getenv-shaped read call sites only — "
     "not a general string-literal search, not assignment/data-flow "
@@ -1942,8 +1938,8 @@ def _run_env(
     Exact match only against ``index.env_reads_by_key`` — no loose/
     token matching needed, since env-var names are conventionally
     atomic ``SCREAMING_SNAKE_CASE`` tokens, not composite type-
-    annotation text the way ``type``'s matching needs (see the design
-    doc). Case-sensitive: ``DATABASE_URL`` and ``database_url`` are
+    annotation text the way ``type``'s matching needs.
+    Case-sensitive: ``DATABASE_URL`` and ``database_url`` are
     genuinely different keys (see ``model.EnvRead``'s docstring).
 
     Args:
@@ -1961,7 +1957,7 @@ def _run_env(
     if not reads:
         return _run_env_not_found(index, needle), None
     reads = sorted(reads, key=lambda r: (is_test_path(r.path), r.path, r.line))
-    # round-29 Track 4b: computed once, regardless of as_json, mirroring
+    # Computed once, regardless of as_json, mirroring
     # every other query action (_run_throws/_run_heritage/etc.) --
     # `env`'s text-mode success branch used to skip this entirely
     # (never even computed), the one text path where a symlink/
@@ -2078,7 +2074,7 @@ def _shadow_note(index: MapIndex, target: str) -> str | None:
 
     An in-repo declaration sharing the target's bare name can suppress
     or corrupt receiver-qualified external-call resolution for that
-    name repo-wide (bug #4/B4 — tensorflow's own ``np_array_ops.py::
+    name repo-wide (e.g. tensorflow's own ``np_array_ops.py::
     array`` shadowed ``np.array(...)``: ``find_usages("array")``
     returned one near-miss hit instead of the ~5,967 real ones, with
     no signal anything was off). This doesn't attempt to detect
@@ -2110,12 +2106,11 @@ def _shadow_note(index: MapIndex, target: str) -> str | None:
     )
 
 
-# Round 33 Track 3 (claude-code.md Finding 1): ``externals_by_name`` is
-# keyed on the *last* callee segment, which is what ``find_usages``'s
-# schema documented, and which cannot answer the most natural question
-# an agent asks -- "who uses chalk?" -- because every ``chalk.red(..)``
-# is filed under ``red``. Reported as an extractor gap; it wasn't (283
-# chalk sites were in the map). ``uses`` now matches three ways.
+# ``externals_by_name`` is keyed on the *last* callee segment, which is what
+# ``find_usages``'s schema documented, and which cannot answer the most natural
+# question an agent asks -- "who uses chalk?" -- because every
+# ``chalk.red(..)`` is filed under ``red``. It looked like an extractor gap; it
+# wasn't (283 chalk sites were in the map). ``uses`` now matches three ways.
 MATCH_BASE = "base"
 MATCH_BINDING = "binding"
 MATCH_MODULE = "module"
@@ -2137,7 +2132,7 @@ def _uses_matches(
     Three match kinds, first one wins per row:
 
     - ``base``: last segment == target (``uses run`` -> ``subprocess.
-      run``; the pre-round-33 behavior, unchanged).
+      run``; the original behavior, unchanged).
     - ``binding``: first segment == target *and* target is an import
       binding in the calling file (``uses chalk`` -> ``chalk.red``).
       The import gate is what keeps ``uses path`` from returning 48
@@ -2342,7 +2337,7 @@ def _print_uses_json(
 def _uses_entry(ext: ExternalCall, kind: str) -> dict:
     """One JSON entry for a ``uses`` hit.
 
-    Round 33 Track 4: an external callee text is the whole receiver
+    An external callee text is the whole receiver
     expression, arguments and nested function bodies included, so a
     fluent builder chain can run to 122,327 characters (claude-code's
     ``program.name(...)...version``). The label is clipped in the
@@ -2455,8 +2450,7 @@ def _importers_row(path: str, imp: Import, language: str) -> str:
     ``imp.source`` — for JS/TS, the stored source has an arbitrary
     local binding name appended (``"./engine/generateBones"`` for
     ``import { generateBones } from "./engine"``), which would
-    otherwise print a submodule path that doesn't exist on disk (round
-    22 claude-buddy.md §2.2).
+    otherwise print a submodule path that doesn't exist on disk.
     """
     bare = bare_import_source(imp, language)
     if not imp.name:
@@ -2793,8 +2787,8 @@ def _heritage_relation_between(
     lookup key for ``direction == "in"`` so callers never need to know
     that detail. The default only matters for a map written before
     doc version 6 (no ``heritage_relation`` entries at all), where
-    ``"extends"`` is the least-surprising fallback (every Phase 1
-    language's plain-class case).
+    ``"extends"`` is the least-surprising fallback (every
+    Python/JS/TS/Java plain-class case).
     """
     key = (node, other) if direction == "out" else (other, node)
     return index.heritage_relation.get(key, "extends")
@@ -2886,7 +2880,7 @@ def _heritage_external_label(index: MapIndex, sym: Symbol, name: str) -> str:
 
     Distinguishes two very different situations the resolver's
     ``heritage_external_out`` bucket otherwise conflates under one
-    ``(external)`` label (round-18 claude-code finding): a genuinely
+    ``(external)`` label: a genuinely
     out-of-repo base type (an npm/stdlib/framework class) versus an
     in-repo name the extractor simply never captured as a
     heritage-eligible symbol — the concrete case being a TS
@@ -2903,17 +2897,17 @@ def _heritage_external_label(index: MapIndex, sym: Symbol, name: str) -> str:
     family where this extraction gap is currently known to apply):
 
     1. A same-file type-alias declaration with this bare name exists
-       (``index.type_aliases_by_path`` — round-19 claude-code finding:
+       (``index.type_aliases_by_path``, e.g.
        ``ShellCommandImpl implements ShellCommand`` where
        ``ShellCommand`` is a same-file ``type X = {...}``. The
-       original round-18 fix only covered the cross-file case below,
+       original fix only covered the cross-file case below,
        since a same-file alias needs no import statement and so never
        had a candidate for that loop to check).
     2. The clause's target name matches a same-named import in the
        subtype's own file, and that import's source looks like a
        relative path into the repo (starts with ``.`` or ``/``, as
        opposed to a bare package specifier like ``"react"``) — the
-       original round-18 signal, for the cross-file case.
+       original signal, for the cross-file case.
 
     Either signal is enough to know the name is at least local.
 
@@ -2945,8 +2939,8 @@ def _sole_type_candidate(
     shared by a class and its own constructors/methods (Java's
     ``ConfigDataEnvironmentPostProcessor``: one class, three ctors) is
     not genuinely ambiguous *for this action* -- every non-type
-    candidate would just hit ``_run_heritage_wrong_kind``. Round 31
-    spring-boot.md: the generic candidate list sent an agent off to
+    candidate would just hit ``_run_heritage_wrong_kind``. The generic
+    candidate list used to send an agent off to
     copy a ``:LINE`` qualifier to say something the action already
     implies. Two or more type candidates stay ambiguous, as before.
     The choice is disclosed on stderr, never silent.
@@ -3060,13 +3054,12 @@ def _run_heritage(
     the target alone rather than every hop of a (non-existent, for
     calls) multi-hop traversal.
 
-    Unlike ``ambig_in``/``ambig_out``, the round-24 heritage
+    Unlike ``ambig_in``/``ambig_out``, the heritage
     crate-decoy tiebreak note (``index.
     heritage_synthetic_tiebreak_count``) is deliberately *not* scoped
     to ``sym`` — it is a repo-wide count of how many heritage edges,
     anywhere, rest on ``resolver._prefer_non_synthetic_crate_match``'s
-    convention-based guess rather than a structural match (see
-    ``.features/plans/round24/03-heritage-crate-decoy-tiebreak.md``).
+    convention-based guess rather than a structural match.
     Per-edge attribution would require threading a flag through every
     resolved ``HeritageEdge``, a materially larger change than this
     disclosure warrants; a nonzero repo-wide count is still actionable
@@ -3170,7 +3163,7 @@ def _fan_line(
     ``ambig_in`` (additional same-named call sites the resolver
     couldn't confidently attribute to this symbol) sits next to
     ``fan-in``, ``ambig_out`` (this symbol's own ambiguously-resolved
-    outgoing calls) sits next to ``fan-out`` — see round23 issue 08.
+    outgoing calls) sits next to ``fan-out``.
 
     Args:
         sym: The symbol the card is for.
@@ -3201,8 +3194,8 @@ def _fan_in_note(sym_id: str) -> str:
     """Build the fan-in axis-disambiguation note line.
 
     Disclosed once a symbol has at least one caller, at the point a
-    reader might otherwise mistake fan-in for a total call-site count
-    (round-24 claude-code.md friction #3): fan-in is deduplicated by
+    reader might otherwise mistake fan-in for a total call-site
+    count: fan-in is deduplicated by
     caller (an ``Edge`` is built once per caller/callee pair), which
     is a different axis from ``query callers --sites`` (one row per
     call site) and ``sanity`` (a grep sweep that can also pick up
@@ -3301,7 +3294,7 @@ def _print_sym_card_text(
         print(_fan_in_note(sym.id))
     if referenced_by:
         # fan-in alone can read as "definitely unused" for a callback
-        # wired up by reference and never itself called (bug #2b) —
+        # wired up by reference and never itself called —
         # this line is what stops that misread.
         print(f"  referenced-by: {referenced_by} (not called)")
     if type_zero_fan:
@@ -3322,7 +3315,7 @@ def _run_symbol(
     # A struct/class/interface/... only ever gets call/reference edges
     # from being constructed or passed by value — used purely as a
     # parameter/field/return-type annotation, it always reads 0/0,
-    # which is easy to misread as "unused" (bug #11/B11).
+    # which is easy to misread as "unused".
     type_zero_fan = (
         sym.kind in TYPE_KINDS
         and fan_in == 0
@@ -3396,12 +3389,12 @@ def _run_file(
     return EXIT_OK, _emit_lines([_sym_line(s) for s in symbols], budget, limit)
 
 
-# ``cohesion``'s weak-signal disclosure (design doc: "the note: line is
-# load-bearing, not decorative"). Always printed, in both text and
+# ``cohesion``'s weak-signal disclosure (the note: line is
+# load-bearing, not decorative). Always printed, in both text and
 # JSON output, never dropped by budget/limit capping — this is what
 # keeps a connectivity view from being misread as real "which
 # functions belong together" clustering, which this action does not
-# implement (see ``symbol-cohesion-clustering-design.md``).
+# implement.
 _COHESION_NOTE = (
     "note: this groups symbols that are mutually reachable, not "
     "symbols that are tightly coupled vs. loosely coupled — a file "
@@ -3554,7 +3547,7 @@ def _run_cohesion(
     """Execute the cohesion action: intra-file connected-components.
 
     A deliberately weak signal, not real clustering — see
-    ``_COHESION_NOTE`` and the design doc. Groups a file's symbols by
+    ``_COHESION_NOTE``. Groups a file's symbols by
     mutual reachability over intra-file calls/references only; a file
     that's fully connected (the common case) yields one big cluster
     and no useful split suggestion.
@@ -3629,10 +3622,9 @@ def _run_cohesion(
         # split mid-row" convention), so a budget tighter than even
         # the first kept row's own cost is silently exceeded with no
         # visible sign the request was overridden, unlike ``lean
-        # --budget``'s own floor-exceeded disclosure (round 25 finding
-        # #18). ``meter.tokens`` is exactly what got rendered, so a
-        # mismatch against the requested ``budget`` is that floor
-        # having bent the request upward.
+        # --budget``'s own floor-exceeded disclosure. ``meter.tokens`` is
+        # exactly what got rendered, so a mismatch against the requested
+        # ``budget`` is that floor having bent the request upward.
         print(
             f"  note: requested budget {budget} is below this "
             f"result's ~{meter.tokens}-token floor (rows are never "

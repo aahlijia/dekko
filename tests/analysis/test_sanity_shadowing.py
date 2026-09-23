@@ -1,4 +1,4 @@
-"""Round 33 Track 5: ``sanity``'s explanations for same-named locals.
+"""``sanity``'s explanations for same-named locals.
 
 Tier 1: the ``x: Name`` colon template is a type annotation only when
 the target *is* a type; for a function target ``error: errorMessage,``
@@ -79,7 +79,7 @@ def test_generic_and_import_type_shapes_stay_ungated(snippet: str) -> None:
 
 
 def test_rust_path_value_still_wins_over_the_colon_shape() -> None:
-    # round 32: ``.map(Prompt::as_str)`` matched the colon template on
+    # ``.map(Prompt::as_str)`` used to match the colon template on
     # the second ``:`` of ``::`` for a function target.
     assert not sanity._looks_like_type_annotation(
         ".map(Prompt::as_str)", "as_str", "a.rs", target_is_type=False

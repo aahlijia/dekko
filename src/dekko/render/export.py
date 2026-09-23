@@ -81,7 +81,7 @@ def dir_graph(
     """Build ``(labels, edges)`` at directory scope (no self-loops).
 
     The coarse, directory-level dependency view shared by MAP.md's
-    mermaid diagram and the lean map's module-edge text (FR3): both are
+    mermaid diagram and the lean map's module-edge text: both are
     skins of this one graph.
     """
     edges: set[tuple[str, str]] = set()

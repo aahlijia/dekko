@@ -72,7 +72,7 @@ def test_ambiguous_bare_name(
     code = cli.main(["query", "symbol", "helper", "--root", str(root)])
     assert code == 4
     err = capsys.readouterr().err
-    # 3.3: candidate rows now carry a line number and signature, not
+    # Candidate rows now carry a line number and signature, not
     # just path:qualname, so same-file/same-name overloads render as
     # visually distinct rows.
     assert "a.py:1  helper(x: int) -> int" in err
@@ -82,7 +82,7 @@ def test_ambiguous_bare_name(
 def test_ambiguous_candidates_truncated_past_cap(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # zed's bug (B10): 99 same-named ``fn main`` candidates dumped
+    # On zed, 99 same-named ``fn main`` candidates dumped
     # unconditionally, ~1,110 tokens for a list an agent virtually
     # never reads past the first handful of before narrowing with a
     # ``file.py:`` qualifier — the candidate dump must truncate like
@@ -97,10 +97,10 @@ def test_ambiguous_candidates_truncated_past_cap(
     candidate_rows = [ln for ln in err.splitlines() if ln.startswith("  mod_")]
     assert len(candidate_rows) == 20
     assert "+5 more (qualify with" in err
-    # round-09 §2.5: the qualifier example must be built from a real
-    # candidate's own path, not a hardcoded ``file.py`` placeholder —
-    # confirmed on two 100%-non-Python monorepos (spring-boot, zed),
-    # neither of which has any ``file.py`` anywhere in the tree.
+    # The qualifier example must be built from a real candidate's own path, not
+    # a hardcoded ``file.py`` placeholder — confirmed on two 100%-non-Python
+    # monorepos (spring-boot, zed), neither of which has any ``file.py``
+    # anywhere in the tree.
     assert "`mod_0.py:dup`" in err
     assert "file.py" not in err
 
@@ -110,7 +110,7 @@ CONTROLLER_COLLISION = {
     # (qualname == name == "controller") coexists with several
     # unrelated nested methods that happen to share the same bare
     # name but never the same qualname (`Foo.controller`,
-    # `Bar.controller`). Bug #1.4: the old ``or``-short-circuiting
+    # `Bar.controller`). The old ``or``-short-circuiting
     # lookup in ``_resolve_exact`` found the single qualname hit and
     # returned it immediately, never even consulting
     # ``symbols_by_name`` — silently picking the top-level function
@@ -140,7 +140,7 @@ def test_bare_name_ambiguity_not_masked_by_qualname_shortcut(
 def test_close_names_suppresses_short_fuzzy_junk(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # 3.4b, mode (b): single-letter symbol names (zed's `B`/`t`/`A`/
+    # Mode (b): single-letter symbol names (zed's `B`/`t`/`A`/
     # `D`) must never win the fuzzy edit-distance tier just because
     # edit distance is biased toward short strings, even when nothing
     # else is close.
@@ -150,14 +150,14 @@ def test_close_names_suppresses_short_fuzzy_junk(
 def test_close_names_suppresses_coincidental_single_char_substring(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # round-13 claude-buddy.md: a totally unrelated, long query
-    # (`totallyMadeUpSymbolXYZ123`) coincidentally contains a lowercase
-    # "b" (from "...Symbol...") and "d" (from "...Made..."), so the
-    # substring tier used to surface single-letter symbol names `B`/`D`
-    # as "closest matches" even though neither has any real relation to
-    # the query -- unlike `test_close_names_suppresses_short_fuzzy_junk`
-    # above (a needle with no such coincidental substrings), this one
-    # reproduces the actual reported shape.
+    # A totally unrelated, long query (`totallyMadeUpSymbolXYZ123`)
+    # coincidentally contains a lowercase "b" (from "...Symbol...") and "d"
+    # (from "...Made..."), so the substring tier used to surface single-letter
+    # symbol names `B`/`D` as "closest matches" even though neither has any
+    # real relation to the query -- unlike
+    # `test_close_names_suppresses_short_fuzzy_junk` above (a needle with no
+    # such coincidental substrings), this one reproduces the actual reported
+    # shape.
     assert query._close_names("totallyMadeUpSymbolXYZ123", ["B", "D"]) == []
 
 
@@ -172,7 +172,7 @@ def test_close_names_keeps_two_char_substring_match(
 def test_close_names_still_surfaces_real_near_typo(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # 3.4b, mode (a): a genuine near-typo of a real (non-trivially-
+    # Mode (a): a genuine near-typo of a real (non-trivially-
     # short) symbol name must still be suggested — the tightened
     # cutoff/floor must not blind the suggester to real answers
     # (claude-buddy's `buddyStateDr` case).
@@ -194,8 +194,8 @@ def test_close_names_raised_cutoff_excludes_marginal_fuzzy_match(
 
 
 def test_close_names_excludes_verbatim_self_match() -> None:
-    # Round 23 §16: a needle that's a verbatim (case-sensitive) match
-    # for a real candidate name offers nothing new as a "closest
+    # A needle that's a verbatim (case-sensitive) match for a real candidate
+    # name offers nothing new as a "closest
     # match" suggestion -- it's just echoing the input back. A
     # case-differing match (still a real, different string) must stay
     # eligible, as must a genuinely different prefix match. Only
@@ -305,7 +305,7 @@ SYMBOL_CARD_BOTH_DIRECTIONS_AMBIGUOUS = {
     # ambiguous call sites named "mid" (entry1, entry2) vs. one
     # ambiguous outgoing call, so ambig_in (2) != ambig_out (1) and a
     # swapped fan-in/fan-out label would be caught by asserting exact
-    # values, not just presence of a number (round23 issue 08).
+    # values, not just presence of a number.
     "a.py": "def mid() -> int:\n    return shared()\n",
     "b.py": "def mid() -> int:\n    return 1\n",
     "shared1.py": "def shared() -> int:\n    return 1\n",
@@ -356,7 +356,7 @@ def test_get_callers_notes_ambiguous_call_sites(
 def test_get_callees_notes_ambiguous_call_sites(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # round-09 §2.1 part A: only the callers direction disclosed
+    # Only the callers direction disclosed
     # ambiguous call sites (``ambig_in``) — a caller's own ambiguous
     # *outgoing* calls (here, ``caller()`` calling the ambiguous
     # ``target``) had no equivalent surfacing on ``query callees``, so
@@ -414,15 +414,15 @@ TS_CALLBACK = {
 def test_symbol_card_notes_zero_fan_for_unreferenced_type(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # B11: a struct/class used only as a field or return-type
+    # A struct/class used only as a field or return-type
     # annotation still reads fan-in/fan-out 0/0 (only call/reference
     # edges are tracked) — easy to misread as "unused." The card must
     # caveat this rather than let 0/0 stand unexplained. (A struct used
     # as a *parameter* type, or as a struct field's own declared type
     # (including anonymous embedding), is exercised separately below —
-    # Track G/bug #1.1a and its follow-up gave Go a ``reference_query``
-    # covering both positions, so they now report real referenced-by
-    # evidence instead of falling back to this caveat. A type named
+    # a later fix gave Go a ``reference_query`` covering both positions, so
+    # they now report real referenced-by evidence instead of falling back to
+    # this caveat. A type named
     # only in a ``switch v := x.(type) { case RepoMeta: ... }`` clause
     # is still outside that query's coverage — ``type_case``'s
     # ``type_identifier`` isn't a position any pattern targets — so it
@@ -452,10 +452,9 @@ def test_symbol_card_notes_zero_fan_for_unreferenced_type(
 def test_symbol_card_shows_referenced_by_for_go_field_type(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Follow-up to Track G/bug #1.1a: a struct used only as another
-    # struct's field type (``Meta RepoMeta``, previously the
-    # deliberately-uncovered case above) now has real referenced-by
-    # evidence, since ``_GO_REFERENCE_QUERY`` gained a
+    # A struct used only as another struct's field type (``Meta RepoMeta``,
+    # previously the deliberately-uncovered case above) now has real
+    # referenced-by evidence, since ``_GO_REFERENCE_QUERY`` gained a
     # ``field_declaration type:`` pattern.
     files = {
         "types.go": (
@@ -477,12 +476,10 @@ def test_symbol_card_shows_referenced_by_for_go_field_type(
 def test_symbol_card_shows_referenced_by_for_go_param_type(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Track G / bug #1.1a's "free correctness bonus" (per the
-    # implementation plan's own Verify section): a Go struct used only
-    # as a parameter type now has real referenced-by evidence instead
-    # of the generic zero-fan caveat, since Go gained a
-    # ``reference_query`` covering parameter/return/var/composite-
-    # literal type positions.
+    # A Go struct used only as a parameter type now has real
+    # referenced-by evidence instead of the generic zero-fan caveat,
+    # since Go gained a ``reference_query`` covering parameter/return/
+    # var/composite-literal type positions.
     files = {
         "types.go": (
             "package types\n\ntype RepoMeta struct {\n\tName string\n}\n"
@@ -543,7 +540,7 @@ def test_symbol_card_fan_in_note_points_at_sites_and_sanity(
     # distinct callers (not call sites) and point at the two other
     # views of "how often is this used" — 'query callers --sites' and
     # 'sanity' — so a reader doesn't mistake one number's axis for
-    # another's (round-24 claude-code.md friction #3).
+    # another's.
     root = make_mapped_repo(TWO_FILES)
     code = cli.main(["query", "symbol", "a.py:helper", "--root", str(root)])
     assert code == 0
@@ -573,7 +570,7 @@ def test_symbol_card_json_omits_fan_in_note(
 def test_symbol_card_shows_referenced_by_count(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Bug #2(b): handleClick is never called, only wired up as a
+    # handleClick is never called, only wired up as a
     # value in wire.ts's object literal. fan-in stays 0 (correct —
     # nothing *calls* it), but referenced-by must be nonzero so a
     # reader doesn't misread "fan-in: 0" as "definitely unused."
@@ -610,7 +607,7 @@ def test_symbol_card_json_referenced_by(
 def test_get_callers_shows_referenced_not_called_section(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # The exact bug #2(b) repro: get_callers on a reference-only
+    # The exact repro: get_callers on a reference-only
     # callback must not read as "nothing uses this."
     root = make_mapped_repo(TS_CALLBACK)
     code = cli.main(
@@ -664,7 +661,7 @@ TS_CALLBACK_NESTED = {
 def test_get_callers_sites_shows_reference_line_not_def_line(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Package B: the reference sits inside wireUp's body (line 5), so
+    # The reference sits inside wireUp's body (line 5), so
     # wireUp has its own definition line (3) distinct from the
     # reference's actual line. Before the fix, `--sites` showed
     # wireUp's definition line instead of the real reference site.
@@ -716,7 +713,7 @@ TS_MODULE_LEVEL_ANONYMOUS_CALLBACK = {
 def test_get_callers_module_level_shows_line_without_sites_flag(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round 22 claude-buddy.md §2.3: a call from inside an anonymous
+    # A call from inside an anonymous
     # callback (no enclosing named function) has no real symbol to be
     # a caller, so it renders as a module-level pseudo-caller row. The
     # per-site line data is already recorded in edge_lines regardless
@@ -779,7 +776,7 @@ def test_get_callers_json_sites_shows_reference_line(
 def test_get_callers_json_module_level_carries_lines(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round 23 §10: `--json --sites` previously dropped module-level
+    # `--json --sites` previously dropped module-level
     # pseudo-callers to a flat list of bare paths, even though the
     # per-site line (already recorded in edge_lines) is exactly what
     # text output shows unconditionally. module_level entries must now
@@ -929,9 +926,8 @@ def test_not_found_lists_closest_matches(
 def test_not_found_ranks_namespace_missing_near_miss_first(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Master report #8 (round 11, tensorflow): a C++ namespace-
-    # qualified target copied without its namespace prefix
-    # (``ClientSession.Run`` instead of the real
+    # On tensorflow, a C++ namespace-qualified target copied without its
+    # namespace prefix (``ClientSession.Run`` instead of the real
     # ``tensorflow.ClientSession.Run``) used to rank unrelated
     # same-bare-name (``Run``) candidates ahead of the real match
     # purely by alphabetically-earliest path. File names are chosen so
@@ -986,7 +982,7 @@ def test_uses_on_internal_symbol_suggests_callers(
     # names; asking it about a purely internal symbol used to fail
     # with "no external reference matches" and a list of near-miss
     # *external* names, never mentioning that ``query callers`` is
-    # the right command (2026-07-31 eval, reproduced on two repos).
+    # the right command (reproduced on two repos).
     root = make_mapped_repo(TWO_FILES)
     code = cli.main(["query", "uses", "helper", "--root", str(root)])
     assert code == 3
@@ -999,7 +995,7 @@ def test_uses_on_internal_symbol_suggests_callers(
 def test_uses_warns_when_in_repo_symbol_shares_the_name(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # tensorflow's bug (B4): an in-repo ``array`` function shadowed
+    # On tensorflow, an in-repo ``array`` function shadowed
     # ``np.array(...)`` external-reference resolution, and
     # ``find_usages("array")`` returned a small, confident-looking but
     # wrong result set with no signal anything was off. Whenever the
@@ -1059,8 +1055,8 @@ def test_query_callers_default_budget_caps_many_callers(
     # The CLI must enforce the same default token budget as the MCP
     # tools: previously ``dekko query callers`` with no --budget had
     # no token cap at all (only --limit's 50-row cap), so a high-fan-in
-    # symbol rendered thousands of tokens (2026-07-31 eval, ~3,524
-    # tokens measured on a 469-caller symbol via the CLI).
+    # symbol rendered thousands of tokens (~3,524 tokens measured on a
+    # 469-caller symbol via the CLI).
     pad = "z" * 60
     files = {"target.py": "def shared() -> int:\n    return 1\n"}
     for i in range(30):
@@ -1117,8 +1113,8 @@ def test_query_callers_reports_unsupported_coverage_gap(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     # A "no callers" answer on a repo with unparsed files must be
-    # qualified, not presented as unconditional truth (2026-07-31
-    # eval, gitaustin/Astro repo: a confident-but-wrong "no callers").
+    # qualified, not presented as unconditional truth (seen on an
+    # Astro repo: a confident-but-wrong "no callers").
     root = make_mapped_repo(
         dict(TWO_FILES, **{"Card.astro": "---\nconst x = 1;\n---\n"})
     )
@@ -1129,7 +1125,7 @@ def test_query_callers_reports_unsupported_coverage_gap(
     assert "may be incomplete" in err
 
 
-# Round-08 §2.5: Java-style overloads sharing one qualname in one file
+# Java-style overloads sharing one qualname in one file
 # — `path:qualname` alone can never tell them apart, since that's
 # exactly the key they collide on. `_make_symbol` (extractor.py)
 # disambiguates the *id* with a `#N` suffix, but `qualname`/`path`
@@ -1221,14 +1217,14 @@ def test_overload_ambiguous_report_hints_line_qualifier(
 
 
 def test_render_candidates_no_hint_for_single_candidate() -> None:
-    """Round 31 zed.md F5: ``render_candidates``'s overload-set check
+    """``render_candidates``'s overload-set check
     (``len({(path, qualname) for s in candidates}) == 1``) is trivially
     true for a SINGLE candidate too -- a one-element set still has
     length 1 -- so the "path+qualname alone can't disambiguate these"
     hint fired under a row with nothing to disambiguate. Reproduced on
     zed: ``ambiguous --name print`` listed Python's builtin ``print()``
     against exactly one same-named Rust method (the cross-language
-    sole-candidate case, kept ``ambiguous`` on purpose, F4) and printed
+    sole-candidate case, kept ``ambiguous`` on purpose) and printed
     the nonsense hint under it. The hint is only meaningful for an
     actual 2+-candidate overload set; this is the shared function both
     ``query.report_unresolved`` and ``ambiguous.py``'s ``--name``
@@ -1280,7 +1276,7 @@ def test_render_candidates_disambiguate_hint_for_real_overload_set() -> None:
 def test_truncation_hint_not_duplicated_for_qualified_overload_target(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    """round-15 (cline): querying an already ``path:qualname`` target
+    """Querying an already ``path:qualname`` target
     that still resolves to a same-file/same-qualname overload set past
     the truncation cap must not build the "+N more" hint by prepending
     ``sample.path`` onto the already-qualified ``target`` string — that
@@ -1316,7 +1312,7 @@ def test_ambiguous_bare_name_no_overload_hint_for_distinct_paths(
 def test_json_flag_has_no_effect_on_ambiguous_error_output(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    """Round-12 §3.15/§6: `--json` is a deliberate, documented no-op
+    """`--json` is a deliberate, documented no-op
     on every error path — `report_unresolved` always prints plain text
     to stderr regardless of `--json`, and the exit code is the only
     machine-readable signal for this case. This locks in the current,
@@ -1350,7 +1346,7 @@ def test_json_flag_has_no_effect_on_not_found_error_output(
         json.loads(err)
 
 
-# --- plan 26: --sites footer/JSON self-reports both totals -----------
+# --- --sites footer/JSON self-reports both totals --------------------
 
 MULTI_SITE_CALLERS = {
     "target.py": ("def target(x: int) -> int:\n    return x + 1\n"),
@@ -1479,7 +1475,7 @@ def test_json_sites_total_present_and_independent_of_truncation(
 def test_json_sites_meta_related_total_populated(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round 25 finding #7: --sites --json's meta.related_total/
+    # --sites --json's meta.related_total/
     # related_label stayed 0/"" (the Meter defaults) because the JSON
     # path never forwarded them to _fit_entries, unlike the text-mode
     # footer, which already got them right.
@@ -1568,7 +1564,7 @@ def test_json_sites_total_fallback_counts_missing_lines_as_one(
     assert doc["meta"]["sites_total"] == 2
 
 
-# --- Round 26: TS type_alias_declaration -> real, resolvable Symbol --
+# --- TS type_alias_declaration -> real, resolvable Symbol -----------
 
 TS_TYPE_ALIAS_ONLY = {
     "types.ts": (
@@ -1584,7 +1580,7 @@ TS_TYPE_ALIAS_ONLY = {
 def test_query_symbol_resolves_type_alias(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Before round 26 this name had no Symbol at all, so `query
+    # This name used to have no Symbol at all, so `query
     # symbol` fell through to "not found" with fuzzy suggestions --
     # type_alias_declaration now matches @classdef in _TS_DEFINITIONS
     # (languages.py) same as interface/enum/class.

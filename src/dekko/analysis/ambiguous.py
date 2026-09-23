@@ -9,9 +9,7 @@ never becomes a resolved edge — it never shows up in
 to ask. This module aggregates every ambiguous call site repo-wide so
 an agent can ask "how much of this call graph is uncertain" before
 trusting a caller/callee/workset answer for an impact-analysis
-decision, instead of discovering the gap one wrong answer at a time
-(the failure mode ``test-repos/reports/`` rounds 07-16 kept
-re-hitting).
+decision, instead of discovering the gap one wrong answer at a time.
 
 No extraction or resolver changes are needed: ``MapIndex.ambiguous_in``
 /``ambiguous_out`` (``render/mapfile.py``) are already built by every
@@ -30,9 +28,7 @@ same caller collapse into one triple here. Counts in this report are
 call-site count."
 
 Methodology limit -- this report is structurally blind to
-single-candidate false confidence (round 23
-``test-repos/reports/23-tokentest-7repo-fable5eval/cline.md`` §2.1,
-``spring-boot.md`` §2.1/§2.2): ``CallGraph.ambiguous`` is only ever
+single-candidate false confidence: ``CallGraph.ambiguous`` is only ever
 populated when a bare call name matches 2+ repo-defined candidates
 with no disambiguating signal. When exactly *one* repo-defined
 candidate shares a call's bare name, ``resolver.py``'s
@@ -48,10 +44,8 @@ its own; cross-check a suspiciously high fan-in with ``dekko sanity``.
 ``_CHAIN_BUILDER_METHOD_NAMES``, ``_RUST_STD_METHOD_NAMES``,
 ``_JAVA_ASSERTION_METHOD_NAMES``, ``_BUILDER_METHOD_NAMES``) catch
 known instances of this shape by routing them to ``external`` instead,
-but the denylist approach is reactive by construction — see
-``.features/plans/round23/01-resolver-single-candidate-false-confidence.md``
-for the full analysis and the deferred structural (arity-aware)
-follow-up.
+but the denylist approach is reactive by construction; a structural
+(arity-aware) follow-up is deferred.
 """
 
 import json
@@ -247,11 +241,10 @@ def ambiguous_rate(index: MapIndex, total_ambiguous: int) -> float:
 # Repo-wide ambiguous-call rate at/above which a standing caveat is
 # surfaced proactively (doctor, session-start hook, summary line)
 # instead of only being visible to an agent that thinks to run
-# `dekko ambiguous` first. Calibrated against round-23's 7-repo eval
-# corpus: awesome-go 0%, claude-buddy 0.2%, claude-code 9.3%, cline
-# 23.1% all sit comfortably under this; tensorflow 44.9%, zed 44.2%,
-# spring-boot 56.6% all independently had their rate called out as
-# unusually high in the same round's reports.
+# `dekko ambiguous` first. Calibrated against a 7-repo corpus:
+# awesome-go 0%, claude-buddy 0.2%, claude-code 9.3%, cline 23.1% all
+# sit comfortably under this; tensorflow 44.9%, zed 44.2%, spring-boot
+# 56.6% all had rates that stood out as unusually high.
 HIGH_AMBIGUOUS_RATE = 0.30
 
 

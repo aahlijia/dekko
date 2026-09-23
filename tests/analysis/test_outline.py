@@ -69,10 +69,10 @@ def test_variable_symbol_renders_as_bare_name(
 def test_interface_symbol_renders_as_bare_name(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # F2: outline.py::_outline_sig() already special-cases
+    # outline.py::_outline_sig() already special-cases
     # sym.kind in TYPE_KINDS (interface/enum/struct/record/trait) with
     # no trailing parens, mirroring the "variable" case above — this
-    # closes the regression-coverage gap the report flagged, since only
+    # closes a regression-coverage gap, since only
     # the "variable" half had a test before this.
     root = make_mapped_repo(
         {"data.ts": "export interface Item {\n  id: number;\n}\n"}
@@ -95,7 +95,7 @@ def test_size_framing_present(
 
 
 def test_size_line_shows_one_decimal_instead_of_misleading_zero() -> None:
-    """9.1: rounding a true ~0.1% savings ratio to the nearest integer
+    """Rounding a true ~0.1% savings ratio to the nearest integer
     reads as "(0%)" -- misleadingly implying no savings at all. A
     ratio that rounds to 0 but isn't actually zero should render with
     one decimal place instead."""
@@ -198,7 +198,7 @@ SPARSE_FILE = {
 def test_sparse_file_gets_a_caveat(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # B9: a callback-heavy file's outline can look like an extreme
+    # A callback-heavy file's outline can look like an extreme
     # (and perfectly legitimate-looking) savings ratio while actually
     # hiding nearly all of the file's real content. A large file with
     # very few named symbols must carry a caveat, not read as complete.
@@ -232,7 +232,7 @@ def test_normal_small_file_has_no_sparse_caveat(
 
 
 def test_sparse_note_suppressed_when_file_failed_to_parse() -> None:
-    """Round-12 master report §3.9: a file that failed to parse
+    """A file that failed to parse
     entirely (most often an unsupported/uninstalled Tier-2 grammar --
     Kotlin/Groovy without ``pip install dekko[all]``) always has 0
     symbols, which used to trip the "few named symbols" heuristic en

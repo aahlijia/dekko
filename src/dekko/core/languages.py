@@ -48,14 +48,14 @@ class LanguageSpec:
             JS/TS/TSX) JSX attribute values and JSX element tag names —
             which a plain call-expression query structurally cannot see
             (a callback passed by reference, or a component used only
-            as ``<Foo />``, is never a call site; bug #2b/#1.1b); and
+            as ``<Foo />``, is never a call site); and
             type-position identifiers — parameter/return/variable/
             const declaration types and composite-literal types (Go's
-            struct/interface usage, bug #1.1a) — which a
+            struct/interface usage) — which a
             definition/call query never visits at all since they name
             a *type*, not a callable or a value; and (Java) method
-            references (``this::method``/``Class::method``, bug
-            #2/round-19), which are call-shaped nowhere in the syntax
+            references (``this::method``/``Class::method``), which
+            are call-shaped nowhere in the syntax
             tree (no argument list) and so are invisible to
             ``call_query`` too. ``None`` for languages still lacking
             one (Rust, C, C++ as of this writing).
@@ -65,14 +65,14 @@ class LanguageSpec:
             repo-wide name registry the resolver consults before
             taking ``Left(x)`` for a construction of ``struct Left``:
             with ``enum Side { Left(u8) }`` anywhere in the repo that
-            call has two readings and the map only indexes one of them
-            (round 32 Track 4). Unit and struct-like variants are left
+            call has two readings and the map only indexes one of
+            them. Unit and struct-like variants are left
             out: neither can be written ``Name(..)``.
         binding_query: Query locating the places a *local* name is
             bound, so ``extractor._collect_refs`` can tell a bare
             identifier that names a repo symbol from one that names a
-            parameter or a local of the same spelling (round 32 Track
-            5b). The capture name says where the binding lives:
+            parameter or a local of the same spelling. The capture
+            name says where the binding lives:
             ``@params`` (a parameter list, binds in its parent),
             ``@param`` (one parameter pattern, same), ``@local``
             (nearest block or function scope), ``@funclocal`` (nearest
@@ -111,17 +111,14 @@ class LanguageSpec:
             ``extractor._collect_heritage`` special-cases it, resolving
             the type side by same-file name lookup instead of span
             correlation (see ``extractor._heritage_rust_impl``). ``None``
-            for languages without one yet (Go — optional bonus item,
-            deferred; see the design doc's Phase 2 section for why).
-            Covers Python/JavaScript/TypeScript/TSX/Java (Phase 1) and
-            Rust/C++ (Phase 2).
+            for languages without one yet (Go, deferred). Covers
+            Python/JavaScript/TypeScript/TSX/Java and Rust/C++.
         throw_query: Query capturing raise/throw sites (``@throw``) and,
             Java only, a method's declared checked-exception clause
             (``@throws_clause``) — a second, independent signal for
             "what can calling this raise" beyond throw-site scanning
             (see ``extractor._collect_throws``). Exception/error
-            handling is not a uniform language feature (see the design
-            doc's own per-language analysis): this is a deliberately
+            handling is not a uniform language feature: this is a deliberately
             scoped pilot covering Python/Java/C++/JS/TS only.
             ``None`` for Rust/Go/C — a **permanent** exclusion, not a
             placeholder awaiting a future pass the way an unset
@@ -150,8 +147,8 @@ class LanguageSpec:
             query field, this targets a small, hand-curated allowlist
             of known "config/env read" call shapes, not a general
             syntactic category — closer in spirit to ``stats.py``'s
-            ``_NOISE_NAMES`` than to a broad grammar-driven capture
-            (see the design doc's own framing). The key argument must
+            ``_NOISE_NAMES`` than to a broad grammar-driven capture.
+            The key argument must
             be a literal string node for a match to occur at all — a
             dynamic key (``os.getenv(some_var)``) or an f-string/
             template-literal key structurally does not match, so no
@@ -171,8 +168,8 @@ class LanguageSpec:
             ``query._heritage_external_label``'s docstring for why
             this matters: an ``implements``/``extends`` clause naming
             a same-file type alias has no other structural signal to
-            distinguish it from a genuinely external base type,
-            round-19 claude-code finding). ``None`` for languages
+            distinguish it from a genuinely external base type).
+            ``None`` for languages
             without one (only TS/TSX have this construct as of this
             writing — plain JS has no ``type`` keyword at all).
     """
@@ -206,8 +203,8 @@ class LanguageSpec:
 # shape a plain call-expression query structurally cannot see (a
 # function passed by name and never itself called at that site is not
 # a call site) -- mirrors _JS_REFERENCE_BASE's identical shape for
-# JS/TS (round 22 tensorflow.md §6: `check_success=valid_ndk_path` is
-# a call *keyword argument*, not a call). Verified against the pinned
+# JS/TS (`check_success=valid_ndk_path` is a call *keyword
+# argument*, not a call). Verified against the pinned
 # tree-sitter-python grammar.
 _PY_REFERENCE_QUERY = """
 (keyword_argument value: (identifier) @ref)
@@ -221,7 +218,7 @@ _PY_REFERENCE_QUERY = """
 (return_statement (identifier) @ref)
 """
 
-# Where Python binds a local name (round 32 Track 5b, see
+# Where Python binds a local name (see
 # ``LanguageSpec.binding_query``). Assignment targets that aren't
 # names (``self.x = ..``, ``table[k] = ..``) fall out by themselves:
 # ``extractor._pattern_identifiers`` only descends into pattern nodes.
@@ -390,7 +387,7 @@ RUST = LanguageSpec(
     (type_item name: (type_identifier) @classname) @classdef))
 """,
     # The two ``type_item`` patterns above are anchored to a file or
-    # ``mod`` body on purpose (round 31 F6b): ``type Alias = Real;`` is
+    # ``mod`` body on purpose: ``type Alias = Real;`` is
     # a module-level alias worth a ``type_alias`` symbol, but the same
     # node type inside an ``impl`` block is an *associated type*
     # (``type Output = Foo;``), and indexing those would mint thousands
@@ -417,7 +414,7 @@ RUST = LanguageSpec(
     # filtering is needed to exclude it. ``trait_item``'s optional
     # ``bounds: (trait_bounds)`` field covers supertrait bounds
     # (``trait Sub: Super``), attached to ``@classdef`` the same way
-    # Phase 1's languages attach their heritage container.
+    # the other languages attach their heritage container.
     heritage_query="""
 (impl_item
   trait: (_) @impl_trait
@@ -468,7 +465,7 @@ _C_DEFINITIONS = """
 # namespace/attribute chain to walk, unlike every other language's
 # shape. ``.`` anchors the key to the first argument; ``extractor.
 # _env_read_c_cpp`` still requires ``@fn`` to read exactly
-# ``"getenv"`` (not merely contain it — see the design doc's
+# ``"getenv"`` (not merely contain it — see the
 # ``my_getenv_wrapper`` false-positive test). Verified live against
 # the pinned tree-sitter-c/tree-sitter-cpp grammars (both accept this
 # identical query).
@@ -607,12 +604,12 @@ _JS_FUNCTION_BOUNDARIES = (
     "method_definition",
 )
 
-# Bare-identifier value references shared by JS/TS/TSX (bug #2b): a
+# Bare-identifier value references shared by JS/TS/TSX: a
 # callback wired up by name rather than invoked at that site — an
 # object-literal property value, a shorthand property, an array
 # element, a bare call argument, an assignment/declarator
 # right-hand side, a ``${...}`` template-literal substitution, or
-# (round-18 claude-buddy finding) an operand of a binary expression
+# an operand of a binary expression
 # (``x >= 0``, ``a + clearLine``) or a branch/condition of a ternary
 # (``cond ? a : b``) — plain reads that ``dekko unused`` was silently
 # missing for module-level ``const``-bound variables read (not
@@ -662,8 +659,8 @@ _JS_REFERENCE_BASE = """
 (for_in_statement right: (identifier) @ref)
 (export_statement value: (identifier) @ref)
 """
-# The last eight positions above are round 32 Track 5. They are plain
-# *reads* that were never captured: ``handle.close()``, ``return
+# The last eight positions above are plain *reads* that were never
+# captured before: ``handle.close()``, ``return
 # DEFAULT_PORT``, ``if (status)``, ``!enabled``, ``for (const e of
 # IMAGE_EXTENSIONS)``, ``export default styles``. Nobody noticed,
 # because a module-level ``let knownChannelsVersion`` read only by
@@ -676,7 +673,7 @@ _JS_REFERENCE_BASE = """
 # use). Writes are deliberately absent: an assignment target or
 # ``x++`` is not a use, and a variable that is only ever written is
 # dead. A subscript *index* / computed key (``table[key]``) stays
-# out too: round 23 scoped that pattern to ``object:`` on purpose,
+# out too: that pattern is scoped to ``object:`` on purpose,
 # since keys are overwhelmingly locals. It costs one known symbol
 # across three repos (cline ``hook-factory.ts::exec``).
 
@@ -712,7 +709,7 @@ _JSX_REFERENCE_EXTRA = """
 
 _JS_REFERENCE_QUERY = _JS_REFERENCE_BASE + _JSX_REFERENCE_EXTRA
 
-# Where JS/TS/TSX bind a local name (round 32 Track 5b, see
+# Where JS/TS/TSX bind a local name (see
 # ``LanguageSpec.binding_query``). ``const``/``let`` bind in the
 # nearest block, ``var`` in the nearest function. ``for (x of xs)``
 # with no ``const``/``let``/``var`` assigns to an existing name and
@@ -1005,7 +1002,7 @@ _TS_HERITAGE = """
   (extends_type_clause)? @heritage) @classdef
 """
 
-# Same-file type-alias registry (round-19 claude-code finding, bug #3):
+# Same-file type-alias registry:
 # originally built because TS's ``type X = {...}``/``type X = A | B``/
 # etc. was never extracted as a ``Symbol`` at all, so an ``implements``/
 # ``extends`` clause naming a same-file alias had no structural signal
@@ -1013,12 +1010,11 @@ _TS_HERITAGE = """
 # ``_heritage_external_label`` in ``query.py`` consults this field's
 # output (``FileMap.type_aliases`` -> ``MapIndex.type_aliases_by_path``)
 # as a same-file counterpart to its existing same-named-relative-import
-# check. As of round 26, ``type_alias_declaration`` also has a real
+# check. ``type_alias_declaration`` now also has a real
 # ``@classdef`` pattern in ``_TS_DEFINITIONS`` above (kind
 # ``"type_alias"``), so this bare-name registry is now a redundant,
 # narrower parallel extraction kept only for
-# ``_heritage_external_label``'s presentation fallback -- see round-26
-# plan notes for why it wasn't merged/retired in the same change.
+# ``_heritage_external_label``'s presentation fallback.
 # Confirmed against the pinned tree-sitter-typescript grammar:
 # ``type_alias_declaration``'s ``name`` field is a ``type_identifier``,
 # fielded as ``name:`` -- no anchor tricks needed. Not wired onto
@@ -1101,7 +1097,7 @@ TSX = LanguageSpec(
     type_alias_query=_TS_TYPE_ALIAS_QUERY,
 )
 
-# Type-reference edges (bug #1.1a): a struct/interface type used only
+# Type-reference edges: a struct/interface type used only
 # as a parameter type (this also covers a method's *receiver* type,
 # since a receiver is just a ``parameter_declaration`` under a
 # different field name), a named or unnamed return type, a var/const
@@ -1187,7 +1183,7 @@ GO = LanguageSpec(
     # ``field:`` fields; the key is an ``interpreted_string_literal``
     # (Go also has ``raw_string_literal`` — backtick-quoted — not
     # matched here, since a raw-string env-var key is vanishingly rare
-    # and the design table only specifies the interpreted form). ``.``
+    # and only the interpreted form is supported). ``.``
     # anchors the key to the first argument. Verified live against the
     # pinned tree-sitter-go grammar.
     env_read_query="""
@@ -1199,7 +1195,7 @@ GO = LanguageSpec(
 """,
 )
 
-# Round-19 (spring-boot) finding: a Java 8 method reference
+# A Java 8 method reference
 # (``this::configureBuildInfoTask``, ``Foo::staticMethod``,
 # ``java.util.Objects::requireNonNull`` -- tree-sitter node type
 # ``method_reference``) is neither a call (no argument list, no
@@ -1317,8 +1313,7 @@ JAVA = LanguageSpec(
 # extraction hasn't been written yet). Rust's ``Result<T, E>``/``?``
 # propagation and Go's returned-``error``-value convention are
 # type-inference problems, not syntax a tree-sitter query can point at;
-# C has no exception concept to extract at all. See the design doc's
-# per-language analysis for the full reasoning.
+# C has no exception concept to extract at all.
 
 TIER1_SPECS: tuple[LanguageSpec, ...] = (
     PYTHON,
@@ -1371,9 +1366,7 @@ def exception_handling_supported(language: str) -> bool:
 # keep silently reusing a stale, possibly-wrong-grammar ``FileMap`` for
 # every ``.h`` file after an upgrade, exactly the silent-wrong-answer
 # failure mode the heuristic itself was added to close, just relocated
-# to the upgrade boundary (round 18 tensorflow finding; see the
-# h-header-cpp-c-grammar implementation plan/report under
-# ``test-repos/reports/18-tokentest-7repo-post0404/``). Folding this
+# to the upgrade boundary. Folding this
 # into the fingerprint below means a cache built under old dispatch
 # logic is discarded automatically -- every file re-parses once on the
 # next non-``--full`` ``dekko map`` run -- rather than requiring users
@@ -1381,7 +1374,7 @@ def exception_handling_supported(language: str) -> bool:
 _HEADER_DISPATCH_HEURISTIC_VERSION = 1
 
 # Bumped whenever ``extractor._heritage_rust_impl``'s subject-recovery
-# logic changes -- round 31 zed coverage pass F2/A3: an ``impl Trait
+# logic changes: an ``impl Trait
 # for Type`` block whose ``Type`` isn't defined in the same file used
 # to be silently dropped at extraction (no same-file symbol to attach
 # a ``RawHeritage`` to); it's now emitted with ``subtype_id=""`` and
@@ -1517,11 +1510,10 @@ TIER2_GRAMMARS: dict[str, str] = {
 # ``dekko map``'s own output, ``map.json``, and every read command
 # (``query callers``, ``find_usages``, ``summary``) treated a partially
 # mapped repo as complete, producing confident "no callers found"
-# answers for symbols only used in these files (2026-07-31 eval,
-# gitaustin/Astro repo). Extend this list as new gaps are confirmed;
-# it intentionally does not attempt to enumerate every non-code
-# extension (``.md``, ``.json``, images, ...), which stay silently
-# ignored as before.
+# answers for symbols only used in these files. Extend this list as new gaps
+# are confirmed; it intentionally does not attempt to enumerate every non-code
+# extension (``.md``, ``.json``, images, ...), which stay silently ignored as
+# before.
 KNOWN_UNSUPPORTED: dict[str, str] = {
     ".astro": "astro",
 }

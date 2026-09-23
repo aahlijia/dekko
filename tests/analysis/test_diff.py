@@ -278,7 +278,7 @@ def test_body_hashes_read_each_file_once(
 def test_diff_jobs_flag_reaches_old_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-12 master report §3.3: ``old_snapshot()``'s rev-cache-miss
+    """``old_snapshot()``'s rev-cache-miss
     re-parse/resolve used to always run single-threaded no matter what
     ``--jobs`` was passed, because ``dekko diff`` never had a
     ``--jobs`` flag to begin with -- a separate, unparallelized code
@@ -304,14 +304,14 @@ def test_diff_jobs_flag_reaches_old_snapshot(
 def test_maybe_warn_sequential_fires_above_threshold(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """Round-15 finding: a jobs=1 rev-cache-miss over enough files gets
+    """A jobs=1 rev-cache-miss over enough files gets
     a stderr disclosure note before the slow single-threaded work
     starts, mirroring ``render_lean.run``'s own floor-disclosure
     pattern."""
     monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 3)
     diff._maybe_warn_sequential(1, ["a.py", "b.py", "c.py"])
     err = capsys.readouterr().err
-    # round-18 tensorflow finding: the count is git-tracked files at
+    # On tensorflow, the count is git-tracked files at
     # the target rev, not dekko's (usually smaller) mapped file count
     # -- the note must say so explicitly rather than implying parity.
     assert "single-threaded resolve on 3 git-tracked files" in err
@@ -331,7 +331,7 @@ def test_maybe_warn_sequential_silent_below_threshold(
 def test_maybe_warn_discloses_the_parallel_wait_too(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """Round 31 P4.1: all cores is now the default, and a cold
+    """All cores is now the default, and a cold
     tensorflow-scale snapshot still takes minutes with them. The wait
     gets a note either way; only the wording (and the now-pointless
     ``--jobs 0`` hint) differs."""
@@ -342,7 +342,7 @@ def test_maybe_warn_discloses_the_parallel_wait_too(
     assert "3 git-tracked files with all 11 cores" in err
     assert "--jobs 0" not in err
 
-    # Round 33 Track 6d: an explicit smaller --jobs is not "all cores".
+    # An explicit smaller --jobs is not "all cores".
     diff._maybe_warn_sequential(4, ["a.py", "b.py", "c.py"])
     err = capsys.readouterr().err
     assert "with 4 workers (of 11 cores)" in err
@@ -351,9 +351,9 @@ def test_maybe_warn_discloses_the_parallel_wait_too(
 
 @pytest.mark.parametrize("command", ["diff", "affected", "workset"])
 def test_cold_rev_commands_default_to_all_cores(command: str) -> None:
-    """Round 31 P4.1: these three kept ``--jobs 1`` after round 29
-    flipped ``map`` to ``0``, so a first-touch call on tensorflow ran
-    single-threaded (754s, vs. 251s with workers)."""
+    """These three kept ``--jobs 1`` after ``map`` flipped to ``0``, so
+    a first-touch call on tensorflow ran single-threaded (754s, vs.
+    251s with workers)."""
     args = cli.build_subcommand_parser().parse_args([command])
     assert args.jobs == 0
 
@@ -397,7 +397,7 @@ def test_old_snapshot_disclosure_note_on_a_real_cache_miss(
 def test_diff_rev_cache_hit_skips_reexport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-08 §2.6: a second ``diff`` call against the same rev must
+    """A second ``diff`` call against the same rev must
     reuse the cached old-side snapshot instead of paying the
     export/tarfile-extract/re-parse cost again."""
     root = _repo(tmp_path, BASE)
@@ -446,9 +446,9 @@ def test_diff_rev_cache_is_correct_not_just_fast(
 
 
 # ---------------------------------------------------------------------
-# Round 28 layer 3: compare() warns when 100% of a large-enough shared
+# compare() warns when 100% of a large-enough shared
 # symbol set reports as "changed" with nothing added/removed -- the
-# known corrupted-rev-cache signature (tensorflow finding: 171706
+# known corrupted-rev-cache signature (seen on tensorflow: 171706
 # changed, 0 added, 0 removed).
 # ---------------------------------------------------------------------
 
@@ -512,7 +512,7 @@ def test_compare_silent_when_something_added(
 
 
 # ---------------------------------------------------------------------
-# Round 28 layer 2: concurrent old_snapshot() calls for the same SHA
+# Concurrent old_snapshot() calls for the same SHA
 # serialize on a per-SHA lock instead of racing an uncoordinated,
 # duplicate export/re-parse/resolve against the same rev.
 # ---------------------------------------------------------------------

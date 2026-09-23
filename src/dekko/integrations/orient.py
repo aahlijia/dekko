@@ -1,4 +1,4 @@
-"""Proactive orientation: the opt-in push layer (F4).
+"""Proactive orientation: the opt-in push layer.
 
 Every other dekko surface is *pull* — it helps only when the agent
 knows to ask. This module is the thin **push** layer that orients a
@@ -37,8 +37,7 @@ DEFAULT_THRESHOLD = 1000
 # Kept as its own line so ``_preamble()`` can drop it when ``search``
 # isn't actually available (see ``_search_available`` below) —
 # steering an agent toward a command that then fails is worse than
-# staying silent about it. See IMPLEMENTATION-PLAN.md's 3.1 note:
-# cline's report caught this banner recommending ``search``
+# staying silent about it. This banner once recommended ``search``
 # unconditionally, even when the invoked ``dekko`` binary predated the
 # subcommand entirely.
 _SEARCH_LINE = (

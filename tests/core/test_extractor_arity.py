@@ -1,8 +1,7 @@
-"""Round 25 structural layer 2, Phases 0-1
-(`.features/plans/round25/06-structural-layer2-arity-resolution.md`):
+"""Structural layer 2:
 ``Param.has_default``/``Param.variadic`` per language parser, and
 ``RawCall.arg_count`` threaded through each Tier-1 language's
-``call_query``. Phase 2's arity-gating logic itself is covered in
+``call_query``. The arity-gating logic itself is covered in
 ``tests/core/test_resolver.py``.
 """
 
@@ -45,7 +44,7 @@ def _params_node(grammar: str, code: str, wrapper_type: str) -> Node:
 
 
 # ---------------------------------------------------------------------
-# Phase 0: Param.has_default / Param.variadic per language.
+# Param.has_default / Param.variadic per language.
 
 
 def test_python_default_and_variadic_params_flagged() -> None:
@@ -173,7 +172,7 @@ def test_java_varargs_parameter_flagged_via_generic_parser() -> None:
 
 
 # ---------------------------------------------------------------------
-# Phase 1: RawCall.arg_count per language.
+# RawCall.arg_count per language.
 
 
 def test_python_call_arg_count(tmp_path: Path) -> None:

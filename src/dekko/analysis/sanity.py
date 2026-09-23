@@ -34,9 +34,7 @@ being checked — see ``_classify_grep_hits``, extracted so ``run()``
 and ``run_all()`` provably classify identically), and reports a triage
 summary (an aggregate cause histogram plus the symbols with an
 unexplained miss) rather than a full per-symbol dump. Callers mode
-only — see ``run_all()``'s own docstring and
-``.features/plans/round23/24-sanity-all-sweep.md`` for the full design
-and its ``--usages``-sweep-mode/MCP-exposure open questions.
+only — see ``run_all()``'s own docstring.
 
 In callers mode (single-target ``run()`` only, not ``--all``), a
 grep-only hit can also be classified ``CAUSE_LIKELY_EXTERNAL_COLLISION``
@@ -46,9 +44,7 @@ imports mention the target's declaring type — the cheap, no-type-
 inference proxy for "this is almost certainly an unrelated external-
 library method sharing the name, not a real caller" (e.g. Java/AssertJ
 ``.isTrue()`` colliding with a repo-defined ``isTrue`` method). See
-``_receiver_mismatch()`` and
-``.features/plans/round23/25-sanity-receiver-mismatch-cue.md`` for the
-full design.
+``_receiver_mismatch()``.
 
 This is a spot check, not a re-verification — see the module's own
 ``EXIT_OK``-always-on-a-clean-run contract in ``run()``'s docstring.
@@ -57,9 +53,7 @@ line's syntax, not a re-derivation of the resolver's actual reasoning,
 so every cause is worded as a *likely* explanation, matching
 ``dekko-verify``'s own cautious framing.
 
-Two design decisions worth calling out (see
-``.features/plans/integrations/05-dekko-sanity-command.md`` for the
-full design-question list this resolves):
+Two design decisions worth calling out:
 
 - **Test filtering defaults to excluded, not included.** The plain
   CLI (``dekko query callers``) defaults to *including* tests unless
@@ -133,8 +127,7 @@ _ALL_JOBS_DEFAULT = 4
 # dominated by noise ``dekko map`` itself never even considers.
 # ``DEFAULT_EXCLUDE_DIRS`` (noise dirs + vendored dirs) is already a
 # public module-level constant in ``core.walker`` — no prerequisite
-# refactor needed to reuse it, resolving the plan's "exclude-pattern
-# reuse" open question. ``.dekko/`` (the cache/output dir) is added on
+# refactor needed to reuse it. ``.dekko/`` (the cache/output dir) is added on
 # top since it isn't itself noise/vendored source but must never be
 # grepped either.
 def _grep_exclude_dirs() -> tuple[str, ...]:
@@ -147,31 +140,30 @@ _GREP_TIMEOUT = 30
 # bare name (see ``_GENERIC_NAMES``) on a huge repo could otherwise
 # return an unbounded number of matches; this is a hard ceiling on
 # work done, independent of the report's own --limit/--budget caps.
-# Round 21 Track B1: this cap used to truncate silently -- cline's
-# repro showed ``matches (24) + grep_only (4976) == 5000`` exactly,
-# with every "dekko-only" row past the cap a truncation artifact
-# rather than a real resolver disagreement. ``_run_grep`` now reports
-# whether the cap was hit (``GrepSweepResult.truncated``) so ``run()``
-# can disclose it and stop reporting a false-confidence "dekko-only"
-# count under truncation — see ``run()``'s own handling.
+# This cap used to truncate silently -- cline showed ``matches (24) +
+# grep_only (4976) == 5000`` exactly, with every "dekko-only" row past
+# the cap a truncation artifact rather than a real resolver
+# disagreement. ``_run_grep`` now reports whether the cap was hit
+# (``GrepSweepResult.truncated``) so ``run()`` can disclose it and stop
+# reporting a false-confidence "dekko-only" count under truncation — see
+# ``run()``'s own handling.
 _MAX_GREP_LINES = 5000
 
-# Round 21 Track B2: a single-line 26 MB cache/data file that grep's
-# own ``-I`` binary-skip heuristic didn't catch (claude-code.md §2.2)
-# produced 26 MB of terminal output from one command. A real source
-# line is never remotely this long -- a raw grep line past this many
-# characters is definitionally a binary/data blob, not code worth
-# reporting as a hit at all (see ``_run_grep``'s pathological-line
-# guard).
+# A single-line 26 MB cache/data file that grep's own ``-I`` binary-skip
+# heuristic didn't catch produced 26 MB of terminal output from one
+# command. A real source line is never remotely this long -- a raw grep
+# line past this many characters is definitionally a binary/data blob,
+# not code worth reporting as a hit at all (see ``_run_grep``'s
+# pathological-line guard).
 _PATHOLOGICAL_LINE_CHARS = 10_000
 
-# Round 21 Track B2: an unconditional length cap on any snippet that
-# does make it into a rendered/serialized row -- independent of, and a
-# lower bar than, ``_PATHOLOGICAL_LINE_CHARS`` (that guard drops a hit
-# entirely; this one just keeps an ordinary-but-long real source line
-# from bloating the report). Applied at render/serialize time in
-# ``_grep_row``, never during classification -- ``classify_miss`` is
-# always called with the hit's full, untruncated snippet.
+# An unconditional length cap on any snippet that does make it into a
+# rendered/serialized row -- independent of, and a lower bar than,
+# ``_PATHOLOGICAL_LINE_CHARS`` (that guard drops a hit entirely; this
+# one just keeps an ordinary-but-long real source line from bloating the
+# report). Applied at render/serialize time in ``_grep_row``, never
+# during classification -- ``classify_miss`` is always called with the
+# hit's full, untruncated snippet.
 _SNIPPET_MAX_CHARS = 240
 
 # Effectively-unbounded caps for the internal dekko-side callers/uses
@@ -206,10 +198,10 @@ CAUSE_COMMENT_MENTION = (
     "comment mention — not a call site (near the symbol's own "
     "definition, or in its file's leading header comment)"
 )
-# Round 32 Track 2(b): a comment line is never a call site wherever it
-# sits, so the old "only near the definition or in the file header"
-# gate protected nothing. The zone survives in the wording instead, so
-# a row still says how much context backs it.
+# A comment line is never a call site wherever it sits, so the old "only
+# near the definition or in the file header" gate protected nothing. The
+# zone survives in the wording instead, so a row still says how much
+# context backs it.
 CAUSE_COMMENT_ELSEWHERE = (
     "comment mention — not a call site (a comment line, away from the "
     "symbol's definition)"
@@ -221,7 +213,7 @@ CAUSE_TYPE_ANNOTATION = (
     "type position (annotation, generic argument, construction, or "
     "enum payload) — not a call site"
 )
-# Round 32 Track 2(a), tier 1: the map already holds this exact
+# Tier 1: the map already holds this exact
 # (path, line) as a value-reference edge to the target. Not a guess.
 CAUSE_VALUE_REFERENCE = (
     "passed or stored as a value, not called — dekko has this as a "
@@ -250,13 +242,13 @@ CAUSE_CROSS_FILE_COLLISION = (
     "elsewhere in the repo — not a miss on the target"
 )
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
-# Round 33 Track 5 tier 2: a value-position use of a same-named local
-# declared earlier in the enclosing function (``const errorMessage =
-# ...`` four lines above ``error: errorMessage,``). Measured on the 100
-# most-flagged non-type claude-code targets: 759 of 4,104 unexplained
-# rows (18.5%), led by ``errorMessage``, ``count``, ``action`` -- the
-# testing guide's own repros. Applied as a post-pass that can only
-# upgrade an "unexplained" row, never override a specific cause.
+# Tier 2: a value-position use of a same-named local declared earlier
+# in the enclosing function (``const errorMessage = ...`` four lines
+# above ``error: errorMessage,``). Measured on the 100 most-flagged
+# non-type claude-code targets: 759 of 4,104 unexplained rows (18.5%),
+# led by ``errorMessage``, ``count``, ``action``. Applied as a
+# post-pass that can only upgrade an "unexplained" row, never override
+# a specific cause.
 # The cause string carries no line number on purpose: ``--all``
 # aggregates by cause, and a per-line variant fragmented cline's sweep
 # into 110 one-row buckets. The declaration line rides on the row
@@ -278,9 +270,7 @@ _TYPE_REFERENCE_WINDOW_LINES = 60
 # ``classify_unused_reference`` answers a different question than
 # ``classify_miss`` above: not "why didn't dekko count this as a call,"
 # but "does this grep hit indicate a reference dekko's zero-evidence
-# claim doesn't already account for." See ``sanity --unused``'s design
-# doc (``.features/plans/round23/23-sanity-unused-variant.md``) for the
-# full rationale.
+# claim doesn't already account for."
 SHAPE_CALL = "call"
 SHAPE_DECLARATION = "declaration"
 SHAPE_SPREAD = "spread"
@@ -294,7 +284,7 @@ SHAPE_OTHER = "other"
 # actual reasoning" — see the module docstring). Not AST-aware, not
 # per-language — these four shapes are common enough across
 # curly-brace languages that one shared heuristic set covers the
-# report's three named cases plus the general "any non-call mention"
+# three named shapes plus the general "any non-call mention"
 # catch-all, without hand-rolling a query per grammar the way
 # reference_query fixes necessarily do.
 _SPREAD_TEMPLATE = r"\.\.\.\s*{name}\b"
@@ -307,13 +297,13 @@ _BARE_CALL_TEMPLATE = r"\b{name}\s*\("
 # ``TF_CAPI_EXPORT``, the actual return type, any ``*`` pointer stars),
 # the name, a parameter list, and a bare trailing ``;`` with nothing
 # else on the line -- no body, so it's a declaration, not an
-# invocation. Checked before ``_BARE_CALL_TEMPLATE`` (round 25 finding
-# #14: ``TF_CloseDeprecatedSession``'s one grep-only hit on
-# tensorflow, a plain ``extern`` prototype in ``c_api.h``, was tagged
-# ``[call]`` -- syntactically indistinguishable from a real call by the
-# bare-call template alone). A genuine call statement on its own line
-# (``foo(a, b);``) never has a type-token prefix before the name, which
-# is the discriminator this template relies on.
+# invocation. Checked before ``_BARE_CALL_TEMPLATE``
+# (``TF_CloseDeprecatedSession``'s one grep-only hit on tensorflow, a
+# plain ``extern`` prototype in ``c_api.h``, was tagged ``[call]`` --
+# syntactically indistinguishable from a real call by the bare-call
+# template alone). A genuine call statement on its own line (``foo(a,
+# b);``) never has a type-token prefix before the name, which is the
+# discriminator this template relies on.
 _DECLARATION_TEMPLATE = (
     r"^(?:extern\s+)?(?:[A-Za-z_][A-Za-z0-9_]*[\s*]+)+"
     r"{name}\s*\([^;]*\)\s*;\s*$"
@@ -341,7 +331,7 @@ def classify_unused_reference(
       prototype -- return type, name, params, bare trailing ``;``, no
       body) is checked before ``SHAPE_CALL``, since a prototype is
       syntactically indistinguishable from a bare call by the call
-      template alone (round 25 finding #14). ``SHAPE_CALL`` (bare
+      template alone. ``SHAPE_CALL`` (bare
       ``name(`` or qualified ``x.name(``/``x::name(``) is checked
       before spread/typeof/subscript, since ``...name()`` (spreading a
       call's *result*) is a genuine call site first and a spread
@@ -454,10 +444,10 @@ def _is_generic_name(name: str, is_known_collision_name: bool = False) -> bool:
     small/synthetic repo where they happen not to collide yet;
     ``is_known_collision_name`` (from ``ambiguous.collision_names``)
     catches any name -- regardless of curation -- that has *actually*
-    collided 2+ ways somewhere in this repo's own call graph (round 28
-    cline.md §3.5: ``delete``/``resolve``/``close``/``invoke``/
-    ``dispose``/``clear``/``error`` all reproduced this exact
-    collision shape while absent from the curated list). Additive by
+    collided 2+ ways somewhere in this repo's own call graph (on cline,
+    ``delete``/``resolve``/``close``/``invoke``/``dispose``/``clear``/
+    ``error`` all reproduced this exact collision shape while absent
+    from the curated list). Additive by
     design: this can only ever add cases to ``CAUSE_GENERIC_NAME``,
     never remove one the curated list already caught, so no existing
     passing test can regress.
@@ -477,17 +467,16 @@ def _looks_qualified_call(snippet: str, bare_name: str) -> bool:
     return pattern.search(snippet) is not None
 
 
-# Round 21 Track B3: the single most common "grep-only" shape on any
-# import-heavy codebase (~300+ of claude-code's grep-only bucket, 8 of
-# claude-buddy's) is a bare import/require statement naming the
-# target — correctly excluded from dekko's own callers count (an
-# import binds a name, it doesn't call it), but with no dedicated
-# ``classify_miss()`` cause before this, every one fell through to
-# ``CAUSE_UNEXPLAINED``. Each template is anchored at the line start
-# (after stripping leading whitespace) so a line that merely mentions
-# "import" mid-sentence (prose, a different identifier) never
-# false-positives -- a real import/require statement's keyword always
-# opens the (stripped) line.
+# The single most common "grep-only" shape on any import-heavy codebase
+# (~300+ of claude-code's grep-only bucket, 8 of claude-buddy's) is a
+# bare import/require statement naming the target — correctly excluded
+# from dekko's own callers count (an import binds a name, it doesn't
+# call it), but with no dedicated ``classify_miss()`` cause before this,
+# every one fell through to ``CAUSE_UNEXPLAINED``. Each template is
+# anchored at the line start (after stripping leading whitespace) so a
+# line that merely mentions "import" mid-sentence (prose, a different
+# identifier) never false-positives -- a real import/require statement's
+# keyword always opens the (stripped) line.
 _ESM_NAMED_IMPORT_TEMPLATE = (
     r"^import\s+(?:type\s+)?\{{[^}}]*\b{name}\b[^}}]*\}}\s*from\s+['\"]"
 )
@@ -495,16 +484,15 @@ _ESM_DEFAULT_IMPORT_TEMPLATE = (
     r"^import\s+(?:\*\s+as\s+)?{name}\s+from\s+['\"]"
 )
 _PY_FROM_IMPORT_TEMPLATE = r"^from\s+\S+\s+import\s+.*\b{name}\b"
-# Round 25 spring-boot.md Finding 2: Java's ``import a.b.C;`` (and
-# ``import static a.b.C.field;``) has no equivalent among the three
-# templates above -- none of them match a semicolon-terminated,
-# dot-qualified import with no braces/``from`` keyword. Requires the
-# bare name to be the final dotted segment immediately before the
-# terminating ``;`` -- same "visible in the line itself" discipline as
-# every other template here. An optional ``static `` modifier is
-# allowed between ``import`` and the qualified path (a Java static
-# import of a field/method, not a type import) without a separate
-# template, since the shape is otherwise identical.
+# Java's ``import a.b.C;`` (and ``import static a.b.C.field;``) has no
+# equivalent among the three templates above -- none of them match a
+# semicolon-terminated, dot-qualified import with no braces/``from``
+# keyword. Requires the bare name to be the final dotted segment
+# immediately before the terminating ``;`` -- same "visible in the line
+# itself" discipline as every other template here. An optional
+# ``static `` modifier is allowed between ``import`` and the qualified
+# path (a Java static import of a field/method, not a type import)
+# without a separate template, since the shape is otherwise identical.
 _JAVA_IMPORT_TEMPLATE = r"^import\s+(?:static\s+)?[\w.]*\.{name}\s*;"
 # Kotlin shares Java's ``import a.b.C`` shape closely enough to warrant
 # its own narrow template rather than loosening the Java one (which
@@ -548,34 +536,32 @@ def _looks_like_import_statement(snippet: str, bare_name: str) -> bool:
     return False
 
 
-# Round 25 claude-code.md Finding 1: a TS/JS type-position mention
-# (``import type Output from './output.js'``, ``output: Output``,
-# ``Foo<Output>``) is neither an import-*statement* shape (none of
-# ``_IMPORT_LINE_TEMPLATES`` match a parameter-type annotation) nor a
-# call -- it fell straight to CAUSE_UNEXPLAINED (78% of claude-code's
-# sample bucket this round). Deliberately scoped to curly-brace/
-# TS-shaped grammars only, gated via ``_grammar_for_path`` the same way
-# ``_COMMENT_PREFIXES_BY_GRAMMAR`` is -- Python's own ``x: Output``
-# annotation syntax looks identical but this round's evidence is
-# TS-specific; other languages' type-position syntax would need their
-# own follow-up evidence before extending this check there (same "ship
-# the shape that's evidenced" precedent as the Java/Kotlin import
-# template split above).
+# A TS/JS type-position mention (``import type Output from
+# './output.js'``, ``output: Output``, ``Foo<Output>``) is neither an
+# import-*statement* shape (none of ``_IMPORT_LINE_TEMPLATES`` match a
+# parameter-type annotation) nor a call -- it fell straight to
+# CAUSE_UNEXPLAINED (78% of claude-code's sample bucket). Deliberately
+# scoped to curly-brace/TS-shaped grammars only, gated via
+# ``_grammar_for_path`` the same way ``_COMMENT_PREFIXES_BY_GRAMMAR`` is
+# -- Python's own ``x: Output`` annotation syntax looks identical but
+# the evidence is TS-specific; other languages' type-position syntax
+# would need their own follow-up evidence before extending this check
+# there (same "ship the shape that's evidenced" precedent as the
+# Java/Kotlin import template split above).
 _TYPE_ANNOTATION_GRAMMARS = frozenset(
     {"typescript", "tsx", "javascript", "rust"}
 )
 _TS_IMPORT_TYPE_TEMPLATE = r"^import\s+type\s+.*\b{name}\b"
-# Round 33 Track 5 (claude-code.md Finding 2): the colon half matches
-# ``identifier: identifier``, which in TS is a type annotation, an
-# object-literal value (``error: errorMessage,``), a ternary else-branch
-# or a ``case`` label -- a regex can't tell them apart, but the
-# *target's kind* can: a function's name after a colon is never a type
-# annotation. So the colon half is consulted only for a type target;
-# the generic-argument and ``import type`` shapes are unambiguous
-# syntax whatever the target is and stay ungated. Measured on the 100
-# most-flagged non-type claude-code targets: 145 of 186 "type position"
-# rows were the colon half firing on a value. Those now fall to
-# "unexplained", on purpose -- a wrong explanation closes an
+# The colon half matches ``identifier: identifier``, which in TS is a
+# type annotation, an object-literal value (``error: errorMessage,``), a
+# ternary else-branch or a ``case`` label -- a regex can't tell them
+# apart, but the *target's kind* can: a function's name after a colon is
+# never a type annotation. So the colon half is consulted only for a
+# type target; the generic-argument and ``import type`` shapes are
+# unambiguous syntax whatever the target is and stay ungated. Measured
+# on the 100 most-flagged non-type claude-code targets: 145 of 186 "type
+# position" rows were the colon half firing on a value. Those now fall
+# to "unexplained", on purpose -- a wrong explanation closes an
 # investigation that should stay open.
 # `x: Output`, not `x: Output()`
 _TS_TYPE_COLON_TEMPLATE = r":\s*{name}\b(?!\s*\()"
@@ -584,12 +570,12 @@ _TS_TYPE_GENERIC_TEMPLATE = r"<\s*{name}\s*[,>]"
 _TS_TYPE_POSITION_TEMPLATE = (
     f"{_TS_TYPE_COLON_TEMPLATE}|{_TS_TYPE_GENERIC_TEMPLATE}"
 )
-# Round 28 zed.md §3.4: Rust's type-position idioms have no TS
-# equivalent and need their own templates, even with "rust" now
-# admitted to _TYPE_ANNOTATION_GRAMMARS -- Rust's field/parameter
-# shape (`field: Type`) is syntactically identical to TS's `x: Output`
-# and already falls out of _TS_TYPE_POSITION_TEMPLATE's first half for
-# free once the grammar gate is open.
+# Rust's type-position idioms have no TS equivalent and need their own
+# templates, even with "rust" now admitted to _TYPE_ANNOTATION_GRAMMARS
+# -- Rust's field/parameter shape (`field: Type`) is syntactically
+# identical to TS's `x: Output` and already falls out of
+# _TS_TYPE_POSITION_TEMPLATE's first half for free once the grammar gate
+# is open.
 #
 # `impl Trait for Type` / `impl<T> Trait<T> for Type<T>` -- an `impl`
 # header naming the type being implemented for, not a call or a value
@@ -601,51 +587,48 @@ _RUST_IMPL_FOR_TEMPLATE = r"^impl(?:<[^>]*>)?\s+.+\bfor\s+{name}\b"
 # existing generic-argument template would likely also match the
 # bare `<Type>` substring once Rust is grammar-gated in.
 _RUST_TURBOFISH_TEMPLATE = r"::<\s*{name}\s*>"
-# Round 28 zed.md §3.4 spot-check (real-repo verification against
-# zed's own two motivating examples, `NavHistory`/`BufferFontSize`):
-# the design doc's `impl...for` template alone left the plain
-# *inherent* impl block (`impl NavHistory { ... }`, `impl<T>
-# NavHistory<T> { ... }` -- no trailing `for Trait`) unclassified, even
-# though the master report's own repro cited exactly this line
-# (`impl NavHistory {`) as a motivating example. Anchored the same way
-# as `_RUST_IMPL_FOR_TEMPLATE` (start of line, optional generic
-# parameter list) but requires the name immediately after, not after a
-# `for`.
+# Real-repo verification against zed's `NavHistory`/`BufferFontSize`:
+# the `impl...for` template alone left the plain *inherent* impl block
+# (`impl NavHistory { ... }`, `impl<T> NavHistory<T> { ... }` -- no
+# trailing `for Trait`) unclassified, even though `impl NavHistory {` is
+# exactly the motivating line. Anchored the same way as
+# `_RUST_IMPL_FOR_TEMPLATE` (start of line, optional generic parameter
+# list) but requires the name immediately after, not after a `for`.
 _RUST_IMPL_TEMPLATE = r"^impl(?:<[^>]*>)?\s+{name}\b"
 # A function's return-type position (`-> Type`, `-> &Type`, `-> &mut
 # Type`) has no TS equivalent needing this shape (TS's colon-based
 # return-type syntax, `): Type {`, already falls out of the existing
 # colon template for free) -- Rust's `->` arrow syntax needs its own.
-# Also evidenced directly by the master report's own repro (`pub fn
-# nav_history(&self) -> &NavHistory {`). Same negative-lookahead
-# discipline as the colon template, to avoid misclassifying `-> Type()`
-# (a call whose result is the return value) as a type annotation --
-# not a real Rust shape (a function's return type is never itself a
-# call expression), but kept for defense-in-depth consistency with
-# every other template in this module. The lookahead also excludes a
-# trailing `::` (a qualified call/path via a leading reference, e.g.
-# `&Type::method()`) for the same defense-in-depth reason, even though
-# a return type is never itself `-> Type::method()`.
+# Also evidenced directly by zed (`pub fn nav_history(&self) ->
+# &NavHistory {`). Same negative-lookahead discipline as the colon
+# template, to avoid misclassifying `-> Type()` (a call whose result is
+# the return value) as a type annotation -- not a real Rust shape (a
+# function's return type is never itself a call expression), but kept
+# for defense-in-depth consistency with every other template in this
+# module. The lookahead also excludes a trailing `::` (a qualified
+# call/path via a leading reference, e.g. `&Type::method()`) for the
+# same defense-in-depth reason, even though a return type is never
+# itself `-> Type::method()`.
 _RUST_RETURN_TYPE_TEMPLATE = r"->\s*&?(?:mut\s+)?{name}\b(?!\s*\(|::)"
 # A reference-type mention anywhere in the line (`&Type`, `&mut Type`)
 # -- covers shapes the colon/return-type templates above don't anchor
 # to, e.g. a nested parameter type inside a higher-order function
-# signature (master report's own repro: `cb: &mut dyn FnMut(&mut
-# NavHistory, &mut App) -> Option<NavigationEntry>,`, where `&mut
-# NavHistory` sits inside a `FnMut(...)` parameter list, not directly
-# after a top-level colon). Gated with the same call-site negative
-# lookahead as every other template here, since `&Type(args)` (a
-# reference to a freshly-constructed tuple struct) is a real call, not
-# a bare type mention -- also excludes a trailing `::` so `&Type::
-# method()` (a qualified call on a reference) isn't misclassified
-# either, even though in practice dekko's own resolver already
-# attributes such a call as a match before classify_miss ever sees it.
+# signature (zed: `cb: &mut dyn FnMut(&mut NavHistory, &mut App) ->
+# Option<NavigationEntry>,`, where `&mut NavHistory` sits inside a
+# `FnMut(...)` parameter list, not directly after a top-level colon).
+# Gated with the same call-site negative lookahead as every other
+# template here, since `&Type(args)` (a reference to a
+# freshly-constructed tuple struct) is a real call, not a bare type
+# mention -- also excludes a trailing `::` so `&Type::method()` (a
+# qualified call on a reference) isn't misclassified either, even though
+# in practice dekko's own resolver already attributes such a call as a
+# match before classify_miss ever sees it.
 _RUST_REF_TYPE_TEMPLATE = r"&(?:mut\s+)?{name}\b(?!\s*\(|::)"
-# Round 32 Track 2(d), zed.md: two Rust shapes that name a *type* with
-# no call involved. Both are consulted only when the target itself is
-# a type (``target_is_type``): for a function target ``name {`` is a
-# block after an expression and ``(name)`` is a value handed to a
-# call, which is value-reference territory, not this bucket's.
+# Two Rust shapes that name a *type* with no call involved. Both are
+# consulted only when the target itself is a type (``target_is_type``):
+# for a function target ``name {`` is a block after an expression and
+# ``(name)`` is a value handed to a call, which is value-reference
+# territory, not this bucket's.
 #
 # Struct literal or struct pattern: ``let loc = AbortMessageLocation {``.
 _RUST_STRUCT_LITERAL_TEMPLATE = r"\b{name}\s*\{{"
@@ -701,10 +684,10 @@ def _looks_like_type_annotation(
     (``impl``, ``->``, ``&``, ``::<...>``) never appears in TS/JS
     source the same way.
 
-    ``target_is_type`` (round 32 Track 2(d)) additionally admits Rust
-    struct literals and enum/tuple-struct payloads -- see
-    ``_looks_like_rust_type_construction`` -- and, since round 33
-    Track 5, is what admits the ``x: Name`` colon shape at all (see
+    ``target_is_type`` additionally admits Rust struct literals and
+    enum/tuple-struct payloads -- see
+    ``_looks_like_rust_type_construction`` -- and is what admits the
+    ``x: Name`` colon shape at all (see
     ``_TS_TYPE_COLON_TEMPLATE``). Keyword-only and required so every
     caller decides it explicitly.
     """
@@ -739,25 +722,24 @@ def _looks_like_type_annotation(
     )
 
 
-# Round 25 claude-buddy.md Finding 2: a same-bare-name local variable/
-# parameter declaration (``const warn: string[] = []``) or a bare
-# quoted string literal value (``status === "warn"``) in an unrelated
-# file share the target's bare name without referencing it at all --
-# 32% of claude-buddy's unexplained bucket this round. A full
-# declaration-vs-reference check would require real parsing (out of
-# scope for this module's pattern-match-on-the-grep-line philosophy,
-# per the module docstring) -- this is a scoped, regex-based partial
-# fix covering the two concrete shapes this round evidenced, not every
-# possible "unrelated local binding" shape (a JSX prop, a destructured
-# parameter, an object-literal key -- extend reactively if a future
-# round surfaces one of those as a concrete new bucket).
+# A same-bare-name local variable/parameter declaration (``const warn:
+# string[] = []``) or a bare quoted string literal value (``status ===
+# "warn"``) in an unrelated file share the target's bare name without
+# referencing it at all -- 32% of claude-buddy's unexplained bucket. A
+# full declaration-vs-reference check would require real parsing (out of
+# scope for this module's pattern-match-on-the-grep-line philosophy, per
+# the module docstring) -- this is a scoped, regex-based partial fix
+# covering the two concrete shapes observed, not every possible
+# "unrelated local binding" shape (a JSX prop, a destructured parameter,
+# an object-literal key -- extend reactively if one of those surfaces as
+# a concrete new bucket).
 _LOCAL_DECL_TEMPLATE = r"^(?:const|let|var)\s+{name}\s*[:=]"
 _STRING_LITERAL_TEMPLATE = r'["\']{name}["\']'
-# Round 28 cline.md §3.5: a `catch (error) { ... }` parameter binding
-# -- the caught exception name shares the target's bare name but is a
-# fresh local binding, not a reference to it. The optional leading
-# `}` covers the common `} catch (error) {` brace-placement style
-# (the previous block's closer on the same line as `catch`).
+# A `catch (error) { ... }` parameter binding -- the caught exception
+# name shares the target's bare name but is a fresh local binding, not a
+# reference to it. The optional leading `}` covers the common `} catch
+# (error) {` brace-placement style (the previous block's closer on the
+# same line as `catch`).
 _CATCH_BINDING_TEMPLATE = r"^\}}?\s*catch\s*\(\s*{name}\b"
 # A bare interface/type field declaration (`error?: string;` /
 # `error: string;`) inside an object/interface body -- same "local
@@ -806,10 +788,10 @@ def _looks_like_local_binding_or_literal(snippet: str, bare_name: str) -> bool:
     )
 
 
-# Round 32 Track 2(a), tier 2: a function handed around as a value in
-# a language dekko extracts no reference edges for. Tier 1 (the map
-# already recorded this exact line as a reference) is the caller's job
-# and needs no regex; this is only the fallback for grammars whose
+# Tier 2: a function handed around as a value in a language dekko
+# extracts no reference edges for. Tier 1 (the map already recorded this
+# exact line as a reference) is the caller's job and needs no regex;
+# this is only the fallback for grammars whose
 # ``LanguageSpec.reference_query`` is ``None``.
 #
 # One shape only: the **path-qualified** name, ``.map(Thing::as_str)``.
@@ -820,8 +802,8 @@ def _looks_like_local_binding_or_literal(snippet: str, bare_name: str) -> bool:
 # ``(program, args)``, ``indent_guide(buffer_id, 1)``), because Rust
 # names a getter after what it returns. A bare name can't be told from
 # a local without scope analysis -- the read-side twin of the
-# resolver's own shadowed-local bug (Track 5). A ``::`` in front of
-# the name is the one thing a local can never have.
+# resolver's own shadowed-local bug. A ``::`` in front of the name is
+# the one thing a local can never have.
 #
 # Allowlisted grammars, not "every grammar without a reference query":
 # the path shape means this in Rust and C++; extend on evidence, same
@@ -878,26 +860,24 @@ def _looks_like_value_reference(
     )
 
 
-# Round 22 claude-buddy.md §2.4: ``_looks_like_import_statement`` only
-# catches the single-line ``import { X } from "...";`` shape --
-# _ESM_NAMED_IMPORT_TEMPLATE is anchored at line start and requires
-# ``import``/``{``/``from`` all on the matched line. A multi-line
-# destructured import (``import {\n  X,\n  Y,\n} from "...";``) puts
-# the bare-name hit on a line containing only ``  X,`` -- none of
-# those tokens are on that line, so the anchored regex never matches
-# and it fell through to CAUSE_UNEXPLAINED. This was the dominant
-# "grep-only" shape in that repo (6 of 8 flagged rows), not the edge
-# case.
+# ``_looks_like_import_statement`` only catches the single-line ``import
+# { X } from "...";`` shape -- _ESM_NAMED_IMPORT_TEMPLATE is anchored at
+# line start and requires ``import``/``{``/``from`` all on the matched
+# line. A multi-line destructured import (``import {\n  X,\n  Y,\n} from
+# "...";``) puts the bare-name hit on a line containing only ``  X,`` --
+# none of those tokens are on that line, so the anchored regex never
+# matches and it fell through to CAUSE_UNEXPLAINED. This was the
+# dominant "grep-only" shape in claude-buddy (6 of 8 flagged rows), not
+# the edge case.
 #
-# Round 31 widened both halves. The opener also accepts ``export {``
-# / ``export type {`` (a barrel's re-export list -- cline.md §4.1 Bug
-# B: those rows fell through to CAUSE_GENERIC_NAME, telling an agent a
-# specific 30-character identifier was "a generic name") and a leading
-# default binding (``import React, {``). And the member line no longer
-# has to be exactly one name: claude-buddy.md C1 packs several per
-# line (``searchBuddy, renderBuddy, SPECIES,`` / ``type Species, type
-# Rarity,``), which is why two one-name-per-line repos could not
-# reproduce that finding.
+# Both halves were later widened. The opener also accepts ``export {`` /
+# ``export type {`` (a barrel's re-export list -- on cline, those rows
+# fell through to CAUSE_GENERIC_NAME, telling an agent a specific
+# 30-character identifier was "a generic name") and a leading default
+# binding (``import React, {``). And the member line no longer has to be
+# exactly one name: claude-buddy packs several per line (``searchBuddy,
+# renderBuddy, SPECIES,`` / ``type Species, type Rarity,``), which is
+# why two one-name-per-line repos could not reproduce the gap.
 _IMPORT_OPEN_BRACE = re.compile(
     r"^\s*(?:import|export)\s+(?:type\s+)?(?:[\w$]+\s*,\s*)?\{"
 )
@@ -921,24 +901,22 @@ def _looks_like_multiline_import_member(
     """Whether ``hit``'s line is a specifier-list line (one or more
     ``name,`` members) inside a multi-line ``import { ... } from
     "...";`` or ``export { ... }`` block --
-    ``_looks_like_import_statement`` only catches the single-line
-    shape (round 22 claude-buddy.md §2.4: 6 of 8 flagged
-    rows in that repo are this multi-line shape, the dominant style
-    there). Reads a small window of the hit's own file around its
-    line -- the only file re-read this module does, kept small and
-    best-effort (any read/decode failure returns ``False``, same
-    fallback as the rest of this module's parsing).
+    ``_looks_like_import_statement`` only catches the single-line shape
+    (on claude-buddy, 6 of 8 flagged rows are this multi-line shape, the
+    dominant style there). Reads a small window of the hit's own file
+    around its line -- the only file re-read this module does, kept
+    small and best-effort (any read/decode failure returns ``False``,
+    same fallback as the rest of this module's parsing).
 
     Scans backward from the hit line (nearest line first) for the
     first brace-relevant line -- an ``import {`` opener or a line
     containing ``}`` -- and answers based on *that* line alone, not
-    "any opener/any closer anywhere in the window" (round 23
-    claude-buddy.md §2.1: a flat any()/any() scan let an unrelated
-    earlier import's closing ``}`` falsely "close" a still-open block
-    sitting directly above the hit, as soon as *any* window line
-    happened to contain a ``}`` regardless of which opener it actually
-    belonged to). A ``}``-bearing line is checked before an opener
-    match on the *same* line so a complete single-line import
+    "any opener/any closer anywhere in the window" (a flat any()/any()
+    scan let an unrelated earlier import's closing ``}`` falsely "close"
+    a still-open block sitting directly above the hit, as soon as *any*
+    window line happened to contain a ``}`` regardless of which opener
+    it actually belonged to). A ``}``-bearing line is checked before an
+    opener match on the *same* line so a complete single-line import
     (``import { X } from 'y';``, which matches both patterns) is
     correctly treated as closed, not as a dangling opener.
     """
@@ -980,9 +958,7 @@ def _in_leading_header_comment(root: Path, hit: "GrepHit") -> bool:
     run starting at line 1 of its own file -- the "module summary"
     shape a doc-comment-proximity check alone can't catch (a header
     block naming several of the file's exports can sit dozens of lines
-    above any one of their definitions; see
-    ``.features/plans/round24/
-    07-sanity-comment-mention-file-header-gap.md``).
+    above any one of their definitions).
 
     Deliberately stricter than a bare ``looks_like_comment`` check on
     the hit line alone: every line from 1 up to and including the hit
@@ -1159,12 +1135,12 @@ def _looks_like_comment_line(snippet: str, path: str) -> bool:
     ``_COMMENT_PREFIXES_BY_GRAMMAR`` (unsupported entirely, or one of
     the deliberately-unmapped Vue/Svelte SFC grammars).
 
-    Round 32 Track 2(b) made this the *only* gate on a comment cause
-    (the near-definition/header zone now picks the wording, not the
-    verdict), so two prefix matches that aren't comments are refused
-    here: a PHP 8 ``#[Attribute]`` line (``#`` opens a comment in PHP,
-    ``#[`` opens an attribute, and an attribute can name a class), and
-    a line whose leading ``/* ... */`` closes with real code after it.
+    This is the *only* gate on a comment cause (the
+    near-definition/header zone now picks the wording, not the verdict),
+    so two prefix matches that aren't comments are refused here: a PHP 8
+    ``#[Attribute]`` line (``#`` opens a comment in PHP, ``#[`` opens an
+    attribute, and an attribute can name a class), and a line whose
+    leading ``/* ... */`` closes with real code after it.
     """
     grammar = _grammar_for_path(path) or ""
     prefixes = _COMMENT_PREFIXES_BY_GRAMMAR.get(grammar)
@@ -1191,7 +1167,7 @@ _BLOCK_COMMENT_SCAN_LINES = 40
 def _looks_like_block_comment_continuation(root: Path, hit: "GrepHit") -> bool:
     """Whether ``hit``'s line is a ``/* ... */`` block-comment
     continuation row (a Javadoc/JSDoc-style `` * text`` line), not real
-    code -- round 31 tensorflow.md Observation 5.2: a `` *
+    code -- on tensorflow, a `` *
     {@link ANeuralNetworksEvent_wait},`` line plainly inside a ``/**
     ... */`` block was labelled ``[unexplained miss]`` because a bare
     ``*`` prefix is deliberately absent from every C-style family in
@@ -1280,60 +1256,56 @@ def classify_miss(
     that need file I/O or a repo-wide symbol-table lookup --
     ``_looks_like_multiline_import_member``, the receiver-mismatch
     heuristic behind ``likely_unrelated_external``, and the
-    ``symbols_by_name`` lookup behind ``looks_like_cross_file_collision``
-    -- are computed by the caller and passed in rather than given to
-    this function directly, to keep that contract). Checked in the
-    order ``dekko-verify/SKILL.md`` lists its blind spots: a
-    qualified-call syntax match is checked first (it's visible in the
-    line itself and the most specific signal available), then whether
-    the line is a bare import/require statement naming the symbol
-    (round 21 Track B3 — the dominant "grep-only" shape on any
-    import-heavy codebase, same "visible in the line itself"
-    precedence as the qualified-call check), then whether the line is
-    a bare member of a multi-line destructured import block (round 22
-    claude-buddy.md §2.4 — the residual gap in the single-line check
-    above), then whether the line uses the name in a TS/JS type
-    position -- an ``import type`` statement, a parameter/variable type
-    annotation, or a generic type argument (round 25 claude-code.md
-    Finding 1 — neither an import statement nor a call, but just as
-    unambiguous once matched; see ``_looks_like_type_annotation``),
-    then whether the line is an unrelated local variable/parameter
-    declaration or a bare string literal equal to the name (round 25
-    claude-buddy.md Finding 2 — a same-bare-name local binding or
+    ``symbols_by_name`` lookup behind
+    ``looks_like_cross_file_collision`` -- are computed by the caller
+    and passed in rather than given to this function directly, to keep
+    that contract). Checked in the order ``dekko-verify/SKILL.md`` lists
+    its blind spots: a qualified-call syntax match is checked first
+    (it's visible in the line itself and the most specific signal
+    available), then whether the line is a bare import/require statement
+    naming the symbol (the dominant "grep-only" shape on any
+    import-heavy codebase, same "visible in the line itself" precedence
+    as the qualified-call check), then whether the line is a bare member
+    of a multi-line destructured import block (the residual gap in the
+    single-line check above), then whether the line uses the name in a
+    TS/JS type position -- an ``import type`` statement, a
+    parameter/variable type annotation, or a generic type argument
+    (neither an import statement nor a call, but just as unambiguous
+    once matched; see ``_looks_like_type_annotation``), then whether the
+    line is an unrelated local variable/parameter declaration or a bare
+    string literal equal to the name (a same-bare-name local binding or
     string value in an unrelated file references nothing; see
-    ``_looks_like_local_binding_or_literal``), then whether the hit is
-    a comment/docstring line either sitting near the symbol's own
-    definition or inside its file's uninterrupted leading header
-    comment block (round 24 07-sanity-comment-mention-file-header-gap.md
-    — a module-header comment naming several exports can sit far from
-    any one of their definitions; not a call at all either way), then
-    whether the file is in a language dekko can't parse at all, then
-    whether this hit is a call-shaped reference sitting in a file that
-    also holds a different, same-bare-named declaration (round 25
-    awesome-go.md Bug 1 — a deterministic, repo-index-backed signal,
-    stronger than the two heuristics that follow; see
-    ``looks_like_cross_file_collision``'s own caller-side computation
-    in ``run()``), then whether the caller's own receiver-mismatch
-    heuristic flagged this hit as likely an unrelated external-library
-    method sharing the target's bare name (round 23 spring-boot.md §4 —
-    a same-named AssertJ/stdlib/third-party method colliding with the
-    one repo-defined candidate; see ``_receiver_mismatch``), then
-    whether it's a test file excluded by ``sanity``'s own default
-    filtering, then whether the target name is short/generic enough
-    that dekko's count should be read as directional rather than
-    exact. A line matching none of these is reported as "unexplained"
-    rather than forcing a guess that doesn't fit — matching the plan's
-    own "false confidence from the classifier itself" caution.
+    ``_looks_like_local_binding_or_literal``), then whether the hit is a
+    comment/docstring line either sitting near the symbol's own
+    definition or inside its file's uninterrupted leading header comment
+    block (a module-header comment naming several exports can sit far
+    from any one of their definitions; not a call at all either way),
+    then whether the file is in a language dekko can't parse at all,
+    then whether this hit is a call-shaped reference sitting in a file
+    that also holds a different, same-bare-named declaration (a
+    deterministic, repo-index-backed signal, stronger than the two
+    heuristics that follow; see ``looks_like_cross_file_collision``'s
+    own caller-side computation in ``run()``), then whether the caller's
+    own receiver-mismatch heuristic flagged this hit as likely an
+    unrelated external-library method sharing the target's bare name (a
+    same-named AssertJ/stdlib/third-party method colliding with the one
+    repo-defined candidate; see ``_receiver_mismatch``), then whether
+    it's a test file excluded by ``sanity``'s own default filtering,
+    then whether the target name is short/generic enough that dekko's
+    count should be read as directional rather than exact. A line
+    matching none of these is reported as "unexplained" rather than
+    forcing a guess that doesn't fit — avoiding false confidence from
+    the classifier itself.
 
-    Round 32 Track 2 changed that order in three places, and the
-    paragraph above predates it. The comment check now runs right
-    after the import checks (above the type and string-literal
-    checks) and fires for *any* comment line: the near-definition/
-    header zone only picks between ``CAUSE_COMMENT_MENTION`` and
-    ``CAUSE_COMMENT_ELSEWHERE``. ``is_recorded_reference`` comes next,
-    exact and index-backed. ``looks_like_value_reference``, a shape
-    heuristic, sits low: after the unsupported-language check and
-    before the cross-file-collision one.
+    A later change reordered that in three places, and the paragraph
+    above predates it. The comment check now runs right after the import
+    checks (above the type and string-literal checks) and fires for
+    *any* comment line: the near-definition/header zone only picks
+    between ``CAUSE_COMMENT_MENTION`` and ``CAUSE_COMMENT_ELSEWHERE``.
+    ``is_recorded_reference`` comes next, exact and index-backed.
+    ``looks_like_value_reference``, a shape heuristic, sits low: after
+    the unsupported-language check and before the cross-file-collision
+    one.
 
     Args:
         snippet: The grep-matched line's text.
@@ -1390,7 +1362,7 @@ def classify_miss(
             (``ambiguous.collision_names``) -- an additive signal to
             ``_is_generic_name`` alongside its curated word list,
             computed once per ``run()``/``run_all()`` invocation by the
-            caller (round 28 cline.md §3.5).
+            caller.
         is_recorded_reference: Whether the map holds this hit's exact
             ``(path, line)`` as a value-reference edge to the target
             (``_reference_sites``). An index fact computed by the
@@ -1409,7 +1381,7 @@ def classify_miss(
         return CAUSE_IMPORT_STATEMENT
     if looks_like_import_member:
         return CAUSE_IMPORT_STATEMENT
-    # Round 32 Track 2(c): the comment test sits above the type and
+    # The comment test sits above the type and
     # string-literal checks. A comment is a comment whatever it quotes
     # (``# ... "tfrun" commands ...`` used to get the literal label).
     # It stays below the anchored qualified-call/import checks, which
@@ -1449,7 +1421,7 @@ def _classify_miss_remaining(
 ) -> str:
     """The back half of ``classify_miss``'s ladder -- split out purely
     to keep ``classify_miss`` itself under this module's McCabe
-    complexity ceiling as the ladder has grown across rounds; not a
+    complexity ceiling as the ladder has grown; not a
     separately meaningful unit on its own, so it isn't independently
     documented/tested beyond what ``classify_miss``'s own test suite
     already exercises through the public function.
@@ -1593,20 +1565,18 @@ def _receiver_mismatch(
     """Whether nothing in ``hit``'s own line or its file's top-of-file
     import/using block textually mentions ``declaring_type`` — the
     cheap, no-type-inference proxy for "this call's receiver almost
-    certainly isn't the target's type" (round 23 spring-boot.md §4's
-    own suggested heuristic: "target's declaring type recognizably
-    unrelated to the call site's surrounding class/import list").
+    certainly isn't the target's type" (the target's declaring type is
+    recognizably unrelated to the call site's surrounding class/import
+    list).
 
     Deliberately the same cost/precision tier as
     ``_looks_like_multiline_import_member`` — a small, bounded,
     best-effort re-read of the hit's own file, ``False`` on any I/O
     failure — not a real import-resolution pass: no alias tracking, no
     type inference, no wildcard-import handling. It answers "is there
-    *any* textual sign," not "is this definitely unrelated" (see
-    ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``'s
-    "Risks / tradeoffs" section for why false positives here are
-    low-cost and false negatives are the accepted, safe-direction
-    failure mode).
+    *any* textual sign," not "is this definitely unrelated": false
+    positives here are low-cost and false negatives are the accepted,
+    safe-direction failure mode.
 
     Args:
         root: Repo root, for the one bounded file re-read.
@@ -1616,12 +1586,12 @@ def _receiver_mismatch(
         declaring_path: The declaring type's own file, when known. A
             file never imports its own class, so checking that file's
             import block for ``declaring_type`` always (spuriously)
-            comes up empty — round 25 finding #9: this misfired on
-            same-file comments referring to the correct target,
-            reporting "likely an unrelated external-library method"
-            when the real candidate was declared in that exact file.
-            When ``hit.path == declaring_path``, the import-block check
-            is skipped and only the hit's own line is checked.
+            comes up empty — this misfired on same-file comments
+            referring to the correct target, reporting "likely an
+            unrelated external-library method" when the real candidate
+            was declared in that exact file. When ``hit.path ==
+            declaring_path``, the import-block check is skipped and only
+            the hit's own line is checked.
 
     Returns:
         ``True`` when neither the hit's own line nor the first
@@ -1650,7 +1620,7 @@ def _reference_sites(
     index: MapIndex, symbols: list[Symbol]
 ) -> frozenset[tuple[str, int]]:
     """Every ``(path, line)`` where the map records one of ``symbols``
-    used as a value rather than called (round 32 Track 2(a), tier 1).
+    used as a value rather than called (tier 1).
 
     Read off ``MapIndex.referenced_in``/``ref_lines``, the same tables
     ``dekko query uses`` answers from -- but **only edges the
@@ -1743,9 +1713,9 @@ def _classify_grep_hits(
     not two implementations that can drift apart — see the module
     docstring's ``--all`` paragraph. This is the whole point of the
     ``--all`` feature: it exists to catch a classification-logic
-    regression like the round-23 ``_looks_like_multiline_import_
-    member`` bug, and if this function's callers were allowed to
-    diverge, a sweep could pass cleanly on exactly that kind of bug.
+    regression like the old ``_looks_like_multiline_import_member`` bug,
+    and if this function's callers were allowed to diverge, a sweep
+    could pass cleanly on exactly that kind of bug.
 
     Args:
         hits: Raw grep hits for ``bare_name`` (``sweep.hits``, before
@@ -1764,36 +1734,35 @@ def _classify_grep_hits(
             run (single-repo-candidate method target with a resolvable
             declaring type) — ``None`` otherwise (the default, and
             always ``None`` from ``run_all()``'s sweep path, which
-            doesn't compute this gating; see
-            ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``).
+            doesn't compute this gating).
             When set, each hit is additionally checked with
             ``_receiver_mismatch`` and the result threaded into
             ``classify_miss`` as ``likely_unrelated_external``.
         declaring_path: The declaring type's own file, when known —
             forwarded to ``_receiver_mismatch`` so a hit inside that
             same file (which never imports its own class) isn't
-            misflagged as a receiver mismatch (round 25 finding #9).
+            misflagged as a receiver mismatch.
         other_candidate_files: Every file (besides the target's own)
             holding a declaration of a different symbol sharing
-            ``bare_name`` — round 25 awesome-go.md Bug 1's
-            deterministic cross-file-collision signal (see ``run()``'s
-            own computation). A hit whose file is in this set *and*
-            looks call-shaped (``_looks_qualified_call`` or
-            ``_BARE_CALL_TEMPLATE``) is threaded into ``classify_miss``
-            as ``looks_like_cross_file_collision``. Defaults to empty
-            (the existing, ungated behavior).
+            ``bare_name`` — the deterministic cross-file-collision
+            signal (see ``run()``'s own computation). A hit whose file
+            is in this set *and* looks call-shaped
+            (``_looks_qualified_call`` or ``_BARE_CALL_TEMPLATE``) is
+            threaded into ``classify_miss`` as
+            ``looks_like_cross_file_collision``. Defaults to empty (the
+            existing, ungated behavior).
         is_known_collision_name: Whether ``bare_name`` is a member of
             ``ambiguous.collision_names(query_index)`` -- a single
             value per call (the same bare name for every hit in this
-            call), computed once by the caller (round 28 cline.md
-            §3.5) and threaded into every ``classify_miss`` call below.
+            call), computed once by the caller and threaded into every
+            ``classify_miss`` call below.
         ref_sites: ``_reference_sites`` for the target (``run()``) or
             for every symbol sharing ``bare_name`` (``--all``). A hit
             at one of these locations is ``is_recorded_reference``.
             Empty by default, and always in ``--usages`` mode.
         target_kinds: The ``Symbol.kind`` of the target (``run()``) or
             of every symbol sharing ``bare_name`` (``--all``). Gates
-            the two round-32 shape heuristics in opposite directions,
+            the two shape heuristics in opposite directions,
             both conservatively on a mixed group: Rust construction/
             payload shapes need *every* kind in ``TYPE_KINDS``, the
             value-reference shape needs *none* of them to be. Empty
@@ -1819,9 +1788,9 @@ def _classify_grep_hits(
         # No textual "does this file shadow the name" guard any more
         # (``_file_shadows_name``, 0.43.68 to 0.43.69). It switched
         # tier 1 off for a whole file because no regex can tell which
-        # scope a line sits in. Since round 32 Track 5b the extractor
-        # can: a shadowing local never becomes an edge, so an edge that
-        # is in the map (and passed ``_can_see``) is one to trust.
+        # scope a line sits in. Since 0.43.70 the extractor can: a
+        # shadowing local never becomes an edge, so an edge that is in
+        # the map (and passed ``_can_see``) is one to trust.
         is_recorded_reference = loc in ref_sites
         causes[loc] = classify_miss(
             h.snippet,
@@ -1897,7 +1866,7 @@ _shadow_decl_lines: dict[tuple[str, int], int] = {}
 # --- tier 2: same-named locals ----------------------------------------
 
 # JS/TS only, like every other shape rule in this module: Python's
-# scoping would mostly work too, but round 33's evidence was TS.
+# scoping would mostly work too, but the evidence was TS.
 _SHADOW_GRAMMARS = frozenset({"typescript", "tsx", "javascript"})
 _SHADOW_DECL_TEMPLATE = (
     r"\b(?:const|let|var)\s+(?:{name}\b|[{{\[][^=]*\b{name}\b[^=]*[}}\]]\s*=)"
@@ -2041,12 +2010,10 @@ def _dekko_hits_callers(
     ``sym_target`` is a ``path:qualname:LINE`` string built from an
     already-resolved ``Symbol`` (see ``run()``) so this re-resolves to
     exactly the same candidate — the same disambiguation escape hatch
-    ``note add``/``note rm`` already use for an overload set (resolves
-    the plan's "overload/#N-suffixed target resolution" open
-    question).
+    ``note add``/``note rm`` already use for an overload set.
 
     ``module_level`` entries carry per-site lines when the map
-    recorded them (round-23 §10 fix); those fold straight into
+    recorded them; those fold straight into
     ``hits`` alongside named-caller sites so a module-level call site
     with a known line matches grep like any other hit. Only entries
     with no recorded line (pre-v3 maps, or no site line captured)
@@ -2074,12 +2041,11 @@ def _dekko_hits_uses(
 
     ``target`` is used as-is — ``uses``/``find_usages`` already only
     ever operates on a bare base identifier (the trailing segment of a
-    qualified external call, e.g. ``get`` for ``requests.get(...)``;
-    see ``mapfile._callee_base``), never a qualified string. That
-    resolves the plan's "bare-name extraction for --usages" open
-    question: there is nothing to extract, since the target grammar
-    ``uses`` already accepts is exactly one bare grep-able token.
-    ``module_level_paths`` is always empty — ``uses`` results carry no
+    qualified external call, e.g. ``get`` for ``requests.get(...)``; see
+    ``mapfile._callee_base``), never a qualified string. There is
+    nothing to extract, since the target grammar ``uses`` already
+    accepts is exactly one bare grep-able token. ``module_level_paths``
+    is always empty — ``uses`` results carry no
     module-level-pseudo-caller distinction the way callers/callees do.
     """
     doc = _run_query_json(index, "uses", target)
@@ -2134,11 +2100,10 @@ def _fit_rows(
     Mirrors ``query._fit_entries`` exactly -- including returning the
     full ``Meter``, not just a bare total, so ``sanity --json`` can
     disclose truncation the same way every other budget-capped
-    ``--json`` command already does (round 23 claude-code.md §2.1:
-    ``sanity --json`` silently capped its row arrays at
-    ``DEFAULT_REPORT_LIMIT`` with no ``meta``/``truncated`` disclosure
-    anywhere in the output, unlike ``query --json``'s existing
-    contract).
+    ``--json`` command already does (``sanity --json`` used to silently
+    cap its row arrays at ``DEFAULT_REPORT_LIMIT`` with no
+    ``meta``/``truncated`` disclosure anywhere in the output, unlike
+    ``query --json``'s existing contract).
 
     Returns:
         ``(kept_rows, meter)``.
@@ -2148,10 +2113,9 @@ def _fit_rows(
     return rows[: len(kept)], meter
 
 
-# Round 21 Track B1/B2 disclosure notes -- printed (text mode) or
-# attached (JSON mode) whenever ``_run_grep``'s safety caps actually
-# fired, so a reader isn't left to (re-)discover on their own that the
-# sweep was incomplete.
+# Disclosure notes -- printed (text mode) or attached (JSON mode)
+# whenever ``_run_grep``'s safety caps actually fired, so a reader isn't
+# left to (re-)discover on their own that the sweep was incomplete.
 _TRUNCATION_NOTE = (
     f"grep sweep hit its {_MAX_GREP_LINES:,}-line safety cap; a "
     "dekko-resolved location the (incomplete) grep hit set doesn't "
@@ -2176,19 +2140,18 @@ def _excluded_declarations_note(count: int) -> str:
     """The banner disclosing declaration lines dropped from the grep
     sweep before bucketing.
 
-    Round 31 (found independently on all five language families
-    tested): a symbol's own declaration line -- and every other
-    same-bare-named symbol's -- is filtered out of the sweep before
-    the matches/grep-only split, because a declaration is not a call
-    site and never was a miss to explain. That exclusion is correct,
-    but it used to be *silent*, so ``matches + grep-only`` never summed
-    to the hit count of the very ``grep:`` command printed one line
-    above it. The gap equalled the number of colliding same-bare-name
-    declaration lines, which on an overload-heavy repo is never zero,
-    and an agent reconciling the two numbers by hand found an
-    unexplained shortfall every time. Disclosing the count makes the
-    report self-reconciling: matches + grep-only + excluded == the
-    swept hit total.
+    Found independently on all five language families tested: a symbol's
+    own declaration line -- and every other same-bare-named symbol's --
+    is filtered out of the sweep before the matches/grep-only split,
+    because a declaration is not a call site and never was a miss to
+    explain. That exclusion is correct, but it used to be *silent*, so
+    ``matches + grep-only`` never summed to the hit count of the very
+    ``grep:`` command printed one line above it. The gap equalled the
+    number of colliding same-bare-name declaration lines, which on an
+    overload-heavy repo is never zero, and an agent reconciling the two
+    numbers by hand found an unexplained shortfall every time.
+    Disclosing the count makes the report self-reconciling: matches +
+    grep-only + excluded == the swept hit total.
     """
     plural = "" if count == 1 else "s"
     return (
@@ -2261,18 +2224,16 @@ def _build_json_doc(
     ``meta`` mirrors ``query --json``'s existing truncation-disclosure
     contract byte-for-byte (one ``Meter.as_dict()`` per bucket) so a
     consumer already handling ``query``'s ``meta`` shape needs no new
-    parsing to detect a capped ``sanity`` bucket (round 23
-    claude-code.md §2.1: the row arrays were silently capped at
-    ``DEFAULT_REPORT_LIMIT`` with nothing in the JSON disclosing it).
-    ``counts`` is kept exactly as-is alongside ``meta`` -- purely
-    additive, so any existing consumer parsing ``counts`` keeps
-    working unmodified.
+    parsing to detect a capped ``sanity`` bucket (the row arrays used to
+    be silently capped at ``DEFAULT_REPORT_LIMIT`` with nothing in the
+    JSON disclosing it). ``counts`` is kept exactly as-is alongside
+    ``meta`` -- purely additive, so any existing consumer parsing
+    ``counts`` keeps working unmodified.
 
     ``receiver_mismatch_note``/``_declaring_type``/``_count`` are
     present only when ``run()``'s receiver-mismatch heuristic actually
     flagged at least one grep-only hit (mirrors ``dekko_only_note``'s
-    "only present when relevant" contract) — see
-    ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``.
+    "only present when relevant" contract).
     """
     matches_rows, matches_meter = matches
     grep_only_rows, grep_only_meter = grep_only
@@ -2294,7 +2255,7 @@ def _build_json_doc(
                 dekko_only_meter.total if dekko_only_meter else None
             ),
             "grep_only": grep_only_meter.total,
-            # Round 31: without this, matches + grep_only silently
+            # Without this, matches + grep_only silently
             # failed to sum to the printed grep command's own hit
             # count -- see ``_excluded_declarations_note``.
             "excluded_declarations": excluded_declarations,
@@ -2355,14 +2316,14 @@ def _group_grep_only_by_file(
 ) -> list[tuple[str, int, Counter[str]]]:
     """Group a bucket's *full* row set by file, largest cluster first.
 
-    Round 31 zed.md F10: grouping must run over every row the sweep
-    found, not whatever survived ``--limit``/``--budget`` fitting
-    first. On zed, ``sanity ... --group-by-file`` with the default
-    ``--limit 200`` never showed either of the two largest real
-    clusters (139 hits in ``shadow.rs``, 125 in ``list.rs``) because
-    neither file's individual rows made it into the first 200 --
-    exactly the clustering the flag exists to surface. Callers cap the
-    *groups* this returns, not the rows that went into them.
+    Grouping must run over every row the sweep found, not whatever
+    survived ``--limit``/``--budget`` fitting first. On zed, ``sanity
+    ... --group-by-file`` with the default ``--limit 200`` never showed
+    either of the two largest real clusters (139 hits in ``shadow.rs``,
+    125 in ``list.rs``) because neither file's individual rows made it
+    into the first 200 -- exactly the clustering the flag exists to
+    surface. Callers cap the *groups* this returns, not the rows that
+    went into them.
 
     Args:
         rows: Every row in the bucket, unfitted.
@@ -2394,7 +2355,7 @@ def _fit_file_groups(
     ``--group-by-file`` prints instead of individual rows -- so
     ``--limit``/``--budget`` bound how many *files* are shown, the
     same knob the rest of the report already uses, not a second
-    row-count cap layered on top of grouping (round 31 zed.md F10).
+    row-count cap layered on top of grouping.
 
     Args:
         groups: Every file group, largest cluster first (see
@@ -2427,8 +2388,8 @@ def _print_bucket_by_file(
     Groups ``rows`` in full, then applies ``--limit``/``--budget`` to
     the number of *file groups* printed -- see
     ``_group_grep_only_by_file`` and ``_fit_file_groups`` for why
-    (round 31 zed.md F10: grouping over an already row-truncated
-    bucket hid the very clustering this flag exists to show).
+    (grouping over an already row-truncated bucket hid the very
+    clustering this flag exists to show).
 
     Args:
         title: Bucket label (``"grep-only"``).
@@ -2478,13 +2439,13 @@ def _print_text(
     Args:
         grep_only: The grep-only bucket, already fit to
             ``--limit``/``--budget`` by row count -- used for the flat
-            (non-grouped) rendering, unchanged from before round 31's
-            C1 fix.
+            (non-grouped) rendering, unchanged from before grouping
+            learned to run over the full row set.
         grep_only_rows: The grep-only bucket's *full*, unfitted rows --
             used only when ``group_by_file`` is set, so grouping runs
             over every hit before ``--limit``/``--budget`` caps the
-            number of file groups instead of the number of rows (round
-            31 zed.md F10; see ``_print_bucket_by_file``).
+            number of file groups instead of the number of rows (see
+            ``_print_bucket_by_file``).
     """
     print(f"dekko sanity: '{target}' ({action}) vs. grep '{bare_name}'")
     print(f"  grep: {grep_command}")
@@ -2557,8 +2518,8 @@ def _build_unused_json_doc(
         "counts": {
             "reference_hits": meter.total,
             "filtered_noise": noise_count,
-            # Round 31: same silent-exclusion gap the callers/uses
-            # path had -- see ``_excluded_declarations_note``.
+            # Same silent-exclusion gap the callers/uses path had -- see
+            # ``_excluded_declarations_note``.
             "excluded_declarations": excluded_declarations,
             "grep_hits_swept": (
                 meter.total + noise_count + excluded_declarations
@@ -2622,7 +2583,7 @@ def _report_not_flagged(
 ) -> int:
     """``sanity --unused`` on a symbol ``dekko unused`` never flagged.
 
-    Round 32, reproduced on all seven repos: this mode used to run its
+    Reproduced on all seven test repos: this mode used to run its
     full grep sweep for any symbol and close with "flagged unused, but
     N call-shaped references found (possible resolver miss)", for
     ``SpringApplication.run`` (4,861 grep hits) as readily as for real
@@ -2795,8 +2756,8 @@ def _run_unused_check(
         return EXIT_GREP_FAILED
 
     hits = [h for h in sweep.hits if (h.path, h.line) not in own_def_locs]
-    # Round 31: same silent-exclusion disclosure as the callers/uses
-    # path -- see ``_excluded_declarations_note``.
+    # Same silent-exclusion disclosure as the callers/uses path -- see
+    # ``_excluded_declarations_note``.
     excluded_declarations = len(sweep.hits) - len(hits)
     reference_rows: list[dict] = []
     noise_count = 0
@@ -2807,11 +2768,11 @@ def _run_unused_check(
         if bucket == "noise":
             noise_count += 1
             continue
-        # Round 31 tensorflow.md Observation 5.2: classify_unused_
-        # reference's own comment check is _looks_like_comment_line
-        # alone, which -- like classify_miss's -- never recognizes a
-        # bare ``*`` block-comment continuation line. Same re-read
-        # pattern as the multiline-import-member check right below.
+        # classify_unused_reference's own comment check is
+        # _looks_like_comment_line alone, which -- like classify_miss's
+        # -- never recognizes a bare ``*`` block-comment continuation
+        # line. Same re-read pattern as the multiline-import-member
+        # check right below.
         if _looks_like_block_comment_continuation(root, h):
             noise_count += 1
             continue
@@ -2823,15 +2784,14 @@ def _run_unused_check(
         reference_rows.append(row)
 
     kept, meter = _fit_rows(reference_rows, budget, limit)
-    # Round-29 Track 4c (cline "Confirmed still-open" §1): this single-
-    # target path never threaded ``ambiguous.collision_names`` into
-    # `_is_generic_name` at all, unlike `_run_all_sweeps`'s ``--all``
-    # path (see its own docstring) -- so a name like ``error``, absent
-    # from the curated `_GENERIC_NAMES` list but measurably collision-
-    # prone in this specific repo's own call graph, ran the full grep
-    # sweep into the safety cap with no caution disclosed. Not a
-    # curated-list or threshold gap after all: a wiring gap, one call
-    # site round 28 missed.
+    # This single-target path never threaded
+    # ``ambiguous.collision_names`` into `_is_generic_name` at all,
+    # unlike `_run_all_sweeps`'s ``--all`` path (see its own docstring)
+    # -- so a name like ``error``, absent from the curated
+    # `_GENERIC_NAMES` list but measurably collision-prone in this
+    # specific repo's own call graph, ran the full grep sweep into the
+    # safety cap with no caution disclosed. Not a curated-list or
+    # threshold gap after all: a wiring gap, one missed call site.
     is_known_collision_name = bare_name in ambiguous.collision_names(index)
     generic_caution = _is_generic_name(bare_name, is_known_collision_name)
 
@@ -2870,15 +2830,13 @@ def _resolve_declaring_type(query_index: MapIndex, sym: Symbol) -> str | None:
     receiver-mismatch heuristic, or ``None`` when the gate doesn't
     hold.
 
-    All four conditions from
-    ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``'s
-    "Gating" section must hold:
+    All four gating conditions must hold:
 
     1. ``sym.kind == "method"`` -- the heuristic is about a *receiver*
        relationship, which only makes sense for a method on some type.
        A free function/closure-local bare-name collision has no
        declaring type to check imports against (layer 1's denylist
-       domain, not this heuristic's -- see the design doc).
+       domain, not this heuristic's).
     2. ``sym.qualname`` has a container segment (a bare ``"."``-free
        qualname, e.g. a free function, fails this and returns
        ``None``).
@@ -2948,7 +2906,7 @@ def run(
     no-op here (see ``_run_unused_check``'s own docstring).
 
     When the grep sweep itself hits its ``_MAX_GREP_LINES`` safety cap
-    (round 21 Track B1 — a generic bare name on a large repo), the
+    (a generic bare name on a large repo), the
     ``dekko-only`` bucket is reported as inconclusive (empty rows, a
     ``None``/absent count in JSON's ``counts.dekko_only``) rather than
     a false-confidence number — a location dekko resolved that the
@@ -2958,7 +2916,7 @@ def run(
     them), alongside a ``grep_truncated``/``dekko_only_note`` (JSON)
     or a printed ``note:`` line (text) disclosing the cap was hit.
     Any raw grep line long enough to be a binary/data blob rather than
-    real source (round 21 Track B2) is dropped from the sweep entirely
+    real source is dropped from the sweep entirely
     and counted in ``grep_skipped_pathological`` instead of being
     reported as a hit or bloating the report.
 
@@ -2990,7 +2948,7 @@ def run(
             instead of a flat row list. Groups the *full* grep-only
             bucket first, then applies ``limit``/``budget`` to the
             number of file groups printed, not to rows before grouping
-            (round 31 zed.md F10 -- see ``_print_bucket_by_file``).
+            (see ``_print_bucket_by_file``).
             Text mode only, single-target only (no effect on ``--json``
             or ``--unused``, which already carries every row's
             ``file``/``cause`` for an external consumer to group).
@@ -3010,20 +2968,20 @@ def run(
     query_index = index if include_tests else index.without_tests()
     own_def_locs: frozenset[tuple[str, int]] = frozenset()
     # Every file (besides the target's own) holding a declaration of a
-    # different symbol sharing the target's bare name -- round 25
-    # awesome-go.md Bug 1's cross-file-collision signal. Callers mode
-    # only, same as ``own_def_locs`` (``--usages`` mode has no in-repo
-    # declaration to collide with).
+    # different symbol sharing the target's bare name -- the
+    # cross-file-collision signal. Callers mode only, same as
+    # ``own_def_locs`` (``--usages`` mode has no in-repo declaration to
+    # collide with).
     other_candidate_files: frozenset[str] = frozenset()
     # The receiver-mismatch heuristic's declaring-type name -- set only
     # when every gating condition below holds (callers mode, a method
     # target, exactly one repo-defined candidate for its bare name, and
     # an unambiguous declaring-type lookup). ``None`` leaves
-    # ``_classify_grep_hits`` in its existing, ungated behavior. See
-    # ``.features/plans/round23/25-sanity-receiver-mismatch-cue.md``.
+    # ``_classify_grep_hits`` in its existing, ungated behavior.
     declaring_type: str | None = None
-    # Round 32 Track 2: the target's recorded value-reference sites
-    # and its kind, for ``_classify_grep_hits``'s (a) and (d) checks.
+    # The target's recorded value-reference sites and its kind, for
+    # ``_classify_grep_hits``'s value-reference and type-construction
+    # checks.
     # Callers mode only, like everything above: an external base
     # identifier has neither a reference edge nor a kind.
     ref_sites: frozenset[tuple[str, int]] = frozenset()
@@ -3049,20 +3007,18 @@ def run(
         # line (e.g. an unrelated MetalRenderer.new_internal, when the
         # query target is Editor.new_internal) is just as much "not a
         # call site" as the target's own, and MapIndex.symbols_by_name
-        # already indexes every symbol by bare name repo-wide (round
-        # 22 zed.md §3.3).
+        # already indexes every symbol by bare name repo-wide.
         own_def_locs = frozenset(
             (s.path, s.start_line)
             for s in query_index.symbols_by_name.get(sym.name, [])
         )
-        # round 25 awesome-go.md Bug 1: dekko already computes every
-        # same-bare-named symbol above (for ``own_def_locs``) -- the
-        # files holding any *other* one of them is the deterministic
-        # "genuine collision" signal ``_is_generic_name``'s
-        # length/word-list heuristic was standing in for by accident.
-        # Excludes the target's own declaration by (path, line), not
-        # just by path, so a same-file overload sharing the bare name
-        # still counts as "another candidate."
+        # Dekko already computes every same-bare-named symbol above (for
+        # ``own_def_locs``) -- the files holding any *other* one of them
+        # is the deterministic "genuine collision" signal
+        # ``_is_generic_name``'s length/word-list heuristic was standing
+        # in for by accident. Excludes the target's own declaration by
+        # (path, line), not just by path, so a same-file overload
+        # sharing the bare name still counts as "another candidate."
         other_candidate_files = frozenset(
             s.path
             for s in query_index.symbols_by_name.get(sym.name, [])
@@ -3097,7 +3053,7 @@ def run(
         grep_hits = [
             h for h in grep_hits if (h.path, h.line) not in own_def_locs
         ]
-    # Round 31: disclose how many raw hits that filter removed, so the
+    # Disclose how many raw hits that filter removed, so the
     # buckets below reconcile against the ``grep:`` command printed
     # above them -- see ``_excluded_declarations_note``.
     excluded_declarations = len(sweep.hits) - len(grep_hits)
@@ -3111,10 +3067,10 @@ def run(
         h for h in grep_hits if (h.path, h.line) not in dekko_set
     ]
     tests_excluded = not include_tests
-    # round 28 cline.md §3.5: consulted only in callers mode -- there
-    # is no "candidate" concept for an external base identifier the
-    # way there is for a repo-defined symbol's bare name, so
-    # ``--usages`` mode never has a collision to report here.
+    # Consulted only in callers mode -- there is no "candidate" concept
+    # for an external base identifier the way there is for a
+    # repo-defined symbol's bare name, so ``--usages`` mode never has a
+    # collision to report here.
     is_known_collision_name = (
         not usages and bare_name in ambiguous.collision_names(query_index)
     )
@@ -3203,16 +3159,13 @@ def run(
 
 # --- --all sweep --------------------------------------------------
 #
-# Round 23's own claude-buddy evaluation shows the cost of a
-# human-selected population of ``sanity <target>`` invocations: a real
-# regression in ``classify_miss``'s own classification logic sat in
-# ``develop`` for a full round undetected, caught only because the
-# tester happened to pick one symbol (out of dozens with nonzero
-# fan-in) that exercised the buggy branch. ``run_all`` removes the
-# selection bias: run the same cross-check over every in-repo symbol
-# with nonzero fan-in instead of one hand-picked target. See
-# ``.features/plans/round23/24-sanity-all-sweep.md`` for the full
-# design this section implements.
+# A human-selected population of ``sanity <target>`` invocations has a
+# real cost: a regression in ``classify_miss``'s own classification
+# logic once sat in ``develop`` undetected, caught only because the
+# tester happened to pick one symbol (out of dozens with nonzero fan-in)
+# that exercised the buggy branch. ``run_all`` removes the selection
+# bias: run the same cross-check over every in-repo symbol with nonzero
+# fan-in instead of one hand-picked target.
 
 
 def _group_fan_in_symbols(query_index: MapIndex) -> dict[str, list[Symbol]]:
@@ -3270,11 +3223,10 @@ def _sweep_bare_name(
             ``--all`` sweep's shared-causes-per-bare-name design.
         is_known_collision_name: Whether ``bare_name`` is a member of
             ``ambiguous.collision_names(query_index)`` -- computed once
-            by ``run_all()`` and threaded through unchanged (round 28
-            cline.md §3.5).
+            by ``run_all()`` and threaded through unchanged.
         ref_sites: Recorded value-reference sites for *every* symbol
             sharing ``bare_name`` -- same shared-causes simplification
-            as ``other_candidate_files`` (round 32 Track 2(a)).
+            as ``other_candidate_files``.
         target_kinds: Kinds of every symbol sharing ``bare_name``; see
             ``_classify_grep_hits`` for how a mixed group is handled.
 
@@ -3390,8 +3342,7 @@ def _build_all_json_doc(
     limit: int,
     budget: int | None,
 ) -> dict:
-    """Assemble ``sanity --all --json``'s output document — see the
-    design doc's "Output shape" section for the schema this mirrors.
+    """Assemble ``sanity --all --json``'s output document.
 
     ``symbols`` carries the full per-symbol breakdown (not just the
     flagged subset) for programmatic/CI use, same for ``flagged`` —
@@ -3513,12 +3464,12 @@ def _run_all_sweeps(
     sequentially or via a thread pool sized by ``workers`` — see
     ``run_all``'s own docstring for why threads, not processes.
 
-    Round 28 cline.md §3.5: ``ambiguous.collision_names(query_index)``
-    is computed exactly once here (not once per name in the loop
-    below) and consulted per name from the already-built ``frozenset``
-    -- avoiding quadratic-ish re-computation across a large ``--all``
-    sweep, since ``collision_names`` itself is bounded by the map's
-    own already-computed ambiguous-edge count, not by sweep size.
+    ``ambiguous.collision_names(query_index)`` is computed exactly once
+    here (not once per name in the loop below) and consulted per name
+    from the already-built ``frozenset`` -- avoiding quadratic-ish
+    re-computation across a large ``--all`` sweep, since
+    ``collision_names`` itself is bounded by the map's own
+    already-computed ambiguous-edge count, not by sweep size.
     """
     collision = ambiguous.collision_names(query_index)
 
@@ -3529,21 +3480,21 @@ def _run_all_sweeps(
         own_def_locs = frozenset(
             (s.path, s.start_line) for s in symbols_for_name
         )
-        # round 25 awesome-go.md Bug 1: unlike ``run()`` (one target
-        # symbol per call, so "other than the target's own file" is
-        # well-defined), one bare-name sweep here is shared across
-        # every fan-in symbol sharing ``name`` (see ``_diff_symbol``),
-        # so there's no single "target" to exclude a file for -- using
-        # the full declaration-file set is the closest safe
-        # approximation. Only meaningful with >= 2 distinct symbols:
-        # with exactly one declaration total, that lone file is by
-        # definition every diffed symbol's *own* file, not "a
-        # different, same-named declaration elsewhere" -- flagging a
-        # genuine same-file resolver miss as a cross-file collision
-        # purely because its own declaration happens to live in a
-        # declaration file would be a real false positive (caught by
-        # this fix's own test coverage), not the narrow, accepted kind
-        # of over-classification the module's other heuristics allow.
+        # Unlike ``run()`` (one target symbol per call, so "other than
+        # the target's own file" is well-defined), one bare-name sweep
+        # here is shared across every fan-in symbol sharing ``name``
+        # (see ``_diff_symbol``), so there's no single "target" to
+        # exclude a file for -- using the full declaration-file set is
+        # the closest safe approximation. Only meaningful with >= 2
+        # distinct symbols: with exactly one declaration total, that
+        # lone file is by definition every diffed symbol's *own* file,
+        # not "a different, same-named declaration elsewhere" --
+        # flagging a genuine same-file resolver miss as a cross-file
+        # collision purely because its own declaration happens to live
+        # in a declaration file would be a real false positive (caught
+        # by this fix's own test coverage), not the narrow, accepted
+        # kind of over-classification the module's other heuristics
+        # allow.
         other_candidate_files = (
             frozenset(s.path for s in symbols_for_name)
             if len(symbols_for_name) >= 2
@@ -3620,11 +3571,9 @@ def run_all(
     """``dekko sanity --all`` — sweep the same callers/grep cross-check
     ``run()`` runs for one target over every in-repo symbol with
     nonzero ``calls_in`` fan-in, deduping the grep subprocess by bare
-    name. See the module docstring's ``--all`` paragraph and
-    ``.features/plans/round23/24-sanity-all-sweep.md`` for the full
-    design and rationale.
+    name. See the module docstring's ``--all`` paragraph.
 
-    Callers mode only (see the design doc's Scope section) — there is
+    Callers mode only — there is
     no ``usages``/``unused`` equivalent here; the caller (``cli.
     run_sanity``) is responsible for rejecting ``--all`` combined with
     ``--usages``/``--unused`` before this function is ever called.

@@ -19,9 +19,8 @@ def _edge_count(index: MapIndex) -> int:
 # edge-count corruption slips past the resolver (e.g. a name this list
 # knows about but the resolver's own narrower checks don't yet cover).
 # Kept intentionally small and hand-curated rather than an attempt at
-# algorithmically detecting "generic-sounding names" — see
-# `test-repos/reports/investigation-1.2-resolver-fanin.md`, whose
-# cline `interface String`/`expect`/`describe` findings motivated this.
+# algorithmically detecting "generic-sounding names". Motivated by
+# cline's `interface String`/`expect`/`describe` inflating fan-in.
 _NOISE_NAMES = frozenset(
     {
         "String", "Number", "Boolean", "Array", "Object",
@@ -115,7 +114,7 @@ def run(index: MapIndex, top: int, as_json: bool) -> int:
     Returns:
         Always ``0``.
     """
-    # round-29 Track 4b: stats never disclosed skipped-file coverage
+    # Stats never disclosed skipped-file coverage
     # (unsupported languages, vendored/too-large/symlinked exclusions)
     # at all -- unlike status/summary/orient, which all attach this
     # note via the same `format_unsupported` helper. Always shown when

@@ -62,7 +62,7 @@ def is_grammar_unavailable_message(error: str) -> bool:
     """Whether a ``FileMap.error``/``errors_by_path`` message names a
     missing optional grammar rather than a genuine parse failure.
 
-    Round-12 master report §3.9/§3.10/§3.16: ``dekko map``'s top-line
+    ``dekko map``'s top-line
     "skipped: parse error N" summary bucket, and ``outline``'s "few
     named symbols for its size" heuristic, both used to lump "this
     file genuinely failed to parse" together with "this optional

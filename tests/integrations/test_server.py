@@ -80,8 +80,8 @@ def test_tools_list_exposes_the_read_surface() -> None:
         },
     )
     names = {t["name"] for t in resp["result"]["tools"]}
-    # trace_path/find_unused/stats/lean/ledger are CLI-only (E5 trim,
-    # 2026-07-10): the MCP surface pays schema rent in context tokens
+    # trace_path/find_unused/stats/lean/ledger are CLI-only: the MCP
+    # surface pays schema rent in context tokens
     # on every session, and agents never reached for them live.
     assert names == {
         "search_code",
@@ -117,8 +117,8 @@ def test_query_symbol_tool(make_mapped_repo: RepoFactory) -> None:
 def test_omitted_root_echoes_resolved_default(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # Bug #1/B1: four independent evaluators hit the same failure on
-    # four different repos — omitting `root` silently resolves
+    # The same failure showed up on four different repos — omitting
+    # `root` silently resolves
     # against the server's cwd, and a wrong-repo answer looks
     # identical in shape to a correct one. Every successful reply
     # that used the default root must now echo it, so this is
@@ -147,7 +147,7 @@ def test_explicit_root_suppresses_the_default_note(
 def test_index_for_caches_across_calls_when_unchanged(
     make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-08 §2.6: a warm session must not re-parse map.json on every
+    """A warm session must not re-parse map.json on every
     tool call — repeated calls against an unchanged map should hit the
     in-process cache and skip ``mapfile.load_map`` entirely."""
     root = make_mapped_repo(SRC)
@@ -232,7 +232,7 @@ def test_index_for_caches_per_root(
     # other_dir is nested under tmp_path purely as a fixture
     # convenience -- it's meant to be a second, wholly unrelated root,
     # not a subtree of root_a, so --force-new-root opts out of the
-    # orphan-root guard (round-28 §3.6) that would otherwise (rightly)
+    # orphan-root guard that would otherwise (rightly)
     # flag this exact directory shape.
     assert (
         cli.main(["map", str(other_dir), "--quiet", "--force-new-root"]) == 0
@@ -266,7 +266,7 @@ def test_get_callers_tool(make_mapped_repo: RepoFactory) -> None:
 def test_symbol_alias_matches_symbol_argument(
     make_mapped_repo: RepoFactory, tool: str, value: str
 ) -> None:
-    # Round-24: two independent evaluators guessed `name` instead of
+    # Agents guessed `name` instead of
     # `symbol` on these tools since `find_usages` itself uses `name`.
     # `name` must resolve to an identical result as `symbol`.
     ctx = _ctx(make_mapped_repo(SRC))
@@ -735,7 +735,7 @@ def test_find_unused_handler(make_mapped_repo: RepoFactory) -> None:
 def test_find_unused_handler_kinds_unexposed(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # unused-types-design.md: no MCP schema/tool change for --kinds —
+    # No MCP schema/tool change for --kinds —
     # find_unused stays CLI-only and always runs the unchanged
     # default ("callables") kind, ignoring any stray "kinds" argument.
     assert not any(t["name"] == "find_unused" for t in server.TOOLS)
@@ -761,8 +761,7 @@ SUSPECT_SRC = {
 def test_find_unused_handler_suspect_forwards_to_unused_run(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # round-23 design doc 21-unused-ambiguous-crossref.md: tool_find_
-    # unused gains a `suspect` arg forwarded to unused.run, alongside
+    # tool_find_unused gains a `suspect` arg forwarded to unused.run, alongside
     # (but not fixing) the pre-existing --kinds omission above.
     ctx = _ctx(make_mapped_repo(SUSPECT_SRC))
     default_out = server.tool_find_unused(ctx, {})
@@ -795,7 +794,7 @@ def test_not_found_is_tool_error_not_doubled(
     result = _call(ctx, "query_symbol", {"symbol": "ghost"})
     text = result["content"][0]["text"]
     assert result["isError"] is True
-    # Round 33 Track 6f: an error reply that defaulted the root now
+    # An error reply that defaulted the root now
     # carries the root line first, like a success reply always did --
     # a wrong-repo query's likeliest outcome IS a not-found error.
     assert text.startswith("(root: ")
@@ -818,16 +817,15 @@ def test_error_with_explicit_root_has_no_root_line(
 def test_query_symbol_tool_reports_unsupported_coverage_gap(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # F3: MCP-surface twin of
+    # MCP-surface twin of
     # test_query.py::test_query_callers_reports_unsupported_coverage_gap
     # — proves query.report_unresolved()'s stderr coverage note (the
-    # "may be incomplete" caveat on a not-found reply, added for the
-    # 2026-07-31 Astro-repo eval finding) actually folds into the
+    # "may be incomplete" caveat on a not-found reply, added after a
+    # whole Astro site went unmapped silently) actually folds into the
     # server.ToolError message across the MCP tool-call path
     # (server._capture -> _relation_tool), not just the CLI's direct
-    # stderr print. Closes the synthesis report's "unresolved" flag on
-    # Improvement #6 — source-reading during the design pass found the
-    # wiring already correct; only this end-to-end test was missing.
+    # stderr print. The wiring was already correct; only this
+    # end-to-end test was missing.
     root = make_mapped_repo(
         dict(SRC, **{"Card.astro": "---\nconst x = 1;\n---\n"})
     )
@@ -888,9 +886,9 @@ def test_refresh_map_delegates_when_process_outdated(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # round-23 §12 found that an outdated server's in-process regen
-    # re-extracts with stale code and re-stamps "fresh", and settled
-    # for a caveat. Round 33 Track 1 removes the cause: an outdated
+    # An outdated server's in-process regen used to re-extract with
+    # stale code and re-stamp "fresh", which once only got a caveat.
+    # Now the cause is gone: an outdated
     # process hands the regen to the installed dekko and never
     # extracts in-process.
     root = make_mapped_repo(SRC)
@@ -973,7 +971,7 @@ def test_map_status_reports_unsupported_coverage(
 def test_map_status_reports_version_stale(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # Bug #1: map_status is the MCP-facing surface of the same
+    # map_status is the MCP-facing surface of the same
     # freshness check as `dekko status` — it must also call out a
     # version-stale map with an actionable message, not a generic
     # content diff (there is none to show).
@@ -987,7 +985,7 @@ def test_map_status_reports_version_stale(
     text = _call(ctx, "map_status", {})["content"][0]["text"]
     assert "stale (version)" in text
     assert "built by dekko 0.0.0-stale, running" in text
-    # Round 33 Track 1: nothing says this process is outdated, so the
+    # Nothing says this process is outdated, so the
     # map is the stale party and regenerating is the real fix. (It
     # used to say "restart" unconditionally, because nothing could
     # tell the two cases apart.)
@@ -999,7 +997,7 @@ def test_map_status_both_old_says_restart(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # round-09 §2.3: identical ``tool_version`` on both sides while
+    # Identical ``tool_version`` on both sides while
     # the extractor spec drifted must name ``spec_hash`` explicitly.
     # Here the installed dekko matches neither this process nor the
     # map: the process IS outdated (restart it) and the map is old too.
@@ -1021,8 +1019,8 @@ def test_outdated_server_serves_the_installed_codes_map_untouched(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # THE round-33 Track 1 regression (tensorflow.md §4.2, and what
-    # rewrote dekko's own tracked map mid-eval). A current CLI built
+    # THE stale-server regression (seen on tensorflow, and it rewrote
+    # dekko's own tracked map). A current CLI built
     # this map (spec "deadbeef" stands in for the installed spec);
     # this server is older. It used to call the map stale, re-extract
     # with its old code, and stamp its old spec over it -- which the
@@ -1121,7 +1119,7 @@ def test_one_shot_process_never_consults_the_arbiter(
 ) -> None:
     # Not long-lived (no ``serve()``): current by construction. The
     # child interpreter must never be spawned, and a mismatched map is
-    # regenerated in-process exactly as before round 33.
+    # regenerated in-process exactly as before.
     root = make_mapped_repo(SRC)
     _stamp_spec(root, "deadbeef")
 
@@ -1143,7 +1141,7 @@ def test_tool_call_reports_too_new_doc_version_clearly(
     # for one) that predates a doc-version bump must not surface the
     # opaque "internal error: expected string or bytes-like object,
     # got 'int'" that a downstream shape mismatch would otherwise
-    # raise first (round-16 finding). mapfile.load_map() now raises
+    # raise first. mapfile.load_map() now raises
     # MapFormatTooNewError instead, and the MCP tool-call path must
     # translate it into an actionable "restart the server" message
     # rather than falling through to the generic internal-error catch.
@@ -1189,7 +1187,7 @@ def test_tool_call_reports_persistent_broken_pool_clearly(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Round 17: a BrokenProcessPool that survives resolver.py's own
+    # A BrokenProcessPool that survives resolver.py's own
     # reduced-parallelism retry (persistent, not transient, sibling
     # multiprocessing contention on the host machine) must not fall
     # through to the generic "internal error: {exc}" catch-all -- it
@@ -1219,7 +1217,7 @@ def test_tool_call_reports_stalled_pool_worker_clearly(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Round 21 Track A: a stalled process-pool worker (one that never
+    # A stalled process-pool worker (one that never
     # returns a result at all -- cline's reproduced 6+ minute hang at
     # 0% CPU from a worker resolving the wrong Python interpreter) now
     # surfaces as resolver.PoolStalledError instead of hanging the MCP
@@ -1298,7 +1296,7 @@ def test_outline_tool_defaults_budget(
 def test_outline_tool_limit_budget_precedence(
     monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
 ) -> None:
-    # Round 31 tensorflow.md Observation 4.3, the limit/budget half of
+    # The limit/budget half of
     # the fix: mirrors _limit_arg's precedence (query.effective_limit)
     # onto outline's own row-count default (200), not the relation
     # tools' (50) -- neither default is being changed, only which one
@@ -1339,7 +1337,7 @@ def test_outline_tool_limit_budget_precedence(
 def test_outline_tool_caps_directory_sparse_notes(
     monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
 ) -> None:
-    # Round 31 tensorflow.md Observation 4.3, the actual measured
+    # The actual measured
     # regression: outline.py's per-file sparse-file caveat is written
     # to stderr once per file in the target DIRECTORY, independent of
     # outline's own row-level --limit/--budget fit -- on claude-code's
@@ -1382,9 +1380,9 @@ def test_summary_tool_defaults_budget(
 def test_get_callers_tool_defaults_budget(
     monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
 ) -> None:
-    # No caller budget → DEFAULT_RELATION_BUDGET, not unbounded — the
-    # 2026-07-31 eval lost to grep on get_callers because uncapped
-    # output dumped every call site with no default cap.
+    # No caller budget → DEFAULT_RELATION_BUDGET, not unbounded —
+    # get_callers once lost to grep because uncapped output dumped
+    # every call site with no default cap.
     ctx = _ctx(make_mapped_repo(SRC))
     seen: dict = {}
 
@@ -1416,8 +1414,8 @@ def test_get_callers_tool_defaults_budget(
 def test_impacted_tests_tool_defaults_budget(
     monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
 ) -> None:
-    # No caller budget -> affected.DEFAULT_BUDGET, not unbounded (round-08
-    # eval: a single tensorflow commit rendered ~124K uncapped tokens
+    # No caller budget -> affected.DEFAULT_BUDGET, not unbounded (a
+    # single tensorflow commit rendered ~124K uncapped tokens
     # with no --budget default at all on either the CLI or this tool).
     ctx = _ctx(make_mapped_repo(SRC))
     seen: dict = {}
@@ -1438,7 +1436,7 @@ def test_impacted_tests_tool_defaults_budget(
     monkeypatch.setattr(server.affected, "run", fake_run)
     assert _call(ctx, "impacted_tests", {})["isError"] is False
     assert seen["budget"] == server.affected.DEFAULT_BUDGET
-    # Round 31 P4.1: never the function's own sequential default.
+    # Never the function's own sequential default.
     assert seen["jobs"] == (os.cpu_count() or 1)
 
     assert _call(ctx, "impacted_tests", {"budget": 9000})["isError"] is False
@@ -1572,8 +1570,8 @@ def test_get_callers_default_budget_caps_many_callers(
     make_mapped_repo: RepoFactory,
 ) -> None:
     # Same shape, but relying on the *default* budget (no caller-given
-    # value at all) — this is the failure mode from the 2026-07-31
-    # eval, where get_callers lost to grep because nothing capped it.
+    # value at all) — the failure mode where get_callers lost to
+    # grep because nothing capped it.
     # Padded names push the total well past DEFAULT_RELATION_BUDGET
     # (800) while staying under the 50-row count limit, so it's the
     # budget default — not the pre-existing row cap — doing the work.
@@ -1640,7 +1638,7 @@ def test_get_callees_and_query_symbol_include_tests_by_default(
 def test_get_callers_discloses_silent_test_exclusion(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """Round-11 §6: a caller who never mentions ``include_tests`` gets
+    """A caller who never mentions ``include_tests`` gets
     a ``note:`` disclosing that test-file callers were dropped by this
     tool's own default (which diverges from the CLI's). A caller who
     explicitly asks for either value gets no such note — they already
@@ -1684,7 +1682,7 @@ def test_get_callees_never_discloses_test_exclusion(
 def test_get_callers_resolves_java_package_named_test(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """Round-11 §3: a Java package segment literally named `test`
+    """A Java package segment literally named `test`
     (org.springframework.boot.test, under src/main/) used to make
     classify.is_test_path() misclassify the *definition's own file* as
     a test file, so MCP's default (without_tests()) filtering removed
@@ -1736,7 +1734,7 @@ AMBIGUOUS_CALL = {
 def test_get_callers_discloses_ambiguous_call_sites_over_mcp(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """Round-12 master report §3.1: ``query.run`` prints its
+    """``query.run`` prints its
     "N additional call site(s) ... resolved ambiguously — not counted
     here" disclosure to stderr on an otherwise-successful (exit 0)
     run. The CLI shows both streams to a human, but every
@@ -1758,7 +1756,7 @@ def test_get_callees_discloses_ambiguous_outgoing_calls_over_mcp(
     make_mapped_repo: RepoFactory,
 ) -> None:
     """Same fix, outgoing-call direction (``ambiguous_out``) via
-    ``get_callees`` — round-12 master report §3.1."""
+    ``get_callees``."""
     ctx = _ctx(make_mapped_repo(AMBIGUOUS_CALL))
     text = _call(ctx, "get_callees", {"symbol": "c.py:caller"})["content"][0][
         "text"
@@ -1771,7 +1769,7 @@ def test_get_callees_discloses_ambiguous_outgoing_calls_over_mcp(
 def test_lean_discloses_budget_floor_note(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """Round-12 master report §3.1: ``render_lean.run`` prints a
+    """``render_lean.run`` prints a
     "requested budget N is below this repo's ~M-token path-only
     floor" note to stderr on success when a caller's ``budget`` is
     too tight to honor. ``tool_lean`` (not currently a registered MCP

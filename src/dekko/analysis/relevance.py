@@ -1,4 +1,4 @@
-"""Task-aware relevance scoring (Pillar B).
+"""Task-aware relevance scoring.
 
 dekko's pull tools rank by *structure* — fan-in, churn, call degree. That
 is the right default when there is no task in hand, but once an agent is
@@ -23,10 +23,9 @@ touching any call site. :class:`BM25Scorer` (used by ``search.py``'s
 ``dekko search``) is the first concrete alternative to
 :class:`LexicalScorer` — it stays a separate class rather than an
 in-place upgrade so ``workset``/``context``/``lean``'s existing
-``--task`` blend (and their pinned ranking tests) are untouched; see
-``.features/plans/SEMANTIC-SEARCH-PLAN.md`` §3.2 for the tradeoff. A
-future embedding-based scorer (Phase 2, optional ``dekko[search]``
-extra) can follow the same seam. When no task is supplied the call
+``--task`` blend (and their pinned ranking tests) are untouched. A
+future embedding-based scorer (optional ``dekko[search]`` extra) can
+follow the same seam. When no task is supplied the call
 sites simply skip this module, so structural ranking is the zero-task
 special case and existing output is byte-for-byte unchanged.
 
@@ -38,11 +37,11 @@ strong match. For a 2+-term task, both scorers additionally discount
 their top-of-batch score by :func:`coverage_factor` on
 :func:`term_coverage` — the fraction of query terms the candidate's
 text actually contains — so a `1.00` requires covering the query, not
-just outscoring a weak field (round-08 §2.2). ``search.rank`` layers a
+just outscoring a weak field. ``search.rank`` layers a
 second, scorer-agnostic use of the same coverage curve on top of
 *any* scorer's output, correcting a different failure mode: one
 lexically-dominant common query term crowding out a candidate that
-covers every distinctive term more lightly (round-08 §2.3).
+covers every distinctive term more lightly.
 """
 
 import math
@@ -103,7 +102,7 @@ _MIN_TERM_LEN = 2
 _MIN_PARTIAL_LEN = 3
 
 # Cache size for the tokenization memoization below. Sized generously
-# above the largest symbol count seen in the 7-repo eval (tensorflow,
+# above the largest symbol count seen across real repos (tensorflow,
 # 157,845 symbols) so a full-corpus search over even the biggest real
 # repo keeps every candidate's terms cached for the lifetime of a
 # process, not just a rolling recent-window subset.
@@ -127,9 +126,9 @@ def _raw_terms(text: str) -> list[str]:
     ``lru_cache`` pattern): ``BM25Scorer.score`` previously re-ran this
     regex tokenization pass over *every* candidate's text on *every*
     call, with no reuse across repeated searches in the same process —
-    the confirmed dominant cost on large repos (2.5 in the eval
-    analysis). Callers must treat the returned list as read-only —
-    identical input text returns the exact same cached list object.
+    the confirmed dominant cost on large repos. Callers must treat the
+    returned list as read-only — identical input text returns the exact
+    same cached list object.
     """
     terms = []
     for piece in _WORD_RE.findall(text):
@@ -241,8 +240,7 @@ class LexicalScorer:
             top-of-batch score is additionally discounted by
             :func:`coverage_factor` so "best of a weak field" can't
             renormalize to a misleading ``1.00`` the way plain
-            ``value / top`` min-max normalization would on its own —
-            see round-08 §2.2.
+            ``value / top`` min-max normalization would on its own.
         """
         raw = {c.id: self._raw(task, c) for c in candidates}
         top = max(raw.values(), default=0.0)
@@ -300,8 +298,8 @@ def _stem(term: str) -> str:
 
     Not a real stemmer — five rule-based cases so ``retry``/
     ``retries``/``retrying``/``retried`` all collapse to the same
-    matching key, per the search feature plan's "obvious and
-    deterministic over linguistically complete" philosophy (matches
+    matching key, per an "obvious and deterministic over
+    linguistically complete" philosophy (matches
     :data:`_STOPWORDS`'s own stated bar). Used only internally by
     :class:`BM25Scorer` for term/document-frequency grouping; never
     changes what :func:`normalize_terms` returns publicly.
@@ -336,8 +334,8 @@ def _stem(term: str) -> str:
 # (e.g. ``search.rank``'s zero-raw-relevance filter), so this only
 # needs to discount a weak match, not eliminate it. Shared, tunable
 # constants rather than inlined literals so both call sites below (and
-# ``search.py``'s separate, scorer-agnostic use of the same curve —
-# round-08 §2.3) stay in lockstep if the curve is ever retuned.
+# ``search.py``'s separate, scorer-agnostic use of the same curve)
+# stay in lockstep if the curve is ever retuned.
 _COVERAGE_FLOOR = 0.4
 _COVERAGE_SCALE = 0.6
 
@@ -352,14 +350,14 @@ def term_coverage(terms: tuple[str, ...], text: str) -> float:
     side happens to carry the inflected spelling.
 
     Shared by :class:`LexicalScorer` (discounting a false ``1.00`` on
-    a weak field, round-08 §2.2) and ``search.rank`` (discounting a
-    lexically-dominant common term that crowds out a candidate
-    covering every distinctive query term, round-08 §2.3) — one shared
+    a weak field) and ``search.rank`` (discounting a lexically-dominant
+    common term that crowds out a candidate covering every distinctive
+    query term) — one shared
     notion of "how much of the query does this text actually cover"
     so both fixes agree on what coverage means. A flat special case of
     :func:`weighted_term_coverage` (every term weighted equally); see
     that function for the IDF-weighted variant :class:`BM25Scorer`
-    uses instead (round-12 §3.13), which this delegates to so the two
+    uses instead, which this delegates to so the two
     can never drift apart.
 
     Args:
@@ -392,7 +390,7 @@ def weighted_term_coverage(
     own) relies on that equivalence by continuing to call the
     unweighted name.
 
-    Round-12 §3.13: introduced because coverage-fraction ties don't
+    Introduced because coverage-fraction ties don't
     discriminate a candidate missing a rare, distinguishing term (e.g.
     "yaml" in a Java/Kotlin codebase) from one missing a common term
     (e.g. "parse") — both cost the same under a flat fraction, even
@@ -550,11 +548,11 @@ class BM25Scorer:
             candidate matches any query term at all. For a 2+-term
             task, the top-of-batch score is additionally discounted
             by :func:`coverage_factor` on an *IDF-weighted* coverage
-            fraction (round-12 §3.13; :func:`weighted_term_coverage`)
+            fraction (:func:`weighted_term_coverage`)
             rather than a flat one, so missing a rare, distinctive
             query term costs more than missing a common one — "best
             of a weak field" can't renormalize to a misleading
-            ``1.00`` (round-08 §2.2) *and* a coverage tie between two
+            ``1.00`` *and* a coverage tie between two
             candidates now breaks toward the more specific match.
         """
         if not candidates:
@@ -683,7 +681,7 @@ def blended_scores(
             ``None`` (the default) preserves the exact current
             behavior for every other caller (workset, contextpack,
             render_lean, hooks): compute relevance from scratch over
-            ``candidates`` itself. Round-13: introduced because
+            ``candidates`` itself. Introduced because
             re-deriving relevance over a *different-sized* batch than
             the one a caller already scored produces a different
             number — IDF and BM25's length normalization are

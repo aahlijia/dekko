@@ -24,7 +24,7 @@ CYCLE_REPO = {
     "quiet.py": "x = 1\n",
 }
 
-# Round 33 Track 2, claude-buddy's exact shape: two loops sharing one
+# claude-buddy's exact shape: two loops sharing one
 # file (state). art -> theme -> state -> art and state -> xp -> state.
 # One strongly-connected cluster, four files, five edges, and NOT the
 # ring the sorted member list (art, state, theme, xp) would suggest.
@@ -96,11 +96,10 @@ def test_deps_summary_acyclic_repo_no_cycle_line(
     assert "detected" not in out
 
 
-# Round-29 Track 4a (flagged rounds 27/28/29 on awesome-go): a repo
-# with zero resolved import edges purely because its only language
-# (Go) has no per-language import resolver at all -- every Go import
-# reports external unconditionally, not a mapping failure -- must say
-# so up front rather than read as "did something break."
+# A repo with zero resolved import edges purely because its only
+# language (Go) has no per-language import resolver at all -- every
+# Go import reports external unconditionally, not a mapping failure
+# -- must say so up front rather than read as "did something break."
 GO_ONLY_REPO = {
     "main.go": (
         'package main\n\nimport "fmt"\n\nfunc main() {\n'
@@ -150,7 +149,7 @@ def test_deps_real_resolved_edges_no_import_resolution_gap_note(
 def test_deps_discloses_unsupported_file_coverage_gap(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round-29 Track 4b: `deps` never disclosed skipped-file coverage
+    # `deps` never disclosed skipped-file coverage
     # (unsupported languages, vendored/too-large/symlinked exclusions)
     # at all, distinct from the Go import-resolution-scope note above.
     root = make_mapped_repo(
@@ -276,7 +275,7 @@ def test_deps_file_zero_symbol_barrel_file_still_resolves(
 
 
 def _assert_every_arrow_is_a_real_edge(out: str, root: Path) -> int:
-    """The invariant round 33 Track 2 exists to establish: every ``->``
+    """The invariant under test: every ``->``
     on the page is a direct import in ``module_deps_out``. Returns the
     number of arrows checked so a test can assert it saw some."""
     index = mapfile.load_map(root)
@@ -314,7 +313,7 @@ def test_deps_cycles_shared_node_prints_a_real_loop_not_the_sorted_list(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     # Before: "art.py -> state.py -> theme.py -> xp.py -> art.py", four
-    # arrows, zero of them real edges (claude-buddy.md §1).
+    # arrows, zero of them real edges.
     root = make_mapped_repo(SHARED_NODE_REPO)
     assert cli.main(["deps", "--root", str(root), "--cycles"]) == 0
     out = capsys.readouterr().out
@@ -391,10 +390,10 @@ def test_deps_cycles_json(
     doc = json.loads(capsys.readouterr().out)
     assert len(doc["results"]) == 1
     entry = doc["results"][0]
-    # pre-round-33 keys, unchanged
+    # original keys, unchanged
     assert set(entry["files"]) == {"a.py", "b.py", "c.py"}
     assert entry["self_import"] is False
-    # round-33 keys
+    # newer keys
     assert entry["internal_edges"] == 3
     assert entry["shortest_loop"] == ["a.py", "b.py", "c.py"]
     assert entry["two_file_loops"] == 0
@@ -592,7 +591,7 @@ def test_deps_budget_caps_file_view_rows(
 def test_deps_rust_crate_import_resolves_against_named_lib_root(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # round-19 zed finding: a crate whose Cargo.toml overrides
+    # A crate whose Cargo.toml overrides
     # `[lib] path = "src/<name>.rs"` (216/222 of zed's own crates with
     # a [lib] path override use this shape) has no literal lib.rs/
     # main.rs anywhere -- before the _rust_crate_root fallback, every
@@ -626,7 +625,7 @@ def test_deps_rust_crate_import_resolves_against_named_lib_root(
 def test_deps_rust_item_resolves_at_named_crate_root_top_level(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # round-22 zed finding (5a): `crate::App`, re-exported at the top
+    # `crate::App`, re-exported at the top
     # level of a custom-named crate root (`[lib] path =
     # "src/gpui.rs"`), previously resolved as external -- the
     # "item defined at crate-root scope" fallback only ever tried
@@ -659,7 +658,7 @@ def test_deps_rust_item_resolves_at_named_crate_root_top_level(
 def test_deps_rust_cross_crate_import_resolves_to_sibling_crate(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # round-22 zed finding (5b): a Cargo-workspace sibling crate
+    # A Cargo-workspace sibling crate
     # referenced by its bare crate name (`use editor::Editor;` from a
     # different crate) previously always resolved as external,
     # unconditionally -- the dominant cross-crate shape in a large
@@ -705,12 +704,12 @@ def test_deps_compute_top_by_deps_in_ranking(
     assert doc["top_by_deps_in"][0] == {"path": "hot.py", "count": 3}
 
 
-# --- round 31: runtime-import disclosure ----------------------------
+# --- runtime-import disclosure --------------------------------------
 
 # A file whose only real dependency is wired at runtime, so static
 # import extraction correctly resolves zero edges for it. Mirrors
-# tensorflow's LazyLoader-wired keras modules, where round 31 measured
-# 6 of 9 real edges invisible behind a bare "imports (0)".
+# tensorflow's LazyLoader-wired keras modules, where 6 of 9 real
+# edges were measured invisible behind a bare "imports (0)".
 DYNAMIC_IMPORT_REPO = {
     "lazy.py": (
         "import importlib\n"

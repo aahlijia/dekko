@@ -354,12 +354,11 @@ def _split_errors(
     """Split ``errors_by_path`` into genuine failures vs. missing-grammar
     skips.
 
-    round-13 tensorflow.md/zed.md: both independently found ``summary``'s
-    "parse errors:" section (and its ``--json`` ``parse_errors``/
-    ``parse_errors_total`` fields) labeling every entry in
-    ``errors_by_path`` as a "parse error," even when every single one is
-    actually a Tier-2-grammar-not-installed skip — the same conflation
-    the round-12 fix already resolved for ``dekko map``'s own top-line
+    ``summary``'s "parse errors:" section (and its ``--json``
+    ``parse_errors``/``parse_errors_total`` fields) used to label every
+    entry in ``errors_by_path`` as a "parse error," even when every
+    single one is actually a Tier-2-grammar-not-installed skip — the same
+    conflation already resolved for ``dekko map``'s own top-line
     summary (see ``cli.py``'s ``no_grammar``/``errors`` split), just not
     wired into this command too. ``grammars.is_grammar_unavailable_message``
     is the same helper that fix uses to tell the two apart.

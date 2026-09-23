@@ -7,7 +7,7 @@ from functools import lru_cache
 
 from dekko.core.model import TYPE_KINDS, Symbol
 
-# Token-counting backend (Q2). The accurate path uses ``tiktoken`` when
+# Token-counting backend. The accurate path uses ``tiktoken`` when
 # it is installed (``pip install dekko[tokenizer]``); otherwise, and in
 # the default install, counting falls back to a ~4-chars/token estimate.
 # ``DEKKO_TOKENIZER=chars4`` forces the cheap path for reproducible,
@@ -23,8 +23,8 @@ def signature(sym: Symbol) -> str:
         return sym.qualname
     if sym.kind == "module":
         # Synthetic placeholder for an anonymous-callback call site
-        # promoted out of contextpack's module-caller bucket (bug #4)
-        # — it has no real params/returns to render.
+        # promoted out of contextpack's module-caller bucket; it has no
+        # real params/returns to render.
         return f"<anonymous> ({sym.path})"
     parts = [f"{p.name}: {p.type}" if p.type else p.name for p in sym.params]
     sig = f"{sym.qualname}({', '.join(parts)})"
@@ -54,9 +54,9 @@ def oneline(text: str, limit: int = 80) -> str:
     return first
 
 
-# Round 33 Track 4: every read command's ``--budget`` assumes rows are
-# small -- ``fit_to_budget`` can only drop whole rows, and always keeps
-# at least one. Three producers broke that assumption (an external
+# Every read command's ``--budget`` assumes rows are small --
+# ``fit_to_budget`` can only drop whole rows, and always keeps at least
+# one. Three producers broke that assumption (an external
 # callee text that is a 122,327-character builder chain; a 1,156-file
 # cycle cluster as one row; a "called by" list of ~1,000 links). This is
 # the bound a rendered row is expected to stay under, enforced by a
@@ -199,7 +199,7 @@ class Meter:
         budget: Token budget in effect, or ``None``.
         limit: Count limit in effect, or ``None``.
         signals: Distinct pieces of information covered (files + symbols),
-            for the FR-D3 density view; ``0`` disables the density line.
+            for the density view; ``0`` disables the density line.
         related_total: Distinct related entities (e.g. callers) backing
             rows that are finer-grained than one-per-entity (e.g. call
             sites). ``0`` disables the related-count footer clause and
@@ -217,12 +217,12 @@ class Meter:
     signals: int = 0
     related_total: int = 0
     related_label: str = ""
-    # Round 33 Track 4: set by ``fit_to_budget`` when the kept output
-    # exceeds ``budget`` anyway, which can only happen when the first
+    # Set by ``fit_to_budget`` when the kept output exceeds ``budget``
+    # anyway, which can only happen when the first
     # row alone is bigger than the budget (the "always keep one row"
     # rule). Should never fire once every producer bounds its rows;
     # it exists so the next producer that doesn't shows up as a footer
-    # in someone's terminal instead of as a discovery three rounds on.
+    # in someone's terminal instead of going unnoticed.
     over_budget: bool = False
 
     @property
@@ -232,7 +232,7 @@ class Meter:
 
     @property
     def per_signal(self) -> float | None:
-        """Tokens spent per signal covered (FR-D3), or ``None``."""
+        """Tokens spent per signal covered, or ``None``."""
         if self.signals <= 0:
             return None
         return round(self.tokens / self.signals, 1)
@@ -247,7 +247,7 @@ class Meter:
         return "budget"
 
     def _density(self) -> str:
-        """The optional ``· N signals`` density suffix (FR-D3)."""
+        """The optional ``· N signals`` density suffix."""
         return f" · {self.signals} signals" if self.signals > 0 else ""
 
     def _related_suffix(self) -> str:

@@ -220,10 +220,10 @@ def test_self_container_resolves_with_like_named_elsewhere() -> None:
 
 
 def test_same_file_step_ignores_receiver_on_unrelated_method_call() -> None:
-    # Known limitation (design doc item #6, investigated as part of the
-    # claude-buddy Task 3 "callee anomaly" — that case turned out to be
-    # a correct callee list, not a resolver bug, but reading the
-    # resolution ladder surfaced this real, narrower gap): the
+    # Known limitation (surfaced while investigating a claude-buddy
+    # "callee anomaly" — that case turned out to be a correct callee
+    # list, not a resolver bug, but reading the resolution ladder
+    # surfaced this real, narrower gap): the
     # same-file step in ``_pick_candidate`` — ``if len(same_file) == 1:
     # return same_file[0]`` — matches purely by bare name in the file,
     # with no check of the call's ``receiver``. A bare ``loadHistory()``
@@ -236,8 +236,7 @@ def test_same_file_step_ignores_receiver_on_unrelated_method_call() -> None:
     # intentional limitation rather than a silent gap — it is not
     # asserting desired behavior, and flipping it would trade a false
     # positive here for a false negative on legitimate same-file calls
-    # through a local variable of the right type (see design doc item
-    # #6's Effort/Risk section).
+    # through a local variable of the right type.
     fm = FileMap(
         path="c.py",
         language="python",
@@ -290,7 +289,7 @@ def test_external_calls_recorded() -> None:
     assert all(line > 0 for ext in graph.external for line in ext.lines)
 
 
-# --- bug #2(b): bare-reference (pass-by-value) resolution -----------------
+# --- bare-reference (pass-by-value) resolution ---------------------------
 
 
 def test_reference_resolves_into_referenced_not_calls() -> None:
@@ -352,7 +351,7 @@ def test_unresolved_reference_is_silently_dropped() -> None:
     assert graph.ambiguous == []
 
 
-# --- aliased-import calls (Work Package C) --------------------------------
+# --- aliased-import calls -------------------------------------------------
 
 
 def test_aliased_import_call_resolves_to_real_target() -> None:
@@ -516,10 +515,9 @@ def test_aliased_import_reference_resolves_to_real_target() -> None:
 
 
 def test_cpp_call_disambiguated_via_whole_file_include() -> None:
-    # C++ import-hint fix (1.5-remainder, part 1) — reproduces the
-    # tensorflow ``rewrite_utils.cc``/``rewrite_utils_test.cc`` gtest
-    # pair from investigation-1.5-cpp-gtest-affected.md as a minimal
-    # fixture: two repo-wide same-named free functions (no receiver,
+    # C++ import-hint fix — reproduces the tensorflow
+    # ``rewrite_utils.cc``/``rewrite_utils_test.cc`` gtest pair as a
+    # minimal fixture: two repo-wide same-named free functions (no receiver,
     # no self/typed-param/same-file evidence — every earlier ladder
     # step fails), disambiguated only by which header the caller's
     # file ``#include``s. Before the whole-file-include fallback, this
@@ -684,7 +682,7 @@ def test_ambiguous_reference_name_is_dropped_not_guessed() -> None:
     assert graph.referenced_in == {}
 
 
-# --- bug #2: undercounted callers through typed vars/params and ----------
+# --- undercounted callers through typed vars/params and ------------------
 # --- ``new X()`` construction ---------------------------------------------
 
 
@@ -696,7 +694,7 @@ def test_typed_parameter_call_resolves_to_declared_type_method() -> None:
     # get guessed via the (unrelated) same-file step either. The class
     # symbol itself (not just its method) is part of the fixture,
     # matching a real TS codebase where ``class Controller`` is
-    # independently indexed -- round 31 A4 requires the declared
+    # independently indexed -- the in-repo-type gate requires the declared
     # type's outer token to name a real in-repo type, to keep a
     # same-named foreign/std generic (``Option``, ``Result``) from
     # ever being tried as a candidate (see
@@ -1025,16 +1023,16 @@ def test_real_ambiguity_between_two_unrelated_classes_still_ambiguous() -> (
     assert len(graph.ambiguous) == 1
 
 
-# --- Resolver fan-in noise (investigation-1.2-resolver-fanin.md) ---
+# --- Resolver fan-in noise ---
 #
 # cline's ``trim``/``expect``/``describe``/``interface String`` hotspots
-# (reported fan-in 1,404/603/676/548) turned out not to be a merge bug —
+# (fan-in 1,404/603/676/548) turned out not to be a merge bug —
 # ``_pick_candidate`` never guesses among 2+ genuinely ambiguous
 # candidates — but a false-positive *single*-candidate resolution: a
 # repo defining exactly one symbol sharing a name with a language
 # built-in/ambient global had every unrelated built-in/global call site
-# silently credited to it. These tests cover the three shapes the
-# investigation confirmed live against cline, plus regression guards
+# silently credited to it. These tests cover the three shapes
+# confirmed live against cline, plus regression guards
 # that legitimate same-shape resolutions are unaffected.
 
 
@@ -1068,7 +1066,7 @@ def test_receiver_qualified_builtin_method_name_not_guessed() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, trim_fn.id) not in edges
     assert graph.calls_in.get(trim_fn.id, []) == []
-    # Round 22 cline.md §3.1: a noise-suppressed call with exactly one
+    # A noise-suppressed call with exactly one
     # real candidate used to land in ``ambiguous`` (indistinguishable
     # from a genuine 2+-candidate collision) — it must now route to
     # ``external`` instead, via the ``_NOISE`` sentinel.
@@ -1179,11 +1177,10 @@ def test_multi_segment_self_chain_builtin_call_not_guessed() -> None:
 
 
 def test_receiver_qualified_schema_builder_method_not_guessed() -> None:
-    # Track H's documented residual gap (investigation-1.2-resolver-
-    # fanin.md): a repo's one ``describe`` symbol is an unrelated
-    # internal helper; a Zod schema chain call like
-    # ``z.string().describe("...")`` must not be guessed into its
-    # fan-in just because ``describe`` is otherwise unique repo-wide —
+    # A documented residual gap: a repo's one ``describe`` symbol is an
+    # unrelated internal helper; a Zod schema chain call like
+    # ``z.string().describe("...")`` must not be guessed into its fan-in
+    # just because ``describe`` is otherwise unique repo-wide —
     # confirmed live against cline (fan-in 60, all Zod ``.describe()``
     # calls through untyped schema-builder receivers).
     describe_fn = _fn("definitions.ts", "describe")
@@ -1210,7 +1207,7 @@ def test_receiver_qualified_schema_builder_method_not_guessed() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, describe_fn.id) not in edges
     assert graph.calls_in.get(describe_fn.id, []) == []
-    # Round 22 cline.md §3.1: noise-suppressed, single-candidate calls
+    # Noise-suppressed, single-candidate calls
     # now route to ``external`` via the ``_NOISE`` sentinel, not
     # ``ambiguous``.
     assert graph.ambiguous == []
@@ -1219,7 +1216,7 @@ def test_receiver_qualified_schema_builder_method_not_guessed() -> None:
 
 
 def test_receiver_qualified_commander_builder_method_not_guessed() -> None:
-    # Master report #5 (round 11, cline): a top-level
+    # On cline, a top-level
     # ``const description = ...`` binding in an unrelated script file
     # (`publish-npm.ts`-shaped) was credited with fan-in 14, all really
     # Commander.js ``.description("...")`` builder calls on local
@@ -1272,7 +1269,7 @@ def test_receiver_qualified_commander_builder_method_not_guessed() -> None:
     assert (caller_a.id, description_binding.id) not in edges
     assert (caller_b.id, description_binding.id) not in edges
     assert graph.calls_in.get(description_binding.id, []) == []
-    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # Noise-suppressed calls now route to
     # ``external``, not ``ambiguous``.
     assert graph.ambiguous == []
     externals = {ext.callee for ext in graph.external}
@@ -1281,7 +1278,7 @@ def test_receiver_qualified_commander_builder_method_not_guessed() -> None:
 
 
 def test_receiver_qualified_rust_std_method_not_guessed() -> None:
-    # zed's headline finding, round-09 §2.1 part B: exactly one
+    # A zed case: exactly one
     # repo-wide ``then`` symbol (an unrelated CI-tool crate's
     # ``PathContextCondition.then``); a call through an untyped local
     # variable is really Rust std's ``bool::then``. Must not be
@@ -1312,7 +1309,7 @@ def test_receiver_qualified_rust_std_method_not_guessed() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, then_fn.id) not in edges
     assert graph.calls_in.get(then_fn.id, []) == []
-    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # Noise-suppressed calls now route to
     # ``external``, not ``ambiguous``.
     assert graph.ambiguous == []
     externals = {ext.callee for ext in graph.external}
@@ -1347,7 +1344,7 @@ def test_rust_iter_mut_not_guessed_into_unrelated_repo_symbol() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, iter_mut_fn.id) not in edges
     assert graph.calls_in.get(iter_mut_fn.id, []) == []
-    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # Noise-suppressed calls now route to
     # ``external``, not ``ambiguous``.
     assert graph.ambiguous == []
     externals = {ext.callee for ext in graph.external}
@@ -1355,7 +1352,7 @@ def test_rust_iter_mut_not_guessed_into_unrelated_repo_symbol() -> None:
 
 
 def test_receiver_qualified_js_now_not_guessed_into_closure_local() -> None:
-    # Round 23 cline.md §2.1: a closure-local
+    # A closure-local
     # ``const now = () => Date.now()``-shaped repo symbol named
     # ``now`` must not absorb every unrelated ``Date.now()``/
     # ``performance.now()`` call in the repo just because it's the
@@ -1390,7 +1387,7 @@ def test_receiver_qualified_js_now_not_guessed_into_closure_local() -> None:
 
 
 def test_receiver_qualified_js_has_not_guessed_into_repo_symbol() -> None:
-    # Round 23 cline.md §2.1: ``Map.prototype.has``/
+    # ``Map.prototype.has``/
     # ``Set.prototype.has`` calls through an untyped local must not be
     # guessed into an unrelated repo-defined ``has`` just because the
     # name is otherwise unique repo-wide (352 -> 436 misattributed
@@ -1425,13 +1422,12 @@ def test_receiver_qualified_js_has_not_guessed_into_repo_symbol() -> None:
 
 
 def test_receiver_qualified_js_on_not_guessed_into_repo_symbol() -> None:
-    # Round 25 cline.md Finding 2: a debug-harness ``CdpClient.on``
-    # (fan-in 95 reported, resolver "fully confident", ``dekko
-    # ambiguous`` reporting nothing wrong) silently absorbed an
-    # unrelated plain Node.js stream ``EventEmitter.on("data",
-    # handler)`` call elsewhere in the repo, mirroring the exact
-    # ``has``/``now`` false-positive shape above for the
-    # ``on``/``once``/``off``/``emit`` event-emitter idiom family.
+    # A debug-harness ``CdpClient.on`` (fan-in 95, resolver "fully
+    # confident", ``dekko ambiguous`` reporting nothing wrong) silently
+    # absorbed an unrelated plain Node.js stream
+    # ``EventEmitter.on("data", handler)`` call elsewhere in the repo,
+    # mirroring the exact ``has``/``now`` false-positive shape above for
+    # the ``on``/``once``/``off``/``emit`` event-emitter idiom family.
     on_fn = _fn("cdp-client.ts", "on", "CdpClient.on")
     caller = _fn("mcp-hub.ts", "connectToServer")
     files = [
@@ -1505,12 +1501,12 @@ def test_receiver_qualified_js_once_off_emit_not_guessed() -> None:
 
 
 def test_receiver_qualified_java_assertj_istrue_not_guessed() -> None:
-    # Round 23 spring-boot.md §2.1: a single real
+    # On spring-boot, a single real
     # ``ResolvedDockerHost.isTrue`` caller had its fan-in inflated to
     # 1,103 by unrelated AssertJ ``assertThat(x).isTrue()`` assertion
     # chain calls elsewhere in the test suite -- ~1,100x inflation from
     # a single denylist gap (no Java-idiom denylist existed at all
-    # before round 23).
+    # back then).
     is_true_fn = _fn(
         "ResolvedDockerHost.java",
         "isTrue",
@@ -1554,7 +1550,7 @@ def test_receiver_qualified_java_assertj_istrue_not_guessed() -> None:
 
 
 def test_receiver_qualified_generic_builder_build_not_guessed() -> None:
-    # Round 23 spring-boot.md §2.2: a repo-defined ``Builder.build``
+    # On spring-boot, a repo-defined ``Builder.build``
     # read 43 real callers plus 1,131 additional ambiguous-but-
     # uncounted sites from unrelated builder types elsewhere in the
     # codebase -- a receiver-qualified ``.build()`` on an untyped local
@@ -1628,13 +1624,12 @@ def test_bare_call_to_same_file_builder_named_function_still_resolves() -> (
 
 
 # ---------------------------------------------------------------------
-# Round 25 structural layer 2 (`.features/plans/round25/
-# 06-structural-layer2-arity-resolution.md`): arity-gated single-
-# candidate resolution. Every test below deliberately picks a call
-# name absent from every layer-1 denylist (``_is_noise_call``'s
+# Structural layer 2: arity-gated single-candidate resolution. Every
+# test below deliberately picks a call name absent from every layer-1
+# denylist (``_is_noise_call``'s
 # ``_BUILTIN_METHOD_NAMES``/``_JAVA_ASSERTION_METHOD_NAMES``/etc.) so
-# the call genuinely reaches the single-candidate fast path under
-# test, rather than being intercepted earlier by layer 1.
+# the call genuinely reaches the single-candidate fast path under test,
+# rather than being intercepted earlier by layer 1.
 
 
 def test_single_candidate_arity_mismatch_lands_in_external() -> None:
@@ -1643,7 +1638,7 @@ def test_single_candidate_arity_mismatch_lands_in_external() -> None:
     # ``check`` (1 required parameter) must not be guessed via the
     # single-candidate fast path -- it should land in ``external``,
     # exactly as if there had been zero candidates, not one wrong one.
-    # (Until round 31 it landed in ``ambiguous``, which a zero-candidate
+    # (It used to land in ``ambiguous``, which a zero-candidate
     # call never does: a collision needs two live candidates. cline had
     # 542 such "ambiguous, avg 1.0 candidates" entries.)
     check_fn = _fn("mod.py", "check", language="python")
@@ -1718,7 +1713,7 @@ def test_single_candidate_arity_mismatch_bare_call_non_method_candidate() -> (
 
 
 def test_single_candidate_arity_mismatch_receiver_qualified() -> None:
-    # Round 25's own refinement to the layer-2 sketch: the arity guard
+    # A refinement to layer 2: the arity guard
     # must fire for a receiver-qualified call too, not just a bare
     # one (cline's ``stderrStream.on(...)`` shape) -- nothing in the
     # ladder above the single-candidate rung special-cases arity by
@@ -1921,7 +1916,7 @@ def test_param_arity_excludes_python_syntax_marker_params() -> None:
 
 
 def test_explicit_type_receiver_resolves_same_file_new_collision() -> None:
-    # zed's headline finding, round-09 §2.1 part A:
+    # A zed case:
     # ``BufferDiff::new(...)`` written inside ``BufferDiff``'s own
     # file, which also defines an unrelated type's same-named ``new``
     # method — there's no import to key ``_import_match`` off (same
@@ -1994,7 +1989,7 @@ def test_explicit_type_receiver_no_unique_method_falls_through() -> None:
         language="rust",
     )
     # Deliberately not named ``build``/``has``/``now``/etc. — those are
-    # now denylisted noise-guard names (round 23) and a
+    # now denylisted noise-guard names and a
     # receiver-qualified call to one of them is suppressed before this
     # step's own candidate count is even reached; this test's fixture
     # needs a name outside every denylist so it still exercises the
@@ -2025,7 +2020,7 @@ def test_explicit_type_receiver_no_unique_method_falls_through() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, unrelated_a.id) not in edges
     assert (caller.id, unrelated_b.id) not in edges
-    # Until round 31 this landed in ``ambiguous`` between Foo.render
+    # This used to land in ``ambiguous`` between Foo.render
     # and Bar.render -- neither of which a ``Widget::render`` path can
     # possibly mean. No member of Widget (and no trait default) is a
     # candidate, so there is no plausible repo target: external.
@@ -2065,7 +2060,7 @@ def test_bare_call_shadowed_by_external_import_not_guessed() -> None:
     graph = resolve(files)
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, shim.id) not in edges
-    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # Noise-suppressed calls now route to
     # ``external``, not ``ambiguous``.
     assert graph.ambiguous == []
     externals = {ext.callee for ext in graph.external}
@@ -2098,7 +2093,7 @@ def test_bare_call_to_ambient_global_name_not_guessed_without_import() -> None:
     graph = resolve(files)
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, local.id) not in edges
-    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # Noise-suppressed calls now route to
     # ``external``, not ``ambiguous``.
     assert graph.ambiguous == []
     externals = {ext.callee for ext in graph.external}
@@ -2134,7 +2129,7 @@ def test_bare_call_to_global_type_name_not_guessed() -> None:
     graph = resolve(files)
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, aug.id) not in edges
-    # Round 22 cline.md §3.1: noise-suppressed calls now route to
+    # Noise-suppressed calls now route to
     # ``external``, not ``ambiguous``.
     assert graph.ambiguous == []
     externals = {ext.callee for ext in graph.external}
@@ -2142,7 +2137,7 @@ def test_bare_call_to_global_type_name_not_guessed() -> None:
 
 
 def test_noise_guard_wins_over_ambiguous_with_two_candidates() -> None:
-    # Round 22 cline.md §3.1: noise detection (``_is_noise_call``) runs
+    # Noise detection (``_is_noise_call``) runs
     # *before* the candidate-count branch in ``_pick_candidate``'s
     # ladder — a receiver-qualified builtin-method-shaped call must
     # still route to ``external`` via the ``_NOISE`` sentinel even
@@ -2182,7 +2177,7 @@ def test_noise_guard_wins_over_ambiguous_with_two_candidates() -> None:
 
 
 def test_receiver_qualified_get_resolve_create_not_guessed() -> None:
-    # Part B of round 22 cline.md §3.1: ``_BUILTIN_METHOD_NAMES`` was
+    # ``_BUILTIN_METHOD_NAMES`` was
     # missing several very common JS/TS names that hit this same fast
     # path once every stronger heuristic fails -- ``get`` averaged
     # 32.0 candidates in cline's own report, almost certainly
@@ -2241,7 +2236,7 @@ def test_receiver_qualified_get_resolve_create_not_guessed() -> None:
 
 
 def test_receiver_qualified_console_warn_not_guessed() -> None:
-    # Round 27 finding M1: none of the five method-name denylists
+    # None of the five method-name denylists
     # ``_is_noise_call`` checks cover ``warn`` (or any other
     # ``console``/``process``/``window`` method), so a receiver-
     # qualified ``console.warn(...)`` call used to fall through to the
@@ -2312,7 +2307,7 @@ def test_reference_resolution_unaffected_by_noise_guard() -> None:
     assert (caller.id, local.id) in ref_edges
 
 
-# 1.4: resolve()/resolve_refs() gained a process-pool parallelization
+# resolve()/resolve_refs() gained a process-pool parallelization
 # split (``_resolve_all``/``_chunk_files``) for large repos. These
 # tests force the parallel path (see ``_force_resolve_pool``) on
 # modest, hand-built fixtures rather than a huge repo, and assert
@@ -2325,7 +2320,7 @@ def test_reference_resolution_unaffected_by_noise_guard() -> None:
 def _force_resolve_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make tiny fixtures actually take the process-pool path.
 
-    Round 30 added two more limits to ``_pool_workers`` beyond the
+    Two more limits were added to ``_pool_workers`` beyond the
     original item-count floor: a minimum items-per-worker, and a RAM
     cap. A test that neutralizes only one of the three silently runs
     the *sequential* path while appearing to test parallelism — the
@@ -2447,7 +2442,7 @@ def test_resolve_parallel_matches_sequential(
 def test_resolve_all_oversubscribes_chunk_count_beyond_worker_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round 17: ``_resolve_all``'s ``_run(w)`` closure must build
+    """``_resolve_all``'s ``_run(w)`` closure must build
     ``w * _RESOLVE_CHUNK_OVERSUBSCRIPTION`` chunks, not just ``w`` --
     more chunks than workers is the whole point of the fix (an idle
     worker can pick up the next queued chunk instead of sitting idle
@@ -2639,10 +2634,8 @@ def test_resolve_below_threshold_stays_sequential_by_default() -> None:
     assert graph.edges  # unchanged baseline behavior, still resolves
 
 
-# 1.5 (round 17): a BrokenProcessPool on the parallel path gets one
-# bounded retry at reduced parallelism (``run_pooled_with_retry``)
-# before propagating — see
-# .features/plans/round17/round17-mcp-process-pool-concurrent-load-plan.md.
+# A BrokenProcessPool on the parallel path gets one bounded retry at
+# reduced parallelism (``run_pooled_with_retry``) before propagating.
 # No existing test simulated a broken pool before this; ``_FlakyPool``
 # replaces ``ProcessPoolExecutor`` with a fake that raises
 # ``BrokenProcessPool`` on ``__enter__`` for its first ``fail_times``
@@ -2658,7 +2651,7 @@ def _flaky_pool_factory(fail_times: int) -> type:
     constructions (counted across every instance built from this one
     factory call), then delegates to ``ThreadPoolExecutor``.
 
-    Round 22: every call site now owns its pool via
+    Every call site now owns its pool via
     ``pool = ProcessPoolExecutor(...)`` / ``try``/``finally:
     pool.shutdown(wait=False)`` instead of ``with ProcessPoolExecutor(
     ...) as pool:`` (see ``_run_pool_bounded``'s docstring for why) --
@@ -2668,8 +2661,8 @@ def _flaky_pool_factory(fail_times: int) -> type:
     protocol.
 
     Accepts (and forwards) ``initializer``/``initargs`` the same way
-    ``ProcessPoolExecutor`` does (round 17: ``_resolve_all`` and its
-    siblings now construct their real pool with these) --
+    ``ProcessPoolExecutor`` does (``_resolve_all`` and its siblings
+    now construct their real pool with these) --
     ``ThreadPoolExecutor`` supports both natively, and since threads
     share process memory, running the initializer per-thread still
     populates the same module-level ``_worker_*`` globals the real
@@ -2686,7 +2679,7 @@ def _flaky_pool_factory(fail_times: int) -> type:
             initializer: object = None,
             initargs: tuple = (),
         ) -> None:
-            # ``mp_context`` is accepted (round 30 (c): every real
+            # ``mp_context`` is accepted (every real
             # pool build now passes one) and dropped -- the fallback
             # ``ThreadPoolExecutor`` has no such concept.
             state["calls"] += 1
@@ -2711,7 +2704,7 @@ def _flaky_pool_factory(fail_times: int) -> type:
 
 @pytest.fixture(autouse=True)
 def _no_real_pool_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Round 23 §15 added a fixed backoff (``_POOL_RETRY_DELAY_S``)
+    """A fixed backoff (``_POOL_RETRY_DELAY_S``)
     before ``run_pooled_with_retry``'s bounded retry fires. Every
     ``BrokenProcessPool``-retry test in this module (and the
     ``_FlakyPool``-based tests further below) deliberately triggers
@@ -2771,7 +2764,7 @@ def test_run_pooled_with_retry_propagates_after_second_failure() -> None:
 def test_run_pooled_with_retry_sleeps_before_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round 23 §15: an immediate retry can land in the exact same
+    """An immediate retry can land in the exact same
     transient window (CPU contention, or a `uv tool install
     --reinstall` shim relink race) that caused the first
     ``BrokenProcessPool``. Confirms the backoff actually fires, with
@@ -2817,7 +2810,7 @@ def test_run_pooled_with_retry_prints_disclosure_note_on_retry(
     assert "reduced parallelism" in err
 
 
-# Round 21 Track A: cline reproduced a spawned worker resolving a
+# cline reproduced a spawned worker resolving a
 # completely different Python interpreter than its own parent process
 # (the system Anaconda install instead of the parent's `uv
 # tool`-managed venv), hanging 6+ minutes at 0% CPU before a manual
@@ -2911,14 +2904,13 @@ def test_run_pooled_with_retry_stalled_error_message_is_actionable() -> None:
     assert "--jobs 1" in message
 
 
-# Round 30 (c): every pool build passes an explicitly chosen
+# Every pool build passes an explicitly chosen
 # multiprocessing context -- ``fork`` from a provably single-threaded
 # POSIX parent (workers get copy-on-write access to the indices, no
 # per-worker pickling), ``spawn`` everywhere else -- and the bounded
 # ``BrokenProcessPool`` retry always falls back to ``spawn``, so a
 # host where ``fork`` misbehaves degrades to the previously-shipped
-# behavior at the cost of one wasted attempt. See
-# ``.features/fixes/round30/03b-fork-and-single-pool-designs.md``.
+# behavior at the cost of one wasted attempt.
 
 _NO_FORK_ON_WINDOWS = pytest.mark.skipif(
     sys.platform == "win32", reason="fork is unavailable on Windows"
@@ -3103,7 +3095,7 @@ def test_resolve_parallel_fork_context_matches_sequential(
     """Parity through a *real* fork-context pool -- the fork path must
     be byte-identical to sequential, exactly as the spawn path already
     is. Routed through ``_force_resolve_pool`` so it exercises a real
-    pool (the round-30 lesson about parity tests that silently stop
+    pool (the lesson about parity tests that silently stop
     reaching the pool). The chooser is bypassed to force ``fork``, so
     CPython's fork-in-a-threaded-process ``DeprecationWarning`` is
     expected here (pytest itself may hold helper threads) and
@@ -3246,7 +3238,7 @@ def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
         resolve(files, workers=4)
 
 
-# Round 22 claude-code.md §1: the tests above all mock the pool away
+# The tests above all mock the pool away
 # (``_StalledPool``/``_flaky_pool_factory``), so none of them ever let
 # a timeout unwind through a *real* ``ProcessPoolExecutor``'s
 # context-manager exit -- which is exactly the gap that let the bug
@@ -3397,11 +3389,11 @@ def test_resolve_catches_parallel_retries_once_on_broken_pool(
     assert sites  # succeeded despite the first pool breaking
 
 
-# --- Bare-call vs. unrelated method collision (round-12 §3.2) ---
+# --- Bare-call vs. unrelated method collision ---
 
 
 def test_bare_call_resolves_to_free_function_over_unrelated_method() -> None:
-    """Round-12 master report §3.2: a bare (receiverless) call to a
+    """A bare (receiverless) call to a
     same-package Go free function (``Generate``) used to misresolve
     as ambiguous against an unrelated *method* sharing the same bare
     name in a different package (``(g *IDGenerator) Generate(...)``),
@@ -3531,7 +3523,7 @@ def test_receiver_qualified_call_unaffected_by_non_method_fallback() -> None:
     assert len(graph.ambiguous) == 1
 
 
-# --- Language-aware candidate pre-filter (round-21 §Track D) --------------
+# --- Language-aware candidate pre-filter ---------------------------------
 
 
 def test_language_filtered_drops_candidates_in_a_different_language() -> None:
@@ -3564,8 +3556,7 @@ def test_language_filtered_drops_candidates_in_a_different_language() -> None:
 
 
 def test_language_filtered_falls_through_within_c_cpp_family() -> None:
-    """Round 21 residual fix (`.features/fixes/resolver-vendored-
-    exclusion-false-match.md`): when no same-language candidate
+    """When no same-language candidate
     exists, the fallback narrows to the call site's language *family*
     rather than the full unfiltered list -- but a legitimate same-
     family case (a C header declaring something a C++ file uses) must
@@ -3661,7 +3652,7 @@ def test_language_filtered_unchanged_for_unrecognized_call_site_path() -> None:
 
 
 def test_module_matches_bare_node_builtin_specifier_denylisted() -> None:
-    # Round 22 claude-buddy.md §2.1: a bare (non-relative) JS/TS import
+    # A bare (non-relative) JS/TS import
     # source naming a Node core module must never match a same-named
     # repo file, regardless of stem collision -- confirmed against the
     # actual extractor encoding (``"path/join"`` for a named import of
@@ -3692,11 +3683,11 @@ def test_module_matches_node_builtin_denylist_is_js_ts_only() -> None:
 
 
 def test_rust_crate_hint_matches_crate_root_re_export() -> None:
-    # Round 22 zed.md §3.2: a trait declared in one file
+    # A trait declared in one file
     # (``crates/gpui/src/element.rs``) but only reachable elsewhere
     # via its crate-root re-export (``use gpui::Render;``) must match
     # through the crate's root directory, not the declaring file's
-    # own stem. Round 23 Fix B: ``crate_roots`` values are now lists
+    # own stem. ``crate_roots`` values are now lists
     # (every matching root, not just one) -- see
     # ``test_rust_crate_hint_matches_multiple_roots_for_same_name``
     # below for the collision-aware behavior this enables.
@@ -3724,8 +3715,7 @@ def test_rust_crate_hint_matches_only_rust_candidates() -> None:
 
 
 def test_rust_crate_hint_matches_multiple_roots_for_same_name() -> None:
-    # Round 23 Fix B (``.features/plans/round23/
-    # 09-subtypes-ambiguous-resolution-rate.md``): when two directories
+    # When two directories
     # both convention-match the same crate name (the real
     # ``crates/gpui`` plus zed's own
     # ``tooling/lints/test_fixture/gpui`` synthetic fixture), a
@@ -3755,7 +3745,7 @@ def test_rust_crate_hint_matches_multiple_roots_for_same_name() -> None:
 
 
 def test_rust_crate_roots_index_all_keeps_every_matching_root() -> None:
-    # Round 23 Fix B: ``_rust_crate_roots_index_all`` must retain every
+    # ``_rust_crate_roots_index_all`` must retain every
     # directory matching a given crate name, not just the last one
     # encountered -- the collision-aware sibling of
     # ``_rust_crate_roots_index``, which intentionally keeps its
@@ -3794,8 +3784,7 @@ def test_rust_crate_roots_index_all_deduplicates_same_directory() -> None:
 
 
 def test_rust_crate_dir_finds_nearest_src_ancestor() -> None:
-    # Round 24 (``.features/plans/round24/
-    # 03-heritage-crate-decoy-tiebreak.md``): a file directly inside
+    # A file directly inside
     # ``src/`` finds that ``src/``'s own parent as the crate dir.
     assert (
         resolver_mod._rust_crate_dir("crates/gpui/src/element.rs")
@@ -3821,7 +3810,7 @@ def test_rust_crate_dir_finds_nearest_src_ancestor() -> None:
 
 
 def test_looks_like_synthetic_crate_root() -> None:
-    # Round 24: a real crate under an ordinary workspace path is never
+    # A real crate under an ordinary workspace path is never
     # flagged, regardless of how many ancestor segments it has.
     assert not resolver_mod._looks_like_synthetic_crate_root("crates/gpui")
     assert not resolver_mod._looks_like_synthetic_crate_root("gpui")
@@ -3893,7 +3882,7 @@ def test_prefer_non_synthetic_crate_match_resolves_3_candidates() -> None:
 
 
 def test_prefer_non_synthetic_crate_match_prefers_caller_crate() -> None:
-    # Round 24's guard against the tiebreak overriding a legitimate
+    # The guard against the tiebreak overriding a legitimate
     # self-reference: when the caller's own file lives inside one of
     # the matched candidates' crate roots, that candidate wins outright
     # -- even though its own root looks synthetic -- and this must not
@@ -3913,8 +3902,7 @@ def test_prefer_non_synthetic_crate_match_prefers_caller_crate() -> None:
 
 
 def test_prefer_non_synthetic_crate_root_resolves_sole_survivor() -> None:
-    # Round 25 (``.features/plans/round25/
-    # 02-deps-crate-decoy-tiebreak.md``): directory-level sibling of
+    # Directory-level sibling of
     # ``_prefer_non_synthetic_crate_match``, operating on plain
     # crate-root directory strings (``_rust_crate_roots_index_all``'s
     # own value shape) rather than ``Symbol`` candidates.
@@ -3967,7 +3955,7 @@ def test_prefer_non_synthetic_crate_root_resolves_3_candidates() -> None:
 
 
 def test_prefer_non_synthetic_crate_root_prefers_importer_crate() -> None:
-    # Round 24's guard against the tiebreak overriding a legitimate
+    # The guard against the tiebreak overriding a legitimate
     # self-reference, mirrored for import resolution: when the
     # importing file's own path lives inside one of the matched
     # candidate roots, that root wins outright -- even though it looks
@@ -3984,16 +3972,15 @@ def test_prefer_non_synthetic_crate_root_prefers_importer_crate() -> None:
 
 
 def test_import_match_uses_receiver_as_rust_crate_hint_fallback() -> None:
-    """Round 23 Fix A (``.features/plans/round23/
-    09-subtypes-ambiguous-resolution-rate.md``): a fully-qualified
+    """A fully-qualified
     ``impl gpui::Render for X`` heritage clause has ``name="Render"``,
     ``receiver="gpui"``, and (by construction of this fixture) no
     ``file_imports`` entry for either name -- the ordinary
     ``hints``-building step in ``_import_match`` finds nothing to loop
-    over at all. Fix A's fallback tries ``call.receiver`` itself as a
+    over at all. The fallback tries ``call.receiver`` itself as a
     bare crate-name hint once the ``hints`` loop comes up empty,
     resolving via ``crate_roots`` directly. Isolated unit test, before
-    Fix B's multi-root collision handling is layered on -- exactly one
+    multi-root collision handling is layered on -- exactly one
     matching root here.
     """
     render_candidate = Symbol(
@@ -4031,7 +4018,7 @@ def test_import_match_uses_receiver_as_rust_crate_hint_fallback() -> None:
 
 
 def test_rust_std_namespace_root_external_no_use_binding() -> None:
-    """Round 27 finding M3: a fully-qualified inline path like
+    """A fully-qualified inline path like
     ``std::fmt::Display`` binds no ``use std;`` anywhere in the file
     (Rust doesn't require one), so ``_receiver_is_external``'s ordinary
     check (first segment has a local ``use``-bound import) always
@@ -4040,8 +4027,8 @@ def test_rust_std_namespace_root_external_no_use_binding() -> None:
     from the heritage/candidate machinery below.
 
     ``receiver="std"`` (not ``"std::fmt"``) matches what the real
-    extractor actually produces for this shape (post-fix finding
-    POST-3: ``_split_callee_text`` flattens a multi-segment path down
+    extractor actually produces for this shape (``_split_callee_text``
+    flattens a multi-segment path down
     to first+last segments only, so ``.receiver`` is always a single
     bare token) -- the short-circuit now reads ``.text`` instead, so
     this hand-built fixture must use a realistic ``.receiver`` too.
@@ -4196,7 +4183,7 @@ def test_rust_impl_std_display_external_via_real_extraction(
 ) -> None:
     """End-to-end version of the zed repro, through the real extractor
     (not a hand-built ``RawHeritage``) -- this is the test shape that
-    would have caught finding POST-3: the hand-built fixtures above
+    would have caught the flattened-receiver bug: the hand-built fixtures above
     used to set ``receiver="std::fmt"``, a value the real extractor
     never produces (see
     ``test_rust_impl_std_path_receiver_flattened_to_bare_token`` in
@@ -4283,8 +4270,7 @@ def test_pick_candidate_returns_none_when_language_filtered_empty() -> None:
 
 def test_resolve_call_records_cross_family_miss_as_ambiguous() -> None:
     """Full ``_resolve_call``/``resolve()`` integration test for the
-    residual tensorflow gap (`.features/fixes/resolver-vendored-
-    exclusion-false-match.md`): the real C++ target lives outside the
+    residual tensorflow gap: the real C++ target lives outside the
     map entirely (simulating a vendored/excluded directory), leaving
     only a same-bare-name, unrelated-language Python class as the sole
     candidate. This must land in ``graph.ambiguous`` -- not silently
@@ -4340,7 +4326,7 @@ def test_resolve_call_records_cross_family_miss_as_ambiguous() -> None:
 
 
 def test_cross_language_bare_call_no_longer_resolves_to_wrong_symbol() -> None:
-    """Round 21 (tensorflow.md §5, Issue 6, Track D): a C++ namespace-
+    """On tensorflow, a C++ namespace-
     qualified factory call (``errors::InvalidArgumentError(...)``,
     extracted with no receiver -- C++ namespace qualifiers are not
     treated as a receiver the way a ``.``/``->`` method call is) used
@@ -4414,11 +4400,11 @@ def test_cross_language_bare_call_no_longer_resolves_to_wrong_symbol() -> None:
     assert graph.ambiguous == []
 
 
-# --- Go cross-package qualified-call resolution (round-13 §1) -------------
+# --- Go cross-package qualified-call resolution ---------------------------
 
 
 def test_go_qualified_call_resolves_to_correct_subpackage() -> None:
-    """Round-13 master report §1: a qualified call through an imported
+    """A qualified call through an imported
     first-party Go subpackage selector (``slug.Generate(...)``) used
     to be dropped entirely -- ``_repo_stem`` compared the import
     source against the *file's own* stem (``"generator"``), which
@@ -4520,7 +4506,7 @@ def test_go_same_package_split_across_files_unaffected_by_stem_fix() -> None:
 
 
 def test_go_method_call_to_same_named_imported_function_not_dropped() -> None:
-    """Round-14 report awesome-go.md §1.1: a method whose bare name
+    """A method whose bare name
     equals the free function it calls in another package
     (``IDGenerator.Generate`` calling ``slug.Generate(...)``) used to
     resolve to itself via the same-file step -- the sole ``Generate``
@@ -4589,8 +4575,7 @@ def test_go_method_call_to_same_named_imported_function_not_dropped() -> None:
 def test_python_method_call_to_same_named_imported_function_not_dropped() -> (
     None
 ):
-    """Not Go-specific, per the round-14 design doc's root-cause
-    finding: the identical bare-name collision shape in Python --
+    """Not Go-specific: the identical bare-name collision shape in Python --
     ``Processor.process`` calling an imported, unrelated module's
     ``process`` function -- must resolve to the import, not silently
     vanish via the same-file self-collision the fix above targets."""
@@ -4699,7 +4684,7 @@ def test_same_file_two_candidates_including_caller_unaffected() -> None:
     be miscoded if a future edit tries to "simplify" the fix into a
     list-filter instead of the single-candidate identity check.
 
-    Deliberately not named ``build`` (a round-23 noise-guard denylist
+    Deliberately not named ``build`` (a noise-guard denylist
     name, see ``_BUILDER_METHOD_NAMES``) — a receiver-qualified call
     to a denylisted name is suppressed to the ``_NOISE`` sentinel
     before ``_pick_candidate`` ever reaches the ambiguous fallback this
@@ -4743,8 +4728,7 @@ def test_same_file_two_candidates_including_caller_unaffected() -> None:
     assert graph.ambiguous == [(caller.id, "render", [caller.id, other.id])]
 
 
-# Round 30 (.features/fixes/round30/
-# 03-resolve-pool-memory-overhead.md): the resolve pool is memory-bound,
+# The resolve pool is memory-bound,
 # not CPU-bound -- each worker holds a private, unpickled copy of the
 # repo indices under ``spawn``. Measured on spring-boot (285,609 calls),
 # 11 workers were a *net loss* against sequential (6.82s vs 4.91s), and
@@ -4809,7 +4793,7 @@ def test_pool_workers_choice_does_not_change_resolution_output(
         assert _graph_shape(resolve(files, workers=8)) == baseline
 
 
-# Round 31 cline.md §4.1 Bug B: `_PATH_SPLIT` splits import sources on
+# `_PATH_SPLIT` splits import sources on
 # ".", so a dotted file stem could never appear among the segments and
 # a relative import of `./catalog.generated-access` lost its hint.
 
@@ -4856,7 +4840,7 @@ def test_dotted_filename_import_disambiguates_colliding_call(
     ]
 
 
-# Round 31 zed.md (P2.1): the round-24 fixture-decoy tiebreak only ran
+# The fixture-decoy tiebreak only ran
 # when the file named the crate. 184 of zed's `impl Render for` clauses
 # reach Render through a glob (`use ui::prelude::*;`) and had the same
 # two candidates, real gpui vs. the test_fixture stand-in.
@@ -4927,7 +4911,7 @@ def test_hintless_tiebreak_two_real_crates_stay_ambiguous(
     assert graph.heritage_synthetic_tiebreak_count == 0
 
 
-# Round 31 zed coverage pass F1: `use crate::{Trait}` where the crate
+# `use crate::{Trait}` where the crate
 # root only re-exports the name (`pub use thread::*;`). The stem test
 # saw just `AgentTool`, no file's stem, and filed the clause external:
 # `query subtypes AgentTool` showed 11 of 35 implementors, silently.
@@ -4992,7 +4976,7 @@ def test_hintless_tiebreak_stays_ambiguous_next_to_the_fixture(
     ]
 
 
-# Round 31 zed coverage pass F6: a Rust `Type::name(..)` path names the
+# A Rust `Type::name(..)` path names the
 # owning type outright, but the ladder only ever used that as positive
 # evidence. With no `Point.default` symbol (Default is derived), the
 # call fell through and took the file's only other `default`.
@@ -5096,7 +5080,7 @@ def test_rust_type_path_reaches_a_trait_default_method(tmp_path: Path) -> None:
     ]
 
 
-# Round 31 F6b: the same path shape, rooted at a type the repo doesn't
+# The same path shape, rooted at a type the repo doesn't
 # define at all (std, third-party, macro-generated). The owner rule
 # above can't veto it, since there is no in-repo owner to name.
 
@@ -5331,7 +5315,7 @@ def test_rust_generic_param_path_is_left_to_the_ladder(tmp_path: Path) -> None:
     assert [e.callee for e in graph.external] != ["T::default"]
 
 
-# Round 32 (zed): calls recovered from `assert_eq!(..)` bodies used to
+# Calls recovered from `assert_eq!(..)` bodies used to
 # reach the resolver as `Type.name` (a dot, no arg count), so none of
 # the Rust shape rules above ever applied to them.
 
@@ -5344,7 +5328,7 @@ _POINT = (
 def test_rust_macro_path_call_never_takes_the_files_only_new(
     tmp_path: Path,
 ) -> None:
-    # The reported repro, in miniature: a 2-arg `Point::new` credited
+    # The zed repro, in miniature: a 2-arg `Point::new` credited
     # to the file's lone, zero-arg `SelectionsCollection::new`.
     graph = _rust_graph(
         tmp_path,
@@ -5368,7 +5352,7 @@ def test_rust_macro_path_call_never_takes_the_files_only_new(
 def test_rust_macro_path_call_to_an_unknown_type_is_external(
     tmp_path: Path,
 ) -> None:
-    # F6b now reaches macro bodies too.
+    # The unknown-type rule now reaches macro bodies too.
     graph = _rust_graph(
         tmp_path,
         {
@@ -5387,7 +5371,7 @@ def test_rust_macro_module_path_call_reaches_the_free_function(
     tmp_path: Path,
 ) -> None:
     # Rendered `movement.down`, this read as a dot-call, and a
-    # dot-call can never reach a free function: the F11 veto was
+    # dot-call can never reach a free function: the free-function veto was
     # killing the CORRECT edge.
     graph = _rust_graph(
         tmp_path,
@@ -5496,7 +5480,7 @@ def test_rust_crate_import_prefers_own_crates_same_named_type(
     ]
 
 
-# Round 31 zed coverage pass F12: `use localmod::X` (a sibling `mod
+# `use localmod::X` (a sibling `mod
 # localmod;`) was always looked up against `ctx.crate_roots` first,
 # resolving to a same-named *workspace crate* instead of the local
 # module the file itself declares — real shape on zed:
@@ -5568,7 +5552,7 @@ def test_rust_bare_import_still_resolves_crate_with_no_local_shadow(
     ]
 
 
-# Round 31 zed coverage pass F8: an `impl X for Y` clause's `X` can
+# An `impl X for Y` clause's `X` can
 # only ever name a trait -- a same-named struct is never a legal
 # candidate, but heritage candidates were only filtered to TYPE_KINDS
 # (every type kind), so a same-named struct dragged a resolvable
@@ -5634,8 +5618,8 @@ def test_impl_heritage_narrowing_falls_back_when_no_trait_matches(
     tmp_path: Path,
 ) -> None:
     # No trait candidate at all -- keep the full, unnarrowed list
-    # rather than manufacturing an empty one (rule 0.3: "no evidence
-    # is not negative evidence").
+    # rather than manufacturing an empty one (no evidence is not
+    # negative evidence).
     graph = _rust_graph(
         tmp_path,
         {
@@ -5652,7 +5636,7 @@ def test_impl_heritage_narrowing_falls_back_when_no_trait_matches(
     ]
 
 
-# Round 31 zed coverage pass F7: the declared-type tokenizer tried
+# The declared-type tokenizer tried
 # every remaining identifier in a typed parameter's type string,
 # including a generic *argument*, rather than stopping at the
 # receiver's own outermost type.
@@ -5788,7 +5772,7 @@ def test_typed_param_match_option_result_still_resolve_own_method(
     # value -- dekko can't see that), but each still has real methods
     # of its own tried first: an in-repo type coincidentally named
     # "Option" must never itself be reachable, since no such type is
-    # ever really locally defined (round 31 A4's in-repo-type gate on
+    # ever really locally defined (the in-repo-type gate on
     # a parameterized token). Only the descent to the real inner type
     # is being tested here.
     graph = _rust_graph(
@@ -5840,10 +5824,10 @@ def test_typed_param_match_bare_foreign_type_no_type_kinds_gate(
     ]
 
 
-# Round 31 zed coverage pass F11/F9: a Rust dot-call resolving onto an
+# A Rust dot-call resolving onto an
 # unrelated same-named symbol -- a free function a method-call syntax
-# can never reach (F11), or a std iterator/Option/Result adaptor name
-# the denylist was missing (F9).
+# can never reach, or a std iterator/Option/Result adaptor name the
+# denylist was missing.
 
 
 def test_rust_dot_call_never_targets_free_function(tmp_path: Path) -> None:
@@ -5919,7 +5903,7 @@ def test_rust_flatten_denylisted_without_structural_evidence(
     assert "crates/text/src/text.rs::Edit.flatten" not in resolved
 
 
-# Round 31 integration review of the F7 receiver-type rule.
+# More checks on the declared-type receiver rule.
 
 
 def test_object_type_field_tokens_picks_the_receivers_field() -> None:
@@ -6001,7 +5985,7 @@ def test_rust_dot_call_vetoes_a_free_function_without_narrowing() -> None:
     assert graph.edges == []
 
 
-# --- round 32 Track 5: a reference needs a way to see its target ------
+# --- a reference needs a way to see its target ------------------------
 #
 # The ladder refs share with calls ends in name-only rungs. Fine for
 # `count(x)`; not for `const count = ...; if (count >= 3)`, which is
@@ -6272,7 +6256,7 @@ def test_ref_veto_runs_inside_the_pooled_path_too(
     assert sequential[1] == {target.id: [user.id]}
 
 
-# --- round 32 Track 5b: bound references, fixtures, scripts vs modules -
+# --- bound references, fixtures, scripts vs modules -------------------
 #
 # The veto above proves what it can from the import table. It can't see
 # a local shadowing a same-file or imported symbol, or any local in a
@@ -6464,7 +6448,7 @@ def test_pooled_ref_resolution_agrees_on_bound_and_export_rules(
     assert len(sequential[0]) == 1 + 4
 
 
-# --- round 32 Track 4: `Name(x)` constructs a tuple struct -------------
+# --- `Name(x)` constructs a tuple struct -------------------------------
 #
 # Every type used to carry `params=[]`, which the arity check reads as
 # "takes zero arguments", so a counted `GroupName(s)` reaching the
@@ -6474,7 +6458,7 @@ def test_pooled_ref_resolution_agrees_on_bound_and_export_rules(
 # of its 552 new edges went to a struct whose name is also an enum
 # variant somewhere. Fixed at the cause instead, with a collision veto.
 
-_T4_TEST_MOD = (
+_TUPLE_CTOR_TEST_MOD = (
     "use super::*;\n"
     "fn check() {\n"
     "    let g = GroupName(name());\n"
@@ -6486,12 +6470,12 @@ _T4_TEST_MOD = (
 )
 
 
-def _t4_edges(tmp_path: Path, types: str) -> set[str]:
+def _tuple_ctor_edges(tmp_path: Path, types: str) -> set[str]:
     graph = _rust_graph(
         tmp_path,
         {
             "crates/a/src/types.rs": types,
-            "crates/b/src/tests.rs": _T4_TEST_MOD,
+            "crates/b/src/tests.rs": _TUPLE_CTOR_TEST_MOD,
         },
     )
     return {
@@ -6504,7 +6488,7 @@ def _t4_edges(tmp_path: Path, types: str) -> set[str]:
 def test_rust_tuple_struct_construction_resolves_by_arity(
     tmp_path: Path,
 ) -> None:
-    got = _t4_edges(
+    got = _tuple_ctor_edges(
         tmp_path,
         "pub struct GroupName(pub String);\n"
         "pub struct Left(u8);\n"
@@ -6528,7 +6512,7 @@ def test_rust_struct_sharing_a_name_with_a_tuple_variant_is_not_taken(
     # gpui's unrelated `struct Percentage(f32)`. dekko indexes enums,
     # not variants, so the struct was the *only* candidate and the
     # rung took it with full confidence.
-    got = _t4_edges(
+    got = _tuple_ctor_edges(
         tmp_path,
         "pub struct Left(u8);\n"
         "pub struct GroupName(pub String);\n"
@@ -6540,7 +6524,7 @@ def test_rust_struct_sharing_a_name_with_a_tuple_variant_is_not_taken(
 
 def test_rust_unit_and_struct_variants_do_not_veto(tmp_path: Path) -> None:
     # Neither `Mid` nor `Right { .. }` can be written `Left(3)`.
-    got = _t4_edges(
+    got = _tuple_ctor_edges(
         tmp_path,
         "pub struct Left(u8);\npub enum Side { Left, Other { Left: u8 } }\n",
     )
@@ -6550,8 +6534,9 @@ def test_rust_unit_and_struct_variants_do_not_veto(tmp_path: Path) -> None:
 def test_rust_dot_call_never_constructs_a_type(tmp_path: Path) -> None:
     # Windows COM: `handler.Update()` against a sole `struct Update`.
     # Zero written arguments fit a unit struct's zero params, so only
-    # the joiner says this can't be a construction (F11's sibling).
-    got = _t4_edges(tmp_path, "pub struct Update();\n")
+    # the joiner says this can't be a construction (a sibling of the
+    # free-function veto).
+    got = _tuple_ctor_edges(tmp_path, "pub struct Update();\n")
     assert "Update" not in got
 
 

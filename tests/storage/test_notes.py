@@ -137,7 +137,7 @@ OVERLOADED_METHODS = {
 def test_note_add_anchors_distinct_overloads(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    """Round 15 (spring-boot): a same-file, same-qualname overload set
+    """A same-file, same-qualname overload set
     resolved via a ``:LINE`` qualifier must land each note under its
     own key, not collide on a shared ``path::qualname`` id — and the
     printed confirmation must show which overload was picked, not

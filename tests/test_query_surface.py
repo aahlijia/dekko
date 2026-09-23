@@ -1,4 +1,4 @@
-"""A2 query surface: --sites, uses, --no-tests, ranking, footers."""
+"""Query surface: --sites, uses, --no-tests, ranking, footers."""
 
 import json
 import re
@@ -35,10 +35,9 @@ SRC = {
 COLLISION_SRC = {
     # ``run`` defined in two in-repo files (same-name collision) plus a
     # receiver-qualified external call (``subprocess.run``) in a third.
-    # Regression fixture for the resolver retest (design doc item #5 /
-    # analysis doc Failure 1, P0): the collision must never push the
-    # external call into the ambiguous bucket or hide it from
-    # ``query uses``/``find_usages``.
+    # Regression fixture for the resolver retest: the collision must
+    # never push the external call into the ambiguous bucket or hide it
+    # from ``query uses``/``find_usages``.
     "src/a.py": "def run():\n    return 1\n",
     "src/b.py": "def run():\n    return 2\n",
     "src/main.py": (

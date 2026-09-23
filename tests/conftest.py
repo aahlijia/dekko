@@ -26,7 +26,7 @@ from dekko.integrations import cli
 def _reset_pool_mp_context_cache() -> Iterator[None]:
     """Clear ``resolver``'s process-wide pool-context verdict per test.
 
-    Round 30 (c): the fork/spawn decision is cached at first pool
+    The fork/spawn decision is cached at first pool
     build for the life of the process (see ``_pool_mp_context``).
     Correct for real dekko processes, but the pytest process runs
     thousands of tests in one process, some of which hold helper
