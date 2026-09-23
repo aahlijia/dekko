@@ -465,6 +465,64 @@ def test_get_subtypes_excludes_test_files_by_default(
     assert "FakeAnimal" in included
 
 
+def test_get_subtypes_note_counts_the_hidden_test_subtypes(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = dict(
+        PY_HERITAGE,
+        **{
+            "tests/test_dog.py": (
+                "from base import Animal\n\n\n"
+                "class FakeAnimal(Animal):\n    pass\n\n\n"
+                "class StubAnimal(Animal):\n    pass\n"
+            )
+        },
+    )
+    ctx = _ctx(make_mapped_repo(files))
+
+    default = _text(ctx, "get_subtypes", {"symbol": "Animal"})
+    assert "note: 2 test-file subtypes excluded by default" in default
+
+    for explicit in (True, False):
+        text = _text(
+            ctx,
+            "get_subtypes",
+            {"symbol": "Animal", "include_tests": explicit},
+        )
+        assert "excluded by default" not in text
+
+
+def test_get_subtypes_no_note_when_no_test_subtypes_exist(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(make_mapped_repo(PY_HERITAGE))
+    assert "excluded by default" not in _text(
+        ctx, "get_subtypes", {"symbol": "Animal"}
+    )
+
+
+def test_get_subtypes_note_follows_the_transitive_walk(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """A test subtype two hops down is hidden only from a transitive
+    walk, so only that walk's note counts it."""
+    files = dict(
+        PY_HERITAGE,
+        **{
+            "tests/test_dog.py": (
+                "from dog import Dog\n\n\nclass FakeDog(Dog):\n    pass\n"
+            )
+        },
+    )
+    ctx = _ctx(make_mapped_repo(files))
+    assert "excluded by default" not in _text(
+        ctx, "get_subtypes", {"symbol": "Animal"}
+    )
+    assert "note: 1 test-file subtype excluded" in _text(
+        ctx, "get_subtypes", {"symbol": "Animal", "transitive": True}
+    )
+
+
 def test_get_supertypes_tool_rust_impl(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -861,6 +919,28 @@ def test_map_status_and_refresh(make_mapped_repo: RepoFactory) -> None:
     assert refreshed["isError"] is False
     assert "mapped" in refreshed["content"][0]["text"]
     assert "fresh" in _call(ctx, "map_status", {})["content"][0]["text"]
+
+
+def test_map_status_fresh_again_after_an_edit_is_reverted(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Editing a file makes the map stale; restoring its exact content
+    makes it fresh again, even though the file's mtime has moved. A
+    long-lived server must decide on content, not on the timestamp.
+    """
+    root = make_mapped_repo(SRC)
+    ctx = _ctx(root)
+    target = root / "a.py"
+    original = target.read_text()
+
+    target.write_text(original + "# probe\n")
+    edited = _text(ctx, "map_status", {})
+    assert "stale" in edited and "a.py" in edited
+
+    target.write_text(original)
+    reverted = _text(ctx, "map_status", {})
+    assert "fresh" in reverted
+    assert "stale" not in reverted
 
 
 def _as_long_lived(
@@ -1654,34 +1734,97 @@ def test_get_callees_and_query_symbol_include_tests_by_default(
     assert "f() -> int" in callees_text
 
 
-def test_get_callers_discloses_silent_test_exclusion(
+CALLERS_WITH_TESTS = {
+    "a.py": "def f() -> int:\n    return 1\n",
+    "b.py": (
+        "from a import f\n\n\n"
+        "def g1() -> int:\n    return f()\n\n\n"
+        "def g2() -> int:\n    return f()\n\n\n"
+        "def g3() -> int:\n    return f()\n"
+    ),
+    "tests/test_a.py": (
+        "from a import f\n\n\n"
+        "def test_f() -> None:\n    assert f() == 1\n\n\n"
+        "def test_f_again() -> None:\n    assert f() == 1\n"
+    ),
+}
+
+
+def _text(ctx: server.Context, name: str, arguments: dict) -> str:
+    return _call(ctx, name, arguments)["content"][0]["text"]
+
+
+def test_get_callers_note_counts_the_hidden_test_callers(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    """A caller who never mentions ``include_tests`` gets
-    a ``note:`` disclosing that test-file callers were dropped by this
-    tool's own default (which diverges from the CLI's). A caller who
-    explicitly asks for either value gets no such note — they already
-    know what they asked for."""
+    """A caller who never mentions ``include_tests`` is told how many
+    test-file callers this tool's default dropped, so it can tell
+    "nothing hidden" from "go look". A caller who explicitly asks for
+    either value gets no note: they already know what they asked for.
+    """
+    ctx = _ctx(make_mapped_repo(CALLERS_WITH_TESTS))
+
+    default = _text(ctx, "get_callers", {"symbol": "f"})
+    assert all(g in default for g in ("g1()", "g2()", "g3()"))
+    assert "test_f" not in default
+    assert (
+        "note: 2 test-file callers excluded by default for this tool"
+        in default
+    )
+
+    opt_in = _text(ctx, "get_callers", {"symbol": "f", "include_tests": True})
+    assert "test_f()" in opt_in and "test_f_again()" in opt_in
+    assert "excluded by default" not in opt_in
+
+    opt_out = _text(
+        ctx, "get_callers", {"symbol": "f", "include_tests": False}
+    )
+    assert "test_f" not in opt_out
+    assert "excluded by default" not in opt_out
+
+
+def test_get_callers_note_uses_the_singular_for_one(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    files = dict(CALLERS_WITH_TESTS)
+    files["tests/test_a.py"] = (
+        "from a import f\n\n\ndef test_f() -> None:\n    assert f() == 1\n"
+    )
+    ctx = _ctx(make_mapped_repo(files))
+    assert "note: 1 test-file caller excluded" in _text(
+        ctx, "get_callers", {"symbol": "f"}
+    )
+
+
+def test_get_callers_note_counts_module_level_call_sites(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """A test file calling the target from its top level is one caller
+    that renders as one row per call site, so the note gives both."""
+    files = {
+        "a.py": "def f() -> int:\n    return 1\n",
+        "b.py": "from a import f\n\n\ndef g() -> int:\n    return f()\n",
+        "tests/test_a.py": "from a import f\n\nf()\nf()\nf()\n",
+    }
+    ctx = _ctx(make_mapped_repo(files))
+    assert (
+        "note: 1 test-file caller (3 call sites) excluded by default"
+        in _text(ctx, "get_callers", {"symbol": "f"})
+    )
+
+
+def test_get_callers_no_note_when_no_test_callers_exist(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """Nothing hidden means nothing to disclose."""
     files = {
         "a.py": "def f() -> int:\n    return 1\n",
         "b.py": "from a import f\n\n\ndef g() -> int:\n    return f()\n",
     }
     ctx = _ctx(make_mapped_repo(files))
-
-    silent_default = _call(ctx, "get_callers", {"symbol": "f"})["content"][0][
-        "text"
-    ]
-    assert "excluded by default for this tool" in silent_default
-
-    explicit_opt_out = _call(
-        ctx, "get_callers", {"symbol": "f", "include_tests": False}
-    )["content"][0]["text"]
-    assert "excluded by default for this tool" not in explicit_opt_out
-
-    explicit_opt_in = _call(
-        ctx, "get_callers", {"symbol": "f", "include_tests": True}
-    )["content"][0]["text"]
-    assert "excluded by default for this tool" not in explicit_opt_in
+    assert "excluded by default" not in _text(
+        ctx, "get_callers", {"symbol": "f"}
+    )
 
 
 def test_get_callees_never_discloses_test_exclusion(

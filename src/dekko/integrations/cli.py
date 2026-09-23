@@ -307,8 +307,16 @@ def _add_map_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_read_options(parser: argparse.ArgumentParser) -> None:
-    """Attach the options shared by map-reading subcommands."""
+def _add_read_options(
+    parser: argparse.ArgumentParser, no_tests_note: str = ""
+) -> None:
+    """Attach the options shared by map-reading subcommands.
+
+    Args:
+        parser: The subcommand parser.
+        no_tests_note: Appended to ``--no-tests``' help, for a
+            subcommand whose default differs from its MCP counterpart.
+    """
     parser.add_argument(
         "--root",
         default=".",
@@ -329,7 +337,8 @@ def _add_read_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-tests",
         action="store_true",
-        help="exclude test files' symbols and edges from results",
+        help="exclude test files' symbols and edges from results"
+        + no_tests_note,
     )
 
 
@@ -529,7 +538,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "repo where a small amount of incidental/vendored code in "
         "another language would otherwise pollute the match list",
     )
-    _add_read_options(p_query)
+    _add_read_options(
+        p_query,
+        no_tests_note=" (this CLI includes tests by default; the MCP "
+        "get_callers and get_subtypes tools exclude them by default)",
+    )
     p_query.set_defaults(func=run_query)
 
     p_outline = sub.add_parser(

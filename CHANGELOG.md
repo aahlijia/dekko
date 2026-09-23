@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.0.4] — 2026-09-23
+
+### Fixed
+- **MCP `get_callers`/`get_subtypes` say how many test rows they
+  hid.** Both tools leave out test files by default (the CLI's
+  `query callers` includes them), and the reply always ended in the
+  same "test-file callers excluded" note, whether that hid fifty
+  callers or none. An agent couldn't tell "nothing to see" from "go
+  look". The note now gives the count, plus the call sites when they
+  differ (`note: 1 test-file caller (21 call sites) excluded ...`,
+  a test file calling the target from its top level), and is left out
+  when nothing was hidden. `get_subtypes`' count follows
+  `transitive`/`relation`. Neither default changed.
+
+### Documentation
+- `query --no-tests` help, `docs/cli.md` and `docs/claude-code.md` now
+  name the other interface's test default, so the CLI/MCP difference
+  is findable from either side.
+
 ## [1.0.3] — 2026-09-23
 
 ### Fixed

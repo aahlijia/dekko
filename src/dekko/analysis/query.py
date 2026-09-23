@@ -2959,6 +2959,89 @@ def _sole_type_candidate(
     return only
 
 
+def _hidden_call_rows(
+    full: MapIndex, filtered: MapIndex, action: str, sym: Symbol
+) -> tuple[int, int]:
+    """``(entities, call sites)`` a test filter removed from callers."""
+    full_syms, full_mods = _related(full, sym, action)
+    _, kept_mods = _related(filtered, sym, action)
+    sites = 0
+    entities = 0
+    for other in full_syms:
+        if other.id in filtered.symbols_by_id:
+            continue
+        entities += 1
+        key = _edge_key(action, sym, other.id)
+        sites += len(full.edge_lines.get(key) or [None])
+    for path in full_mods:
+        if path in kept_mods:
+            continue
+        entities += 1
+        sites += len(_module_site_lines(full, action, sym, path) or [None])
+
+    return entities, sites
+
+
+def _hidden_heritage_rows(
+    full: MapIndex,
+    filtered: MapIndex,
+    action: str,
+    sym: Symbol,
+    transitive: bool,
+    relation: str | None,
+) -> int:
+    """Heritage hits a test filter removed, under the query's own walk."""
+    direction = _heritage_direction(action)
+    walk = walk_heritage if transitive else _one_hop_heritage
+    return len(walk(full, sym.id, direction, relation)) - len(
+        walk(filtered, sym.id, direction, relation)
+    )
+
+
+def hidden_test_rows(
+    full: MapIndex,
+    filtered: MapIndex,
+    action: str,
+    target: str,
+    *,
+    transitive: bool = False,
+    relation: str | None = None,
+) -> tuple[int, int]:
+    """How much a test filter removed from a relation query's result.
+
+    Resolves ``target`` against ``filtered``, the index the query
+    itself ran on, so an ambiguous name is never counted under a
+    different resolution than the one the caller was shown.
+
+    Args:
+        full: The unfiltered index.
+        filtered: ``full.without_tests()``.
+        action: ``callers``, ``callees``, ``supertypes`` or
+            ``subtypes``.
+        target: The target string exactly as the query received it.
+        transitive: Heritage only: count the full walk, not one hop.
+        relation: Heritage only: the relation filter, or ``None``.
+
+    Returns:
+        ``(entities, sites)``: distinct callers/callees/types removed,
+        and the call sites they account for (one per entity with no
+        recorded site, and always equal to ``entities`` for heritage).
+        A module-level test caller is one entity but often many
+        sites. ``(0, 0)`` when ``target`` doesn't resolve to one
+        symbol.
+    """
+    sym, _ = resolve_target(filtered, target)
+    if sym is None:
+        return 0, 0
+    if action in ("callers", "callees"):
+        return _hidden_call_rows(full, filtered, action, sym)
+
+    hidden = _hidden_heritage_rows(
+        full, filtered, action, sym, transitive, relation
+    )
+    return hidden, hidden
+
+
 def _run_heritage_wrong_kind(sym: Symbol) -> int:
     """Report a resolved target that isn't a type-kind symbol."""
     print(

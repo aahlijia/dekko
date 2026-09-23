@@ -398,13 +398,15 @@ def _relation_tool(
         Rendered text result, or a placeholder when there are none. When
         ``include_tests`` was silently defaulted to false (the caller
         omitted the argument and ``default_include_tests`` is false for
-        this tool), a trailing ``note:`` line discloses the exclusion —
-        an explicit ``include_tests=false`` from the caller needs no
-        such note, since that filtering was requested, not implicit.
+        this tool) and that actually hid rows, a trailing ``note:``
+        line says how many — an explicit ``include_tests=false`` from
+        the caller needs no such note, since that filtering was
+        requested, not implicit.
     """
     explicit_include_tests = "include_tests" in args
     include_tests = bool(args.get("include_tests", default_include_tests))
-    index = _index_for(ctx, args, include_tests=include_tests)
+    full = _index_for(ctx, args)
+    index = full if include_tests else full.without_tests()
     target = _require(args, "symbol")
     limit = _limit_arg(args)
     sites = bool(args.get("sites", False))
@@ -424,12 +426,38 @@ def _relation_tool(
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
     result = _with_notes(out, err, fallback=f"(no {action} for {target})")
-    if not include_tests and not explicit_include_tests:
-        result += (
-            f"\n\nnote: test-file {action} excluded by default for "
-            "this tool; pass include_tests=true to see them."
-        )
-    return result
+    if include_tests or explicit_include_tests:
+        return result
+
+    hidden, sites = query.hidden_test_rows(full, index, action, target)
+    return result + _hidden_tests_note(action, hidden, sites)
+
+
+def _hidden_tests_note(action: str, hidden: int, sites: int) -> str:
+    """Trailing note for what a tool's default test filter removed.
+
+    Empty when nothing was hidden, so "no note" means "no test rows",
+    and a count tells the caller whether re-querying is worth it.
+
+    Args:
+        action: The plural relation name (``callers``, ``subtypes``).
+        hidden: Distinct callers/types the default filter removed.
+        sites: The call sites those account for; shown when it
+            differs from ``hidden`` (a module-level test caller is one
+            caller but one output row per call site).
+
+    Returns:
+        The note, with its leading blank line, or ``""``.
+    """
+    if hidden <= 0:
+        return ""
+
+    noun = action if hidden != 1 else action.removesuffix("s")
+    detail = f" ({sites} call sites)" if sites != hidden else ""
+    return (
+        f"\n\nnote: {hidden} test-file {noun}{detail} excluded by "
+        "default for this tool; pass include_tests=true to see them."
+    )
 
 
 def tool_query_symbol(ctx: Context, args: dict) -> str:
@@ -511,12 +539,14 @@ def _heritage_tool(
     Returns:
         Rendered text result, or a placeholder when there are none.
         Same silent-default disclosure rule as ``_relation_tool``: when
-        ``include_tests`` was defaulted to false for this tool and the
-        caller didn't say so, a trailing ``note:`` line discloses it.
+        ``include_tests`` was defaulted to false for this tool, the
+        caller didn't say so, and rows were hidden, a trailing
+        ``note:`` line says how many.
     """
     explicit_include_tests = "include_tests" in args
     include_tests = bool(args.get("include_tests", default_include_tests))
-    index = _index_for(ctx, args, include_tests=include_tests)
+    full = _index_for(ctx, args)
+    index = full if include_tests else full.without_tests()
     target = _require(args, "symbol")
     transitive = bool(args.get("transitive", False))
     relation = args.get("relation")
@@ -537,12 +567,18 @@ def _heritage_tool(
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
     result = _with_notes(out, err, fallback=f"(no {action} for {target})")
-    if not include_tests and not explicit_include_tests:
-        result += (
-            f"\n\nnote: test-file {action} excluded by default for "
-            "this tool; pass include_tests=true to see them."
-        )
-    return result
+    if include_tests or explicit_include_tests:
+        return result
+
+    hidden, sites = query.hidden_test_rows(
+        full,
+        index,
+        action,
+        target,
+        transitive=transitive,
+        relation=relation,
+    )
+    return result + _hidden_tests_note(action, hidden, sites)
 
 
 def tool_get_supertypes(ctx: Context, args: dict) -> str:

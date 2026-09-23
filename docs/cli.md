@@ -7,6 +7,7 @@ dekko summary                        # repo digest: dirs, hotspots, entry points
 dekko outline src/server.py          # a file's signatures + docs, no bodies
 dekko query symbol run_map           # signature card: doc, location, fan-in/out
 dekko query callers resolve --sites  # who calls resolve, with call sites
+dekko query callers resolve --no-tests  # production callers only (the MCP get_callers default; the CLI includes tests)
 dekko query callees main             # what does main call?
 dekko query uses Path                # who references the external name Path?
 dekko query type Config              # what takes/returns Config? (--exact for literal match)
