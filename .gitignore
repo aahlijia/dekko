@@ -20,7 +20,7 @@ dist/
 .serena/
 .eval/
 .features/
-test-repos/
+.testing/
 .marketplaces/
 
 # Demo recording tooling (kept locally to re-record when the CLI changes)

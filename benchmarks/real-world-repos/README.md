@@ -2,7 +2,7 @@
 
 A hands-on benchmark: dekko's MCP tools vs. a plain `Read`/`Grep`
 workflow ("the old way"), run against **7 real, unmodified open-source
-repositories** under `test-repos/` — no synthetic fixtures. Each repo
+repositories** under `.testing/` — no synthetic fixtures. Each repo
 got an independent pass over a handful of realistic tasks (repo
 orientation, outlining a large file, tracing a symbol's callers/callees,
 searching for an external API's usage sites, bundling a change's
@@ -72,7 +72,7 @@ repo. The shape from the original study holds: outline ratios scale with
 file size, call-graph ratios scale with how noisy the same-named grep
 is, and the floor is a small, grep-friendly local symbol (about 2.5x).
 Full per-task detail, timings, and the six Low findings of round 34 are
-in `test-repos/reports/v0/33-*/` and `test-repos/reports/v1/round1.1/`
+in `.testing/reports/v0/33-*/` and `.testing/reports/v1/round1.1/`
 (local, not tracked in git).
 
 This is distinct from `benchmarks/measure.py` (the synthetic
