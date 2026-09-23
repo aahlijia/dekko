@@ -55,7 +55,7 @@ of measurement:
 | Outline a large file | tensorflow (`direct_session.cc`, 2,186 lines) | 1,711 | ~21,112 | ~12.3x |
 | Outline a large file | tensorflow (`eager/backprop.py`, 1,345 lines) | 946 | ~12,574 | ~13.3x |
 | Outline a large file | zed (`gpui/src/window.rs`, 425 symbols) | ~4,756 | ~69,753 | ~14.7x |
-| Outline a directory | zed (`crates/git_ui/src`, 32 files) | ~5,219 | ~418,520 | ~80x |
+| Outline a directory | zed (`crates/git_ui/src`, 32 files, full outline) | ~35,778 | ~418,520 | ~11.7x (the earlier ~80x was the default 200-of-1,574-row view) |
 | Callers of a symbol (`--sites`) | awesome-go (`Generate`, same-named method nearby) | 79 | 5,227 | ~66x, and correct where grep conflates |
 | Callers of a symbol (`--sites`) | claude-buddy (`generateBones`) | ~298 | ~756 (grep, 39 raw hits) | ~2.5x, plus separating 6 real calls from 23 test assertions |
 | Callers of a symbol (`--sites`) | claude-code (`errors.ts:errorMessage`) | ~602 | ~18,521 (grep, 323+ raw hits) | ~30.8x |

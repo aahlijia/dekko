@@ -71,7 +71,7 @@ callers).
 | Repo orientation (`summary`) | claude-buddy (57 files) | ~349 tok | ~113,514 tok (every source file) | ~325x |
 | Outline a large file | claude-code `REPL.tsx` (5,005 lines) | ~1,154 tok | ~223,963 tok | ~194x |
 | Outline a large file | cline `SdkController.ts` (84 KB) | 1,803 tok | ~21,023 tok | ~11.7x |
-| Outline a directory | zed `crates/git_ui/src` (32 files) | ~5,219 tok | ~418,520 tok | ~80x |
+| Outline a directory | zed `crates/git_ui/src` (32 files) | ~35,778 tok | ~418,520 tok | ~11.7x |
 | Callers of a symbol | claude-code `errorMessage` | ~602 tok | ~18,521 tok (323+ grep hits) | ~31x |
 | Callers of a symbol | zed `MultiWorkspace.new` (22 sites, 8 files) | ~809 tok | ~381,446 tok (read the caller files) | ~471x |
 | External-API usage | claude-code `chalk` | ~798 tok | ~8,099 tok | ~10x |

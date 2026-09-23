@@ -121,6 +121,89 @@ def test_size_line_true_zero_stays_zero() -> None:
     assert "(0%)" in line
 
 
+BIG = {
+    "big.py": "".join(
+        f"def func_{i}(alpha: int, beta: str) -> None:\n    pass\n\n\n"
+        for i in range(60)
+    )
+}
+
+
+def _savings_line(out: str) -> str:
+    return next(ln for ln in out.splitlines() if ln.startswith("full ≈"))
+
+
+def test_size_line_marks_a_budget_cut_outline_partial(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """A budget-trimmed outline's savings line says it is partial and
+    gives the complete outline's cost, so the ratio a reader quotes
+    can't silently come from a truncated view."""
+    root = make_mapped_repo(BIG)
+    cli.main(["outline", "big.py", "--root", str(root)])
+    whole = _savings_line(capsys.readouterr().out)
+    complete_tokens = whole.split("outline ≈ ")[1].split(" tok")[0]
+
+    cli.main(["outline", "big.py", "--root", str(root), "--budget", "200"])
+    line = _savings_line(capsys.readouterr().out)
+
+    assert "partial: " in line
+    assert " of 60 symbols" in line
+    assert f"complete outline ≈ {complete_tokens} tok" in line
+
+
+def test_size_line_unmarked_when_nothing_omitted(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(BIG)
+    cli.main(["outline", "big.py", "--root", str(root)])
+    line = _savings_line(capsys.readouterr().out)
+    assert "partial" not in line
+    assert "complete outline" not in line
+
+
+def test_directory_size_line_marks_partial_in_rows(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """The directory rollup's aggregate savings line gets the same
+    disclosure, counted in rows (file headers and symbols)."""
+    root = make_mapped_repo({**PY, **BIG})
+    cli.main(["outline", ".", "--root", str(root), "--budget", "200"])
+    line = _savings_line(capsys.readouterr().out)
+    assert "partial: " in line
+    assert " rows; complete outline ≈ " in line
+
+    cli.main(["outline", ".", "--root", str(root)])
+    assert "partial" not in _savings_line(capsys.readouterr().out)
+
+
+def test_outline_json_says_whether_it_is_complete(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(BIG)
+    cli.main(["outline", "big.py", "--root", str(root), "--json"])
+    whole = json.loads(capsys.readouterr().out)["files"][0]
+    assert whole["complete"] is True
+    assert len(whole["symbols"]) == 60
+
+    cli.main(
+        [
+            "outline",
+            "big.py",
+            "--root",
+            str(root),
+            "--json",
+            "--budget",
+            "200",
+        ]
+    )
+    cut = json.loads(capsys.readouterr().out)["files"][0]
+    assert cut["complete"] is False
+    assert len(cut["symbols"]) < 60
+    assert cut["outline_tokens_complete"] == whole["outline_tokens_complete"]
+    assert cut["outline_tokens_complete"] > 0
+
+
 def test_docless_file_has_no_emdash(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

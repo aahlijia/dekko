@@ -1334,6 +1334,25 @@ def test_outline_tool_limit_budget_precedence(
     assert seen["limit"] == 5
 
 
+def test_outline_tool_default_budget_discloses_partial_view(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The MCP tool's default budget trims a large file, and its reply's
+    savings line has to say so rather than read like the whole outline.
+    """
+    source = "".join(
+        f"def func_{i}(alpha: int, beta: str) -> None:\n    pass\n\n\n"
+        for i in range(400)
+    )
+    ctx = _ctx(make_mapped_repo({"big.py": source}))
+    result = _call(ctx, "outline", {"target": "big.py"})
+    assert result["isError"] is False
+    text = result["content"][0]["text"]
+    line = next(ln for ln in text.splitlines() if ln.startswith("full ≈"))
+    assert "partial: " in line
+    assert " of 400 symbols; complete outline ≈ " in line
+
+
 def test_outline_tool_caps_directory_sparse_notes(
     monkeypatch: pytest.MonkeyPatch, make_mapped_repo: RepoFactory
 ) -> None:

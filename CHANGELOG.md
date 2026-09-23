@@ -9,6 +9,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-09-23
+
+### Fixed
+- **`outline`'s savings line says when the outline was cut.** A
+  budget- or limit-trimmed outline printed the same `full ≈ N tok ·
+  outline ≈ M tok (P%)` line as a complete one, with the truncation
+  only in the footer below it, so the ratio was easy to quote as the
+  whole outline's. The line now ends in `partial: K of N symbols;
+  complete outline ≈ T tok (P%)` when anything was omitted
+  (directory outlines count `rows`). This shows up by default on the
+  MCP `outline` tool, whose 2000-token budget trims large files.
+  `--json` gains `outline_tokens_complete` and `complete` per file.
+- **README savings table:** the zed `crates/git_ui/src` directory
+  outline row said ~80x, measured on the default 200-of-1,574-row
+  view. The complete outline is ~35,778 tokens, ~11.7x.
+
 ## [1.0.2] — 2026-09-23
 
 ### Fixed
