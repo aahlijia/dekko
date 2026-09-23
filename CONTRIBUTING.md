@@ -41,9 +41,6 @@ tests skip on a default install (same as a user install). CI runs across
   cross-cutting/behavioral tests and top-level-module tests stay flat
   under `tests/`. Fixtures (tiny sample-language files) live in
   `tests/fixtures/`.
-  `test-repos/` holds real, unmodified open-source repos used for
-  manual/agent evaluation of dekko itself, not pytest fixtures — see
-  `test-repos/TESTING-GUIDE.md`.
 
 ## Commit messages
 
@@ -89,9 +86,7 @@ trigger — see "Releasing" below for the mechanics of applying a bump:
 - **MINOR — closes out a body of work.** Bumped when either applies:
   1. **A testing round's fix cycle is fully closed** — every track
      designed against that round's eval findings is implemented,
-     verified, and merged to `develop` (see
-     `test-repos/reports/README.md` and `test-repos/TESTING-GUIDE.md`
-     for what "closed" means for a round). Individual fixes within
+     verified, and merged to `develop`. Individual fixes within
      the round land as PATCH bumps under the *current* minor version
      as each track is built; the MINOR bump happens once, at the
      point the round is verified closed, so the *next* round's fixes
@@ -114,16 +109,16 @@ trigger — see "Releasing" below for the mechanics of applying a bump:
 
 ### Testing rounds and the version line
 
-Evaluation rounds are numbered `<MAJOR>.<N>`, and the round counter
-**resets at every MAJOR release**: the first round of the 1.x series
-is round 1.1, the first round after 2.0.0 is round 2.1. (Round 1.1 is
-the former round 34; pre-1.0 rounds 01-33 keep their old numbers.)
+dekko is periodically evaluated against a set of real open-source
+repos; each evaluation is a numbered **round** whose findings become a
+set of fix tracks. Rounds are numbered `<MAJOR>.<N>`, and the round
+counter **resets at every MAJOR release**: the first round of the 1.x
+series is round 1.1, the first round after 2.0.0 is round 2.1.
 
 Round numbers and MINOR versions move together:
 
-- **One fix track = one commit = one PATCH bump.** Each design in a
-  round's fix folder (e.g. `.features/fixes/v1/round1.1/01-*.md`) is
-  implemented, tested, and committed on its own, with its own PATCH
+- **One fix track = one commit = one PATCH bump.** Each fix track
+  from a round is implemented, tested, and committed on its own, with its own PATCH
   bump in that same commit. No batching two tracks into one commit,
   no track split across commits. (A design doc that explicitly
   batches several one-liners into one track, like a "small fixes"
@@ -138,19 +133,10 @@ Round numbers and MINOR versions move together:
   through the normal "Releasing" steps below (develop → main PR, tag).
 - If a capability MINOR (trigger 2 above) ships mid-round, it takes
   the next MINOR number and the round closes on the one after it; say
-  so in the round's README section. Otherwise round `X.N` always
+  so in the round's notes. Otherwise round `X.N` always
   closes as `X.N.0`.
 - A round whose findings need no fixes gets no MINOR bump. The round
-  counter still advances for the next evaluation, and the next round's
-  README section says the version line skipped it.
-
-Where things go (both directories are local and gitignored):
-
-- Eval reports: `test-repos/reports/v<MAJOR>/round<MAJOR>.<N>/`,
-  indexed in `test-repos/reports/README.md`.
-- Fix designs: `.features/fixes/v<MAJOR>/round<MAJOR>.<N>/`, same
-  round number as the reports that motivated them.
-- Everything from before 1.0.0 lives under `v0/` in both places.
+  counter still advances for the next evaluation.
 
 When in doubt between MINOR and PATCH for a given change, default to
 PATCH — it's the more reversible mistake, and the CHANGELOG narrative
