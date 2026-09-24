@@ -77,6 +77,31 @@ NODE_BUILTIN_COLLISION = {
 }
 
 
+# core() is called only from a helper under a test-*support* directory
+# (``testing/``: mocks, matchers, generators), which one real test file
+# exercises. The helper is test code (hidden by --no-tests, never a
+# dead-code candidate) but not a test: no runner discovers tests under
+# that directory name. ``affected`` must reach the test file *through*
+# the helper and never list the helper itself.
+TEST_SUPPORT_DIR = {
+    "src/app.py": "def core() -> int:\n    return 1\n",
+    "testing/helpers.py": (
+        "from src.app import core\n"
+        "\n"
+        "\n"
+        "def run_core() -> int:\n"
+        "    return core()\n"
+    ),
+    "tests/test_via_helper.py": (
+        "from testing.helpers import run_core\n"
+        "\n"
+        "\n"
+        "def test_run_core():\n"
+        "    assert run_core() == 1\n"
+    ),
+}
+
+
 def _change_resolve_path(root: Path) -> None:
     (root / "server/path.ts").write_text(
         "export function resolvePath(): number {\n    return 2;\n}\n"
@@ -165,6 +190,36 @@ def test_node_builtin_module_name_collision_not_falsely_impacted(
     assert "server/c.test.ts" not in out
     assert "server/d.test.ts" not in out
     assert "server/e.test.ts" not in out
+
+
+def test_test_support_file_is_walked_through_but_not_reported(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, TEST_SUPPORT_DIR)
+    (root / "src/app.py").write_text("def core() -> int:\n    return 2\n")
+
+    assert cli.main(["affected", "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "[transitive] tests/test_via_helper.py" in out
+    assert "testing/helpers.py" not in out
+
+    # workset's symbol seed shares the walk (impacts_from_symbol) and
+    # must agree; the helper legitimately appears in the bundle as a
+    # caller, so check the impacted-tests list specifically.
+    argv = [
+        "workset",
+        "--root",
+        str(root),
+        "--symbol",
+        "src/app.py:core",
+        "--json",
+    ]
+    assert cli.main(argv) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert [t["path"] for t in doc["impacted_tests"]] == [
+        "tests/test_via_helper.py"
+    ]
+    assert doc["impacted_tests_total"] == 1
 
 
 def test_affected_rev_cache_hit_skips_reexport(

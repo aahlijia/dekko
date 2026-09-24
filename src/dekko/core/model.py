@@ -99,7 +99,9 @@ class Symbol:
         test: Whether the symbol is classified as test code — either
             because the defining file is (path-based; see
             ``classify.is_test_path``, applied in
-            ``repo_ops.map_repository``)
+            ``repo_ops.map_repository``; this is the broad "test code"
+            level that includes test-support directories, not the
+            narrower "test file" level ``affected`` reports)
             or because the extractor found it nested inside a
             language-specific test-only AST container (currently just
             Rust's inline ``mod tests { ... }``; see

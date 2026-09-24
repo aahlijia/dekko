@@ -12,6 +12,13 @@ kinds of evidence are combined:
    that touch changed code through fixtures, references, or deleted
    symbols, where no static call edge survives.
 
+Only test *files* are reported (``classify.is_test_file``: test
+directories and test filename patterns). Test-support code under a
+``testing/`` directory (mocks, matchers, fixtures, generators) is test
+code for ``--no-tests``/``unused`` purposes but is not something a
+runner executes, so reaching it is not an impacted test; the walk
+still passes through it to any test file beyond.
+
 Static analysis cannot see fixture injection, parametrization, or
 dynamic dispatch, so the report is a set of strong leads — run them,
 don't treat the absence of a test as proof it is unaffected.
@@ -25,7 +32,7 @@ from pathlib import Path
 from dekko import repo_ops
 from dekko.analysis import diff
 from dekko.render import mapfile
-from dekko.classify import is_test_path
+from dekko.classify import is_test_file
 from dekko.core.model import Import, Symbol
 from dekko.textutil import fit_to_budget, signature
 from dekko.core.resolver import _module_matches
@@ -120,7 +127,7 @@ def _call_impacts(
     impacts: dict[str, TestImpact] = {}
     for sym_id, hop in dist.items():
         path = _id_path(sym_id)
-        if not is_test_path(path):
+        if not is_test_file(path):
             continue
         tier = "direct" if hop <= 1 else "transitive"
         impact = impacts.get(path)
@@ -150,7 +157,7 @@ def _import_hits(
     """Test files whose imports resolve to any changed file."""
     hits: set[str] = set()
     for path, imports in imports_by_path.items():
-        if not is_test_path(path):
+        if not is_test_file(path):
             continue
         for imp in imports:
             if any(_module_matches(imp.source, cf) for cf in changed_files):

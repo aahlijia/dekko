@@ -71,6 +71,14 @@ shouldn't spuriously flag every test in a file as impacted — but it's worth
 knowing before assuming a "no changes detected" result means the file itself
 is byte-identical to the compared rev.
 
+`affected` reports test *files*: what a runner discovers by directory
+(`test/`, `tests/`, `__tests__/`, `spec/`, `specs/`, Maven's `src/test/`) or
+by filename (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`,
+`*Tests.*`). Test-support code under a `testing/` directory (mocks,
+matchers, test-case generators, a tool that only exists in a test build)
+counts as test code for `--no-tests` and `unused`, but is never listed as an
+impacted test; the walk passes through it to whatever tests lie beyond.
+
 `query type` only covers what tree-sitter extracts a type from:
 function/method parameter and return-type annotations. It does not see
 struct/class **fields** typed with the target type — those aren't

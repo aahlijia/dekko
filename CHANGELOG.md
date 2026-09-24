@@ -9,6 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-09-24
+
+### Fixed
+- **`affected`/`impacted_tests`/`workset` no longer list test-support
+  files as impacted tests.** A file under a `testing/` directory
+  (mocks, matchers, test-case generators, a tool that only exists in
+  a test build) is test code, and stays hidden by `--no-tests` and out
+  of `unused`, but no test runner discovers tests under that
+  directory name, so it was never something to run. The path
+  classifier now has two levels: `classify.is_test_path` (test code;
+  its answer is unchanged on every mapped path of the seven evaluation
+  repos) and the new `classify.is_test_file` (test directories and
+  test filename patterns only). The impacted-tests walk reports the
+  narrow one and still passes through support code to the tests
+  beyond it. On claude-code, a repo with zero test files, `workset
+  --symbol MCPServerConnection --type-impact` reported
+  `src/tools/testing/TestingPermissionTool.tsx` as an impacted test;
+  it now reports none. tensorflow has 226 such files under
+  `lite/testing/` and its siblings. zed's `affected HEAD~1` still
+  names the same 46 tests.
+
 ## [1.1.0] — 2026-09-24
 
 Closes round 1.1's fix cycle. The code is 1.0.5; this release is the
