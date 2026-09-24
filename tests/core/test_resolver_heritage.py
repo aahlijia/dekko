@@ -7,7 +7,7 @@ honest ambiguous/external buckets, and the ``TYPE_KINDS`` candidate
 pre-filter that keeps a base-class name from ever resolving to a
 same-named function. Most of this file (synthetic ``FileMap``/
 ``Symbol`` fixtures tagged ``language="python"``) is language-agnostic
-by design — the ladder itself never branches on language. The Phase 2
+by design — the ladder itself never branches on language. The Rust/C++
 section near the end instead runs real Rust/C++ source through
 ``extract_file`` + ``resolve()`` end to end, confirming the ``impl``
 relation and C++'s access-specifier-stripped names resolve correctly
@@ -146,7 +146,7 @@ def test_same_named_types_in_two_files_are_ambiguous() -> None:
 
 
 def test_cross_language_name_collision_no_longer_ambiguous() -> None:
-    """Round 21 (tensorflow.md §4/§7, Track D): before the language-
+    """Before the language-
     aware candidate pre-filter, a bare type name colliding with a
     same-named type *anywhere* in the repo -- even a completely
     unrelated one in a different language -- landed the whole clause
@@ -155,9 +155,7 @@ def test_cross_language_name_collision_no_longer_ambiguous() -> None:
     compared candidate/call-site language. Contrast with
     ``test_same_named_types_in_two_files_are_ambiguous`` above, a
     genuine same-language collision, which must stay ambiguous
-    unchanged (not this fix's target -- see round 21's
-    IMPLEMENTATION-PLAN.md Track D, "substantially improve, but not
-    fully fix, Issue 7")."""
+    unchanged (not this fix's target)."""
     base_py = Symbol(
         id="unrelated/base.py::Base",
         name="Base",
@@ -203,8 +201,7 @@ def test_cross_language_name_collision_no_longer_ambiguous() -> None:
 
 def test_cross_family_heritage_miss_lands_in_ambiguous() -> None:
     """Heritage-path counterpart to ``test_resolve_call_records_cross_
-    family_miss_as_ambiguous`` (`.features/fixes/resolver-vendored-
-    exclusion-false-match.md`): a C++ base-class name with only a
+    family_miss_as_ambiguous``: a C++ base-class name with only a
     same-bare-name, unrelated-language Python candidate (no C/C++
     family candidate at all -- simulating the real C++ base living
     outside the map, e.g. under an excluded vendored directory) must
@@ -382,7 +379,7 @@ def test_type_fixture_repo_resolves(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------------
 def test_cpp_heritage_disambiguated_via_whole_file_include() -> None:
-    """Round 22 tensorflow.md §5 (``resolve_heritage`` never built or
+    """Seen on tensorflow (``resolve_heritage`` never built or
     threaded ``raw_imports`` at all, unlike ``_resolve_files_chunk``'s
     call-resolution path — see ``test_resolver.py::
     test_cpp_call_disambiguated_via_whole_file_include`` for the
@@ -515,7 +512,7 @@ def test_cpp_heritage_stays_ambiguous_when_no_include_matches() -> None:
     ]
 
 
-# Phase 2: Rust / C++ (real extraction, end to end through resolve())
+# Rust / C++ (real extraction, end to end through resolve())
 
 
 def test_rust_impl_trait_resolves_same_file(tmp_path: Path) -> None:
@@ -574,7 +571,7 @@ def test_rust_impl_unknown_trait_is_external(tmp_path: Path) -> None:
 def test_rust_impl_trait_resolves_via_crate_root_reexport(
     tmp_path: Path,
 ) -> None:
-    """Round 22 zed.md §3.2: ``Render`` is declared in ``gpui``'s
+    """zed shape: ``Render`` is declared in ``gpui``'s
     ``element.rs``, only reachable elsewhere via the crate root's
     ``pub use element::*;`` re-export, and collides repo-wide with an
     unrelated, differently-named trait in a completely different
@@ -621,8 +618,7 @@ def test_rust_impl_trait_resolves_via_crate_root_reexport(
 def test_rust_impl_trait_resolves_via_fully_qualified_crate_path(
     tmp_path: Path,
 ) -> None:
-    """Round 23 Fix A (``.features/plans/round23/
-    09-subtypes-ambiguous-resolution-rate.md``): Rust's other
+    """Rust's other
     equally-common spelling for a cross-crate impl,
     ``impl gpui::Render for Editor`` (fully crate-qualified, no
     ``use`` needed since external crate names are always in scope in
@@ -650,7 +646,7 @@ def test_rust_impl_trait_resolves_via_fully_qualified_crate_path(
     (tmp_path / "crates" / "editor" / "src").mkdir(parents=True)
     (tmp_path / "crates" / "editor" / "src" / "editor.rs").write_text(
         # No ``use gpui::Render;`` anywhere -- fully crate-qualified
-        # in the impl clause only, the shape Fix A targets.
+        # in the impl clause only, the shape under test.
         "struct Editor;\n\nimpl gpui::Render for Editor {}\n"
     )
     spec = languages.spec_for_path("a.rs")
@@ -672,12 +668,12 @@ def test_rust_impl_trait_resolves_via_fully_qualified_crate_path(
 def test_rust_impl_trait_resolves_despite_unrelated_fixture_crate_present(
     tmp_path: Path,
 ) -> None:
-    """Round 23 Fix A + Fix B combined, mirroring the real zed shape
+    """Both crate-resolution fixes combined, mirroring the real zed shape
     verified live -- a genuine ``crates/gpui`` crate coexists with an
     unrelated same-named synthetic test-fixture directory
     (``tooling/lints/test_fixture/gpui``); both convention-match crate
     name ``"gpui"``, so ``crate_roots["gpui"]`` now legitimately holds
-    *two* directories (Fix B). The trait being resolved here
+    *two* directories. The trait being resolved here
     (``Focusable``) is declared only in the real crate, not
     re-declared by the fixture crate -- unlike two genuinely
     same-named traits under the same crate name (see
@@ -685,9 +681,8 @@ def test_rust_impl_trait_resolves_despite_unrelated_fixture_crate_present(
     below, an irreducible case neither fix claims to solve), a
     crate-name collision alone must not block resolution when only one
     of the collision's roots actually contains a matching candidate.
-    Exercises both the ``use``-imported and Fix A's fully-qualified
-    impl spelling, since round 23's zed finding was that the two
-    mechanisms compound.
+    Exercises both the ``use``-imported and the fully-qualified
+    impl spelling, since on zed the two mechanisms compound.
     """
     from dekko.core import languages
     from dekko.core.extractor import extract_file
@@ -755,7 +750,8 @@ def test_rust_impl_trait_resolves_despite_unrelated_fixture_crate_present(
 def test_rust_crate_hint_matches_genuine_collision_stays_ambiguous(
     tmp_path: Path,
 ) -> None:
-    """Fix B only ever *adds* a previously-dropped match -- it must not
+    """Mapping several roots to one crate name only ever *adds* a
+    previously-dropped match -- it must not
     turn a genuine collision between two *distinct, both-real* crates
     into a false resolution. Here both same-named ``gpui`` directories
     define their own, unrelated ``Render`` trait and both are
@@ -767,16 +763,12 @@ def test_rust_crate_hint_matches_genuine_collision_stays_ambiguous(
     name alone must stay ambiguous, since ``_rust_crate_hint_matches``
     now matches *both* roots and ``_import_match``'s
     ``len(crate_matched) == 1`` gate correctly declines. This is the
-    intentional, examined tradeoff documented in
-    ``.features/plans/round23/
-    09-subtypes-ambiguous-resolution-rate.md``'s "Implemented" note:
-    honest ambiguity instead of a 50/50 chance of a silently wrong
-    resolution.
+    intentional, examined tradeoff: honest ambiguity instead of a
+    50/50 chance of a silently wrong resolution.
 
     The second root deliberately lives under ``workspace2/`` rather
     than the more tempting ``vendor/`` this fixture originally used --
-    round 24's heritage crate-decoy tiebreak (``.features/plans/
-    round24/03-heritage-crate-decoy-tiebreak.md``) added ``"vendor"``
+    the heritage crate-decoy tiebreak added ``"vendor"``
     to ``_SYNTHETIC_CRATE_DIR_MARKERS``, which would make this
     fixture's own second root look synthetic and let the new tiebreak
     resolve it -- exactly the false-positive shape this test exists to
@@ -819,9 +811,8 @@ def test_rust_crate_hint_matches_genuine_collision_stays_ambiguous(
 def test_rust_crate_decoy_tiebreak_resolves_real_crate_over_fixture(
     tmp_path: Path,
 ) -> None:
-    """Round 24 (``.features/plans/round24/
-    03-heritage-crate-decoy-tiebreak.md``): the actual zed shape round
-    23's own "Implemented" note flagged as an unattempted follow-up --
+    """The actual zed shape the earlier crate fix left as an
+    unattempted follow-up --
     unlike ``test_rust_impl_trait_resolves_despite_unrelated_fixture_
     crate_present`` above (where the fixture crate doesn't declare the
     trait being resolved at all, so ``crate_matched`` never exceeds
@@ -839,9 +830,8 @@ def test_rust_crate_decoy_tiebreak_resolves_real_crate_over_fixture(
     self-referentially names ``gpui::Render`` too (legitimate Rust:
     the crate's own external name is in scope even from inside
     itself). This must resolve to the *decoy's own* ``Render`` --
-    the design doc's own test plan calls this out explicitly: "the
-    tiebreak must not blindly prefer 'not synthetic' when the caller
-    itself lives inside the synthetic crate's own tree." This
+    the tiebreak must not blindly prefer 'not synthetic' when the
+    caller itself lives inside the synthetic crate's own tree. This
     self-crate resolution is a structural fact, not a guess, so it
     must not itself increment ``heritage_synthetic_tiebreak_count``.
     """
@@ -924,7 +914,7 @@ def test_cpp_multiple_inheritance_resolves(tmp_path: Path) -> None:
     assert all(e.relation == "extends" for e in graph.heritage)
 
 
-# Round 31 zed coverage pass F2/A3: an ``impl Trait for Type`` block
+# An ``impl Trait for Type`` block
 # in a different file than ``struct Type`` itself -- an ordinary Rust
 # layout (a sibling ``render.rs`` implementing a trait for a type
 # defined in the module's own file), not a rare one. Previously

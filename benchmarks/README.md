@@ -90,3 +90,56 @@ analysis), and the 2026-09-21/22 re-measurement on 0.43.77 from the
 same repos, which is the current headline. The correctness caveats
 the original study raised were all fixed in the intervening rounds;
 that section says which and where.
+
+## Search ranking: known-answer queries
+
+`search_known_answers.py` checks `dekko search` against
+`search_known_answers.json`: 11 free-text queries over claude-buddy,
+cline, claude-code, spring-boot and zed, each with the symbol(s) that
+is the right answer. Every query was written from what the answer's
+code does, before any search output was looked at. Five are **hub**
+queries, where the answer is heavily called, so a ranking change
+can't score well just by ignoring connectivity.
+
+```sh
+# each repo checked out at the fixture's commit and mapped
+python benchmarks/search_known_answers.py --repos-dir ../repos
+```
+
+**First measurement (dekko 1.0.4, 2026-09-23):** top-1 7/11, MRR 0.700.
+
+It was built to test one suspicion: `search` adds a flat connectivity
+bonus (15% weight, min-max over every symbol that matched any query
+term), so a weakly-matching hub can outrank a strong match. On
+claude-buddy, `buddyStateDir` (22 callers, matches only "state") ranks
+first for "hunt minigame state machine phases". Scaling the bonus by
+each hit's share of the top relevance, squaring that, or applying it
+only within 90% of the top relevance were all tried, each with and
+without demoting Storybook files (`*.stories.*`):
+
+| Variant | top-1 | MRR | `isEnvTruthy` (hub) rank |
+|---|---:|---:|---:|
+| current (flat bonus) | 7/11 | 0.700 | 9 |
+| current + stories demoted | 7/11 | 0.706 | 9 |
+| bonus × relative relevance | 7/11 | 0.692 | 24 |
+| bonus × relative relevance² | 7/11 | 0.697 | 27 |
+| bonus only within 90% of top | 7/11 | 0.696 | 28 |
+| relevance only | 7/11 | 0.696 | 28 |
+
+None improves top-1, and every rescaling loses a hub query. The two
+queries that move explain why:
+
+- **"hunt minigame state machine phases"**: removing the bonus only
+  lifts `HuntPhase` from 5th to 4th. Five `Hunt*` symbols score within
+  2% of each other on relevance alone, and `HuntPhase` is 4th among
+  them. That's a lexical tie, not a blend problem.
+- **"check if an environment variable is set to a truthy value"**:
+  `isEnvTruthy` (236 callers) has 28% of the top hit's relevance and
+  ranks 28th on relevance alone. The flat bonus is what lifts it to
+  9th. Scaling the bonus by relevance takes that away.
+
+So the flat bonus stays. Demoting Storybook files moves one query's
+answer from 7th to 5th and changes no top-1, which doesn't clear the
+bar for a ranking change either. Re-run the set before any future
+change to `search.rank`; add a query whenever a wrong top hit is
+reported with a clear right answer.

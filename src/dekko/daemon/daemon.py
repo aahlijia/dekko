@@ -1,8 +1,7 @@
 """The dekko daemon: accept loop, request routing, explicit lifecycle.
 
-Phase 2 of ``.features/daemon-mode/``: a per-repo background process
-the bare CLI can talk to instead of paying a full ``map.json``
-reload on every invocation. This module owns:
+A per-repo background process the bare CLI can talk to instead of
+paying a full ``map.json`` reload on every invocation. This module owns:
 
 - The daemon-side accept loop (``serve_daemon``), built on
   ``daemon_transport.DaemonTransport`` so it never branches on
@@ -20,7 +19,7 @@ reload on every invocation. This module owns:
   helpers (``start``/``stop``/``status``) backing ``dekko daemon
   start/stop/status``.
 
-Phase 3 (``.features/daemon-mode/TRACKER.md``) adds a single-slot warm
+It also keeps a single-slot warm
 ``MapIndex`` cache (``_WarmCache``) that ``serve_daemon`` installs into
 ``repo_ops.py``'s ``load_or_regen`` via ``repo_ops.set_daemon_cache_hook``
 at startup, re-validated on every access via ``mapfile.check_freshness``
@@ -58,7 +57,7 @@ from dekko.daemon.daemon_transport import (
     spawn_detached,
 )
 
-# Read-only subcommands eligible for daemon routing (design doc §2.3).
+# Read-only subcommands eligible for daemon routing.
 # Write-path commands -- map (regen), note add/rm, hooks
 # install/uninstall/run -- always run directly, regardless of whether
 # a daemon is running, sidestepping write-concurrency questions
@@ -91,7 +90,7 @@ _DAEMON_ELIGIBLE = frozenset(
 # instead of the default ``map.json``-size-scaled one -- the only
 # three commands whose daemon-side handler can take
 # ``diff.old_snapshot``'s expensive export/re-parse/resolve path on a
-# rev-cache miss (round-24 §2).
+# rev-cache miss.
 _REVCACHE_TIMEOUT_COMMANDS = frozenset({"diff", "affected", "workset"})
 
 # Reserved protocol verbs, distinct from any real subcommand name (no
@@ -100,7 +99,7 @@ _REVCACHE_TIMEOUT_COMMANDS = frozenset({"diff", "affected", "workset"})
 _SHUTDOWN_CMD = "_shutdown"
 _STATUS_CMD = "_status"
 
-# Round-29 Track 2 fix: the detached daemon's own stdout/stderr used
+# The detached daemon's own stdout/stderr used
 # to inherit whatever terminal ran `dekko daemon start`, which is
 # usually gone by the time the child prints anything -- orphaning
 # every daemon-side print (crashes included) to a file descriptor
@@ -125,8 +124,7 @@ EXIT_DAEMON_ABANDONED = 7
 # running" for "stopped."
 EXIT_DAEMON_STILL_RUNNING = 8
 
-# Default self-shutdown window: 30 minutes with no requests (design
-# doc §2.1).
+# Default self-shutdown window: 30 minutes with no requests.
 DEFAULT_IDLE_TIMEOUT = 1800.0
 
 # Per-request socket timeout once a connection has been accepted --
@@ -134,60 +132,54 @@ DEFAULT_IDLE_TIMEOUT = 1800.0
 # wedged client can't hang the accept loop indefinitely.
 _REQUEST_TIMEOUT = 30.0
 
-# Client-side connect/round-trip timeout (design doc §2.5: "generous
-# relative to the reload times this whole feature exists to avoid,
-# tight enough that a genuinely hung daemon doesn't make every
-# subsequent `dekko` call visibly slower than not having a daemon at
-# all"). Originally a separate, much tighter 2.0s constant -- round-12
-# master report §3.5: ``socket.settimeout()`` covers the *entire*
-# connect-send-recv cycle, not just connection setup, and the
-# single-threaded accept loop (see ``serve_daemon``'s docstring) means
-# a concurrent request can't even be accepted, let alone answered,
-# until whatever the daemon is currently servicing finishes. 2.0s was
-# tighter than a routine cold-cache reload on a large repo (round 11's
-# own numbers: 6-8s just to reload map.json on tensorflow), so both
-# ``status()`` and ``try_daemon()`` would misreport/time out on
-# entirely ordinary requests, not just pathological ones --
-# ``status()`` printed a false "not running" while the daemon was
-# alive and busy, and ``try_daemon()`` abandoned the original slow
-# request mid-flight and silently duplicated the work locally, while
-# the daemon kept computing the orphaned request in the background.
-# Matching the server's own per-request budget (``_REQUEST_TIMEOUT``)
-# means a client never gives up before the daemon itself would --
-# turning the false-negative into an honest wait when the daemon is
-# genuinely busy, not fixing the daemon's single-request-at-a-time
-# design (a separate, larger architectural change; see that
-# docstring for why it's single-threaded on purpose).
+# Client-side connect/round-trip timeout: generous relative to the
+# reload times this whole feature exists to avoid, tight enough that a
+# genuinely hung daemon doesn't make every subsequent `dekko` call
+# visibly slower than not having a daemon at all. Originally a
+# separate, much tighter 2.0s constant, but ``socket.settimeout()`` covers the
+# *entire* connect-send-recv cycle, not just connection setup, and the
+# single-threaded accept loop (see ``serve_daemon``'s docstring) means a
+# concurrent request can't even be accepted, let alone answered, until whatever
+# the daemon is currently servicing finishes. 2.0s was tighter than a routine
+# cold-cache reload on a large repo (6-8s just to reload map.json on
+# tensorflow), so both ``status()`` and ``try_daemon()`` would misreport/time
+# out on entirely ordinary requests, not just pathological ones -- ``status()``
+# printed a false "not running" while the daemon was alive and busy, and
+# ``try_daemon()`` abandoned the original slow request mid-flight and silently
+# duplicated the work locally, while the daemon kept computing the orphaned
+# request in the background. Matching the server's own per-request budget
+# (``_REQUEST_TIMEOUT``) means a client never gives up before the daemon itself
+# would -- turning the false-negative into an honest wait when the daemon is
+# genuinely busy, not fixing the daemon's single-request-at-a-time design (a
+# separate, larger architectural change; see that docstring for why it's
+# single-threaded on purpose).
 _CLIENT_TIMEOUT = _REQUEST_TIMEOUT
 
-# Round-15 finding: ``_CLIENT_TIMEOUT``'s fixed 30s budget covers the
+# ``_CLIENT_TIMEOUT``'s fixed 30s budget covers the
 # entire connect-send-recv round trip (see above), but an edit-
 # triggered auto-regen on the fleet's largest repos can legitimately
 # exceed it -- not a hang, just genuinely slow work. Isolated,
-# contention-free benchmarks (round-15 daemon-large-repo-timeout-plan
-# investigation) of a single-file-change auto-regen (map_repository's
-# extraction + resolve(), both already run with regen_map's hardcoded
-# jobs=0/all-cores) measured ~21s on spring-boot (853 MB map.json)
-# and ~209s on tensorflow (1.1 GB map.json) -- a sharply super-linear
-# jump for only a ~1.35x size increase, since resolve()'s call-graph
-# cost scales with the graph's size, not just file count/bytes. A
-# straight-line fit through both points would either badly
-# under-provision tensorflow-scale repos or badly over-provision
-# spring-boot-scale ones, so this was originally fit to the slower
-# (tensorflow) measurement alone -- 1,212,389,046 bytes in 209.08s,
+# contention-free benchmarks of a single-file-change auto-regen
+# (map_repository's extraction + resolve(), both already run with regen_map's
+# hardcoded jobs=0/all-cores) measured ~21s on spring-boot (853 MB map.json)
+# and ~209s on tensorflow (1.1 GB map.json) -- a sharply super-linear jump for
+# only a ~1.35x size increase, since resolve()'s call-graph cost scales with
+# the graph's size, not just file count/bytes. A straight-line fit through both
+# points would either badly under-provision tensorflow-scale repos or badly
+# over-provision spring-boot-scale ones, so this was originally fit to the
+# slower (tensorflow) measurement alone -- 1,212,389,046 bytes in 209.08s,
 # rounded down to ~5.5 MB/s for margin.
 #
-# Round-24 recalibration (daemon-timeout-messaging-followup.md): that
-# 5.5 MB/s fit was measured against a pre-symbol-interning map.json.
-# ``1f06c44e`` ("intern symbol ids in map.json, drop pretty-printing")
-# landed three hours after the original calibration commit and shrank
-# map.json's on-disk size ~5.15x without changing how long a full/
-# auto-regen actually takes -- confirmed unchanged again this round:
-# tensorflow's `dekko map --full --jobs 0` wall time was 209.46s,
-# essentially identical to the original 209.08s calibration run,
-# against a map.json now measuring 235.6 MB, not the original ~1.16
-# GB. 235,600,000 / 209.46 =~ 1.12 MB/s; rounded down for margin, same
-# convention as the original fit, to ~1.1 MB/s.
+# Recalibration: that 5.5 MB/s fit was measured against a pre-symbol-interning
+# map.json. ``1f06c44e`` ("intern symbol ids in map.json, drop
+# pretty-printing") landed three hours after the original calibration commit
+# and shrank map.json's on-disk size ~5.15x without changing how long a full/
+# auto-regen actually takes -- confirmed unchanged on remeasurement:
+# tensorflow's `dekko map --full --jobs 0` wall time was 209.46s, essentially
+# identical to the original 209.08s calibration run, against a map.json now
+# measuring 235.6 MB, not the original ~1.16 GB. 235,600,000 / 209.46 =~ 1.12
+# MB/s; rounded down for margin, same convention as the original fit, to ~1.1
+# MB/s.
 _TIMEOUT_BYTES_PER_SECOND = 1_100_000
 
 # Upper bound on the size-scaled client timeout: keeps a hypothetical
@@ -197,7 +189,7 @@ _TIMEOUT_BYTES_PER_SECOND = 1_100_000
 # repo_ops._REGEN_LOCK_WAIT_CAP).
 _SCALED_CLIENT_TIMEOUT_CAP = 300.0
 
-# Round-24 §2 finding: ``diff``/``affected``/``workset``'s rev-cache-
+# ``diff``/``affected``/``workset``'s rev-cache-
 # *miss* path (``diff.old_snapshot``) never touches ``map.json`` or
 # the daemon's warm ``_WarmCache`` at all -- it exports the *historical*
 # rev via ``git archive`` and re-parses/resolves it from scratch, the
@@ -206,7 +198,7 @@ _SCALED_CLIENT_TIMEOUT_CAP = 300.0
 # current working tree's serialized ``map.json`` size -- the two only
 # looked correlated on a single-repo-at-a-nearby-revision measurement.
 # Only one real data point exists so far: tensorflow's 232.34s
-# (confirmed live, round-24 verification: a fresh cold-rev-cache
+# (confirmed live: a fresh cold-rev-cache
 # ``affected`` call's daemon-side ``busy`` flag genuinely stayed
 # ``True`` for ~230s server-side, matching this) against
 # ``tracked_at_rev()``'s 36,518-file count for that commit -- 232.34 /
@@ -279,7 +271,7 @@ def _scaled_client_timeout_for_revcache_miss(
             command`) and shared with its own disclosure-note
             decision -- this used to call ``tracked_at_rev`` itself,
             paying a second ``git`` invocation for a value the caller
-            already had (round-29 Track 2).
+            already had.
 
     Returns:
         ``_CLIENT_TIMEOUT`` when the tracked-file count can't be
@@ -335,8 +327,7 @@ def _target_rev_for(command: str, args: argparse.Namespace) -> str | None:
     return prov.get("git_commit") or "HEAD"
 
 
-# Round-14 master report §"Daemon-lifecycle investigation": bound on
-# how long stop() will poll for the daemon's transport artifacts to
+# Bound on how long stop() will poll for the daemon's transport artifacts to
 # actually disappear before giving up and reporting success anyway
 # (this command's contract is "always returns 0" -- see stop()'s own
 # docstring). Comfortably above the ~1.0-1.1s worst-case teardown lag
@@ -352,8 +343,7 @@ _STOP_TEARDOWN_POLL_INTERVAL = 0.02
 # distinct from _CLIENT_TIMEOUT (stop()'s shutdown handshake stays a
 # fixed 30s; a routed command's own reply gets _scaled_client_timeout,
 # which can grow past 30s on the largest repos -- see that function).
-# Round-14 daemon-status-contention-plan.md §2:
-# round-12's reason for making the old, single liveness timeout
+# The original reason for making the old, single liveness timeout
 # generous (a short probe timeout used to mean "lie and say not
 # running") no longer applies once a probe timeout produces an honest
 # degraded report instead of a false negative -- see status()'s own
@@ -362,15 +352,14 @@ _STOP_TEARDOWN_POLL_INTERVAL = 0.02
 # consistency between the two liveness checks.
 _STATUS_PROBE_TIMEOUT = 2.0
 
-# Round-23 §13: bound on how long start() will poll for confirmation
+# Bound on how long start() will poll for confirmation
 # that the just-spawned child has actually bound its listening socket
 # before returning "started". Without this, a `daemon status` issued
 # immediately after `daemon start` prints could race the child's own
 # interpreter-startup + bind_and_listen() and see `transport.exists()
 # == False` -- an honest-but-wrong "not running" (observed ~1/6 in
-# testing, round-23's awesome-go.md §2.2). Binding is normally
-# near-instant once the interpreter is up (the same report's `status
-# --json` moments later showed `uptime_seconds: 0.089`) -- a wait
+# testing). Binding is normally near-instant once the interpreter is
+# up (a `status --json` moments later showed `uptime_seconds: 0.089`) -- a wait
 # anywhere near this cap would itself indicate a real problem worth
 # surfacing via the "unconfirmed" branch, not silently swallowing.
 # Mirrors _STOP_TEARDOWN_TIMEOUT/_STOP_TEARDOWN_POLL_INTERVAL's
@@ -440,19 +429,18 @@ class _WarmCache:
     ``server.Context.index_cache``'s dict-keyed shape the way a
     multi-root MCP server session does -- a single slot is enough,
     re-validated via ``mapfile.check_freshness`` on every access
-    exactly as that cache is (design doc §2.4). Installed into
+    exactly as that cache is. Installed into
     ``repo_ops.load_or_regen`` via ``repo_ops.set_daemon_cache_hook``
     for the lifetime of ``serve_daemon``'s accept loop.
 
     ``get``/``put`` are only ever called from the main accept loop's
     thread (single-threaded by design). ``snapshot()`` is also called
-    from the dedicated status-listener thread (round-13 master report
-    §2), which runs concurrently with the main loop -- ``_lock`` guards
-    the ``(root, index)`` pair so a snapshot can never observe a torn
-    read (a new root paired with a stale index, or vice versa) from a
-    ``put()`` happening mid-read. The (potentially slower)
-    ``mapfile.check_freshness`` stat call itself runs outside the lock
-    in ``snapshot()`` so a status probe never blocks behind it.
+    from the dedicated status-listener thread, which runs concurrently with the
+    main loop -- ``_lock`` guards the ``(root, index)`` pair so a snapshot can
+    never observe a torn read (a new root paired with a stale index, or vice
+    versa) from a ``put()`` happening mid-read. The (potentially slower)
+    ``mapfile.check_freshness`` stat call itself runs outside the lock in
+    ``snapshot()`` so a status probe never blocks behind it.
     """
 
     def __init__(self) -> None:
@@ -478,7 +466,7 @@ class _WarmCache:
                 # rebuilt without a source change (a newer dekko after
                 # an upgrade) is invisible to ``check_freshness``,
                 # which only compares this cached copy's own
-                # provenance to the tree (round 33 Track 1).
+                # provenance to the tree.
                 if (
                     mapfile.index_matches_disk(root, self._index)
                     and mapfile.check_freshness(root, self._index).fresh
@@ -525,7 +513,7 @@ def _recv_line(sock: socket.socket) -> str | None:
     instead of byte-at-a-time.
 
     Each connection carries exactly one request line and one response
-    line (no streaming, per the design doc's §2.2 framing), so any
+    line (no streaming), so any
     bytes received past the first newline in the same chunk are
     discarded rather than buffered for a next call -- there never is
     a next call on the same connection.
@@ -565,7 +553,7 @@ def _status_payload(
         start_time: ``time.monotonic()`` value at daemon startup.
         cache: This daemon's warm cache, for its snapshot.
         busy: Whether the main accept loop is currently mid-request
-            (round-13 master report §2) -- always ``False`` when this
+            -- always ``False`` when this
             is built from inside the main loop's own ``_status``
             handling (it can't be handling two requests at once by
             definition), meaningfully ``True``/``False`` when built by
@@ -582,7 +570,7 @@ def _status_payload(
         # cache; a dict with the cached root, its current freshness,
         # and cumulative hit/miss counts afterward.
         "cache": cache.snapshot(),
-        # Round 33 Track 1: dekko was upgraded underneath this daemon.
+        # dekko was upgraded underneath this daemon.
         # It still answers (from the on-disk map, regens delegated to
         # the installed dekko) but should be restarted. Memo-only
         # (``known_outdated``): this runs on the status side thread
@@ -633,7 +621,7 @@ def _handle_connection(
             ``_status`` payload's cache-state report.
         busy_event: Set immediately before a routed command runs and
             cleared immediately after, so the independent status-
-            listener thread (round-13 master report §2) can report an
+            listener thread can report an
             honest ``busy`` flag while this connection is in flight.
 
     Returns:
@@ -746,7 +734,7 @@ def _serve_status_connection(
 ) -> None:
     """Handle exactly one connection on the status-only listener.
 
-    Deliberately minimal (round-13 master report §2): authenticates,
+    Deliberately minimal: authenticates,
     expects a single ``_status`` request, and replies -- anything else
     (a malformed line, an unexpected command) gets an error envelope
     or is simply dropped, never dispatched to a routed ``cli.py``
@@ -831,15 +819,14 @@ def serve_daemon(
 ) -> int:
     """Run the daemon's accept loop for ``root``.
 
-    Serves requests one at a time (design doc §2.6: a single-threaded
-    accept loop, not thread-per-connection -- the realistic CLI
-    invocation pattern doesn't need true parallelism, and this
-    sidesteps every question about locking shared state around
-    concurrent access). Returns when a ``_shutdown`` request is
-    received or when ``idle_timeout`` seconds pass with no new
-    connection since the last one was handled.
+    Serves requests one at a time (a single-threaded accept loop, not
+    thread-per-connection -- the realistic CLI invocation pattern doesn't need
+    true parallelism, and this sidesteps every question about locking shared
+    state around concurrent access). Returns when a ``_shutdown`` request is
+    received or when ``idle_timeout`` seconds pass with no new connection since
+    the last one was handled.
 
-    Round-13 master report §2: alongside the main command socket, this
+    Alongside the main command socket, this
     also binds and serves a second, status-only listener
     (``DaemonTransport.bind_status_listener``) on a dedicated
     background thread (``_serve_status_loop``). That thread's contract
@@ -888,7 +875,7 @@ def serve_daemon(
     repo_ops.set_daemon_cache_hook(cache.get, cache.put)
     # Long-lived by definition: an identity mismatch with a map now
     # means "ask the disk who is outdated" instead of "rewrite it"
-    # (round 33 Track 1, see ``selfcheck``).
+    # (see ``selfcheck``).
     selfcheck.mark_long_lived()
     start_time = time.monotonic()
     busy_event = threading.Event()
@@ -937,7 +924,7 @@ def serve_daemon(
 class DaemonRequestAbandonedError(Exception):
     """A request reached the daemon, but its response never arrived.
 
-    Round-12 master report §3.8: ``serve_daemon``'s accept loop is
+    ``serve_daemon``'s accept loop is
     single-threaded (see its own docstring), so once the daemon has
     started ``_run_captured(func, args)`` for a dispatched request, it
     runs to completion regardless of whether the client is still
@@ -956,7 +943,7 @@ class DaemonRequestAbandonedError(Exception):
     Attributes:
         jobs: The ``--jobs`` value actually forwarded to the daemon
             for the abandoned request, when the command has one
-            (``None`` otherwise). Round-25: lets ``cli.py``'s error
+            (``None`` otherwise). Lets ``cli.py``'s error
             report name ``--jobs 0`` as the actual lever likely to
             avoid a repeat timeout, when the abandoned request ran
             sequentially.
@@ -1034,11 +1021,11 @@ def _timeout_and_args_for_command(
     root: Path,
     *,
     jobs_explicit: bool,
-) -> tuple[float, argparse.Namespace]:
+) -> tuple[float, argparse.Namespace, str | None]:
     """Client timeout and (possibly ``--jobs``-overridden) request args.
 
     Isolates ``try_daemon``'s rev-cache-miss-aware timeout selection
-    (round-24) and its round-25 ``--jobs 0`` default override into one
+    and its ``--jobs 0`` default override into one
     helper, keeping ``try_daemon`` itself readable.
 
     Args:
@@ -1049,36 +1036,37 @@ def _timeout_and_args_for_command(
             name.
 
     Returns:
-        ``(timeout, args)``. ``args`` is returned unchanged unless the
-        round-25 override applies, in which case it's a *copy* with
-        ``jobs`` set to ``0`` -- the caller's original ``Namespace``
-        is never mutated in place, so a fallback to direct execution
-        (if the daemon turns out to be unreachable) still sees the
-        caller's original, un-overridden choice.
+        ``(timeout, args, disclosed)``. ``args`` is returned unchanged
+        unless the ``--jobs 0`` override applies, in which case it's a
+        *copy* with ``jobs`` set to ``0`` -- the caller's original
+        ``Namespace`` is never mutated in place, so a fallback to
+        direct execution (if the daemon turns out to be unreachable)
+        still sees the caller's original, un-overridden choice.
+        ``disclosed`` is the note this call printed, or ``None``, so
+        the caller can drop the daemon's replayed copy of it.
 
     Before returning, prints the same cold-rev-cache disclosure note
     ``diff._maybe_warn_sequential`` would print in-process -- but
     client-side, before the request is dispatched, since a routed
     request's own stdout/stderr only replay to the caller after the
-    (possibly multi-minute) resolve completes (round-29 Track 2:
-    the in-process note arrives too late to be useful for a
-    daemon-routed call).
+    (possibly multi-minute) resolve completes (the in-process note
+    arrives too late to be useful for a daemon-routed call).
     """
     if command not in _REVCACHE_TIMEOUT_COMMANDS:
-        return _scaled_client_timeout(root), args
+        return _scaled_client_timeout(root), args, None
 
     target_rev = _target_rev_for(command, args)
     if target_rev is None or revcache.has_entry(root, target_rev):
-        return _scaled_client_timeout(root), args
+        return _scaled_client_timeout(root), args, None
 
     candidates = diff_mod.tracked_at_rev(root, target_rev)
     timeout = _scaled_client_timeout_for_revcache_miss(candidates)
     if not jobs_explicit and getattr(args, "jobs", None) == 1:
-        # Round 31 P4.1 made ``--jobs 0`` the CLI default for these
+        # ``--jobs 0`` is now the CLI default for these
         # commands, so a parsed CLI invocation no longer arrives here
         # with an unchosen 1. Kept for a programmatic ``Namespace``
         # that does.
-        # Round-25 finding: this is the one operation shape (a
+        # This is the one operation shape (a
         # cold-rev-cache resolve on a large repo, routed through an
         # already-running daemon) where sequential is a uniquely bad
         # default -- burning idle cores briefly on a request that's
@@ -1087,14 +1075,46 @@ def _timeout_and_args_for_command(
         # successful one.
         args = argparse.Namespace(**vars(args))
         args.jobs = 0
-    if candidates is not None:
+    message = None
+    # A clean tree at the target rev skips the export entirely (see
+    # diff.snapshot_pair), so there's no wait to warn about. The long
+    # timeout stays: if the map turns out stale, the daemon still
+    # builds, and a short timeout would abandon that request.
+    if candidates is not None and not diff_mod.worktree_matches_rev(
+        root, target_rev
+    ):
         resolved_jobs = getattr(args, "jobs", 1)
         message = diff_mod.sequential_disclosure_message(
             len(candidates), workers=resolved_jobs
         )
         if message is not None:
             print(message, file=sys.stderr)
-    return timeout, args
+
+    return timeout, args, message
+
+
+def _drop_disclosed_note(stderr: str, disclosed: str | None) -> str:
+    """Remove the daemon's replayed copy of a note already printed.
+
+    The daemon prints the same cold-rev-cache note in-process, and its
+    captured stderr only replays after the response arrives, so a
+    routed call would otherwise show the note twice. Only one
+    occurrence is removed: a second one means the daemon genuinely hit
+    the miss twice. A daemon whose wording differs (an older version)
+    leaves its line in place, which is honest, just redundant.
+
+    Args:
+        stderr: The daemon's captured stderr for this request.
+        disclosed: The note :func:`_timeout_and_args_for_command`
+            printed before dispatch, or ``None``.
+
+    Returns:
+        ``stderr`` with one ``disclosed`` line removed, if present.
+    """
+    if disclosed is None:
+        return stderr
+
+    return stderr.replace(disclosed + "\n", "", 1)
 
 
 def try_daemon(
@@ -1103,13 +1123,13 @@ def try_daemon(
     """Attempt to route a parsed CLI invocation through a live daemon.
 
     Returns ``None`` on every "the daemon was never actually reached
-    for this request" condition (design doc §2.5) so ``cli.py``'s
+    for this request" condition so ``cli.py``'s
     ``main()`` integration can treat those as "fall back to direct
     execution, silently." Once a request has been sent, though, a
     failure to get its response back is raised as
     :class:`DaemonRequestAbandonedError` rather than folded into the same
-    ``None`` return -- round-12 master report §3.8 traced a silent
-    local fallback in that specific case to a duplicate-execution bug
+    ``None`` return -- a silent local fallback in that specific case
+    caused a duplicate-execution bug
     (the daemon keeps computing the abandoned request in the
     background while the client redoes the same work locally,
     contending for the same CPU). ``main()`` must let that exception
@@ -1122,7 +1142,7 @@ def try_daemon(
             would otherwise be called with directly).
         jobs_explicit: Whether the caller deliberately chose ``args
             .jobs`` (as opposed to it being argparse's own unmodified
-            default). Round-25: a daemon-routed ``diff``/``affected``/
+            default). A daemon-routed ``diff``/``affected``/
             ``workset`` request on a genuine rev-cache miss defaults
             to ``--jobs 0`` (all cores) instead of inheriting the
             CLI's own sequential default, since a request specifically
@@ -1159,7 +1179,7 @@ def try_daemon(
     if not transport.exists():
         return None
 
-    timeout, args = _timeout_and_args_for_command(
+    timeout, args, disclosed = _timeout_and_args_for_command(
         command, args, root, jobs_explicit=jobs_explicit
     )
 
@@ -1171,12 +1191,14 @@ def try_daemon(
     try:
         if not _send_daemon_request(sock, transport, command, args):
             return None
-        return _recv_daemon_response(sock)
+        exit_code, stdout, stderr = _recv_daemon_response(sock)
     except DaemonRequestAbandonedError as exc:
         exc.jobs = getattr(args, "jobs", None)
         raise
     finally:
         sock.close()
+
+    return exit_code, stdout, _drop_disclosed_note(stderr, disclosed)
 
 
 def _query_pid(transport: DaemonTransport) -> int | None:
@@ -1190,11 +1212,11 @@ def _query_pid(transport: DaemonTransport) -> int | None:
     treats a missing PID as "can't force-stop," not as an error to
     surface. Uses ``_STATUS_PROBE_TIMEOUT`` (not ``_CLIENT_TIMEOUT``):
     this is a liveness probe, not a routed command, so it should give
-    up quickly rather than tie up ``stop()`` for up to 30s (round-14
-    daemon-status-contention-plan.md §2) -- ``stop()``'s own call site
+    up quickly rather than tie up ``stop()`` for up to 30s --
+    ``stop()``'s own call site
     treats a timeout here the same as any other failure to confirm a
     PID, and falls back to ``is_daemon_reachable`` as a second opinion
-    before deciding whether it's safe to unlink the transport (§3).
+    before deciding whether it's safe to unlink the transport.
     """
     sock = _status_connect(transport, _STATUS_PROBE_TIMEOUT)
     if sock is None:
@@ -1219,7 +1241,7 @@ def _wait_for_bind(
 ) -> bool:
     """Poll until the just-spawned daemon's transport artifact exists.
 
-    Round-23 §13: closes the race where `start()` used to return the
+    Closes the race where `start()` used to return the
     instant `spawn_detached` launched the child, before the child had
     necessarily finished interpreter startup + `bind_and_listen()` --
     a `status` call issued in that window would see `transport.exists()
@@ -1250,8 +1272,8 @@ def start(root: Path, idle_timeout: float = DEFAULT_IDLE_TIMEOUT) -> int:
     No-op (not an error) if a live daemon is already reachable for
     this root. Spawns a detached background process, then polls
     (bounded by ``_START_CONFIRM_TIMEOUT``) for confirmation the child
-    has actually bound its listening socket before returning -- round-23
-    §13: an unconfirmed return here used to let an immediate ``daemon
+    has actually bound its listening socket before returning -- an
+    unconfirmed return here used to let an immediate ``daemon
     status`` call race the child's own startup and report a false
     "not running".
 
@@ -1349,10 +1371,8 @@ def _wait_for_teardown(
 ) -> None:
     """Block until a gracefully-shutting-down daemon's artifacts are gone.
 
-    Round-14 master report ("Daemon-lifecycle investigation"): three
-    independent evaluators (``cline.md`` §5.2, ``claude-buddy.md``
-    §3.3, ``claude-code.md`` §1) found ``dekko daemon stop`` printing
-    "stopped" and returning success up to ~1.0-1.1s *before* the
+    ``dekko daemon stop`` used to print "stopped" and return success
+    up to ~1.0-1.1s *before* the
     daemon process actually exits. Root cause: ``_handle_connection``
     acks a ``_shutdown`` request (and returns) the moment it's
     received, but ``serve_daemon()``'s own teardown -- joining the
@@ -1404,13 +1424,12 @@ def stop(root: Path) -> int:
     The forced-fallback branch only unlinks the daemon's transport
     artifacts when there is *positive* evidence it's actually gone --
     either a confirmed PID it just force-stopped, or a final
-    reachability probe that itself fails (round-14 daemon-status-
-    contention-plan.md §3: under sustained CPU contention, both the
+    reachability probe that itself fails (under sustained CPU
+    contention, both the
     graceful-ack wait and the PID lookup can time out without
     confirming anything even though the daemon is genuinely still
     alive and listening; unlinking unconditionally in that case
-    stranded a live, unreachable daemon process -- see that document
-    for the full root cause).
+    stranded a live, unreachable daemon process).
 
     Args:
         root: Resolved repo root whose daemon to stop.
@@ -1490,7 +1509,7 @@ def _status_connect(
     """Connect for a ``_status`` round-trip, preferring the status-only
     listener.
 
-    Round-13 master report §2: the dedicated status-only listener
+    The dedicated status-only listener
     stays fast and honest even while the daemon is mid-request on the
     main command socket. Falls back to the main socket only for a
     daemon started before that listener existed (an in-place upgrade
@@ -1511,7 +1530,7 @@ def _probe_status(transport: DaemonTransport) -> tuple[dict | None, bool]:
     """Run the ``_status`` round-trip, distinguishing a timeout from
     every other failure.
 
-    Round-14 daemon-status-contention-plan.md §1-2: a connect to a
+    A connect to a
     genuinely dead/absent daemon fails immediately at
     ``_status_connect()`` (``ConnectionRefusedError``, not a timeout)
     -- reaching the ``TimeoutError`` branch below at all means a live

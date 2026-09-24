@@ -1,6 +1,6 @@
 """Extraction tests for raise/throw sites and except/catch clauses.
 
-Python/Java/C++/JS/TS (the design doc's scoped-pilot languages): a
+Python/Java/C++/JS/TS (the scoped-pilot languages): a
 repo-defined type raised/caught, a stdlib type raised/caught (still
 extracted the same way — resolution, not extraction, is what buckets
 it "external"), a bare re-raise, a catch-all, and a multi-catch.
@@ -198,11 +198,9 @@ def test_python_nested_closure_reraise_folds_into_bare(
     # walk does not stop at the nested `def` and still finds the
     # outer `except ... as e:` binding — the closure genuinely
     # re-raises the same bound exception object, so folding this into
-    # bare re-raise is correct, not a mis-tag. Documented explicitly
-    # (deviation from the original design doc, which expected this
-    # case to fall through to an "external type named e" — see the
-    # design doc's T1 section for the reconciliation note) so a future
-    # change doesn't silently alter this behavior.
+    # bare re-raise is correct, not a mis-tag, rather than falling
+    # through to an "external type named e". Documented explicitly so
+    # a future change doesn't silently alter this behavior.
     spec = languages.spec_for_path("a.py")
     assert spec is not None
     (tmp_path / "a.py").write_text(
@@ -261,7 +259,7 @@ def test_java_throw_and_throws_clause(tmp_path: Path) -> None:
 
     # A method with a declared `throws` clause but no throw statement
     # of its own still surfaces the checked-exception signal — this is
-    # the design doc's own called-out "common real pattern".
+    # a common real pattern.
     propagate = by_caller["Sample.java::Sample.propagateOnly"]
     assert len(propagate) == 1
     assert propagate[0].name == "IOException"
@@ -320,7 +318,7 @@ def test_java_catch_param_reraise_folds_into_bare(tmp_path: Path) -> None:
 def test_java_instanceof_pattern_bound_reraise_folds_into_bare(
     tmp_path: Path,
 ) -> None:
-    # round-18 spring-boot finding, reproduced from
+    # Reproduced from spring-boot's
     # `Binder.handleBindError`: rethrowing a caught exception through a
     # Java 16+ `instanceof` pattern-match binding (`if (ex instanceof
     # BindException bindException) { throw bindException; }`) was

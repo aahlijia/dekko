@@ -1,4 +1,4 @@
-"""JS/TS workspace-package import resolution (round 31 cline.md §4.1 A).
+"""JS/TS workspace-package import resolution.
 
 ``import { X } from "@scope/pkg"`` names a package, not a file, so the
 stem-based "is this import in-repo" test filed every such call and
@@ -252,7 +252,7 @@ def test_only_js_ts_bindings_are_tagged() -> None:
 
 
 # ---------------------------------------------------------------------
-# Module graph (round 31 P1.1b): a bare workspace specifier resolves to
+# Module graph: a bare workspace specifier resolves to
 # the package's *source* entry file, mapped back from build output.
 
 

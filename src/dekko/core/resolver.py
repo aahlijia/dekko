@@ -21,7 +21,7 @@ written inside ``BufferDiff``'s own file (so there's no import to key
 off) used to fall through to the generic same-file/fast-path ladder
 and land ambiguous whenever the repo defined more than one same-named
 method elsewhere, silently dropping the edge (zed's ``BufferDiff.new``
-read zero callers despite 13 real call sites — round-09 §2.1 part A).
+read zero callers despite 13 real call sites).
 ``_receiver_type_match`` closes this by checking, before the typed-
 parameter step, whether the receiver's first segment is itself the
 bare name of an in-repo type (``model.TYPE_KINDS``) and, if so,
@@ -40,9 +40,9 @@ ClassName(...)`` construction was invisible to the constructor
 method's fan-in even though it resolved fine to the class itself (or,
 for Java specifically, fell into ``ambiguous`` entirely, since a Java
 constructor's own bare name is the class name — see
-``_construction_pick``). These three gaps were bug #2's undercounted-
-caller family (cline's ``get_callers("Controller.initTask")`` finding
-2 of 9 real callers; cline/spring-boot's ``Controller.constructor``/
+``_construction_pick``). These three gaps undercounted callers
+(cline's ``get_callers("Controller.initTask")`` finding 2 of 9 real
+callers; cline/spring-boot's ``Controller.constructor``/
 ``AutoConfigurations.of`` reading fan-in 0 despite real call sites).
 
 Bare-identifier *references* (a callback passed by value rather than
@@ -66,8 +66,7 @@ that one symbol's fan-in, since nothing else in the ladder ever
 disambiguates a bare-name call with no receiver or an untyped
 receiver. Confirmed live against cline: a same-file-only helper
 literally named ``trim`` (true fan-in 8) was reported at fan-in 1,404,
-almost entirely misattributed ``String.prototype.trim()`` calls — see
-``test-repos/reports/investigation-1.2-resolver-fanin.md``.
+almost entirely misattributed ``String.prototype.trim()`` calls.
 
 The "imported names" step (``_import_match``) ordinarily keys on a
 *local binding* name (``from x import y`` / ``import {y} from 'x'``),
@@ -78,8 +77,7 @@ caller's file against every candidate's file instead (see
 ``affected.py``'s ``_import_hits`` already uses for its diff-import
 evidence tier. Without this, a same-named free function defined in two
 different files was unresolvable for C/C++ regardless of which header
-the caller actually included — see
-``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
+the caller actually included.
 
 The final fallback, ``_bare_call_non_method_match``, uses ``Symbol.kind``
 itself as a disambiguator: a syntactically bare (receiverless) call
@@ -89,7 +87,7 @@ one always requires some receiver/qualifier at the call site
 method-kind candidates from an otherwise-ambiguous set and checking
 whether exactly one non-method candidate remains turns a real
 same-name collision into a correct resolution without guessing.
-Round-12 master report §3.2: awesome-go's bare, same-package
+For example, awesome-go's bare, same-package
 ``Generate(tt.input)`` (``pkg/slug``'s free function) misresolved as
 ambiguous against an unrelated method with a completely different
 receiver/arity, ``(g *IDGenerator) Generate(...)`` in ``pkg/markdown``
@@ -146,8 +144,7 @@ _INDEX_STEMS = {"__init__", "mod", "lib", "index"}
 # — ``_import_match``'s ordinary name-keyed hint lookups can never
 # fire for these, since neither the call's own name nor its receiver
 # is ever the local name of an import (there is no such thing). See
-# ``_import_match``'s whole-file fallback and
-# ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
+# ``_import_match``'s whole-file fallback.
 _WHOLE_FILE_IMPORT_LANGUAGES = frozenset({"c", "cpp"})
 # Language groupings that genuinely interoperate within one codebase --
 # a C header routinely declares something only a C++ ``.cc``/``.cpp``
@@ -184,14 +181,13 @@ MODULE_CALLER_SUFFIX = "::<module>"
 # fast enough single-threaded that a process pool's own startup +
 # index-pickling overhead isn't worth paying — parallelization only
 # pays off once the per-file/per-call loop itself is the bottleneck.
-# See round 11's tensorflow finding (~857K raw calls, single-threaded
-# resolve()/resolve_refs() dominating wall-clock even on an 11-core
-# machine): this threshold is deliberately well below that scale so
+# On tensorflow (~857K raw calls), single-threaded
+# resolve()/resolve_refs() dominated wall-clock even on an 11-core
+# machine: this threshold is deliberately well below that scale so
 # medium repos see a win too, while trivial ones (most test fixtures)
 # stay sequential.
 #
-# Round 30 (.features/fixes/round30/03-resolve-pool-memory-overhead.md):
-# this alone is not a sufficient gate. It answers "is there enough work
+# This alone is not a sufficient gate. It answers "is there enough work
 # to parallelize at all" but says nothing about how many workers that
 # work justifies, and each worker costs a private, unpickled copy of the
 # whole repo index under ``spawn``. spring-boot (285,609 calls, far past
@@ -204,7 +200,7 @@ _RESOLVE_PARALLEL_MIN_ITEMS = 5_000
 # Minimum items (raw calls/refs/throws/catches) a resolve worker must
 # have to be worth its own copy of the repo index.
 #
-# Calibrated by measured sweep on spring-boot (round 30, 11-core/18 GB;
+# Calibrated by measured sweep on spring-boot (11-core/18 GB;
 # `_resolve_all`, same work, varying worker count):
 #
 #     workers   wall    speedup   items/worker
@@ -223,7 +219,7 @@ _RESOLVE_PARALLEL_MIN_ITEMS = 5_000
 # intended division of labor between the two.
 _RESOLVE_MIN_ITEMS_PER_WORKER = 75_000
 
-# NOTE (round 30): a RAM-based worker cap was built here and then
+# NOTE: a RAM-based worker cap was built here and then
 # REMOVED after measurement refuted it. The theory was sound-looking --
 # each worker holds a private ~2.5 GB copy of the indices under
 # ``spawn``, so tensorflow at 11 workers attempts ~27.5 GB of live
@@ -247,49 +243,46 @@ _RESOLVE_MIN_ITEMS_PER_WORKER = 75_000
 # ``_POOL_RETRY_WORKERS``.
 
 # How many chunks to build per worker when parallelizing a resolution
-# pass (round 17 scaling investigation:
-# .features/plans/round17/round17-resolve-all-scaling-plan.md). Static
-# one-chunk-per-worker partitioning left workers that finished early
-# with nothing else to pick up -- measured at 2.2x-3.9x speedup on 8
-# workers instead of the ~8-10x a compute-bound, evenly-splittable
-# workload should get close to. Building ``workers *
+# pass. Static one-chunk-per-worker partitioning left workers that
+# finished early with nothing else to pick up -- measured at 2.2x-3.9x
+# speedup on 8 workers instead of the ~8-10x a compute-bound,
+# evenly-splittable workload should get close to. Building ``workers *
 # _RESOLVE_CHUNK_OVERSUBSCRIPTION`` chunks and submitting them all to
-# the pool's own task queue (instead of exactly ``workers`` chunks,
-# one per worker) lets an idle worker pull the next chunk as soon as
-# it finishes, the same dynamic-rebalancing pattern
+# the pool's own task queue (instead of exactly ``workers`` chunks, one
+# per worker) lets an idle worker pull the next chunk as soon as it
+# finishes, the same dynamic-rebalancing pattern
 # ``repo_ops._extract_misses``'s ``pool.map(..., chunksize=1)`` already
 # gets ~10x from. 4 was chosen as a middle point between finer-grained
 # balancing (higher multiplier) and per-task dispatch overhead (lower
 # multiplier) without a full empirical sweep on this repo's own CI
-# hardware -- see the design doc's "Tune the oversubscription
-# multiplier empirically" step for the sweep that would refine this.
+# hardware; an empirical sweep of the multiplier would refine this.
 _RESOLVE_CHUNK_OVERSUBSCRIPTION = 4
 
 # Worker count for the one bounded retry a broken process pool gets
-# (round 17: an MCP server's auto-regen requesting os.cpu_count()
+# (an MCP server's auto-regen requesting os.cpu_count()
 # workers while a sibling `dekko map --jobs 0` does the same on the
 # same machine can starve worker-process startup enough to raise
 # BrokenProcessPool). Reduced-but-nonzero, not straight to sequential
 # -- see ``run_pooled_with_retry``'s docstring for why.
 _POOL_RETRY_WORKERS = 2
 
-# Delay before the one bounded retry fires (round 23 §15: a
+# Delay before the one bounded retry fires (a
 # ``BrokenProcessPool`` right after `uv tool install --reinstall`
 # resolving `/…/bin/dekko`'s `FileNotFoundError` -- the reinstall's
 # shim delete-then-relink is a brief filesystem race, not just CPU
 # contention; firing the retry immediately gives it a real chance of
 # landing in the same still-unsettled window and failing identically,
-# which is consistent with the retry itself visibly failing in that
-# report despite this function's existing bounded-retry mechanism).
+# which is consistent with the retry itself visibly failing there
+# despite this function's existing bounded-retry mechanism).
 # Cheap and harmless regardless of the exact transient cause -- CPU
-# contention (round 17's original motivating case) also benefits from
+# contention (the original motivating case) also benefits from
 # not immediately retrying into the same conditions. 1.5s is an
-# estimate (the report's own "30s later, worked cleanly" data point
+# estimate (the observed "30s later, worked cleanly" data point
 # suggests the window closes well under 30s), not empirically tuned;
 # revisit if a tighter repro becomes available.
 _POOL_RETRY_DELAY_S = 1.5
 
-# Per-future result-retrieval bound (round 21 Track A: cline's
+# Per-future result-retrieval bound (cline's
 # ``dekko map --jobs 0`` hung 6+ minutes at 0% CPU across every
 # worker, later revealed via a manual kill to be a worker that
 # resolved a completely different Python interpreter than its parent
@@ -417,7 +410,7 @@ class _NameGroup:
             file's). Compared by ``==``/``!=`` only -- a **set**, not a
             sequence, because within one name unordered comparison is
             correct here even though whole-file ``symbol_projection``
-            must stay order-sensitive (round 30 risk #2): two entries
+            must stay order-sensitive: two entries
             that swap their ``#N`` collision suffix produce two
             genuinely different row strings (the suffix lives in
             ``id``), so the set still changes when a swap changes what
@@ -486,11 +479,7 @@ class NameDelta:
     repo-wide resolve whenever a dirty file's symbol set changed at
     all. This is v2: identify exactly which bare *names* changed
     meaning, so an unchanged file's cached resolution can be trusted
-    unless it actually depends on one of them. See
-    ``.features/fixes/round30/01-incremental-resolution.md``'s "v2"
-    section and ``test-repos/reports/31-tokentest-7repo-post04355/
-    FIX-PLAN-remaining.md`` WP-B for the dependency-class analysis this
-    implements.
+    unless it actually depends on one of them.
 
     Attributes:
         blocks_reuse: True when a type-kind symbol (``model.TYPE_KINDS``)
@@ -635,8 +624,7 @@ class ResolveReuse:
     Built by ``storage.resolvecache.build_reuse`` only when the global
     resolution inputs are provably identical to the cached run, so that
     an unchanged file's resolution is identical by construction rather
-    than by heuristic. See
-    ``.features/fixes/round30/01-incremental-resolution.md``.
+    than by heuristic.
 
     Attributes:
         cached: ``path -> {"edges": [...], "ambiguous": [...],
@@ -734,11 +722,10 @@ def _pool_workers(workers: int, items: int) -> int:
     ``_RESOLVE_CHUNK_OVERSUBSCRIPTION`` for the sweep data and why not to
     reintroduce it blind.
 
-    Round 30: before this existed, each pass gated only on
+    Before this existed, each pass gated only on
     ``workers > 1 and items >= _RESOLVE_PARALLEL_MIN_ITEMS``, which let
     spring-boot run 11 workers on work that justified 3 and measured a
-    net loss against sequential. See
-    ``.features/fixes/round30/03-resolve-pool-memory-overhead.md``.
+    net loss against sequential.
 
     Args:
         workers: Worker count the caller asked for.
@@ -766,8 +753,8 @@ def _pool_mp_context() -> BaseContext:
     Decided once per process, at the first pool build, and reused for
     every later one. The cache is not an optimization -- it is what
     makes the thread gate sound: ``ProcessPoolExecutor.shutdown(
-    wait=False)`` (every call site's teardown, deliberately, since
-    round 22) can leave the executor's manager/feeder threads alive
+    wait=False)`` (every call site's teardown, deliberately) can
+    leave the executor's manager/feeder threads alive
     for a moment after a pool finishes, so a naive per-pool check
     would see the *extraction* pool's harmless ghost threads and
     silently downgrade every *resolve* pass to ``spawn`` in the exact
@@ -793,10 +780,9 @@ def _choose_pool_mp_context() -> BaseContext:
 
     ``fork`` gives workers copy-on-write access to the parent's memory:
     the resolution indices are not pickled, transferred, or duplicated
-    per worker the way they are under ``spawn`` (round 30 measured
-    ~205 MB pickled per worker expanding to ~2.5 GB live on a
-    tensorflow-scale repo -- see ``.features/fixes/round30/
-    03b-fork-and-single-pool-designs.md``). Linux got this for free as
+    per worker the way they are under ``spawn`` (measured at ~205 MB
+    pickled per worker expanding to ~2.5 GB live on a tensorflow-scale
+    repo). Linux got this for free as
     the platform default through Python 3.13; choosing the context
     explicitly both extends it to macOS and pins it on Linux before
     3.14's ``forkserver`` default flip silently takes it away
@@ -812,7 +798,7 @@ def _choose_pool_mp_context() -> BaseContext:
     problem host back out, ``fork`` is an explicit default. A
     first-attempt failure under ``fork`` is retried under ``spawn`` by
     ``run_pooled_with_retry``, so a host where ``fork`` misbehaves
-    degrades to exactly the pre-round-30 behavior at the cost of one
+    degrades to exactly the spawn-only behavior at the cost of one
     wasted attempt.
 
     Returns:
@@ -836,7 +822,7 @@ class PoolStalledError(RuntimeError):
 
     Raised by ``run_pooled_with_retry`` when a worker never returns a
     result within ``POOL_RESULT_TIMEOUT_S`` -- almost always a wedged
-    worker spawn (round 21 Track A), not a legitimately slow
+    worker spawn, not a legitimately slow
     computation. Deliberately distinct from ``BrokenProcessPool``
     (which the pool itself raises on an outright crash): a stalled
     worker that never starts or never finishes doesn't necessarily
@@ -847,7 +833,7 @@ class PoolStalledError(RuntimeError):
 def _pool_retry_note(what: str, retry_workers: int, forked: bool) -> None:
     """Print the process-pool-retry disclosure note to stderr.
 
-    Mirrors round 15's ``_maybe_warn_sequential`` pattern (a one-line
+    Mirrors ``diff._maybe_warn_sequential``'s pattern (a one-line
     ``note:`` on stderr before a slower fallback path runs) so a
     caller that ends up waiting longer for a reduced-parallelism retry
     isn't left in the dark about why. When the first attempt ran under
@@ -874,24 +860,24 @@ def run_pooled_with_retry(
     """Run a process-pool step, retrying once at reduced parallelism if
     the pool itself breaks.
 
-    Round 30 (c): also chooses the pool's start method. The first
+    Also chooses the pool's start method. The first
     attempt runs under ``_pool_mp_context()`` (``fork`` from a provably
     single-threaded POSIX parent, ``spawn`` otherwise); the retry
     always runs under ``spawn``. A first-attempt failure under ``fork``
     is at least as likely to be fork-specific (a macOS Objective-C
     ``+initialize`` abort in a worker is delivered as exactly
-    ``BrokenProcessPool``) as it is the round-17 contention case, and
+    ``BrokenProcessPool``) as it is the host-contention case, and
     retrying under ``spawn`` covers both causes at once -- ``fork`` is
     strictly opportunistic, and its worst case is one wasted attempt
     followed by the previously-shipped behavior.
 
     ``BrokenProcessPool`` most often means sibling multiprocessing
     contention on the host machine starved worker-process startup
-    (round 17), not that process pools are fundamentally broken here
+    not that process pools are fundamentally broken here
     -- a bounded retry at a small but nonzero worker count is far more
     likely to survive the same transient contention than either
     repeating at full parallelism (same risk) or falling straight to
-    fully-sequential (round 15 measured 5+ minutes cold on a
+    fully-sequential (measured at 5+ minutes cold on a
     tensorflow-scale repo; silently downgrading an in-flight MCP call
     to that is its own trap).
 
@@ -902,12 +888,12 @@ def run_pooled_with_retry(
     -- a genuinely wedged or resource-exhausted machine should surface
     a clear error, not hang retrying indefinitely. The delay exists
     because an immediate retry can land in the exact same transient
-    window that caused the first failure (round 23 §15: observed right
+    window that caused the first failure (observed right
     after ``uv tool install --reinstall``, where the retry itself also
     failed -- see ``_POOL_RETRY_DELAY_S``'s comment).
 
     Before every attempt, pins ``multiprocessing``'s spawn executable
-    to this process's own ``sys.executable`` (round 21 Track A: cline
+    to this process's own ``sys.executable`` (cline
     reproduced a spawned worker resolving a completely different
     Python interpreter -- the system Anaconda install -- than its own
     parent's ``uv tool``-managed venv, under host CPU contention,
@@ -975,7 +961,7 @@ def _run_pool_bounded(
     site's ``with ProcessPoolExecutor(...) as pool:`` block on
     ``ProcessPoolExecutor.__exit__``'s default ``shutdown(wait=True)``.
 
-    Round 22 claude-code.md finding: every pool call site used to be a
+    Every pool call site used to be a
     bare ``with ProcessPoolExecutor(...) as pool:`` around a
     ``future.result(timeout=POOL_RESULT_TIMEOUT_S)`` loop. When that
     ``.result()`` call raised ``PoolTimeoutError``, the exception
@@ -1033,8 +1019,8 @@ def _run_pool_bounded(
 # Worker-process-local copies of the shared, read-only indices every
 # resolution pass needs. Populated once per worker process (not once
 # per submitted chunk) by ``_init_resolve_worker``, so that
-# oversubscribing a pool to many more chunks than workers (round 17,
-# see ``_RESOLVE_CHUNK_OVERSUBSCRIPTION``) doesn't also multiply how
+# oversubscribing a pool to many more chunks than workers (see
+# ``_RESOLVE_CHUNK_OVERSUBSCRIPTION``) doesn't also multiply how
 # many times these (potentially large -- tens of MB on a big repo)
 # structures get pickled across process boundaries. ``None`` outside a
 # pool worker process; every pass that reads these asserts non-``None``
@@ -1120,8 +1106,7 @@ def resolve(
             reusable; refs/heritage/imports/throws/catches are always
             recomputed in full — they are a small share of the cost and
             caching them would drag in path-set and tsconfig
-            invalidation questions the call pass doesn't have. See
-            ``.features/fixes/round30/01-incremental-resolution.md``.
+            invalidation questions the call pass doesn't have.
 
     Returns:
         The resolved ``CallGraph`` with bidirectional adjacency.
@@ -1136,7 +1121,7 @@ def resolve(
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
 
-    # Round 30 (c): under fork-context pools, CPython refcounting
+    # Under fork-context pools, CPython refcounting
     # dirties copy-on-write pages on mere *reads*, so each worker
     # progressively re-privatizes index pages as it touches them.
     # gc.freeze() moves everything currently alive (the FileMaps and
@@ -1334,7 +1319,7 @@ def _resolve_all(
     result, same cost, no pool startup overhead paid for nothing. That
     now happens on repos well above ``_RESOLVE_PARALLEL_MIN_ITEMS``
     whose work doesn't justify a second worker's private index copy,
-    which is deliberate: round 30 measured spring-boot (285,609 calls)
+    which is deliberate: spring-boot (285,609 calls) measured
     losing to sequential at 11 workers. Otherwise ``files`` is split
     into up to ``_pool_workers``-many x oversubscription
     chunks; each chunk resolves independently against the same
@@ -1347,7 +1332,7 @@ def _resolve_all(
     ran or which one finished first — a parallel run must be
     byte-identical to a sequential one.
 
-    A ``BrokenProcessPool`` on the parallel path (round 17: sibling
+    A ``BrokenProcessPool`` on the parallel path (sibling
     multiprocessing contention on the host machine) gets one bounded
     retry at reduced parallelism via ``run_pooled_with_retry`` before
     propagating — see that function's docstring.
@@ -1590,10 +1575,10 @@ def _resolve_ref(
     caller_id = ref.caller_id or f"{ref.path}{MODULE_CALLER_SUFFIX}"
     candidates = index.get(ref.name, [])
     if ref.bound is not None:
-        # The identifier names a parameter or a local (round 32 Track
-        # 5b). Not the candidate pre-filter ``_pick_candidate`` warns
-        # about: nothing is being narrowed, the reference itself is
-        # impossible, so dropping it can only ever remove an edge.
+        # The identifier names a parameter or a local. Not the candidate
+        # pre-filter ``_pick_candidate`` warns about: nothing is being
+        # narrowed, the reference itself is impossible, so dropping it
+        # can only ever remove an edge.
         fixture = _fixture_param_target(ref, candidates)
         if fixture is not None and fixture.id != caller_id:
             edges.setdefault((caller_id, fixture.id), set()).add(ref.line)
@@ -1686,7 +1671,7 @@ def _ref_target_visible(
 ) -> bool:
     """Whether the file holding ``ref`` could name ``target`` at all.
 
-    Round 32 Track 5. The ladder ``_resolve_ref`` shares with calls
+    The ladder ``_resolve_ref`` shares with calls
     ends in name-only rungs (sole candidate, last resort). For a call
     that is a fair guess: ``count(x)`` on a local is rare. For a bare
     value identifier it is not: ``const count = ...; if (count >= 3)``
@@ -1714,14 +1699,14 @@ def _ref_target_visible(
       TypeScript treats a file with neither ``import`` nor ``export``.
       A file that exports something is a module and shares nothing, so
       a free ``process`` or ``performance`` in it is the runtime
-      global, not ``cronScheduler.ts::process`` (Track 5b: 33 such
+      global, not ``cronScheduler.ts::process`` (33 such
       sites on claude-code, 49 on cline).
     - A target declared in a ``.d.ts``: ambient types are global.
 
     Not this function's job: a local that shadows a *same-file* or
     an *imported* symbol (claude-code ``utils/ide.ts`` imports
     ``errorMessage`` and rebinds it in a catch block), or any local in
-    a zero-import file. Those never get here since Track 5b: the
+    a zero-import file. Those never get here: the
     extractor tags them (``RawRef.bound``) and ``_resolve_ref`` drops
     them before the ladder runs.
     """
@@ -1784,25 +1769,23 @@ def resolve_heritage(
     call so ``_import_match``'s Rust crate-aware fallback step (see
     ``_rust_crate_hint_matches``) can resolve a heritage clause naming
     a crate-root re-exported trait/type against a same-named
-    repo-wide collision — round 22 zed.md §3.2 (``impl Render for
+    repo-wide collision (``impl Render for
     Editor`` previously fell through to ``heritage_ambiguous`` because
     ``Render``'s own declaring file, ``element.rs``, is never a
-    segment of its ``use gpui::Render;`` import source). Round 23
-    (``.features/plans/round23/
-    09-subtypes-ambiguous-resolution-rate.md``) added two things: Fix
-    A, a ``call.receiver``-as-crate-hint step in ``_import_match`` for
+    segment of its ``use gpui::Render;`` import source). Two later
+    additions: a ``call.receiver``-as-crate-hint step in ``_import_match`` for
     the fully-qualified ``impl gpui::Render for X`` spelling, which has
     no ``use`` binding for either ``Render`` or ``gpui`` to build a
-    hint from otherwise (see ``_rust_receiver_crate_match``); and Fix
-    B, switching this from the single-root ``_rust_crate_roots_index``
+    hint from otherwise (see ``_rust_receiver_crate_match``); and
+    switching this from the single-root ``_rust_crate_roots_index``
     to the collision-aware ``_rust_crate_roots_index_all`` (one crate
     name can map to multiple root directories, e.g. a real crate plus
     a same-named test-fixture directory) after live measurement
     against zed showed the single-root version was a genuine 50/50
     coin flip between "every affected clause resolves correctly" and
     "every affected clause silently resolves to the wrong crate's
-    same-named symbol" -- see ``_rust_crate_hint_matches``'s docstring
-    and the design doc's "Implemented" note for the numbers.
+    same-named symbol" -- see ``_rust_crate_hint_matches``'s
+    docstring.
 
     Args:
         files: Per-file extraction results.
@@ -1810,7 +1793,7 @@ def resolve_heritage(
             ``load_workspace_packages``), or ``None``. Without it, a
             clause whose base is imported by package name (``import
             type { ApiHandler } from "@cline/llms"``) is misfiled as
-            external -- round 31 cline.md §4.1 Bug A.
+            external.
 
     Returns:
         ``(heritage_edges, heritage_out, heritage_in,
@@ -1823,8 +1806,7 @@ def resolve_heritage(
         rather than a ``CallGraph`` method, since ``resolve()`` just
         assigns the pieces onto the graph it already built, exactly as
         it already does for ``resolve_refs()``'s result.
-        ``synthetic_tiebreak_count`` (round 24, ``.features/plans/
-        round24/03-heritage-crate-decoy-tiebreak.md``) is how many of
+        ``synthetic_tiebreak_count`` is how many of
         the resolved edges above were resolved via
         ``_prefer_non_synthetic_crate_match`` rather than an
         unambiguous structural match — a convention-based guess about
@@ -1832,7 +1814,7 @@ def resolve_heritage(
         ``CallGraph.heritage_synthetic_tiebreak_count`` so ``query
         subtypes``/``supertypes`` can disclose it rather than blending
         it silently into every other, more certain resolution.
-        ``unplaced_subtype_count`` (round 31 A3) is how many clauses
+        ``unplaced_subtype_count`` is how many clauses
         with an empty ``subtype_id`` (see ``RawHeritage.subtype_name``)
         were dropped because ``_resolve_heritage_subtype_id`` found
         zero or 2+ same-crate candidates for the written type name —
@@ -1933,7 +1915,7 @@ def _record_external_heritage(
     on ``(subtype_id, target)`` for resolved edges (target = supertype
     id) and for external ones (target = the clause text), which never
     collide since a symbol id always contains ``::``/``:`` and a bare
-    clause text of that shape would have resolved. Round 33 Track 6e.
+    clause text of that shape would have resolved.
     """
     key = (h.subtype_id, h.text)
     external.setdefault(key, set()).add(h.line)
@@ -1945,7 +1927,7 @@ def _resolve_heritage_subtype_id(
 ) -> str | None:
     """Resolve a cross-file Rust ``impl`` clause's own subject symbol.
 
-    Round 31 zed coverage pass F2/A3: ``extractor._heritage_rust_impl``
+    ``extractor._heritage_rust_impl``
     emits a clause with ``subtype_id=""`` and ``subtype_name`` set
     when the implementing type isn't defined in the same file as the
     ``impl`` block — an ordinary Rust layout
@@ -1973,8 +1955,8 @@ def _resolve_heritage_subtype_id(
         ``resolve_heritage``'s ``unplaced_subtype_count``).
     """
     own_crate = _rust_crate_dir(h.path)
-    # A ``type`` alias is never the placement (round 31 F6b started
-    # indexing them). ``subtype_name`` is the bare last segment, so
+    # A ``type`` alias is never the placement (they are indexed as
+    # symbols). ``subtype_name`` is the bare last segment, so
     # zed's ``impl<T> TideResultExt for tide::Result<T>`` would land on
     # collab's own unrelated ``pub type Result<T, E = Error>``, the
     # crate's only ``Result``. An alias names someone else's type by
@@ -1994,7 +1976,7 @@ def _narrow_impl_candidates_to_traits(
 ) -> list[Symbol]:
     """Narrow ``impl Trait for Type`` candidates to trait-kind only.
 
-    Round 31 zed coverage pass F8: heritage candidates were filtered
+    Heritage candidates used to be filtered
     only to ``TYPE_KINDS`` (every type kind), but a Rust ``impl X for
     Y`` clause's ``X`` can only ever name a *trait* — a same-named
     struct/enum/other type is never a legal candidate (``impl
@@ -2005,10 +1987,10 @@ def _narrow_impl_candidates_to_traits(
     struct half of every one of those pairs was pure noise dragging a
     resolvable clause into "ambiguous."
 
-    Same shape as ``query._sole_type_candidate`` (round 31 P3.4),
+    Same shape as ``query._sole_type_candidate``,
     applied here at resolve time instead of at query time: only
-    narrows when doing so leaves at least one candidate (rule 0.3 in
-    the round 31 fix design — "no evidence is not negative evidence").
+    narrows when doing so leaves at least one candidate ("no evidence
+    is not negative evidence").
     A clause whose name matches *no* trait at all keeps its full,
     unnarrowed candidate list — it may still resolve some other way
     (same-file, import hint) that this kind filter alone can't rule
@@ -2032,7 +2014,7 @@ def _narrow_impl_candidates_to_traits(
     # No trait by that name. The "keep everything" allowance above is
     # for kinds that *might* be the target; a Rust ``type`` alias never
     # is (``impl Alias for Y`` doesn't compile, trait aliases being
-    # unstable). Round 31 F6b started indexing those aliases, and
+    # unstable). Those aliases are indexed as symbols, and
     # without this veto zed's ``impl ActionHandler for
     # A11yActionHandler`` (accesskit's trait) resolved to ``ui``'s
     # unrelated ``type ActionHandler = Box<dyn Fn(..)>``, its only
@@ -2071,8 +2053,8 @@ def _resolve_one_heritage(
     it, ``_pick_candidate``'s ``_import_match`` step has no way to
     disambiguate a same-named C/C++ heritage base via "which one does
     this file's own ``#include`` list actually pull in," which is the
-    *only* signal available for that language pair (round 22
-    tensorflow.md §5: ``resolve_heritage`` never built or threaded this
+    *only* signal available for that language pair
+    (``resolve_heritage`` once never built or threaded this
     at all, unlike ``_resolve_files_chunk``, losing 828 of ~829 real
     ``OpKernel`` subtype edges to ``ambiguous``).
 
@@ -2082,12 +2064,12 @@ def _resolve_one_heritage(
     ``resolve_heritage()``), passed straight through to
     ``_pick_candidate``'s own ``crate_roots`` parameter -- see that
     docstring and ``_rust_crate_hint_matches`` for what it fixes
-    (round 22 zed.md §3.2: a crate-root re-exported Rust trait
+    (a crate-root re-exported Rust trait
     colliding with a same-named type elsewhere in the repo).
 
     ``tiebreak_hits``, when given, is passed straight through to
-    ``_pick_candidate``'s own parameter of the same name (round 24
-    heritage crate-decoy tiebreak) so ``resolve_heritage()`` can count
+    ``_pick_candidate``'s own parameter of the same name (the heritage
+    crate-decoy tiebreak) so ``resolve_heritage()`` can count
     how many resolved edges in this repo rest on that convention-based
     guess.
     """
@@ -2153,22 +2135,22 @@ def _hintless_decoy_tiebreak(
 ) -> Symbol | None:
     """Last-resort Rust fixture-decoy tiebreak for a clause with no hint.
 
-    Round 24's ``_prefer_non_synthetic_crate_match`` only ever ran
-    inside the crate-hint steps, i.e. when the file names the crate
-    (``use gpui::Render;`` / ``impl gpui::Render for X``). Round 31
-    zed.md measured what that leaves behind on its own motivating
-    example: 174 of 358 ``impl Render for`` clauses resolved, 184
-    ambiguous -- and **every one of the 184 had the identical two
-    candidates**, the real ``crates/gpui/src/element.rs::Render`` and
-    the ``tooling/lints/test_fixture/gpui`` stand-in. Those files reach
+    ``_prefer_non_synthetic_crate_match`` originally only ran inside the
+    crate-hint steps, i.e. when the file names the crate (``use
+    gpui::Render;`` / ``impl gpui::Render for X``). On zed, its own
+    motivating example, that left: 174 of 358 ``impl Render for``
+    clauses resolved, 184 ambiguous -- and **every one of the 184 had
+    the identical two candidates**, the real
+    ``crates/gpui/src/element.rs::Render`` and the
+    ``tooling/lints/test_fixture/gpui`` stand-in. Those files reach
     ``Render`` through a glob (``use ui::prelude::*;``, 165 of them) or
-    a re-exporting crate (``use ui::Render;``, 19), so there is no
-    crate name to build a hint from, and there never will be short of
-    tracing glob re-exports.
+    a re-exporting crate (``use ui::Render;``, 19), so there is no crate
+    name to build a hint from, and there never will be short of tracing
+    glob re-exports.
 
     The same convention answers it without a hint: real code does not
-    implement a test fixture's stand-in trait. Reuses the round-24
-    function whole, so its guarantees carry over unchanged -- a clause
+    implement a test fixture's stand-in trait. Reuses that function
+    whole, so its guarantees carry over unchanged -- a clause
     written *inside* the fixture crate resolves to the fixture's own
     trait (the structural self-crate check, tried first), exactly one
     non-synthetic survivor is required, and every edge resolved this
@@ -2210,7 +2192,7 @@ def _nearer_to_a_decoy(path: str, candidates: list[Symbol]) -> bool:
     (``tooling/lints/ui/*.rs``) carry no ``test_fixture`` segment, yet
     ``tooling/lints/src/lib.rs`` compiles them with
     ``--extern=gpui=<fixture rlib>``, so their ``use gpui::*;`` is the
-    stand-in. Round 31's zed coverage pass caught 7 such edges this
+    stand-in. On zed, 7 such edges were caught that this
     tiebreak had newly pointed at the real trait (they were honestly
     ambiguous before it existed). The build flag is unknowable
     statically; shared directory depth is a usable proxy.
@@ -2271,8 +2253,7 @@ def _add_heritage_edge(
 # all (``ValueError``, ``IOException``, ``std::runtime_error``), so
 # ``_resolve_type_name`` only tries the cheap, high-confidence steps
 # (unique repo-wide name, same-file, import hint) before giving up as
-# "external" — a design choice, not a shortcut (see the design doc's
-# "Resolution" section).
+# "external" — a design choice, not a shortcut.
 
 
 def _resolve_type_name(
@@ -2677,7 +2658,7 @@ def _add_call_and_constructor(
 ) -> None:
     """Record the resolved call edge, plus a constructor edge if any.
 
-    See ``_constructor_of`` (module docstring, bug #2): a call or
+    See ``_constructor_of`` (module docstring): a call or
     construction that resolves to a class-shaped symbol also counts
     toward that class's own explicit constructor method's fan-in, when
     the language extracted one as its own symbol.
@@ -2719,8 +2700,8 @@ def _language_filtered(
     versa — no step later in ``_pick_candidate``'s ladder ever compares
     a candidate's language against the call/heritage site's own, so a
     same-bare-name symbol in a completely unrelated language could
-    otherwise win a later, weaker heuristic (round 21 tensorflow.md
-    §5: ``errors::InvalidArgumentError`` calls resolving to a same-
+    otherwise win a later, weaker heuristic (tensorflow's
+    ``errors::InvalidArgumentError`` calls resolving to a same-
     named, unrelated Python class purely because it was the sole
     non-method candidate left once ``_bare_call_non_method_match``
     ran). ``call.path``'s registry language (Tier-1 only — every
@@ -2737,9 +2718,8 @@ def _language_filtered(
     dekko already treats as one interoperating unit elsewhere in this
     module (``_WHOLE_FILE_IMPORT_LANGUAGES``, ``_IMPORT_RESOLVERS``).
 
-    This **can legitimately return an empty list** — round 21's
-    residual tensorflow finding (`.features/fixes/resolver-vendored-
-    exclusion-false-match.md`): when the real C++ target is itself
+    This **can legitimately return an empty list** (seen on
+    tensorflow): when the real C++ target is itself
     excluded from the index (e.g. it lives under a vendored/excluded
     directory like ``third_party/``) and the only remaining bare-name
     candidate is a same-named symbol in a wholly unrelated language
@@ -2769,8 +2749,7 @@ def _language_filtered(
     return [c for c in candidates if c.language in family]
 
 
-# Structural layer 2 (`.features/plans/round25/
-# 06-structural-layer2-arity-resolution.md`): the single-candidate
+# Structural layer 2: the single-candidate
 # rung's "nothing else worked, but there's only one name in the whole
 # repo, guess it" fast path is itself only as trustworthy as its one
 # remaining piece of evidence -- the name. This adds a second,
@@ -2827,7 +2806,7 @@ def _is_receiver_param(param: Param, language: str) -> bool:
         # (``&'a self``, ``&'a mut self``) used to fall through as an
         # ordinary parameter, which put the method's arity one too
         # high and made ``_sole_candidate_match`` reject a correct
-        # lone target (round 32, live-testing on zed:
+        # lone target (on zed:
         # ``syntax_map.layers(&buffer)`` against ``fn layers<'a>(&'a
         # self, buffer: ..)``). Rust reserves ``self`` for the
         # receiver, so a parameter whose name ends in it is one.
@@ -2923,7 +2902,7 @@ class _Noise:
     """Sentinel: ``_pick_candidate`` determined this call is noise
     (``_is_noise_call`` fired), not a genuine multi-candidate collision
     -- distinguishes the two ``None``-shaped outcomes so the caller can
-    bucket correctly (round 22 cline.md §3.1: a noise-suppressed call
+    bucket correctly (a noise-suppressed call
     with exactly one real candidate used to be recorded as ambiguous,
     identically to a real 2+-candidate collision, since both paths
     returned bare ``None``)."""
@@ -2970,13 +2949,13 @@ def _pick_candidate_ladder(
 
     When the noise guard fires, this returns the ``_NOISE`` sentinel
     rather than ``None`` — distinct from "genuinely ambiguous, 2+ real
-    candidates with no disambiguating signal" (round 22 cline.md §3.1:
-    a noise-suppressed call with exactly *one* real candidate was
-    previously indistinguishable from a real ambiguous collision, since
-    both returned bare ``None``, so every noise-suppressed call got
-    recorded via ``_record_ambiguous`` — contradicting that function's
-    own "2+ candidates" docstring and inflating the ambiguous count on
-    common built-in method names like ``trim``). Callers that pass a
+    candidates with no disambiguating signal" (a noise-suppressed call
+    with exactly *one* real candidate was previously indistinguishable
+    from a real ambiguous collision, since both returned bare ``None``,
+    so every noise-suppressed call got recorded via
+    ``_record_ambiguous`` — contradicting that function's own "2+
+    candidates" docstring and inflating the ambiguous count on common
+    built-in method names like ``trim``). Callers that pass a
     non-``None`` ``repo_stems`` must check for ``_NOISE`` before
     treating a non-``None`` return as a resolved ``Symbol``.
 
@@ -2991,13 +2970,12 @@ def _pick_candidate_ladder(
     crate-aware fallback step (see ``_rust_crate_hint_matches``) to
     resolve a crate-root re-exported Rust trait/type against a
     same-named repo-wide collision that its own file-stem can't reach.
-    Currently only threaded in by ``resolve_heritage()`` (round 22
-    zed.md §3.2, the ``query subtypes``/heritage-resolution path);
+    Currently only threaded in by ``resolve_heritage()`` (the
+    ``query subtypes``/heritage-resolution path);
     ``resolve()``'s call/ref resolution path leaves this ``None``.
 
     ``tiebreak_hits``, when given, is a mutable single-element counter
-    passed straight through to ``_import_match`` (round 24, ``.features/
-    plans/round24/03-heritage-crate-decoy-tiebreak.md``) -- incremented
+    passed straight through to ``_import_match`` -- incremented
     whenever a crate-root collision is broken by preferring the one
     candidate whose crate root doesn't look like a test-fixture/vendor
     stand-in. Same threading scope as ``crate_roots``: only
@@ -3008,16 +2986,15 @@ def _pick_candidate_ladder(
     language *family* (see ``_language_filtered`` and
     ``_LANGUAGE_FAMILIES``) — a same-bare-name candidate in a language
     that can never legitimately be the target is removed before it
-    gets a chance to win one of the later, weaker heuristics (round 21
-    tensorflow.md §5). This narrowing can leave ``candidates`` empty
+    gets a chance to win one of the later, weaker heuristics. This
+    narrowing can leave ``candidates`` empty
     (no same-language *or* same-family candidate exists), in which
     case every remaining ladder step below is a no-op over an empty
     list and this function returns ``None`` — the caller
     (``_resolve_call``/``_resolve_ref``/``_resolve_one_heritage``)
     then records the call as ambiguous against the original,
     unfiltered candidate list, rather than silently resolving through
-    a candidate in a definitively unrelated language family (see
-    `.features/fixes/resolver-vendored-exclusion-false-match.md`).
+    a candidate in a definitively unrelated language family.
     ``same_file`` needs no equivalent filtering: every symbol in it is
     already, by construction, in the same file (and therefore the
     same language) as the call site.
@@ -3085,13 +3062,13 @@ def _pick_candidate(
 
     See ``_pick_candidate_ladder`` for the ladder itself and every
     parameter. The one rule applied here: a Rust dot-call
-    (``recv.name(..)``) can never reach a free function (round 31 zed
-    coverage pass F11: ``.px(..)`` landing on ``fn px``, ``x.clone()``
+    (``recv.name(..)``) can never reach a free function (zed's
+    ``.px(..)`` landing on ``fn px``, ``x.clone()``
     on a test module's ``fn clone``).
 
     It is a *veto on the result*, deliberately not a filter on the
     candidates going in. The first implementation pre-filtered, and
-    integration review measured what that did on zed: removing a free
+    measuring that on zed showed: removing a free
     ``fn or`` left ``EnvVar.or`` as the lone survivor, so 137
     ``Option::or`` calls (``stdout.or(stderr)``) newly resolved to it;
     removing a same-file free ``fn focus_handle`` left one same-file
@@ -3118,7 +3095,8 @@ def _pick_candidate(
         and _rust_is_dot_call(call)
         and (not _drop_free_functions([picked]) or picked.kind in TYPE_KINDS)
     ):
-        # F11's rule, plus its Track 4 sibling: ``recv.Name(..)`` can no
+        # The dot-call rule, plus its type sibling: ``recv.Name(..)``
+        # can no
         # more construct a type than reach a free function
         # (``handler.Update()``, Windows COM, landing on
         # ``struct Update``).
@@ -3146,17 +3124,16 @@ def _sole_candidate_match(
     this guard for exactly the bare-call shape it exists to cover.
 
     A rejected sole candidate is **not** ambiguous: a collision needs
-    two live candidates, and this call has none. Round 31 cline.md
-    §4.2: 542 of cline's 6,271 "ambiguous" call entries had exactly one
-    candidate, all of this shape -- ``arr.at(-1)`` (1 arg) against the
-    repo's only ``at``, a local ``at(r, c)``; ``Buffer.byteLength(s,
-    "utf8")`` against a one-parameter ``byteLength(value)``. Filing
-    them as ambiguous made ``query symbol at`` print "+86 additional
-    call site(s) resolved ambiguously" about calls that provably
-    cannot be its own, and showed up in ``dekko ambiguous --by name``
-    as the self-contradictory "avg 1.0 candidates". Same defect class
-    and same remedy as the round 22 ``_NOISE`` split: no plausible
-    repo target means external.
+    two live candidates, and this call has none. 542 of cline's 6,271
+    "ambiguous" call entries had exactly one candidate, all of this
+    shape -- ``arr.at(-1)`` (1 arg) against the repo's only ``at``, a
+    local ``at(r, c)``; ``Buffer.byteLength(s, "utf8")`` against a
+    one-parameter ``byteLength(value)``. Filing them as ambiguous made
+    ``query symbol at`` print "+86 additional call site(s) resolved
+    ambiguously" about calls that provably cannot be its own, and showed
+    up in ``dekko ambiguous --by name`` as the self-contradictory "avg
+    1.0 candidates". Same defect class and same remedy as the ``_NOISE``
+    split: no plausible repo target means external.
 
     Args:
         call: The raw call/reference/heritage clause being resolved.
@@ -3206,19 +3183,19 @@ def _bare_call_non_method_match(
     """Prefer a lone non-method candidate for a receiverless call.
 
     A syntactically bare call/reference (``call.receiver`` falsy) can
-    never invoke a *method* — every language dekko parses requires
-    some receiver/qualifier at the call site to reach a symbol with a
+    never invoke a *method* — every language dekko parses requires some
+    receiver/qualifier at the call site to reach a symbol with a
     receiver (Go's ``recv.Method()``, Python/JS/TS's ``obj.method()``,
     Rust/C++'s ``Type::method()``). When a bare name collides with an
     unrelated method elsewhere in the repo, narrowing to non-method
     candidates can turn a real name collision into a correct
-    single-candidate resolution. Round-12 master report §3.2:
-    awesome-go's bare, same-package ``Generate(tt.input)`` (a call to
-    ``pkg/slug``'s free function ``Generate``) misresolved as
-    ambiguous against an unrelated method with a completely different
-    receiver/arity, ``(g *IDGenerator) Generate(...)`` in
-    ``pkg/markdown`` — this is trivially distinguishable, since a bare
-    call can never mean the method.
+    single-candidate resolution. For example, awesome-go's bare,
+    same-package ``Generate(tt.input)`` (a call to ``pkg/slug``'s free
+    function ``Generate``) misresolved as ambiguous against an unrelated
+    method with a completely different receiver/arity, ``(g
+    *IDGenerator) Generate(...)`` in ``pkg/markdown`` — this is
+    trivially distinguishable, since a bare call can never mean the
+    method.
 
     Only used as a last resort, after every earlier ladder step
     (receiver-aware matches, same-file, import hints, the noise
@@ -3242,8 +3219,7 @@ def _bare_call_non_method_match(
 # globals (vitest/jest/mocha, commonly injected without an explicit
 # import via ``globals: true``) — a same-named free function/shim a
 # repo happens to define is essentially never what a *bare* call to
-# one of these names means. See
-# ``test-repos/reports/investigation-1.2-resolver-fanin.md``: cline's
+# one of these names means. On cline,
 # ``interface String`` (a TS ``declare global`` augmentation, not a
 # real definition) was credited with 548 calls that were actually
 # ``String(...)`` casts; its ``expect``/``describe`` hotspots were an
@@ -3262,35 +3238,34 @@ _AMBIENT_GLOBAL_NAMES = frozenset(
 # Well-known String/Array/Object prototype method names. When a
 # *receiver-qualified* call reaches this point in the ladder, every
 # receiver-aware disambiguation step (self/this, typed parameter,
-# same-file, import hint) has already had its shot and failed — the
-# only remaining "evidence" for the single-candidate fast path is
-# "this name happens to be otherwise unique in the repo," which is
-# false for these names precisely because they are called constantly
-# on ordinary local variables (``opts.config.trim()``) that are never
-# provably typed as the repo's own like-named class. See the same
-# investigation report: cline's ``trim`` (fan-in 1,404, true fan-in 8)
-# was almost entirely misattributed ``String.prototype.trim()`` calls.
-# ``get``/``resolve``/``create`` added round 22 (cline.md §3.1): confirmed
-# leaking through with inflated ``avg_candidates`` in cline's own report
+# same-file, import hint) has already had its shot and failed — the only
+# remaining "evidence" for the single-candidate fast path is "this name
+# happens to be otherwise unique in the repo," which is false for these
+# names precisely because they are called constantly on ordinary local
+# variables (``opts.config.trim()``) that are never provably typed as
+# the repo's own like-named class. Cline's ``trim`` (fan-in 1,404, true
+# fan-in 8) was almost entirely misattributed
+# ``String.prototype.trim()`` calls. ``get``/``resolve``/``create``:
+# confirmed leaking through with inflated ``avg_candidates`` on cline
 # (``get`` averaged 32.0 candidates -- almost certainly
-# ``Map.get()``/``Promise.resolve()``/``Object.create()`` noise, not real
-# repo-symbol collisions). ``has``/``now`` added round 23
-# (cline.md §2.1): a closure-local ``const now = () => Date.now()``
-# was credited with every ``Date.now()``/``performance.now()`` call in
-# the repo (404 misattributed sites), and ``Map.prototype.has``/
-# ``Set.prototype.has``/``Reflect.has`` calls through untyped
-# receivers inflated an unrelated repo-defined ``has`` to 436
-# misattributed sites vs. 0 credible. ``on``/``once``/``off``/
-# ``emit``/``addListener``/``removeListener`` added round 25
-# (cline.md Finding 2): a debug-harness ``CdpClient.on`` (fan-in 95
-# reported, resolver "fully confident") silently absorbed an unrelated
-# plain Node.js ``EventEmitter``/stream ``.on("data", handler)`` call
-# elsewhere in the repo -- the same false-positive shape as ``has``/
-# ``now`` above, just for Node's core ``EventEmitter`` idiom instead of
-# ``Map``/``Date``. ``addEventListener``/``removeEventListener``/
-# ``dispatchEvent`` added alongside for the browser/DOM
-# ``EventTarget`` interface, the same idiom family, common in VS Code
-# extension code (both cline and claude-code are).
+# ``Map.get()``/``Promise.resolve()``/``Object.create()`` noise, not
+# real repo-symbol collisions). ``has``/``now``: a closure-local ``const
+# now = () => Date.now()`` was credited with every
+# ``Date.now()``/``performance.now()`` call in the repo (404
+# misattributed sites), and ``Map.prototype.has``/
+# ``Set.prototype.has``/``Reflect.has`` calls through untyped receivers
+# inflated an unrelated repo-defined ``has`` to 436 misattributed sites
+# vs. 0 credible. ``on``/``once``/``off``/
+# ``emit``/``addListener``/``removeListener``: a debug-harness
+# ``CdpClient.on`` (fan-in 95 reported, resolver "fully confident")
+# silently absorbed an unrelated plain Node.js ``EventEmitter``/stream
+# ``.on("data", handler)`` call elsewhere in the repo -- the same
+# false-positive shape as ``has``/``now`` above, just for Node's core
+# ``EventEmitter`` idiom instead of ``Map``/``Date``.
+# ``addEventListener``/``removeEventListener``/``dispatchEvent``
+# added alongside for the browser/DOM ``EventTarget`` interface, the same
+# idiom family, common in VS Code extension code (both cline and
+# claude-code are).
 _BUILTIN_METHOD_NAMES = frozenset(
     {
         "trim", "trimStart", "trimEnd", "toString", "valueOf",
@@ -3305,30 +3280,26 @@ _BUILTIN_METHOD_NAMES = frozenset(
     }
 )  # fmt: skip
 
-# Chain-call method names from popular fluent/builder-pattern
-# libraries (Zod's schema builder, Commander.js's CLI builder, and the
-# like) — ``z.string().describe("...")``, ``program.description("...")``.
-# Same shape of false-positive as ``_BUILTIN_METHOD_NAMES``: a
+# Chain-call method names from popular fluent/builder-pattern libraries
+# (Zod's schema builder, Commander.js's CLI builder, and the like) —
+# ``z.string().describe("...")``, ``program.description("...")``. Same
+# shape of false-positive as ``_BUILTIN_METHOD_NAMES``: a
 # receiver-qualified call whose receiver isn't provably typed as an
 # in-repo class, so the only "evidence" for the single-candidate fast
-# path is name uniqueness — which fails whenever a repo also happens
-# to define its own like-named method/function. Confirmed live against
+# path is name uniqueness — which fails whenever a repo also happens to
+# define its own like-named method/function. Confirmed live against
 # cline twice: ``describe`` (a Zod ``.describe()`` schema call) still
 # read fan-in 60 after ``_BUILTIN_METHOD_NAMES`` alone, because
-# ``describe`` isn't a String/Array/Object prototype method — see
-# ``test-repos/reports/investigation-1.2-resolver-fanin.md``'s
-# "residual gap" note; and ``description`` (a Commander.js
-# ``.description()`` builder call on a local ``Command``/``program``
-# instance) read fan-in 14, all credited to an unrelated top-level
-# ``const description = ...`` binding in a separate script — see
-# ``test-repos/reports/11-tokentest-7repo-postdaemonfix/cline.md``
-# (master report finding #5). Originally named
-# ``_SCHEMA_BUILDER_METHOD_NAMES`` for the Zod-only case; renamed once
-# a second, unrelated fluent-builder library hit the exact same
-# false-positive shape, since "schema builder" no longer describes the
-# whole set. Extend here whenever another fluent/chain-builder
-# collision turns up — this is the third occurrence of the same
-# pattern class, not a new one.
+# ``describe`` isn't a String/Array/Object prototype method; and
+# ``description`` (a Commander.js ``.description()`` builder call on a
+# local ``Command``/``program`` instance) read fan-in 14, all credited
+# to an unrelated top-level ``const description = ...`` binding in a
+# separate script. Originally named ``_SCHEMA_BUILDER_METHOD_NAMES`` for
+# the Zod-only case; renamed once a second, unrelated fluent-builder
+# library hit the exact same false-positive shape, since "schema
+# builder" no longer describes the whole set. Extend here whenever
+# another fluent/chain-builder collision turns up — this is the third
+# occurrence of the same pattern class, not a new one.
 _CHAIN_BUILDER_METHOD_NAMES = frozenset(
     {
         # Zod (and similar schema/validation builders).
@@ -3349,12 +3320,11 @@ _CHAIN_BUILDER_METHOD_NAMES = frozenset(
 # rather than an in-repo type sharing the name. Confirmed live against
 # zed: ``Editor.new_internal``'s bare ``.then()`` attributed to an
 # unrelated ``PathContextCondition.then`` (a CI-tool crate) and
-# ``.iter_mut()`` to ``AtlasTextureList.iter_mut`` (``gpui``) — see
-# round-09 §2.1 part B (``test-repos/reports/09-tokentest-7repo-postfix/
-# zed.md`` §3). Not gated by language, matching how
+# ``.iter_mut()`` to ``AtlasTextureList.iter_mut`` (``gpui``). Not
+# gated by language, matching how
 # ``_BUILTIN_METHOD_NAMES`` (JS/TS-flavored) already isn't — these
 # names are unlikely method names to collide with in other languages.
-# Round 31 zed coverage pass F9: the iterator/Option/Result adaptor
+# The iterator/Option/Result adaptor
 # vocabulary was missing from this set entirely -- ``.flatten()``
 # (zed's *only* ``fn flatten``, in ``text.rs``) absorbed 454 unrelated
 # std-iterator callers (``x.iter().flatten()``-shaped, per
@@ -3391,7 +3361,7 @@ _RUST_STD_METHOD_NAMES = frozenset(
         "position", "last", "nth", "count", "sum", "cloned", "copied",
         "ok_or", "ok_or_else", "as_deref",
         # Channel receivers (std mpsc, smol, futures, flume, tokio all
-        # spell it the same). Round 32: zed defines exactly one
+        # spell it the same). Zed defines exactly one
         # ``try_recv`` (gpui's ``PriorityQueueState``), and once the
         # lifetimed-``self`` arity fix stopped rejecting it by
         # accident, 66 ``rx.try_recv()`` calls on ordinary channels
@@ -3409,7 +3379,7 @@ _RUST_STD_METHOD_NAMES = frozenset(
 # receiver is an untyped ``assertThat(...)`` chain result reaches this
 # guard, and these names are called constantly across test suites
 # rather than naming an in-repo type sharing the name. Confirmed live
-# against spring-boot round 23 (§2.1): a single real
+# against spring-boot: a single real
 # ``ResolvedDockerHost.isTrue`` caller had its fan-in inflated to 1,103
 # by unrelated AssertJ ``.isTrue()`` chain calls (~1,100x inflation).
 _JAVA_ASSERTION_METHOD_NAMES = frozenset(
@@ -3428,12 +3398,12 @@ _JAVA_ASSERTION_METHOD_NAMES = frozenset(
 # shape: a receiver-qualified call whose receiver isn't provably typed
 # as the repo's own like-named builder reaches this guard purely on
 # "otherwise unique repo-wide" name evidence. Confirmed live against
-# spring-boot round 23 (§2.2): a repo-defined ``Builder.build`` read 43
+# spring-boot: a repo-defined ``Builder.build`` read 43
 # real callers plus 1,131 additional ambiguous-but-uncounted sites from
 # unrelated builder types across the codebase.
 #
-# Deliberately narrower than the design doc's original proposal, which
-# also suggested ``of``/``from``/``with``: dropped after finding real
+# Deliberately narrower than an earlier proposal, which also
+# suggested ``of``/``from``/``with``: dropped after finding real
 # collisions during implementation, not merely speculative risk --
 # this repo's own resolver test fixtures already use a same-file
 # ``build`` method as an incidental placeholder name in two unrelated
@@ -3443,10 +3413,7 @@ _JAVA_ASSERTION_METHOD_NAMES = frozenset(
 # same-named ``from`` methods, so denylisting it repo-wide (this guard
 # is not language-gated) would trade a modest inflation fix for a much
 # larger true-resolution loss on a language dekko already invests
-# heavily in getting right. See the "Implemented" note in
-# ``.features/plans/round23/
-# 01-resolver-single-candidate-false-confidence.md`` for the full
-# reasoning; ``of``/``with`` were dropped alongside ``from`` for
+# heavily in getting right. ``of``/``with`` were dropped alongside ``from`` for
 # consistency (no repro evidence backs them individually either) with
 # nothing lost, since the confirmed spring-boot repro is specifically
 # ``Builder.build()``.
@@ -3454,10 +3421,10 @@ _BUILDER_METHOD_NAMES = frozenset({"build"})
 
 # Node's core module names -- a bare (non-relative) JS/TS import source
 # exactly matching one of these is never a same-named local file,
-# regardless of stem collision (round 22 claude-buddy.md §2.1: `import
+# regardless of stem collision (claude-buddy: `import
 # { join } from "path"` was matching a repo's own `server/path.ts`
 # purely on stem equality, inflating `affected`/`workset`'s impacted-
-# test count with false positives across three consecutive rounds).
+# test count with false positives).
 # Deliberately short: only names common enough to plausibly collide
 # with a real repo module name are worth hard-coding here; extend as
 # new collisions turn up, same maintenance model as
@@ -3481,7 +3448,7 @@ _JS_TS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")
 # receiver-qualified call to a well-known global object (``console``,
 # ``process``, ``window``, ...) whose method name isn't itself in one
 # of those sets still reaches the bare-name ambiguous/single-candidate
-# fallback. Confirmed live against claude-buddy round 27 (finding M1):
+# fallback. Confirmed live against claude-buddy:
 # ``console.warn("...")`` in ``cli/validate-species.ts`` was reported
 # ambiguous against 7 unrelated same-named free-function ``warn()``
 # definitions, since ``warn`` is in none of the five method-name sets.
@@ -3596,7 +3563,7 @@ def _shadowed_by_external_import(
 # (``Vec``, ``List``, ``Array``, ``Promise``, ``HashMap``,
 # ``BTreeMap``, ...) stays *opaque*: the method belongs to the
 # collection itself, and there's no equivalent "same-name rebind to
-# the element type" idiom to protect. Round 31 zed coverage pass F7:
+# the element type" idiom to protect. On zed,
 # ``active_rows: &BTreeMap<DisplayRow, u8>`` then
 # ``active_rows.get(..)`` used to try *every* remaining identifier —
 # including ``DisplayRow``, a generic argument, never the receiver's
@@ -3607,13 +3574,12 @@ def _shadowed_by_external_import(
 # (``&mut Foo``, ``mut Foo``) is skipped outright, never itself tried
 # or counted as a wrapper.
 #
-# Every entry past ``Optional`` here is a deliberate deviation from
-# the design doc, which named ``Entity<T>`` (and, by the same shape,
-# would have named ``Option``/``Result``/``Mutex``/etc.) as *opaque*
-# examples. Live-measuring the design's literal choice against zed
-# (not just its own worked examples) first showed -3888/+156 edges,
-# two orders of magnitude past the "9 zed edges" this item's own
-# accept criterion expects, with ``ambiguous`` jumping +3207 --
+# Every entry past ``Optional`` here is a deliberate choice against
+# the obvious reading, which treats ``Entity<T>`` (and, by the same
+# shape, ``Option``/``Result``/``Mutex``/etc.) as *opaque*.
+# Live-measuring that literal choice against zed first showed
+# -3888/+156 edges, two orders of magnitude past the ~9 zed edges
+# expected, with ``ambiguous`` jumping +3207 --
 # treating ``Entity`` as fully opaque broke it. Each addition below is
 # read against source, not guessed:
 #
@@ -3638,7 +3604,7 @@ def _shadowed_by_external_import(
 #   ``let Some(buffer) = buffer else { .. }; buffer.file()``). Unlike
 #   a plain collection, there is no way to call a method through an
 #   un-destructured ``Option``/``Result`` at all, so this doesn't
-#   weaken the F7 collection-argument guard the way it might first
+#   weaken the collection-argument guard the way it might first
 #   appear to.
 #
 # All of the above still have real methods of their own
@@ -3677,8 +3643,8 @@ def _object_type_field_tokens(
     site says which one it means (``input.client.getSchedule(..)``).
     The outermost-token rule in ``_typed_param_token_candidates`` was
     written for ``Wrapper<T>`` shapes; applied here it stopped at
-    ``Chat``, the first field's type, and integration review found it
-    had dropped 9 correct ``HubSessionClient.*`` edges on cline.
+    ``Chat``, the first field's type, and measurement found it had
+    dropped 9 correct ``HubSessionClient.*`` edges on cline.
 
     Args:
         type_text: The parameter's declared type, as written.
@@ -3716,8 +3682,8 @@ def _typed_param_token_candidates(
     ``_TRANSPARENT_TYPE_WRAPPERS``'s own comment). The chain stops
     the moment it reaches an *opaque* wrapper or a plain type name —
     that token is tried, but the search never descends into ITS own
-    generic arguments (round 31 zed coverage pass F7: a collection's
-    key/value type parameters are never the receiver).
+    generic arguments (a collection's key/value type parameters are
+    never the receiver).
 
     A lowercase-leading token is skipped outright — never tried, never
     counted as a stop — rather than treated as the type itself. Every
@@ -3776,8 +3742,7 @@ def _receiver_type_match(
     path ladder — which silently drops it as ambiguous whenever the
     repo defines the method name more than once elsewhere (zed's
     ``BufferDiff.new``, called from inside ``BufferDiff``'s own file,
-    read zero callers despite 13 real call sites — round-09 §2.1
-    part A).
+    read zero callers despite 13 real call sites).
 
     Args:
         call: The raw call or reference being resolved.
@@ -3844,17 +3809,16 @@ def _rust_shape_narrowed_candidates(
     ``Type::name`` path can only reach that type's own members
     (``_owned_by_receiver_type``), the same path rooted at a type the
     repo doesn't define can reach nothing at all
-    (``_rust_unknown_type_path``, round 31 F6b), and a ``recv.name``
-    dot-call can never reach a free function
-    (``_drop_free_functions``, round 31 F11). Split out of
+    (``_rust_unknown_type_path``), and a ``recv.name`` dot-call can
+    never reach a free function (``_drop_free_functions``). Split out of
     ``_pick_candidate`` purely to keep that function's cyclomatic
-    complexity under the project's Ruff limit
-    (round 31 rule 0.5) — mirrors ``_structural_match``'s own reason
-    for existing. ``_rust_type_path_receiver``/``_rust_is_dot_call``
-    test the same call text for opposite join characters (``::`` vs
-    ``.``), so the two shapes are mutually exclusive by construction
-    and at most one narrowing ever applies (the two ``::`` rules are
-    exclusive too: one needs an in-repo type, the other needs none).
+    complexity under the project's Ruff limit — mirrors
+    ``_structural_match``'s own reason for existing.
+    ``_rust_type_path_receiver``/``_rust_is_dot_call`` test the same
+    call text for opposite join characters (``::`` vs ``.``), so the two
+    shapes are mutually exclusive by construction and at most one
+    narrowing ever applies (the two ``::`` rules are exclusive too: one
+    needs an in-repo type, the other needs none).
 
     Args:
         call: The raw call or reference being resolved.
@@ -3883,7 +3847,7 @@ def _rust_shape_narrowed_candidates(
     if _rust_unknown_type_path(
         call, candidates, index, file_imports, repo_stems
     ):
-        # Rooted at a type the repo doesn't define (round 31 F6b):
+        # Rooted at a type the repo doesn't define:
         # nothing here can be the target.
         return [], [], True
     if _rust_is_dot_call(call) and not _drop_free_functions(candidates):
@@ -3898,7 +3862,7 @@ def _rust_is_dot_call(call: _Referable) -> bool:
     """Whether a Rust call joins its receiver and name with ``.``,
     not ``::``.
 
-    Round 31 zed coverage pass F11: a Rust *method* call
+    A Rust *method* call
     (``recv.name(..)``) can never reach a free (module-level)
     function — the language simply has no syntax for it, unlike
     Python/JS/TS's ``module.func()``, a legitimate dot-call on a
@@ -3909,7 +3873,7 @@ def _rust_is_dot_call(call: _Referable) -> bool:
     dekko-only ``sanity`` rows for that name alone.
 
     Uses ``call.text`` (via ``getattr``, since ``RawRef`` carries no
-    ``text`` field at all — round 31 rule 0.6; its ``receiver`` field
+    ``text`` field at all; its ``receiver`` field
     exists but is always ``None``, which already short-circuits this
     function before ``text`` is ever read) rather than re-deriving the
     join character: for a genuine method call built by
@@ -3938,7 +3902,7 @@ def _drop_free_functions(symbols: list[Symbol]) -> list[Symbol]:
     A free function's ``qualname`` equals its bare ``name`` (no
     ``.`` — see ``Symbol.qualname``'s own docstring); a method or
     associated function always has a container prefix. Used by the
-    round 31 F11 dot-call guard in ``_pick_candidate``: only
+    dot-call guard in ``_pick_candidate``: only
     ``kind == "function"`` is dropped, never a variable/type/other
     kind, and only when it's genuinely containerless.
 
@@ -3968,7 +3932,7 @@ def _rust_type_path_receiver(
     last = _rust_type_path_last_segment(call)
     if last is None:
         return None
-    # A ``type_alias`` alone doesn't qualify (round 31 F6b): an alias's
+    # A ``type_alias`` alone doesn't qualify: an alias's
     # members live under the type it aliases, so ``Alias::new()`` has
     # no ``Alias.new`` to find and the owner rule would veto the real
     # ``Real.new``. Leave those to the ordinary ladder.
@@ -4010,7 +3974,7 @@ def _rust_unknown_type_path(
     """Whether a Rust ``Type::name`` path is rooted at a type the repo
     doesn't define at all.
 
-    Round 31 zed coverage pass F6b: ``Default::default()``,
+    ``Default::default()``,
     ``Vec::new()``, ``Box::new()`` and a macro-generated
     ``StyleRefinement::default()`` name a std, third-party, or
     macro-minted type. No repo symbol can be the target, yet the
@@ -4115,8 +4079,8 @@ def _owned_by_receiver_type(
     ``Point::default()`` where ``Default`` is derived (no ``Point.
     default`` symbol exists), that ladder then picked whatever
     ``default`` was nearest: ``ScrollHandle.default``, because it is
-    the only ``default`` in the same file. Round 31 zed coverage pass
-    F6 counted 35 such wrong edges that 0.43.61 exposed by no longer
+    the only ``default`` in the same file. On zed, 35 such wrong edges
+    were counted that 0.43.61 exposed by no longer
     short-circuiting ``crate::``-imported receivers to ``external``
     (they were skipped before, for the wrong reason). The rule was
     always missing; that release just stopped hiding it.
@@ -4170,21 +4134,22 @@ def _typed_param_match(
     """Resolve a call through one of the caller's own typed parameters.
 
     ``controller.initTask(...)``, where the calling function declares
-    a parameter ``controller: Controller`` — cline's headline finding
-    for bug #2: the container (``self``/``this``) and same-file steps
-    never look at a receiver that is neither, so a call through an
-    explicitly-typed parameter of a *different* name than its class
-    either fell through to a coincidental same-file match or, when no
-    same-file candidate existed, straight to ``ambiguous`` whenever
-    another same-named method existed anywhere else in the repo.
+    a parameter ``controller: Controller`` — the headline cline case
+    for undercounted callers: the container (``self``/``this``) and
+    same-file steps never look at a receiver that is neither, so a
+    call through an explicitly-typed parameter of a *different* name
+    than its class either fell through to a coincidental same-file
+    match or, when no same-file candidate existed, straight to
+    ``ambiguous`` whenever another same-named method existed anywhere
+    else in the repo.
 
     Tries each of the declared type's own ordered candidate tokens
     (``_typed_param_token_candidates``), outermost first, and returns
-    the first one with a unique match — round 31 zed coverage pass F7
-    (see ``_TRANSPARENT_TYPE_WRAPPERS``'s comment): trying every
-    remaining identifier in the type string without regard to nesting,
-    including a generic *argument* buried inside an opaque wrapper,
-    used to land a call on an unrelated type entirely.
+    the first one with a unique match (see
+    ``_TRANSPARENT_TYPE_WRAPPERS``'s comment): trying every remaining
+    identifier in the type string without regard to nesting, including a
+    generic *argument* buried inside an opaque wrapper, used to land a
+    call on an unrelated type entirely.
 
     A *parameterized* token (one taking its own type arguments, e.g.
     ``Option<...>``) is tried only when it also names an in-repo
@@ -4240,10 +4205,10 @@ def _typed_param_match(
     if tokens is None:
         tokens = _typed_param_token_candidates(param_type)
     for token, is_parameterized in tokens:
-        # A Rust ``type`` alias doesn't open the gate (round 31 F6b
-        # started indexing them): ``type Result<T> = std::result::
-        # Result<T, Error>;`` is the foreign generic container this
-        # gate exists to keep out, under a local name.
+        # A Rust ``type`` alias doesn't open the gate:
+        # ``type Result<T> = std::result::Result<T, Error>;`` is the
+        # foreign generic container this gate exists to keep out, under
+        # a local name.
         if is_parameterized and not any(
             sym.kind in TYPE_KINDS
             and not (sym.kind == "type_alias" and sym.path.endswith(".rs"))
@@ -4274,7 +4239,7 @@ def _rust_typed_match_looks_cross_crate(
     """Whether ``_typed_param_match``'s sole candidate is provably the
     *wrong* crate's same-named type.
 
-    Round 31 zed coverage pass F7, "second half": a declared type's
+    A declared type's
     outer identifier can genuinely name a *different* type in two
     crates (zed defines its own ``Entity<T>`` in both ``gpui`` and
     ``workspace``). Bare qualname equality (``"Entity.focus"``) can't
@@ -4290,8 +4255,8 @@ def _rust_typed_match_looks_cross_crate(
     *and* one of them is the caller's own crate *and* the sole
     candidate isn't in that crate. Any one of those missing (no
     same-name collision at all, or the caller's own crate doesn't
-    define this type either) leaves the match untouched — round 31's
-    rule 0.3, "no evidence is not negative evidence": this function
+    define this type either) leaves the match untouched ("no evidence
+    is not negative evidence"): this function
     can only disprove a match, never merely fail to confirm one, so a
     declared type dekko can't independently place (common: many
     typed-parameter matches target a type only ever seen through this
@@ -4339,7 +4304,7 @@ def _rust_typed_match_looks_cross_crate(
     # ``html/html_minifier.rs``; ``markdown.rs`` never imports it and
     # gets ``gpui::Context`` through a prelude glob, yet the unscoped
     # version of this check disproved every ``cx.observe_global(..)``
-    # edge in the file (integration review, round 31).
+    # edge in the file.
     #
     # A ``pub`` own-crate type is the opposite case: it reaches other
     # modules through ``pub use binding::*;``-style globs dekko can't
@@ -4376,7 +4341,7 @@ def _constructor_of(
     real "how is this constructed" fan-in whenever the language also
     extracts an explicit constructor as its own method symbol —
     cline's ``Controller.constructor`` read fan-in 0 despite a real
-    ``new Controller(...)`` call site (bug #2). When one exists,
+    ``new Controller(...)`` call site. When one exists,
     ``_add_call_and_constructor`` adds a second edge to it alongside
     the class-level edge, so both "who constructs this class" and
     "who calls the constructor body" are counted.
@@ -4412,7 +4377,7 @@ def _construction_pick(
     Python's ``__init__`` is), so ``new Foo(...)`` finds two same-
     named candidates — the class ``Foo`` and its constructor method
     ``Foo.Foo`` — and used to be recorded as unresolvably ambiguous,
-    undercounting fan-in for *both* (bug #2). This isn't a real
+    undercounting fan-in for *both*. This isn't a real
     ambiguity: the two symbols are one class and its own constructor,
     so the class wins as the primary target (matching JS/TS/Python's
     convention elsewhere in this ladder) — ``_add_call_and_constructor``
@@ -4501,7 +4466,6 @@ def _import_match(
     here. Verified against a fixture reproducing tensorflow's
     ``rewrite_utils.cc``/``rewrite_utils_test.cc`` gtest pair (same
     file paths, same symbol names, same header) — see
-    ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md`` and
     ``tests/test_resolver.py::test_cpp_call_disambiguated_via_whole_file_include``.
 
     ``crate_roots`` (Rust only, see ``_rust_crate_roots_index_all``) is
@@ -4510,11 +4474,10 @@ def _import_match(
     crate root (``pub use submodule::*;``) is imported elsewhere by
     crate-qualified path (``use gpui::Render;``), which
     ``_module_matches``'s file-stem check can never match against the
-    symbol's *actual* declaring file — round 22 zed.md §3.2. See
+    symbol's *actual* declaring file. See
     ``_rust_crate_hint_matches`` for the matching rule.
 
-    Round 23 Fix A (``.features/plans/round23/
-    09-subtypes-ambiguous-resolution-rate.md``): when the ``hints``
+    When the ``hints``
     loop above finds nothing at all -- because neither the callee name
     nor the receiver's leading segment has a local ``use`` binding to
     build a hint from in the first place -- a Rust heritage clause's
@@ -4525,8 +4488,7 @@ def _import_match(
     never even reached ``_rust_crate_hint_matches`` -- the crate-root
     fallback existed but had nothing to loop over.
 
-    ``tiebreak_hits`` (round 24, ``.features/plans/round24/
-    03-heritage-crate-decoy-tiebreak.md``) is an optional mutable
+    ``tiebreak_hits`` is an optional mutable
     single-element counter, incremented whenever
     ``_prefer_non_synthetic_crate_match`` fires inside either of the
     two crate-hint steps below -- lets ``resolve_heritage()`` disclose
@@ -4589,10 +4551,9 @@ def _hint_match(
     Split out of ``_import_match`` purely to keep that function's
     cyclomatic complexity under the project's Ruff limit -- the
     per-hint ``_module_matches``-then-``_rust_crate_hint_matches``
-    loop that function has run unmodified since before round 23.
+    loop that function has long run unmodified.
 
-    Round 24 (``.features/plans/round24/
-    03-heritage-crate-decoy-tiebreak.md``): when a hint matches 2+
+    When a hint matches 2+
     crate roots, ``_prefer_non_synthetic_crate_match`` gets one more
     try before this hint gives up -- see that function's own
     docstring for why this can only ever resolve, never misresolve,
@@ -4626,7 +4587,7 @@ def _rust_receiver_crate_match(
     crate_roots: dict[str, list[str]] | None,
     tiebreak_hits: list[int] | None = None,
 ) -> Symbol | None:
-    """Round 23 Fix A: try a heritage clause's bare receiver as a
+    """Try a heritage clause's bare receiver as a
     crate-name hint directly, split out of ``_import_match`` purely to
     keep that function's cyclomatic complexity under the project's
     Ruff limit.
@@ -4640,7 +4601,7 @@ def _rust_receiver_crate_match(
     ``_rust_crate_hint_matches`` unchanged, just fed a hint sourced
     from the call site rather than a ``file_imports`` entry.
 
-    Round 24: the same ``_prefer_non_synthetic_crate_match`` fallback
+    The same ``_prefer_non_synthetic_crate_match`` fallback
     ``_hint_match`` gained also applies here, since this is the other
     call site that can produce a 2+-candidate ``crate_matched`` list.
     """
@@ -4707,31 +4668,30 @@ def _alias_candidates(
 # check (first segment has a local ``use``-bound import) always misses
 # this shape, so a same-bare-name in-repo collision (e.g. an in-repo
 # ``enum Display``) silently wins instead of the receiver being
-# recognized as external. Confirmed live against zed round 27 (finding
-# M3): ``impl std::fmt::Display for SharedUri`` resolved to an
+# recognized as external. Confirmed live against zed:
+# ``impl std::fmt::Display for SharedUri`` resolved to an
 # unrelated in-repo ``Display`` enum rather than ``(external)``, while
 # the sibling ``impl std::fmt::Debug for SharedUri`` on the same line
 # happened to show ``(external)`` correctly only because it has no
 # in-repo collision to begin with (a different code path, not this
 # check).
 #
-# Round 27 finding M3's original fix re-split ``call.receiver`` looking
-# for more than one segment -- but ``call.receiver`` is *already*
-# flattened to a single bare token (``"std"``) by the time it reaches
-# this function (``_heritage_rust_impl`` -> ``_heritage_name_parts`` ->
+# The original fix re-split ``call.receiver`` looking for more than one
+# segment -- but ``call.receiver`` is *already* flattened to a single
+# bare token (``"std"``) by the time it reaches this function
+# (``_heritage_rust_impl`` -> ``_heritage_name_parts`` ->
 # ``_split_callee_text`` in extractor.py keeps only the first and last
 # path segments, discarding everything between), so that check could
-# structurally never fire (round-27 post-fix verification, finding
-# POST-3). Fixed here by testing ``call.text`` instead -- the one field
-# that still carries the receiver's genuine, unflattened structure --
-# split on the literal ``::`` token specifically (not the general
-# ``_PATH_SPLIT``, which also matches ``.`` and would misclassify a
-# same-named local variable like ``std.run()`` as a multi-segment
-# path). Gated to Rust call/heritage sites specifically (via
-# ``languages.spec_for_path``, the same idiom ``_language_filtered``
-# already uses) since this text-based check, unlike the original
-# receiver-based one, is no longer provably collision-free across every
-# language once it reads unflattened text.
+# structurally never fire. Fixed here by testing ``call.text`` instead
+# -- the one field that still carries the receiver's genuine,
+# unflattened structure -- split on the literal ``::`` token
+# specifically (not the general ``_PATH_SPLIT``, which also matches
+# ``.`` and would misclassify a same-named local variable like
+# ``std.run()`` as a multi-segment path). Gated to Rust call/heritage
+# sites specifically (via ``languages.spec_for_path``, the same idiom
+# ``_language_filtered`` already uses) since this text-based check,
+# unlike the original receiver-based one, is no longer provably
+# collision-free across every language once it reads unflattened text.
 _RUST_STD_NAMESPACE_ROOTS = frozenset({"std", "core", "alloc"})
 
 
@@ -4864,7 +4824,7 @@ def _repo_stem(path: PurePosixPath) -> str:
     regardless of its own filename (``generator.go``, ``helpers.go``,
     ...). Unlike Python/JS/Rust/C++, where "the file's own stem is the
     importable unit" holds, a Go file's individual stem must never be
-    the matching unit -- round-13 master report §1: a qualified
+    the matching unit -- a qualified
     cross-package call (``slug.Generate(...)`` importing
     ``.../pkg/slug``) against ``pkg/slug/generator.go`` used to compare
     the import source against ``"generator"`` (the file's own stem,
@@ -4895,7 +4855,7 @@ def _module_matches(source: str, candidate_path: str) -> bool:
 
     A *bare* (non-relative) JS/TS import source naming a Node core
     module (``_NODE_BUILTIN_MODULE_NAMES``) never matches, regardless
-    of stem collision -- round 22 claude-buddy.md §2.1: ``import {
+    of stem collision -- on claude-buddy, ``import {
     join } from "path"`` was matching a repo's own ``server/path.ts``
     purely because both reduce to the segment ``"path"``. A genuine
     relative import (``"./path"``) is unaffected -- only the bare
@@ -4905,8 +4865,8 @@ def _module_matches(source: str, candidate_path: str) -> bool:
 
     A *dotted* stem (``catalog.generated-access.ts``, Angular's
     ``user.service.ts``, a C++ ``foo.pb.h``) gets a second,
-    component-wise check -- see ``_dotted_components``. Round 31
-    cline.md §4.1 Bug B: ``_import_segments`` splits on ``.``, so such
+    component-wise check -- see ``_dotted_components``.
+    ``_import_segments`` splits on ``.``, so such
     a stem could never appear among the segments, and a plain relative
     import of a dotted filename silently lost its import hint. Gated
     on the stem actually containing a dot, so every undotted file
@@ -4998,9 +4958,9 @@ def _looks_like_synthetic_crate_root(crate_dir: str) -> bool:
     (``tooling/lints/test_fixture/gpui`` -- the ``gpui`` leaf is fine,
     ``test_fixture`` one level up is the tell) that signals "this
     crate exists to test something else," per the exact zed shape this
-    is scoped against (round 23 design doc's own "preferring a root
-    that looks more like a real Cargo workspace member over one nested
-    under a `test_fixture`/`vendor`-shaped path" suggestion).
+    is scoped against (prefer a root that looks more like a real Cargo
+    workspace member over one nested under a
+    `test_fixture`/`vendor`-shaped path).
 
     Args:
         crate_dir: A crate root's ``src/``-parent directory (see
@@ -5020,8 +4980,7 @@ def _prefer_non_synthetic_crate_match(
     caller_path: str,
     tiebreak_hits: list[int] | None = None,
 ) -> Symbol | None:
-    """Round 24 heritage crate-decoy tiebreak (``.features/plans/
-    round24/03-heritage-crate-decoy-tiebreak.md``): break a 2+-way
+    """Heritage crate-decoy tiebreak: break a 2+-way
     crate-root collision when exactly one candidate's crate root
     doesn't look synthetic (test-fixture/vendor-shaped).
 
@@ -5030,7 +4989,7 @@ def _prefer_non_synthetic_crate_match(
     crates (or two synthetic ones) stays correctly ambiguous, matching
     this module's existing "resolve only on an unambiguous signal"
     contract throughout (see ``_pick_candidate``'s own docstring and
-    round 23's "report as ambiguous rather than guessed" philosophy).
+    the "report as ambiguous rather than guessed" philosophy).
     This is a strictly additive fallback tried only *after*
     ``_rust_crate_hint_matches``'s own ``len(crate_matched) == 1``
     check has already failed -- it can only ever turn a previously-
@@ -5045,18 +5004,17 @@ def _prefer_non_synthetic_crate_match(
     external name is always in scope for self-reference, Rust 2018+)
     must resolve to the decoy's own ``Render``, not get silently
     redirected to a different, unrelated real crate just because that
-    other crate's path looks more legitimate -- the design doc's own
-    test plan calls this out explicitly: "the tiebreak must not
-    blindly prefer 'not synthetic' when the caller itself lives inside
-    the synthetic crate's own tree." This self-crate check does not
+    other crate's path looks more legitimate: the tiebreak must not
+    blindly prefer "not synthetic" when the caller itself lives inside
+    the synthetic crate's own tree. This self-crate check does not
     increment ``tiebreak_hits`` -- unlike the marker-based guess below,
     "the caller's own file lives in this exact candidate's crate" is a
     structural fact, not a convention-based guess.
 
     Args:
         crate_matched: Every candidate whose path matched the crate
-            name hint across 2+ registered crate roots (round 23 Fix
-            B) -- the set this tiebreak narrows.
+            name hint across 2+ registered crate roots -- the set
+            this tiebreak narrows.
         caller_path: Repo-relative path of the file declaring the
             heritage clause being resolved (``call.path``) -- used
             only for the self-crate check above.
@@ -5092,8 +5050,7 @@ def _prefer_non_synthetic_crate_match(
 def _prefer_non_synthetic_crate_root(
     crate_dirs: list[str], importer_path: str
 ) -> str | None:
-    """Round 25 ``dekko deps`` crate-decoy tiebreak (``.features/plans/
-    round25/02-deps-crate-decoy-tiebreak.md``): directory-level sibling
+    """``dekko deps`` crate-decoy tiebreak: directory-level sibling
     of ``_prefer_non_synthetic_crate_match``, for
     ``_resolve_import_rust``'s bare-crate-name lookup.
 
@@ -5142,18 +5099,17 @@ def _rust_crate_hint_matches(
 ) -> bool:
     """Check a Rust import hint against a candidate via its crate root.
 
-    ``_module_matches`` only ever compares an import source against
-    the *candidate's own declaring file's* stem (or its immediate
-    parent directory, for index files) — round 22 zed.md §3.2: a
-    trait re-exported at its crate root via ``pub use
-    submodule::*;`` (e.g. ``gpui``'s ``pub use element::*;``) is
-    imported elsewhere as ``use gpui::{..., Render, ...};``, whose
-    source ``"gpui::Render"`` contains neither ``"element"`` (the
-    real declaring file's stem) nor anything else ``_module_matches``
-    can key off, so a same-named repo-wide collision on the trait
-    name (e.g. a same-named fixture crate) falls all the way through
-    to ambiguous even though the import hint, read correctly, points
-    unambiguously at the real trait.
+    ``_module_matches`` only ever compares an import source against the
+    *candidate's own declaring file's* stem (or its immediate parent
+    directory, for index files). A trait re-exported at its crate root
+    via ``pub use submodule::*;`` (e.g. ``gpui``'s ``pub use
+    element::*;``) is imported elsewhere as ``use gpui::{..., Render,
+    ...};``, whose source ``"gpui::Render"`` contains neither
+    ``"element"`` (the real declaring file's stem) nor anything else
+    ``_module_matches`` can key off, so a same-named repo-wide collision
+    on the trait name (e.g. a same-named fixture crate) falls all the
+    way through to ambiguous even though the import hint, read
+    correctly, points unambiguously at the real trait.
 
     This reuses ``_rust_crate_roots_index_all`` (built once per
     ``resolve_heritage()`` call, a repo-wide crate-name -> *every*
@@ -5164,7 +5120,7 @@ def _rust_crate_hint_matches(
 
     Args:
         hint: One import source string from ``_import_match``'s hint
-            list (e.g. ``"gpui::Render"``), or (round 23 Fix A) a bare
+            list (e.g. ``"gpui::Render"``), or a bare
             heritage-clause receiver segment used directly as a
             crate-name hint.
         candidate_path: Repo-relative path of a candidate symbol.
@@ -5176,10 +5132,7 @@ def _rust_crate_hint_matches(
         root registered for the crate name in ``hint``'s leading
         segment.
 
-    Round 23 Fix B (``.features/plans/round23/
-    09-subtypes-ambiguous-resolution-rate.md``) -- see that design
-    doc's "Implemented" note for the live measurement this decision
-    is based on. Before Fix B, ``crate_roots`` held one root per crate
+    ``crate_roots`` once held one root per crate
     *name* (``dict[str, str]``), so two same-named crates (an
     in-workspace one and an unrelated same-named fixture/vendor crate
     elsewhere in the repo -- the exact zed shape this was verified
@@ -5199,11 +5152,10 @@ def _rust_crate_hint_matches(
     module docstring). This trades away the "lucky half" of the old
     coin flip's resolved-count along with the "unlucky half"'s silent
     wrong answers -- an intentional, examined tradeoff, not an
-    oversight; see the design doc for the exact numbers.
+    oversight.
 
-    Round 24 (``.features/plans/round24/
-    03-heritage-crate-decoy-tiebreak.md``) narrows the residual gap
-    Fix B's "genuine collision -> ambiguous" left unattempted: when
+    The residual gap that "genuine collision -> ambiguous" left
+    unattempted is narrowed: when
     ``len(crate_matched) > 1`` here, this function's own caller
     (``_hint_match``/``_rust_receiver_crate_match``) now tries
     ``_prefer_non_synthetic_crate_match`` before giving up -- if
@@ -5258,7 +5210,7 @@ def _rust_name_is_also_a_variant(
     """Whether ``Name(..)`` has a second reading the map can't offer:
     some enum's tuple variant of the same name.
 
-    Round 32 Track 4. dekko indexes enums, not their variants, so
+    dekko indexes enums, not their variants, so
     ``Left(x)`` from a glob-imported ``enum Side { Left(u8) }`` has
     exactly one in-repo candidate, an unrelated ``struct Left``, and
     the sole-candidate rung would take it with full confidence.
@@ -5303,8 +5255,8 @@ def _build_name_path_index(
 # "does this import point into the repo" test every external guard
 # relied on (``_import_segments(source) & repo_stems``) called it an
 # npm dependency, and the call/heritage clause landed in ``external``
-# before the candidate ladder ever ran. Round 31 cline.md §4.1 Bug A
-# found it as one missing ``query subtypes`` row; measured against
+# before the candidate ladder ever ran. It first showed up as one
+# missing ``query subtypes`` row; measured against
 # cline it was ~900 call edges, 12 heritage edges and 2,610 import
 # bindings across 690 files -- the dominant import shape of the whole
 # TS-monorepo repo class.
@@ -5577,23 +5529,22 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
         # the file stems say. The stem test fails it whenever the crate
         # root merely *re-exports* the name (``pub use thread::*;``):
         # ``_import_segments`` drops ``crate`` itself, leaving only
-        # ``AgentTool``, which is no file's stem. Round 31 zed coverage
-        # pass F1: 218 of zed's 2,503 ``heritage_external`` entries
-        # named an in-repo trait this way, and ``query subtypes
-        # AgentTool`` showed 11 of 35 implementors with no hint that 24
-        # were missing. A file reaching the same trait through a glob
-        # resolved fine, which was the tell.
+        # ``AgentTool``, which is no file's stem. 218 of zed's 2,503
+        # ``heritage_external`` entries named an in-repo trait this way,
+        # and ``query subtypes AgentTool`` showed 11 of 35 implementors
+        # with no hint that 24 were missing. A file reaching the same
+        # trait through a glob resolved fine, which was the tell.
         return True
     if imp.source.startswith(_RELATIVE_SOURCE_PREFIXES):
         # ``import { run } from "./index"`` / ``from "."`` / ``from
-        # ".."``: a relative specifier is in-repo by definition, and
-        # the stem test can't see it. An index file's matching stem is
-        # its *directory* name (``acp`` for ``acp/index.ts``, see
+        # ".."``: a relative specifier is in-repo by definition, and the
+        # stem test can't see it. An index file's matching stem is its
+        # *directory* name (``acp`` for ``acp/index.ts``, see
         # ``_repo_stem``), which ``./index`` and ``.`` never spell, so
         # the binding looked external and ``_shadowed_by_external_
-        # import`` threw the call to noise. Round 32 Track 5 found it:
-        # recording ``await import("./index")`` as an import cost cline
-        # 9 correct test-to-module call edges until this was fixed.
+        # import`` threw the call to noise. Recording ``await
+        # import("./index")`` as an import cost cline 9 correct
+        # test-to-module call edges until this was fixed.
         return True
     if _import_segments(imp.source) & repo_stems:
         return True
@@ -5647,7 +5598,7 @@ def _rust_own_crate_narrowed(
     The Rust counterpart of ``_workspace_narrowed``. ``use crate::Foo;``
     says ``Foo`` is reachable from *this* crate's root, so when the
     repo has two ``Foo``s, the one inside this crate is the one meant
-    (round 31 zed coverage pass F6: ``Foo::build()`` landed on an
+    (on zed, ``Foo::build()`` landed on an
     unrelated crate's ``Foo.build``, a crate that isn't even a
     dependency). Checked for the call's own name and for its
     receiver's leading segment.
@@ -5767,13 +5718,12 @@ class _ImportResolveContext:
             ``_rust_crate_roots_index_all``). Lets a bare, non-``crate``/
             ``self``/``super`` ``use`` path be recognized as a
             cross-crate, in-workspace import rather than assumed
-            external by default. Collision-aware (round 25, ``.features/
-            plans/round25/02-deps-crate-decoy-tiebreak.md``): a crate
+            external by default. Collision-aware: a crate
             name matching two or more directories (e.g. a real crate
             plus a same-named test-fixture/vendor stand-in) keeps every
             match here rather than picking one, so
             ``_resolve_import_rust`` can apply the same synthetic-crate
-            tiebreak round 24 already applies to heritage resolution
+            tiebreak that already applies to heritage resolution
             instead of silently guessing.
         ts_path_aliases: Each discovered ``tsconfig.json``/
             ``jsconfig.json``'s own directory (its scope) → the
@@ -5974,9 +5924,7 @@ _JS_EXTENSIONS = (".ts", ".tsx", ".js", ".jsx")
 # Only the canonical basenames are discovered for v1 -- a repo whose
 # real ``paths`` config lives only in a non-canonically-named variant
 # (``tsconfig.build.json``, TS "solution style" ``references``) keeps
-# today's external-by-default behavior for those aliases. See
-# ``.features/plans/round25/07-tsconfig-path-alias-resolution.md``
-# "Explicit non-goals".
+# today's external-by-default behavior for those aliases.
 _TSCONFIG_BASENAMES = frozenset({"tsconfig.json", "jsconfig.json"})
 
 # Bounded recursion depth for an ``extends`` chain, paired with a
@@ -6711,26 +6659,25 @@ def _resolve_import_js(
     stripping unconditionally would truncate a real path segment (e.g.
     ``"opentui-spinner/react"`` down to ``"opentui-spinner"``).
 
-    Bare specifiers (no leading ``.``/``..``) are resolved first
-    against a ``tsconfig.json``/``jsconfig.json``
-    ``compilerOptions.paths`` alias governing this importer's directory
-    (``ctx.ts_path_aliases``, empty whenever ``resolve_imports`` was
-    called with no filesystem ``root`` — see
-    ``_ImportResolveContext``'s docstring), then, failing that, as a
-    path relative to the repo root (round 28 claude-code.md §3.3: a
-    bare, repo-root-relative specifier with no leading ``./`` and no
-    governing tsconfig alias, e.g. ``import { x } from
-    'src/bootstrap/state.js'``, is a real third convention seen in the
-    wild, not just "relative" or "alias-configured"). The root-relative
-    attempt is gated on the specifier containing at least one ``/`` — a
-    single-segment bare specifier (``"react"``, ``"lodash"``) is
-    overwhelmingly a real npm package name in practice, so leaving it
-    external bounds the false-positive risk of an npm package name
-    coincidentally matching an in-repo path. Only once every attempt
-    misses does the specifier fall through to "external".
+    Bare specifiers (no leading ``.``/``..``) are resolved first against
+    a ``tsconfig.json``/``jsconfig.json`` ``compilerOptions.paths``
+    alias governing this importer's directory (``ctx.ts_path_aliases``,
+    empty whenever ``resolve_imports`` was called with no filesystem
+    ``root`` — see ``_ImportResolveContext``'s docstring), then, failing
+    that, as a path relative to the repo root (a bare,
+    repo-root-relative specifier with no leading ``./`` and no governing
+    tsconfig alias, e.g. ``import { x } from 'src/bootstrap/state.js'``,
+    is a real third convention seen in the wild, not just "relative" or
+    "alias-configured"). The root-relative attempt is gated on the
+    specifier containing at least one ``/`` — a single-segment bare
+    specifier (``"react"``, ``"lodash"``) is overwhelmingly a real npm
+    package name in practice, so leaving it external bounds the
+    false-positive risk of an npm package name coincidentally matching
+    an in-repo path. Only once every attempt misses does the specifier
+    fall through to "external".
 
-    Between those two sits the workspace-package attempt (round 31
-    P1.1b, see ``_resolve_workspace_entry``): ``"@cline/llms"`` is an
+    Between those two sits the workspace-package attempt (see
+    ``_resolve_workspace_entry``): ``"@cline/llms"`` is an
     in-repo package in a monorepo that declares it as a workspace
     member, and resolves to that package's source entry file. After
     the tsconfig alias (explicit per-scope config outranks a
@@ -6842,14 +6789,13 @@ def _rust_crate_root_index_names(
     (named-file) heuristic rather than a literal ``lib.rs``/``main.rs``
     -- e.g. ``"gpui.rs"`` for ``crates/gpui/src``.
 
-    Needed because ``_dir_module_candidates`` has no other way to know
-    a ``crate::X`` item re-exported at crate-root scope (not a
-    submodule) might live in that custom-named file rather than one of
-    the three standard index names (round 22 zed.md §3.1: ``crate::
-    App`` for a ``[lib] path = "src/gpui.rs"`` crate never resolved,
-    since the fixed ``_RUST_INDEX_NAMES`` tuple has no way to know
-    this crate's own root file isn't named ``lib.rs``/``main.rs``/
-    ``mod.rs``).
+    Needed because ``_dir_module_candidates`` has no other way to know a
+    ``crate::X`` item re-exported at crate-root scope (not a submodule)
+    might live in that custom-named file rather than one of the three
+    standard index names (zed's ``crate::App`` for a ``[lib] path =
+    "src/gpui.rs"`` crate never resolved, since the fixed
+    ``_RUST_INDEX_NAMES`` tuple has no way to know this crate's own root
+    file isn't named ``lib.rs``/``main.rs``/``mod.rs``).
 
     Args:
         base: The crate root directory, as found by
@@ -6880,11 +6826,11 @@ def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
     ``_rust_crate_root``'s own per-importer logic): a workspace-member
     crate's name is the name of the directory containing its ``src/
     lib.rs``/``src/main.rs`` (or, for a custom ``[lib] path`` override,
-    its ``src/<crate-name>.rs``) -- round 19's own convention, reused
-    rather than reinvented. Lets a cross-crate ``use other_crate::X;``
-    import in a Cargo workspace resolve against the sibling crate's
-    real root directory, without parsing ``Cargo.toml`` (out of scope;
-    see ``_rust_crate_root``'s own docstring for why).
+    its ``src/<crate-name>.rs``) -- ``_rust_crate_root``'s own
+    convention, reused rather than reinvented. Lets a cross-crate ``use
+    other_crate::X;`` import in a Cargo workspace resolve against the
+    sibling crate's real root directory, without parsing ``Cargo.toml``
+    (out of scope; see ``_rust_crate_root``'s own docstring for why).
 
     Scoped to the ``<crate>/src/...`` nesting shape only -- the same
     shape confirmed dominant against zed in ``_rust_crate_root``'s own
@@ -6893,22 +6839,21 @@ def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
     public name (a ``[package] name = "..."`` override) differs from
     its directory name, is not found here -- an acceptable,
     documentable residual gap, the same "honest can't tell" shape
-    ``_rust_crate_root`` itself already accepts for its own edge case
-    (round 22 zed.md §3.1).
+    ``_rust_crate_root`` itself already accepts for its own edge
+    case.
 
     Collision-aware: retains *every* directory that matches a given
     crate name rather than letting one silently win. Built once per
     ``resolve_heritage()`` call and threaded through
-    ``_pick_candidate``/``_import_match`` as that path's ``crate_roots``
-    (round 23), and, as of round 25, also built once per
+    ``_pick_candidate``/``_import_match`` as that path's
+    ``crate_roots``, and also built once per
     ``resolve_imports()`` call and threaded through
     ``_ImportResolveContext.crate_roots`` for ``_resolve_import_rust``'s
     bare-crate-name lookup -- both call sites now share this single
     collision-aware index rather than ``resolve_imports()`` using an
     earlier single-winner variant.
 
-    Round 23 (``.features/plans/round23/
-    09-subtypes-ambiguous-resolution-rate.md`` Fix B): zed's
+    Zed's
     ``crates/gpui`` (the real crate) and
     ``tooling/lints/test_fixture/gpui`` (a same-named synthetic test
     fixture) both convention-match crate name ``"gpui"`` -- a
@@ -6926,8 +6871,7 @@ def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
     deterministic, honest "ambiguous" for the genuinely unresolvable
     case, at the cost of the coin flip's lucky-draw resolved count.
 
-    Round 24 (``.features/plans/round24/
-    03-heritage-crate-decoy-tiebreak.md``) narrows that residual gap
+    The heritage crate-decoy tiebreak narrows that residual gap
     without touching this index's own shape: a genuine 2+-root
     collision here still deterministically falls through to
     ``_rust_crate_hint_matches``'s ``len(crate_matched) > 1`` branch
@@ -6936,13 +6880,12 @@ def _rust_crate_roots_index_all(paths: frozenset[str]) -> dict[str, list[str]]:
     when exactly one matched root's path doesn't look like a
     test-fixture/vendor stand-in -- see that function's docstring.
 
-    Round 25 (``.features/plans/round25/
-    02-deps-crate-decoy-tiebreak.md``) threads this same index and an
+    The same index and an
     analogous directory-level tiebreak
-    (``_prefer_non_synthetic_crate_root``) through
+    (``_prefer_non_synthetic_crate_root``) are threaded through
     ``_resolve_import_rust`` too, closing the identical gap in
-    ``dekko deps``'s module-dependency-graph resolution that round 24
-    closed for heritage resolution -- the single-winner predecessor
+    ``dekko deps``'s module-dependency-graph resolution already closed
+    for heritage resolution -- the single-winner predecessor
     this function replaced there is gone; every reader of
     ``crate_roots`` throughout this module (heritage and import
     resolution both) now sees the same collision-aware
@@ -6981,7 +6924,7 @@ def _rust_local_module_base(
     of the importer's own module position — shadowing a same-named
     workspace crate.
 
-    Round 31 zed coverage pass F12: Rust 2018+ resolves a bare
+    Rust 2018+ resolves a bare
     leading ``use`` segment against the local scope before a crate
     name — ``mod localmod;`` (or its per-file sibling directory,
     ``localmod/``) declared alongside the importing file wins over a
@@ -7058,15 +7001,15 @@ def _resolve_import_rust(
     ``_rust_crate_roots_index_all``) resolves against *that* crate's
     own root the same way ``crate::`` does -- a Cargo workspace's
     sibling crates are referenced by bare crate name too, not just
-    genuine third-party dependencies (round 22 zed.md §3.1). Any other
+    genuine third-party dependencies. Any other
     bare crate name is external by construction.
 
     ``ctx.crate_roots`` is collision-aware (``dict[str, list[str]]``):
     a crate name matching exactly one directory resolves against it
     directly; a crate name matching two or more (a real crate plus a
     same-named test-fixture/vendor stand-in, e.g. zed's ``gpui``) falls
-    back to ``_prefer_non_synthetic_crate_root`` -- round 25's
-    directory-level sibling of round 24's heritage-resolution tiebreak
+    back to ``_prefer_non_synthetic_crate_root`` -- the
+    directory-level sibling of the heritage-resolution tiebreak
     (``_prefer_non_synthetic_crate_match``) -- rather than guessing;
     a genuine, still-ambiguous collision (or no synthetic-marker signal
     to break the tie) resolves to ``None`` here and is correctly
@@ -7076,7 +7019,7 @@ def _resolve_import_rust(
     submodule" and "an item defined in the parent module" — resolved
     the same way, via ``_resolve_two_candidate_lists``.
 
-    Round 31 zed coverage pass F12: a bare first segment was always
+    A bare first segment was always
     looked up in ``ctx.crate_roots`` first, but Rust 2018+ resolves a
     bare path against the *local scope first* — a sibling ``mod
     localmod;`` declared in (or reachable from) the importing file's
@@ -7204,8 +7147,7 @@ def _resolve_import_cpp(
     include-guard bug or, more commonly under this design, an
     artifact of the *real* same-basename file being vendored/excluded
     from the map, which must not silently resolve to "self" instead
-    of correctly falling through to external; see the design doc's D1
-    fix for the concrete repro this guards against).
+    of correctly falling through to external).
     """
     basename = imp.source.rsplit("/", 1)[-1]
     matches = [
@@ -7273,8 +7215,7 @@ def bare_import_source(imp: Import, language: str) -> str:
 
 # Go is deliberately absent: real Go import-path resolution needs
 # ``go.mod``'s module-prefix declaration, which dekko does not parse
-# (out of scope for this design — see the design doc's Feasibility
-# section). Every Go import is reported external rather than guessed
+# (out of scope). Every Go import is reported external rather than guessed
 # from a bare directory-name match, which would silently misresolve
 # as often as it helped. Any other/generic language falls through the
 # same way.
@@ -7341,7 +7282,7 @@ def _py_package_roots(paths: frozenset[str]) -> dict[str, list[str]]:
 # match anywhere in the path, not just a literal prefix at position 0,
 # since a real multi-module Maven/Gradle repo nests each module's own
 # "src/main/java" under a module directory (``spring-core/src/main/
-# java/...``, confirmed live against ``test-repos/spring-boot``), not
+# java/...``, confirmed live against spring-boot), not
 # at the repo root.
 _JAVA_ROOT_SEGMENTS = (
     ("src", "main", "java"),
@@ -7431,8 +7372,7 @@ def resolve_imports(
     indices are built, so the whole pass is O(total imports) after one
     O(files) index-build pass — no O(imports x files) scan anywhere,
     the shape that would make this pathologically slow on a large
-    repo (verified live against ``test-repos/spring-boot``'s Java-heavy
-    corpus; see the implementation report).
+    repo (verified live against spring-boot's Java-heavy corpus).
 
     Args:
         files: Per-file extraction results.
@@ -7525,9 +7465,8 @@ def find_cycles(deps_out: dict[str, list[str]]) -> list[list[str]]:
     Implemented iteratively (an explicit work stack, not recursive
     call frames) — a straightforward recursive Tarjan would blow
     Python's default recursion limit on a large repo's genuinely deep
-    import chain (confirmed a real risk, not a theoretical one, when
-    verifying against ``test-repos``' larger corpora; see the
-    implementation report). O(V + E), the same complexity class as
+    import chain (confirmed a real risk, not a theoretical one, on
+    larger real-world repos). O(V + E), the same complexity class as
     ``trace.py``'s own BFS.
 
     Args:

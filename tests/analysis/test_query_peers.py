@@ -142,7 +142,7 @@ AMBIGUOUS_OUT = {
 def test_peers_ambiguous_only_outgoing_call_is_not_a_leaf_function(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Regression test (round-17 spring-boot finding): `caller`'s only
+    # Regression test (seen on spring-boot): `caller`'s only
     # outgoing call resolves ambiguously (two same-named `target`
     # candidates repo-wide), so `calls_out` is empty for it -- same
     # observable shape as a genuine leaf function, but the "no

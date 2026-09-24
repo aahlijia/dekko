@@ -46,7 +46,7 @@ def test_status_json(
 def test_status_stale_on_version_bump(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Bug #1: an unchanged source tree must still read as stale once
+    # An unchanged source tree must still read as stale once
     # the map's recorded tool_version no longer matches the running
     # build — "dekko status" is the primary surface for this.
     root = make_mapped_repo(SRC)
@@ -65,7 +65,7 @@ def test_status_stale_on_version_bump(
     json_doc = json.loads(capsys.readouterr().out)
     assert json_doc["status"] == "stale"
     assert json_doc["reason"] == "version"
-    # Round-23 §11: the disambiguation fields must be exposed once
+    # The disambiguation fields must be exposed once
     # reason == "version" so a script can tell "genuine version bump"
     # from "long-lived process drifted on spec_hash alone" apart.
     assert json_doc["version_stale"] is True
@@ -76,11 +76,10 @@ def test_status_stale_on_version_bump(
 def test_status_stale_on_spec_hash_only(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # round-09 §2.3, ported to the CLI surface in round-23 §11: a
-    # long-lived process can have an identical tool_version on both
-    # sides while spec_hash alone drifted — the old CLI message
-    # ignored spec_stale entirely and printed the self-contradictory
-    # "built by dekko X, running X" with no explanation.
+    # A long-lived process can have an identical tool_version on both
+    # sides while spec_hash alone drifted — the old CLI message ignored
+    # spec_stale entirely and printed the self-contradictory "built by
+    # dekko X, running X" with no explanation.
     root = make_mapped_repo(SRC)
     map_path = root / ".dekko" / "map.json"
     doc = json.loads(map_path.read_text())
@@ -92,10 +91,10 @@ def test_status_stale_on_spec_hash_only(
     assert "stale (spec_hash)" in out
     assert "tool_version:" not in out
     assert "deadbeef" in out
-    # Round 33 Track 1: the CLI is a one-shot process, current by
+    # The CLI is a one-shot process, current by
     # construction. It used to tell the reader "this is a long-lived
     # process running older code; restart it" -- about itself, which
-    # was exactly backwards and had two eval agents contradicting each
+    # was exactly backwards and had two readers contradicting each
     # other about which spec was current. It now blames the map's
     # writer, the only thing it can prove.
     assert "written by a different dekko build" in out

@@ -177,7 +177,7 @@ def test_type_no_matches_reports_closest_type_names(
 def test_type_exact_no_matches_does_not_self_echo_suggestion(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round 23 §16: `Project` is a real declared type, but every usage
+    # `Project` is a real declared type, but every usage
     # in this fixture is wrapped (`Optional[Project]`), so --exact's
     # literal-text match rejects all of them and the not-found path is
     # reached. The "closest type names" suggester must not echo

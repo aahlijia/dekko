@@ -4,7 +4,7 @@ the callers/uses cross-check pipeline, and its JSON shape.
 Most blind-spot scenarios force the internal dekko-side query to
 report zero hits (``monkeypatch``ing ``sanity._dekko_hits_callers``)
 rather than trying to construct a repo whose resolver genuinely misses
-a call — the plan's own suggested fallback (a real resolver-blind-spot
+a call (a real resolver-blind-spot
 repro is fragile and language-specific; the classifier's job is to
 explain a grep-only line, and it does that the same way regardless of
 *why* dekko didn't also find it). ``classify_miss`` itself is also
@@ -100,7 +100,7 @@ def test_classify_miss_generic_name() -> None:
     assert cause == sanity.CAUSE_GENERIC_NAME
 
 
-# --- data-driven generic-name signal (round 28 cline.md §3.5) ----------
+# --- data-driven generic-name signal ------------------------------------
 
 
 def test_is_generic_name_true_for_curated_word() -> None:
@@ -181,7 +181,7 @@ def test_classify_miss_comment_mention_near_definition() -> None:
 def test_classify_miss_comment_far_from_definition_is_comment_elsewhere() -> (
     None
 ):
-    # Round 32 Track 2(b): used to fall through to "unexplained". A
+    # Used to fall through to "unexplained". A
     # comment line is never a call site wherever it sits; the zone now
     # only picks the wording.
     cause = sanity.classify_miss(
@@ -238,8 +238,7 @@ def test_classify_miss_python_docstring_opening_line() -> None:
 
 
 def test_classify_miss_header_comment_far_from_definition() -> None:
-    # Round 24 07-sanity-comment-mention-file-header-gap.md: a
-    # module-header comment naming the symbol, far outside
+    # A module-header comment naming the symbol, far outside
     # near_own_definition's proximity window, must still classify as
     # a comment mention via the new independent qualifying path.
     cause = sanity.classify_miss(
@@ -389,7 +388,7 @@ def test_looks_like_comment_line_unsupported_language() -> None:
 def test_dekko_hits_callers_folds_lined_module_level_into_hits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Round 23 §10: query.py's module_level entries now carry a
+    # query.py's module_level entries now carry a
     # "lines" key when a site line was recorded. _dekko_hits_callers
     # must fold those (path, line) pairs into hits alongside
     # named-caller sites, matching grep like any other hit, rather
@@ -510,7 +509,7 @@ def test_sanity_data_driven_collision_flags_uncurated_name(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # round 28 cline.md §3.5: "dispose" is not in the curated
+    # "dispose" is not in the curated
     # _GENERIC_NAMES list, but two unrelated dispose() methods create
     # a real, measurable ambiguous call-graph collision the moment a
     # bare, receiverless call to it exists -- ambiguous.collision_names
@@ -553,7 +552,7 @@ def test_sanity_no_generic_name_caution_for_non_colliding_name(
     doc = json.loads(capsys.readouterr().out)
     causes = {row["cause"] for row in doc["grep_only"]}
     assert sanity.CAUSE_GENERIC_NAME not in causes
-    # Round 32 Track 2(a): the map does record ``value = name`` as a
+    # The map does record ``value = name`` as a
     # reference edge, but b.py never imports the name, so the edge
     # fails ``_can_see`` and the row stays honestly unexplained.
     assert sanity.CAUSE_UNEXPLAINED in causes
@@ -564,7 +563,7 @@ def test_sanity_usages_mode_never_sets_collision_signal(
     make_mapped_repo: RepoFactory,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # round 28 cline.md §3.5 risk note: --usages mode has no
+    # --usages mode has no
     # "candidate" concept for an external base identifier the way
     # there is for a repo-defined symbol's bare name, so the
     # collision-name signal must always be False there -- even for a
@@ -635,8 +634,7 @@ def test_sanity_detects_header_comment_mention_far_from_definition(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     # Mirrors the real gap confirmed against claude-buddy's
-    # server/path.ts (round 24
-    # 07-sanity-comment-mention-file-header-gap.md): a module-header
+    # server/path.ts: a module-header
     # comment block naming several exports sits well outside
     # _COMMENT_PROXIMITY_LINES of any one definition, so only the new
     # in_leading_header_comment path -- not near_own_definition --
@@ -748,7 +746,7 @@ def test_sanity_json_shape(
         assert {"file", "line", "snippet", "cause"} <= set(row)
     for row in doc["matches"]:
         assert {"file", "line"} <= set(row)
-    # Round 23 claude-code.md §2.1: every bucket's meta mirrors
+    # Every bucket's meta mirrors
     # ``query --json``'s own Meter.as_dict() shape, and under no
     # truncation reports truncated_by as None.
     for bucket in ("matches", "dekko_only", "grep_only"):
@@ -764,15 +762,15 @@ def test_sanity_json_shape(
         assert doc["meta"][bucket]["total"] == doc["counts"][bucket]
 
 
-# --- Round 23 claude-code.md §2.1: report-row truncation disclosure ----
+# --- report-row truncation disclosure -----------------------------------
 
 
 def _make_many_grep_only_hits_repo(
     make_mapped_repo: RepoFactory, n: int
 ) -> Path:
     """A repo whose ``target`` symbol has ``n`` grep-only call sites,
-    one per file -- cheap-to-construct stand-in for the round-23
-    report's 379-row ``grep_only`` bucket, small enough to drive
+    one per file -- cheap-to-construct stand-in for a real
+    379-row ``grep_only`` bucket, small enough to drive
     through an explicit ``--limit``/``--budget`` rather than the real
     ``DEFAULT_REPORT_LIMIT`` (200)."""
     files = {"a.py": "def target():\n    return 1\n"}
@@ -786,7 +784,7 @@ def test_sanity_json_meta_discloses_limit_truncation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # Round 23 claude-code.md §2.1: ``sanity --json`` used to cap its
+    # ``sanity --json`` used to cap its
     # row arrays with zero disclosure anywhere in the JSON. Drive the
     # same code path DEFAULT_REPORT_LIMIT (200) exercises, via a small
     # explicit --limit on a 5-hit fixture (cheaper than constructing
@@ -861,7 +859,7 @@ def test_sanity_json_meta_discloses_budget_truncation(
     assert meta["returned"] == len(doc["grep_only"])
 
 
-# --- Round 21 Track B1: silent 5,000-line grep truncation ---------------
+# --- silent 5,000-line grep truncation ----------------------------------
 
 
 class _FakeCompletedProcess:
@@ -945,7 +943,7 @@ def test_sanity_json_suppresses_dekko_only_when_grep_truncated(
     assert doc["dekko_only"] == []
     assert doc["counts"]["dekko_only"] is None
     assert "dekko_only_note" in doc
-    # Round 23 claude-code.md §2.1: the suppressed dekko-only bucket
+    # The suppressed dekko-only bucket
     # carries no Meter either -- a real count for data explicitly
     # being suppressed as inconclusive would be false confidence,
     # mirroring counts.dekko_only's own None.
@@ -1018,7 +1016,7 @@ def test_sanity_json_reports_skipped_pathological_lines(
     )
 
 
-# --- Round 21 Track B2: pathological-line guard + snippet cap -----------
+# --- pathological-line guard + snippet cap ------------------------------
 
 
 def test_run_grep_skips_pathological_lines(
@@ -1075,7 +1073,7 @@ def test_classify_miss_still_sees_full_snippet_not_capped() -> None:
     assert cause == sanity.CAUSE_QUALIFIED_CALL
 
 
-# --- Round 21 Track B3: import/require-statement classifier -------------
+# --- import/require-statement classifier --------------------------------
 
 
 def test_classify_miss_esm_named_import() -> None:
@@ -1242,7 +1240,7 @@ def test_classify_miss_qualified_call_wins_over_import_shape() -> None:
 
 
 def test_classify_miss_java_import() -> None:
-    # Round 25 spring-boot.md Finding 2: a plain Java type import has
+    # A plain Java type import has
     # no equivalent among the ESM/CJS/Python templates.
     cause = sanity.classify_miss(
         "import org.springframework.boot.ansi.AnsiPropertySource;",
@@ -1268,7 +1266,7 @@ def test_classify_miss_java_static_import() -> None:
 def test_classify_miss_kotlin_import() -> None:
     # Kotlin shares Java's ``import a.b.C`` shape but drops the
     # terminating semicolon -- a dedicated template, not a loosened
-    # Java one (round 25 spring-boot.md Finding 2).
+    # Java one.
     cause = sanity.classify_miss(
         "import a.b.AnsiPropertySource",
         "AnsiPropertySource",
@@ -1350,7 +1348,7 @@ def test_sanity_detects_import_statement_miss(
     assert sanity.CAUSE_IMPORT_STATEMENT in causes
 
 
-# --- multi-line destructured import member (round 22 §8) ---------------
+# --- multi-line destructured import member ------------------------------
 
 
 def test_classify_miss_multiline_import_member() -> None:
@@ -1454,7 +1452,7 @@ def test_looks_like_multiline_import_member_false_without_bare_line(
 def test_looks_like_multiline_import_member_nearest_opener_wins(
     tmp_path: Path,
 ) -> None:
-    # Round 23 claude-buddy.md §2.1: the prior any()/any() scan let an
+    # The prior any()/any() scan let an
     # unrelated, already-closed earlier import's "}" falsely "close" a
     # genuinely still-open block sitting directly above the hit, as
     # soon as the window contained *any* opener and *any* closer
@@ -1530,7 +1528,7 @@ def test_sanity_detects_multiline_destructured_import_member_miss(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # Round 22 claude-buddy.md §2.4: the residual gap in the
+    # The residual gap in the
     # single-line import fix -- a multi-line destructured import puts
     # the bare-name hit on a line with no import/{/from token at all.
     root = make_mapped_repo(
@@ -1565,12 +1563,12 @@ def test_sanity_multiline_import_member_with_unrelated_import_above(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # Round 23 claude-buddy.md §2.1 end-to-end regression: an unrelated
+    # End-to-end regression: an unrelated
     # single-line import sits above the real, still-open multi-line
     # import block whose member is the hit -- the exact shape that
     # defeated the flat any()/any() scan on any file with more than
     # one import statement above the target block (the common case on
-    # a real codebase, per the round-23 repro).
+    # a real codebase).
     root = make_mapped_repo(
         {
             "path.ts": "export function buddyStateDir(): string {\n"
@@ -1598,7 +1596,7 @@ def test_sanity_multiline_import_member_with_unrelated_import_above(
     assert rows_by_line[4] == sanity.CAUSE_IMPORT_STATEMENT
 
 
-# --- TS/JS type-position usage (round 25 claude-code.md Finding 1) -----
+# --- TS/JS type-position usage -----------------------------------------
 
 
 def test_looks_like_type_annotation_import_type() -> None:
@@ -1667,7 +1665,7 @@ def test_looks_like_type_annotation_javascript_generic() -> None:
     )
 
 
-# --- Rust type-position usage (round 28 zed.md §3.4) -------------------
+# --- Rust type-position usage -------------------------------------------
 
 
 def test_looks_like_type_annotation_rust_field_annotation() -> None:
@@ -1749,9 +1747,8 @@ def test_looks_like_type_annotation_rust_where_clause_generic() -> None:
 
 def test_looks_like_type_annotation_rust_inherent_impl() -> None:
     # Plain inherent impl (no trailing "for Trait") -- surfaced by a
-    # real-repo spot-check on zed after the design doc's own
-    # `impl...for` template alone left this exact line (the master
-    # report's own motivating example) unclassified.
+    # real-repo spot-check on zed after the original `impl...for`
+    # template alone left this exact line unclassified.
     assert sanity._looks_like_type_annotation(
         "impl NavHistory {", "NavHistory", "a.rs", target_is_type=True
     )
@@ -1764,8 +1761,8 @@ def test_looks_like_type_annotation_rust_inherent_impl_generic() -> None:
 
 
 def test_looks_like_type_annotation_rust_return_type() -> None:
-    # Also surfaced by the same zed spot-check -- the master report's
-    # own repro cited this exact line as unexplained.
+    # Also surfaced by the same zed spot-check, where this exact line
+    # read as unexplained.
     assert sanity._looks_like_type_annotation(
         "pub fn fork_nav_history(&self) -> NavHistory {",
         "NavHistory",
@@ -1910,8 +1907,7 @@ def test_sanity_detects_ts_type_annotation_miss(
     assert rows_by_line.get(3) == sanity.CAUSE_TYPE_ANNOTATION
 
 
-# --- unrelated local binding / string literal (round 25 --------------
-# claude-buddy.md Finding 2) ---------------------------------------------
+# --- unrelated local binding / string literal ---------------------------
 
 
 def test_looks_like_local_binding_or_literal_local_decl() -> None:
@@ -1952,7 +1948,7 @@ def test_looks_like_local_binding_or_literal_false_for_substring() -> None:
 
 
 def test_looks_like_local_binding_or_literal_ordering_caveat() -> None:
-    # The plan's own ordering caveat: `warn` appearing as a *string
+    # Ordering caveat: `warn` appearing as a *string
     # argument* to an unrelated call is genuinely a literal-value
     # mention, not a call to `warn` -- correctly True here. Real call
     # shapes (`logger.warn(...)`, bare `warn(...)`) are intercepted
@@ -1964,7 +1960,7 @@ def test_looks_like_local_binding_or_literal_ordering_caveat() -> None:
     )
 
 
-# --- catch binding / interface field (round 28 cline.md §3.5) ----------
+# --- catch binding / interface field ------------------------------------
 
 
 def test_looks_like_local_binding_or_literal_catch_binding() -> None:
@@ -2103,7 +2099,7 @@ def test_sanity_detects_local_binding_or_literal_miss(
     assert rows_by_line.get(2) == sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
 
 
-# --- leading-header-comment mention (round 24 plan 07) -----------------
+# --- leading-header-comment mention -------------------------------------
 
 
 def test_in_leading_header_comment_true_for_module_header_shape(
@@ -2199,7 +2195,7 @@ def test_in_leading_header_comment_unreadable_file_is_false(
     assert not sanity._in_leading_header_comment(tmp_path, hit)
 
 
-# --- block-comment continuation lines (round 31 tensorflow.md 5.2) ------
+# --- block-comment continuation lines -----------------------------------
 
 
 def test_block_comment_continuation_true_for_jsdoc_line(
@@ -2304,8 +2300,8 @@ def test_block_comment_continuation_unreadable_file_is_false(
 def test_sanity_unused_block_comment_continuation_is_noise(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # End-to-end reproduction of tensorflow.md Observation 5.2: a
-    # JSDoc-style continuation line mentioning the target inside an
+    # End-to-end reproduction of a tensorflow shape: a JSDoc-style
+    # continuation line mentioning the target inside an
     # open block comment must be filtered as noise, not reported as
     # unexplained reference evidence.
     root = make_mapped_repo({"a.py": "def TARGET_NAME():\n    return 1\n"})
@@ -2324,13 +2320,13 @@ def test_sanity_unused_block_comment_continuation_is_noise(
     assert doc["counts"]["filtered_noise"] == 1
 
 
-# --- other same-named symbols' own def lines (round 22 §10) -------------
+# --- other same-named symbols' own def lines ----------------------------
 
 
 def test_sanity_excludes_unrelated_same_named_symbols_own_def_line(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round 22 zed.md §3.3: dekko's own map already knows a genuinely
+    # zed shape: dekko's own map already knows a genuinely
     # unrelated MetalRenderer.new_internal's own declaration line is a
     # definition, not a call site -- but only the *query target's own*
     # definition line was excluded from grep-only, so this unrelated
@@ -2406,7 +2402,7 @@ def test_sanity_near_own_definition_checks_every_same_named_symbol(
     assert rows_by_line.get(1) == sanity.CAUSE_COMMENT_MENTION
 
 
-# --- cross-file bare-name collision (round 25 awesome-go.md Bug 1) -----
+# --- cross-file bare-name collision -------------------------------------
 
 
 def test_classify_miss_cross_file_collision() -> None:
@@ -2436,7 +2432,7 @@ def test_classify_miss_cross_file_collision_absent_without_flag() -> None:
 
 
 def test_classify_miss_cross_file_collision_wins_over_generic_name() -> None:
-    # Round 25 awesome-go.md Bug 1's own precedence lock-in: a name
+    # Precedence lock-in: a name
     # that's both short/generic *and* a genuine cross-file collision
     # must resolve to the deterministic collision cause, not the
     # accident-prone length/word-list heuristic.
@@ -2481,7 +2477,7 @@ def test_classify_miss_qualified_call_wins_over_cross_file_collision() -> None:
 def test_sanity_cross_file_collision_flags_call_shaped_reference(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round 25 awesome-go.md Bug 1's own repro shape: two files each
+    # awesome-go's repro shape: two files each
     # declare a same-bare-named function and each correctly calls its
     # own local declaration -- dekko already resolves both correctly
     # (no monkeypatching needed), so file B's real call to *its own*
@@ -2678,7 +2674,7 @@ def test_classify_unused_reference_qualified_call() -> None:
 
 
 def test_classify_unused_reference_c_extern_prototype_is_declaration() -> None:
-    # Round 25 finding #14 (tensorflow.md Finding 4): a header-only
+    # A header-only
     # extern forward declaration -- no body, ends `;` -- is
     # syntactically indistinguishable from a bare call by the call
     # template alone and was mistagged [call]; must classify as
@@ -2823,7 +2819,7 @@ def test_sanity_unused_json_reports_counts_and_meta(
     assert shapes == {sanity.SHAPE_SPREAD, sanity.SHAPE_TYPEOF}
 
 
-# Round 32, all seven repos: --unused never asked `dekko unused` whether
+# Seen on all seven test repos: --unused never asked `dekko unused` if
 # it had flagged the target, so it closed every report with "flagged
 # unused, but N call-shaped references found (possible resolver miss)",
 # for `SpringApplication.run` (4,861 grep hits) as readily as for real
@@ -3063,7 +3059,7 @@ def test_sanity_unused_generic_name_caution_text_note(
     assert sanity.CAUSE_GENERIC_NAME in out
 
 
-# Round-29 Track 4c (cline "Confirmed still-open" §1): ``error`` is
+# ``error`` is
 # absent from the curated ``_GENERIC_NAMES`` list and longer than the
 # short-name shortcut, but is a genuine repo-wide method-name collision
 # (``Logger.error``/``Response.error``, both reached through the same
@@ -3156,8 +3152,6 @@ def test_sanity_unused_text_discloses_truncation_and_pathological_skips(
 
 
 # --- ``sanity --all``: repo-wide sweep -----------------------------
-#
-# .features/plans/round23/24-sanity-all-sweep.md
 
 
 def test_group_fan_in_symbols_excludes_zero_fan_in(
@@ -3490,7 +3484,7 @@ def _buggy_looks_like_multiline_import_member(
     root: Path, hit: sanity.GrepHit, bare_name: str
 ) -> bool:
     """The pre-0.43.18 flat ``any()``/``any()`` implementation this
-    module's round-23 regression fixed (commit ``b5f692f``) -- a
+    module's regression fix replaced (commit ``b5f692f``) -- a
     still-open multi-line destructured import block is falsely read as
     "closed" as soon as *any* line in the lookback window contains
     ``}``, regardless of which opener it actually belongs to."""
@@ -3519,7 +3513,7 @@ def test_sanity_all_regression_would_have_caught_multiline_import_bug(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # Round 23's own thesis, made concrete: sweeping every fan-in
+    # The thesis, made concrete: sweeping every fan-in
     # symbol with the *pre-fix* buggy classifier flags a nonzero
     # unexplained count on the exact shape that defeated it (an
     # unrelated single-line import sitting above the real, still-open
@@ -3565,10 +3559,9 @@ def test_sanity_all_regression_would_have_caught_multiline_import_bug(
     assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED, 0) > 0
 
 
-# --- receiver-mismatch cue (round 23 plan 25) --------------------------
+# --- receiver-mismatch cue ---------------------------------------------
 #
-# See .features/plans/round23/25-sanity-receiver-mismatch-cue.md. A
-# grep-only hit for a single-repo-candidate *method* target can be
+# A grep-only hit for a single-repo-candidate *method* target can be
 # flagged CAUSE_LIKELY_EXTERNAL_COLLISION when neither the hit's own
 # line nor its file's top-of-file imports mention the target's
 # declaring type -- the cheap textual proxy for "this is almost
@@ -3609,7 +3602,7 @@ def test_receiver_mismatch_unreadable_file_is_false(tmp_path: Path) -> None:
 def test_receiver_mismatch_same_declaring_file_is_false(
     tmp_path: Path,
 ) -> None:
-    # Round 25 finding #9: a file never imports its own class, so a
+    # A file never imports its own class, so a
     # same-file comment about the correct target (not close enough to
     # its def line to trip the separate comment-proximity check) must
     # not be flagged as a receiver mismatch just because the type name
@@ -3660,8 +3653,8 @@ def test_classify_miss_likely_unrelated_external_preempts_test_filter() -> (
     None
 ):
     # Without the new flag this line would land on CAUSE_TEST_FILTER --
-    # the exact regression this design targets (round 23
-    # spring-boot.md §4: a grep-only AssertJ-style hit in a test file
+    # the exact regression this design targets (spring-boot: a
+    # grep-only AssertJ-style hit in a test file
     # read as "re-run with --include-tests" when it was never a real
     # caller to begin with).
     cause = sanity.classify_miss(
@@ -3810,7 +3803,7 @@ def test_sanity_receiver_mismatch_skips_same_file_comment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # Round 25 finding #9 (cline.md Finding 3): a same-file comment
+    # A same-file comment
     # mentioning the target's own method, far enough from its def line
     # to not trip the comment-proximity check, must not get the
     # misleading "likely an unrelated external-library method" message
@@ -3857,8 +3850,7 @@ def test_sanity_receiver_mismatch_absent_when_gate_unheld(
     assert "receiver_mismatch_note" not in doc
 
 
-# --- C.1/round-24 11-output-self-disclosure-hints.md: C.3
-# --group-by-file --------------------------------------------------
+# --- --group-by-file ----------------------------------------------
 
 
 def test_sanity_group_by_file_rolls_up_grep_only(
@@ -3874,9 +3866,9 @@ def test_sanity_group_by_file_rolls_up_grep_only(
     # calls -- a bare cross-file call to a same-named symbol with no
     # confirming import is itself a real, deterministic collision
     # dekko's resolver already records (``ambiguous_in``/``_out``),
-    # which round 28's data-driven generic-name signal now correctly
+    # which the data-driven generic-name signal now correctly
     # surfaces as ``CAUSE_GENERIC_NAME`` rather than leaving it
-    # unexplained. And since round 32 Track 2(a) a bare value
+    # unexplained. And a bare value
     # reference (``value = name``) is explained too, from the map's
     # own reference edges. A name inside a longer string is the one
     # shape sanity deliberately refuses to classify, which keeps these
@@ -3954,7 +3946,7 @@ def test_sanity_group_by_file_respects_limit_truncation(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # Round 31 C1 (zed.md F10): grouping must run over the FULL
+    # Grouping must run over the FULL
     # grep-only bucket, then --limit caps the number of file *groups*
     # printed, not the number of rows before grouping. Updated from
     # the pre-fix pinning of "grouping happens over whatever rows
@@ -3994,7 +3986,7 @@ def test_sanity_group_by_file_groups_full_bucket_before_limit(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # Round 31 C1 (zed.md F10), the actual regression: on zed, a
+    # The actual regression: on zed, a
     # --limit-200 row cap applied BEFORE grouping meant the two
     # largest real clusters (139 and 125 hits) never appeared in the
     # grouped output, because none of their individual rows survived
@@ -4036,10 +4028,10 @@ def test_sanity_group_by_file_groups_full_bucket_before_limit(
     assert "... +3 more file groups (outside --limit/budget)" in out
 
 
-# --- round 31: buckets must reconcile with the printed grep ---------
+# --- buckets must reconcile with the printed grep ------------------
 
-# Two same-bare-named declarations plus a real call site. Before round
-# 31 both declaration lines were dropped from the buckets silently, so
+# Two same-bare-named declarations plus a real call site. Previously
+# both declaration lines were dropped from the buckets silently, so
 # ``matches + grep_only`` came up short against the very grep command
 # printed above them, with nothing explaining the gap. Found on all
 # five language families tested; worst on overload-heavy repos, where
@@ -4127,9 +4119,8 @@ def test_sanity_unused_counts_reconcile(
     )
 
 
-# Round 31: the member check widened from "exactly one bare name" to a
-# full specifier-list line, and the opener to export/default+named
-# blocks (claude-buddy.md C1 / cline.md §4.1 Bug B's mislabel half).
+# The member check widened from "exactly one bare name" to a full
+# specifier-list line, and the opener to export/default+named blocks.
 
 
 def test_multiline_import_member_packed_several_names_per_line(
@@ -4207,11 +4198,10 @@ def test_multiline_import_member_rejects_object_literal_and_calls(
     )
 
 
-# --- round 32 Track 2: recognizable lines no longer "unexplained" -----
+# --- recognizable lines no longer "unexplained" ----------------------
 #
-# Design: .features/fixes/round31/02-sanity-miss-classification.md.
-# Every positive below is a literal line from that doc's evidence
-# table; every negative pins a shape the classifier must keep
+# Every positive below is a literal line from a real repo; every
+# negative pins a shape the classifier must keep
 # admitting it doesn't know.
 
 
@@ -4226,10 +4216,10 @@ def _cause(snippet: str, name: str = "cleanup", **flags: Any) -> str:
     )
 
 
-# (c) the comment test runs before the type and string-literal checks.
+# The comment test runs before the type and string-literal checks.
 
 
-def test_track2c_comment_quoting_the_name_is_a_comment() -> None:
+def test_miss_comment_quoting_the_name_is_a_comment() -> None:
     # tensorflow: a shell comment that happens to quote the name used
     # to get the string-literal label, because that check ran first.
     snippet = '# Therefore, "tfrun" commands cannot include pipes'
@@ -4243,7 +4233,7 @@ def test_track2c_comment_quoting_the_name_is_a_comment() -> None:
     assert cause == sanity.CAUSE_COMMENT_ELSEWHERE
 
 
-def test_track2c_real_string_literal_still_local_or_literal() -> None:
+def test_miss_real_string_literal_still_local_or_literal() -> None:
     snippet = 'x = "tfrun"'
     assert not sanity._looks_like_comment_line(snippet, "a.py")
     cause = _cause(
@@ -4256,7 +4246,7 @@ def test_track2c_real_string_literal_still_local_or_literal() -> None:
     assert cause == sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
 
 
-def test_track2c_comment_beats_type_annotation() -> None:
+def test_miss_comment_beats_type_annotation() -> None:
     cause = _cause(
         "// takes a cfg: Output and returns it",
         "Output",
@@ -4266,7 +4256,7 @@ def test_track2c_comment_beats_type_annotation() -> None:
     assert cause == sanity.CAUSE_COMMENT_ELSEWHERE
 
 
-# (b) the zone gate is gone; the zone picks the wording.
+# The zone gate is gone; the zone picks the wording.
 
 
 @pytest.mark.parametrize(
@@ -4277,7 +4267,7 @@ def test_track2c_comment_beats_type_annotation() -> None:
         ({}, sanity.CAUSE_COMMENT_ELSEWHERE),
     ],
 )
-def test_track2b_comment_cause_wording_by_zone(
+def test_miss_comment_cause_wording_by_zone(
     flags: dict[str, bool], expected: str
 ) -> None:
     # claude-buddy: a banner comment far from the definition.
@@ -4289,7 +4279,7 @@ def test_track2b_comment_cause_wording_by_zone(
     assert cause == expected
 
 
-def test_track2b_neither_comment_cause_counts_as_unexplained() -> None:
+def test_miss_neither_comment_cause_counts_as_unexplained() -> None:
     causes = [sanity.CAUSE_COMMENT_MENTION, sanity.CAUSE_COMMENT_ELSEWHERE]
     assert sanity._unexplained_count(causes) == 0
 
@@ -4307,7 +4297,7 @@ def test_track2b_neither_comment_cause_counts_as_unexplained() -> None:
         ("/* legacy */ cleanup();", "src/main.c"),
     ],
 )
-def test_track2b_not_comment_lines(snippet: str, path: str) -> None:
+def test_miss_not_comment_lines(snippet: str, path: str) -> None:
     assert not sanity._looks_like_comment_line(snippet, path)
 
 
@@ -4319,24 +4309,24 @@ def test_track2b_not_comment_lines(snippet: str, path: str) -> None:
         ("/* cleanup: opening line of a block", "src/main.c"),
     ],
 )
-def test_track2b_still_comment_lines(snippet: str, path: str) -> None:
+def test_miss_still_comment_lines(snippet: str, path: str) -> None:
     assert sanity._looks_like_comment_line(snippet, path)
 
 
-def test_track2b_word_inside_a_string_stays_unexplained() -> None:
+def test_miss_word_inside_a_string_stays_unexplained() -> None:
     # Deliberate non-decision: "name somewhere inside quotes" also
     # matches eval("cleanup()") and dispatch-by-string, which are real
-    # references. Pinned so a later round doesn't "fix" it.
+    # references. Pinned so a later change doesn't "fix" it.
     snippet = 'lines.push("... settings.json cleanup complete.");'
     assert not sanity._looks_like_local_binding_or_literal(snippet, "cleanup")
     assert not sanity._looks_like_value_reference(snippet, "cleanup", "a.rs")
     assert _cause(snippet) == sanity.CAUSE_UNEXPLAINED
 
 
-# (a) tier 1: the map already recorded this line as a value reference.
+# Tier 1: the map already recorded this line as a value reference.
 
 
-def test_track2a_recorded_reference_flag() -> None:
+def test_miss_recorded_reference_flag() -> None:
     cause = _cause(
         "if (names.some(cleanup)) {",
         is_recorded_reference=True,
@@ -4344,7 +4334,7 @@ def test_track2a_recorded_reference_flag() -> None:
     assert cause == sanity.CAUSE_VALUE_REFERENCE
 
 
-def test_track2a_comment_still_beats_recorded_reference() -> None:
+def test_miss_comment_still_beats_recorded_reference() -> None:
     cause = _cause(
         "// cleanup",
         looks_like_comment=True,
@@ -4353,7 +4343,7 @@ def test_track2a_comment_still_beats_recorded_reference() -> None:
     assert cause == sanity.CAUSE_COMMENT_ELSEWHERE
 
 
-def test_track2a_tier1_typescript_end_to_end(
+def test_miss_tier1_typescript_end_to_end(
     make_mapped_repo: RepoFactory,
     capsys: pytest.CaptureFixture,
 ) -> None:
@@ -4389,11 +4379,11 @@ def test_track2a_tier1_typescript_end_to_end(
         assert doc["counts"]["grep_only"] == len(doc["grep_only"])
 
 
-def test_track2a_tier1_java_method_reference(
+def test_miss_tier1_java_method_reference(
     make_mapped_repo: RepoFactory,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # spring-boot: the design doc assumed Java had no reference edges.
+    # spring-boot: it was assumed Java had no reference edges.
     # It does (`method_reference`), so this is exact, not a shape guess.
     root = make_mapped_repo(
         {
@@ -4416,7 +4406,7 @@ def test_track2a_tier1_java_method_reference(
     assert rows.get(5) == sanity.CAUSE_VALUE_REFERENCE
 
 
-def test_track2a_all_sweep_uses_recorded_references(
+def test_miss_all_sweep_uses_recorded_references(
     make_mapped_repo: RepoFactory,
     capsys: pytest.CaptureFixture,
 ) -> None:
@@ -4440,7 +4430,7 @@ def test_track2a_all_sweep_uses_recorded_references(
     assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED) is None
 
 
-# (a) tier 2: the path-qualified shape, Rust/C++ only, never with a
+# Tier 2: the path-qualified shape, Rust/C++ only, never with a
 # `(` after.
 
 
@@ -4454,9 +4444,7 @@ def test_track2a_all_sweep_uses_recorded_references(
         ("register(&Widget::on_click);", "on_click", "src/main.cc"),
     ],
 )
-def test_track2a_tier2_value_shapes(
-    snippet: str, name: str, path: str
-) -> None:
+def test_miss_tier2_value_shapes(snippet: str, name: str, path: str) -> None:
     assert sanity._looks_like_value_reference(snippet, name, path)
 
 
@@ -4495,13 +4483,13 @@ def test_track2a_tier2_value_shapes(
         (".map(Src::getSource)", "getSource", "Src.java"),
     ],
 )
-def test_track2a_tier2_not_value_shapes(
+def test_miss_tier2_not_value_shapes(
     snippet: str, name: str, path: str
 ) -> None:
     assert not sanity._looks_like_value_reference(snippet, name, path)
 
 
-def test_track2a_tier2_cause_and_ladder_position() -> None:
+def test_miss_tier2_cause_and_ladder_position() -> None:
     assert (
         _cause(".map(T::my_fn)", "my_fn", looks_like_value_reference=True)
         == sanity.CAUSE_VALUE_REFERENCE_UNRESOLVED
@@ -4536,7 +4524,7 @@ def _grep_only_causes(
     return {r["line"]: r["cause"] for r in doc["grep_only"]}
 
 
-def test_track2a_tier2_rust_end_to_end_function_target_only(
+def test_miss_tier2_rust_end_to_end_function_target_only(
     make_mapped_repo: RepoFactory,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
@@ -4566,7 +4554,7 @@ def test_track2a_tier2_rust_end_to_end_function_target_only(
     assert rows.get(7) != sanity.CAUSE_VALUE_REFERENCE_UNRESOLVED
 
 
-# (d) Rust construction and payload shapes, type targets only.
+# Rust construction and payload shapes, type targets only.
 
 
 @pytest.mark.parametrize(
@@ -4580,7 +4568,7 @@ def test_track2a_tier2_rust_end_to_end_function_target_only(
         "if let AbortMessageLocation { line, .. } = loc {",
     ],
 )
-def test_track2d_rust_type_construction_shapes(snippet: str) -> None:
+def test_miss_rust_type_construction_shapes(snippet: str) -> None:
     name = "AbortMessageLocation"
     assert sanity._looks_like_type_annotation(
         snippet, name, "src/abort.rs", target_is_type=True
@@ -4606,13 +4594,13 @@ def test_track2d_rust_type_construction_shapes(snippet: str) -> None:
         ("const w = Wrapper {", "src/lib.ts"),
     ],
 )
-def test_track2d_not_type_construction(snippet: str, path: str) -> None:
+def test_miss_not_type_construction(snippet: str, path: str) -> None:
     assert not sanity._looks_like_type_annotation(
         snippet, "Wrapper", path, target_is_type=True
     )
 
 
-def test_track2d_rust_end_to_end_struct_target(
+def test_miss_rust_end_to_end_struct_target(
     make_mapped_repo: RepoFactory,
     capsys: pytest.CaptureFixture,
 ) -> None:
@@ -4637,7 +4625,7 @@ def test_track2d_rust_end_to_end_struct_target(
     assert rows.get(6) == sanity.CAUSE_TYPE_ANNOTATION
 
 
-def test_track2a_tier1_ignores_edges_the_file_could_not_make(
+def test_miss_tier1_ignores_edges_the_file_could_not_make(
     make_mapped_repo: RepoFactory,
     capsys: pytest.CaptureFixture,
 ) -> None:
@@ -4666,7 +4654,7 @@ def test_track2a_tier1_ignores_edges_the_file_could_not_make(
     assert sanity.CAUSE_VALUE_REFERENCE not in rows.values()  # ...unblessed
 
 
-def test_track2a_tier1_stands_down_in_a_file_that_shadows_the_name(
+def test_miss_tier1_stands_down_in_a_file_that_shadows_the_name(
     make_mapped_repo: RepoFactory,
     capsys: pytest.CaptureFixture,
 ) -> None:
@@ -4697,7 +4685,7 @@ def test_track2a_tier1_stands_down_in_a_file_that_shadows_the_name(
     assert sanity.CAUSE_VALUE_REFERENCE not in rows.values()
 
 
-def test_track5b_tier1_labels_a_true_ref_beside_a_shadowing_local(
+def test_miss_tier1_labels_a_true_ref_beside_a_shadowing_local(
     make_mapped_repo: RepoFactory,
     capsys: pytest.CaptureFixture,
 ) -> None:

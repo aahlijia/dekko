@@ -1,9 +1,6 @@
 """C/C++ "most vexing parse" constructor-argument call recovery.
 
-Round 24's tensorflow eval (``test-repos/reports/
-24-tokentest-7repo-post04328/tensorflow.md`` §2.1;
-``.features/plans/round24/01-cpp-vexing-parse-ctor-calls-dropped.md``)
-found that a statement shaped like ``Type name(Ctor(), deleter);`` (the
+On tensorflow, a statement shaped like ``Type name(Ctor(), deleter);`` (the
 idiomatic RAII smart-pointer construction ``std::unique_ptr<T, D> p(
 Ctor(), deleter);``) hits C++'s "most vexing parse" ambiguity:
 tree-sitter-cpp/tree-sitter-c have no type information and always
@@ -92,7 +89,7 @@ def test_nested_ctor_arg_recovers_only_outer_level(
     ``Foo bar(Baz(Qux()), other);`` recovers ``Baz`` (the direct
     constructor argument); ``Qux`` (nested inside ``Baz``'s own
     misparsed argument list) is a known, narrower residual gap --
-    round 24's evidence never surfaced this shape in practice, but the
+    real repos never surfaced this shape in practice, but the
     boundary should be an explicit, tested one rather than silent.
     """
     spec = languages.spec_for_path("nested.cc")
@@ -143,7 +140,7 @@ def test_file_scope_declaration_not_recovered(tmp_path: Path) -> None:
 
 def test_c_grammar_also_recovers_the_same_shape(tmp_path: Path) -> None:
     """The grammar-level ambiguity is identical in C; the fix covers
-    both ``LanguageSpec``s (round 23/24's design decision -- C hits it
+    both ``LanguageSpec``s (a deliberate decision -- C hits it
     less often in practice with no RAII idiom driving it, but the
     mechanism is the same)."""
     spec = languages.spec_for_path("ctor_arg.c")

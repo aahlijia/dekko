@@ -118,7 +118,7 @@ def test_spec_change_invalidates_cache(
     # A dev iteration or hotfix can change what the extractor pulls
     # out of a file without bumping the released version string — the
     # cache must still invalidate on that, not just on a real version
-    # bump (bug #1: the tool-version check alone is too coarse).
+    # bump (the tool-version check alone is too coarse).
     root = make_mapped_repo(SRC)
     monkeypatch.setattr(cache_mod, "spec_fingerprint", lambda: "deadbeef")
     assert cache_mod.load(root) == {}
@@ -131,7 +131,7 @@ def test_spec_change_invalidates_cache(
 def test_header_dispatch_heuristic_change_invalidates_cache(
     make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round 18's tensorflow finding: ``.h`` was always parsed with the
+    """Seen on tensorflow: ``.h`` was always parsed with the
     C grammar, even for a genuine C++ header, silently dropping every
     ``class``/``namespace``/``template`` construct and producing wrong
     call/heritage resolution downstream. The fix
@@ -234,7 +234,7 @@ def test_jobs_flag_also_parallelizes_resolution(
     """1.4: ``--jobs`` used to parallelize extraction only —
     resolve()/resolve_refs() ran single-threaded regardless, which is
     why a one-file-edit auto-regen could cost as much as a full remap
-    on a large repo (round 11 §1). ``run_map`` now threads the same
+    on a large repo. ``run_map`` now threads the same
     ``--jobs`` value into ``resolve()``'s new ``workers`` parameter;
     this forces the resolution-side parallel path too (via the
     resolver's own low item-count threshold) and confirms the output
@@ -243,7 +243,7 @@ def test_jobs_flag_also_parallelizes_resolution(
 
     root = make_mapped_repo(SRC)
     monkeypatch.setattr(repo_ops, "_PARALLEL_MIN", 1)
-    # Round 30: both of _pool_workers' limits have to be lifted, or this
+    # Both of _pool_workers' limits have to be lifted, or this
     # silently exercises the sequential path. See
     # tests/core/test_resolver.py::_force_resolve_pool.
     monkeypatch.setattr(resolver_mod, "_RESOLVE_PARALLEL_MIN_ITEMS", 0)
@@ -273,8 +273,8 @@ def test_regen_map_uses_all_cores_for_resolution(
     """1.4: the auto-regen path (``repo_ops.regen_map``, used by every
     read subcommand's ``load_or_regen`` on a stale map) used to
     hardcode ``jobs=1`` in its synthetic ``argparse.Namespace`` -- the
-    exact scenario round 11 §1 flagged (a single-file edit's auto-regen
-    paying the full single-threaded resolution cost). It must now
+    exact scenario that made a single-file edit's auto-regen
+    pay the full single-threaded resolution cost. It must now
     request all cores (``jobs=0``) so the same fix that speeds up
     ``dekko map --jobs 0`` also reaches auto-regen."""
     root = make_mapped_repo(SRC)
@@ -387,8 +387,8 @@ def test_save_leaves_no_temp_file_and_overwrites(
     make_mapped_repo: RepoFactory,
 ) -> None:
     """cache.json is written atomically: no ``.tmp`` sibling survives,
-    and a second ``save`` fully replaces the prior content (round-12
-    master report §4.1b: no atomic write previously guarded this
+    and a second ``save`` fully replaces the prior content (no
+    atomic write previously guarded this
     file, so a concurrent reader could observe a partial write)."""
     root = make_mapped_repo(SRC)
     cache_dir = root / cache_mod.CACHE_DIR
@@ -484,7 +484,7 @@ def test_heritage_survives_a_cache_hit_reparse(
     assert reloaded.heritage_out["dog.py::Dog"] == ["base.py::Animal"]
 
 
-# --- round-29 Critical: cache._filemap_from_dict field loss ---------
+# --- cache._filemap_from_dict field loss ---------------------------
 
 
 def _fully_populated_filemap() -> FileMap:
@@ -496,7 +496,7 @@ def _fully_populated_filemap() -> FileMap:
     future ``FileMap`` field addition with only a default value makes
     the first test fail until this fixture (and, if the deserializer
     needs it too, ``cache._filemap_from_dict``) is updated, which is
-    exactly the recurrence-proofing the round-29 fix design calls for
+    exactly the recurrence-proofing this bug calls for
     -- the original bug was "a field was added to the model and one
     manual deserializer wasn't updated."
     """
@@ -615,7 +615,7 @@ def test_every_field_is_populated_in_the_fixture() -> None:
 
 
 def test_filemap_dict_round_trip_preserves_every_field() -> None:
-    """The load-bearing regression test for the round-29 Critical.
+    """The load-bearing regression test for the field-loss bug.
 
     Every ``FileMap`` field must survive a cache write
     (``_filemap_to_dict``) + read (``_filemap_from_dict``) round
@@ -674,7 +674,7 @@ def test_throws_catches_env_type_aliases_survive_a_cache_hit_reparse(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """The round-29 Critical, end to end: an incremental (cache-hit)
+    """The field-loss bug, end to end: an incremental (cache-hit)
     re-map used to silently zero throws/catches/env_reads/
     type_aliases for every file served from the cache, even though
     the on-disk ``cache.json`` already held the data (the write side,
@@ -726,7 +726,7 @@ def test_throws_catches_env_type_aliases_survive_a_cache_hit_reparse(
 
 
 def test_cached_ref_without_bound_still_loads() -> None:
-    # Round 32 Track 5b added `RawRef.bound`. A cache entry written by
+    # 0.43.70 added `RawRef.bound`. A cache entry written by
     # an older dekko has no such key; `spec_fingerprint` invalidates it
     # anyway, but loading it must never be what raises.
     old_entry = {

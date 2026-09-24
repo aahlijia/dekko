@@ -12,19 +12,18 @@ Composition mirrors :mod:`workset`: build a
 ``list[relevance.Candidate]`` from the full symbol universe, blend the
 chosen scorer's relevance with structural centrality via
 :func:`relevance.blended_scores`, budget-fit the ranked rows with
-:func:`textutil.fit_to_budget`, and render text or JSON. See
-``.features/plans/SEMANTIC-SEARCH-PLAN.md`` for the design.
+:func:`textutil.fit_to_budget`, and render text or JSON.
 
-``--scorer {lexical,embedding}`` (Phase 2) swaps in
+``--scorer {lexical,embedding}`` swaps in
 :class:`embedding.EmbeddingScorer` — a deterministic, dependency-light
 hashing-trick embedding, opt-in via the ``dekko[search]`` extra — for
 :class:`relevance.BM25Scorer`. The lexical scorer stays the unflagged
 default: a base install and every existing ``dekko search`` call are
-completely unaffected by Phase 2's addition. See ``embedding.py``'s
-module docstring for the scorer itself and the plan's §8 for why this
-diverges from the plan's original ``sentence-transformers`` sketch.
+completely unaffected by the embedding scorer. See ``embedding.py``'s
+module docstring for the scorer itself and why it isn't a
+``sentence-transformers`` model.
 
-``--scorer both`` (round-13 §4) runs the lexical and embedding scorers
+``--scorer both`` runs the lexical and embedding scorers
 independently and fuses their rankings via reciprocal rank fusion
 (:func:`_fuse_both`) — for a query whose correct answer has little or
 no lexical overlap with its indexed text (thin-docstring code, a
@@ -32,19 +31,19 @@ misspelled/rephrased term), one scorer can surface an answer the other
 misses entirely. Opt-in only; ``--scorer lexical``/``--scorer
 embedding`` are byte-for-byte unaffected by this addition.
 
-Two round-08 corrections layer on top of whichever scorer runs:
+Two corrections layer on top of whichever scorer runs:
 :class:`_CoverageAdjustedScorer` (wrapped around ``scorer`` in
 :func:`rank`) discounts a candidate that only covers some of a 2+-term
 query's distinct terms, so one lexically-dominant common term can't
-crowd out a candidate matching every distinctive term more lightly
-(§2.3); and ``--include-tests`` defaulting to off means a genuinely
+crowd out a candidate matching every distinctive term more lightly;
+and ``--include-tests`` defaulting to off means a genuinely
 relevant test-path symbol can be silently excluded before ranking ever
 sees it — :func:`run` prints a ``note:`` hint (a JSON ``"note"`` key)
 when the surviving top hit is weak and symbols were in fact excluded,
-so a low-confidence result doesn't read as a confident one (§2.2).
+so a low-confidence result doesn't read as a confident one.
 
-``--scorer both`` also always prints a second, unconditional note
-(round-14 master report, LOW): its fused score is a reciprocal rank
+``--scorer both`` also always prints a second, unconditional note:
+its fused score is a reciprocal rank
 fusion value on a different scale than ``lexical``/``embedding``
 scores (see :func:`_scale_note`), so a caller comparing scores across
 scorer modes isn't misled by the scale change. Both notes, when
@@ -79,10 +78,10 @@ DEFAULT_BUDGET = 800
 # so there's one threshold in the codebase to reason about, not two.
 LOW_CONFIDENCE_THRESHOLD = 0.4
 
-# Phase 1 (BM25, always available) vs. Phase 2 (hashing-trick
-# embedding, requires `pip install dekko[search]`). See embedding.py's
+# BM25 (always available) vs. hashing-trick embedding (requires
+# `pip install dekko[search]`). See embedding.py's
 # module docstring for why the latter isn't a pretrained model.
-# "both" (round-13 §4) fuses the two via reciprocal rank fusion — see
+# "both" fuses the two via reciprocal rank fusion — see
 # _fuse_both — and requires the same `dekko[search]` extra as
 # "embedding" does, since it runs the embedding scorer internally.
 DEFAULT_SCORER = "lexical"
@@ -183,7 +182,7 @@ def _candidate_text(sym: Symbol) -> str:
     field weighting is approximated by term repetition at
     candidate-construction time rather than by widening the shared
     dataclass. Repeat counts (name x3, doc x2, signature x1) are a
-    starting guess per the plan, not derived from tuning data.
+    starting guess, not derived from tuning data.
     """
     name_part = f"{sym.name} {sym.qualname}"
     doc_part = sym.doc or ""
@@ -216,7 +215,7 @@ def _build_candidates(
     only during construction); a single CLI invocation only ever calls
     this once per process either way, so the cache costs one dict
     lookup there and never pays off — it's the persisted-index case
-    (Track J's territory) this exists for.
+    this exists for.
     """
     cache = getattr(index, _CANDIDATE_CACHE_ATTR, None)
     if cache is None:
@@ -237,7 +236,7 @@ def _build_candidates(
 class _CoverageAdjustedScorer:
     """Wraps a scorer, discounting candidates with low query-term coverage.
 
-    A scorer-agnostic post-processing layer (round-08 §2.3): a
+    A scorer-agnostic post-processing layer: a
     candidate that matches one query term very strongly (e.g. a short
     symbol whose name/doc repeats a common word) can otherwise outrank
     a candidate that covers every distinctive query term more
@@ -247,9 +246,9 @@ class _CoverageAdjustedScorer:
     it rather than duplicated inside each one (any future scorer
     inherits the fix automatically, instead of needing to remember to
     implement it itself). Deliberately separate from
-    ``relevance.py``'s own per-scorer coverage discount (round-08
-    §2.2, which fixes a different failure mode — a false ``1.00`` on a
-    weak candidate field): this wraps *whatever* score a scorer
+    ``relevance.py``'s own per-scorer coverage discount (which fixes a
+    different failure mode — a false ``1.00`` on a weak candidate
+    field): this wraps *whatever* score a scorer
     already returned, compounding with any discount the scorer already
     applied internally.
     """
@@ -264,8 +263,8 @@ class _CoverageAdjustedScorer:
 
         Only engages for 2+-term queries — a one-term query has no
         "crowded out by a different term" failure mode to correct.
-        The coverage discount is IDF-weighted (round-12 §3.13,
-        :func:`relevance.idf_term_weights`/``weighted_term_coverage``)
+        The coverage discount is IDF-weighted
+        (:func:`relevance.idf_term_weights`/``weighted_term_coverage``)
         rather than a flat fraction, so missing a rare, distinctive
         query term costs more than missing a common one — this is a
         second, independent IDF computation from whatever the wrapped
@@ -310,7 +309,7 @@ def rank(
     2+-term query, discounting any candidate that only covers some of
     the query's distinct terms — otherwise a candidate matching one
     common term very strongly can outrank one that covers every term
-    lightly, under any scorer (round-08 §2.3).
+    lightly, under any scorer.
 
     Args:
         index: Loaded map index. Callers wanting to exclude test-path
@@ -319,8 +318,8 @@ def rank(
         kinds: Restrict candidates to these symbol kinds, or ``None``
             for all kinds.
         scorer: The relevance scorer to use; defaults to
-            :class:`relevance.BM25Scorer` (Phase 1). Pass an
-            ``embedding.EmbeddingScorer`` for Phase 2's opt-in
+            :class:`relevance.BM25Scorer`. Pass an
+            ``embedding.EmbeddingScorer`` for the opt-in
             ``--scorer embedding``.
 
     Returns:
@@ -363,7 +362,7 @@ def _fuse_both(
 ) -> list[SearchHit]:
     """Fuse two independently-ranked hit lists via reciprocal rank fusion.
 
-    Round-13 §4: ``--scorer both`` runs :func:`rank` twice — once with
+    ``--scorer both`` runs :func:`rank` twice — once with
     :class:`relevance.BM25Scorer`, once with
     :class:`embedding.EmbeddingScorer` — and combines the two rankings
     here by rank *position*, not raw score magnitude. The two scorers'
@@ -371,7 +370,7 @@ def _fuse_both(
     top-of-batch-normalized over a *different-sized* survivor set (see
     :func:`rank`'s docstring), which is the same "two different-sized
     batches, two genuinely different numbers for the same candidate"
-    hazard round-13 §1's ``precomputed_relevance`` fix addressed for
+    hazard the ``precomputed_relevance`` fix addressed for
     one scorer reused inconsistently — fusing on rank sidesteps that
     hazard entirely for two genuinely *different* scorers, with no
     cross-scorer score-scale reconciliation needed.
@@ -486,7 +485,7 @@ def _exclusion_note(
     below :data:`LOW_CONFIDENCE_THRESHOLD`, or there are no hits at
     all. A strong, confident top hit means exclusion almost certainly
     didn't matter, so staying silent there keeps the common case
-    quiet (round-08 §2.2).
+    quiet.
 
     Args:
         hits: The ranked hits, already scored (pre-budget-fit).
@@ -494,7 +493,7 @@ def _exclusion_note(
             before ranking, or ``0`` if nothing was excluded.
         top_score: The confidence score to compare against
             :data:`LOW_CONFIDENCE_THRESHOLD`, or ``None`` to default
-            to ``hits[0].score``. Round-13 §4: ``--scorer both``'s
+            to ``hits[0].score``. ``--scorer both``'s
             fused ``hits[0].score`` is a reciprocal-rank-fusion value
             (max ``~1/k``, far below the ``[0, 1]`` blended-score
             scale this threshold was calibrated against) rather than a
@@ -521,7 +520,6 @@ def _exclusion_note(
 def _scale_note(scorer_name: str) -> str | None:
     """A hint that ``--scorer both``'s score isn't on the usual scale.
 
-    Round-14 master report (cline §4.3, claude-code §2.2, both LOW):
     ``--scorer lexical``/``--scorer embedding`` scores land in a
     familiar ``~0.25-0.9`` blended range, but ``--scorer both``'s fused
     ``hits[0].score`` is a reciprocal rank fusion value (see
@@ -653,8 +651,8 @@ def run(
             ``"embedding"`` or ``"both"`` — ignored for the default
             lexical scorer.
         scorer_name: One of :data:`SCORER_CHOICES`; defaults to
-            :data:`DEFAULT_SCORER` (Phase 1's BM25 lexical scorer).
-            ``"both"`` (round-13 §4) runs the lexical and embedding
+            :data:`DEFAULT_SCORER` (the BM25 lexical scorer).
+            ``"both"`` runs the lexical and embedding
             scorers independently and fuses their rankings via
             reciprocal rank fusion — see :func:`_fuse_both` — and
             requires the same ``dekko[search]`` extra ``"embedding"``
@@ -663,7 +661,7 @@ def run(
             ``.without_tests()`` before ``index`` was passed in, or
             ``0`` when nothing was excluded (including whenever
             ``--include-tests`` was given). Used only to decide
-            whether to print the exclusion hint (round-08 §2.2); it
+            whether to print the exclusion hint; it
             plays no part in ranking.
 
     Returns:
@@ -714,7 +712,7 @@ def run(
         hits, excluded_test_count, top_score=top_score
     )
     scale_note = _scale_note(scorer_name)
-    # round-29 Track 4b: search never disclosed skipped-file coverage
+    # Search never disclosed skipped-file coverage
     # (unsupported languages, vendored/too-large/symlinked exclusions)
     # -- a symbol living only in a skipped file is invisible to
     # search the same way it's invisible to `query`, but only `query`

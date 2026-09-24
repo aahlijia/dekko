@@ -23,10 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from dekko import repo_ops
-from dekko.storage import cache as cache_mod
 from dekko.analysis import diff
 from dekko.render import mapfile
-from dekko.core import walker
 from dekko.classify import is_test_path
 from dekko.core.model import Import, Symbol
 from dekko.textutil import fit_to_budget, signature
@@ -40,8 +38,8 @@ EXIT_ERROR = 2
 _TIERS = ("direct", "transitive", "import")
 
 # Mirrors workset.DEFAULT_BUDGET: without a cap, a single large-repo
-# commit can render an unbounded report (round-08 eval: ~124K tokens
-# for one tensorflow commit) — a sane default keeps `affected` cheap
+# commit can render an unbounded report (~124K tokens for one
+# tensorflow commit) — a sane default keeps `affected` cheap
 # by default like every other read command, while `--budget 0`/a large
 # explicit value still opts back out.
 DEFAULT_BUDGET = 6000
@@ -194,7 +192,7 @@ def impacts_from_symbol(
     This closes a real false-negative for languages (C++ in particular)
     whose whole-file-include model leaves same-named cross-file calls
     unresolved as ``ambiguous`` in the resolver, never reaching
-    ``calls_in`` at all — see investigation-1.5-cpp-gtest-affected.md.
+    ``calls_in`` at all.
     It is narrower than ``analyze()``'s tier (a whole diff's changed
     files vs. one seed's own file), since a bare symbol seed has no
     diff to draw a broader changed-file set from.
@@ -300,8 +298,8 @@ def render(
 # Cap on how many paths a "ready to paste" test-runner invocation
 # embeds per language group. Without this, the hint is unbounded
 # regardless of budget — a real ~1,500-impact repo embedded every path
-# in this one line, blowing a workset budget 3.6x over its stated cap
-# (bug #6/B6). A command holding hundreds/thousands of paths also
+# in this one line, blowing a workset budget 3.6x over its stated
+# cap. A command holding hundreds/thousands of paths also
 # stops being "ready to paste" long before it stops being technically
 # valid.
 _MAX_HINT_PATHS = 20
@@ -451,10 +449,9 @@ def changes(
             callers with no index to hand in (``affected.run``).
         jobs: Resolved worker count passed through to
             ``diff.old_snapshot``/``diff.snapshot_new_side`` — see
-            ``diff.snapshot``. Round-12 master report §3.3: this is
-            the dominant cost on a first-touch/cold-rev-cache call, a
-            separate code path ``dekko map --full``'s own ``--jobs``
-            fix never reached.
+            ``diff.snapshot``. This is the dominant cost on a
+            first-touch/cold-rev-cache call, a separate code path
+            ``dekko map --full``'s own ``--jobs`` fix never reached.
 
     Returns:
         ``(impacts, result, new, target_rev, provenance)``, or ``None``
@@ -467,32 +464,12 @@ def changes(
     if index is None:
         index = repo_ops.load_current_index_no_regen(root)
     prov = (index.provenance if index else None) or {}
-    subpath = prov.get("subpath")
-    excludes = tuple(prov.get("excludes", []))
-    max_file_size = prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE)
     target_rev = rev or prov.get("git_commit") or "HEAD"
-
-    old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
-    old = diff.old_snapshot(
-        root,
-        target_rev,
-        subpath,
-        excludes,
-        max_file_size,
-        old_cache,
-        jobs=jobs,
-    )
-    if old is None:
-        print(
-            f"dekko: cannot export git rev '{target_rev}' "
-            f"(unknown rev or not a git repo)",
-            file=sys.stderr,
-        )
+    pair = diff.snapshot_pair(root, target_rev, index, jobs=jobs)
+    if pair is None:
         return None
 
-    new = diff.snapshot_new_side(
-        root, subpath, excludes, max_file_size, index, jobs=jobs
-    )
+    old, new = pair
     result = diff.compare(target_rev, old, new)
     impacts = analyze(result, new)
     return impacts, result, new, target_rev, prov

@@ -1,9 +1,7 @@
 """Tests for repo_ops.py's shared discover/extract/resolve/render
-pipeline -- currently just round 17's process-pool retry behavior on
+pipeline -- currently just the process-pool retry behavior on
 ``_extract_misses``. No existing test exercised this function or a
-broken process pool directly before this pass; see
-``.features/plans/round17/round17-mcp-process-pool-concurrent-load-plan.md``
-for the investigation and design behind it.
+broken process pool directly before this pass.
 """
 
 import json
@@ -36,7 +34,7 @@ def _flaky_pool_factory(fail_times: int) -> type:
     test util, since it's small and each module's real pool site has
     its own call shape).
 
-    Round 22: ``_extract_misses`` now owns its pool via
+    ``_extract_misses`` now owns its pool via
     ``pool = ProcessPoolExecutor(...)`` / ``try``/``finally:
     pool.shutdown(wait=False)`` instead of ``with ProcessPoolExecutor(
     ...) as pool:`` (see ``resolver._run_pool_bounded``'s docstring
@@ -116,7 +114,7 @@ def test_extract_misses_propagates_when_retry_also_broken(
         repo_ops._extract_misses(root, misses, workers=4)
 
 
-# Round 21 Track A: cline reproduced a spawned extraction worker
+# Seen on cline: a spawned extraction worker
 # hanging indefinitely at 0% CPU (a worker that resolved a completely
 # different Python interpreter than its own parent and never came
 # up). ``_extract_misses`` now submits each file individually and
@@ -253,7 +251,7 @@ def test_extract_misses_below_parallel_min_never_touches_pool(
     assert set(result) == set(misses)
 
 
-# --- provenance: standing ambiguous-rate stamp (round 23) -----------------
+# --- provenance: standing ambiguous-rate stamp ----------------------------
 
 
 def test_map_run_stamps_ambiguous_rate_into_provenance(
@@ -262,8 +260,7 @@ def test_map_run_stamps_ambiguous_rate_into_provenance(
     """End-to-end ``dekko map`` stamps ``provenance.ambiguous_rate`` /
     ``ambiguous_sites`` at write time, and ``load_provenance()`` -- the
     cheap sidecar-only path ``dekko doctor`` uses -- surfaces both
-    without needing a full ``load_map()`` (round 23's standing
-    high-ambiguous-rate flag design doc).
+    without needing a full ``load_map()``.
     """
     files = {
         "a.py": "def target() -> int:\n    return 1\n",
@@ -283,7 +280,7 @@ def test_map_run_stamps_ambiguous_rate_into_provenance(
     assert loaded["ambiguous_rate"] == 1.0
 
 
-# --- follow_symlinks threading (round 28 §3.2) -----------------------------
+# --- follow_symlinks threading --------------------------------------------
 
 
 def test_map_repository_threads_follow_symlinks_to_discover(

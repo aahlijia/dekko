@@ -123,11 +123,11 @@ def test_export_requires_format(capsys: pytest.CaptureFixture) -> None:
 def test_export_granularity_help_clarifies_whole_graph_not_per_symbol(
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """9.1: the flag's help text used to just say "node granularity
+    """The flag's help text used to just say "node granularity
     (default: symbol)", easily misread as a per-symbol root/filter.
     It must make explicit that --granularity controls the whole
     rendered graph's node granularity and point at 'dekko context' for
-    a single symbol's neighborhood. Round 24: the flag itself was
+    a single symbol's neighborhood. The flag itself was later
     renamed from --scope to --granularity (the old name is exactly
     the wrong mental model the help text above had to work around);
     --scope survives only as a hidden, deprecated alias, so it must

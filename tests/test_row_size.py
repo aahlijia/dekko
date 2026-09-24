@@ -1,4 +1,4 @@
-"""Round 33 Track 4: no read command may print a row that outruns the budget.
+"""No read command may print a row that outruns the budget.
 
 ``fit_to_budget`` can only drop whole rows, and always keeps one, so
 ``--budget`` is only a promise while rows are small. This is the audit
@@ -159,7 +159,7 @@ def test_fixture_chain_really_is_stored_whole(
     make_mapped_repo: RepoFactory,
 ) -> None:
     # Guard the guard: if a future extractor change shortens what it
-    # stores (Track 4's D5), the tests above pass vacuously. Say so.
+    # stores, the tests above pass vacuously. Say so.
     root = make_mapped_repo(_repo())
     doc = json.loads((root / ".dekko" / "map.json").read_text())
     ids = doc.get("ids") or []

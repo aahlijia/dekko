@@ -144,7 +144,7 @@ def test_rev_seed_loads_current_index_once(
 def test_rev_seed_jobs_flag_reaches_old_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-12 master report §3.3: a rev-seeded ``dekko workset``
+    """A rev-seeded ``dekko workset``
     shares ``diff``/``affected``'s rev-cache-miss old-side re-parse/
     resolve path, which used to always run single-threaded regardless
     of ``--jobs`` because ``dekko workset`` never had that flag.
@@ -317,8 +317,8 @@ def test_json_impacted_tests_total_matches_seed(
 def test_impacted_tests_respect_budget_when_numerous(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    # tensorflow's bug (B6): impacted_tests used to bypass token-
-    # budget accounting entirely — a real ~1,500-impact repo dumped
+    # On tensorflow, impacted_tests used to bypass token-budget
+    # accounting entirely — a real ~1,500-impact repo dumped
     # every path verbatim, 3.6x over the stated budget. Many impacted
     # tests under a modest budget must now truncate like every other
     # section, with the meter reflecting the omission.
@@ -354,7 +354,7 @@ def test_mcp_workset_tool(tmp_path: Path) -> None:
     result = server.handle(ctx, msg)["result"]
     assert not result["isError"]
     # No explicit `root` argument: the reply is prefixed with the
-    # resolved default root (bug #1/B1) ahead of the usual manifest.
+    # resolved default root ahead of the usual manifest.
     assert "workset:" in result["content"][0]["text"]
 
 
@@ -510,7 +510,7 @@ def test_type_impact_budget_capping_at_scale(
     # A widely-used shared type -- many functions taking it as a
     # parameter -- must still fit_to_budget cleanly at the larger scale
     # --type-impact can produce, not just the pre-existing
-    # single-symbol case (design doc's own edge-case callout).
+    # single-symbol case.
     files = {"config.py": "class Config:\n    pass\n"}
     for i in range(60):
         files[f"user_{i}.py"] = (

@@ -3,9 +3,8 @@
 ``resolve()`` is a pure function of the *whole* file list and used to run
 unconditionally on every ``dekko map``, so an incremental run saved only
 the tree-sitter extraction step. On a large repo that made "incremental"
-nearly worthless: round 30 measured one edited file out of 9,942 costing
-93% of a full rebuild, with repo-wide resolution the floor. See
-``.features/fixes/round30/01-incremental-resolution.md``.
+nearly worthless: one edited file out of 9,942 measured as costing 93%
+of a full rebuild, with repo-wide resolution the floor.
 
 This caches the *call* pass (``_resolve_all``) per owning file, so an
 edit only re-resolves the files that changed. Two properties already in
@@ -438,11 +437,9 @@ def build_reuse(
       ``_files_naming``/``_files_importing`` here). Unlike v1's blanket
       "any symbol-set change forces a full resolve," this narrows the
       re-resolve to exactly the files ``_pick_candidate``'s ladder could
-      actually answer differently for -- see WP-B's dependency-class
-      audit in ``test-repos/reports/31-tokentest-7repo-post04355/
-      FIX-PLAN-remaining.md`` for the full case analysis, including the
-      two gaps the v1 design didn't anticipate (constructor-collapse,
-      import-alias recovery) that this closes.
+      actually answer differently for, including the two gaps the v1
+      design didn't anticipate (constructor-collapse, import-alias
+      recovery) that this closes.
     - A dirty file whose delta includes a **type-kind** name (a class,
       struct, interface, enum, trait, or type alias) forces a full
       resolve outright, because the type-aware ladder steps

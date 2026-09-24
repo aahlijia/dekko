@@ -50,8 +50,8 @@ def test_hops2_grows_pack(make_mapped_repo: RepoFactory) -> None:
     assert {e.hop for e in pack2.entries} == {1, 2}
 
 
-# Round 26: a hop-1 caller of the target also calls an unrelated
-# third function for its own reasons. Before the direction-lock fix,
+# A hop-1 caller of the target also calls an unrelated third
+# function for its own reasons. Before the direction-lock fix,
 # _neighbors() expanded *both* calls_in and calls_out from every
 # frontier node at hop >= 2, so `side_effect` (a callee of `caller`,
 # with no relationship to `target`) leaked in mislabeled as a hop-2
@@ -122,7 +122,7 @@ ANON_CALLER = {
 def test_module_caller_promoted_to_pack_entry(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # Bug #4: a call site with no named enclosing function (here,
+    # A call site with no named enclosing function (here,
     # b.py's top-level `helper()`) must land in pack.entries with a
     # real line number, not only the terser, line-number-less
     # module_callers bucket — otherwise it's easy to miss when
@@ -278,8 +278,8 @@ def test_context_not_found(
 
 # A file whose only relevant import is `Path` (used by the target's
 # own signature) alongside 20 unrelated stdlib imports never touched
-# by the target or its one neighbor — mirrors the manual eval's
-# ~36-import cli.py case (eval/manual_token_test.md, Task 3).
+# by the target or its one neighbor — mirrors a real ~36-import
+# cli.py case.
 _UNRELATED_IMPORTS = "\n".join(
     f"import {name}"
     for name in (
@@ -421,11 +421,11 @@ JS_MULTI_NAME_IMPORT = {
 def test_render_text_strips_js_named_import_suffix(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # I2/round-22 item 6: a JS/TS multi-name import (`import { A, B }
+    # A JS/TS multi-name import (`import { A, B }
     # from "./engine";`) stores each name's Import.source as
     # "./engine/A"/"./engine/B" for resolver-internal disambiguation —
     # but that's not a real submodule path on disk, and must not be
-    # displayed as one (claude-buddy.md §2.2).
+    # displayed as one.
     root = make_mapped_repo(JS_MULTI_NAME_IMPORT)
     index, ensure = _resolved(root, "ensureCompanion")
     pack = contextpack.build_pack(index, ensure, hops=1)
@@ -483,9 +483,9 @@ def test_trim_to_budget_drops_imports_before_source(
 def test_trim_to_budget_protects_callers_over_imports(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # B5: four evaluators hit a context pack that spent its entire
-    # default budget on the import list and returned 0% of the
-    # callers/callees actually asked about. Imports must be the first
+    # A context pack used to spend its entire default budget on the
+    # import list and return 0% of the callers/callees actually
+    # asked about. Imports must be the first
     # thing dropped under a tight budget, not the last — a caller's
     # real callers/callees must never be zeroed out while a (still
     # relevant) import list survives untouched.
@@ -525,7 +525,7 @@ def test_run_applies_default_pack_budget(
     assert doc["meta"]["budget"] == contextpack.DEFAULT_PACK_BUDGET
 
 
-# round23 issue 07: get_context_pack silently dropped the "N
+# get_context_pack silently dropped the "N
 # ambiguous, not counted" disclosure that query callers/callees and
 # the CLI both show — a.py:target's fan-in looks exhaustive (no
 # calls_in edge) even though c.py's call to the bare name "target"

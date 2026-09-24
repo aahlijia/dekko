@@ -2,7 +2,7 @@
 
 A hands-on benchmark: dekko's MCP tools vs. a plain `Read`/`Grep`
 workflow ("the old way"), run against **7 real, unmodified open-source
-repositories** under `test-repos/` — no synthetic fixtures. Each repo
+repositories** under `.testing/` — no synthetic fixtures. Each repo
 got an independent pass over a handful of realistic tasks (repo
 orientation, outlining a large file, tracing a symbol's callers/callees,
 searching for an external API's usage sites, bundling a change's
@@ -26,7 +26,8 @@ This page carries two measurements:
 ## Current numbers (dekko 0.43.77)
 
 Measured in rounds 33 (0.43.71) and 34 (0.43.77) of the evaluation
-program, 2026-09-21/22, one independent agent per repo, `chars/4`
+program (round 34 is now numbered round 1.1, the first round of the 1.x
+series), 2026-09-21/22, one independent agent per repo, `chars/4`
 tokens, same task shapes as the original study. Repo scale at the time
 of measurement:
 
@@ -54,7 +55,7 @@ of measurement:
 | Outline a large file | tensorflow (`direct_session.cc`, 2,186 lines) | 1,711 | ~21,112 | ~12.3x |
 | Outline a large file | tensorflow (`eager/backprop.py`, 1,345 lines) | 946 | ~12,574 | ~13.3x |
 | Outline a large file | zed (`gpui/src/window.rs`, 425 symbols) | ~4,756 | ~69,753 | ~14.7x |
-| Outline a directory | zed (`crates/git_ui/src`, 32 files) | ~5,219 | ~418,520 | ~80x |
+| Outline a directory | zed (`crates/git_ui/src`, 32 files, full outline) | ~35,778 | ~418,520 | ~11.7x (the earlier ~80x was the default 200-of-1,574-row view) |
 | Callers of a symbol (`--sites`) | awesome-go (`Generate`, same-named method nearby) | 79 | 5,227 | ~66x, and correct where grep conflates |
 | Callers of a symbol (`--sites`) | claude-buddy (`generateBones`) | ~298 | ~756 (grep, 39 raw hits) | ~2.5x, plus separating 6 real calls from 23 test assertions |
 | Callers of a symbol (`--sites`) | claude-code (`errors.ts:errorMessage`) | ~602 | ~18,521 (grep, 323+ raw hits) | ~30.8x |
@@ -71,7 +72,8 @@ repo. The shape from the original study holds: outline ratios scale with
 file size, call-graph ratios scale with how noisy the same-named grep
 is, and the floor is a small, grep-friendly local symbol (about 2.5x).
 Full per-task detail, timings, and the six Low findings of round 34 are
-in `test-repos/reports/33-*/` and `34-*/` (local, not tracked in git).
+in `.testing/reports/v0/33-*/` and `.testing/reports/v1/round1.1/`
+(local, not tracked in git).
 
 This is distinct from `benchmarks/measure.py` (the synthetic
 regression harness that runs on every `pytest` invocation, `benchmarks/README.md`

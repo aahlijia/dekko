@@ -139,7 +139,7 @@ def _ambiguous_path_exists(index: MapIndex, start: str, goal: str) -> bool:
     """Whether ``start`` can reach ``goal`` once ambiguous call edges
     are allowed alongside resolved ones.
 
-    round-13 spring-boot.md: ``trace`` on two symbols connected only by
+    ``trace`` on two symbols connected only by
     same-file-overload-ambiguous edges (e.g. every hop between them is
     ``bind(...)`` calling another same-class ``bind(...)`` overload)
     reported a flatly false-sounding "no call path," even though

@@ -68,7 +68,7 @@ def test_tier2_with_pack_resolves() -> None:
 
 
 def test_is_grammar_unavailable_message_matches_both_raise_sites() -> None:
-    """Round-12 master report §3.9/§3.10/§3.16: both
+    """Both
     ``GrammarUnavailableError`` messages ``get_grammar`` can raise
     (unknown name, and Tier-2-without-``dekko[all]``) must be
     recognized -- this is the single signal callers use to give

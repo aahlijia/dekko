@@ -1,4 +1,4 @@
-"""Tier-2 shell call extraction (round 31 tensorflow coverage pass).
+"""Tier-2 shell call extraction.
 
 tree-sitter-bash's call node is ``command``, which the generic
 extractor's call heuristic never matched: zero calls were extracted

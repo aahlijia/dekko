@@ -46,7 +46,7 @@ def test_sanity_smoke(tmp_path: Path) -> None:
 
 
 def test_affected_budget_defaults_to_affected_default_budget() -> None:
-    # Round-08 eval: `dekko affected` had no default --budget at all
+    # `dekko affected` had no default --budget at all
     # (confirmed via --help) and returned ~124K uncapped tokens for one
     # commit on a large repo. It should be budgeted by default like
     # every other whole-graph read command (search/summary/workset).
@@ -56,11 +56,11 @@ def test_affected_budget_defaults_to_affected_default_budget() -> None:
 
 
 def test_map_jobs_defaults_to_all_cores() -> None:
-    # Round-29 Track 3: bare `dekko map` defaulted to --jobs 1, so a
+    # Bare `dekko map` defaulted to --jobs 1, so a
     # one-file edit's remap on a large repo ran the repo-wide resolve
     # single-threaded (tensorflow: 12m24s incremental vs. 5m03s for a
     # parallel --full rebuild). The auto-regen path (repo_ops.regen_map)
-    # has requested all cores since round 11; the explicit invocation
+    # has requested all cores for a long time; the explicit invocation
     # must match it. An explicit --jobs value still wins.
     parser = cli.build_subcommand_parser()
     assert parser.parse_args(["map", "."]).jobs == 0
@@ -80,11 +80,11 @@ def test_map_rejects_missing_dir(tmp_path: Path) -> None:
 
 
 def test_write_pages_creates_missing_parent_dir(tmp_path: Path) -> None:
-    # round-13 spring-boot.md: `_write_pages` used to write the index
+    # `_write_pages` used to write the index
     # page (`md_path`) without first re-asserting its parent directory
     # exists, unlike every subsequent page write in the same loop --
     # a `FileNotFoundError` was seen once, right after `.dekko/` had
-    # just been removed by `test-repos/reset.sh`. `md_path.parent` not
+    # just been removed by a reset script. `md_path.parent` not
     # existing at all when `_write_pages` runs is exactly that
     # scenario, reproduced directly rather than relying on a timing
     # race to hit the same code path.
@@ -144,7 +144,7 @@ def test_map_full_bypasses_noop_fast_path(
 def test_map_regens_when_doc_version_stale(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    # round-15 plan: MAP_DOC_VERSION (the on-disk map.json *format*,
+    # MAP_DOC_VERSION (the on-disk map.json *format*,
     # e.g. the id-interning change) can bump independently of a
     # package release, so tool_version/spec_hash alone would call an
     # old-format map.json "fresh" forever on an unchanged source tree
@@ -206,7 +206,7 @@ def test_map_removed_file_forces_a_real_rewrite(
 def test_map_scoped_run_refuses_to_overwrite_full_map(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round-22 item 7: a subpath-scoped `dekko map DIR SUBPATH` used to
+    # A subpath-scoped `dekko map DIR SUBPATH` used to
     # silently replace a full-repo map with a 1-file scoped one at the
     # default .dekko/ location, same success shape as an ordinary run.
     (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
@@ -465,8 +465,8 @@ def test_map_summary_reports_unsupported_language(
 ) -> None:
     # A confirmed-unsupported extension (.astro) must show up in the
     # build summary instead of being silently dropped — the primary
-    # visibility fix for the 2026-07-31 eval's most severe finding
-    # (a partially mapped repo with no warning anywhere).
+    # visibility fix for a partially mapped repo with no warning
+    # anywhere.
     (tmp_path / "a.py").write_text("def f():\n    return 1\n")
     (tmp_path / "Card.astro").write_text("---\nconst x = 1;\n---\n")
     assert cli.main(["--map", str(tmp_path)]) == 0
@@ -488,7 +488,7 @@ def test_map_summary_counts_variable_symbols(
 
 
 def test_summary_separates_missing_grammar_from_real_parse_errors() -> None:
-    """Round-12 master report §3.10/§3.16: a missing *optional*
+    """A missing *optional*
     grammar (``pip install dekko[all]``) used to share one alarming
     "parse error N" bucket with genuine parse failures in the run
     summary. They must now be broken out into distinct buckets, built
@@ -511,7 +511,7 @@ def test_summary_separates_missing_grammar_from_real_parse_errors() -> None:
     out = repo_ops._summary(files, 0, 0, 0, [], [])
     assert "no grammar installed 1" in out
     assert "parse error 1" in out
-    # Round 31 claude-buddy.md S2: a no-grammar file yields nothing, so
+    # A no-grammar file yields nothing, so
     # it must not be counted (or listed by language) as "mapped".
     first = out.splitlines()[0]
     assert first.startswith("dekko: mapped 2 files (python 2)")
@@ -842,7 +842,7 @@ def test_claude_invoked_by_resolved_path_not_bare_name(
     assert calls and all(cmd[0] == resolved for cmd in calls)
 
 
-# --- load_or_regen: inter-process regen locking (round-12 §4.1b) ------
+# --- load_or_regen: inter-process regen locking ----------------------
 
 
 def test_load_or_regen_waits_for_other_process_regen_instead_of_redoing_it(
@@ -855,7 +855,7 @@ def test_load_or_regen_waits_for_other_process_regen_instead_of_redoing_it(
     regen to land and reuse it, rather than redundantly regenerating
     itself.
 
-    Round-23 §14: this wait used to be entirely silent -- on a large
+    This wait used to be entirely silent -- on a large
     repo, blocking here for up to the wait cap with zero output read
     as indistinguishable from a hang. Also confirms the disclosure
     note is printed exactly once, not once per poll iteration (a
@@ -918,7 +918,7 @@ def test_load_or_regen_fails_open_after_lock_wait_cap(
     ever landing, ``load_or_regen`` must fail open and regen locally
     rather than blocking indefinitely.
 
-    Round-23 §14: the fall-through to an uncoordinated local regen
+    The fall-through to an uncoordinated local regen
     used to also be silent -- a caller watching stderr saw nothing
     explaining why a second, redundant regen was about to run. Both
     the entry-wait note and the fall-through note must appear."""

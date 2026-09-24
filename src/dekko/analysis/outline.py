@@ -20,7 +20,7 @@ from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.analysis.query import paths_matching
 from dekko.source import read_lines
-from dekko.textutil import estimate_tokens, fit_to_budget, oneline
+from dekko.textutil import Meter, estimate_tokens, fit_to_budget, oneline
 
 EXIT_OK = 0
 EXIT_NOT_FOUND = 3
@@ -123,17 +123,56 @@ def _full_tokens(root: Path | None, path: str) -> int:
     return estimate_tokens("\n".join(read_lines(root, path)))
 
 
-def _size_line(full: int, outline_tokens: int) -> str | None:
-    """The 'full file vs outline' savings line, or ``None``."""
-    if full <= 0:
-        return None
-    raw_pct = 100 * outline_tokens / full
+def _pct(part: int, full: int) -> str:
+    """``part`` as a percentage of ``full``, formatted for the size line."""
+    raw_pct = 100 * part / full
     # Rounding to the nearest integer reads a true ~0.1% ratio as a
     # misleading "(0%)" on very-high-savings files. Fall back to one
     # decimal place only in that band; normal cases (1%, 45%, ...)
     # render exactly as before, with no ".0" noise.
-    pct = f"{raw_pct:.1f}" if 0 < raw_pct < 1 else f"{round(raw_pct)}"
-    return f"full ≈ {full} tok · outline ≈ {outline_tokens} tok ({pct}%)"
+    return f"{raw_pct:.1f}" if 0 < raw_pct < 1 else f"{round(raw_pct)}"
+
+
+def _size_line(
+    full: int,
+    outline_tokens: int,
+    meter: Meter | None = None,
+    complete_tokens: int = 0,
+    noun: str = "symbols",
+) -> str | None:
+    """The 'full file vs outline' savings line, or ``None``.
+
+    This line is the one people quote as "outline saves N%", so when a
+    budget or limit cut rows it says so on the same line and gives the
+    complete outline's cost too. Otherwise a truncated outline's ratio
+    reads exactly like the whole thing's.
+
+    Args:
+        full: Estimated tokens of reading the whole file(s).
+        outline_tokens: Estimated tokens of the outline as printed.
+        meter: The printed outline's meter; when it shows omitted
+            rows, the line is marked partial.
+        complete_tokens: Estimated tokens of the untrimmed outline,
+            used only when the view is partial.
+        noun: What the meter's rows are, for the partial clause.
+
+    Returns:
+        The savings line, or ``None`` when the full size is unknown.
+    """
+    if full <= 0:
+        return None
+    line = (
+        f"full ≈ {full} tok · outline ≈ {outline_tokens} tok "
+        f"({_pct(outline_tokens, full)}%)"
+    )
+    if meter is None or meter.omitted == 0:
+        return line
+
+    return (
+        f"{line} · partial: {meter.returned} of {meter.total} {noun}; "
+        f"complete outline ≈ {complete_tokens} tok "
+        f"({_pct(complete_tokens, full)}%)"
+    )
 
 
 # Thresholds for ``_sparse_note``: a file has to be substantial
@@ -167,8 +206,8 @@ def _sparse_note(
     app's ``router.get(...)``) — has almost no *named* symbols for
     the extractor to find, so its outline can look like an extreme
     (and perfectly legitimate-looking) token-savings ratio while
-    actually hiding nearly the entire file's real content (bug #9/B9
-    — claude-buddy's 1,344-line MCP server entrypoint outlined to 5
+    actually hiding nearly the entire file's real content (e.g.
+    claude-buddy's 1,344-line MCP server entrypoint outlined to 5
     rows/43 tokens, ~0.2% of the full file). This doesn't detect the
     callback pattern itself (that needs new extraction work) — it
     flags the precondition (large file, almost no named symbols, and
@@ -182,13 +221,13 @@ def _sparse_note(
             untrimmed outline (see ``_file_outline_tokens``).
         symbol_count: Number of symbols the outline lists.
         error: The file's ``FileOutline.error``, if any. A file that
-            failed to parse at all (round-12 master report §3.9: most
-            often an unsupported/uninstalled grammar — Kotlin/Groovy
-            without ``pip install dekko[all]``) always has 0 symbols,
-            which used to trip this heuristic en masse even though
-            the real cause is already shown in the file's own
-            ``(parse error: ...)`` header line, not a callback-heavy
-            file the outline is silently missing content from.
+            failed to parse at all (most often an unsupported/
+            uninstalled grammar — Kotlin/Groovy without ``pip install
+            dekko[all]``) always has 0 symbols, which used to trip this
+            heuristic en masse even though the real cause is already
+            shown in the file's own ``(parse error: ...)`` header line,
+            not a callback-heavy file the outline is silently missing
+            content from.
 
     Returns:
         A one-line caveat, or ``None`` when the file doesn't look
@@ -248,12 +287,11 @@ def _render_text_file(
     for row in kept:
         print(row)
     full = _full_tokens(root, fo.path)
-    size = _size_line(full, meter.tokens)
+    complete = _file_outline_tokens(fo)
+    size = _size_line(full, meter.tokens, meter, complete)
     if size:
         print(size)
-    note = _sparse_note(
-        full, _file_outline_tokens(fo), len(fo.symbols), fo.error
-    )
+    note = _sparse_note(full, complete, len(fo.symbols), fo.error)
     if note:
         print(f"  note: {note}", file=sys.stderr)
     print(meter.footer())
@@ -278,7 +316,8 @@ def _render_text_dir(
     for row in kept:
         print(row)
     full = sum(_full_tokens(root, fo.path) for fo in outlines)
-    size = _size_line(full, meter.tokens)
+    complete = estimate_tokens("\n".join([banner, *rows]))
+    size = _size_line(full, meter.tokens, meter, complete, noun="rows")
     if size:
         print(size)
     for fo in outlines:
@@ -312,6 +351,7 @@ def _render_json(
     for fi, fo in enumerate(outlines):
         kept_syms = keep_by_file.get(fi, [])
         full = _full_tokens(root, fo.path)
+        complete = _file_outline_tokens(fo)
         entry = {
             "path": fo.path,
             "language": fo.language,
@@ -319,8 +359,10 @@ def _render_json(
             "error": fo.error,
             "symbols": [_sym_json(s) for s in kept_syms],
             "full_tokens": full,
+            "outline_tokens_complete": complete,
+            "complete": len(kept_syms) == len(fo.symbols),
         }
-        note = _sparse_note(full, _file_outline_tokens(fo), len(fo.symbols))
+        note = _sparse_note(full, complete, len(fo.symbols))
         if note:
             entry["sparse_note"] = note
         files.append(entry)

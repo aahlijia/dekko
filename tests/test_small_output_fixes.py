@@ -1,9 +1,9 @@
-"""Round 33 Track 6: seven small fixes, one version (0.43.77).
+"""Small output fixes across several commands.
 
-6a deps --file scope note; 6b daemon status booleans; 6c unused
---dispatch/--suspect section disclosure; 6d covered in test_diff /
-test_daemon; 6e external heritage rows keep their relation; 6f covered
-in test_server; 6g the json-backend doctor row and the [all] extra.
+The ``deps --file`` scope note, daemon status booleans, ``unused``
+--dispatch/--suspect section cap disclosure, external heritage rows
+that keep their relation, and the json-backend doctor row plus the
+[all] extra.
 """
 
 import json
@@ -41,7 +41,7 @@ PY_REPO = {
 }
 
 
-# --- 6a ------------------------------------------------------------------
+# --- deps --file scope note ----------------------------------------------
 
 
 def test_deps_file_on_go_carries_the_scope_note(
@@ -76,7 +76,7 @@ def test_deps_file_on_a_resolved_language_has_no_scope_note(
     assert "import_scope_note" not in json.loads(capsys.readouterr().out)
 
 
-# --- 6b ------------------------------------------------------------------
+# --- daemon status -------------------------------------------------------
 
 
 def test_daemon_status_text_prints_busy_as_a_word(
@@ -99,7 +99,7 @@ def test_daemon_status_text_prints_busy_as_a_word(
     assert "False" not in out
 
 
-# --- 6c ------------------------------------------------------------------
+# --- unused section caps -------------------------------------------------
 
 
 def _sym(i: int) -> Symbol:
@@ -172,7 +172,7 @@ def test_section_json_carries_totals() -> None:
     assert len(doc["dispatch_candidates"]) == 3
 
 
-# --- 6e ------------------------------------------------------------------
+# --- external heritage relation ------------------------------------------
 
 JAVA_REPO = {
     "Base.java": "public class Base {}\n",
@@ -239,7 +239,7 @@ def test_pre_fix_map_without_relation_renders_as_before(
     assert line.rstrip().endswith("pydantic.BaseModel")
 
 
-# --- 6g ------------------------------------------------------------------
+# --- json backend --------------------------------------------------------
 
 
 def test_all_extra_includes_fast_json() -> None:

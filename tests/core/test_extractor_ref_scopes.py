@@ -1,8 +1,8 @@
-"""Round 32 Track 5b: ``RawRef.bound``, what a bare identifier is
+"""``RawRef.bound``, what a bare identifier is
 lexically bound to.
 
 The reference query captures every bare identifier in value position.
-Before 5b nothing told ``count`` on line 1624 apart from the ``const
+Before this, nothing told ``count`` on line 1624 apart from the ``const
 count`` on line 1623, so a local became a reference edge to whichever
 repo symbol shared its spelling. The extractor now tags each reference
 with its innermost binding; the resolver decides what a tag costs.

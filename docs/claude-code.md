@@ -25,11 +25,10 @@ status`, `dekko hooks install --help`, and manually checking `command
 
 - **PATH shadowing** — whether the `dekko` a bare `dekko` invocation
   resolves to on `$PATH` is the same binary this process is actually
-  running. This is the single most-repeated friction point across past
-  eval rounds: a stale globally-installed `dekko` silently answering
-  from the wrong build, with no "command not found"-style error to
-  flag it. This is the automated version of the manual `command -v
-  dekko` check in `test-repos/TESTING-GUIDE.md` §0.
+  running. This is the most common install problem: a stale
+  globally-installed `dekko` silently answering from the wrong build,
+  with no "command not found"-style error to flag it. This is the
+  automated version of a manual `command -v dekko` check.
 - **Map freshness** — the same signal `dekko status` reports.
 - **MCP registration** (`claude mcp list`) and whether a `dekko serve
   --mcp` process is currently running (best-effort, POSIX only).
@@ -174,10 +173,10 @@ full guidance.
 | --- | --- |
 | `search_code` | free-text relevance search over every symbol (BM25 by default; `scorer: "embedding"` opt-in with `dekko[search]`) |
 | `query_symbol` | signature, doc, fan-in/out, notes |
-| `get_callers` / `get_callees` | callers/callees, with call sites |
+| `get_callers` / `get_callees` | callers/callees, with call sites. `get_callers` leaves out test-file callers unless you pass `include_tests: true` (the CLI's `query callers` includes them), and says how many it left out |
 | `find_usages` | calls into an external name: by function (`run`), import binding (`chalk`, `np`), or module (`numpy`, `node:path`), with a members histogram |
 | `find_type_usages` | functions/methods taking or returning a type |
-| `get_supertypes` / `get_subtypes` | a type's extends/implements heritage, one hop or transitive |
+| `get_supertypes` / `get_subtypes` | a type's extends/implements heritage, one hop or transitive. `get_subtypes` leaves out test-file subtypes the same way `get_callers` does |
 | `get_context_pack` | a symbol's neighborhood, budget-capped |
 | `outline` | a file's structure without bodies |
 | `workset` | one bundle for a change (`rev` or `symbol`; `type_impact` for a type's full blast radius) |

@@ -1,11 +1,11 @@
 """OS-independent transport abstraction for the dekko daemon.
 
-The bare CLI's daemon mode (see ``.features/daemon-mode/``) needs a
+The bare CLI's daemon mode needs a
 socket-like channel between a short-lived ``dekko <cmd>`` client
 process and a long-lived per-repo daemon process. Unix domain sockets
 are the natural choice on macOS/Linux but don't exist in a usable,
 battle-tested form on Windows, so every daemon-facing caller
-(a later phase's accept loop, the CLI's daemon-routing check) is
+(the daemon's accept loop, the CLI's daemon-routing check) is
 written against the ``DaemonTransport`` interface here rather than
 against ``socket.AF_UNIX`` directly. ``default_transport_for()`` is
 the *only* place that branches on ``sys.platform`` -- everything above
@@ -16,9 +16,9 @@ module presents ``AF_UNIX`` and ``AF_INET`` through the identical
 This module is transport plumbing plus the OS-conditional process
 primitives (detached spawn, forced stop, connect-based liveness) that
 are equally platform-sensitive. It does *not* contain a daemon accept
-loop, request/response JSON framing, or CLI wiring -- those land in a
-later phase (see ``.features/daemon-mode/TRACKER.md``); this module
-only needs to bind, connect, authenticate, and clean up a transport.
+loop, request/response JSON framing, or CLI wiring -- those live
+elsewhere; this module only needs to bind, connect, authenticate, and
+clean up a transport.
 """
 
 import json
@@ -35,11 +35,10 @@ from dekko.render.mapfile import atomic_write_bytes
 
 # Socket file name inside a repo's ``.dekko/`` directory (POSIX).
 _SOCKET_NAME = "daemon.sock"
-# Second, status-only socket file (round-13 master report §2): a
-# dedicated listener the main accept loop never touches, so a
-# liveness/status probe stays fast and honest even while the main
-# socket is busy on a slow routed request. See ``bind_status_listener``/
-# ``status_client_connect``.
+# Second, status-only socket file: a dedicated listener the main
+# accept loop never touches, so a liveness/status probe stays fast and
+# honest even while the main socket is busy on a slow routed request.
+# See ``bind_status_listener``/``status_client_connect``.
 _STATUS_SOCKET_NAME = "daemon.status.sock"
 # Port-file name inside a repo's ``.dekko/`` directory (Windows/TCP).
 _PORT_FILE_NAME = "daemon.port"
@@ -103,10 +102,9 @@ def _recv_line(sock: socket.socket) -> str | None:
     return None
 
 
-# Name kept as specified: the workflow doc (§2.1) names this
-# exception "TransportUnavailable" explicitly ("raise a dedicated
-# TransportUnavailable exception rather than letting the underlying
-# OSError ... propagate"), so it isn't renamed to satisfy N818's
+# Name kept as specified: this exception is deliberately named
+# "TransportUnavailable" (a dedicated exception rather than letting the
+# underlying OSError propagate), so it isn't renamed to satisfy N818's
 # Error-suffix convention.
 class TransportUnavailable(Exception):  # noqa: N818
     """This transport cannot be used in the current environment.
@@ -175,15 +173,15 @@ class DaemonTransport(ABC):
     def bind_status_listener(self) -> socket.socket:
         """Daemon-side: create and return a status-only listening socket.
 
-        Round-13 master report §2: the main accept loop is
-        deliberately single-threaded (see ``daemon.serve_daemon``'s
-        docstring) and cannot answer *any* connection, including a
-        liveness/status probe, while busy dispatching an earlier slow
-        routed request. This second, independent listener is serviced
-        by its own dedicated thread whose only job is answering
-        ``_status`` requests -- it never dispatches a routed command
-        and never blocks behind one. Uses the same authentication as
-        the main socket (``authenticate``/``send_auth_preamble``).
+        The main accept loop is deliberately single-threaded (see
+        ``daemon.serve_daemon``'s docstring) and cannot answer *any*
+        connection, including a liveness/status probe, while busy
+        dispatching an earlier slow routed request. This second,
+        independent listener is serviced by its own dedicated thread
+        whose only job is answering ``_status`` requests -- it never
+        dispatches a routed command and never blocks behind one. Uses
+        the same authentication as the main socket
+        (``authenticate``/``send_auth_preamble``).
 
         Raises:
             TransportUnavailable: If this listener cannot be bound in
@@ -379,11 +377,11 @@ class UnixSocketTransport(DaemonTransport):
         try:
             sock.connect(str(path))
         except TimeoutError as exc:
-            # Round-13 master report §2: a connect-level timeout can
-            # mean the daemon is genuinely alive but momentarily
-            # unable to service the accept queue -- not "no listener
-            # here." Unlike every other connect failure below, this
-            # must NOT delete a live daemon's transport artifact.
+            # A connect-level timeout can mean the daemon is genuinely
+            # alive but momentarily unable to service the accept queue
+            # -- not "no listener here." Unlike every other connect
+            # failure below, this must NOT delete a live daemon's
+            # transport artifact.
             sock.close()
             raise DaemonUnavailableError(
                 f"timed out connecting to {path}: {exc}"
@@ -682,9 +680,9 @@ def spawn_detached(
     Without ``log_path``, the child inherits the parent's stdout/
     stderr file descriptors -- for a detached daemon, that means
     whatever terminal ran ``dekko daemon start``, which is usually
-    long gone by the time the child prints anything (round-29 Track 2
-    finding: this orphans every daemon-side print, including ones
-    meant to warn a caller about a slow operation in progress). Pass
+    long gone by the time the child prints anything (this orphans
+    every daemon-side print, including ones meant to warn a caller
+    about a slow operation in progress). Pass
     ``log_path`` to redirect both streams to that file instead (opened
     append, so repeated starts don't clobber prior runs); a stream
     that fails to open falls back to ``DEVNULL`` rather than aborting
@@ -694,7 +692,7 @@ def spawn_detached(
         cmd: Full argv for the detached process.
         log_path: Path to append the child's stdout/stderr to, or
             ``None`` to leave the parent's file descriptors inherited
-            (the pre-round-29 behavior).
+            (the original behavior).
 
     Returns:
         The ``subprocess.Popen`` handle for the spawned process.
@@ -770,8 +768,8 @@ def is_daemon_reachable(
     this transport-layer version only proves a listener is present and
     accepting connections.
 
-    Round-13 master report §2: probes the dedicated status-only
-    listener first (see ``DaemonTransport.bind_status_listener``),
+    Probes the dedicated status-only listener first (see
+    ``DaemonTransport.bind_status_listener``),
     never the main command socket -- a busy main accept loop can't
     answer *any* connection, including this one, until it finishes
     whatever slow routed request it's currently servicing, so probing

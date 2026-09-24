@@ -1,4 +1,4 @@
-"""Optional embedding-based scorer for ``dekko search`` (Phase 2).
+"""Optional embedding-based scorer for ``dekko search``.
 
 Gated behind the ``dekko[search]`` extra (``pip install dekko[search]``).
 This module must import cleanly with or without that extra present —
@@ -11,21 +11,15 @@ embedding`` request (``search.py`` surfaces a clear error instead); the
 unaffected either way.
 
 **Model choice.** Rather than a pretrained sentence-transformer model
-(the plan's original sketch — ``sentence-transformers``, ~1GB+ once its
-``torch`` dependency resolves, plus a model-weights download on first
-use), this ships a deterministic "hashing trick" embedding: character
-n-gram feature hashing with a signed random projection (Weinberger et
-al. 2009; the same idea behind scikit-learn's ``HashingVectorizer``),
-built on ``numpy`` alone. This keeps dekko's "no model download, fully
-offline after ``pip install``" pitch intact (``README.md``'s "Why
-dekko?", quoted verbatim in the plan's §8 "model choice tension") at
-the cost of being closer to fuzzy subword/typo-tolerant similarity
-than true semantic (synonym-level) matching — the plan's own
-hashing-trick alternative, chosen here because §8 explicitly left the
-model-choice decision to Phase 2's implementer rather than resolving
-it speculatively. See ``.features/plans/SEMANTIC-SEARCH-PLAN.md`` §8
-and the "Implementation status" section for the full reasoning and any
-further deviations.
+(``sentence-transformers``, ~1GB+ once its ``torch`` dependency
+resolves, plus a model-weights download on first use), this ships a
+deterministic "hashing trick" embedding: character n-gram feature
+hashing with a signed random projection (Weinberger et al. 2009; the
+same idea behind scikit-learn's ``HashingVectorizer``), built on
+``numpy`` alone. This keeps dekko's "no model download, fully offline
+after ``pip install``" pitch intact at the cost of being closer to
+fuzzy subword/typo-tolerant similarity than true semantic
+(synonym-level) matching.
 
 :class:`EmbeddingCache` mirrors :class:`cache.IncrementalCache`'s
 read-old/write-new, hash-invalidated reuse pattern, persisted to

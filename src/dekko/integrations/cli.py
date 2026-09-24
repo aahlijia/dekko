@@ -307,8 +307,16 @@ def _add_map_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_read_options(parser: argparse.ArgumentParser) -> None:
-    """Attach the options shared by map-reading subcommands."""
+def _add_read_options(
+    parser: argparse.ArgumentParser, no_tests_note: str = ""
+) -> None:
+    """Attach the options shared by map-reading subcommands.
+
+    Args:
+        parser: The subcommand parser.
+        no_tests_note: Appended to ``--no-tests``' help, for a
+            subcommand whose default differs from its MCP counterpart.
+    """
     parser.add_argument(
         "--root",
         default=".",
@@ -329,12 +337,13 @@ def _add_read_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-tests",
         action="store_true",
-        help="exclude test files' symbols and edges from results",
+        help="exclude test files' symbols and edges from results"
+        + no_tests_note,
     )
 
 
 def _add_task_option(parser: argparse.ArgumentParser) -> None:
-    """Attach the ``--task`` relevance flag (Pillar B)."""
+    """Attach the ``--task`` relevance flag."""
     parser.add_argument(
         "--task",
         default=None,
@@ -361,9 +370,9 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         dest="command", required=True, metavar="COMMAND"
     )
 
-    # Argument-parsing shape rubric (round 24, 10-cli-verb-placement-
-    # consistency.md) -- pick deliberately when adding a new subcommand
-    # rather than copying whichever neighbor you scrolled past first:
+    # Argument-parsing shape rubric -- pick deliberately when adding a new
+    # subcommand rather than copying whichever neighbor you scrolled past
+    # first:
     #
     #   A. Real `add_subparsers` verbs (note/hooks/daemon): use when
     #      the verbs genuinely take different arguments -- a single
@@ -388,8 +397,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     #      see `deps`'s `file_positional` for the pattern.
     #
     # This is documentation, not enforcement -- no linter checks "did
-    # you pick the right shape." Full audit: .features/plans/round24/
-    # 10-cli-verb-placement-consistency.md.
+    # you pick the right shape."
 
     p_map = sub.add_parser("map", help="generate MAP.md and map.json")
     p_map.add_argument(
@@ -501,8 +509,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         choices=query.HERITAGE_RELATIONS,
         default=None,
         help="for 'supertypes'/'subtypes': restrict to one heritage "
-        "relation kind ('impl'/'embeds' are Phase 2 — Rust/Go — and "
-        "never appear in Phase 1's Python/JS/TS/Java output)",
+        "relation kind ('impl'/'embeds' are Rust/Go only and never "
+        "appear in Python/JS/TS/Java output)",
     )
     p_query.add_argument(
         "--min-shared",
@@ -530,7 +538,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "repo where a small amount of incidental/vendored code in "
         "another language would otherwise pollute the match list",
     )
-    _add_read_options(p_query)
+    _add_read_options(
+        p_query,
+        no_tests_note=" (this CLI includes tests by default; the MCP "
+        "get_callers and get_subtypes tools exclude them by default)",
+    )
     p_query.set_defaults(func=run_query)
 
     p_outline = sub.add_parser(
@@ -819,8 +831,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         choices=list(search.SCORER_CHOICES),
         default=search.DEFAULT_SCORER,
         help="relevance scorer: 'lexical' (default, BM25, always "
-        "available), 'embedding' (Phase 2, hashing-trick embedding, "
-        "requires `pip install dekko[search]`), or 'both' (round-13, "
+        "available), 'embedding' (hashing-trick embedding, "
+        "requires `pip install dekko[search]`), or 'both' ("
         "fuses lexical + embedding rankings via reciprocal rank "
         "fusion, requires `pip install dekko[search]`)",
     )
@@ -1406,7 +1418,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         "--dense",
         action="store_true",
         help="terser skin: signatures only on the most-central symbols, "
-        "names for the rest (FR-D1)",
+        "names for the rest",
     )
     _add_task_option(p_lean)
     p_lean.set_defaults(func=run_lean)
@@ -1797,8 +1809,8 @@ def _reject_orphan_root(
     natural reading if the argument order isn't memorized) is instead
     read as "treat this directory as a brand-new repo root", silently
     forking a second, independent ``.dekko/`` tree nested inside the
-    subdirectory (round-28 §3.6 — spring-boot's report only noticed via
-    ``git status`` surfacing the untracked nested directory).
+    subdirectory (only noticeable via ``git status`` surfacing the
+    untracked nested directory).
 
     Only fires when no ``subpath`` was given (a real two-arg
     ``dekko map ROOT SUBPATH`` is never ambiguous this way) and
@@ -2017,8 +2029,8 @@ def run_search(args: argparse.Namespace) -> int:
     the ``--no-tests`` opt-out convention every other read command
     uses — a relevance-ranked result competing for a rank slot
     shouldn't default to including test noise the way an exhaustive
-    caller list should default to completeness (deliberate deviation,
-    see the search feature plan §9.6).
+    caller list should default to completeness (deliberate
+    deviation).
     """
     query_text = " ".join(args.query)
     root = Path(args.root).resolve()
@@ -2245,9 +2257,9 @@ def _resolve_for_note(root: Path, target: str) -> tuple[Symbol | None, int]:
     qualified target used to disambiguate an overload set (see
     ``query``'s module docstring) stays visibly disambiguated in the
     command's own output, not just in ``Symbol.id``'s ``#N`` suffix
-    (round 15's spring-boot finding: the id-only echo doesn't visibly
-    show *which* overload was picked, even though the id itself
-    already anchors each overload to a distinct notes-file key).
+    (the id-only echo doesn't visibly show *which* overload was
+    picked, even though the id itself already anchors each overload
+    to a distinct notes-file key).
     """
     index = mapfile.load_map(root)
     if index is None:
@@ -2406,7 +2418,7 @@ def run_status(args: argparse.Namespace) -> int:
             "too_large": too_large,
         }
         if fresh.reason == "version":
-            # Round-23 §11: distinguish a genuine tool_version bump
+            # Distinguish a genuine tool_version bump
             # (reinstall fixes it) from a spec_hash-only drift on a
             # long-lived process (only a restart fixes it) — gated
             # behind reason == "version" so the common-case JSON shape
@@ -2471,7 +2483,7 @@ def _print_stale_status(
 def _version_stale_note(fresh: mapfile.Freshness) -> str:
     """One-line explanation for a ``reason="version"`` freshness verdict.
 
-    Round-23 §11: ``dekko status``/``dekko doctor`` used to build this
+    ``dekko status``/``dekko doctor`` used to build this
     string straight from raw ``provenance``/``_pkg_version`` values,
     which only ever named a ``tool_version`` mismatch — a long-lived
     process stale on ``spec_hash`` alone (identical ``tool_version`` on
@@ -2523,7 +2535,7 @@ def run_sanity(args: argparse.Namespace) -> int:
     that dispenses with a single target entirely — it's validated
     first and dispatched separately, since it's callers-mode only and
     mutually exclusive with both ``--usages`` and ``--unused`` (see
-    ``run_all``'s own docstring / the design doc's Scope section).
+    ``run_all``'s own docstring).
     """
     if args.all:
         if args.usages:
@@ -2653,7 +2665,7 @@ def _jobs_flag_explicit(args_list: list[str]) -> bool:
     argparse can't distinguish "the user passed --jobs 1" from "the
     user passed nothing and got argparse's own default of 1" once
     parsing is done, so this inspects the pre-parse argument list
-    directly. Used to gate ``daemon.try_daemon``'s round-25
+    directly. Used to gate ``daemon.try_daemon``'s
     cold-rev-cache ``--jobs 0`` override (see that function's
     ``jobs_explicit`` parameter): the override must only kick in when
     the sequential value came from the default, never when the caller
@@ -2674,7 +2686,7 @@ def _report_daemon_request_abandoned(
 ) -> int:
     """Report a timed-out/dropped daemon-routed request, no fallback.
 
-    Round-12 master report §3.8: a client that silently falls back to
+    A client that silently falls back to
     a local ``args.func(args)`` re-run after abandoning a daemon
     request duplicates whatever work the daemon (which has no notion
     of "the client hung up," see ``daemon.py``'s ``_handle_connection``
@@ -2685,7 +2697,7 @@ def _report_daemon_request_abandoned(
     Args:
         exc: The abandoned-request exception; its message names the
             underlying cause (timeout, disconnect, malformed reply).
-            Round-25: when its ``jobs`` attribute is ``1``, the
+            When its ``jobs`` attribute is ``1``, the
             abandoned request ran sequentially -- the message names
             ``--jobs 0`` as the actual lever likely to avoid a repeat
             timeout, rather than only apologizing.

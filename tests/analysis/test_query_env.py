@@ -1,7 +1,6 @@
 """``dekko query env``: statically-known environment-variable reads.
 
-Design doc: config-constant-value-tracing-design.md. CLI-level
-end-to-end tests through ``cli.main`` + a real ``dekko map`` run
+CLI-level end-to-end tests through ``cli.main`` + a real ``dekko map`` run
 (``make_mapped_repo``), mirroring ``test_query_throws.py``'s pattern.
 Covers: exact-key lookup across languages, ``--list`` aggregate
 ranking, JSON output, the default-value-argument-not-shown scope
@@ -55,7 +54,7 @@ def test_env_default_value_argument_not_shown(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
     # os.environ.get('PORT', '8080') only has its key captured — the
-    # default-value second argument is out of scope (design doc).
+    # default-value second argument is out of scope.
     root = make_mapped_repo(ENV_SRC)
     code = cli.main(["query", "env", "PORT", "--root", str(root)])
     assert code == 0
@@ -87,13 +86,12 @@ def test_env_not_found(
 def test_env_exact_key_lookup_discloses_coverage_gap_with_real_results(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round-29 Track 4b: `query env`'s text-mode success branch (a
+    # `query env`'s text-mode success branch (a
     # real match found, not the not-found path) used to skip the
     # unsupported-file coverage note entirely -- the one branch of
     # this command where it never showed up at all, unlike every
     # other query action's own success branch... which turns out to
-    # have the exact same gap (see the round's implementation notes),
-    # but env is the one this round's report actually flagged.
+    # have the exact same gap.
     root = make_mapped_repo(
         dict(ENV_SRC, **{"Card.astro": "---\nconst x = 1;\n---\n"})
     )
@@ -135,7 +133,7 @@ def test_env_list_ranking(
 def test_env_list_footer_total_matches_distinct_key_count(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round 23 §17: the text footer's TOTAL previously folded the
+    # The text footer's TOTAL previously folded the
     # summary header line into the counted/droppable row list, so with
     # N distinct keys and truncation active it reported N+1. TOTAL must
     # equal the real distinct-key count, and shown + omitted must equal

@@ -69,10 +69,10 @@ def test_variable_symbol_renders_as_bare_name(
 def test_interface_symbol_renders_as_bare_name(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # F2: outline.py::_outline_sig() already special-cases
+    # outline.py::_outline_sig() already special-cases
     # sym.kind in TYPE_KINDS (interface/enum/struct/record/trait) with
     # no trailing parens, mirroring the "variable" case above — this
-    # closes the regression-coverage gap the report flagged, since only
+    # closes a regression-coverage gap, since only
     # the "variable" half had a test before this.
     root = make_mapped_repo(
         {"data.ts": "export interface Item {\n  id: number;\n}\n"}
@@ -95,7 +95,7 @@ def test_size_framing_present(
 
 
 def test_size_line_shows_one_decimal_instead_of_misleading_zero() -> None:
-    """9.1: rounding a true ~0.1% savings ratio to the nearest integer
+    """Rounding a true ~0.1% savings ratio to the nearest integer
     reads as "(0%)" -- misleadingly implying no savings at all. A
     ratio that rounds to 0 but isn't actually zero should render with
     one decimal place instead."""
@@ -119,6 +119,89 @@ def test_size_line_true_zero_stays_zero() -> None:
     line = outline._size_line(full=1000, outline_tokens=0)
     assert line is not None
     assert "(0%)" in line
+
+
+BIG = {
+    "big.py": "".join(
+        f"def func_{i}(alpha: int, beta: str) -> None:\n    pass\n\n\n"
+        for i in range(60)
+    )
+}
+
+
+def _savings_line(out: str) -> str:
+    return next(ln for ln in out.splitlines() if ln.startswith("full ≈"))
+
+
+def test_size_line_marks_a_budget_cut_outline_partial(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """A budget-trimmed outline's savings line says it is partial and
+    gives the complete outline's cost, so the ratio a reader quotes
+    can't silently come from a truncated view."""
+    root = make_mapped_repo(BIG)
+    cli.main(["outline", "big.py", "--root", str(root)])
+    whole = _savings_line(capsys.readouterr().out)
+    complete_tokens = whole.split("outline ≈ ")[1].split(" tok")[0]
+
+    cli.main(["outline", "big.py", "--root", str(root), "--budget", "200"])
+    line = _savings_line(capsys.readouterr().out)
+
+    assert "partial: " in line
+    assert " of 60 symbols" in line
+    assert f"complete outline ≈ {complete_tokens} tok" in line
+
+
+def test_size_line_unmarked_when_nothing_omitted(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(BIG)
+    cli.main(["outline", "big.py", "--root", str(root)])
+    line = _savings_line(capsys.readouterr().out)
+    assert "partial" not in line
+    assert "complete outline" not in line
+
+
+def test_directory_size_line_marks_partial_in_rows(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """The directory rollup's aggregate savings line gets the same
+    disclosure, counted in rows (file headers and symbols)."""
+    root = make_mapped_repo({**PY, **BIG})
+    cli.main(["outline", ".", "--root", str(root), "--budget", "200"])
+    line = _savings_line(capsys.readouterr().out)
+    assert "partial: " in line
+    assert " rows; complete outline ≈ " in line
+
+    cli.main(["outline", ".", "--root", str(root)])
+    assert "partial" not in _savings_line(capsys.readouterr().out)
+
+
+def test_outline_json_says_whether_it_is_complete(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(BIG)
+    cli.main(["outline", "big.py", "--root", str(root), "--json"])
+    whole = json.loads(capsys.readouterr().out)["files"][0]
+    assert whole["complete"] is True
+    assert len(whole["symbols"]) == 60
+
+    cli.main(
+        [
+            "outline",
+            "big.py",
+            "--root",
+            str(root),
+            "--json",
+            "--budget",
+            "200",
+        ]
+    )
+    cut = json.loads(capsys.readouterr().out)["files"][0]
+    assert cut["complete"] is False
+    assert len(cut["symbols"]) < 60
+    assert cut["outline_tokens_complete"] == whole["outline_tokens_complete"]
+    assert cut["outline_tokens_complete"] > 0
 
 
 def test_docless_file_has_no_emdash(
@@ -198,7 +281,7 @@ SPARSE_FILE = {
 def test_sparse_file_gets_a_caveat(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # B9: a callback-heavy file's outline can look like an extreme
+    # A callback-heavy file's outline can look like an extreme
     # (and perfectly legitimate-looking) savings ratio while actually
     # hiding nearly all of the file's real content. A large file with
     # very few named symbols must carry a caveat, not read as complete.
@@ -232,7 +315,7 @@ def test_normal_small_file_has_no_sparse_caveat(
 
 
 def test_sparse_note_suppressed_when_file_failed_to_parse() -> None:
-    """Round-12 master report §3.9: a file that failed to parse
+    """A file that failed to parse
     entirely (most often an unsupported/uninstalled Tier-2 grammar --
     Kotlin/Groovy without ``pip install dekko[all]``) always has 0
     symbols, which used to trip the "few named symbols" heuristic en

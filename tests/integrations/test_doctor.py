@@ -111,7 +111,7 @@ def test_map_freshness_version_stale(
 def test_map_freshness_spec_hash_stale_distinctly(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # Round-23 §11: doctor independently built its own bare
+    # doctor independently built its own bare
     # "built by dekko X, running X" string, never touching
     # spec_stale/built_spec_hash/running_spec_hash even though the
     # full Freshness was already in scope — a spec_hash-only drift on
@@ -311,8 +311,8 @@ def _epoch(text: str) -> float:
 def test_mcp_server_predating_the_install_is_stale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Round 33 Track 1: three servers held an older extractor all day
-    # and this row said "unknown, can't tell" on all seven eval repos.
+    # Three servers held an older extractor all day and this row said
+    # "unknown, can't tell" on every repo.
     # A process that started before the installed code last changed
     # is, by definition, not running the installed code.
     _fake_pgrep_and_ps(monkeypatch, _PS_TWO, _epoch("2026-09-21 16:09"))

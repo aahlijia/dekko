@@ -157,7 +157,7 @@ def _anonymous_entries(
     call-site line becomes its own synthetic ``kind="module"`` symbol
     with a real line number, landing in the ``callers:`` list next to
     named-function callers instead of a separate, line-number-less
-    ``module-level callers:`` summary that is easy to miss (bug #4).
+    ``module-level callers:`` summary that is easy to miss.
 
     Maps written before doc version 3 have no ``edge_lines``; when the
     lookup is empty, the caller falls back to the bare
@@ -486,7 +486,7 @@ def _pack_meter(pack: Pack, text: str, budget: int | None) -> Meter:
     """
     kept = len(pack.entries) + len(pack.file_symbols)
     # Signals: the symbols this pack puts in context — neighbors, file
-    # symbols, and the target itself (FR-D3 density).
+    # symbols, and the target itself (density).
     signals = kept + (1 if pack.target is not None else 0)
     return Meter(
         tokens=estimate_tokens(text),
@@ -540,13 +540,12 @@ def trim_to_budget(
 
     Imports are trimmed *before* neighbors specifically so a high-
     fan-out symbol's import list can never fully starve the callers/
-    callees a caller actually asked about (bug #5/B5 — four
-    evaluators hit a context pack that spent its entire default
-    budget on imports and returned 0% of the requested callers/
-    callees; ``_relevant_imports`` already shrinks the import list to
-    what the pack references, but a tight budget could previously
-    still empty ``pack.entries`` to zero before touching a single
-    import).
+    callees a caller actually asked about (a context pack could
+    otherwise spend its entire default budget on imports and return
+    0% of the requested callers/callees; ``_relevant_imports``
+    already shrinks the import list to what the pack references, but
+    a tight budget could previously still empty ``pack.entries`` to
+    zero before touching a single import).
 
     Args:
         index: Loaded map index (for degree ranking).

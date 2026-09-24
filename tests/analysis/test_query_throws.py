@@ -9,15 +9,14 @@ superclass doesn't match — the documented limitation locked in by a
 test), multi-catch matching each listed type, and the JS/TS weak-signal
 caveat appearing in the command's own output (not just ``--help``).
 
-Also covers plan 28's ``--lang`` filter and default exact-before-
+Also covers the ``--lang`` filter and default exact-before-
 catch-all sort: the CLI-level tests exercise real multi-language
 (Java/JS) map data through the full ``cli.main`` -> ``query.run`` ->
 ``_dispatch`` -> ``_run_catches``/``_run_throws`` path; the
 ``--transitive`` cross-language-BFS case is exercised directly against
 a hand-built ``MapIndex`` instead, since real cross-language call-graph
 resolution isn't something the extractor produces (there's no way to
-get a genuine repo to reproduce it) — this is still exactly what the
-plan's "small fixture index" test-plan bullets describe.
+get a genuine repo to reproduce it).
 """
 
 import json
@@ -100,7 +99,7 @@ PY_AND_RUST = {
     "lib.rs": "fn foo() {}\n",
 }
 
-# round-18 spring-boot finding, reproduced from the real
+# Reproduced from spring-boot's real
 # `Binder.handleBindError` shape: rethrowing a caught exception
 # through a Java 16+ `instanceof` pattern-match binding used to be
 # mislabeled `(external) bindException` -- the raw variable name
@@ -347,7 +346,7 @@ def test_catches_json_includes_note_on_jsts_repo(
 def test_catches_caveat_absent_on_non_jsts_repo(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # Round-22 item 9 (awesome-go.md §3.1): the JS/TS caveat must not
+    # The JS/TS caveat must not
     # print on a repo with no JS/TS files at all -- it survived a full
     # release cycle unflagged as noise on Go/C++/Python repos.
     root = make_mapped_repo(PY_THROWS)
@@ -497,7 +496,7 @@ def test_catches_excluded_file_count_disclosed_when_repo_has_rust_files(
     assert "1 of 2 mapped files" in result.err
     # Names the actual excluded language present in this repo (rust),
     # not a static "Rust/Go/C" list that could name languages the
-    # repo doesn't even contain -- see round-18 claude-buddy finding.
+    # repo doesn't even contain.
     assert "(rust)" in result.err
     assert "Rust/Go/C" not in result.err
 
@@ -575,7 +574,7 @@ JAVA_AND_JS_CATCHES = {
 
 SORT_FIXTURE = {
     # Paths deliberately alphabetize the catch-all ahead of the exact
-    # match, so a passing test proves Fix B's sort key (not path
+    # match, so a passing test proves the exact-first sort key (not path
     # lexical order) decides row order.
     "aaa_widget.js": (
         "function handle() {\n    try {\n    } catch (e) {\n    }\n}\n"

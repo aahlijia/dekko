@@ -9,6 +9,127 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-09-24
+
+Closes round 1.1's fix cycle. The code is 1.0.5; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.1 (the first
+evaluation of the 1.x series, seven real repositories against
+0.43.77) was the cleanest on record: zero new High, Medium, or
+Critical findings, and every round 33 fix held. Its five Low findings
+became five fix tracks; four shipped and one measured out:
+
+- **1.0.2** — daemon-routed `diff`/`affected`/`workset` print the
+  cold rev-cache note once, not twice.
+- **1.0.3** — `outline`'s savings line says `partial:` when the
+  outline was cut, so a truncated ratio can't be quoted as the whole
+  file's (the README's zed row was; it's fixed).
+- **1.0.4** — MCP `get_callers`/`get_subtypes` say how many test rows
+  their default hid, and nothing when it hid none.
+- **1.0.5** — a bare `workset`/`affected`/`diff` on a clean tree no
+  longer exports and re-parses the commit it's sitting on: tensorflow
+  265 s -> 10 s, cline 6.7 s -> 1.0 s.
+- **Search centrality** (the round's one Low-Medium): measured against
+  an 11-query known-answer set (`benchmarks/search_known_answers.py`)
+  and left as is. Scaling the connectivity bonus by relevance changed
+  no top-1 result and cost the `isEnvTruthy` hub its place, so the
+  benchmark shipped and the change didn't.
+
+1.0.1, a source cleanup, rode along ahead of the tracks. Round 1.2
+(dekko 1.0.5, 2026-09-23) has since run: no regressions on any of
+the seven repositories, map counts byte-identical to 0.43.77. Its
+findings open the 1.1.x line.
+
+## [1.0.5] — 2026-09-23
+
+### Performance
+- **A bare `workset`/`affected`/`diff` on a clean tree no longer
+  rebuilds the commit it's already sitting on.** With no rev given,
+  these compare against the map's own commit, usually `HEAD`. The
+  first call after a new commit exported that commit with `git
+  archive`, re-parsed and re-resolved all of it, and cached the
+  result, only to compare it against an identical working tree and
+  report nothing changed. Now, when the target rev is `HEAD`, the tree
+  has no changes or untracked files outside `.dekko/`, and the map is
+  fresh, both sides come from the current map and nothing is exported.
+  Cold bare `workset` on tensorflow: 265 s -> 10 s; cline: 6.7 s ->
+  1.0 s. No rev-cache entry is written on that path, and a routed
+  call no longer prints the "no rev-cache ... may take a while" note
+  for it. Any change, untracked file, older rev, or stale map takes
+  the full path exactly as before. Before shipping, a cold clean-tree
+  `diff HEAD` on the full path was confirmed empty on all seven
+  evaluation repos, so the shortcut returns what the full path did.
+
+## [1.0.4] — 2026-09-23
+
+### Fixed
+- **MCP `get_callers`/`get_subtypes` say how many test rows they
+  hid.** Both tools leave out test files by default (the CLI's
+  `query callers` includes them), and the reply always ended in the
+  same "test-file callers excluded" note, whether that hid fifty
+  callers or none. An agent couldn't tell "nothing to see" from "go
+  look". The note now gives the count, plus the call sites when they
+  differ (`note: 1 test-file caller (21 call sites) excluded ...`,
+  a test file calling the target from its top level), and is left out
+  when nothing was hidden. `get_subtypes`' count follows
+  `transitive`/`relation`. Neither default changed.
+
+### Documentation
+- `query --no-tests` help, `docs/cli.md` and `docs/claude-code.md` now
+  name the other interface's test default, so the CLI/MCP difference
+  is findable from either side.
+
+## [1.0.3] — 2026-09-23
+
+### Fixed
+- **`outline`'s savings line says when the outline was cut.** A
+  budget- or limit-trimmed outline printed the same `full ≈ N tok ·
+  outline ≈ M tok (P%)` line as a complete one, with the truncation
+  only in the footer below it, so the ratio was easy to quote as the
+  whole outline's. The line now ends in `partial: K of N symbols;
+  complete outline ≈ T tok (P%)` when anything was omitted
+  (directory outlines count `rows`). This shows up by default on the
+  MCP `outline` tool, whose 2000-token budget trims large files.
+  `--json` gains `outline_tokens_complete` and `complete` per file.
+- **README savings table:** the zed `crates/git_ui/src` directory
+  outline row said ~80x, measured on the default 200-of-1,574-row
+  view. The complete outline is ~35,778 tokens, ~11.7x.
+
+## [1.0.2] — 2026-09-23
+
+### Fixed
+- **Daemon-routed `diff`/`affected`/`workset` no longer print the
+  cold rev-cache note twice.** The client prints it before dispatch
+  so you see it before the wait, and the daemon's replayed stderr
+  carried the same line again. The client now drops that one replayed
+  copy. Works against an already-running older daemon too; direct
+  mode is unchanged.
+
+## [1.0.1] — 2026-09-23
+
+Source cleanup. The code no longer points at internal evaluation
+reports, fix plans, or design documents, none of which ship with
+dekko. No behavior changes.
+
+### Changed
+- **Comments and docstrings say why, not where it came from.**
+  Citations of internal evaluation rounds, fix-plan items, report
+  sections, and design-spec labels (e.g. `FR1`, `NFR2`) are gone from
+  `src/`, `tests/`, and `scripts/`. The reasoning they carried stays.
+  Where a label named a concept, the concept's plain name replaces it.
+- **CLI help text** for `--scorer`, `--relation`, and dense output no
+  longer mentions internal round or phase labels.
+- **`dekko-verify` skill and `docs/`** no longer reference
+  maintainer-local files that don't exist in a clone.
+- **Test names** carry what they test rather than which round found
+  it (`tests/test_round33_small_fixes.py` is now
+  `tests/test_small_output_fixes.py`, among a few function renames).
+
+### Fixed
+- **`RawHeritage.relation` docstring** said Rust `impl` edges weren't
+  produced by any extractor; they are. It now says only Go `embeds`
+  is not yet produced.
+
 ## [1.0.0] — 2026-09-22
 
 dekko 1.0. This is a milestone promotion, not a rewrite: the code is

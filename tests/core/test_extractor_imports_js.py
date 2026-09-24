@@ -1,10 +1,9 @@
-"""Extraction tests for JS/TS import statements — I1 fix.
+"""Extraction tests for JS/TS import statements.
 
 Side-effect imports (``import "./foo.css";``) and namespace imports
 (``import * as ns from "mod";``) were previously silently dropped by
 ``_imports_js``/``JAVASCRIPT.import_query`` (no capture at all, since
 neither had matched either of the two pre-existing query patterns).
-See ``.features/fixes/post-indexing-tooling-bugfix-design.md`` I1.
 """
 
 from pathlib import Path
@@ -52,7 +51,7 @@ def test_js_side_effect_import_does_not_disturb_named_default(
 
 
 def test_js_two_side_effect_imports_do_not_crash(tmp_path: Path) -> None:
-    # Verified non-issue from the design doc: two side-effect imports
+    # Verified non-issue: two side-effect imports
     # in one file both collapse to the "" local-name key in
     # resolver._imports_by_file (inert for its call-graph purpose),
     # but must both still appear in the raw imports list.

@@ -255,10 +255,10 @@ def test_js_side_effect_import_relative_path_not_truncated() -> None:
 
 
 def test_js_side_effect_bare_specifier_stays_external_untruncated() -> None:
-    # Critical regression guard for the resolver-fallout fix (I1 part
-    # 3): without the imp.name-conditional strip, this would
-    # incorrectly compute module_source="opentui-spinner" (truncated,
-    # wrong) instead of treating the full bare specifier as external.
+    # Critical regression guard for the resolver-fallout fix: without
+    # the imp.name-conditional strip, this would incorrectly compute
+    # module_source="opentui-spinner" (truncated, wrong) instead of
+    # treating the full bare specifier as external.
     files = [
         _fm(
             "src/index.ts",
@@ -287,8 +287,7 @@ def test_js_multiple_named_imports_collapse_to_one_external_label() -> None:
 
 
 # ---------------------------------------------------------------------
-# tsconfig.json/jsconfig.json path-alias resolution (round 25 finding 6,
-# .features/plans/round25/07-tsconfig-path-alias-resolution.md)
+# tsconfig.json/jsconfig.json path-alias resolution
 
 
 def test_js_bare_alias_specifier_stays_external_when_root_omitted() -> None:
@@ -310,9 +309,7 @@ def test_js_bare_alias_specifier_stays_external_when_root_omitted() -> None:
 
 
 # ---------------------------------------------------------------------
-# repo-root-relative bare-specifier fallback (round 28
-# claude-code.md §3.3, .features/fixes/round28/
-# 03-deps-bare-specifier-resolution.md)
+# repo-root-relative bare-specifier fallback
 
 
 def test_js_bare_root_relative_specifier_resolves_to_repo_file() -> None:
@@ -370,7 +367,7 @@ def test_js_bare_root_relative_specifier_scoped_package_with_slash() -> None:
     # A scoped npm package (`@org/pkg`) has no further "/" so it stays
     # external; `@org/pkg/sub` does have one and is attempted against
     # the repo root -- documents the trade-off rather than leaving it
-    # untested (round 28 plan's own "scoped packages" risk note). No
+    # untested (the "scoped packages" risk). No
     # real npm package's files are ever laid out at a literal
     # "@org/..." repo path, so this coincidental collision is narrow
     # in practice, not a common false positive.
@@ -794,7 +791,7 @@ def test_rust_bare_crate_name_is_external() -> None:
 
 
 def test_rust_crate_path_resolves_against_named_lib_root() -> None:
-    # round-19 zed finding: Cargo.toml `[lib] path = "src/editor.rs"`
+    # On zed, Cargo.toml `[lib] path = "src/editor.rs"`
     # overrides the default lib.rs filename -- 216/222 of zed's own
     # crates with a [lib] path override use this pattern. No Cargo.toml
     # parsing; matched instead by the "single .rs file under src/
@@ -847,9 +844,9 @@ def test_rust_crate_path_still_external_when_no_named_root_matches() -> None:
 
 
 def test_rust_crate_item_resolves_at_named_crate_root_top_level() -> None:
-    # round-22 zed finding (5a): `crate::App`, re-exported at the top
+    # On zed, `crate::App`, re-exported at the top
     # level of a custom-named crate root (crates/gpui/src/gpui.rs,
-    # matching round 19's `[lib] path = "src/gpui.rs"` convention),
+    # matching the `[lib] path = "src/gpui.rs"` convention),
     # previously never resolved -- _dir_module_candidates's "item
     # defined in the parent module" fallback only ever tried
     # mod.rs/lib.rs/main.rs, with no way to know this crate's own
@@ -870,7 +867,7 @@ def test_rust_crate_item_resolves_at_named_crate_root_top_level() -> None:
 
 
 def test_rust_cross_crate_bare_name_resolves_to_sibling_crate() -> None:
-    # round-22 zed finding (5b): a Cargo-workspace sibling crate
+    # On zed, a Cargo-workspace sibling crate
     # referenced by its bare crate name (`use editor::Editor;` from a
     # different crate that depends on `editor`) previously fell
     # straight through _resolve_import_rust's "no recognized prefix"
@@ -942,22 +939,18 @@ def test_rust_cross_crate_unknown_bare_name_stays_external() -> None:
 
 
 def test_rust_crate_decoy_tiebreak_resolves_real_crate_over_fixture() -> None:
-    # Round 25 (``.features/plans/round25/
-    # 02-deps-crate-decoy-tiebreak.md``): the zed.md finding this round
-    # fixes -- a real crate (``crates/gpui``) and an unrelated
-    # same-named test-fixture stand-in
-    # (``tooling/lints/test_fixture/gpui``) both convention-match
-    # crate name "gpui", exactly the shape round 24's heritage
+    # On zed, a real crate (``crates/gpui``) and an unrelated same-named
+    # test-fixture stand-in (``tooling/lints/test_fixture/gpui``) both
+    # convention-match crate name "gpui", exactly the shape the heritage
     # crate-decoy tiebreak
     # (test_rust_crate_decoy_tiebreak_resolves_real_crate_over_fixture
     # in test_resolver_heritage.py) already fixed for heritage
     # resolution but ``resolve_imports``'s own bare-crate-name lookup
     # never got the equivalent fix. A ``use gpui::...`` import from a
     # file outside either crate's own tree must resolve to the real
-    # crate, not the decoy, and the decoy's own internal
-    # self-reference (legitimate: a crate's own external name is in
-    # scope from inside itself) must resolve to *its own* root, not
-    # the real crate's.
+    # crate, not the decoy, and the decoy's own internal self-reference
+    # (legitimate: a crate's own external name is in scope from inside
+    # itself) must resolve to *its own* root, not the real crate's.
     files = [
         _fm("crates/gpui/src/lib.rs", "rust", []),
         _fm("tooling/lints/test_fixture/gpui/src/lib.rs", "rust", []),
@@ -1039,7 +1032,7 @@ def test_java_import_resolves_flat_layout() -> None:
 
 
 def test_java_import_resolves_nested_maven_module_layout() -> None:
-    # Confirmed against test-repos/spring-boot's real layout: each
+    # Confirmed against spring-boot's real layout: each
     # module nests its own src/main/java under a module directory, not
     # the repo root, so a literal-prefix-only check would miss this.
     files = [

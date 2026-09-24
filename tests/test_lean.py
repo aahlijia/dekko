@@ -1,6 +1,6 @@
-"""FR1 file backbone: floor guarantee, dense encoding, determinism.
+"""File backbone: floor guarantee, dense encoding, determinism.
 
-Plus the FR2/FR4 atom layer: name + signature atoms with Q1 centrality.
+Plus the atom layer: name + signature atoms with centrality.
 """
 
 import json
@@ -162,7 +162,7 @@ def test_purpose_truncated_to_width_cap(
     assert len(row.purpose) <= render_lean.LEAN_PURPOSE_WIDTH
 
 
-# --- FR2/FR4 atom layer ---------------------------------------------
+# --- atom layer -----------------------------------------------------
 
 # hub() is called by caller(); test_hub is test code. Gives a fan-in
 # gradient (hub=1, caller=0) and a demotable file.
@@ -273,7 +273,7 @@ def test_file_churn_empty_on_non_git_root(
     assert summary.file_churn(root) == Counter()
 
 
-# --- FR3 module-edge text -------------------------------------------
+# --- module-edge text -----------------------------------------------
 
 # main.py (src/app) calls into src/pkg and src/util -> two cross-dir
 # edges from one source directory, exercising grouping.
@@ -342,7 +342,7 @@ def test_render_module_edges_deterministic(
     )
 
 
-# --- NFR2 degradation ladder ----------------------------------------
+# --- degradation ladder ---------------------------------------------
 
 # hub() is called by go() and test_hub(); leaf() and go() are uncalled.
 # Cross-dir calls give module edges; tests/ is a demotable group.
@@ -510,7 +510,7 @@ def test_report_as_dict_shape(make_mapped_repo: RepoFactory) -> None:
     assert d["floored"] is True
 
 
-# --- 2.1: _shed_symbols binary search (was O(N^2), hung on large repos)
+# --- _shed_symbols binary search (was O(N^2), hung on large repos)
 
 
 def _synthetic_model(n: int) -> render_lean.LeanModel:
@@ -613,7 +613,7 @@ def test_shed_symbols_handles_large_live_set_without_hanging() -> None:
     assert report.names_dropped > 0
 
 
-# --- FR6 mermaid block ----------------------------------------------
+# --- mermaid block --------------------------------------------------
 
 
 def test_build_mermaid_renders_dir_graph(
@@ -726,7 +726,7 @@ def test_cli_lean_budget_floors(
 def test_cli_lean_tiny_budget_discloses_floor_override(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
-    # round-09 §2.4: a `--budget` below the path-only floor was
+    # A `--budget` below the path-only floor was
     # silently bumped up with no indication the request was ever
     # overridden — `effective_cap`'s own docstring says "the cap
     # bends, not the floor," but nothing told the caller that
@@ -765,7 +765,7 @@ def test_lean_registered_and_tool_count() -> None:
     # get_supertypes/get_subtypes (the type/interface heritage graph)
     # joined the always-loaded read surface — directly named in the
     # source ideation prompt as an example of "connections beyond
-    # simple call graphs," per the heritage-graph design doc.
+    # simple call graphs."
     assert len(server.TOOLS) == 18
 
 

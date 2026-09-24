@@ -1,15 +1,15 @@
 """Extraction tests for heritage clauses.
 
-Phase 1 (Python/JS/TS/Java): single/multiple inheritance, the
-metaclass/Generic[T] filtering edge cases the design doc calls out,
+Python/JS/TS/Java: single/multiple inheritance, the
+metaclass/Generic[T] filtering edge cases,
 cross-language relation labeling (extends vs. implements), and the
 "no heritage" empty case — one fixture per language, plus the
 correlation-by-byte-span mechanism ``_collect_heritage`` uses to
 attach clauses to their owning symbol.
 
-Phase 2 (Rust/C++): Rust's ``impl Trait for Type`` (a separate
+Rust/C++: Rust's ``impl Trait for Type`` (a separate
 top-level construct with no ``@classdef`` to correlate against, unlike
-every Phase 1 language — resolved by same-file name lookup instead,
+every Python/JS/TS/Java language — resolved by same-file name lookup instead,
 see ``extractor._heritage_rust_impl``), inherent-impl exclusion,
 supertrait bounds (including lifetime-bound filtering), and the
 same-file-ambiguous-name/type-not-in-file skip cases the same-file
@@ -248,7 +248,7 @@ def test_heritage_lines_are_1_based_and_at_clause_site(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------
-# Phase 2: Rust
+# Rust
 
 
 def test_rust_impl_trait_for_type_is_impl_relation(tmp_path: Path) -> None:
@@ -268,7 +268,7 @@ def test_rust_impl_trait_for_type_is_impl_relation(tmp_path: Path) -> None:
 def test_rust_inherent_impl_produces_no_heritage(tmp_path: Path) -> None:
     # `impl Foo { ... }` has no `trait:` field — the query itself
     # never matches it, so it must never flood `heritage` with a
-    # `Foo -> Foo`-shaped no-op edge (the design doc's own documented
+    # `Foo -> Foo`-shaped no-op edge (a documented
     # false-signal risk: inherent impls vastly outnumber trait impls).
     spec = languages.spec_for_path("a.rs")
     assert spec is not None
@@ -316,7 +316,7 @@ def test_rust_impl_for_type_defined_elsewhere_carries_subtype_name(
 ) -> None:
     # `impl Bar for External {}` where `External` is only imported,
     # not defined in this file — there's no same-file symbol to attach
-    # a `RawHeritage.subtype_id` to. Round 31 zed coverage pass F2/A3:
+    # a `RawHeritage.subtype_id` to. But
     # a cross-file `impl` block is ordinary Rust layout (a sibling
     # `render.rs` implementing a trait for a type defined in the
     # module's own file), not a rare shape worth silently dropping at
@@ -372,7 +372,7 @@ def test_rust_heritage_line_at_impl_block_site(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------
-# Phase 2: C++
+# C++
 
 
 def test_cpp_single_base_no_access_specifier(tmp_path: Path) -> None:

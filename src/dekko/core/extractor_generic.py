@@ -52,12 +52,12 @@ def _generic_class_kind(node_type: str) -> str:
 
 
 # ``^command$`` is the shell family's call node (tree-sitter-bash, fish,
-# PowerShell: ``command`` with a ``name`` field). Round 31's tensorflow
-# coverage pass found it missing: with no ``command`` nodes collected,
-# *zero* calls were extracted from any bash file, so every bash
-# function in a repo had fan-in 0 and was listed by ``dekko unused``
-# (``tfrun()``, 27 real call sites) with no caveat. Anchored so it can't
-# also swallow ``command_name``/``command_substitution``.
+# PowerShell: ``command`` with a ``name`` field). Without it, no
+# ``command`` nodes are collected and *zero* calls are extracted from
+# any bash file, so every bash function in a repo has fan-in 0 and is
+# listed by ``dekko unused`` (on tensorflow, ``tfrun()`` with 27 real
+# call sites) with no caveat. Anchored so it can't also swallow
+# ``command_name``/``command_substitution``.
 _CALL_RE = re.compile(r"call$|call_expression|invocation|^command$")
 # A shell ``command`` is any word in command position: ``./build.sh``,
 # ``"$TOOL"``, ``-f``. Only a plain identifier can ever be a call to a

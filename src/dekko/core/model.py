@@ -193,8 +193,7 @@ class RawRef:
             ``LanguageSpec.binding_query``. A tag rather than a filter
             in the extractor on purpose: whether a bound reference
             still earns an edge (a pytest fixture parameter does) is a
-            question about the *target*, which only the resolver has
-            (round 32 Track 5b).
+            question about the *target*, which only the resolver has.
     """
 
     caller_id: str | None
@@ -236,25 +235,23 @@ class RawHeritage:
         relation: How the subtype relates to the supertype:
             ``"extends"`` (class/interface extends), ``"implements"``
             (class implements interface), ``"impl"`` (Rust
-            ``impl Trait for Type``, Phase 2 — not produced by any
-            Phase 1 extractor), or ``"embeds"`` (Go anonymous struct
-            field, Phase 2 — not produced by any Phase 1 extractor).
+            ``impl Trait for Type``), or ``"embeds"`` (Go anonymous
+            struct field, not yet produced by any extractor).
         line: 1-based line of the clause.
-        subtype_name: Round 31 zed coverage pass F2 (extractor
-            ``_heritage_rust_impl``): a Rust ``impl Trait for Type``
-            block is resolved to its own ``subtype_id`` by same-file
-            name lookup against ``Type`` — ordinary Rust layout often
-            puts the impl block in a sibling file (``render.rs``)
-            from the struct it's for (``text_finder.rs``), so no
-            same-file symbol exists to attach to and the clause used
-            to be silently dropped at extraction, before the resolver
-            ever saw it. When that same-file lookup fails, the
-            extractor emits the clause anyway with ``subtype_id=""``
-            and this field set to the written type name instead, so
-            ``resolver.resolve_heritage`` can resolve the subject
-            itself (repo-wide, by name and crate) before resolving
-            the supertype the normal way. Empty whenever
-            ``subtype_id`` is already non-empty.
+        subtype_name: Extractor ``_heritage_rust_impl``: a Rust ``impl
+            Trait for Type`` block is resolved to its own ``subtype_id``
+            by same-file name lookup against ``Type`` — ordinary Rust
+            layout often puts the impl block in a sibling file
+            (``render.rs``) from the struct it's for
+            (``text_finder.rs``), so no same-file symbol exists to
+            attach to and the clause used to be silently dropped at
+            extraction, before the resolver ever saw it. When that
+            same-file lookup fails, the extractor emits the clause
+            anyway with ``subtype_id=""`` and this field set to the
+            written type name instead, so ``resolver.resolve_heritage``
+            can resolve the subject itself (repo-wide, by name and
+            crate) before resolving the supertype the normal way. Empty
+            whenever ``subtype_id`` is already non-empty.
     """
 
     subtype_id: str
@@ -356,9 +353,8 @@ class CatchSite:
 
     Kept as one entry per clause (not collapsed into a caller->type
     edge table the way ``ThrowEdge`` is) since a ``dekko query catches
-    Y`` request matches by name against ``type_names`` directly (see
-    the design doc's "mostly a name-index lookup" resolution note) —
-    the common case is ``Y`` naming a stdlib/third-party type that was
+    Y`` request matches by name against ``type_names`` directly — the
+    common case is ``Y`` naming a stdlib/third-party type that was
     never extracted as a repo ``Symbol`` at all, so a caller/type
     edge table keyed on resolved ids would miss the majority of real
     matches.
@@ -397,7 +393,7 @@ class EnvRead:
     text *is* the fully-resolved fact, so unlike every other fact this
     module models, there is no separate raw/resolved pair and no
     resolution pass at all (see ``languages.LanguageSpec.
-    env_read_query``'s docstring and the design doc's own framing).
+    env_read_query``'s docstring).
     Config-value *flow* (assignment tracking, override detection,
     config-file parsing) is explicitly out of scope — this only
     records where a known ``getenv``-shaped call reads a literal key.
@@ -476,8 +472,7 @@ class FileMap:
             type_alias_query``). Not full symbols, just names: a
             same-file lookup registry so ``query._heritage_external_
             label`` can tell a same-file ``type X = {...}`` apart from
-            a genuinely external heritage base (round-19 claude-code
-            finding).
+            a genuinely external heritage base.
     """
 
     path: str
@@ -520,9 +515,9 @@ class ExternalCall:
         callee: Callee text as written (``mod.func``, ``Path``).
         lines: Sorted, deduplicated 1-based call-site lines.
         relation: For a ``heritage_external`` entry only: the clause's
-            ``extends``/``implements``/``impl``/``embeds`` (round 33
-            Track 6e -- the parser always knew it, and an external
-            base used to lose it while a resolved one kept it). Always
+            ``extends``/``implements``/``impl``/``embeds`` (the parser
+            always knew it, and an external base used to lose it while
+            a resolved one kept it). Always
             ``None`` for call and throws externals.
     """
 
@@ -646,8 +641,8 @@ class CallGraph:
             separately.
         throws: Deduplicated resolved caller -> raised-repo-type edges
             (see ``RawThrow``/``ThrowEdge``) — Python/Java/C++/JS/TS
-            only, a scoped pilot per the design doc (Rust/Go/C
-            permanently excluded, not deferred).
+            only, a scoped pilot (Rust/Go/C permanently excluded, not
+            deferred).
         throws_out: Symbol id (or module pseudo-id) → sorted
             resolved raised-type ids.
         throws_ambiguous: Per caller, an unresolved raised-type name
@@ -673,29 +668,26 @@ class CallGraph:
             resolver pass involved (the literal key text is already
             the fully-resolved fact).
         heritage_synthetic_tiebreak_count: How many entries in
-            ``heritage`` were resolved via the round-24 heritage
-            crate-decoy tiebreak (``.features/plans/round24/
-            03-heritage-crate-decoy-tiebreak.md``,
-            ``resolver._prefer_non_synthetic_crate_match``) rather than
-            an unambiguous structural match — a convention-based guess
-            about which of two same-named Rust crates is "the real
-            one" when a crate-name hint collides across 2+ registered
-            crate roots and exactly one candidate's ancestor path
-            avoids a test-fixture/vendor marker. Surfaced so ``query
-            subtypes``/``supertypes`` can disclose this lower-certainty
-            resolution rather than blending it silently into every
-            other, structurally-resolved edge.
-        heritage_unplaced_subtype_count: How many Rust ``impl Trait
-            for Type`` clauses (round 31 A3, ``extractor.
-            _heritage_rust_impl``'s ``subtype_name`` recovery path)
-            named a ``Type`` not defined in the same file, and whose
-            subject symbol still couldn't be placed uniquely within
-            the clause's own crate (zero or 2+ same-crate candidates
-            for the written name) — dropped rather than guessed, and
-            counted here the same way ``heritage_synthetic_tiebreak_
-            count`` is, so a later round can see how many were
-            genuinely unplaceable rather than the count silently
-            vanishing into "clause never happened."
+            ``heritage`` were resolved via the heritage crate-decoy
+            tiebreak (``resolver._prefer_non_synthetic_crate_match``)
+            rather than an unambiguous structural match — a
+            convention-based guess about which of two same-named Rust
+            crates is "the real one" when a crate-name hint collides
+            across 2+ registered crate roots and exactly one candidate's
+            ancestor path avoids a test-fixture/vendor marker. Surfaced
+            so ``query subtypes``/``supertypes`` can disclose this
+            lower-certainty resolution rather than blending it silently
+            into every other, structurally-resolved edge.
+        heritage_unplaced_subtype_count: How many Rust ``impl Trait for
+            Type`` clauses (``extractor._heritage_rust_impl``'s
+            ``subtype_name`` recovery path) named a ``Type`` not defined
+            in the same file, and whose subject symbol still couldn't be
+            placed uniquely within the clause's own crate (zero or 2+
+            same-crate candidates for the written name) — dropped rather
+            than guessed, and counted here the same way
+            ``heritage_synthetic_tiebreak_count`` is, so it's visible
+            how many were genuinely unplaceable rather than the count
+            silently vanishing into "clause never happened."
     """
 
     edges: list[Edge] = field(default_factory=list)

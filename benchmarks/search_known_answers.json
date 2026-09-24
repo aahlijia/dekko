@@ -1,0 +1,88 @@
+{
+  "description": "Free-text queries with known right answers, for measuring `dekko search` ranking. Each query was written from what the answer's code does, before looking at any search output. `answers` lists acceptable `path:qualname` targets; the best-ranked one counts. `hub` marks queries whose answer is heavily called, so a ranking change can't pass by ignoring connectivity.",
+  "repos": {
+    "claude-buddy": {"commit": "ed8c897c"},
+    "cline": {"commit": "e34e79462"},
+    "claude-code": {"commit": "a371abb"},
+    "spring-boot": {"commit": "db19648b8e1"},
+    "zed": {"commit": "5e1fd392f6"}
+  },
+  "queries": [
+    {
+      "repo": "claude-buddy",
+      "query": "hunt minigame state machine phases",
+      "answers": ["cli/tui.tsx:HuntPhase"],
+      "hub": false
+    },
+    {
+      "repo": "cline",
+      "query": "retry logic for failed api requests",
+      "answers": [
+        "apps/vscode/src/utils/retry.ts:retryOperation",
+        "sdk/packages/core/src/runtime/orchestration/session-runtime-orchestrator.ts:SessionRuntime.executeRunWithAuthRetry",
+        "sdk/packages/core/src/runtime/host/local-runtime-host.ts:LocalRuntimeHost.runWithAuthRetry"
+      ],
+      "hub": false
+    },
+    {
+      "repo": "cline",
+      "query": "convert vscode language model messages to anthropic content blocks",
+      "answers": ["apps/vscode/src/sdk/vscode-lm/vscode-lm-format.ts:convertToVsCodeLmMessages"],
+      "hub": false
+    },
+    {
+      "repo": "cline",
+      "query": "capture a telemetry event when telemetry is enabled",
+      "answers": ["apps/vscode/src/services/telemetry/TelemetryService.ts:TelemetryService.capture"],
+      "hub": true
+    },
+    {
+      "repo": "claude-code",
+      "query": "extract a readable message from an unknown error",
+      "answers": ["src/utils/errors.ts:errorMessage"],
+      "hub": true
+    },
+    {
+      "repo": "claude-code",
+      "query": "check if an environment variable is set to a truthy value",
+      "answers": ["src/utils/envUtils.ts:isEnvTruthy"],
+      "hub": true
+    },
+    {
+      "repo": "claude-code",
+      "query": "parse slash command input into command name and arguments",
+      "answers": ["src/utils/slashCommandParsing.ts:parseSlashCommand"],
+      "hub": false
+    },
+    {
+      "repo": "spring-boot",
+      "query": "write the application process id to a pid file",
+      "answers": [
+        "core/spring-boot/src/main/java/org/springframework/boot/context/ApplicationPidFileWriter.java:ApplicationPidFileWriter",
+        "core/spring-boot/src/main/java/org/springframework/boot/context/ApplicationPidFileWriter.java:ApplicationPidFileWriter.writePidFile"
+      ],
+      "hub": false
+    },
+    {
+      "repo": "spring-boot",
+      "query": "bootstrap and launch a spring application from a java main method",
+      "answers": [
+        "core/spring-boot/src/main/java/org/springframework/boot/SpringApplication.java:SpringApplication",
+        "core/spring-boot/src/main/java/org/springframework/boot/SpringApplication.java:SpringApplication.run"
+      ],
+      "hub": true
+    },
+    {
+      "repo": "zed",
+      "query": "construct a length value in pixels",
+      "answers": ["crates/gpui/src/geometry.rs:px"],
+      "hub": true
+    },
+    {
+      "repo": "zed",
+      "query": "git blame information for editor rows",
+      "answers": ["crates/editor/src/git/blame.rs:GitBlame.blame_for_rows"],
+      "hub": false
+    }
+  ]
+}

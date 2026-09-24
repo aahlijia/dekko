@@ -1,7 +1,7 @@
-"""Pillar D: dense encoding and the FR-D3 density metric.
+"""Dense encoding and the density metric.
 
-Covers Meter.signals (tokens-per-signal), the lean map's --dense skin
-(FR-D1), and its seen/delta omission (FR-D2).
+Covers Meter.signals (tokens-per-signal), the lean map's --dense skin,
+and its seen/delta omission.
 """
 
 from pathlib import Path
@@ -31,7 +31,7 @@ def _index(make_mapped_repo: RepoFactory) -> tuple[Path, MapIndex]:
     return root, index
 
 
-# --- FR-D3: Meter.signals --------------------------------------------
+# --- Meter.signals ---------------------------------------------------
 
 
 def test_meter_per_signal_and_footer() -> None:
@@ -62,7 +62,7 @@ def test_context_pack_reports_signals(
     assert meter.signals >= 1
 
 
-# --- FR-D1: --dense --------------------------------------------------
+# --- --dense ---------------------------------------------------------
 
 
 def test_dense_drops_signatures_off_the_tail(
@@ -94,7 +94,7 @@ def test_cli_lean_dense_smoke(make_mapped_repo: RepoFactory) -> None:
     assert cli.main(["lean", "--root", str(root), "--dense"]) == 0
 
 
-# --- FR-D2: seen / delta ---------------------------------------------
+# --- seen / delta ----------------------------------------------------
 
 
 def test_seen_omits_and_counts_symbols(

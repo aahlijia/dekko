@@ -7,6 +7,7 @@ dekko summary                        # repo digest: dirs, hotspots, entry points
 dekko outline src/server.py          # a file's signatures + docs, no bodies
 dekko query symbol run_map           # signature card: doc, location, fan-in/out
 dekko query callers resolve --sites  # who calls resolve, with call sites
+dekko query callers resolve --no-tests  # production callers only (the MCP get_callers default; the CLI includes tests)
 dekko query callees main             # what does main call?
 dekko query uses Path                # who references the external name Path?
 dekko query type Config              # what takes/returns Config? (--exact for literal match)
@@ -400,7 +401,7 @@ reading past `--limit`'s default truncation or reaching for `--json`
 and aggregating by hand. Grouping runs over the *full* grep-only
 bucket — every hit the sweep found — before `--limit`/`--budget` are
 applied; those caps then bound the number of file *groups* printed,
-not the number of rows grouping is allowed to see. (Before round 31,
+not the number of rows grouping is allowed to see. (In older versions,
 `--limit`/`--budget` were applied to rows first and grouping ran only
 over the survivors, which could hide the very clustering the flag
 exists to show — a file with the most real hits could still print
@@ -816,7 +817,7 @@ never on every zero.
 
 **Languages `deps` never resolves imports for** (Go today) get a
 second, independent disclosure. The bare `dekko deps` summary already
-carries a coverage note (since round 29) when the repo-wide edge count
+carries a coverage note (since 0.43.53) when the repo-wide edge count
 is zero and that gap would actually explain it. `dekko deps --file` on
 one such file goes further and always explains itself: a `note:` on
 stderr (`import_scope_note` in `--json`) says the file's language
@@ -1121,10 +1122,7 @@ are a single connected component**, and for those, `cohesion` gives
 a bug. Real community-detection/modularity-style clustering (which
 would give a genuinely useful answer even for a fully-connected file)
 is a materially harder algorithm dekko has no other precedent for and
-does not implement; see
-`.features/plans/post-indexing-tooling/symbol-cohesion-clustering-design.md`
-for the full reasoning and what a future "real clustering" version
-would require.
+does not implement.
 
 `cohesion` is **CLI-only** (no MCP tool) — this is a human refactor-
 planning aid, not something an agent typically needs mid-task, and the
@@ -1186,7 +1184,12 @@ alike, keyed by resolved commit SHA) makes a *repeat* comparison
 against the same rev faster. A daemon-routed `diff`/`affected` against
 a rev it hasn't seen before pays the same old-side reparse cost a
 direct invocation would — daemon routing speeds up the current-tree
-side only.
+side only. The exception is a working tree that is exactly the rev
+being compared (no changes, no untracked files outside `.dekko/`) with
+a fresh map, which is what a bare `workset`/`affected`/`diff` sees
+right after a commit or checkout: the old side would only rebuild
+what's already on disk, so both sides come from the current map, no
+old-side reparse runs, and no rev-cache entry is written.
 
 Even for the current-tree side, the warm cache's win is specifically
 skipping map *loading* (re-parsing `map.json` into an in-memory

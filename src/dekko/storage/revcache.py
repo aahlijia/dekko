@@ -13,7 +13,7 @@ A commit's tree is immutable once it exists, so a snapshot cached
 under its resolved full SHA never goes stale the way the working
 tree's own map can — there is no freshness question to re-check on
 every access here, only "have we already paid this cost for this
-exact commit" (round-08 §2.6).
+exact commit".
 
 Bounded to :data:`MAX_ENTRIES` most-recently-used revisions (a simple
 access-time cap via ``mtime``, not full LRU bookkeeping) so a repo
@@ -46,7 +46,7 @@ _MAP_DIR = ".dekko"
 # evicted. A plain access-time cap rather than true LRU bookkeeping —
 # simpler to implement correctly, and a cache whose main value is "the
 # last few revisions someone's actively iterating against" doesn't
-# need more (round-08 §2.6's tradeoffs section).
+# need more.
 MAX_ENTRIES = 20
 
 
@@ -127,7 +127,7 @@ def load(root: Path, sha: str) -> "Snapshot | None":
         spec-hash check catches an entry built by a different
         extractor version (a new symbol kind, a heritage-relation
         change, a resolver fix that changes what counts as
-        "resolved") — round 27 finding H2: previously such an entry
+        "resolved"). Previously such an entry
         was served forever, and ``diff``/``workset``/``affected``
         reported the schema drift as a genuine code change. Mirrors
         ``mapfile.py``'s own ``built_spec_hash``/``running_spec_hash``
@@ -159,7 +159,7 @@ def _is_all_empty_body(snap: "Snapshot") -> bool:
     or all-empty-string is the exact signature of
     ``diff._body_hashes_for_path``'s silent OSError fallback having
     fired for every mapped file — never a legitimate outcome for a
-    real snapshot (round 28 tensorflow finding). An empty symbol table
+    real snapshot (seen on tensorflow). An empty symbol table
     (a subpath filter matching nothing) is not flagged; there is
     nothing to be wrong about.
 
@@ -182,10 +182,10 @@ def save(root: Path, sha: str, snap: "Snapshot") -> None:
     Refuses to write a snapshot whose body map is all-empty-string
     across every symbol (see :func:`_is_all_empty_body`) — the known
     signature of a transient read failure during old-side export
-    (round 28 tensorflow finding: a corrupted entry saved this way was
-    then served forever, since a rev-cache hit needs no freshness
-    check by design). Logs one loud ``note:`` line and skips the write
-    rather than persisting a maximally-wrong cache entry.
+    (on tensorflow, a corrupted entry saved this way was then served
+    forever, since a rev-cache hit needs no freshness check by
+    design). Logs one loud ``note:`` line and skips the write rather
+    than persisting a maximally-wrong cache entry.
 
     Args:
         root: Repository root.

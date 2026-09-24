@@ -1,7 +1,6 @@
 """Tests for the OS-independent daemon transport abstraction.
 
-Per the daemon-mode-cli-workflow.md's cross-cutting test-scoping rule
-(its §7): most of this feature's tests should run unconditionally on
+Most of this feature's tests should run unconditionally on
 every platform, since ``default_transport_for()`` is the only
 ``sys.platform`` branch anything downstream needs to know about. A
 test only gets a ``skipif`` when the code path it exercises is itself
@@ -185,7 +184,7 @@ def test_unix_socket_preflight_check_catches_long_path_without_binding(
     touching the filesystem or a real socket -- this is what lets
     ``daemon.start()`` fail fast in the foreground before spawning the
     detached child that would otherwise hit this same failure
-    invisibly (see round-10's daemon-start-false-success finding)."""
+    invisibly (``daemon start`` reporting a false success)."""
     deep = _deep_root(short_root)
 
     transport = dt.UnixSocketTransport(deep)
@@ -206,7 +205,7 @@ def test_unix_socket_preflight_check_passes_for_a_short_path(
 
 
 # ---------------------------------------------------------------------
-# Status-only listener (round-13 master report §2)
+# Status-only listener
 # ---------------------------------------------------------------------
 
 
@@ -307,7 +306,7 @@ def test_unix_preflight_check_also_covers_status_socket_path(
 ) -> None:
     """A root deep enough to blow the sun_path limit for the (longer)
     status socket name, but not for the main one, must still be caught
-    by preflight_check() -- round-13 master report §2 adds a second
+    by preflight_check() -- the status-only listener adds a second
     listener with a longer filename (``daemon.status.sock`` vs.
     ``daemon.sock``), so the length margin that used to be safe for
     the main socket alone can now be exactly the case that's fine for
@@ -339,7 +338,7 @@ def test_unix_preflight_check_also_covers_status_socket_path(
 
 
 # ---------------------------------------------------------------------
-# Round-13 master report §2: a connect-level timeout must not delete a
+# A connect-level timeout must not delete a
 # live daemon's transport artifact -- only a definitive "nothing is
 # listening" failure (connection refused, a bogus non-socket file, ...)
 # should still trigger cleanup.
@@ -674,7 +673,7 @@ def test_spawn_detached_posix_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result == "fake-popen"
     assert captured["cmd"] == ["dekko", "daemon", "start"]
     # No log_path given -- stdout/stderr stay unset (inherit the
-    # parent's fds), the pre-round-29 behavior.
+    # parent's fds), the original behavior.
     assert captured["kwargs"] == {
         "start_new_session": True,
         "stdout": None,
@@ -715,7 +714,7 @@ def test_spawn_detached_redirects_stdio_to_log_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """``log_path`` redirects both stdout and stderr to the same
-    opened file descriptor -- round-29 Track 2's daemon-log fix: the
+    opened file descriptor -- the daemon-log fix: the
     detached child otherwise inherits whatever terminal ran
     ``dekko daemon start``, orphaning every daemon-side print."""
     monkeypatch.setattr(dt.sys, "platform", "darwin")
@@ -797,7 +796,7 @@ def test_is_daemon_reachable_false_when_no_artifact(tmp_path: Path) -> None:
 
 def test_is_daemon_reachable_true_when_listening(short_root: Path) -> None:
     """``is_daemon_reachable()`` probes the dedicated status-only
-    listener (round-13 master report §2) -- bind both listeners like a
+    listener -- bind both listeners like a
     real daemon does, and accept only on the status one, to prove
     that's genuinely the path being used."""
     transport = dt.default_transport_for(short_root)

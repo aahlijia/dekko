@@ -7,7 +7,7 @@ blocks; Windows uses ``msvcrt.locking``. Mirrors
 branches on ``sys.platform`` for its own narrow concern, rather than
 scattering platform checks through ``cli.py``.
 
-Round-12 §4.1b: multiple independent processes (bare CLI, a
+Multiple independent processes (bare CLI, a
 daemon-triggered auto-regen, the MCP server) can each trigger a full
 ``.dekko/`` regen against the same root with zero coordination. This
 module doesn't prevent that outright -- it's advisory and best-effort,
@@ -109,8 +109,8 @@ def try_named_lock(root: Path, name: str) -> Iterator[bool]:
 
     Generalizes :func:`try_regen_lock`'s mechanism (originally
     hardcoded to the single ``.dekko/`` regen lock) to any named lock
-    file, so other critical sections (e.g. per-SHA rev-cache builds,
-    round 28) can reuse the identical acquire/wait/fail-open shape
+    file, so other critical sections (e.g. per-SHA rev-cache builds)
+    can reuse the identical acquire/wait/fail-open shape
     without duplicating the platform-branching logic.
 
     Yields ``True`` if the lock was acquired (caller should proceed

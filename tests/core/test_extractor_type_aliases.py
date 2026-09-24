@@ -1,5 +1,4 @@
-"""Extraction tests for TS/TSX type-alias declarations — round-19
-claude-code finding, bug #3, and round-26's fuller follow-up.
+"""Extraction tests for TS/TSX type-alias declarations.
 
 ``type X = {...}`` object aliases were never extracted as ``Symbol``s
 at all, so an ``implements``/``extends`` clause naming a same-file
@@ -9,7 +8,7 @@ external base type (``query._heritage_external_label`` mislabeled it
 that gap by giving the extractor a lightweight, file-scoped registry
 of alias names — see ``FileMap.type_aliases``'s docstring.
 
-Round 26 closes the fuller gap: ``type_alias_declaration`` now also
+A later change closes the fuller gap: ``type_alias_declaration`` now also
 matches a ``@classdef`` pattern in ``_TS_DEFINITIONS``, producing a
 real ``Symbol`` (``kind == "type_alias"``, in ``model.TYPE_KINDS``) so
 type aliases are resolvable by ``query_symbol``, heritage, and
@@ -90,7 +89,7 @@ def test_ts_file_with_no_type_alias_returns_empty(tmp_path: Path) -> None:
     assert aliases == []
 
 
-# --- Round 26: type_alias_declaration -> real Symbol ------------------
+# --- type_alias_declaration -> real Symbol ----------------------------
 
 
 def test_ts_object_type_alias_produces_type_alias_symbol(

@@ -42,7 +42,7 @@ EXIT_AMBIGUOUS = 4
 
 # Textual signatures of import mechanisms that resolve at *runtime*,
 # which ``resolver.resolve_imports`` cannot follow statically and so
-# never contributes an edge for. Round 31 found ``deps`` reporting a
+# never contributes an edge for. ``deps`` used to report a
 # bare "imports (0)" on files wired up entirely this way -- on five
 # repos across four language families, worst on tensorflow, where 6 of
 # 9 real edges for a ``LazyLoader``-wired module were invisible with
@@ -123,10 +123,9 @@ def compute(index: MapIndex, top: int) -> dict:
 def _import_resolution_coverage_note(index: MapIndex) -> str | None:
     """Scope-gap disclosure for a "0 resolved import edges" headline.
 
-    Round-29 Track 4a (flagged rounds 27/28/29 on awesome-go): an
-    all-Go repo's ``dekko deps`` leads with "0 resolved import edges"
-    before the ``external (K)`` breakdown explains it, reading as "did
-    something break" every round it's re-found. Go (and any Tier-2/
+    An all-Go repo's ``dekko deps`` leads with "0 resolved import
+    edges" before the ``external (K)`` breakdown explains it, reading
+    as "did something break". Go (and any Tier-2/
     generic-grammar language — see ``resolver.import_resolution_
     supported``) has no per-language import resolver at all: every one
     of its imports reports external unconditionally by design, not a
@@ -170,13 +169,13 @@ def _import_resolution_coverage_note(index: MapIndex) -> str | None:
 def _file_import_scope_note(index: MapIndex, path: str) -> str | None:
     """Scope-gap disclosure for one file in an unresolved-import language.
 
-    Round 33 Track 6a (awesome-go.md §3.1): the bare ``dekko deps``
-    summary has carried ``_import_resolution_coverage_note`` since
-    round 29, but ``--file`` on a Go file printed ``imports (0):`` /
-    ``imported by (0):`` and listed the repo's own packages under
-    ``external`` with no explanation. The second half matters more:
-    ``imported by (0)`` reads as "nothing depends on this", a claim
-    dekko can't make for a language whose imports it never resolves.
+    The bare ``dekko deps`` summary has carried
+    ``_import_resolution_coverage_note``, but ``--file`` on a Go file
+    printed ``imports (0):`` / ``imported by (0):`` and listed the
+    repo's own packages under ``external`` with no explanation. The
+    second half matters more: ``imported by (0)`` reads as "nothing depends on
+    this", a claim dekko can't make for a language whose imports it never
+    resolves.
 
     Args:
         index: Loaded map index.
@@ -308,7 +307,7 @@ def _print_summary_text(doc: dict, coverage: str | None = None) -> None:
 def _run_summary(index: MapIndex, top: int, as_json: bool) -> int:
     """Handle the default (no ``--file``/``--cycles``) summary view."""
     doc = compute(index, top)
-    # Two independent coverage gaps, both round-29 Track 4: skipped
+    # Two independent coverage gaps: skipped
     # files (unsupported language, vendored/too-large/symlinked --
     # the same note status/summary/stats/search all carry), and a
     # language whose files *are* mapped but whose imports never
@@ -357,7 +356,7 @@ def _run_file(
     imports = index.module_deps_out.get(path, [])
     imported_by = index.module_deps_in.get(path, [])
     external = index.module_external.get(path, [])
-    # Round 31: never report a bare "imports (0)" for a file that
+    # Never report a bare "imports (0)" for a file that
     # plainly wires its imports up at runtime -- see
     # ``_dynamic_import_constructs``.
     dynamic = _dynamic_import_constructs(
@@ -434,10 +433,10 @@ def _print_file_text(
         print("external (0):")
 
 
-# Round 33 Track 2 (claude-buddy.md §1): ``find_cycles`` returns each
-# strongly-connected cluster as its members *sorted*, and the renderer
-# joined that list with ``->`` arrows -- an alphabetical listing dressed
-# up as an import path. Measured on the eval repos, 0 of 4 printed arrows
+# ``find_cycles`` returns each strongly-connected cluster as its
+# members *sorted*, and the renderer used to join that list with ``->``
+# arrows -- an alphabetical listing dressed up as an import path.
+# Measured on real repos, 0 of 4 printed arrows
 # were real edges on claude-buddy, 159 of 1,175 on claude-code, 226 of
 # 433 on zed; a chain was only ever right for a two-file cluster. An
 # agent asking "which import do I cut" was pointed at edges that don't
@@ -519,7 +518,7 @@ def _bfs_loop(
 def _cycle_entry(cluster: list[str], deps_out: dict[str, list[str]]) -> dict:
     """The JSON document for one cluster; also feeds the text block.
 
-    ``files`` and ``self_import`` are the pre-round-33 keys, unchanged.
+    ``files`` and ``self_import`` are the original keys, unchanged.
     ``edges`` is present only under ``_CYCLE_EDGE_LIST_CAP`` (a
     7,046-pair array is not a default payload); ``internal_edges`` is
     always present so a consumer knows what it isn't seeing.
@@ -598,7 +597,7 @@ def _module_graph_pairs(
     """Build ``(labels, edges)`` for the module graph, matching the
     shape ``export.render_mermaid``/``export.render_dot`` already
     accept — export.py's own renderers are reused verbatim, not
-    reimplemented, per this design's own reuse plan.
+    reimplemented.
     """
     edges = sorted(
         (importer, imported)

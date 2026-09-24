@@ -1,4 +1,4 @@
-"""Pillar A: the opt-in Claude Code push hooks.
+"""The opt-in Claude Code push hooks.
 
 Covers the four entrypoints (session-start / prompt-submit / pre-read /
 pre-bash), their fail-silent contract, the relevance ⋈ ledger dedup in
@@ -60,10 +60,10 @@ def test_session_start_empty_repo_is_silent(tmp_path: Path) -> None:
 def test_session_start_discloses_when_floor_exceeds_budget(
     make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # round-13 tensorflow.md: on a large monorepo, the path-only floor
+    # On a large monorepo (tensorflow), the path-only floor
     # (~80K tok there) silently overrode SESSION_MAP_BUDGET (2000 tok)
     # by ~40x with no note anywhere -- `dekko lean --budget` has
-    # disclosed this same override on stderr since round 09, but
+    # long disclosed this same override on stderr, but
     # `session_start` called `render_lean.generate()` directly and
     # skipped that check entirely. Shrinking the budget constant below
     # any repo's real floor is the same technique
@@ -77,7 +77,7 @@ def test_session_start_discloses_when_floor_exceeds_budget(
     assert "path-only floor" in ctx
     assert "exceeds dekko's 1-token session-start budget" in ctx
     assert "src/" in ctx and "auth.py" in ctx  # the lean map still renders
-    # under the (default, much larger) hard ceiling -- only the round-13
+    # under the (default, much larger) hard ceiling -- only the
     # soft-overage note fires, not the hard-ceiling disclosure-only note.
     assert "far larger than dekko's" not in ctx
 
@@ -95,13 +95,13 @@ def test_session_start_ample_budget_has_no_floor_note(
 def test_session_start_hard_ceiling_omits_map_body(
     make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # round-25 spring-boot.md finding 1: on a repo whose path-only floor
+    # On a repo whose path-only floor
     # exceeds even SESSION_MAP_HARD_CEILING (spring-boot: ~113K tok,
     # ~56x SESSION_MAP_BUDGET), rendering the floor anyway means a hook
     # that fires automatically, with zero user choice, on every new
     # session can cost more than the whole session's context is worth.
     # Shrinking the constant below any repo's real floor is the same
-    # technique the round-13 test above uses for the softer case.
+    # technique the soft-overage test above uses for the softer case.
     monkeypatch.setattr(hooks, "SESSION_MAP_HARD_CEILING", 1)
     root = make_mapped_repo(_FILES)
     out = hooks.session_start({"cwd": str(root)})
@@ -112,7 +112,7 @@ def test_session_start_hard_ceiling_omits_map_body(
     assert "dekko lean --budget N" in ctx
     # no map body at all -- the whole point of the disclosure-only path.
     assert "src/" not in ctx and "auth.py" not in ctx
-    # and the softer round-13 note must not also fire alongside it.
+    # and the softer floor note must not also fire alongside it.
     assert "uses the floor instead" not in ctx
 
 
@@ -251,7 +251,7 @@ def test_pre_read_advises_on_large_file(
     assert out is not None
     hso = out["hookSpecificOutput"]
     assert hso["hookEventName"] == "PreToolUse"
-    # Advisory only (Q5): text reaches the model via additionalContext
+    # Advisory only: text reaches the model via additionalContext
     # and no permissionDecision is emitted at all -- "defer" is not an
     # advisory in Claude Code's hook contract, it hands the decision to
     # an Agent SDK wrapper, and a non-ask decision's reason text is
@@ -596,7 +596,7 @@ def test_uninstall_removes_only_dekko(tmp_path: Path) -> None:
 def test_uninstall_removes_settings_file_when_nothing_left(
     tmp_path: Path,
 ) -> None:
-    # Round 25 finding #16: when dekko's own hook entries were the
+    # When dekko's own hook entries were the
     # only content, uninstall must remove the now-empty settings.json
     # (and the now-empty .claude/ dir it lived in) rather than leaving
     # a stray `{}` and an empty directory behind.
@@ -638,7 +638,7 @@ def test_uninstall_keeps_dir_with_other_files(tmp_path: Path) -> None:
 
 
 def test_install_preserves_existing_indent_style(tmp_path: Path) -> None:
-    # Round 25 finding #17: install must not force 2-space indent onto
+    # Install must not force 2-space indent onto
     # a file that already used a different width, avoiding unnecessary
     # whitespace-only diff noise.
     settings_file = tmp_path / ".claude" / "settings.json"

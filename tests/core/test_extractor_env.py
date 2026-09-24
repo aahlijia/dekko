@@ -1,7 +1,6 @@
 """Extraction tests for statically-known environment-variable reads.
 
-Design doc: config-constant-value-tracing-design.md — a scoped
-detector, not the general config-value-flow feature. Covers every
+A scoped detector, not the general config-value-flow feature. Covers every
 Tier-1 language's curated call shape, the "default-value argument is
 never captured" scope boundary, dynamic-key/f-string rejection, a
 module-level read (no enclosing definition), the same key read via
@@ -93,7 +92,7 @@ def test_python_fstring_key_not_captured(tmp_path: Path) -> None:
 def test_python_near_miss_name_not_captured(tmp_path: Path) -> None:
     # A user-defined function literally named my_getenv_wrapper must
     # not produce a false-positive match — exact-name filtering, not
-    # substring, per the design doc's own precision requirement.
+    # substring.
     spec = languages.spec_for_path("a.py")
     assert spec is not None
     (tmp_path / "a.py").write_text(

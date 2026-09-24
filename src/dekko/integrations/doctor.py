@@ -6,8 +6,8 @@ Three independent opt-in installers exist (``dekko --claude-install``,
 ``dekko hooks install``, ``dekko --claude-md-install``, plus a separate
 ``--mcp-install``) and nothing answers "what's actually wired up in
 this session" — only ``dekko status`` answers "is the map fresh."
-Meanwhile the single most-repeated friction point across eval rounds
-(``test-repos/reports/``, rounds 08/17/18) is PATH shadowing: a stale
+Meanwhile the single most-repeated friction point is PATH
+shadowing: a stale
 globally-installed ``dekko`` binary resolving ahead of the one a
 project actually wants, silently producing wrong/empty answers with no
 "command not found"-style error to flag it.
@@ -106,8 +106,8 @@ def _which_version(which_path: str) -> str | None:
 def _check_binary_resolution() -> Finding:
     """PATH-shadowing check: what `dekko` resolves to vs. what's running.
 
-    The direct automation of ``TESTING-GUIDE.md`` §0's manual "check
-    `command -v dekko`, not just the version string" step.
+    Automates the manual "check `command -v dekko`, not just the
+    version string" step.
     """
     running = _running_binary()
     running_version = _running_version()
@@ -200,7 +200,7 @@ def _check_map_freshness(root: Path) -> tuple[Finding, dict | None]:
             prov,
         )
     if fresh.reason == "version":
-        # Round-23 §11: share the same signal-naming logic
+        # Share the same signal-naming logic
         # status/map_status already use, so a spec_hash-only drift on
         # a long-lived process is named explicitly here too, instead
         # of collapsing to a self-contradictory "built by dekko X,
@@ -324,7 +324,7 @@ def _check_mcp_server_running() -> Finding:
 
     Can only ever confirm a process exists, never its *loaded* code
     version (no IPC round trip through the MCP protocol itself — out
-    of scope, see the plan's open-questions section) — surfaces the
+    of scope) — surfaces the
     existing documented caveat (``docs/claude-code.md``: a running
     server holds its code in memory for its whole lifetime) as an
     active finding instead of leaving it doc-only, but stays
@@ -404,9 +404,9 @@ def _server_age_finding(pids: list[str]) -> Finding:
     A server can't be asked for its loaded spec (no IPC round trip
     through MCP, out of scope), but it doesn't need to be: a process
     that started *before* the installed code last changed is running
-    code that is no longer on disk. Round 33 Track 1: three such
-    servers rewrote maps with an older extractor all day while this
-    row said "unknown, can't tell" on all seven eval repos.
+    code that is no longer on disk. Three such servers once rewrote
+    maps with an older extractor all day while this row said
+    "unknown, can't tell".
 
     Compares against ``selfcheck.install_mtime`` of the dekko this
     ``doctor`` runs from. A server launched from a *different* install
@@ -418,7 +418,7 @@ def _server_age_finding(pids: list[str]) -> Finding:
 
     Returns:
         ``stale`` naming the outdated pids, ``ok`` when every server
-        started after the install last changed, or the pre-round-33
+        started after the install last changed, or the old
         ``unknown`` caveat when start times can't be read.
     """
     starts = _pid_start_times(pids)
@@ -458,10 +458,10 @@ def _server_age_finding(pids: list[str]) -> Finding:
 def _check_json_backend() -> Finding:
     """Whether ``map.json`` is parsed with ``orjson`` or stdlib ``json``.
 
-    Round 33 Track 6g: the extra named ``all`` did not include orjson,
-    so every eval round's load timings were measured on stdlib json
-    without anyone noticing -- the difference is only visible in a
-    profile. Advisory: dekko is correct either way, just slower.
+    The extra named ``all`` once did not include orjson, so load
+    timings were measured on stdlib json without anyone noticing -- the
+    difference is only visible in a profile. Advisory: dekko is correct either
+    way, just slower.
     """
     if mapfile.orjson is not None:
         return Finding("json-backend", "ok", "orjson", None)

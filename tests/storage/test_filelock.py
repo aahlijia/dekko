@@ -1,4 +1,4 @@
-"""Cross-platform advisory regen lock (round-12 §4.1b)."""
+"""Cross-platform advisory regen lock."""
 
 import subprocess
 import sys

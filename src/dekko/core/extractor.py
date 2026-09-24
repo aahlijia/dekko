@@ -285,10 +285,10 @@ def _collect_definitions(
 # macro-shaped test helpers like gtest's ``TEST(Suite, Case) { ... }``
 # — those parse with a syntactically clean (if semantically nonsense)
 # parameter list, so requiring an actual parse error keeps this from
-# over-triggering (verified empirically against round 15's
-# tensorflow/zed/spring-boot/cline/awesome-go/claude-code test-repos
-# corpus: 228 flagged out of 137,705 C/C++ definitions, one false
-# negative risk accepted — see the macro-extraction-gaps plan).
+# over-triggering (verified empirically against a
+# tensorflow/zed/spring-boot/cline/awesome-go/claude-code corpus: 228
+# flagged out of 137,705 C/C++ definitions, one false negative risk
+# accepted).
 _ALL_CAPS_NAME = re.compile(r"^[A-Z_]*[A-Z][A-Z0-9_]*$")
 
 
@@ -303,9 +303,8 @@ def _looks_like_c_macro_invocation(
     design. Best-effort grammar error recovery sometimes lands on a
     ``function_definition``/``function_declarator`` shape anyway,
     whose "name" is the macro's own name and whose "parameters" node
-    itself contains a syntax error (round 15's ``TF_DEVICELIST_
-    METHOD`` finding in tensorflow's C API layer — see
-    ``round15-macro-extraction-gaps-plan.md`` Track B). Symbols
+    itself contains a syntax error (e.g. ``TF_DEVICELIST_METHOD`` in
+    tensorflow's C API layer). Symbols
     matching this shape are dropped rather than emitted garbled.
 
     Note: this only suppresses the one garbled symbol. Definitions
@@ -508,7 +507,7 @@ def _modifiers_keyword(def_node: Node, keyword: str) -> bool:
 # same two literal values as ``classify.TEST_DIR_PARTS``' bare-name
 # test-directory check, kept as a separate constant here since this is
 # an AST-context signal, not a path-segment one — see ``_qualify``'s
-# ``in_test_module`` return value and round 11 master report #7.
+# ``in_test_module`` return value.
 _RUST_TEST_MOD_NAMES = frozenset({"tests", "test"})
 
 
@@ -610,8 +609,8 @@ def _clean_doc(line: str) -> str | None:
 
 
 # A leading comment/docstring line that reads as copyright/license
-# boilerplate rather than a real file description -- round 25 finding
-# #15: on an Apache/BSD/MIT-licensed codebase, nearly every file's
+# boilerplate rather than a real file description. On an
+# Apache/BSD/MIT-licensed codebase, nearly every file's
 # leading comment opens with exactly this shape ("Copyright 20XX The
 # Foo Authors. All Rights Reserved.", "Licensed under the Apache
 # License, Version 2.0...", "SPDX-License-Identifier: ..."), which
@@ -619,7 +618,7 @@ def _clean_doc(line: str) -> str | None:
 # file's one-line description since they share this same module-doc
 # extraction path.
 #
-# Round 27 finding H1: the original set only covered the first three
+# The original set only covered the first three
 # lines of a standard Apache-2.0 header, so the fourth line onward
 # ("You may obtain a copy of the License at", the "AS IS" disclaimer,
 # ...) leaked through as the file's "purpose" on every file carrying
@@ -661,7 +660,7 @@ def _looks_like_boilerplate_header(line: str) -> bool:
 # close a header block, independent of license family -- TensorFlow's
 # header convention appends one of these right before the closing `*/`
 # on effectively every .h/.cc file in the repo) is never real "purpose"
-# content either. Round 27 finding H1's fix (``_BOILERPLATE_HEADER_RE``
+# content either. The license-header fix (``_BOILERPLATE_HEADER_RE``
 # above) closed the license-*text* gap but not this sibling shape: none
 # of that regex's alternatives match a bare row of `=` signs, so the
 # skip loop stopped here and surfaced the divider itself as the file's
@@ -1139,8 +1138,8 @@ def _collect_calls(
 # Rust macros whose arguments are ordinary expressions in practice
 # (even though tree-sitter-rust never parses them as such — see
 # ``_collect_rust_macro_calls``). Deliberately narrow: the highest-
-# value, lowest-risk subset (round 15's assert-family recommendation)
-# rather than an attempt at general macro-argument parsing.
+# value, lowest-risk subset (the assert family) rather than an
+# attempt at general macro-argument parsing.
 _RUST_ASSERT_MACROS = frozenset(
     {
         "assert",
@@ -1165,8 +1164,7 @@ def _collect_rust_macro_calls(
     mechanism has nothing to match inside it. This is a real, common
     coverage gap: ``assert!``/``assert_eq!`` wrapping a direct call is
     an everyday Rust test idiom, and a call made only this way was
-    previously invisible to the call graph entirely (round 15's zed
-    finding — see ``round15-macro-extraction-gaps-plan.md`` Track A).
+    previously invisible to the call graph entirely (seen in zed).
 
     Scans ``_RUST_ASSERT_MACROS`` invocations' token trees for
     ``name(...)``, ``recv.name(...)`` and ``a::b::name(...)``-shaped
@@ -1317,7 +1315,7 @@ def _scan_rust_token_tree(node: Node, found: list[_MacroCallSite]) -> None:
 # Token node types that can name a callee. ``default`` and ``union``
 # are contextual keywords with node types of their own, so
 # ``assert_eq!(x, Foo::default())``, as common as Rust test idioms
-# get, was never recovered at all before round 32.
+# get, used to go unrecovered entirely.
 _RUST_CALLEE_TOKEN_TYPES = frozenset({"identifier", "default", "union"})
 
 
@@ -1331,7 +1329,7 @@ def _rust_token_qualifier(
 ) -> tuple[str | None, str] | None:
     """What qualifies the callee at ``children[i]``, read leftwards.
 
-    Round 32 (zed): the joiner used to be matched and then thrown
+    The joiner used to be matched and then thrown
     away, every recovered call being rendered ``receiver.name``. So
     ``assert_eq!(p, Point::new(1, 1))`` reached the resolver as
     ``Point.new``, and every rule that reads a Rust call's *shape* off
@@ -1449,7 +1447,7 @@ def _rust_token_arg_count(args: Node) -> int | None:
     Parenthesised and bracketed sub-expressions are already nested
     ``token_tree`` nodes, so a top-level comma really is a separator,
     with the two exceptions in ``_RUST_UNCOUNTABLE_ARG_TOKENS``. Those
-    return ``None`` (this path's behavior before round 32) rather than
+    return ``None`` (this path's original behavior) rather than
     a guess: arity is used to *reject* a sole candidate
     (``resolver._sole_candidate_match``), so a wrong count costs a
     correct edge, where no count costs nothing.
@@ -1483,7 +1481,7 @@ def _collect_cpp_ctor_arg_calls(
     ``call_query`` has no node to match: the call is silently dropped,
     not misattributed. This is a common idiom in RAII-heavy C++
     (``std::unique_ptr<T, D> p(Ctor(), deleter);``), not a rare edge
-    case (round 24's tensorflow eval found 100+ dropped sites).
+    case (tensorflow alone had 100+ dropped sites).
 
     Scans block-scoped ``declaration`` nodes shaped like the ambiguity
     and synthesizes the call each ``abstract_function_declarator``
@@ -1605,7 +1603,7 @@ def _collect_refs(
     object-literal property values, array elements, call arguments,
     and assignment/declarator right-hand sides (see ``languages.py``'s
     per-language ``reference_query``) — the pass-by-reference usage a
-    plain call-expression query structurally cannot see (bug #2b).
+    plain call-expression query structurally cannot see.
     Returns an empty list for languages with no ``reference_query``
     yet.
 
@@ -1639,11 +1637,11 @@ def _collect_refs(
 
 
 # ---------------------------------------------------------------------
-# Local bindings (round 32 Track 5b)
+# Local bindings
 #
 # ``reference_query`` captures every bare identifier in value position,
 # and nothing in it knows ``count`` on line 1624 is the ``const count``
-# from line 1623. ``resolver._ref_target_visible`` (Track 5a) vetoes
+# from line 1623. ``resolver._ref_target_visible`` vetoes
 # the cross-file cases it can prove from the import table. It cannot
 # see a local that shadows a *same-file* symbol, one that shadows an
 # *imported* name, or any local at all in a file with zero imports
@@ -1652,8 +1650,8 @@ def _collect_refs(
 # 4.1% of cline's, two thirds of it in zero-import files.
 #
 # Everything here fails open. A binding shape this table doesn't know
-# yields ``bound=None``, which is exactly the pre-5b behavior: it can
-# leave a false edge standing, never remove a true one.
+# yields ``bound=None``, which is exactly the behavior without this
+# table: it can leave a false edge standing, never remove a true one.
 
 # One scope's claim on a name: (start byte, end byte, kind, scope node
 # type). ``kind`` is "param" / "local", or ``_BOUND_EXEMPT`` for a
@@ -2117,7 +2115,7 @@ def _heritage_cpp(clause_node: Node) -> list[tuple[Node, str]]:
     carries no ``access_specifier`` sibling at all) or preceded by its
     own ``access_specifier`` wrapper node (``public``/``private``/
     ``protected``) that must be stripped, not treated as part of the
-    type name — the design doc's own documented pitfall
+    type name — a known pitfall
     (``"public Base"`` would never equal any real symbol name).
     Verified against the pinned tree-sitter-cpp grammar:
     ``base_class_clause``'s named children are a flat sequence, each
@@ -2169,7 +2167,7 @@ def _heritage_rust_impl(
     Rust ``impl`` blocks are almost always in the same file as the
     type they're for, though not required by the language.
 
-    Round 31 zed coverage pass F2: an ordinary Rust layout puts the
+    An ordinary Rust layout puts the
     impl block in a sibling file (``text_finder/render.rs: impl
     Render for TextFinder``) from the struct it's for
     (``text_finder.rs: struct TextFinder``) — a normal way to split a
@@ -2378,8 +2376,8 @@ def _throw_type_parts(expr: Node) -> tuple[str, str | None]:
     ``new SomeError(...)``) or a bare type/identifier reference
     (``raise SomeError`` / ``raise err`` re-raising a caught
     variable) — ``None`` for anything else (a string/object-literal
-    throw, valid in JS/TS but not a name-able type; the design doc's
-    own documented JS/TS caveat).
+    throw, valid in JS/TS but not a name-able type; a known JS/TS
+    caveat).
     """
     text = _text(expr)
     if expr.type in ("call", "call_expression"):
@@ -2544,8 +2542,8 @@ def _nearest_catch_binding(
     is reached: a pattern-matching ``instanceof`` guard's bound
     variable (``if (ex instanceof BindException bindException) {
     throw bindException; }``, Java 16+), scoped to that ``if``'s own
-    consequence block only — see ``_java_if_pattern_binding``. Round-18
-    spring-boot finding: without this, a rethrown pattern-bound
+    consequence block only — see ``_java_if_pattern_binding``. Without
+    this (seen in spring-boot), a rethrown pattern-bound
     variable was labeled ``(external)`` with the raw variable
     identifier standing in for a fabricated type name. See
     ``_catch_binding_name`` for the per-language terminal-node
@@ -2976,8 +2974,8 @@ def _env_read_c_cpp(caps: dict[str, list[Node]]) -> tuple[str, str] | None:
 # every walker returns ``(call_shape, key)`` for a name-matched hit or
 # ``None`` for a structurally-matched but name-mismatched call (e.g.
 # Python's ``json.dumps("x")``, which shares ``os.getenv``'s two-level
-# attribute-call shape; see the design doc's own "curated, not general
-# string-matching" precision requirement).
+# attribute-call shape; the matching is curated, not general
+# string-matching, for precision).
 _ENV_READ_DISPATCH: dict[
     str, Callable[[dict[str, list[Node]]], tuple[str, str] | None]
 ] = {
@@ -3092,7 +3090,7 @@ def _tuple_struct_fields(def_node: Node) -> list[Param]:
     _arity_plausible`` reads as "takes zero arguments": a counted
     ``GroupName(s)`` reaching the sole-candidate rung (through a glob
     import, the norm in Rust test modules) was rejected and filed
-    external (round 32 Track 4). A brace struct and a unit struct keep
+    external. A brace struct and a unit struct keep
     ``[]``, correctly: neither can be written ``Name(x)``.
     """
     if def_node.type != "struct_item":
@@ -3124,8 +3122,8 @@ def _collect_type_aliases(spec: LanguageSpec, root: Node) -> list[str]:
 
     TS/TSX only (see ``LanguageSpec.type_alias_query``'s docstring) --
     a lightweight file-scoped name registry, not full symbols, feeding
-    ``query._heritage_external_label``'s same-file lookup (round-19
-    claude-code finding: ``ShellCommandImpl implements ShellCommand``
+    ``query._heritage_external_label``'s same-file lookup (on
+    claude-code, ``ShellCommandImpl implements ShellCommand``
     where ``ShellCommand`` is a same-file ``type X = {...}`` alias was
     mislabeled ``(external)`` for lack of this signal).
     """
@@ -3156,7 +3154,7 @@ def _import_binding_bytes(matches: _QueryMatches) -> frozenset[int]:
     A function-local ``const { X } = await import("./x")`` is a
     ``variable_declarator`` like any other local, and
     ``_local_bindings`` has to know it binds an import, not a shadowing
-    variable (round 32 Track 5b: about 40 true edges on claude-code).
+    variable (about 40 true edges on claude-code).
     The import query already found them, so the answer is read off its
     matches rather than re-derived a second way. Applies the same
     ``@binder`` check ``_imports_js`` does: ``const x = t("key")`` is
@@ -3240,7 +3238,7 @@ def _imports_js(
     import("./x")`` and a CommonJS ``const { X } = require("./x")`` /
     ``const x = require("./x")``.
 
-    Round 32 Track 5: those two bind a cross-file name exactly as a
+    Those two bind a cross-file name exactly as a
     static import does, and the reference-visibility veto
     (``resolver._ref_target_visible``) needs to see them. Without
     them it dropped 23 true edges on claude-code, every one a lazily
@@ -3295,8 +3293,7 @@ def _imports_cpp(
     a far more useful label wherever ``Import.name`` is displayed
     (``contextpack.py``). ``resolver.py``'s ``_import_match`` actually
     disambiguates C/C++ calls via each import's full ``source`` path
-    (see its whole-file-include fallback), not this ``name`` — see
-    ``test-repos/reports/investigation-1.5-cpp-gtest-affected.md``.
+    (see its whole-file-include fallback), not this ``name``.
     """
     out: list[Import] = []
     for _, caps in matches:

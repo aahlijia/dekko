@@ -40,9 +40,8 @@ def _resolve(doc: dict, ref: int) -> str:
 
 
 def test_doc_version_is_11(make_mapped_repo: RepoFactory) -> None:
-    # Bumped 10 -> 11 for heritage_synthetic_tiebreak_count (round 24
-    # heritage crate-decoy tiebreak disclosure, ``.features/plans/
-    # round24/03-heritage-crate-decoy-tiebreak.md``).
+    # Bumped 10 -> 11 for heritage_synthetic_tiebreak_count (heritage
+    # crate-decoy tiebreak disclosure).
     doc = _map_doc(make_mapped_repo(SRC))
     assert doc["version"] == 11
 
@@ -119,7 +118,7 @@ def test_v2_document_loads_with_defaults(
         sym.pop("test", None)
     # Pre-v5 documents wrote caller/callee/candidate ids as raw
     # strings directly, not indices into an "ids" intern table
-    # (round-15 plan) — the fixture's real map.json is already v5+,
+    # — the fixture's real map.json is already v5+,
     # so de-intern every id-bearing field to simulate the true v2
     # shape rather than just lowering the version number.
     ids = doc.pop("ids")

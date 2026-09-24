@@ -4,9 +4,7 @@ The script runs against a temp copy of pyproject.toml + the two
 Claude Code plugin manifests (never the real repo files) so it's
 tested the same way the ``sync-plugin-version`` pre-commit hook and a
 deliberate version bump would exercise it: as a standalone process
-with its own ``ROOT`` resolved from its own location on disk. See
-``.features/fixes/plugin-manifest-version-drift.md`` for the drift
-this guards against.
+with its own ``ROOT`` resolved from its own location on disk.
 """
 
 import json

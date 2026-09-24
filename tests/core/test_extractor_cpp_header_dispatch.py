@@ -1,11 +1,9 @@
 """``extractor.looks_like_cpp_header``: the C/C++ ``.h`` content-sniff.
 
-Round 18's tensorflow finding: ``.h`` was always parsed with the C
+On tensorflow, ``.h`` was always parsed with the C
 grammar, silently dropping every ``class``/``namespace``/``template``
-construct in a genuine C++ header instead of erroring -- see the
-h-header-cpp-c-grammar implementation plan/report under
-``test-repos/reports/18-tokentest-7repo-post0404/``. These cover the
-heuristic itself (option 1 of that plan); ``tests/core/
+construct in a genuine C++ header instead of erroring. These cover the
+content-sniffing heuristic itself; ``tests/core/
 test_languages.py::test_cpp_header_dispatch_by_content_not_extension``
 covers the same fix through the real end-to-end pipeline.
 """
@@ -38,11 +36,11 @@ def test_plain_c_header_is_not_cpp() -> None:
 
 
 def test_extern_c_wrapped_c_header_is_not_cpp() -> None:
-    # Option 2 (a directory/sibling-count heuristic) was rejected in
-    # the implementation plan precisely because this case -- a plain C
-    # header that happens to sit in a C++-heavy directory -- would get
-    # misclassified by directory composition. Content-sniffing must
-    # get it right regardless of what else lives alongside it.
+    # A directory/sibling-count heuristic was rejected precisely because
+    # this case -- a plain C header that happens to sit in a C++-heavy
+    # directory -- would get misclassified by directory composition.
+    # Content-sniffing must get it right regardless of what else lives
+    # alongside it.
     source = (
         b'#ifdef __cplusplus\nextern "C" {\n#endif\n'
         b"struct Point { int x; int y; };\n"

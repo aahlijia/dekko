@@ -5,10 +5,9 @@ description: Sanity-check a suspiciously low or zero call-graph result from dekk
 
 # Verifying a low-confidence dekko answer
 
-dekko's call-graph resolution is real but conditional — repeated
-hands-on evaluation rounds (see this repo's own
-`test-repos/reports/`) keep finding the same failure shape: a
-**confident wrong answer**, not a visible error. A caller trusts "0
+dekko's call-graph resolution is real but conditional, and its
+typical failure shape is a **confident wrong answer**, not a visible
+error. A caller trusts "0
 callers" more than it should. This skill exists to catch that before
 it leads to deleting live code or missing a real impact.
 
@@ -37,9 +36,8 @@ Spot-check — not a full re-verification — when any of these apply:
 - **A cross-package/cross-module qualified call is involved.**
   `pkg.Func()`-style calls (Go), `namespace::func()` (C++), or any
   call where the receiver is a same-repo package/module rather than a
-  local variable are a known resolver blind spot — confirmed missing
-  4 real call sites on a live repo as recently as this project's own
-  round-13 eval. Same caution applies to trait/interface dispatch
+  local variable are a known resolver blind spot, confirmed missing
+  4 real call sites on a real repo. Same caution applies to trait/interface dispatch
   (Rust `dyn Trait` calls, Java/Kotlin interface methods) — the
   resolver ladder only reliably matches an explicit `Type::method()`
   or `Type.method()` form.

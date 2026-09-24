@@ -4,7 +4,7 @@ from dekko.classify import is_test_path
 
 
 def test_is_test_path_is_cached() -> None:
-    # Round-12 §1 fix: is_test_path is called ~7.9M times per search
+    # is_test_path is called ~7.9M times per search
     # on a large repo (all rediscovering the same ~2K distinct paths),
     # so it is lru_cache-wrapped. Build a distinct-but-equal string
     # (not the same object) so a hit can only come from the cache
@@ -52,7 +52,7 @@ def test_maven_src_test_java_layout_is_test() -> None:
 
 
 def test_maven_src_main_java_package_named_test_is_not_test() -> None:
-    # Round-11 §3 regression: a Java *package* segment literally named
+    # Regression: a Java *package* segment literally named
     # `test` (org.springframework.boot.test) under src/main/ is
     # production code, not a test directory, even though `test` is one
     # of TEST_DIR_PARTS. This is the exact spring-boot repro path.

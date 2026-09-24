@@ -1,4 +1,4 @@
-"""Q2 token-counting seam: fallback, backend selection, determinism.
+"""Token-counting seam: fallback, backend selection, determinism.
 
 The suite pins ``DEKKO_TOKENIZER=chars4`` (see conftest), so these
 assert the cheap path's exact behavior and the seam's contract; the

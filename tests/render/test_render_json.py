@@ -1,5 +1,5 @@
 """render_json.py: id-interning, compact output, backward-read compat
-(round-15 plan: map.json size at scale)."""
+(map.json size at scale)."""
 
 import json
 from pathlib import Path
@@ -106,7 +106,7 @@ def test_render_json_interns_repeated_ids() -> None:
     # "a.py::main" and "b.py::helper" each occur in more than one of
     # edges/ambiguous/external/referenced; the shared "ids" table must
     # write each distinct id string exactly once regardless of how
-    # many sections reference it (round-15 plan's core fix).
+    # many sections reference it (the core size fix).
     files, graph = _sample_graph()
     doc = json.loads(render_json(files, graph, "demo"))
     assert doc["version"] == mapfile.MAP_DOC_VERSION
@@ -170,7 +170,7 @@ def test_render_json_is_compact_not_pretty_printed() -> None:
 
 
 def test_round_trip_matches_index_from_maps(tmp_path: Path) -> None:
-    # The acceptance bar the round-15 plan asks for: not just "loads
+    # The acceptance bar: not just "loads
     # without crashing" but "produces the same answers" as the
     # in-process index built directly from the same graph.
     files, graph = _sample_graph()
@@ -209,8 +209,7 @@ def test_round_trip_matches_index_from_maps(tmp_path: Path) -> None:
 def test_heritage_synthetic_tiebreak_count_round_trips(
     tmp_path: Path,
 ) -> None:
-    # Round 24 (``.features/plans/round24/
-    # 03-heritage-crate-decoy-tiebreak.md``): a nonzero count must
+    # A nonzero count must
     # survive a real write-then-load round trip, not just default to 0
     # by coincidence.
     files, graph = _sample_graph()
@@ -247,9 +246,8 @@ def test_heritage_synthetic_tiebreak_count_defaults_to_0_pre_v11(
 
 
 def test_map_doc_version_is_11() -> None:
-    # Bumped 10 -> 11 for heritage_synthetic_tiebreak_count (round 24
-    # heritage crate-decoy tiebreak disclosure, ``.features/plans/
-    # round24/03-heritage-crate-decoy-tiebreak.md``).
+    # Bumped 10 -> 11 for heritage_synthetic_tiebreak_count (heritage
+    # crate-decoy tiebreak disclosure).
     assert mapfile.MAP_DOC_VERSION == 11
 
 

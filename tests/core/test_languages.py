@@ -72,12 +72,10 @@ def test_cpp() -> None:
 
 
 def test_cpp_header_dispatch_by_content_not_extension() -> None:
-    # Round 18 tensorflow finding: `.h` used to be parsed
+    # Seen on tensorflow: `.h` used to be parsed
     # unconditionally with the C grammar, silently dropping every
     # `class`/`namespace`/`template` construct in a genuine C++ header
-    # instead of erroring -- see the h-header-cpp-c-grammar
-    # implementation plan/report under
-    # test-repos/reports/18-tokentest-7repo-post0404/. widget.h and
+    # instead of erroring. widget.h and
     # plain.h sit in the same fixture directory on purpose: a
     # directory/sibling-count heuristic would get one of them wrong
     # depending on which extension is more common there, but this
@@ -124,7 +122,7 @@ def test_spec_fingerprint_changes_with_header_dispatch_heuristic_version(
 def test_spec_fingerprint_changes_with_rust_macro_call_recovery_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Round 32: extractor._collect_rust_macro_calls changed what it
+    # extractor._collect_rust_macro_calls changed what it
     # emits (real `::`/`.` joiner, full path, arg count). Python logic,
     # not a LanguageSpec field, so without this marker an upgraded
     # install keeps serving cached dot-joined RawCalls and the fix
@@ -235,7 +233,7 @@ def test_java() -> None:
     assert ("App.java::App.main", "App.java::App.run") in edges
     assert ("App.java::App.run", "App.java::Helper.twice") in edges
 
-    # F1: bug #3's kind-mapping fix (RawRef -> _CLASSDEF_KIND) is
+    # The kind-mapping fix (RawRef -> _CLASSDEF_KIND) is
     # already fully generic across kinds; these close the previously
     # unasserted Java enum/record cases (interface was already covered
     # by the TS test above; class is covered by App itself).
@@ -244,7 +242,7 @@ def test_java() -> None:
 
 
 def test_rust_kind_mapping() -> None:
-    # F1: closes the Rust-side gap left by the bug #3 kind-mapping
+    # Closes the Rust-side gap left by the kind-mapping
     # verification — struct was already extracted correctly but
     # unasserted for `.kind`, and enum/trait had no fixture coverage
     # at all. `kinds.rs` is a separate fixture file (not lib.rs/
@@ -260,7 +258,7 @@ def test_rust_kind_mapping() -> None:
 def test_spec_fingerprint_covers_the_binding_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Round 32 Track 5b: `RawRef.bound` comes from `binding_query`, so
+    # `RawRef.bound` comes from `binding_query`, so
     # a cache built before a change to it holds refs with stale tags.
     # The fingerprint loops `dataclasses.fields`, so the new fields are
     # meant to be covered with no hand-kept list. Confirm it, since a

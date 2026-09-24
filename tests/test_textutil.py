@@ -65,7 +65,7 @@ def test_signature_variable() -> None:
 
 def test_signature_module_anonymous_placeholder() -> None:
     # The synthetic <anonymous> placeholder for a module-caller bucket
-    # entry (bug #4) -- see the inline comment at textutil.py:23-27.
+    # entry -- see the inline comment at textutil.py:23-27.
     sym = _symbol(id="a.py::<module>", kind="module", path="a.py")
     assert signature(sym) == "<anonymous> (a.py)"
 
@@ -160,7 +160,7 @@ def test_dir_of_path_with_no_slash() -> None:
     assert dir_of("README.md") == "."
 
 
-# --- round 33 Track 4: rows that outrun the budget ------------------------
+# --- rows that outrun the budget ------------------------------------------
 
 
 def test_clip_middle_identity_when_it_fits() -> None:

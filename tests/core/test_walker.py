@@ -32,8 +32,8 @@ def test_discover_reports_known_unsupported_language(tmp_path: Path) -> None:
     # .astro has no parser at all (not even a Tier-2 attempt): unlike
     # ordinary non-code files (notes.txt), it must be surfaced in
     # ``skipped`` rather than silently dropped, so a caller can warn
-    # that map coverage is incomplete (2026-07-31 eval, gitaustin repo:
-    # a whole Astro site was mapped with zero warning).
+    # that map coverage is incomplete (on one real repo a whole Astro
+    # site was mapped with zero warning).
     _touch(tmp_path / "src" / "app.py")
     _touch(tmp_path / "src" / "Card.astro", "---\nconst x = 1;\n---\n")
     _touch(tmp_path / "notes.txt")
@@ -235,7 +235,7 @@ def test_discover_vendored_dir_reason_parity_git_and_walk(
 def test_discover_reports_vendored_directory_with_reason(
     tmp_path: Path,
 ) -> None:
-    # Track E / 1.5: a default-excluded dir that occasionally holds
+    # A default-excluded dir that occasionally holds
     # first-party code (tensorflow's third_party/xla is the motivating
     # case) must be recorded with a distinguishable reason, not
     # silently dropped like a VCS/cache dir.
@@ -253,7 +253,7 @@ def test_discover_reports_vendored_directory_with_reason(
 def test_discover_java_package_named_build_is_not_vendored(
     tmp_path: Path,
 ) -> None:
-    # Regression guard for the round-08 spring-boot finding: JVM
+    # Regression guard for a spring-boot shape: JVM
     # package-naming conventions can legitimately produce a directory
     # literally named "build" beneath a src/main/java source root
     # (Spring Boot's own org.springframework.boot.build package lives
@@ -312,7 +312,7 @@ def test_discover_noise_dirs_stay_silent_not_vendored(
 def test_discover_flags_minified_content_without_min_filename(
     tmp_path: Path,
 ) -> None:
-    # Track E / 3.4a: zed's junk suggestions came from a vendored
+    # zed's junk suggestions came from a vendored
     # book.js/highlight.js bundle with no ".min." filename convention
     # — filename-pattern matching alone misses it, so a content-based
     # average-line-length heuristic must catch it.
@@ -348,7 +348,7 @@ def test_discover_minified_check_ignores_unreadable_file(
 
 
 # ---------------------------------------------------------------------
-# symlinked files (round 28 §3.2: phantom duplicate symbols)
+# symlinked files (phantom duplicate symbols)
 
 
 def test_discover_skips_symlinked_file_by_default(tmp_path: Path) -> None:
@@ -407,7 +407,7 @@ def test_discover_follow_symlinks_restores_indexing_git(
 
 
 # ---------------------------------------------------------------------
-# find_config_files (round 25 tsconfig/jsconfig path-alias resolution)
+# find_config_files (tsconfig/jsconfig path-alias resolution)
 
 
 def test_find_config_files_discovers_monorepo_configs_not_vendored(

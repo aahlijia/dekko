@@ -1,7 +1,6 @@
 """The dekko daemon: accept loop, request routing, explicit lifecycle.
 
-Per the daemon-mode-cli-workflow.md's cross-cutting test-scoping rule
-(its §7): this module is built entirely on ``default_transport_for()``
+This module is built entirely on ``default_transport_for()``
 and ``DaemonTransport``'s interface, so almost none of it needs a
 ``skipif`` -- the one platform-specific test explicitly exercises the
 TCP loopback transport's accept-loop parity, which is meaningful (and
@@ -11,7 +10,7 @@ Tests that spawn a genuine background daemon process are wrapped in a
 try/finally teardown that force-stops the daemon even if assertions
 fail partway through -- GitHub Actions' windows-latest runners have a
 known history of hanging on orphaned child processes left behind by a
-test that didn't clean up (workflow doc §3, point 3).
+test that didn't clean up.
 """
 
 import json as _json
@@ -287,7 +286,7 @@ def test_no_daemon_flag_skips_routing(
 
 
 # ---------------------------------------------------------------------
-# Abandoned requests (round-12 master report §3.8): a client-side
+# Abandoned requests: a client-side
 # timeout after a request has already been sent to the daemon must
 # not be treated like "no daemon reachable" -- silently falling back
 # to a local re-run would duplicate the (possibly still-running)
@@ -387,8 +386,8 @@ def test_stop_is_a_noop_when_nothing_is_running(short_root: Path) -> None:
 def test_stop_blocks_until_artifacts_are_gone_before_returning(
     short_root: Path,
 ) -> None:
-    """Round-14 master report ("daemon stop returns success ~1s
-    before the process actually dies"): ``stop()`` used to report
+    """``daemon stop`` returned success ~1s before the process actually
+    died: ``stop()`` used to report
     success as soon as the daemon's graceful-shutdown ack arrived,
     which is *before* ``serve_daemon()``'s own teardown (joining the
     status thread, closing both sockets, unlinking transport
@@ -429,17 +428,16 @@ def test_stop_does_not_unlink_live_daemon_when_ack_and_pid_query_both_fail(
     short_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round-14 daemon-status-contention-plan.md §3: ``stop()``'s
+    """``stop()``'s
     forced-fallback branch used to call ``transport.cleanup()``
     unconditionally whenever neither the shutdown-ack round trip nor a
     ``_query_pid`` lookup confirmed anything -- even when the daemon
-    was still genuinely alive and listening. This reproduced
-    tensorflow.md §4.3's exact symptom (``ps``/``lsof`` confirm a
+    was still genuinely alive and listening. This reproduced a
+    symptom seen on tensorflow (``ps``/``lsof`` confirm a
     live, listening process; the directory entries for its bound
     socket paths are gone) *without* needing the ``start``-races-
-    self-cleanup timing window a different item in this round's plan
-    doc describes -- a single ``stop()`` call against a busy daemon is
-    sufficient.
+    self-cleanup timing window -- a single ``stop()`` call against a
+    busy daemon is sufficient.
 
     Forces ``graceful = False`` for real: a sleep-based slow routed
     command occupies the single-threaded main accept loop long enough
@@ -450,8 +448,8 @@ def test_stop_does_not_unlink_live_daemon_when_ack_and_pid_query_both_fail(
     busy double (it's a separate thread untouched by the main loop
     sleeping -- see ``test_status_true_positive_while_daemon_busy_
     on_slow_request``), so making it *also* time out for real needs
-    the CPU-bound GIL-starvation double this round's status-probe
-    fix is about, not this test's own charter; monkeypatching isolates
+    the CPU-bound GIL-starvation double the status-probe fix is
+    about, not this test's own charter; monkeypatching isolates
     *this* fix's new conditional logic in ``stop()`` -- whether to
     unlink once both signals have failed to confirm anything -- from
     that separate concern.
@@ -461,7 +459,7 @@ def test_stop_does_not_unlink_live_daemon_when_ack_and_pid_query_both_fail(
     artifacts (and the process itself) alone as a result, rather than
     orphaning a live, now-unreachable-by-path daemon.
 
-    Round 21 (tensorflow.md §3, Track C): this branch used to print
+    This branch used to print
     the same unconditional "stopped" success message and return ``0``
     even here -- the one branch that did not stop anything. Now
     returns the distinct ``EXIT_DAEMON_STILL_RUNNING`` exit code
@@ -531,7 +529,7 @@ def test_stop_reports_still_running_message_and_exit_code(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """Round 21 (tensorflow.md §3, Track C), text/exit-code companion
+    """Text/exit-code companion
     to ``test_stop_does_not_unlink_live_daemon_when_ack_and_pid_query_
     both_fail`` above, which can't safely assert ``print()`` output
     itself (see that test's docstring for why). Exercises the exact
@@ -545,8 +543,8 @@ def test_stop_reports_still_running_message_and_exit_code(
 
     Confirms the new honest message and ``EXIT_DAEMON_STILL_RUNNING``
     exit code, and that ``cleanup()`` -- which would strand a live
-    daemon's transport in this branch, the exact bug round 14 already
-    fixed once -- is never called here.
+    daemon's transport in this branch, an earlier bug already fixed
+    once -- is never called here.
     """
     client_sock, server_sock = socket.socketpair()
     client_sock.settimeout(0.2)
@@ -590,12 +588,10 @@ def test_stop_reports_still_running_message_and_exit_code(
 def test_stop_then_immediate_command_falls_back_not_abandoned(
     short_root: Path,
 ) -> None:
-    """Round-14 master report: three independent evaluators
-    (``cline.md`` §5.2, ``claude-buddy.md`` §3.3, ``claude-code.md``
-    §1) found a command issued within ~1s of ``daemon stop`` hard-
+    """A command issued within ~1s of ``daemon stop`` used to hard-
     failing with exit 7 ("a daemon-routed request did not respond in
     time") instead of silently falling back to direct-process mode,
-    violating the documented §3.3 fail-open contract for an entirely
+    violating the documented fail-open contract for an entirely
     ordinary stop-then-continue-working sequence. Uses a real
     subprocess daemon (not the in-thread fixture used elsewhere in
     this module) since the bug is specifically about what a separate
@@ -688,9 +684,9 @@ def test_status_reports_outdated_without_spawning_the_identity_child(
     capsys: pytest.CaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round 33 Track 1: a daemon whose dekko was upgraded underneath
+    """A daemon whose dekko was upgraded underneath
     it says so in ``status``. The status reply is built on a side
-    thread under a short probe timeout (round 14), so it may only
+    thread under a short probe timeout, so it may only
     *read* an existing verdict -- it must never spawn the
     child-interpreter arbiter itself.
     """
@@ -734,7 +730,7 @@ def test_status_probe_timeout_reports_confirmed_false_not_not_running(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """Round-14 daemon-status-contention-plan.md §1-2: before this fix,
+    """Before this fix,
     a post-connect ``TimeoutError`` in ``status()``'s ``_recv_line``
     call (raised only *after* a live listener already accepted the
     connection -- see ``_status_connect``'s docstring for why a
@@ -744,7 +740,7 @@ def test_status_probe_timeout_reports_confirmed_false_not_not_running(
     to be caught by the same ``except (OSError, ValueError): data =
     None`` clause as every other failure, folding "alive but hasn't
     replied yet" into the identical "not running" outcome as a
-    genuine absence -- tensorflow.md §4.2's exact symptom (~30.0s
+    genuine absence -- a symptom seen on tensorflow (~30.0s
     calls returning ``{"running": false}`` for a confirmed-alive
     daemon).
 
@@ -795,8 +791,7 @@ def test_query_pid_timeout_returns_none_same_as_daemon_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``_query_pid``'s contract intentionally stays "``None`` on any
-    failure, including a timeout" (round-14 daemon-status-contention-
-    plan.md §3's "open question": the extra confirmation ``stop()``
+    failure, including a timeout" (the extra confirmation ``stop()``
     needs when a pid lookup fails to confirm anything is added at the
     call site via ``is_daemon_reachable``, not by growing this
     function's own return type into a three-state contract). Confirms
@@ -828,7 +823,7 @@ def test_query_pid_timeout_returns_none_same_as_daemon_absent(
 
 
 def test_client_timeout_matches_request_timeout() -> None:
-    """Round-12 master report §3.5: ``_CLIENT_TIMEOUT`` used to be a
+    """``_CLIENT_TIMEOUT`` used to be a
     separate, much tighter 2.0s constant covering the client's entire
     connect+send+recv cycle -- shorter than the server's own
     per-request budget (``_REQUEST_TIMEOUT``), so a client could give
@@ -858,11 +853,11 @@ def test_scaled_client_timeout_floors_for_a_small_map(
 def test_scaled_client_timeout_scales_past_the_floor_for_a_large_map(
     short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-15 finding: a large enough map.json widens the budget.
+    """A large enough map.json widens the budget.
 
     Uses a tiny ``_TIMEOUT_BYTES_PER_SECOND`` rather than writing a
     genuinely large file to disk, so the test stays fast -- the real
-    constant is derived from round-15's own measurements (see that
+    constant is derived from real measurements (see that
     constant's docstring), not re-derived here.
     """
     monkeypatch.setattr(daemon, "_TIMEOUT_BYTES_PER_SECOND", 100)
@@ -888,8 +883,8 @@ def test_scaled_client_timeout_is_capped(
     )
 
 
-def test_timeout_bytes_per_second_reflects_round24_recalibration() -> None:
-    """Round-24 finding: the pre-recalibration 5.5 MB/s fit was made
+def test_timeout_bytes_per_second_reflects_recalibration() -> None:
+    """The pre-recalibration 5.5 MB/s fit was made
     against a pre-symbol-interning map.json and stayed stale after
     ``1f06c44e`` shrank map.json's on-disk size ~5.15x without
     changing build cost, under-provisioning every non-rev-cache-miss
@@ -907,7 +902,7 @@ def test_try_daemon_uses_scaled_client_timeout(
     daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``try_daemon()`` connects with the size-aware budget, not the
-    fixed ``_CLIENT_TIMEOUT`` -- the actual round-15 fix, not just the
+    fixed ``_CLIENT_TIMEOUT`` -- the actual fix, not just the
     helper function it's built on."""
     root = daemon_thread_root
     seen: list[Path] = []
@@ -947,7 +942,7 @@ def test_try_daemon_uses_scaled_client_timeout(
 
 
 # ---------------------------------------------------------------------
-# Round-24 §2 fix: rev-cache-miss-aware timeout for diff/affected/
+# Rev-cache-miss-aware timeout for diff/affected/
 # workset, scaled by tracked-file count instead of map.json size.
 # ---------------------------------------------------------------------
 
@@ -959,7 +954,7 @@ def test_scaled_client_timeout_for_revcache_miss_floors_when_untrackable() -> (
     failure-mode contract as ``_scaled_client_timeout`` with no
     ``map.json``.
 
-    Round-29 Track 2: the caller (``_timeout_and_args_for_command``)
+    The caller (``_timeout_and_args_for_command``)
     now computes ``tracked_at_rev`` once and passes the result in
     directly, rather than this helper calling it a second time.
     """
@@ -983,7 +978,7 @@ def test_scaled_client_timeout_for_revcache_miss_floors_for_few_files() -> (
 def test_scaled_client_timeout_for_revcache_miss_scales_past_the_floor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round-24 §2 fix: a large tracked-file count widens the budget,
+    """A large tracked-file count widens the budget,
     scaled by ``_TIMEOUT_SECONDS_PER_TRACKED_FILE`` rather than
     ``map.json`` size -- the tensorflow repro this fix targets never
     even reaches a ``map.json`` read on this path.
@@ -1169,10 +1164,8 @@ def test_try_daemon_other_commands_never_use_revcache_miss_timeout(
 
 
 # ---------------------------------------------------------------------
-# Round-25: default a daemon-routed cold-rev-cache resolve to
-# --jobs 0 (all cores) when the caller never chose --jobs explicitly
-# (`.features/plans/round25/
-# 04-daemon-coldcache-timeout-parallelism.md`).
+# Default a daemon-routed cold-rev-cache resolve to
+# --jobs 0 (all cores) when the caller never chose --jobs explicitly.
 # ---------------------------------------------------------------------
 
 
@@ -1207,9 +1200,9 @@ def test_try_daemon_defaults_jobs_to_zero_on_a_genuine_miss_when_not_explicit(
     args = cli.build_subcommand_parser().parse_args(
         ["affected", "--root", str(root)]
     )
-    # Round 31 P4.1: the CLI default is itself all cores now, so a
+    # The CLI default is itself all cores now, so a
     # parsed invocation no longer arrives with an unchosen 1. The
-    # round-25 override still has to cover a programmatic Namespace
+    # cold-cache override still has to cover a programmatic Namespace
     # that does, which is what this simulates.
     assert args.jobs == 0
     args.jobs = 1
@@ -1225,7 +1218,7 @@ def test_try_daemon_preserves_an_explicit_jobs_one_on_a_genuine_miss(
 ) -> None:
     """``dekko affected --jobs 1`` (a deliberate sequential choice, e.g.
     a memory-constrained CI environment) is forwarded unchanged --
-    ``jobs_explicit=True`` must suppress the round-25 override even
+    ``jobs_explicit=True`` must suppress the cold-cache override even
     though ``args.jobs`` still equals the argparse default's value."""
     root = daemon_thread_root
 
@@ -1258,7 +1251,7 @@ def test_try_daemon_does_not_override_jobs_on_a_revcache_hit(
     daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A rev-cache *hit* never takes the expensive cold-resolve path,
-    so the round-25 override must not apply even when the caller never
+    so the cold-cache override must not apply even when the caller never
     chose ``--jobs`` explicitly -- there's no slow work here to justify
     burning idle cores for."""
     root = daemon_thread_root
@@ -1287,9 +1280,9 @@ def test_try_daemon_does_not_override_jobs_on_a_revcache_hit(
 def test_try_daemon_abandoned_error_carries_the_jobs_actually_sent(
     daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-25 Fix 2: ``DaemonRequestAbandonedError.jobs`` reflects
+    """``DaemonRequestAbandonedError.jobs`` reflects
     whatever value was actually forwarded to the daemon for the
-    abandoned request -- including the Fix 1 override -- so
+    abandoned request -- including the cold-cache override -- so
     ``cli.py``'s error message can tell an already-parallel abandoned
     request apart from a still-sequential one."""
     root = daemon_thread_root
@@ -1312,7 +1305,7 @@ def test_try_daemon_abandoned_error_carries_the_jobs_actually_sent(
 
     with pytest.raises(daemon.DaemonRequestAbandonedError) as excinfo:
         daemon.try_daemon(args, jobs_explicit=False)
-    assert excinfo.value.jobs == 0  # Fix 1's override was applied
+    assert excinfo.value.jobs == 0  # the cold-cache override applied
 
     explicit = cli.build_subcommand_parser().parse_args(
         ["affected", "--root", str(root), "--jobs", "1"]
@@ -1323,7 +1316,7 @@ def test_try_daemon_abandoned_error_carries_the_jobs_actually_sent(
 
 
 # ---------------------------------------------------------------------
-# Round-29 Track 2: client-side pre-dispatch disclosure for a
+# Client-side pre-dispatch disclosure for a
 # cold-rev-cache diff/affected/workset call routed through the daemon
 # -- the in-process note (diff._maybe_warn_sequential) only reaches
 # the caller after the wait, buffered in the routed response's
@@ -1336,7 +1329,7 @@ def test_timeout_and_args_discloses_all_cores_wording_when_override_applies(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """A genuine rev-cache miss, jobs not explicit: the round-25
+    """A genuine rev-cache miss, jobs not explicit: the cold-cache
     override rewrites jobs to 0, and the client-side note must say so
     ("with all cores"), not the single-threaded wording."""
     monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
@@ -1348,14 +1341,14 @@ def test_timeout_and_args_discloses_all_cores_wording_when_override_applies(
     args = cli.build_subcommand_parser().parse_args(
         ["affected", "--root", str(short_root)]
     )
-    _, new_args = daemon._timeout_and_args_for_command(
+    _, new_args, _ = daemon._timeout_and_args_for_command(
         "affected", args, short_root, jobs_explicit=False
     )
 
     assert new_args.jobs == 0
     err = capsys.readouterr().err
     assert err.count("note:") == 1
-    assert "with all " in err and " cores" in err  # round 33 6d wording
+    assert "with all " in err and " cores" in err
     assert "6000" in err
 
 
@@ -1364,7 +1357,7 @@ def test_timeout_and_args_discloses_sequential_wording_when_jobs_explicit(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """An explicit ``--jobs 1``: the round-25 override never applies,
+    """An explicit ``--jobs 1``: the cold-cache override never applies,
     so the note keeps the existing single-threaded wording (including
     the ``--jobs 0`` hint), matching ``_maybe_warn_sequential``'s own
     in-process message -- the two call sites share one message-
@@ -1379,7 +1372,7 @@ def test_timeout_and_args_discloses_sequential_wording_when_jobs_explicit(
     args = cli.build_subcommand_parser().parse_args(
         ["affected", "--root", str(short_root), "--jobs", "1"]
     )
-    _, new_args = daemon._timeout_and_args_for_command(
+    _, new_args, _ = daemon._timeout_and_args_for_command(
         "affected", args, short_root, jobs_explicit=True
     )
 
@@ -1388,6 +1381,41 @@ def test_timeout_and_args_discloses_sequential_wording_when_jobs_explicit(
     assert err.count("note:") == 1
     assert "single-threaded" in err
     assert "--jobs 0" in err
+
+
+def test_timeout_and_args_silent_when_the_tree_matches_the_rev(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A clean tree at the target rev skips the old-side build, so the
+    "may take a while" note would be false. The generous revcache-miss
+    timeout is kept, in case the map turns out stale and the daemon
+    builds after all."""
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    candidates = [f"f{i}.py" for i in range(6000)]
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
+    )
+    monkeypatch.setattr(
+        daemon.diff_mod, "worktree_matches_rev", lambda r, rev: True
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_scaled_client_timeout_for_revcache_miss",
+        lambda c: 999.0,
+    )
+
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(short_root)]
+    )
+    timeout, _, disclosed = daemon._timeout_and_args_for_command(
+        "affected", args, short_root, jobs_explicit=False
+    )
+
+    assert disclosed is None
+    assert timeout == 999.0
+    assert capsys.readouterr().err == ""
 
 
 def test_timeout_and_args_silent_below_the_disclosure_threshold(
@@ -1468,6 +1496,104 @@ def test_timeout_and_args_silent_on_a_revcache_hit(
     assert capsys.readouterr().err == ""
 
 
+def _route_cold_affected(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    daemon_stderr: str,
+) -> tuple[int, str, str] | None:
+    """Route a cold-rev-cache ``affected`` through the live test daemon,
+    with the daemon's reply replaced by one carrying ``daemon_stderr``.
+    """
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: False)
+    candidates = [f"f{i}.py" for i in range(6000)]
+    monkeypatch.setattr(
+        daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_recv_daemon_response",
+        lambda sock: (0, "out\n", daemon_stderr),
+    )
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(root)]
+    )
+    return daemon.try_daemon(args, jobs_explicit=False)
+
+
+def _cold_note(workers: int = 0) -> str:
+    """The note ``_timeout_and_args_for_command`` prints for 6000 files."""
+    message = daemon.diff_mod.sequential_disclosure_message(
+        6000, workers=workers
+    )
+    assert message is not None
+    return message
+
+
+def test_try_daemon_drops_the_replayed_copy_of_the_disclosed_note(
+    daemon_thread_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The client prints the cold-rev-cache note before dispatch and the
+    daemon prints it again in-process; the replayed copy is dropped so
+    the user sees it exactly once, and the daemon's other lines stay."""
+    note = _cold_note()
+    routed = _route_cold_affected(
+        daemon_thread_root, monkeypatch, f"{note}\nother line\n"
+    )
+
+    assert routed == (0, "out\n", "other line\n")
+    assert capsys.readouterr().err.count(note) == 1
+
+
+def test_try_daemon_leaves_stderr_without_the_note_unchanged(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daemon reply that never printed the note (or worded it
+    differently) comes back untouched."""
+    routed = _route_cold_affected(
+        daemon_thread_root, monkeypatch, "other line\n"
+    )
+
+    assert routed == (0, "out\n", "other line\n")
+
+
+def test_try_daemon_drops_only_one_copy_of_a_repeated_note(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A daemon that genuinely hit the miss twice keeps its second
+    note: only the copy the client already showed is removed."""
+    note = _cold_note()
+    routed = _route_cold_affected(
+        daemon_thread_root, monkeypatch, f"{note}\n{note}\n"
+    )
+
+    assert routed == (0, "out\n", f"{note}\n")
+
+
+def test_try_daemon_keeps_stderr_when_nothing_was_disclosed(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rev-cache hit discloses nothing client-side, so a note in the
+    daemon's reply is the only copy and must survive."""
+    note = _cold_note()
+    monkeypatch.setattr(daemon.revcache, "has_entry", lambda r, rev: True)
+    monkeypatch.setattr(
+        daemon,
+        "_recv_daemon_response",
+        lambda sock: (0, "", f"{note}\n"),
+    )
+    args = cli.build_subcommand_parser().parse_args(
+        ["affected", "--root", str(daemon_thread_root)]
+    )
+
+    assert daemon.try_daemon(args, jobs_explicit=False) == (
+        0,
+        "",
+        f"{note}\n",
+    )
+
+
 def test_jobs_flag_explicit_detects_bare_and_equals_forms() -> None:
     """``cli._jobs_flag_explicit`` must catch both ``--jobs N`` and
     ``--jobs=N`` and must not fire on args that merely contain 'jobs'
@@ -1508,7 +1634,7 @@ def test_main_computes_jobs_explicit_from_raw_argv(
 def test_report_daemon_request_abandoned_hints_jobs_zero_when_sequential(
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """Round-25 Fix 2: when the abandoned request ran with ``--jobs 1``
+    """When the abandoned request ran with ``--jobs 1``
     (sequential), the timeout message names ``--jobs 0`` as the actual
     lever likely to avoid a repeat, instead of only apologizing."""
     exc = daemon.DaemonRequestAbandonedError("timed out", jobs=1)
@@ -1542,7 +1668,7 @@ def test_status_true_positive_while_daemon_busy_on_slow_request(
     short_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round-13 master report §2: the main accept loop is deliberately
+    """The main accept loop is deliberately
     single-threaded, so before this fix a concurrent ``daemon status``
     request couldn't be accepted -- let alone answered -- until
     whatever the daemon was currently servicing finished, no matter
@@ -1622,13 +1748,13 @@ def test_start_does_not_spawn_duplicate_while_daemon_busy(
     short_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round-13 master report §2: ``daemon start``'s own liveness probe
+    """``daemon start``'s own liveness probe
     (``is_daemon_reachable``, called with its default 2.0s timeout)
     used to target the main command socket, which can't answer while
     busy on a slow routed request -- making a live, busy daemon look
     unreachable and causing ``start()`` to spawn a duplicate process
-    for the same root (the exact bug caught live in claude-code.md,
-    two PIDs for one root). Confirms ``start()`` now returns success
+    for the same root (caught live on claude-code: two PIDs for one
+    root). Confirms ``start()`` now returns success
     (the "already running" branch) with no duplicate spawn, even while
     the daemon is mid-request -- the fix (probing the dedicated
     status-only listener instead of the busy main socket) closes this
@@ -1697,7 +1823,7 @@ def test_start_does_not_spawn_duplicate_while_daemon_busy(
 def test_try_daemon_raises_abandoned_error_on_client_timeout(
     short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-12 master report §3.8: once a request has actually been
+    """Once a request has actually been
     sent to the daemon, a client-side timeout must surface as
     ``DaemonRequestAbandonedError``, not a plain ``None`` return --
     the daemon (single-threaded, no cancellation, see
@@ -1755,7 +1881,7 @@ def test_try_daemon_raises_abandoned_error_on_client_timeout(
 
 
 # ---------------------------------------------------------------------
-# Warm cache (Phase 3): repeated daemon-routed reads against an
+# Warm cache: repeated daemon-routed reads against an
 # unchanged map skip mapfile.load_map entirely, and a working-tree
 # change between requests is picked up on the next one, never served
 # stale. Mirrors tests/test_server.py's Context.index_cache tests for
@@ -1896,12 +2022,12 @@ def test_daemon_status_reports_cache_state_after_a_request(
 
 
 # ---------------------------------------------------------------------
-# Phase 4: diff/affected's current-tree load shares the warm cache.
+# diff/affected's current-tree load shares the warm cache.
 #
 # diff.run/affected.changes used to call mapfile.load_map(root)
 # directly, bypassing load_or_regen (and therefore the daemon's
-# warm-cache hook) entirely -- the "partial exception" the design doc
-# flagged at §2.4's last bullet. repo_ops.load_current_index_no_regen()
+# warm-cache hook) entirely -- a "partial exception" to cache
+# sharing. repo_ops.load_current_index_no_regen()
 # closes that gap: it checks the same _daemon_cache_get/_put hooks
 # load_or_regen uses, without adopting its regen-on-stale side
 # effect (diff/affected never wrote map.json as a side effect before,
@@ -1974,7 +2100,7 @@ def test_daemon_diff_and_affected_reuse_query_warmed_cache(
 ) -> None:
     """A ``diff``/``affected`` request's current-tree load reuses a
     cache a prior ``query`` request already warmed -- the fix for
-    Phase 4's partial-exception investigation."""
+    the partial-exception gap."""
     root = daemon_thread_git_root
     calls: list[Path] = []
     real_load_map = mapfile.load_map
@@ -2168,7 +2294,7 @@ def test_start_waits_for_bind_confirmation_before_reporting_started(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    """Round-23 §13: ``start()`` used to return (and print "started")
+    """``start()`` used to return (and print "started")
     the instant ``spawn_detached`` launched the child, before the
     child had necessarily finished binding -- an immediate ``daemon
     status`` call could race that and see ``transport.exists() ==
@@ -2203,7 +2329,7 @@ def test_start_spawns_with_the_dekko_daemon_log_path(
     short_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round-29 Track 2: ``start()`` passes a ``.dekko/daemon.log``
+    """``start()`` passes a ``.dekko/daemon.log``
     path to ``spawn_detached`` so the detached child's stdio lands
     somewhere a later ``dekko daemon`` invocation (or a human) can
     read it, instead of inheriting the launching shell's now-defunct
@@ -2264,8 +2390,8 @@ def test_start_reports_unconfirmed_when_bind_poll_times_out(
 def test_start_immediately_followed_by_status_never_false_negative(
     short_root: Path,
 ) -> None:
-    """The actual regression test for the reported bug (round-23 §13,
-    awesome-go.md §2.2): a real ``daemon start`` followed *immediately*
+    """The actual regression test for the reported bug: a real
+    ``daemon start`` followed *immediately*
     (no artificial wait) by ``daemon status`` must never report "not
     running" once ``start()`` itself has returned -- run several
     real start/stop cycles for a reasonable chance of statistically
@@ -2298,7 +2424,7 @@ def test_start_immediately_followed_by_status_never_false_negative(
 def test_start_fails_fast_on_unbindable_socket_path(
     short_root: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    """Round-10's headline daemon-mode finding: ``dekko daemon start``
+    """``dekko daemon start``
     used to print "started" and exit 0 even though the detached
     child's own ``bind_and_listen()`` silently failed on a too-long
     ``AF_UNIX`` ``sun_path`` -- the failure only surfaced later, on a
@@ -2323,8 +2449,8 @@ def test_start_fails_fast_on_unbindable_socket_path(
 
     # A second attempt against the same broken root must fail exactly
     # the same deterministic way -- not the flaky "sometimes prints
-    # only 'started' with no error at all" behavior the round-10
-    # report flagged for the old race between the child's async
+    # only 'started' with no error at all" behavior seen with the
+    # old race between the child's async
     # stderr write and the parent's own stdout flush.
     code2 = daemon.start(deep)
     assert code2 == 1

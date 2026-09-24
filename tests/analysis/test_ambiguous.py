@@ -51,7 +51,7 @@ CANDIDATE_CAP_FILES = {
 }
 CANDIDATE_CAP_FILES["caller.py"] = "def entry() -> int:\n    return dup()\n"
 
-# Round 22 cline.md §3.1: exactly one real repo-wide ``trim`` symbol; a
+# Exactly one real repo-wide ``trim`` symbol; a
 # call through an untyped local variable (``opts.config.trim()``) is
 # really JS's built-in ``String.prototype.trim()``, not the repo
 # symbol -- must never surface in ``dekko ambiguous`` at all (not even

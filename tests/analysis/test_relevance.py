@@ -1,4 +1,4 @@
-"""Pillar B: task-aware relevance scoring and the --task blend.
+"""Task-aware relevance scoring and the --task blend.
 
 The pure core (:mod:`dekko.relevance`) is tested offline and
 deterministically; the three blend points (lean, workset, context) are
@@ -115,9 +115,7 @@ def test_bm25_no_candidate_matches_is_all_zero() -> None:
 def test_bm25_rare_term_outweighs_common_term() -> None:
     # "retry" appears in every candidate (common -> low IDF); "auth"
     # appears in exactly one (rare -> high IDF). The concrete, testable
-    # difference BM25 adds over LexicalScorer's plain overlap count —
-    # see the plan's §3.2/§7 rationale for picking BM25 over a naive
-    # count.
+    # difference BM25 adds over LexicalScorer's plain overlap count.
     task = TaskContext(terms=("retry", "auth"))
     cands = [
         Candidate("common_only", "retry retry retry", "a.py"),
@@ -154,7 +152,7 @@ def test_bm25_suffix_broadening_matches_inflections() -> None:
     assert scores["miss"] == 0.0
 
 
-# --- round-08 §2.2: coverage-factor discount on top-of-batch --------
+# --- coverage-factor discount on top-of-batch ----------------------
 #
 # Both scorers' ``value / top`` min-max normalization rescales
 # whatever survives filtering to exactly 1.00, regardless of how weak
@@ -193,8 +191,8 @@ def test_coverage_factor_is_bounded_floor_to_one() -> None:
     assert relevance._COVERAGE_FLOOR < relevance.coverage_factor(0.5) < 1.0
 
 
-# --- pure core: weighted_term_coverage / idf_term_weights (round-12
-# §3.13: a flat coverage fraction can't tell "missed a rare,
+# --- pure core: weighted_term_coverage / idf_term_weights (a flat
+# coverage fraction can't tell "missed a rare,
 # distinctive term" from "missed a common one" -- these give the
 # coverage discount access to the same IDF signal BM25 already has.
 # --------------------------------------------------------------------
@@ -350,7 +348,7 @@ def test_bm25_full_coverage_top_hit_still_reads_as_confident() -> None:
     assert scores["mkdir_all"] < scores["get_all_flagged_repositories"]
 
 
-# --- round-12 §3.13: coverage discount is IDF-weighted, not a flat
+# --- coverage discount is IDF-weighted, not a flat
 # fraction -- a candidate that misses a rare, distinctive query term
 # should be discounted more than one that misses a common term, even
 # when both cover the same *number* of terms (a flat-fraction tie).
@@ -474,9 +472,9 @@ def test_bm25_coverage_weighting_uses_the_same_batch_doc_freq() -> None:
     assert external_weights["yaml"] > external_weights["parse"]
 
 
-# --- 2.5: tokenization memoization (search/BM25 performance) ---------
+# --- tokenization memoization (search/BM25 performance) ---------
 #
-# Track F (test-repos/reports/IMPLEMENTATION-PLAN.md #2.5): BM25Scorer
+# BM25Scorer
 # used to re-tokenize every candidate's text from scratch on every
 # call, with no reuse across repeated searches in the same process —
 # the dominant cost on large repos. These assert the cache is actually

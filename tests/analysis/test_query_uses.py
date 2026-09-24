@@ -1,4 +1,4 @@
-"""``query uses`` match kinds (round 33 Track 3).
+"""``query uses`` match kinds.
 
 ``externals_by_name`` keys on the last callee segment, so ``uses chalk``
 used to say "no external reference matches" while 283 ``chalk.*`` call

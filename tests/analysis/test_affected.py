@@ -58,8 +58,7 @@ BASE = {
 }
 
 
-# Round 22 claude-buddy.md §2.1 (carried unfixed from rounds 20/21): a
-# repo-local ``server/path.ts`` collides by stem with Node's builtin
+# A repo-local ``server/path.ts`` collides by stem with Node's builtin
 # ``path`` module -- five unrelated files merely do ``import { join }
 # from "path"`` (Node's core module), and one genuinely imports the
 # repo's own ``path.ts`` via a relative specifier.
@@ -151,9 +150,7 @@ def test_tiers_direct_transitive_import(
 def test_node_builtin_module_name_collision_not_falsely_impacted(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    # The single most-repeated, longest-standing correctness gap in
-    # dekko's own eval history (3 consecutive rounds, per round 22's
-    # implementation guide item 3): a change to a repo-local
+    # A long-standing correctness gap: a change to a repo-local
     # ``server/path.ts`` must impact only the file that genuinely
     # imports it (``./path``), not every unrelated file that happens
     # to import Node's builtin ``path`` module by its bare specifier.
@@ -173,7 +170,7 @@ def test_node_builtin_module_name_collision_not_falsely_impacted(
 def test_affected_rev_cache_hit_skips_reexport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-08 §2.6: a second ``affected`` call against the same rev
+    """A second ``affected`` call against the same rev
     must reuse the cached old-side snapshot (``diff.old_snapshot``)
     instead of re-exporting and re-parsing the rev from scratch."""
     root = _repo(tmp_path, BASE)
@@ -300,7 +297,7 @@ VENDORED_ONLY = {
 def test_no_impact_on_vendored_only_change_carries_coverage_note(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    # Track E's optional item, closed as a follow-up: a diff that only
+    # A diff that only
     # touches vendored-excluded files (e.g. tensorflow's
     # ``third_party/xla``) is invisible to the diff pipeline entirely
     # (the walker never mapped it, so it produces no symbol delta), so
@@ -451,7 +448,7 @@ def _sym(path: str, name: str) -> Symbol:
 
 
 def test_impacts_from_symbol_falls_back_to_import_tier() -> None:
-    """investigation-1.5-cpp-gtest-affected.md: a C++-style
+    """A C++-style
     cross-file call that the resolver drops as ``ambiguous`` never
     reaches ``calls_in``, so a pure call-edge walk sees zero impacted
     tests despite a real, direct test call. ``impacts_from_symbol``
@@ -548,7 +545,7 @@ def test_changes_reuses_provided_index_no_reload(
 def test_affected_jobs_flag_reaches_old_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Round-12 master report §3.3: ``dekko affected`` shares
+    """``dekko affected`` shares
     ``diff``'s rev-cache-miss old-side re-parse/resolve path
     (``diff.old_snapshot``), which used to always run single-threaded
     regardless of core count because ``dekko affected`` never had a
@@ -570,3 +567,130 @@ def test_affected_jobs_flag_reaches_old_snapshot(
         1,
     )
     assert seen_jobs == [2]
+
+
+# ---------------------------------------------------------------------
+# Clean tree at the target rev: both sides are the working tree, so the
+# old-side export is skipped.
+# ---------------------------------------------------------------------
+
+
+def _forbid_old_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("old_snapshot should have been skipped")
+
+    monkeypatch.setattr(diff, "old_snapshot", _fail)
+
+
+def _count_old_snapshot(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    real = diff.old_snapshot
+
+    def spy(*args: object, **kwargs: object) -> diff.Snapshot | None:
+        calls.append(str(args[1]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(diff, "old_snapshot", spy)
+    return calls
+
+
+def test_clean_tree_at_head_skips_the_old_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The only untracked entry is the map's own ``.dekko/`` dir, which
+    doesn't count as a change."""
+    root = _repo(tmp_path, BASE)
+    status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert status.strip() == "?? .dekko/"
+    _forbid_old_snapshot(monkeypatch)
+
+    outcome = affected.changes(root, None)
+
+    assert outcome is not None
+    impacts, result, *_ = outcome
+    assert impacts == []
+    assert result.empty()
+    assert not (root / ".dekko" / "rev-cache").exists()
+
+
+def test_modified_tracked_file_builds_the_old_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    calls = _count_old_snapshot(monkeypatch)
+
+    outcome = affected.changes(root, None)
+
+    assert outcome is not None
+    assert len(calls) == 1
+    assert not outcome[1].empty()
+
+
+def test_untracked_source_file_builds_the_old_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path, BASE)
+    (root / "src/extra.py").write_text("def extra() -> int:\n    return 3\n")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    calls = _count_old_snapshot(monkeypatch)
+
+    outcome = affected.changes(root, None)
+
+    assert outcome is not None
+    assert len(calls) == 1
+    assert [d.symbol.name for d in outcome[1].added] == ["extra"]
+
+
+def test_explicit_older_rev_on_a_clean_tree_builds_the_old_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    _commit_all(root, "second")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    calls = _count_old_snapshot(monkeypatch)
+
+    outcome = affected.changes(root, "HEAD~1")
+
+    assert outcome is not None
+    assert calls == ["HEAD~1"]
+    assert [d.symbol.name for d in outcome[1].changed] == ["core"]
+
+
+def test_stale_map_on_a_clean_tree_builds_the_old_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit after mapping leaves the tree clean but the map stale;
+    the shortcut needs a fresh index, so it isn't taken."""
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    _commit_all(root, "second")
+    calls = _count_old_snapshot(monkeypatch)
+
+    outcome = affected.changes(root, "HEAD")
+
+    assert outcome is not None
+    assert calls == ["HEAD"]
+    assert outcome[1].empty()
+
+
+def test_diff_head_on_a_clean_tree_skips_the_old_side(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _forbid_old_snapshot(monkeypatch)
+
+    code = cli.main(["diff", "HEAD", "--root", str(root), "--json"])
+
+    assert code == diff.EXIT_SAME
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["added"] == doc["removed"] == doc["changed"] == []
