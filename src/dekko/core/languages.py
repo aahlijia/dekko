@@ -1426,6 +1426,16 @@ _RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION = 1
 # would appear not to work on exactly the repos already mapped.
 _RUST_MACRO_CALL_RECOVERY_VERSION = 1
 
+# Bumped whenever ``extractor._canonical_expr`` changes how a call's
+# receiver is rendered into ``RawCall.text``/``receiver``. Those two
+# strings used to be the receiver's source text verbatim, arguments
+# and all; they are now a bounded structural rendering (``expect()
+# .toBe``, ``[].join``). Same blind spot as the constants above: a
+# ``.dekko`` cache built before the change keeps serving the old
+# strings, and the external id table would stay unbounded on exactly
+# the repos already mapped.
+_CALLEE_TEXT_CANONICAL_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.
@@ -1454,6 +1464,7 @@ def spec_fingerprint() -> str:
         "rust_heritage_impl_subtype_recovery="
         f"{_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION}",
         f"rust_macro_call_recovery={_RUST_MACRO_CALL_RECOVERY_VERSION}",
+        f"callee_text_canonical={_CALLEE_TEXT_CANONICAL_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):

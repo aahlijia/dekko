@@ -1349,14 +1349,19 @@ def _load_notes(root: Path) -> dict[str, list[str]]:
 def callee_segments(text: str) -> list[str]:
     """Path segments of an external callee text, whitespace-stripped.
 
-    ``subprocess.run`` → ``["subprocess", "run"]``. Multi-line chains
-    are whitespace-normalized to a single space before storage, so
-    ``z\n  .object`` is stored as ``z .object`` and a naive split
-    leaves ``"z "`` as the head; 979 of claude-code's ``z.*`` externals
-    (39%) had that trailing space. Stripping here
-    is what makes a head-segment match see them.
+    ``subprocess.run`` → ``["subprocess", "run"]``. Whitespace is
+    stripped from each segment: a map written before callee text was
+    canonicalized stored a multi-line chain as ``z .object`` (979 of
+    claude-code's ``z.*`` externals had that trailing space), and the
+    head must still match on such a map. The ``…`` that
+    ``extractor._cap_callee`` puts in the middle of an over-long chain
+    is not a member and is dropped.
     """
-    return [s for s in (p.strip() for p in _BASE_SPLIT.split(text)) if s]
+    return [
+        s
+        for s in (p.strip() for p in _BASE_SPLIT.split(text))
+        if s and s != "…"
+    ]
 
 
 def _callee_base(text: str) -> str:

@@ -2261,6 +2261,22 @@ def _uses_summary(
     return "\n".join(lines)
 
 
+_UNSUGGESTABLE = re.compile(r"[\s()\[\]{}\"'`<>…]")
+
+
+def _suggestable(name: str) -> bool:
+    """Whether a name is fit to print as a "closest external names" hint.
+
+    The pool is built from external callee heads and bases plus import
+    sources. A head can be a canonical marker (``expect()``, ``[]``,
+    ``""``) or, on a map written before receivers were canonicalized,
+    a fragment of source text (``expect(result``); neither is a name
+    anyone can pass back to ``uses``. Import sources such as
+    ``node:fs`` or ``@scope/pkg`` are, and pass.
+    """
+    return len(name) <= 40 and not _UNSUGGESTABLE.search(name)
+
+
 def _run_uses_not_found(index: MapIndex, target: str) -> int:
     """Report a ``uses`` target with zero external matches."""
     internal = index.symbols_by_name.get(
@@ -2291,7 +2307,13 @@ def _run_uses_not_found(index: MapIndex, target: str) -> int:
         for i in imps
     }
     pool = sorted(
-        set(index.externals_by_name) | set(index.externals_by_head) | sources
+        name
+        for name in (
+            set(index.externals_by_name)
+            | set(index.externals_by_head)
+            | sources
+        )
+        if _suggestable(name)
     )
     close = _close_names(target, pool, exclude_verbatim=True)
     if close:

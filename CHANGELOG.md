@@ -9,6 +9,48 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.3] — 2026-09-24
+
+### Fixed
+- **External callee ids are bounded and canonical.** A call's
+  receiver used to be stored as its source text, arguments and all,
+  so `expect(result.foo).toBe` or a thirty-line array literal's
+  `.join` became the external callee id: claude-buddy's longest was
+  1,749 characters, claude-code's 122,129, and half of a TypeScript
+  or Rust repo's distinct external ids were argument-bearing chains.
+  The extractor now renders the receiver structurally, identifiers
+  and member chains verbatim, a call as `name()`, a subscript as
+  `name[]`, a literal as `""`/`[]`/`{}`, anything else as `(…)`, and
+  caps a chain of many hops to its head, `…` and member. Every head
+  token the resolver keys on (an import binding, `this`/`self`, a
+  parameter name, a Rust `std` path) is byte-identical to before.
+  Rows that differed only by an argument merge: cline's external
+  table drops from 53,600 rows / 24,646 distinct ids to 46,453 /
+  14,172, zed's from 197,553 / 97,137 to 189,714 / 77,367, and no
+  eval map has an external id over 161 bytes. `query uses` rows read
+  `[chalk.hex().bold]` instead of the source line, and its "closest
+  external names" hint now applies a quality floor (no whitespace,
+  brackets, quotes, or entries over 40 characters), so
+  `expect(result` can no longer be suggested. Resolved edges are
+  unchanged on claude-buddy, awesome-go and cline. On claude-code
+  (-3), zed (+218/-24) and spring-boot (+19/-1) every moved edge was
+  read: a multi-line chain such as `z\n .string()` used to store its
+  head as `"z "`, which matched no import or parameter, so the call
+  either resolved by bare name to an unrelated symbol (those false
+  edges are gone) or sat ambiguous where a parameter's type now
+  settles it (those edges are new and correct). A C++ template
+  member name longer than 40 characters is stored as `add<>` rather
+  than with its argument list (2,350 characters on one tensorflow
+  call); a short one such as `Get<int>` is kept, since a template
+  specialization is a symbol with exactly that name.
+- **Rust turbofish calls are named after their real callee.**
+  `xs.iter().map(f).collect::<Vec<_>>()` was named `iter`: the
+  `generic_function` node has no name field and the raw-text
+  fallback cut at the first `(`. 2,859 of zed's 7,372 turbofish
+  calls carried the wrong name and resolved to it. Found by the
+  edge gate above, where the canonical text stopped masking one;
+  103 of zed's moved edges are these.
+
 ## [1.1.2] — 2026-09-24
 
 ### Fixed

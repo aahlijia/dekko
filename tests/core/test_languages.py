@@ -284,3 +284,14 @@ def test_binding_queries_cover_exactly_the_shadowable_languages() -> None:
         spec.name for spec in languages.TIER1_SPECS if spec.binding_query
     }
     assert with_query == {"python", "javascript", "typescript", "tsx"}
+
+
+def test_spec_fingerprint_changes_with_callee_text_canonical_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``extractor._canonical_expr`` decides what ``RawCall.text`` and
+    # ``receiver`` look like; a change there must invalidate every
+    # cached extraction, so it is versioned into the fingerprint.
+    baseline = languages.spec_fingerprint()
+    monkeypatch.setattr(languages, "_CALLEE_TEXT_CANONICAL_VERSION", 999999)
+    assert languages.spec_fingerprint() != baseline

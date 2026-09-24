@@ -1119,6 +1119,7 @@ def _collect_calls(
         text, name, receiver = _callee_parts(callee)
         if not name:
             continue
+        text, receiver = _cap_callee(text, name, receiver)
         caller = _enclosing(spans, callee.start_byte)
         args_node = _one(caps, "args")
         arg_count = (
@@ -1926,6 +1927,304 @@ _NAME_FIELDS = ("attribute", "property", "field")
 _RECEIVER_FIELDS = ("object", "value", "operand", "argument", "scope", "path")
 _SCOPED_TYPES = ("scoped_identifier", "qualified_identifier")
 
+# Canonical receiver text. A call's receiver used to be copied from
+# the source verbatim, so a chain like ``expect(result.foo).toBe`` or
+# ``[...30 lines...].join`` became the external callee id with its
+# arguments and literal contents inside: claude-buddy's longest was
+# 1,749 characters, claude-code's 122,129, and half of a TS or Rust
+# repo's distinct external ids were argument-bearing chains. The
+# resolver never reads past the first ``(`` of that text: every rule
+# wants the head token (``chalk``, ``this``, ``std``, a parameter
+# name), the second segment of a parameter-rooted chain, or the last
+# joiner (see ``_PATH_SPLIT`` and ``_rust_dot_call`` in resolver.py).
+# So the receiver is rendered structurally instead: identifiers and
+# member chains verbatim, a call as ``name()``, a subscript ``name[]``,
+# a literal as ``""``/``[]``/``{}``, anything else ``(…)``. Every head
+# that is an identifier today stays byte-identical; every head that
+# was already garbage (``expect(result``) becomes different garbage.
+_CANON_LEAF_TYPES = frozenset(
+    {
+        "identifier",
+        "property_identifier",
+        "field_identifier",
+        "type_identifier",
+        "namespace_identifier",
+        "package_identifier",
+        "shorthand_property_identifier",
+        "this",
+        "self",
+        "super",
+        "this_expression",
+        "super_expression",
+        "crate",
+        "metavariable",
+        "meta_property",
+        "generic_type",
+        "bracketed_type",
+        "primitive_type",
+        "predefined_type",
+        "class_literal",
+    }
+)
+_CANON_CALL_TYPES = frozenset({"call_expression", "call"})
+_CANON_NEW_TYPES = frozenset({"new_expression", "object_creation_expression"})
+_CANON_SUBSCRIPT_TYPES = frozenset(
+    {
+        "subscript_expression",
+        "subscript",
+        "index_expression",
+        "array_access",
+        "element_access_expression",
+    }
+)
+_CANON_STRING_TYPES = frozenset(
+    {
+        "string",
+        "string_literal",
+        "template_string",
+        "raw_string_literal",
+        "interpreted_string_literal",
+        "concatenated_string",
+        "char_literal",
+    }
+)
+_CANON_ARRAY_TYPES = frozenset(
+    {
+        "array",
+        "array_expression",
+        "array_literal",
+        "list",
+        "list_comprehension",
+        "tuple",
+        "tuple_expression",
+        "slice_literal",
+    }
+)
+_CANON_OBJECT_TYPES = frozenset(
+    {"object", "dictionary", "dictionary_comprehension", "set"}
+)
+_CANON_OPAQUE = "(…)"
+# Node type → fixed marker, for every literal shape.
+_CANON_MARKERS = {
+    **dict.fromkeys(_CANON_STRING_TYPES, '""'),
+    **dict.fromkeys(_CANON_ARRAY_TYPES, "[]"),
+    **dict.fromkeys(_CANON_OBJECT_TYPES, "{}"),
+    "regex": "/…/",
+}
+# Longest callee text kept whole. Canonical text is bounded by hop
+# count, not argument size, but zed has builder chains a hundred hops
+# long; over this, ``_cap_callee`` keeps the head, the last joiner
+# and the name, which is everything the resolver reads.
+_CALLEE_TEXT_LIMIT = 160
+_HEAD_SPLIT = re.compile(r"::|\?\.|\.|->")
+
+
+def _joiner_text(node: Node, recv: Node, name: Node) -> str:
+    """The operator tokens between a receiver and its member name.
+
+    Anonymous children between the two (``.``, ``?.``, ``::``,
+    ``->``), comments dropped, so a chain split across lines with a
+    comment in it renders the same as one written on one line.
+    """
+    return "".join(
+        _text(child)
+        for child in node.children
+        if child.start_byte >= recv.end_byte
+        and child.end_byte <= name.start_byte
+        and not child.type.endswith("comment")
+    )
+
+
+def _canonical_expr(node: Node) -> str:
+    """Render an expression node as bounded, argument-free text.
+
+    See the comment above ``_CANON_LEAF_TYPES`` for why and for the
+    invariant this keeps. Recursive over the receiver chain; each hop
+    contributes its name or a fixed marker, never its arguments.
+    """
+    # Iterative, not recursive: a builder chain of a hundred hops
+    # (zed's ``server.add_request_handler::<_>(..)`` a hundred times) is a
+    # hundred nested nodes, and the head the resolver needs is the
+    # innermost one. Walk down the chain's spine collecting each
+    # hop's suffix, then render from the head outward.
+    suffixes: list[str] = []
+    current = node
+    while True:
+        step = _canonical_step(current)
+        if isinstance(step, str):
+            return step + "".join(reversed(suffixes))
+        current, suffix = step
+        suffixes.append(suffix)
+
+
+def _canonical_step(node: Node) -> str | tuple[Node, str]:
+    """Render one node, or hand back the node it wraps and its suffix."""
+    kind = node.type
+    if kind in _CANON_LEAF_TYPES:
+        return _text(node)
+    marker = _CANON_MARKERS.get(kind)
+    if marker is not None:
+        return marker
+    special = _canonical_call_like(node)
+    if special is None:
+        special = _canonical_wrapped(node)
+    if special is not None:
+        return special
+    return _canonical_access(node)
+
+
+def _canonical_access(node: Node) -> str | tuple[Node, str]:
+    """A member/scoped access, or a named type-shaped node, or opaque."""
+    name_node = None
+    for field_name in (*_NAME_FIELDS, "name"):
+        name_node = node.child_by_field_name(field_name)
+        if name_node is not None:
+            break
+    if name_node is None:
+        return _canonical_fallback(node)
+    recv = _receiver_child(node)
+    if recv is not None:
+        return recv, _joiner_text(node, recv, name_node) + _text(name_node)
+    # A named node with no receiver (``Foo<T>``, ``template_type``):
+    # type-shaped and short, kept as written.
+    return _text(node)
+
+
+_IDENT_HEAD = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+
+
+def _canonical_fallback(node: Node) -> str:
+    """Opaque rendering that still keeps an identifier head.
+
+    A node shape this module does not know (Java's ``Foo.class``, a
+    Go type assertion ``x.(T)``, a Rust range ``a..b``) may still start
+    with the identifier the resolver keys on. Dropping it to ``(…)``
+    would turn an import-vetoed call into a bare-name lookup, which
+    fabricates edges; so the head and its separator survive and only
+    the rest is elided. A shape with no identifier head was garbage
+    to the resolver already and stays garbage.
+    """
+    text = _text(node)
+    match = _HEAD_SPLIT.search(text)
+    head = text[: match.start()] if match else text
+    if not _IDENT_HEAD.fullmatch(head):
+        return _CANON_OPAQUE
+    if match is None:
+        return head
+    return head + match.group(0) + _CANON_OPAQUE
+
+
+def _receiver_child(node: Node) -> Node | None:
+    """The node under the first ``_RECEIVER_FIELDS`` field present."""
+    for field_name in _RECEIVER_FIELDS:
+        child = node.child_by_field_name(field_name)
+        if child is not None:
+            return child
+    return None
+
+
+def _descend(node: Node | None, suffix: str) -> str | tuple[Node, str]:
+    """Keep descending into ``node`` with ``suffix``, or end opaque."""
+    if node is None:
+        return _CANON_OPAQUE + suffix
+    return node, suffix
+
+
+def _canonical_call_like(node: Node) -> str | tuple[Node, str] | None:
+    """Calls, constructors, macros and generic instantiations."""
+    kind = node.type
+    first = node.named_children[0] if node.named_children else None
+    if kind in _CANON_CALL_TYPES:
+        return _descend(node.child_by_field_name("function"), "()")
+    if kind == "method_invocation":
+        obj = node.child_by_field_name("object")
+        name = node.child_by_field_name("name")
+        tail = (_text(name) if name else "") + "()"
+        if obj is None:
+            return tail
+        return obj, "." + tail
+    if kind in _CANON_NEW_TYPES:
+        ctor = node.child_by_field_name(
+            "constructor"
+        ) or node.child_by_field_name("type")
+        if ctor is None:
+            return "new " + _CANON_OPAQUE + "()"
+        # ``new`` is a prefix; the constructor's own text is a leaf or
+        # a short access chain, so rendering it here is bounded.
+        return "new " + _canonical_expr(ctor) + "()"
+    if kind == "macro_invocation":
+        macro = node.child_by_field_name("macro")
+        return (_text(macro) if macro else _CANON_OPAQUE) + "!()"
+    if kind == "generic_function":
+        return _descend(node.child_by_field_name("function") or first, "::<>")
+    if kind == "instantiation_expression":
+        return _descend(first, "<>")
+    return None
+
+
+def _canonical_wrapped(node: Node) -> str | tuple[Node, str] | None:
+    """Subscripts, struct literals and postfix wrappers."""
+    kind = node.type
+    first = node.named_children[0] if node.named_children else None
+    if kind in _CANON_SUBSCRIPT_TYPES:
+        return _descend(_receiver_child(node) or first, "[]")
+    if kind == "struct_expression":
+        name = node.child_by_field_name("name")
+        return (_text(name) if name else _CANON_OPAQUE) + " {}"
+    if kind == "composite_literal":
+        type_node = node.child_by_field_name("type")
+        return (_text(type_node) if type_node else _CANON_OPAQUE) + "{}"
+    if first is None:
+        return None
+    if kind == "try_expression":
+        return first, "?"
+    if kind == "non_null_expression":
+        return first, "!"
+    if kind == "await_expression":
+        if _text(node).endswith(".await"):
+            return first, ".await"
+        return _CANON_OPAQUE
+    return None
+
+
+def _cap_callee(
+    text: str, name: str, receiver: str | None
+) -> tuple[str, str | None]:
+    """Shorten an over-long callee to head, ellipsis, joiner and name.
+
+    Only reached by a chain of many hops (``server
+    .add_request_handler()`` a hundred times). Keeps exactly the parts
+    the resolver reads: the head token, the final joiner and the name.
+    """
+    if len(text) <= _CALLEE_TEXT_LIMIT:
+        return text, receiver
+    canonical = (
+        receiver is not None
+        and text.startswith(receiver)
+        and text.endswith(name)
+        and len(text) - len(receiver) - len(name) <= 3
+    )
+    if not canonical:
+        # Raw text from ``_callee_parts``'s fallback branch (a callee
+        # with no name field: an immediately-invoked function, a
+        # string-concatenation callee). Nothing in it is structured;
+        # cut it and mark the cut. ``name`` is what resolution uses
+        # and is untouched.
+        cut = text[:_CALLEE_TEXT_LIMIT] + "…"
+        if receiver is not None and len(receiver) > _CALLEE_TEXT_LIMIT:
+            receiver = receiver[:_CALLEE_TEXT_LIMIT] + "…"
+        return cut, receiver
+    assert receiver is not None
+    joiner = text[len(receiver) : len(text) - len(name)]
+    match = _HEAD_SPLIT.search(receiver)
+    # The head keeps its own separator so it stays a whole token to
+    # the resolver's split (``ListItem::…``, never ``ListItem…``).
+    if match is None:
+        head = receiver[:_CALLEE_TEXT_LIMIT] + "…"
+    else:
+        head = receiver[: match.start()] + match.group(0) + "…"
+    return head + joiner + name, head
+
 
 def _callee_parts(node: Node) -> tuple[str, str, str | None]:
     """Split a callee node into (full text, base name, receiver).
@@ -1937,25 +2236,68 @@ def _callee_parts(node: Node) -> tuple[str, str, str | None]:
     special = _callee_java(node)
     if special is not None:
         return special
-    name_node = None
-    for field_name in _NAME_FIELDS:
-        name_node = node.child_by_field_name(field_name)
-        if name_node is not None:
-            break
-    if name_node is None and node.type in _SCOPED_TYPES:
-        name_node = node.child_by_field_name("name")
+    # A Rust turbofish call (``xs.iter().collect::<Vec<_>>()``) is a
+    # ``generic_function`` wrapping the real callee. It has no name
+    # field, so it used to fall through to the raw-text splitter,
+    # which cut at the first ``(`` and named the call after the
+    # chain's first member (``iter``): 2,859 of zed's 7,372 turbofish
+    # calls carried the wrong name, and resolved to it. The type
+    # arguments are not part of the callee path; unwrap them.
+    if node.type == "generic_function":
+        inner = node.child_by_field_name("function")
+        if inner is not None:
+            return _callee_parts(inner)
+    name_node = _callee_name_node(node)
     if name_node is not None:
-        receiver = None
+        name = _canonical_member_name(name_node)
         for field_name in _RECEIVER_FIELDS:
             recv_node = node.child_by_field_name(field_name)
             if recv_node is not None:
-                receiver = _text(recv_node)
-                break
-        return _text(node), _text(name_node), receiver
+                receiver = _canonical_expr(recv_node)
+                joiner = _joiner_text(node, recv_node, name_node)
+                return receiver + joiner + name, name, receiver
+        return _text(node), name, None
     text = _text(node)
     if node.named_child_count == 0:
         return text, text, None
     return text, *_split_callee_text(text)
+
+
+_TEMPLATE_NAME_TYPES = frozenset({"template_method", "template_function"})
+_TEMPLATE_NAME_LIMIT = 40
+
+
+def _canonical_member_name(name_node: Node) -> str:
+    """A member name with C++ template arguments elided.
+
+    ``patterns->add<ConvertAllOp, ..., ConvertXOp>(ctx)`` names its
+    member with a ``template_method`` node whose text is the whole
+    argument list (2,350 characters on tensorflow). A short one stays
+    as written: a template specialization is a symbol named exactly
+    ``Get<int>``, and ``v.Get<int>()`` resolves to it by that name.
+    Past the gate no symbol could carry the name, so the list is
+    elided to ``add<>`` and the call stays external, as it was.
+    """
+    text = _text(name_node)
+    if (
+        name_node.type in _TEMPLATE_NAME_TYPES
+        and len(text) > _TEMPLATE_NAME_LIMIT
+    ):
+        inner = name_node.child_by_field_name("name")
+        if inner is not None:
+            return _text(inner) + "<>"
+    return text
+
+
+def _callee_name_node(node: Node) -> Node | None:
+    """The member-name child of an access-shaped callee, if any."""
+    for field_name in _NAME_FIELDS:
+        name_node = node.child_by_field_name(field_name)
+        if name_node is not None:
+            return name_node
+    if node.type in _SCOPED_TYPES:
+        return node.child_by_field_name("name")
+    return None
 
 
 def _callee_java(node: Node) -> tuple[str, str, str | None] | None:
@@ -1964,7 +2306,7 @@ def _callee_java(node: Node) -> tuple[str, str, str | None] | None:
         name_node = node.child_by_field_name("name")
         obj = node.child_by_field_name("object")
         name = _text(name_node) if name_node else ""
-        receiver = _text(obj) if obj else None
+        receiver = _canonical_expr(obj) if obj else None
         text = f"{receiver}.{name}" if receiver else name
         return text, name, receiver
     if node.type == "object_creation_expression":

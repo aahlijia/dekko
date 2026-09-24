@@ -145,9 +145,12 @@ as a property read never lands in the call bucket, so on a React
 codebase the importing-file count is much larger than the call-site
 count. A name that appears as a receiver but is never imported is
 reported as such rather than as "no match" (it is a local variable).
-Before 0.43.75 only the base match existed, and `uses chalk` said "no
-external reference matches" while hundreds of `chalk.*` calls sat in
-the map under `red`/`dim`/`bold`.
+A row shows the callee as the map stores it: a chained receiver with
+its arguments elided (`[chalk.hex().bold]`, `[expect().toBe]`,
+`[[].join]`), a very long chain as its head, `…` and the member
+(`[program.….version]`). Before 0.43.75 only the base match existed,
+and `uses chalk` said "no external reference matches" while hundreds
+of `chalk.*` calls sat in the map under `red`/`dim`/`bold`.
 
 `query uses <symbol>` (and `unused`, which reads the same edges) only
 credits a value reference the referencing file could actually make. In

@@ -12,6 +12,7 @@ from typing import Iterator
 
 from dekko.core.extractor import (
     _callee_parts,
+    _cap_callee,
     _doc_comment_above,
     _enclosing,
     _module_doc,
@@ -241,6 +242,7 @@ def _collect_calls(
             continue
 
         text, name, receiver = parts
+        text, receiver = _cap_callee(text, name, receiver)
         caller = _enclosing(spans, node.start_byte)
         calls.append(
             RawCall(

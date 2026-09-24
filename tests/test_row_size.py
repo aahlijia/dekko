@@ -85,17 +85,20 @@ def test_no_read_command_prints_an_oversized_row(
     assert longest <= ROW_CHAR_CAP, out[:400]
 
 
-def test_uses_row_is_clipped_but_still_matches(
+def test_uses_row_shows_the_bounded_chain_and_still_matches(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Clipping happens at render, after lookup: the row must still be
-    # found by its base name, and the label must keep both ends.
+    # The chain is stored canonically (arguments elided) and, past the
+    # extractor's hop cap, as head, ellipsis and name; the row is
+    # found by its base name and needs no render-time clipping. The
+    # render clip (``textutil.clip_middle``) stays for maps written
+    # before canonical storage and has its own unit tests.
     root = make_mapped_repo(_repo())
     assert cli.main(["query", "uses", "version", "--root", str(root)]) == 0
     out = capsys.readouterr().out
-    assert "[program.name('x')" in out
-    assert ".version]" in out
-    assert "chars]…" in out
+    assert "[program.….version]" in out
+    assert "top members: version 1" in out
+    assert "chars]…" not in out
     assert "over --budget" not in out
 
     assert (
@@ -104,8 +107,8 @@ def test_uses_row_is_clipped_but_still_matches(
     )
     doc = json.loads(capsys.readouterr().out)
     entry = doc["results"][0]
-    assert entry["callee_truncated"] is True
-    assert len(entry["callee"]) <= 120
+    assert entry["callee"] == "program.….version"
+    assert "callee_truncated" not in entry
     assert doc["meta"]["over_budget"] is False
 
 
@@ -155,14 +158,17 @@ def test_long_signatures_are_the_allowed_exception(
     assert "prop59: string" in out
 
 
-def test_fixture_chain_really_is_stored_whole(
+def test_fixture_chain_is_stored_bounded(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # Guard the guard: if a future extractor change shortens what it
-    # stores, the tests above pass vacuously. Say so.
+    # The 5,000-character source chain never reaches ``map.json``: the
+    # extractor stores callee text without arguments and caps a chain
+    # of many hops, so the longest interned id is a symbol id or a
+    # path, never a call chain. The read-command rows above are short
+    # because the data is, not because a renderer rescued them.
     root = make_mapped_repo(_repo())
     doc = json.loads((root / ".dekko" / "map.json").read_text())
     ids = doc.get("ids") or []
     longest = max(len(s) for s in ids) if ids else 0
-    assert longest > 5000, "the chain is no longer stored whole; revisit"
+    assert longest < 200, "an unbounded callee id reached map.json"
     assert Path(root / ".dekko" / "map.json").exists()
