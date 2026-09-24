@@ -9,6 +9,37 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-09-24
+
+Closes round 1.1's fix cycle. The code is 1.0.5; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.1 (the first
+evaluation of the 1.x series, seven real repositories against
+0.43.77) was the cleanest on record: zero new High, Medium, or
+Critical findings, and every round 33 fix held. Its five Low findings
+became five fix tracks; four shipped and one measured out:
+
+- **1.0.2** — daemon-routed `diff`/`affected`/`workset` print the
+  cold rev-cache note once, not twice.
+- **1.0.3** — `outline`'s savings line says `partial:` when the
+  outline was cut, so a truncated ratio can't be quoted as the whole
+  file's (the README's zed row was; it's fixed).
+- **1.0.4** — MCP `get_callers`/`get_subtypes` say how many test rows
+  their default hid, and nothing when it hid none.
+- **1.0.5** — a bare `workset`/`affected`/`diff` on a clean tree no
+  longer exports and re-parses the commit it's sitting on: tensorflow
+  265 s -> 10 s, cline 6.7 s -> 1.0 s.
+- **Search centrality** (the round's one Low-Medium): measured against
+  an 11-query known-answer set (`benchmarks/search_known_answers.py`)
+  and left as is. Scaling the connectivity bonus by relevance changed
+  no top-1 result and cost the `isEnvTruthy` hub its place, so the
+  benchmark shipped and the change didn't.
+
+1.0.1, a source cleanup, rode along ahead of the tracks. Round 1.2
+(dekko 1.0.5, 2026-09-23) has since run: no regressions on any of
+the seven repositories, map counts byte-identical to 0.43.77. Its
+findings open the 1.1.x line.
+
 ## [1.0.5] — 2026-09-23
 
 ### Performance
