@@ -396,5 +396,143 @@ def test_type_usage_name_index_matches_wrapper_syntax() -> None:
     # matcher, and vice versa — confirms the inversion didn't change
     # matching semantics, only its cost shape.
     rows = query.type_usage_rows(idx, "Config", exact=False)
-    row_names = {r[0].name for r in rows}
+    row_names = {r.symbol.name for r in rows if r.symbol is not None}
     assert row_names == {"start", "maybe", "load", "ptr"}
+
+
+# --- Sites the map never named: nested/anonymous function shapes -----
+
+# ``Ctx`` is used only where no symbol carries params: a returned
+# arrow inside ``make``, a function-typed member of ``Opts``, and a
+# module-level callback in a test file. ``start`` uses ``Other``
+# through its own signature (the pre-existing row shape).
+TS_NESTED = {
+    "app.ts": (
+        "export interface Ctx { id: string }\n"
+        "export interface Other { n: number }\n"
+        "\n"
+        "export function make() {\n"
+        "  return (ctx: Ctx) => ctx.id;\n"
+        "}\n"
+        "\n"
+        "export interface Opts {\n"
+        "  build: (config: Ctx) => string\n"
+        "}\n"
+        "\n"
+        "export function start(o: Other): void {}\n"
+    ),
+    "app.test.ts": (
+        "import { Ctx } from './app';\n"
+        "describe('x', () => { items.map((c: Ctx) => c) });\n"
+    ),
+}
+
+
+def test_type_finds_sites_on_unnamed_function_shapes(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_NESTED)
+    code = cli.main(["query", "type", "Ctx", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "app.ts:5  arrow function in make  [param: ctx]" in out
+    assert "app.ts:9  function type in Opts  [param: config]" in out
+    assert "app.test.ts:2  arrow function (module level)  [param: c]" in out
+    # Owned rows sort by relevance first; the module-level row last.
+    assert out.index("in make") < out.index("(module level)")
+
+
+def test_type_symbol_signature_rows_keep_their_shape(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_NESTED)
+    assert cli.main(["query", "type", "Other", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "start(o: Other) -> void  [param: o]" in out
+    assert "function type" not in out
+    capsys.readouterr()
+    code = cli.main(["query", "type", "Other", "--root", str(root), "--json"])
+    assert code == 0
+    entry = json.loads(capsys.readouterr().out)["results"][0]
+    assert entry["id"] == "app.ts::start"
+    assert "site" not in entry
+    assert "owner" not in entry
+
+
+def test_type_json_site_entry_shape(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_NESTED)
+    code = cli.main(["query", "type", "Ctx", "--root", str(root), "--json"])
+    assert code == 0
+    results = json.loads(capsys.readouterr().out)["results"]
+    by_line = {(r["path"], r["line"]): r for r in results}
+    member = by_line[("app.ts", 9)]
+    assert member["site"] == "function_type"
+    assert member["owner"]["id"] == "app.ts::Opts"
+    assert member["usage"] == "param"
+    assert member["param_name"] == "config"
+    assert member["raw_type"] == "Ctx"
+    top = by_line[("app.test.ts", 2)]
+    assert top["site"] == "arrow_function"
+    assert top["owner"] is None
+
+
+def test_type_exact_matches_site_rows(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_NESTED)
+    code = cli.main(["query", "type", "Ctx", "--root", str(root), "--exact"])
+    assert code == 0
+    assert "in Opts" in capsys.readouterr().out
+
+
+def test_type_no_tests_drops_test_file_sites(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_NESTED)
+    code = cli.main(
+        ["query", "type", "Ctx", "--root", str(root), "--no-tests"]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "in make" in out
+    assert "app.test.ts" not in out
+    assert "(module level)" not in out
+
+
+def test_unused_types_credits_sites_as_evidence(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Before sites were recorded ``Ctx`` had no type-usage evidence
+    # at all and ``--kinds types`` reported it dead.
+    root = make_mapped_repo(TS_NESTED)
+    cli.main(["unused", "--kinds", "types", "--root", str(root), "--json"])
+    doc = json.loads(capsys.readouterr().out)
+    flagged = {r["id"] for r in doc["results"]}
+    assert "app.ts::Ctx" not in flagged
+    assert "app.ts::Other" not in flagged
+
+
+def test_workset_type_impact_counts_sites_and_bundles_owners(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(TS_NESTED)
+    code = cli.main(
+        [
+            "workset",
+            "--symbol",
+            "Ctx",
+            "--type-impact",
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    # Two owned sites (make, Opts) + one module-level site, all
+    # counted; only the two owners can be bundled with the target.
+    assert doc["seed"]["blast_radius"]["type_usage"] == 3
+    assert doc["seed"]["touched_symbols"] == 3
+    assert "app.ts" in doc["seed"]["touched_files"]

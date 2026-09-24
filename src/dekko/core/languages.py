@@ -172,6 +172,13 @@ class LanguageSpec:
             ``None`` for languages
             without one (only TS/TSX have this construct as of this
             writing — plain JS has no ``type`` keyword at all).
+        type_use_query: Query capturing every parameter-list node
+            (``@params``) so ``extractor._collect_type_uses`` can
+            record the parameter/return annotations of the
+            function-shaped nodes ``definition_query`` does not name
+            (see ``model.TypeUse``). ``None`` for languages whose
+            parameter lists carry no annotations the read side could
+            match (plain JS) or that have no measurement yet.
     """
 
     name: str
@@ -190,6 +197,7 @@ class LanguageSpec:
     catch_query: str | None = None
     env_read_query: str | None = None
     type_alias_query: str | None = None
+    type_use_query: str | None = None
     enum_variant_query: str | None = None
     binding_query: str | None = None
     binding_function_scopes: tuple[str, ...] = ()
@@ -1025,6 +1033,24 @@ _TS_TYPE_ALIAS_QUERY = """
 (type_alias_declaration name: (type_identifier) @name)
 """
 
+# Every parameter list in the file. ``_TS_DEFINITIONS`` above names
+# five function shapes and parses only their parameters; a
+# ``formal_parameters`` node under anything else (a returned or
+# callback ``arrow_function``, a ``function_type`` on an interface
+# member or type alias, a ``method_signature``/``call_signature``/
+# ``construct_signature``, an overload ``function_signature``, a
+# class-field arrow) was parsed by nobody, so a type used only there
+# was invisible to ``dekko query type`` and looked dead to ``unused``.
+# The query is deliberately the bare node: ``extractor.
+# _collect_type_uses`` drops the lists the definition pass already
+# claimed, which keeps "unnamed" defined by what ``_TS_DEFINITIONS``
+# matches rather than by a second, parallel list of parent node
+# types that would drift. Not wired onto ``JAVASCRIPT``: its
+# parameter lists carry no annotations, so there is nothing to record.
+_TS_TYPE_USE_QUERY = """
+(formal_parameters) @params
+"""
+
 # TypeScript-only binding form, appended to ``JAVASCRIPT.import_query``
 # for the TS/TSX specs: a CommonJS require wearing a type assertion,
 # ``const { X } = require("./x") as typeof import("./x")``. claude-code
@@ -1073,6 +1099,7 @@ TYPESCRIPT = LanguageSpec(
     catch_query=_JS_CATCH_QUERY,
     env_read_query=_JS_ENV_READ_QUERY,
     type_alias_query=_TS_TYPE_ALIAS_QUERY,
+    type_use_query=_TS_TYPE_USE_QUERY,
 )
 
 TSX = LanguageSpec(
@@ -1095,6 +1122,7 @@ TSX = LanguageSpec(
     catch_query=_JS_CATCH_QUERY,
     env_read_query=_JS_ENV_READ_QUERY,
     type_alias_query=_TS_TYPE_ALIAS_QUERY,
+    type_use_query=_TS_TYPE_USE_QUERY,
 )
 
 # Type-reference edges: a struct/interface type used only

@@ -9,6 +9,35 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-09-24
+
+### Fixed
+- **`query type`/`find_type_usages`/`unused` now see a type used
+  only on a function-shaped site the map has no symbol for**
+  (TypeScript/TSX). A parameter or return annotation on a returned
+  or callback arrow function, a function-typed interface member, a
+  `type Fn = (a: A) => B` alias, a method/call/construct/overload
+  signature or a class-field arrow was parsed by nobody: only the
+  five named function shapes ever filled `Symbol.params`/`returns`,
+  so `query type` reported no results for a type used only there and
+  `unused --kinds types` flagged it. The extractor now records those
+  annotations as `type_uses` (a new, additive `map.json` section: one
+  record per typed parameter and per return type, attributed to the
+  innermost enclosing definition or to the module) and the read side
+  matches them with the same token rule it applies to a symbol's own
+  signature. A site row prints its file and line, the kind of site
+  and its owner: `sdk-followup-coordinator.ts:31  function type in
+  SdkFollowupCoordinatorOptions  [param: config]`; JSON entries for
+  sites carry `site`, `line` and `owner`, while entries for a
+  symbol's own signature are unchanged. `--no-tests` drops sites by
+  path, `workset --type-impact` counts them and bundles their owners.
+  On cline, `unused --kinds types` drops from 557 to 459 rows and
+  `query type AccountContext`/`SessionConfig` find their sites; on
+  claude-code, 387 to 364. Symbol, edge, reference and heritage sets
+  are byte-identical on every evaluation repo; the map gains ~7,500
+  records (+1.8 MB) on cline and none on non-TS repos. Struct/class
+  fields, generic arguments and JSX remain the documented gap.
+
 ## [1.1.1] — 2026-09-24
 
 ### Fixed

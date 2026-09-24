@@ -79,11 +79,17 @@ matchers, test-case generators, a tool that only exists in a test build)
 counts as test code for `--no-tests` and `unused`, but is never listed as an
 impacted test; the walk passes through it to whatever tests lie beyond.
 
-`query type` only covers what tree-sitter extracts a type from:
-function/method parameter and return-type annotations. It does not see
-struct/class **fields** typed with the target type — those aren't
-extracted as their own symbols with a type at all, so a clean result
-set from `query type` doesn't mean the type is otherwise unused.
+`query type` covers parameter and return-type annotations at every
+function-shaped site: named functions and methods, and (TypeScript/TSX)
+the sites the map has no symbol for — a returned or callback arrow
+function, a function-typed interface member, a `type Fn = (a: A) => B`
+alias, a method or overload signature, a class-field arrow. A site row
+prints its own file and line, what kind of site it is, and the
+enclosing definition (`app.ts:31  function type in Options  [param:
+config]`), or `(module level)` when there is none. It does not see
+struct/class **fields** typed with the target type, generic arguments,
+or JSX — those aren't function-shaped, so a clean result set from
+`query type` doesn't mean the type is otherwise unused.
 Default matching is identifier-token based (`Config` matches
 `Optional[Config]`, `Vec<Config>`, `Config | None`, but not
 `ConfigManager`); pass `--exact` to match the stored type text

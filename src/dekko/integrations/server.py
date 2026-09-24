@@ -1232,15 +1232,18 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "find_type_usages",
-        "description": "Every function/method that uses a type as a "
-        "parameter or return type — for 'what breaks if I change this "
+        "description": "Every parameter or return annotation that "
+        "uses a type — for 'what breaks if I change this "
         "struct/class's shape' questions the call graph alone can't "
         "answer, since a function can use a type without calling "
-        "anything on it. Matches the bare type name inside wrapper "
+        "anything on it. Covers every function-shaped site: named "
+        "functions/methods, and (TS/TSX) callbacks and returned arrow "
+        "functions, function-typed interface members, method and "
+        "overload signatures, reported under their enclosing "
+        "definition. Matches the bare type name inside wrapper "
         "syntax (Optional[Config], Vec<Config>, Config | None all match "
-        "'Config') unless exact=true. Only functions/methods carry "
-        "typed params/returns — struct/class fields typed with the "
-        "target type are not covered.",
+        "'Config') unless exact=true. Struct/class fields, generic "
+        "arguments and JSX typed with the target are not covered.",
         "inputSchema": {
             "type": "object",
             "properties": {

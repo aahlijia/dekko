@@ -14,6 +14,7 @@ import difflib
 import io
 import json
 from collections import Counter
+from dataclasses import dataclass
 import re
 import sys
 from collections import deque
@@ -2591,25 +2592,86 @@ def _type_matches(type_text: str | None, needle: str, exact: bool) -> bool:
     return needle in _IDENT_RE.findall(type_text)
 
 
-def _type_usage_row(sym: Symbol, usage: str, param_name: str | None) -> str:
+@dataclass
+class TypeUsageRow:
+    """One type-usage hit: a param/return annotation naming the needle.
+
+    Two sources feed the same row. A symbol's own signature
+    (``Symbol.params``/``Symbol.returns``) gives ``site=None`` and the
+    symbol's path/line. A function-shaped node the map never named
+    (``model.TypeUse``: a callback or returned arrow, a function-typed
+    interface member, a method or overload signature) gives ``site``
+    set to that node's type, its own path/line, and ``symbol`` set to
+    the innermost enclosing definition, or ``None`` at module level.
+
+    Attributes:
+        symbol: The function/method whose signature matched, or the
+            enclosing definition of a site row (``None`` when the
+            site is module-level).
+        usage: ``"param"`` or ``"return"``.
+        param_name: The parameter's display name, ``None`` for a
+            return-type row.
+        raw_type: The stored annotation text that matched.
+        path: File of the hit.
+        line: 1-based line of the hit.
+        site: ``None`` for a symbol's own signature; otherwise the
+            function-shaped node type (``"arrow_function"``,
+            ``"function_type"``, ...).
+    """
+
+    symbol: Symbol | None
+    usage: str
+    param_name: str | None
+    raw_type: str
+    path: str
+    line: int
+    site: str | None = None
+
+
+def _site_label(site: str) -> str:
+    """Human wording for a ``TypeUse.site`` node type."""
+    return site.replace("_", " ")
+
+
+def _type_usage_row(row: TypeUsageRow) -> str:
     """One text row for a type-usage hit."""
-    tag = f"[param: {param_name}]" if usage == "param" else "[return]"
-    return f"{_sym_line(sym)}  {tag}"
+    tag = f"[param: {row.param_name}]" if row.usage == "param" else "[return]"
+    if row.site is None and row.symbol is not None:
+        return f"{_sym_line(row.symbol)}  {tag}"
+    where = (
+        f"in {row.symbol.qualname}"
+        if row.symbol is not None
+        else "(module level)"
+    )
+    label = _site_label(row.site or "")
+    return f"{row.path}:{row.line}  {label} {where}  {tag}"
 
 
-def _type_usage_entry(
-    index: MapIndex,
-    sym: Symbol,
-    usage: str,
-    param_name: str | None,
-    raw_type: str,
-) -> dict:
-    """One JSON entry for a type-usage hit."""
-    entry = _sym_json(index, sym)
-    entry["usage"] = usage
-    if param_name is not None:
-        entry["param_name"] = param_name
-    entry["raw_type"] = raw_type
+def _type_usage_entry(index: MapIndex, row: TypeUsageRow) -> dict:
+    """One JSON entry for a type-usage hit.
+
+    A symbol's own signature keeps the shape it always had (the
+    symbol's fields plus ``usage``/``param_name``/``raw_type``). A
+    site row is its own path/line plus ``site`` and an ``owner``
+    (the enclosing symbol's rendering, or ``null``).
+    """
+    if row.site is None and row.symbol is not None:
+        entry = _sym_json(index, row.symbol)
+    else:
+        entry = {
+            "path": row.path,
+            "line": row.line,
+            "site": row.site,
+            "owner": (
+                _sym_json(index, row.symbol)
+                if row.symbol is not None
+                else None
+            ),
+        }
+    entry["usage"] = row.usage
+    if row.param_name is not None:
+        entry["param_name"] = row.param_name
+    entry["raw_type"] = row.raw_type
     return entry
 
 
@@ -2630,19 +2692,23 @@ def _run_type_not_found(index: MapIndex, needle: str) -> int:
 
 def type_usage_rows(
     index: MapIndex, needle: str, exact: bool = False
-) -> list[tuple[Symbol, str, str | None, str]]:
-    """Every function/method row using ``needle`` as a param/return type.
+) -> list[TypeUsageRow]:
+    """Every param/return annotation naming ``needle``, repo-wide.
 
     The reusable core behind ``_run_type_usage`` (``dekko query type``/
     ``find_type_usages``) — factored out so a second call site
     (``workset``'s ``--type-impact``) can reuse the same matching logic
-    without duplicating it. Walks every ``function``/``method``
-    symbol's ``returns`` and ``params[].type`` directly — a pure read
-    over data already on disk in ``map.json``, no resolver involvement.
-    Only ``function``/``method`` symbols ever carry non-empty
-    ``params``/``returns`` (see ``extractor._collect_definitions``), so
-    this cannot answer "what struct fields are typed X" — that's a
-    real extraction-pipeline gap, not a matching-strategy shortcoming.
+    without duplicating it. A pure read over data already on disk in
+    ``map.json``, no resolver involvement, from two places: every
+    ``function``/``method`` symbol's own ``returns``/``params[].type``
+    (the only symbol kinds that carry them, see
+    ``extractor._collect_definitions``), and every ``index.type_uses``
+    record, the annotations on function-shaped nodes that are not
+    symbols (a callback or returned arrow function, a function-typed
+    interface member, a method/overload signature — see
+    ``model.TypeUse``). Still not covered: a struct/class field typed
+    with the target, a generic argument, JSX. Those are not
+    function-shaped and no record exists for them.
 
     Args:
         index: Loaded map index.
@@ -2651,26 +2717,55 @@ def type_usage_rows(
             identifier token inside wrapper syntax.
 
     Returns:
-        ``(symbol, usage, param_name, raw_type)`` rows — ``usage`` is
-        ``"param"`` or ``"return"``, ``param_name`` is ``None`` for a
-        return-type row — sorted by relevance (most central/production
-        code first). A symbol appears once per matching param/return,
-        so it can appear more than once (e.g. a function that both
-        takes and returns the same type).
+        :class:`TypeUsageRow` rows, symbol-signature and site rows
+        together, sorted by relevance of the symbol (most central/
+        production code first; for a site row that is its enclosing
+        definition), with module-level sites last in path/line order.
+        A symbol appears once per matching param/return, so it can
+        appear more than once (e.g. a function that both takes and
+        returns the same type).
     """
-    rows: list[tuple[Symbol, str, str | None, str]] = []
+    rows: list[TypeUsageRow] = []
     for sym in index.symbols_by_id.values():
         if sym.kind not in ("function", "method"):
             continue
         if _type_matches(sym.returns, needle, exact):
-            rows.append((sym, "return", None, sym.returns))
+            rows.append(
+                TypeUsageRow(
+                    sym, "return", None, sym.returns, sym.path, sym.start_line
+                )
+            )
         rows.extend(
-            (sym, "param", p.name, p.type)
+            TypeUsageRow(
+                sym, "param", p.name, p.type, sym.path, sym.start_line
+            )
             for p in sym.params
             if _type_matches(p.type, needle, exact)
         )
-    rows.sort(key=lambda r: relevance_key(r[0], index))
+    for use in index.type_uses:
+        if not _type_matches(use.type, needle, exact):
+            continue
+        owner = index.symbols_by_id.get(use.owner_id) if use.owner_id else None
+        rows.append(
+            TypeUsageRow(
+                owner,
+                use.usage,
+                use.param_name,
+                use.type,
+                use.path,
+                use.line,
+                site=use.site,
+            )
+        )
+    rows.sort(key=lambda r: _type_usage_sort_key(r, index))
     return rows
+
+
+def _type_usage_sort_key(row: TypeUsageRow, index: MapIndex) -> tuple:
+    """Symbol relevance first; module-level sites after, by position."""
+    if row.symbol is not None:
+        return (0, relevance_key(row.symbol, index))
+    return (1, row.path, row.line)
 
 
 def type_usage_name_index(index: MapIndex) -> frozenset[str]:
@@ -2695,10 +2790,12 @@ def type_usage_name_index(index: MapIndex) -> frozenset[str]:
 
     Returns:
         Every identifier token found in any function/method's declared
-        return type or parameter type text. A type name in this set
-        has at least one ``exact=False`` type-usage match somewhere in
-        the repo (per ``type_usage_rows(index, name, exact=False)``);
-        a type name absent from it has none.
+        return type or parameter type text, or in any
+        ``index.type_uses`` record (the same two sources
+        ``type_usage_rows`` reads). A type name in this set has at
+        least one ``exact=False`` type-usage match somewhere in the
+        repo (per ``type_usage_rows(index, name, exact=False)``); a
+        type name absent from it has none.
     """
     names: set[str] = set()
     for sym in index.symbols_by_id.values():
@@ -2709,6 +2806,8 @@ def type_usage_name_index(index: MapIndex) -> frozenset[str]:
         for p in sym.params:
             if p.type:
                 names.update(_IDENT_RE.findall(p.type))
+    for use in index.type_uses:
+        names.update(_IDENT_RE.findall(use.type))
     return frozenset(names)
 
 
@@ -2739,10 +2838,7 @@ def _run_type_usage(
     if not rows:
         return _run_type_not_found(index, needle), None
     if as_json:
-        entries = [
-            _type_usage_entry(index, sym, usage, pname, raw)
-            for sym, usage, pname, raw in rows
-        ]
+        entries = [_type_usage_entry(index, row) for row in rows]
         kept, meter = _fit_entries(entries, budget, limit)
         doc = {
             "action": "type",
@@ -2756,9 +2852,7 @@ def _run_type_usage(
             doc["coverage_warning"] = coverage
         print(json.dumps(doc, indent=2))
         return EXIT_OK, None
-    lines = [
-        _type_usage_row(sym, usage, pname) for sym, usage, pname, _ in rows
-    ]
+    lines = [_type_usage_row(row) for row in rows]
     return EXIT_OK, _emit_lines(lines, budget, limit)
 
 

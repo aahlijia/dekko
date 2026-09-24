@@ -18,6 +18,7 @@ from dekko.core.model import (
     RawRef,
     RawThrow,
     Symbol,
+    TypeUse,
 )
 from tree_sitter import Node, Parser, Query, QueryCursor
 from dekko.core.grammars import get_grammar
@@ -112,6 +113,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     imports = _collect_imports(spec, rel, import_matches)
     type_aliases = _collect_type_aliases(spec, tree.root_node)
     enum_variants = _collect_enum_variants(spec, tree.root_node)
+    type_uses = _collect_type_uses(spec, tree.root_node, rel, defs)
     return FileMap(
         path=rel,
         language=spec.name,
@@ -125,6 +127,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         imports=imports,
         type_aliases=type_aliases,
         enum_variants=enum_variants,
+        type_uses=type_uses,
         doc=_module_doc(spec.name, tree.root_node),
     )
 
@@ -3135,6 +3138,135 @@ def _collect_type_aliases(spec: LanguageSpec, root: Node) -> list[str]:
         if name_node is not None:
             names.append(_text(name_node))
     return names
+
+
+# ---------------------------------------------------------------------
+# Type uses on function-shaped nodes that are not symbols
+
+# Parameter lists the definition pass reaches through one wrapper: a
+# ``const f = (a: A) => ...`` is captured with ``@def`` on the
+# ``variable_declarator``, so its ``formal_parameters``' parent is the
+# arrow, not the definition node.
+_DECLARATOR_BOUND_FUNCTIONS = frozenset(
+    {"arrow_function", "function_expression"}
+)
+# ``construct_signature`` (``new (a: A): B``) is the one function-shaped
+# node whose return annotation sits in ``type`` rather than
+# ``return_type`` in the pinned tree-sitter-typescript grammar.
+_RETURN_TYPE_FIELDS = ("return_type", "type")
+
+
+def _is_claimed_params(node: Node, def_ids: frozenset[int]) -> bool:
+    """Whether the definition pass already parsed this parameter list."""
+    parent = node.parent
+    if parent is None:
+        return True
+    if parent.id in def_ids:
+        return True
+    grand = parent.parent
+    return (
+        parent.type in _DECLARATOR_BOUND_FUNCTIONS
+        and grand is not None
+        and grand.id in def_ids
+    )
+
+
+def _return_type_text(owner: Node) -> str | None:
+    """The owner node's return annotation, normalized like ``returns``."""
+    fields = _RETURN_TYPE_FIELDS
+    if owner.type != "construct_signature":
+        fields = fields[:1]
+    for name in fields:
+        ret = owner.child_by_field_name(name)
+        if ret is not None:
+            return _text(ret).lstrip(":").strip() or None
+    return None
+
+
+def _collect_type_uses(
+    spec: LanguageSpec,
+    root: Node,
+    rel: str,
+    defs: list[tuple[Node, Symbol]],
+) -> list[TypeUse]:
+    """Parameter/return annotations on parameter lists no symbol owns.
+
+    Walks every ``formal_parameters`` node ``spec.type_use_query``
+    finds and skips the ones ``_collect_definitions`` already parsed
+    into a ``Symbol`` (``_is_claimed_params``). What remains is every
+    function-shaped node the map has no name for: returned and
+    callback arrow functions, function-typed interface members and
+    type aliases, method/call/construct signatures, overload
+    signatures, class-field arrows. Their annotations are the same
+    ``required_parameter``/``optional_parameter`` shape the owning
+    language's parameter parser already handles, so each typed
+    parameter and each return type becomes one ``TypeUse`` attributed
+    to the innermost enclosing definition (``_enclosing``, as
+    ``_collect_refs`` does), or to the module when there is none. A
+    list under an ``ERROR`` node is skipped: tree-sitter could not
+    place it, so neither can this.
+
+    Args:
+        spec: Language spec; returns ``[]`` when it has no
+            ``type_use_query``.
+        root: Parsed tree root.
+        rel: Repo-relative path, stored on every record.
+        defs: The definition pass's ``(node, symbol)`` pairs.
+
+    Returns:
+        One record per typed parameter and per return type, in
+        source order.
+    """
+    if spec.type_use_query is None:
+        return []
+    def_ids = frozenset(node.id for node, _ in defs)
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    out: list[TypeUse] = []
+    for _, caps in _run_query(spec.grammar, spec.type_use_query, root):
+        params_node = _one(caps, "params")
+        if params_node is None or _is_claimed_params(params_node, def_ids):
+            continue
+        owner = params_node.parent
+        if owner is None or owner.type == "ERROR":
+            continue
+        enclosing = _enclosing(spans, params_node.start_byte)
+        owner_id = enclosing.id if enclosing else None
+        params = _parse_params(spec.param_style, params_node)
+        # The TS parameter parser emits one ``Param`` per named child,
+        # in order, so the pairing below recovers each parameter's own
+        # line; a parser that ever skips children falls back to the
+        # list's line rather than misattribute.
+        nodes = params_node.named_children
+        aligned = len(nodes) == len(params)
+        for i, param in enumerate(params):
+            if not param.type:
+                continue
+            at = nodes[i] if aligned else params_node
+            out.append(
+                TypeUse(
+                    owner_id=owner_id,
+                    path=rel,
+                    line=at.start_point[0] + 1,
+                    site=owner.type,
+                    usage="param",
+                    param_name=param.name,
+                    type=param.type,
+                )
+            )
+        returns = _return_type_text(owner)
+        if returns is not None:
+            out.append(
+                TypeUse(
+                    owner_id=owner_id,
+                    path=rel,
+                    line=owner.start_point[0] + 1,
+                    site=owner.type,
+                    usage="return",
+                    param_name=None,
+                    type=returns,
+                )
+            )
+    return out
 
 
 # ---------------------------------------------------------------------

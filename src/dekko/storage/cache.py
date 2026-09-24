@@ -37,6 +37,7 @@ from dekko.core.model import (
     RawHeritage,
     RawRef,
     RawThrow,
+    TypeUse,
 )
 
 CACHE_VERSION = 1
@@ -85,6 +86,7 @@ def _filemap_from_dict(d: dict) -> FileMap:
         imports=[Import(**i) for i in d.get("imports", [])],
         type_aliases=list(d.get("type_aliases", [])),
         enum_variants=list(d.get("enum_variants", [])),
+        type_uses=[TypeUse(**t) for t in d.get("type_uses", [])],
         error=d.get("error"),
         doc=d.get("doc"),
     )

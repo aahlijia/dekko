@@ -30,6 +30,7 @@ from dekko.core.model import (
     Import,
     Param,
     Symbol,
+    TypeUse,
 )
 
 try:
@@ -776,6 +777,14 @@ class MapIndex:
             other new field added alongside it, there is no
             corresponding `env_reads_ambiguous`/`env_reads_external`
             side table.
+        type_uses: Every parameter/return annotation on a
+            function-shaped node that is not a symbol, repo-wide
+            (empty for maps written before the section existed) —
+            see ``model.TypeUse``. A flat list, not an index: the only
+            readers are ``query.type_usage_rows`` (a token match over
+            every record, the same scan it makes over every symbol's
+            own params/returns) and ``query.type_usage_name_index``
+            (one tokenizing pass).
         notes: Symbol id → note texts loaded from ``.dekko/notes.json``.
         provenance: Provenance stamp, or ``None`` for v1 documents.
         doc_version: The on-disk document's ``"version"`` field (``1``
@@ -853,6 +862,7 @@ class MapIndex:
     )
     catches: list[CatchSite] = field(default_factory=list)
     env_reads_by_key: dict[str, list[EnvRead]] = field(default_factory=dict)
+    type_uses: list[TypeUse] = field(default_factory=list)
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
     doc_version: int = MAP_DOC_VERSION
@@ -967,6 +977,7 @@ class MapIndex:
         _filter_module_graph(self, out)
         _filter_throws_catches(self, out, by_id)
         _filter_env_reads(self, out)
+        out.type_uses = [t for t in self.type_uses if not is_test_path(t.path)]
         return out
 
 
@@ -1503,6 +1514,7 @@ def load_map(root: Path) -> MapIndex | None:
     _load_module_graph(index, doc, ids)
     _load_throws_catches(index, doc, ids)
     _load_env_reads(index, doc)
+    _load_type_uses(index, doc)
     return index
 
 
@@ -1660,6 +1672,28 @@ def _load_env_reads(index: MapIndex, doc: dict) -> None:
         index.env_reads_by_key.setdefault(read.key, []).append(read)
 
 
+def _load_type_uses(index: MapIndex, doc: dict) -> None:
+    """Fill ``index.type_uses`` from a parsed ``map.json`` doc.
+
+    Absent from documents written before the section existed;
+    ``.get("type_uses", [])`` makes this a no-op for those. Plain
+    strings throughout, no id table (``owner_id`` is disclosure, never
+    resolved — see ``model.TypeUse``), the ``_load_env_reads`` shape.
+    """
+    for d in doc.get("type_uses", []):
+        index.type_uses.append(
+            TypeUse(
+                owner_id=d.get("owner_id"),
+                path=d.get("path", ""),
+                line=d.get("line", 0),
+                site=d.get("site", ""),
+                usage=d.get("usage", "param"),
+                param_name=d.get("param_name"),
+                type=d.get("type", ""),
+            )
+        )
+
+
 def _index_ambiguous(
     entries: Iterator[tuple[str, str, list[str]]],
 ) -> tuple[dict[str, list[tuple[str, str]]], dict[str, list[str]]]:
@@ -1761,6 +1795,7 @@ def index_from_maps(
     _index_module_graph(index, graph)
     _index_throws_catches(index, graph)
     _index_env_reads(index, graph)
+    index.type_uses = [t for fm in files for t in fm.type_uses]
     return index
 
 

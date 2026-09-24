@@ -60,7 +60,10 @@ class BlastRadius:
         type_usage: Raw count of type-usage-matching rows found
             (``query.type_usage_rows``), before deduping against
             heritage overlap — a symbol can appear in this count more
-            than once (e.g. taking and returning the same type).
+            than once (e.g. taking and returning the same type), and
+            a site row on a function-shaped node that is not a symbol
+            (a callback's parameter, a function-typed interface
+            member) counts here through its enclosing definition.
         heritage: Raw count of transitive implementors found
             (``query.walk_heritage``), before deduping.
         note: Undercount caveat when the target's heritage has
@@ -182,8 +185,11 @@ def _type_impact_touched(
         index, sym.id, direction="in", relation=None
     )
     extra: dict[str, Symbol] = {}
-    for row_sym, _usage, _param, _raw in usage_rows:
-        extra[row_sym.id] = row_sym
+    for row in usage_rows:
+        # A module-level site (``row.symbol is None``) has no
+        # definition to bundle; it is still counted below.
+        if row.symbol is not None:
+            extra[row.symbol.id] = row.symbol
     for sub_sym, _relation, _depth in heritage_hits:
         extra[sub_sym.id] = sub_sym
     # Heritage's own ambiguity disclosure (`_run_heritage`'s ambig_in
