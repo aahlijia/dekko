@@ -22,17 +22,19 @@ import sys
 import tarfile
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cache as memoize
 from pathlib import Path
 
 from dekko import repo_ops
 from dekko.storage import cache as cache_mod
 from dekko.render import mapfile
-from dekko.storage import filelock, revcache
+from dekko.storage import filelock, resolvecache, revcache
 from dekko.core import walker
 from dekko.core.model import Import, Symbol
 from dekko.textutil import signature
-from dekko.core.resolver import MODULE_CALLER_SUFFIX, resolve
+from dekko.core.resolver import MODULE_CALLER_SUFFIX, ResolveReuse, resolve
 
 EXIT_SAME = 0
 EXIT_DIFFERENT = 1
@@ -80,12 +82,20 @@ class Snapshot:
         body: Symbol id → short hash of the definition's source text.
         imports: File path → imports declared in it (used by
             ``affected`` for its import-edge fallback).
+        ambiguous_in: Candidate id → ``(caller_id, name)`` pairs for
+            calls that matched it among 2+ candidates, same as
+            ``MapIndex.ambiguous_in`` (used by ``affected``'s possible
+            impacts). Only the working-tree side fills it; the
+            rev-cache neither stores nor needs it.
     """
 
     symbols: dict[str, Symbol] = field(default_factory=dict)
     callers: dict[str, list[str]] = field(default_factory=dict)
     body: dict[str, str] = field(default_factory=dict)
     imports: dict[str, list[Import]] = field(default_factory=dict)
+    ambiguous_in: dict[str, list[tuple[str, str]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -155,6 +165,8 @@ def snapshot(
     cache: cache_mod.IncrementalCache | None = None,
     candidates: list[str] | None = None,
     jobs: int = 1,
+    reuse_resolution: bool = False,
+    follow_symlinks: bool = False,
 ) -> Snapshot:
     """Map a tree and capture its symbols, callers, and body hashes.
 
@@ -189,6 +201,15 @@ def snapshot(
             already-resolved concrete count (see
             ``repo_ops.resolve_workers``), not the raw ``--jobs`` CLI
             value (which allows ``0`` for "all cores").
+        reuse_resolution: Also reuse ``root``'s cached call resolution
+            for files the edit can't have affected, the way an
+            incremental ``dekko map`` does. Only valid for the working
+            tree whose ``.dekko/`` holds both caches, with ``cache``
+            loaded from it. Resolution is most of a snapshot's cost on
+            a large repo, so this is what makes a stale-map diff cheap.
+            Nothing is saved.
+        follow_symlinks: See ``walker.discover``; pass the map's own
+            recorded setting so both sides discover what the map did.
     """
     files, _ = repo_ops.map_repository(
         root,
@@ -198,8 +219,13 @@ def snapshot(
         cache=cache,
         jobs=jobs,
         candidates=candidates,
+        follow_symlinks=follow_symlinks,
     )
-    graph = resolve(files, workers=jobs, root=root)
+    reuse = None
+    if reuse_resolution and cache is not None:
+        reuse = resolvecache.build_reuse(root, files, cache)
+        _maybe_warn_stale_new_side(len(files), reuse, jobs)
+    graph = resolve(files, workers=jobs, root=root, reuse=reuse)
     snap = Snapshot()
     all_syms: list[Symbol] = []
     for fm in files:
@@ -210,6 +236,7 @@ def snapshot(
             snap.imports[fm.path] = fm.imports
     snap.body = _body_hashes(root, all_syms)
     snap.callers = graph.calls_in
+    snap.ambiguous_in, _ = mapfile.index_ambiguous(iter(graph.ambiguous))
     return snap
 
 
@@ -235,6 +262,7 @@ def snapshot_from_index(index: mapfile.MapIndex, root: Path) -> Snapshot:
     snap = Snapshot()
     snap.symbols = dict(index.symbols_by_id)
     snap.callers = index.calls_in
+    snap.ambiguous_in = index.ambiguous_in
     # Match snapshot()'s own construction exactly: only files with at
     # least one import get an entry. index.imports_by_path (loaded from
     # map.json) has a key for every mapped file, even ones with an
@@ -256,19 +284,45 @@ def snapshot_new_side(
     max_file_size: int,
     index: mapfile.MapIndex | None,
     jobs: int = 1,
+    load_cache: Callable[[], dict[str, dict]] | None = None,
+    follow_symlinks: bool = False,
 ) -> Snapshot:
     """New-side (working tree) snapshot, reusing a fresh index when possible.
 
-    Falls back to a full re-parse (``snapshot``) whenever ``index`` is
-    missing or stale against the current working tree, so the
-    performance win never comes at the cost of correctness — a caller
-    that forgot to regenerate the map first still gets an accurate
-    diff, just without the speedup. ``jobs`` (see ``snapshot``) only
-    matters on that fallback path.
+    Falls back to re-mapping the working tree (``snapshot``) whenever
+    ``index`` is missing or stale, so a caller that forgot to
+    regenerate the map first still gets an accurate diff. That
+    fallback reuses the last ``dekko map``'s extraction cache and
+    cached call resolution for everything the edit can't have
+    affected, so it costs about what an incremental map does, and
+    writes nothing. ``jobs`` (see ``snapshot``) only matters on the
+    fallback.
+
+    Args:
+        root: Repository root (the working tree).
+        subpath: Optional repo-relative subtree restriction.
+        excludes: Extra glob patterns to skip.
+        max_file_size: Size cap in bytes.
+        index: The current-tree index, or ``None``.
+        jobs: Resolved worker count for the fallback.
+        load_cache: Returns ``root``'s extraction-cache entries; lets
+            ``snapshot_pair`` parse the file once for both sides.
+            ``None`` loads it here.
+        follow_symlinks: The map's recorded setting.
     """
     if index is not None and mapfile.check_freshness(root, index).fresh:
         return snapshot_from_index(index, root)
-    return snapshot(root, subpath, excludes, max_file_size, jobs=jobs)
+    entries = load_cache() if load_cache is not None else cache_mod.load(root)
+    return snapshot(
+        root,
+        subpath,
+        excludes,
+        max_file_size,
+        cache=cache_mod.IncrementalCache(entries),
+        jobs=jobs,
+        reuse_resolution=True,
+        follow_symlinks=follow_symlinks,
+    )
 
 
 def old_snapshot(
@@ -277,9 +331,10 @@ def old_snapshot(
     subpath: str | None,
     excludes: tuple[str, ...],
     max_file_size: int,
-    old_cache: cache_mod.IncrementalCache,
+    load_cache: Callable[[], dict[str, dict]],
     jobs: int = 1,
-) -> Snapshot | None:
+    follow_symlinks: bool = False,
+) -> Snapshot:
     """Old-side snapshot for ``target_rev``, from the rev-cache when possible.
 
     Shared by ``diff.run`` and ``affected.changes`` — both need the
@@ -300,15 +355,21 @@ def old_snapshot(
         subpath: Optional repo-relative subtree restriction.
         excludes: Extra glob patterns to skip.
         max_file_size: Size cap in bytes.
-        old_cache: Incremental extraction cache to pass through to
-            ``snapshot()`` on a rev-cache miss.
+        load_cache: Returns the current tree's extraction-cache
+            entries. Called only on a rev-cache miss, where
+            ``snapshot()`` reuses any file whose old content is
+            byte-identical to a cached entry.
         jobs: Resolved worker count for the rev-cache-miss export/
             re-parse/resolve path — see ``snapshot``. No effect on a
             rev-cache hit, which skips ``snapshot()`` entirely.
+        follow_symlinks: The map's recorded setting.
 
     Returns:
-        The old-side ``Snapshot``, or ``None`` if ``target_rev`` cannot
-        be exported (unknown rev, not a git repo).
+        The old-side ``Snapshot``.
+
+    Raises:
+        ExportError: If ``target_rev`` can't be exported (unknown rev,
+            not a git repo, or a failed extraction such as a full disk).
     """
     sha = revcache.resolve_sha(root, target_rev)
     if sha is not None:
@@ -333,9 +394,10 @@ def old_snapshot(
                 subpath,
                 excludes,
                 max_file_size,
-                old_cache,
+                load_cache,
                 sha,
                 jobs=jobs,
+                follow_symlinks=follow_symlinks,
             )
     return _build_and_cache_old_snapshot(
         root,
@@ -343,9 +405,10 @@ def old_snapshot(
         subpath,
         excludes,
         max_file_size,
-        old_cache,
+        load_cache,
         sha,
         jobs=jobs,
+        follow_symlinks=follow_symlinks,
     )
 
 
@@ -439,26 +502,37 @@ def snapshot_pair(
     subpath = prov.get("subpath")
     excludes = tuple(prov.get("excludes", []))
     max_file_size = prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE)
-    old_cache = cache_mod.IncrementalCache(cache_mod.load(root))
-    old = old_snapshot(
-        root,
-        target_rev,
-        subpath,
-        excludes,
-        max_file_size,
-        old_cache,
-        jobs=jobs,
-    )
-    if old is None:
+    follow_symlinks = prov.get("follow_symlinks", False)
+    # Parsed at most once, and only if a side actually extracts: a
+    # rev-cache hit with a fresh index needs neither side's cache.
+    load_cache = memoize(lambda: cache_mod.load(root))
+    try:
+        old = old_snapshot(
+            root,
+            target_rev,
+            subpath,
+            excludes,
+            max_file_size,
+            load_cache,
+            jobs=jobs,
+            follow_symlinks=follow_symlinks,
+        )
+    except ExportError as exc:
         print(
-            f"dekko: cannot export git rev '{target_rev}' "
-            f"(unknown rev or not a git repo)",
+            f"dekko: cannot export git rev '{target_rev}': {exc}",
             file=sys.stderr,
         )
         return None
 
     new = snapshot_new_side(
-        root, subpath, excludes, max_file_size, index, jobs=jobs
+        root,
+        subpath,
+        excludes,
+        max_file_size,
+        index,
+        jobs=jobs,
+        load_cache=load_cache,
+        follow_symlinks=follow_symlinks,
     )
     return old, new
 
@@ -509,21 +583,25 @@ def _build_and_cache_old_snapshot(
     subpath: str | None,
     excludes: tuple[str, ...],
     max_file_size: int,
-    old_cache: cache_mod.IncrementalCache,
+    load_cache: Callable[[], dict[str, dict]],
     sha: str | None,
     jobs: int = 1,
-) -> Snapshot | None:
+    follow_symlinks: bool = False,
+) -> Snapshot:
     """Export, re-parse, and (if resolvable) cache the old-side snapshot.
 
     The always-correct fallback path shared by every branch of
     :func:`old_snapshot`, whether or not per-SHA lock coordination
     applies (an unresolvable ``target_rev`` never has a SHA to lock
     on).
+
+    The old side gets its own ``IncrementalCache`` over the shared
+    entries: its ``store()`` calls record old-rev content, which the
+    new side's reuse plan would otherwise read as the current tree.
     """
     with tempfile.TemporaryDirectory(prefix="dekko-diff-") as tmp:
         old_root = Path(tmp)
-        if not export_rev(root, target_rev, old_root):
-            return None
+        export_rev(root, target_rev, old_root)
         candidates = tracked_at_rev(root, target_rev)
         _maybe_warn_sequential(jobs, candidates)
         old = snapshot(
@@ -531,9 +609,10 @@ def _build_and_cache_old_snapshot(
             subpath,
             excludes,
             max_file_size,
-            cache=old_cache,
+            cache=cache_mod.IncrementalCache(load_cache()),
             candidates=candidates,
             jobs=jobs,
+            follow_symlinks=follow_symlinks,
         )
     if sha is not None:
         revcache.save(root, sha, old)
@@ -573,22 +652,62 @@ def sequential_disclosure_message(
     if tracked_count < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
         return None
     if workers != 1:
-        cores = os.cpu_count() or 1
-        with_what = (
-            f"all {cores} cores"
-            if workers <= 0 or workers >= cores
-            else f"{workers} workers (of {cores} cores)"
-        )
         return (
             f"note: no rev-cache for this commit; resolving "
-            f"{tracked_count} git-tracked files with {with_what} may "
-            f"take a while"
+            f"{tracked_count} git-tracked files with "
+            f"{_workers_phrase(workers)} may take a while"
         )
     return (
         f"note: no rev-cache for this commit; single-threaded resolve "
         f"on {tracked_count} git-tracked files may take a while -- "
         f"pass --jobs 0 to use all cores"
     )
+
+
+def _workers_phrase(workers: int) -> str:
+    """``all 11 cores``, ``4 workers (of 11 cores)`` or ``1 worker``."""
+    cores = os.cpu_count() or 1
+    if workers <= 0 or workers >= cores:
+        return f"all {cores} cores"
+    if workers == 1:
+        return "1 worker"
+
+    return f"{workers} workers (of {cores} cores)"
+
+
+def _maybe_warn_stale_new_side(
+    file_count: int, reuse: ResolveReuse | None, jobs: int
+) -> None:
+    """Disclose a stale-map new-side resolve before it starts.
+
+    With a reuse plan this is roughly an incremental ``dekko map``
+    (20 s on tensorflow); without one (a file added, removed or
+    renamed, or a type changed) it resolves the whole repo, which is
+    minutes on the largest repos. Both used to be silent. The count is
+    *mapped* files, unlike the rev-cache note's git-tracked count.
+
+    Args:
+        file_count: Mapped files in the working tree.
+        reuse: The plan ``resolvecache.build_reuse`` returned.
+        jobs: Resolved worker count the resolve will run with.
+    """
+    if file_count < _SEQUENTIAL_DISCLOSURE_THRESHOLD:
+        return
+    if reuse is not None:
+        message = (
+            f"note: map is stale; reusing cached call resolution for all "
+            f"but {len(reuse.dirty)} of {file_count} mapped files "
+            f"(`dekko map` makes repeat calls faster)"
+        )
+    else:
+        message = (
+            f"note: map is stale and this change can't reuse cached call "
+            f"resolution (a file was added, removed or renamed, or a type "
+            f"changed); resolving all {file_count} mapped files with "
+            f"{_workers_phrase(jobs)} may take a while -- `dekko map` "
+            f"pays this once and makes repeat calls fast"
+        )
+    print(message, file=sys.stderr)
 
 
 def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
@@ -684,33 +803,56 @@ def _safe_extractall(tf: tarfile.TarFile, dest: Path) -> None:
     tf.extractall(dest, members=safe)
 
 
-def export_rev(root: Path, rev: str, dest: Path) -> bool:
+class ExportError(RuntimeError):
+    """``git archive`` of a rev, or extracting it, failed; the message
+    says which, in words a user can act on."""
+
+
+_ARCHIVE_TIMEOUT_S = 120
+
+
+def export_rev(root: Path, rev: str, dest: Path) -> None:
     """Extract the tracked sources at ``rev`` into ``dest``.
+
+    Every failure used to collapse into one "unknown rev or not a git
+    repo" message, including a full disk during extraction, which sent
+    the user hunting for a typo in a valid SHA.
 
     Args:
         root: Repository root.
         rev: Git revision to export.
         dest: Empty directory to receive the sources.
 
-    Returns:
-        ``True`` on success, ``False`` if the rev or git is unavailable.
+    Raises:
+        ExportError: Naming git's own error, the timeout, or the
+            extraction failure.
     """
     try:
         archive = subprocess.run(
             ["git", "-C", str(root), "archive", "--format=tar", rev],
             capture_output=True,
-            timeout=120,
+            timeout=_ARCHIVE_TIMEOUT_S,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    except subprocess.TimeoutExpired:
+        raise ExportError(
+            f"git archive timed out after {_ARCHIVE_TIMEOUT_S}s"
+        ) from None
+    except OSError as exc:
+        raise ExportError(f"could not run git: {exc.strerror}") from None
     if archive.returncode != 0:
-        return False
+        detail = archive.stderr.decode("utf-8", "replace").strip()
+        first = detail.splitlines()[0] if detail else "git archive failed"
+        raise ExportError(f"{first} (unknown rev or not a git repo?)")
     try:
         with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tf:
             _safe_extractall(tf, dest)
-    except (tarfile.TarError, OSError):
-        return False
-    return True
+    except tarfile.TarError as exc:
+        raise ExportError(f"could not read git's archive: {exc}") from None
+    except OSError as exc:
+        reason = exc.strerror or str(exc)
+        raise ExportError(
+            f"could not extract it to {dest}: {reason}"
+        ) from None
 
 
 def _render_caller(caller_id: str, syms: dict[str, Symbol]) -> str:

@@ -125,13 +125,16 @@ Targets accept a bare name, `Class.method`, `file.py:name`, or the
 resolve to the same symbol. If a reply says the target is ambiguous
 (an overload set sharing the same file and name), append `:LINE` from
 one of the candidate rows it prints (`file.py:Class.method:42`) rather
-than reading the file to pick one.
+than reading the file to pick one. MCP tools accept the target under
+any of `symbol`, `name`, `target` or `type`, whichever the tool's own
+schema calls it.
 
 ## Get more out of each call
 
 - **Pass a `budget`** (`--budget`) whenever you don't need the default.
   The footer reports token cost and what was dropped to fit, so you
   can raise it once instead of paying for everything up front.
+  `budget=0` (`--budget 0`) means no cap.
 - **`sites=true`** (`--sites`) on callers/callees gives one row per
   call site with `path:line` — use it when you're about to edit call
   sites, skip it when you only need the caller list.

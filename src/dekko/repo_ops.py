@@ -219,11 +219,67 @@ def map_repository(
         extracted[rel] = fm
 
     file_maps = [extracted[rel] for rel in paths if rel in extracted]
+    _flag_test_code(file_maps, set(paths).union(r for r, _ in skipped))
+    return file_maps, skipped
+
+
+def _flag_test_code(file_maps: list[FileMap], known: set[str]) -> None:
+    """Set ``Symbol.test`` on whole files that are test code.
+
+    By path (``classify.is_test_path``) and, for Rust, by an
+    out-of-line ``#[cfg(test)] mod x;`` in another file
+    (``_test_module_files``). Per-symbol Rust scopes are already set by
+    the extractor.
+    """
+    module_files = _test_module_files(file_maps, known)
     for fm in file_maps:
-        if classify.is_test_path(fm.path):
+        if fm.path in module_files or classify.is_test_path(fm.path):
             for sym in fm.symbols:
                 sym.test = True
-    return file_maps, skipped
+
+
+def _test_module_files(file_maps: list[FileMap], known: set[str]) -> set[str]:
+    """Mapped files Rust compiles only under test, by declaration.
+
+    A ``#[cfg(test)] mod editor_tests;`` in one file makes another file
+    test code, so this can't happen inside a single file's extraction.
+    It runs on every assembly, never from the cache: the cache
+    serializes each ``FileMap`` before this pass touches it, so adding
+    or removing the parent's attribute re-flags an unchanged child on
+    the next run, in both directions.
+
+    Args:
+        file_maps: Every extracted file.
+        known: Every discovered path, skipped ones included, so a
+            too-large child still claims its declaration instead of
+            letting a later fallback candidate that happens to exist
+            take it.
+
+    Returns:
+        Mapped paths of every test-only module file and, transitively,
+        every module file declared inside one.
+    """
+    children: dict[str, list[str]] = {}
+    pending: list[str] = []
+    for fm in file_maps:
+        for sub in fm.submodules:
+            child = next((c for c in sub.candidates if c in known), None)
+            if child is None:
+                continue
+            children.setdefault(fm.path, []).append(child)
+            if sub.test_only:
+                pending.append(child)
+
+    mapped = {fm.path for fm in file_maps}
+    found: set[str] = set()
+    while pending:
+        rel = pending.pop()
+        if rel in found:
+            continue
+        found.add(rel)
+        pending.extend(children.get(rel, ()))
+
+    return found & mapped
 
 
 def resolve_outputs(
@@ -981,6 +1037,7 @@ def load_or_regen(
         return None, 5
 
     _note_foreign_build(fresh)
+    _note_regen(root, index)
     regenerated, code = _locked_regen(root)
     if regenerated is None and index is not None and fresh.process_outdated:
         # An outdated long-lived process whose delegated regen failed
@@ -996,6 +1053,43 @@ def load_or_regen(
         return index, 0
 
     return regenerated, code
+
+
+# Mapped-file count from which a stale-map regen is announced. A
+# one-file edit's regen measured ~15-20 s on spring-boot (9,942 files)
+# and ~45 s on tensorflow (14,285), silent both times; repos up to
+# ~2,700 files regen in a few seconds. Same cut as the rev-cache note.
+_REGEN_DISCLOSURE_THRESHOLD = 5000
+
+
+def _note_regen(root: Path, index: mapfile.MapIndex | None) -> None:
+    """Announce a regen before its wait, when the wait can be long.
+
+    A missing (or unreadable) map is always announced: that build is a
+    cold map at any size, minutes on the largest repos, and happens
+    once. A stale map only on large repos.
+
+    Args:
+        root: Repository root about to be regenerated.
+        index: The stale map, or ``None`` when there is no usable one.
+    """
+    if index is None:
+        print(
+            f"note: no usable map under {root}; building one first",
+            file=sys.stderr,
+        )
+        return
+
+    count = len(index.languages_by_path)
+    if count < _REGEN_DISCLOSURE_THRESHOLD:
+        return
+
+    noun = "file" if count == 1 else "files"
+    print(
+        f"note: map is stale; regenerating {count} mapped {noun} "
+        "before answering",
+        file=sys.stderr,
+    )
 
 
 def _note_foreign_build(fresh: mapfile.Freshness | None) -> None:

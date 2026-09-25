@@ -260,6 +260,37 @@ def test_pre_read_advises_on_large_file(
     assert "outline" in hso["additionalContext"]
 
 
+def test_pre_read_without_cwd_uses_the_process_cwd(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A payload with no ``cwd`` still resolves an absolute read path
+    against the directory the hook runs in."""
+    root = make_mapped_repo({"src/big.py": "x = 1\n" * 4000})
+    monkeypatch.chdir(root)
+    out = hooks.pre_read(
+        {"tool_input": {"file_path": str(root / "src/big.py")}}
+    )
+    assert out is not None
+    assert "src/big.py" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_pre_read_matches_a_cwd_reached_through_a_symlink(
+    make_mapped_repo: RepoFactory, tmp_path: Path
+) -> None:
+    """``cwd`` spelled through a symlink and a real ``file_path`` (or
+    the reverse) name the same file."""
+    root = make_mapped_repo({"src/big.py": "x = 1\n" * 4000})
+    link = tmp_path / "link"
+    link.symlink_to(root, target_is_directory=True)
+    out = hooks.pre_read(
+        {
+            "cwd": str(link),
+            "tool_input": {"file_path": str(root.resolve() / "src/big.py")},
+        }
+    )
+    assert out is not None
+
+
 def test_pre_read_silent_on_small_file(
     make_mapped_repo: RepoFactory,
 ) -> None:

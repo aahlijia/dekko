@@ -77,6 +77,31 @@ NODE_BUILTIN_COLLISION = {
 }
 
 
+# core() is called only from a helper under a test-*support* directory
+# (``testing/``: mocks, matchers, generators), which one real test file
+# exercises. The helper is test code (hidden by --no-tests, never a
+# dead-code candidate) but not a test: no runner discovers tests under
+# that directory name. ``affected`` must reach the test file *through*
+# the helper and never list the helper itself.
+TEST_SUPPORT_DIR = {
+    "src/app.py": "def core() -> int:\n    return 1\n",
+    "testing/helpers.py": (
+        "from src.app import core\n"
+        "\n"
+        "\n"
+        "def run_core() -> int:\n"
+        "    return core()\n"
+    ),
+    "tests/test_via_helper.py": (
+        "from testing.helpers import run_core\n"
+        "\n"
+        "\n"
+        "def test_run_core():\n"
+        "    assert run_core() == 1\n"
+    ),
+}
+
+
 def _change_resolve_path(root: Path) -> None:
     (root / "server/path.ts").write_text(
         "export function resolvePath(): number {\n    return 2;\n}\n"
@@ -167,6 +192,36 @@ def test_node_builtin_module_name_collision_not_falsely_impacted(
     assert "server/e.test.ts" not in out
 
 
+def test_test_support_file_is_walked_through_but_not_reported(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, TEST_SUPPORT_DIR)
+    (root / "src/app.py").write_text("def core() -> int:\n    return 2\n")
+
+    assert cli.main(["affected", "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "[transitive] tests/test_via_helper.py" in out
+    assert "testing/helpers.py" not in out
+
+    # workset's symbol seed shares the walk (impacts_from_symbol) and
+    # must agree; the helper legitimately appears in the bundle as a
+    # caller, so check the impacted-tests list specifically.
+    argv = [
+        "workset",
+        "--root",
+        str(root),
+        "--symbol",
+        "src/app.py:core",
+        "--json",
+    ]
+    assert cli.main(argv) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert [t["path"] for t in doc["impacted_tests"]] == [
+        "tests/test_via_helper.py"
+    ]
+    assert doc["impacted_tests_total"] == 1
+
+
 def test_affected_rev_cache_hit_skips_reexport(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -179,7 +234,7 @@ def test_affected_rev_cache_hit_skips_reexport(
     calls: list[str] = []
     real_export_rev = diff.export_rev
 
-    def spy(root_arg: Path, rev: str, dest: Path) -> bool:
+    def spy(root_arg: Path, rev: str, dest: Path) -> None:
         calls.append(rev)
         return real_export_rev(root_arg, rev, dest)
 
@@ -205,7 +260,7 @@ def test_affected_shares_rev_cache_with_diff(
     calls: list[str] = []
     real_export_rev = diff.export_rev
 
-    def spy(root_arg: Path, rev: str, dest: Path) -> bool:
+    def spy(root_arg: Path, rev: str, dest: Path) -> None:
         calls.append(rev)
         return real_export_rev(root_arg, rev, dest)
 
@@ -694,3 +749,214 @@ def test_diff_head_on_a_clean_tree_skips_the_old_side(
     assert code == diff.EXIT_SAME
     doc = json.loads(capsys.readouterr().out)
     assert doc["added"] == doc["removed"] == doc["changed"] == []
+
+
+# --- Rust code compiled only under `cargo test` holds impacted tests ------
+
+# core() is called by an inline `#[cfg(test)] mod tests` in its own file,
+# by an out-of-line `#[cfg(test)] mod lib_tests;` file, and by ordinary
+# production code in app.rs. Neither test file is a test *path*, so
+# before, `affected` reported nothing.
+RUST_TEST_MODULES = {
+    "Cargo.toml": '[package]\nname = "demo"\nversion = "0.1.0"\n',
+    "src/lib.rs": (
+        "pub mod app;\n"
+        "\n"
+        "pub fn core() -> i32 {\n"
+        "    1\n"
+        "}\n"
+        "\n"
+        "#[cfg(test)]\n"
+        "mod lib_tests;\n"
+        "\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    use super::*;\n"
+        "\n"
+        "    #[test]\n"
+        "    fn core_is_one() {\n"
+        "        let value = core();\n"
+        "        assert_eq!(value, 1);\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/lib_tests.rs": (
+        "use super::*;\n"
+        "\n"
+        "#[test]\n"
+        "fn core_again() {\n"
+        "    let value = core();\n"
+        "    assert_eq!(value, 1);\n"
+        "}\n"
+    ),
+    "src/app.rs": (
+        "use crate::core;\n\npub fn run() -> i32 {\n    core()\n}\n"
+    ),
+}
+
+
+def _change_rust_core(root: Path) -> None:
+    text = (root / "src/lib.rs").read_text()
+    (root / "src/lib.rs").write_text(text.replace("    1\n}", "    2\n}", 1))
+
+
+def test_rust_cfg_test_modules_are_impacted_test_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, RUST_TEST_MODULES)
+    _change_rust_core(root)
+
+    assert cli.main(["affected", "--root", str(root), "--json"]) == 1
+    doc = json.loads(capsys.readouterr().out)
+    by_path = {i["path"]: i for i in doc["impacted"]}
+    assert set(by_path) == {"src/lib.rs", "src/lib_tests.rs"}
+    assert by_path["src/lib.rs"]["tier"] == "direct"
+    assert [s["id"] for s in by_path["src/lib.rs"]["symbols"]] == [
+        "src/lib.rs::tests.core_is_one"
+    ]
+    assert doc["command"].startswith("cargo test")
+
+
+# --- tests past an unresolved call are disclosed, not merged --------------
+
+# convert() is called by AHandler.createMessage. The test calls
+# `handler.createMessage()` on a value of unknown type, and two classes
+# define createMessage, so the call stays ambiguous and the resolved walk
+# never reaches the test.
+AMBIGUOUS_HOP = {
+    "src/format.ts": "export function convert(): number {\n    return 1;\n}\n",
+    "src/a.ts": (
+        'import { convert } from "./format";\n'
+        "\n"
+        "export class AHandler {\n"
+        "    createMessage(): number {\n"
+        "        return convert();\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/b.ts": (
+        "export class BHandler {\n"
+        "    createMessage(): number {\n"
+        "        return 2;\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/handler.test.ts": (
+        "declare const handler: { createMessage(): number };\n"
+        "\n"
+        "handler.createMessage();\n"
+    ),
+}
+
+
+def _change_convert(root: Path) -> None:
+    (root / "src/format.ts").write_text(
+        "export function convert(): number {\n    return 3;\n}\n"
+    )
+
+
+def test_ambiguous_test_caller_is_a_note_not_an_impact(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, AMBIGUOUS_HOP)
+    _change_convert(root)
+
+    # Possible impacts never change the exit status.
+    assert cli.main(["affected", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "no impacted tests" in out
+    assert "note: 1 more test file(s) call changed code" in out
+    assert "src/handler.test.ts -> createMessage, 2 candidates" in out
+    assert "--possible lists them" in out
+
+
+def test_possible_flag_lists_ambiguous_test_callers(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, AMBIGUOUS_HOP)
+    _change_convert(root)
+
+    argv = ["affected", "--root", str(root), "--possible"]
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "possible: 1 test file(s)" in out
+    assert "  src/handler.test.ts  via createMessage (2 candidates)" in out
+
+    assert cli.main([*argv, "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["impacted"] == []
+    assert doc["possible_total"] == 1
+    assert doc["possible"] == [
+        {
+            "path": "src/handler.test.ts",
+            "via": "createMessage",
+            "candidates": 2,
+            "shared_dirs": 1,
+            "callers": ["src/handler.test.ts::<module>"],
+        }
+    ]
+
+
+def test_json_counts_possible_without_the_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, AMBIGUOUS_HOP)
+    _change_convert(root)
+
+    assert cli.main(["affected", "--root", str(root), "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["possible_total"] == 1
+    assert doc["possible_example"]["path"] == "src/handler.test.ts"
+    assert "possible" not in doc
+
+
+def test_no_possible_note_when_nothing_is_ambiguous(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    assert cli.main(["affected", "--root", str(root)]) == 1
+    assert "more test file(s) call changed code" not in capsys.readouterr().out
+
+
+def test_fallback_snapshot_carries_the_same_ambiguous_calls_as_the_index(
+    tmp_path: Path,
+) -> None:
+    # The working tree's snapshot comes from the map index when it is
+    # fresh and from a re-parse when it isn't; possible impacts must not
+    # depend on which.
+    root = _repo(tmp_path, AMBIGUOUS_HOP)
+    index = mapfile.load_map(root)
+    from_index = diff.snapshot_from_index(index, root)
+    reparsed = diff.snapshot(root, None, (), 1_000_000)
+    assert from_index.ambiguous_in
+    assert reparsed.ambiguous_in == from_index.ambiguous_in
+
+
+def test_affected_help_states_the_exit_status(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    for command in ("affected", "diff"):
+        with pytest.raises(SystemExit):
+            cli.main([command, "--help"])
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Exit status: 0 no" in out
+        assert "1 impacted tests found" in out or "1 changes found" in out
+
+
+def test_possible_ranks_the_test_beside_the_code_first() -> None:
+    # A colocated test behind a 9-way ambiguous call outranks a distant
+    # one behind a 4-way call: tests usually sit beside what they test.
+    near = affected.PossibleImpact(
+        path="apps/lm/handler.test.ts", name="create", candidates=9
+    )
+    near.shared_dirs = affected._shared_dirs(near.path, "apps/lm/handler.ts")
+    far = affected.PossibleImpact(
+        path="sdk/core/runtime.test.ts", name="get", candidates=4
+    )
+    far.shared_dirs = affected._shared_dirs(far.path, "apps/lm/handler.ts")
+    assert (near.shared_dirs, far.shared_dirs) == (2, 0)
+    assert sorted([far, near], key=affected.PossibleImpact.rank) == [
+        near,
+        far,
+    ]

@@ -8,7 +8,7 @@ import pytest
 
 from dekko.integrations import cli
 from dekko.analysis import diff
-from dekko.analysis import workset
+from dekko.analysis import affected, outline, workset
 from dekko.render import mapfile
 from dekko.integrations import server
 from dekko.core.model import CallGraph, FileMap, Symbol
@@ -620,3 +620,99 @@ def test_type_impact_discloses_ambiguous_heritage_undercount() -> None:
     assert seed.blast_radius.note is not None
     assert "ambiguously" in seed.blast_radius.note
     assert "undercount" in seed.blast_radius.note
+
+
+def _impact(i: int) -> affected.TestImpact:
+    return affected.TestImpact(path=f"tests/test_{i:02d}.py", tier="direct")
+
+
+def test_first_impacted_tests_come_before_outline_detail() -> None:
+    # With every test row last, a budget spent on big outlines dropped
+    # all of them. The first twenty now sit ahead of detail.
+    sym = Symbol(
+        id="src/a.py::f",
+        name="f",
+        qualname="f",
+        kind="function",
+        path="src/a.py",
+        language="python",
+        start_line=1,
+        end_line=2,
+    )
+    seed = workset.Seed(
+        mode="symbol",
+        label="symbol src/a.py:f",
+        rev=None,
+        symbol="f",
+        touched=[sym],
+        files=["src/a.py"],
+        impacts=[_impact(i) for i in range(25)],
+    )
+    ws = workset.Workset(
+        seed=seed,
+        outlines=[
+            outline.FileOutline(
+                path="src/a.py", language="python", symbols=[sym]
+            )
+        ],
+    )
+    tiers = [row.tier for row in workset._rows(ws)]
+    first_detail = tiers.index("detail")
+    assert tiers[:first_detail] == ["files"] + ["tests"] * 20
+    assert tiers[first_detail:].count("tests_more") == 5
+    assert tiers[-1] == "tests_more"
+
+
+def test_tight_budget_keeps_impacted_tests_over_detail(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+    argv = ["workset", "--root", str(root), "--json", "--budget", "120"]
+    assert cli.main(argv) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["impacted_tests_total"] == 2
+    assert len(doc["impacted_tests"]) == 2
+
+
+# A test reaching convert() only through an ambiguous createMessage()
+# call (two classes define it); same shape as test_affected's fixture.
+AMBIGUOUS_HOP = {
+    "src/format.ts": "export function convert(): number {\n    return 1;\n}\n",
+    "src/a.ts": (
+        'import { convert } from "./format";\n'
+        "\n"
+        "export class AHandler {\n"
+        "    createMessage(): number {\n"
+        "        return convert();\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/b.ts": (
+        "export class BHandler {\n"
+        "    createMessage(): number {\n"
+        "        return 2;\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/handler.test.ts": (
+        "declare const handler: { createMessage(): number };\n"
+        "\n"
+        "handler.createMessage();\n"
+    ),
+}
+
+
+def test_workset_counts_possible_tests(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, AMBIGUOUS_HOP)
+    target = "src/format.ts:convert"
+    argv = ["workset", "--root", str(root), "--symbol", target]
+    assert cli.main([*argv, "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["impacted_tests_total"] == 0
+    assert doc["possible_tests_total"] == 1
+
+    assert cli.main(argv) == 0
+    assert "src/handler.test.ts -> createMessage" in capsys.readouterr().out

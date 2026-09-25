@@ -31,13 +31,14 @@ colliding with exactly one non-repo builtin never appears in
 somewhere else in the repo.
 
 A mirror-image caveat is always on (no flag needed): a symbol *is*
-reported unused, but its own id is one of the unresolved candidates of
-some ambiguous call site elsewhere in the repo -- the shape a
-`this.method()`/`self.method()` polymorphic-dispatch call through an
-abstract base produces when 2+ concrete overrides exist and the resolver
-can't attribute the base's call to any single one of them. See
-``find_dispatch_candidates``. ``--dispatch`` (opt-in) additionally lists
-which flagged symbols these are.
+reported unused, but some call site elsewhere in the repo may reach it
+through dynamic dispatch -- a `this.method()`/`self.method()` call
+through an abstract base, or `tool.prompt()` on an interface- or
+trait-typed value, when 2+ same-named implementations exist and the
+resolver can't attribute the call to any single one of them. See
+``find_dispatch_candidates``. Every such row is marked in the main
+listing, and ``--dispatch`` (opt-in) additionally lists them with the
+check command to run.
 """
 
 import fnmatch
@@ -49,6 +50,7 @@ from typing import NamedTuple
 from dekko.analysis import ambiguous, query
 from dekko.classify import is_test_path
 from dekko.core.languages import SPEC_BY_NAME
+from dekko.core.resolver import is_guarded_method_name
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.textutil import fit_to_budget, signature
@@ -205,7 +207,7 @@ def _is_root(
         return True
     if _matches_globs(sym.path, root_globs):
         return True
-    if is_test_path(sym.path):
+    if sym.test or is_test_path(sym.path):
         return True
     if sym.language == "go" and sym.name[:1].isupper():
         return True
@@ -554,26 +556,79 @@ def find_suspects(
     return sorted(found, key=lambda s: (s.path, s.start_line))
 
 
+EVIDENCE_AMBIGUOUS = "ambiguous"
+EVIDENCE_GUARDED_NAME = "guarded-name"
+
+
+def _has_guarded_receiver_call(sym: Symbol, index: MapIndex) -> bool:
+    """Whether a receiver call the resolver sent external might reach ``sym``.
+
+    The resolver's noise guard sends every receiver call to a guarded
+    method name (``tool.description()``, ``node.parse()``) external,
+    however many repo symbols define it, so those calls never reach
+    ``ambiguous_in``. They are still the same evidence: when 2+ repo
+    symbols share the name and a receiver call uses it, any of them
+    might be the target. A lone definition is ordinary unused code.
+    """
+    if not is_guarded_method_name(sym.name):
+        return False
+    if len(index.symbols_by_name.get(sym.name, ())) < 2:
+        return False
+    return any(
+        ext.callee.rsplit(".", 1)[-1] == sym.name and "." in ext.callee
+        for ext in index.externals_by_name.get(sym.name, ())
+    )
+
+
+def _dispatch_evidence(sym: Symbol, index: MapIndex) -> str | None:
+    """Why a flagged symbol might be a dispatch target, or ``None``.
+
+    ``EVIDENCE_AMBIGUOUS`` when its own id is a candidate of an
+    unresolved call, the stronger signal; ``EVIDENCE_GUARDED_NAME``
+    when only a receiver call the noise guard sent external uses its
+    name (see ``_has_guarded_receiver_call``).
+    """
+    if index.ambiguous_in.get(sym.id):
+        return EVIDENCE_AMBIGUOUS
+    if _has_guarded_receiver_call(sym, index):
+        return EVIDENCE_GUARDED_NAME
+    return None
+
+
+def _dispatch_evidence_by_id(
+    found: list[Symbol], index: MapIndex
+) -> dict[str, str]:
+    """Candidate id to its evidence, for the candidates among ``found``."""
+    out: dict[str, str] = {}
+    for sym in found:
+        evidence = _dispatch_evidence(sym, index)
+        if evidence is not None:
+            out[sym.id] = evidence
+    return out
+
+
 def find_dispatch_candidates(
     index: MapIndex,
     root_globs: tuple[str, ...],
     kinds: str = "callables",
 ) -> list[Symbol]:
-    """Symbols `find_unused` flagged whose own id is an unresolved
-    ambiguous-call candidate elsewhere in the repo.
+    """Symbols `find_unused` flagged that dynamic dispatch might reach.
 
-    A symbol is a dispatch candidate when: it would be in-scope for
+    A symbol is a dispatch candidate when it would be in-scope for
     `find_unused`'s kind filter, it WAS reported unused (unlike
-    `find_suspects`, which only checks excluded symbols), and its own
-    id appears as a candidate in `index.ambiguous_in` -- i.e. some
-    call site elsewhere in the repo named this symbol's bare name,
-    matched 2+ same-named repo-defined candidates including this one,
-    and could not be resolved to any single target. This is exactly
-    the shape a `this.method()`/`self.method()` polymorphic-dispatch
-    call through an abstract base produces when the base class itself
-    never defines the method: every concrete override is a same-named
-    candidate, none can be picked over the others, and the base
-    class's call to it never becomes a resolved edge for any of them.
+    `find_suspects`, which only checks excluded symbols), and either:
+
+    - its own id appears as a candidate in `index.ambiguous_in`: some
+      call site named this symbol's bare name, matched 2+ same-named
+      repo-defined candidates including this one, and could not be
+      resolved to any single target. That is the shape of a
+      `this.method()`/`self.method()` call through an abstract base
+      that never defines the method, and of a receiver call through an
+      interface- or trait-typed value (`tool.prompt()` where every tool
+      object defines `prompt`); or
+    - its name is one the resolver's noise guard never resolves on a
+      receiver call, 2+ repo symbols share it, and some receiver call
+      uses it (see `_dispatch_evidence`).
 
     Args:
         index: Loaded map index.
@@ -585,10 +640,8 @@ def find_dispatch_candidates(
         subset of `find_unused`'s own result, never a disjoint set.
     """
     found = find_unused(index, root_globs, kinds)
-    return sorted(
-        (s for s in found if index.ambiguous_in.get(s.id)),
-        key=lambda s: (s.path, s.start_line),
-    )
+    evidence = _dispatch_evidence_by_id(found, index)
+    return [s for s in found if s.id in evidence]
 
 
 def _sym_json(sym: Symbol) -> dict:
@@ -632,16 +685,16 @@ def _section_caps(
 ) -> tuple[int, int | None]:
     """``(limit, budget)`` for a supplemental section.
 
-    Each section has always had its own flat cap so it can't steal
-    budget from the main list, but it printed that cap's worth of rows
-    in silence -- a header saying 258, twenty rows, and nothing about
-    the 238 dropped -- and ignored an
-    explicit ``--limit`` and ``--budget`` alike. Now an explicit lower
-    ``--limit`` binds, ``--budget`` applies to the section on its own
-    (the same number, independently, the way ``sanity`` applies it
-    per bucket), and ``fit_to_budget``'s footer says what was dropped.
+    Each section has its own flat default cap so it can't steal budget
+    from the main list. An explicit ``--limit`` (``limit`` is ``None``
+    when none was given) replaces that cap in either direction, so the
+    footer's "raise --limit" advice is true: a 733-row section capped
+    at 20 that ``--limit 1400`` couldn't lift read as complete.
+    ``--budget`` applies to the section on its own (the same number,
+    independently, the way ``sanity`` applies it per bucket), and
+    ``fit_to_budget``'s footer says what was dropped.
     """
-    return (min(section_cap, limit) if limit else section_cap, budget)
+    return (section_cap if limit is None else limit, budget)
 
 
 def _print_section(
@@ -703,13 +756,15 @@ def _dispatch_check_command(sym: Symbol) -> str:
     return f"dekko sanity --unused {sym.path}:{sym.qualname}:{sym.start_line}"
 
 
-def _dispatch_json(sym: Symbol) -> dict:
+def _dispatch_json(sym: Symbol, evidence: str | None) -> dict:
     """Structured rendering of one dispatch candidate.
 
-    Unused fields plus the check command to run before trusting the
-    "unused" verdict for this symbol.
+    Unused fields, which evidence made it a candidate, and the check
+    command to run before trusting the "unused" verdict for this
+    symbol.
     """
     doc = _sym_json(sym)
+    doc["evidence"] = evidence
     doc["check_command"] = _dispatch_check_command(sym)
     return doc
 
@@ -721,6 +776,10 @@ def _dispatch_row_text(sym: Symbol) -> str:
         f"  -- possible polymorphic-dispatch target "
         f"({_dispatch_check_command(sym)})"
     )
+
+
+# The per-row marker on a dispatch candidate in the main listing.
+_DISPATCH_MARKER = "  [dispatch?]"
 
 
 def _print_dispatch_text(
@@ -736,11 +795,12 @@ def _print_dispatch_text(
     """
     header = (
         f"dispatch candidates: {len(dispatch_candidates)} of these "
-        "unused-flagged symbols are unresolved-ambiguous-call "
-        "candidates elsewhere in the repo -- may be reached via "
-        "this.method()/self.method() polymorphic dispatch the "
-        "resolver can't attribute. Run `dekko sanity --unused <name>` "
-        "on each before deleting."
+        "unused-flagged symbols share a name with an unresolved call "
+        "elsewhere in the repo -- may be reached via polymorphic "
+        "dispatch the resolver can't attribute (this.method()/"
+        "self.method(), or a receiver call through an interface/"
+        "trait-typed value like tool.prompt()). Run `dekko sanity "
+        "--unused <name>` on each before deleting."
     )
     rows = [_dispatch_row_text(s) for s in dispatch_candidates]
     _print_section(header, rows, _DISPATCH_LIMIT, limit, budget)
@@ -761,10 +821,12 @@ def _dispatch_caveat(dispatch_candidates: list[Symbol]) -> str | None:
         return None
     return (
         f"note: {n} of these are unresolved-ambiguous-call candidates "
-        "elsewhere in the repo -- may be reached via this.method()/"
-        "self.method() polymorphic dispatch the resolver can't "
-        "attribute. Run `dekko sanity --unused <name>` before "
-        "deleting any of them (see --dispatch for which ones)."
+        "elsewhere in the repo -- may be reached via polymorphic "
+        "dispatch the resolver can't attribute (this.method()/"
+        "self.method(), or a receiver call through an interface/"
+        "trait-typed value like tool.prompt()). They are marked "
+        "[dispatch?]; run `dekko sanity --unused <name>` before "
+        "deleting any of them (--dispatch lists them with the command)."
     )
 
 
@@ -847,14 +909,29 @@ def _build_json_doc(
     suspect: bool,
     dispatch: bool,
     budget: int | None,
-    limit: int,
+    limit: int | None,
+    evidence_by_id: dict[str, str] | None = None,
 ) -> dict:
     """Build ``run``'s ``--json`` document, factored out to keep
     ``run`` itself under the module's cyclomatic-complexity cap.
+
+    ``limit`` is ``None`` when the caller gave none: the main list
+    then takes its default and each section its own (see
+    ``_section_caps``). A result row that is a dispatch candidate
+    carries ``"dispatch_candidate": true``; the key is absent on every
+    other row, so thousands of rows don't each grow by a false.
+    ``evidence_by_id`` (see ``_dispatch_evidence``) labels each
+    ``--dispatch`` row.
     """
+    evidence_by_id = evidence_by_id or {}
+    candidate_ids = {s.id for s in dispatch_candidates}
     entries = [_sym_json(s) for s in found]
+    for entry in entries:
+        if entry["id"] in candidate_ids:
+            entry["dispatch_candidate"] = True
     serialized = [json.dumps(e) for e in entries]
-    kept_ser, meter = fit_to_budget(serialized, budget, limit)
+    main_limit = query.DEFAULT_LIMIT if limit is None else limit
+    kept_ser, meter = fit_to_budget(serialized, budget, main_limit)
     doc = {
         "results": entries[: len(kept_ser)],
         "meta": meter.as_dict(),
@@ -875,7 +952,8 @@ def _build_json_doc(
     if dispatch:
         cap, _ = _section_caps(_DISPATCH_LIMIT, limit, budget)
         doc["dispatch_candidates"] = [
-            _dispatch_json(s) for s in dispatch_candidates[:cap]
+            _dispatch_json(s, evidence_by_id.get(s.id))
+            for s in dispatch_candidates[:cap]
         ]
         doc["dispatch_meta"] = {
             "returned": len(doc["dispatch_candidates"]),
@@ -892,11 +970,13 @@ def _print_text(
     c_abi_caveat: str | None,
     dispatch_caveat: str | None,
     majority_warning: str | None = None,
+    dispatch_ids: frozenset[str] = frozenset(),
 ) -> None:
     """Print ``run``'s text-mode listing, footer, and caveats.
 
     ``majority_warning`` (see ``_dispatch_majority_warning``) is the
-    one caveat printed *above* the rows rather than below them.
+    one caveat printed *above* the rows rather than below them. A row
+    whose id is in ``dispatch_ids`` ends with ``[dispatch?]``.
 
     Factored out of ``run`` to keep it under the module's cyclomatic-
     complexity cap; prints nothing beyond the "no unused symbols" line
@@ -916,7 +996,9 @@ def _print_text(
     else:
         header = f"dekko: {len(found)} unused symbols"
     rows = [
-        f"  {s.path}:{s.start_line}  {signature(s)}  [{s.kind}]" for s in found
+        f"  {s.path}:{s.start_line}  {signature(s)}  [{s.kind}]"
+        + (_DISPATCH_MARKER if s.id in dispatch_ids else "")
+        for s in found
     ]
     kept, meter = fit_to_budget(rows, budget, limit, prefix=header)
     print(header)
@@ -935,7 +1017,7 @@ def run(
     index: MapIndex,
     root_globs: tuple[str, ...],
     as_json: bool,
-    limit: int,
+    limit: int | None = None,
     budget: int | None = None,
     kinds: str = "callables",
     suspect: bool = False,
@@ -947,7 +1029,10 @@ def run(
         index: Loaded map index.
         root_globs: Extra path globs to treat as roots.
         as_json: Emit structured JSON instead of text.
-        limit: Cap on result rows.
+        limit: Cap on result rows, or ``None`` when the caller gave
+            none: the main list then shows ``query.DEFAULT_LIMIT`` rows
+            and each supplemental section its own default. An explicit
+            value caps the main list and every section alike.
         budget: Approximate token budget for the rows, or ``None``.
         kinds: ``"callables"`` (default), ``"types"``, or ``"all"`` —
             see ``find_unused``.
@@ -970,8 +1055,8 @@ def run(
         When one or more flagged symbols are dispatch candidates (see
         ``find_dispatch_candidates``), an always-on advisory caveat is
         printed (text) or added to ``doc["dispatch_caveat"]`` (JSON,
-        ``None`` otherwise) regardless of ``dispatch``. See
-        ``_dispatch_caveat``.
+        ``None`` otherwise) regardless of ``dispatch``, and each such
+        row is marked. See ``_dispatch_caveat``.
 
     Returns:
         ``0`` when none are found, ``1`` when some are. Reflects only
@@ -980,7 +1065,8 @@ def run(
     """
     found = find_unused(index, root_globs, kinds)
     suspects = find_suspects(index, root_globs, kinds) if suspect else []
-    dispatch_candidates = find_dispatch_candidates(index, root_globs, kinds)
+    evidence_by_id = _dispatch_evidence_by_id(found, index)
+    dispatch_candidates = [s for s in found if s.id in evidence_by_id]
     c_abi_caveat = _c_abi_caveat(found)
     dispatch_caveat = _dispatch_caveat(dispatch_candidates)
     blind_caveat = _blind_language_caveat(index, kinds)
@@ -996,6 +1082,7 @@ def run(
             dispatch,
             budget,
             limit,
+            evidence_by_id,
         )
         if blind_caveat:
             doc["caveats"].append(blind_caveat)
@@ -1006,10 +1093,11 @@ def run(
         found,
         kinds,
         budget,
-        limit,
+        query.DEFAULT_LIMIT if limit is None else limit,
         c_abi_caveat,
         dispatch_caveat,
         _dispatch_majority_warning(len(dispatch_candidates), len(found)),
+        frozenset(evidence_by_id),
     )
     # Printed here, not inside _print_text: it matters most on the
     # "no unused symbols" early-return path, where a clean-looking

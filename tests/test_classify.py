@@ -1,6 +1,11 @@
 """Shared path classification: test code vs production code."""
 
-from dekko.classify import is_test_path
+import fnmatch
+
+import pytest
+
+from dekko import classify
+from dekko.classify import is_test_file, is_test_path
 
 
 def test_is_test_path_is_cached() -> None:
@@ -77,6 +82,7 @@ def test_src_without_main_or_test_segment_falls_through() -> None:
     # flat src/ layout) falls through to the existing directory-part
     # and basename checks unchanged.
     assert is_test_path("src/lib/testing/helper.py") is True
+    assert is_test_file("src/lib/testing/helper.py") is False
     assert is_test_path("src/lib/helper.py") is False
 
 
@@ -85,3 +91,71 @@ def test_repos_without_src_root_are_unaffected() -> None:
     # src/ root at all — the new branch must never trigger for them.
     assert is_test_path("pkg/handler.go") is False
     assert is_test_path("pkg/handler_test.go") is True
+
+
+def test_test_support_dir_is_test_code_but_not_a_test_file() -> None:
+    # A `testing/` directory holds test-support code: mocks, matchers,
+    # test-case generators, or (here) a tool that only exists in a test
+    # build. That is test code for --no-tests/unused purposes, but no
+    # runner discovers tests under that directory name, so `affected`
+    # must not report such a file as an impacted test.
+    path = "src/tools/testing/TestingPermissionTool.tsx"
+    assert is_test_path(path) is True
+    assert is_test_file(path) is False
+
+
+def test_test_support_dir_with_test_basename_is_a_test_file() -> None:
+    # A real test living under a support directory still matches on
+    # its filename, at both levels.
+    path = "tensorflow/lite/testing/kernel_test/util_test.cc"
+    assert is_test_path(path) is True
+    assert is_test_file(path) is True
+
+
+def test_runner_dirs_match_at_both_levels() -> None:
+    for path in (
+        "tests/test_cli.py",
+        "src/__tests__/app.js",
+        "spec/app_spec.rb",
+        "core/src/test/java/com/example/Widget.java",
+    ):
+        assert is_test_path(path) is True, path
+        assert is_test_file(path) is True, path
+
+
+def test_test_support_dir_under_src_main_is_production() -> None:
+    # The src/main exemption applies to the support-directory keyword
+    # the same way it applies to the runner-directory ones.
+    path = "core/src/main/java/org/example/testing/Helper.java"
+    assert is_test_path(path) is False
+    assert is_test_file(path) is False
+
+
+def test_basename_globs_match_case_sensitively_on_every_os(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Windows' ``normcase`` lowercases both sides of ``fnmatch.fnmatch``,
+    # which made ``*Test.*`` match ``test.rs`` and ``latest.py`` there.
+    monkeypatch.setattr(fnmatch.os.path, "normcase", str.lower)
+    is_test_path.cache_clear()
+    is_test_file.cache_clear()
+    try:
+        for base in ("test.rs", "ed_tests.rs", "latest.py", "contest.go"):
+            assert classify._basename_is_test(base) is False, base
+            assert is_test_path(f"crates/ed/src/{base}") is False, base
+        assert classify._basename_is_test("AppTest.java") is True
+    finally:
+        is_test_path.cache_clear()
+        is_test_file.cache_clear()
+
+
+def test_is_test_file_is_never_wider_than_is_test_path() -> None:
+    for path in (
+        "tests/test_cli.py",
+        "src/app.spec.ts",
+        "testing/helpers.py",
+        "lib/testing/mock.h",
+        "src/app.py",
+        "core/src/main/java/org/example/test/Runner.java",
+    ):
+        assert not (is_test_file(path) and not is_test_path(path)), path

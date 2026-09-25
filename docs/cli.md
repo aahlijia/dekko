@@ -31,13 +31,14 @@ dekko search "..." --scorer embedding        # optional; needs dekko[search]
 dekko search "..." --scorer both             # fuses lexical+embedding; needs dekko[search]
 dekko workset                        # one bundle for your current change
 dekko workset --symbol Config --type-impact  # + type-usage + heritage impact, unioned
-dekko affected                       # test files impacted by your changes
+dekko affected                       # test files impacted by your changes (exit 0/1)
+dekko affected --possible            # + tests reaching the change only through unresolved calls
 dekko diff                           # symbols changed since the map's commit (exit 0/1)
 dekko unused                         # symbols nothing calls (dead-code leads)
 dekko unused --kinds types           # unused types only (heritage + type-usage aware)
 dekko unused --kinds all             # callables + types, unioned
 dekko unused --suspect               # + flag excluded symbols whose name is a proven collider
-dekko unused --dispatch              # + list flagged symbols that are unresolved dispatch candidates
+dekko unused --dispatch              # + list flagged symbols dynamic dispatch might reach
 dekko ambiguous                      # resolver-trust report: where resolution was ambiguous
 dekko deps                           # module-level dependency graph: edge/file counts, cycle count
 dekko deps src/app.py                # one file's resolved imports/importers/external sources
@@ -57,10 +58,17 @@ guessing. Every read command takes `--json` for structured output.
 Most also regenerate a stale map automatically (`--no-regen` to fail
 instead) — `diff`, `affected`, `status`, and `ledger` don't accept
 `--no-regen` at all: `status`/`ledger` never regenerate regardless,
-and `diff`/`affected` always re-parse the current tree in memory
+and `diff`/`affected` always re-map the current tree in memory
 rather than writing a fresh `map.json` to disk, so `dekko status`
 right after a `dekko diff`/`dekko affected` on a fresh edit can still
-report the map as stale.
+report the map as stale. That in-memory pass reuses the last `dekko
+map`'s caches the same way an incremental map does (see "Incremental
+vs. `--full` map runs"), so it costs about what `dekko map` would, and
+nothing gets cheaper on the next call until you run `dekko map`. On a
+large repo (5,000+ mapped files) both waits print a `note:` to stderr
+first: a stale map's in-memory pass, and the regen every other read
+command does. A missing map is always announced, since the first build
+is a cold one.
 
 `diff`/`affected` compare at symbol-body-hash granularity, not a whole-file
 diff: an edit outside every symbol's body span (a trailing comment after the
@@ -71,11 +79,61 @@ shouldn't spuriously flag every test in a file as impacted — but it's worth
 knowing before assuming a "no changes detected" result means the file itself
 is byte-identical to the compared rev.
 
-`query type` only covers what tree-sitter extracts a type from:
-function/method parameter and return-type annotations. It does not see
-struct/class **fields** typed with the target type — those aren't
-extracted as their own symbols with a type at all, so a clean result
-set from `query type` doesn't mean the type is otherwise unused.
+`affected` reports test *files*: what a runner discovers by directory
+(`test/`, `tests/`, `__tests__/`, `spec/`, `specs/`, Maven's `src/test/`) or
+by filename (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*Test.*`,
+`*Tests.*`). Test-support code under a `testing/` directory (mocks,
+matchers, test-case generators, a tool that only exists in a test build)
+counts as test code for `--no-tests` and `unused`, but is never listed as an
+impacted test; the walk passes through it to whatever tests lie beyond.
+
+Rust test code is whatever the compiler builds only under `cargo test`: an
+item or module gated by a `cfg` predicate that can't hold without `test`
+(`#[cfg(test)]`, `#[cfg(all(test, ...))]`), a whole file opening with
+`#![cfg(test)]`, an inline `mod tests`, and a whole file declared out of line
+as `#[cfg(test)] mod editor_tests;` from its parent (plus that file's own
+submodules). `--no-tests` drops it, and `unused` never flags it as dead. Code
+gated `any(test, feature = "test-support")` stays production code: the
+feature builds it into benchmarks and binaries too. `affected` lists a
+source file holding such code as an impacted test file when the walk reaches
+its test code: `crates/vim/src/motion.rs` for a `#[gpui::test]` in its
+`#[cfg(test)] mod test`. That's where most Rust unit tests live, so on a Rust
+repo most impacted files are ordinary source paths. The runner hint stays
+`cargo test`.
+
+`affected` follows resolved calls only. A test that calls changed code
+through a call dekko couldn't pin to one target (`handler.createMessage()`,
+with nine classes defining `createMessage`) is a *possible* impact. It is
+never mixed into the impacted list, the runner hint or the exit status,
+because following those calls reaches most of a large suite. Instead a note
+counts them and names the strongest lead, and `--possible` lists them all:
+
+```
+note: 8 more test file(s) call changed code through a call dekko couldn't
+resolve to one target (strongest:
+apps/vscode/src/sdk/vscode-lm/vscode-lm-handler.test.ts -> createMessage, 9
+candidates); they may be impacted. --possible lists them.
+```
+
+Leads are ranked by how many leading directories the test shares with the
+code it may reach (tests usually sit beside what they test), then by how few
+same-named definitions the call matched. `--json` always carries
+`possible_total` and `possible_example`, and adds a `possible` list (with
+`via`, `candidates`, `shared_dirs` and `callers`) under `--possible`.
+`workset` counts them too (`possible_tests_total`), and the MCP
+`impacted_tests` tool includes the note.
+
+`query type` covers parameter and return-type annotations at every
+function-shaped site: named functions and methods, and (TypeScript/TSX)
+the sites the map has no symbol for — a returned or callback arrow
+function, a function-typed interface member, a `type Fn = (a: A) => B`
+alias, a method or overload signature, a class-field arrow. A site row
+prints its own file and line, what kind of site it is, and the
+enclosing definition (`app.ts:31  function type in Options  [param:
+config]`), or `(module level)` when there is none. It does not see
+struct/class **fields** typed with the target type, generic arguments,
+or JSX — those aren't function-shaped, so a clean result set from
+`query type` doesn't mean the type is otherwise unused.
 Default matching is identifier-token based (`Config` matches
 `Optional[Config]`, `Vec<Config>`, `Config | None`, but not
 `ConfigManager`); pass `--exact` to match the stored type text
@@ -131,9 +189,12 @@ as a property read never lands in the call bucket, so on a React
 codebase the importing-file count is much larger than the call-site
 count. A name that appears as a receiver but is never imported is
 reported as such rather than as "no match" (it is a local variable).
-Before 0.43.75 only the base match existed, and `uses chalk` said "no
-external reference matches" while hundreds of `chalk.*` calls sat in
-the map under `red`/`dim`/`bold`.
+A row shows the callee as the map stores it: a chained receiver with
+its arguments elided (`[chalk.hex().bold]`, `[expect().toBe]`,
+`[[].join]`), a very long chain as its head, `…` and the member
+(`[program.….version]`). Before 0.43.75 only the base match existed,
+and `uses chalk` said "no external reference matches" while hundreds
+of `chalk.*` calls sat in the map under `red`/`dim`/`bold`.
 
 `query uses <symbol>` (and `unused`, which reads the same edges) only
 credits a value reference the referencing file could actually make. In
@@ -217,13 +278,17 @@ has ambiguous inbound edges dekko couldn't resolve — the disclosed
 counts are then a conservative undercount, never an overcount, since
 ambiguous and external matches are excluded rather than guessed at.
 
-`--json` governs the shape of *successful* (exit 0) output only. Any
-error — an ambiguous match, a not-found symbol, a stale map under
-`--no-regen`, an invalid argument — is always reported as a plain-text
-message on stderr with a distinct nonzero exit code, regardless of
-`--json`. This is deliberate and consistent project-wide, not a
-per-command gap: check the exit code first, and only parse stdout as
-JSON when it is 0.
+Exit status 0 and 1 are both answers, with normal stdout (`--json`
+included). 1 means the command found what it looks for: `affected`
+impacted tests, `diff` changed symbols, `unused` unused symbols,
+`status` a stale or missing map, `trace` no resolved path. That's the
+`git diff --exit-code` convention, so a CI step can gate on it. Any
+error (an ambiguous match, a not-found symbol, a stale map under
+`--no-regen`, an unknown rev, an invalid argument) is always a
+plain-text message on stderr with an exit status of 2 or more,
+regardless of `--json`. The one opt-in exception is `sanity
+--fail-on-unexplained`, which exits 3 on a completed sweep. So parse
+stdout as JSON when the status is 0 or 1.
 
 Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,
@@ -260,12 +325,18 @@ sets by `(file, line)` into three buckets:
   is labeled with a likely cause: a cross-package/qualified call
   (`pkg.Func(`, `Type::method(`, `Type.method(`), a bare
   import/require statement naming the symbol (`import { X } from
-  '...'`, `from x import X`, `const { X } = require('...')` — not a
-  call site), a file in a language dekko can't parse, a likely
+  '...'`, `from x import X`, `const { X } = require('...')`, a Rust
+  `use a::{X, Y};` line or one row of a multi-line `use` list — not a
+  call site), a file in a language dekko can't parse, a file in a
+  language it does parse that the map doesn't hold (skipped as too
+  large or generated, or excluded; checked first, since no other
+  cause can apply to a file dekko never read), a likely
   unrelated external-library method sharing the target's bare name
   (see "Receiver-mismatch detection" below), a test-only call
   site (tests are excluded from the dekko-side query by default here,
-  unlike the plain `query callers` default — see `--include-tests`), a
+  unlike the plain `query callers` default — see `--include-tests`;
+  "test" means exactly what that filter drops, so a call inside Rust
+  `#[cfg(test)]` code counts, not only a call in a test-named file), a
   short/generic target name (resolver precision degrades in a dense
   repo), or "unexplained" when none of those fit.
 
@@ -488,6 +559,13 @@ an edit could have affected. Either way the output is identical; you can
 check that yourself by diffing `map.json` against a `--full` run of the
 same tree.
 
+`dekko diff`, `dekko affected` and `dekko workset` on an edited tree
+use the same reuse for the current side without saving anything. On
+tensorflow a one-line edit's `diff` takes ~32s instead of ~205s. The
+edits the reuse doesn't cover (an added, removed or renamed file, a
+changed type) still resolve the whole repo there, just as they do for
+`dekko map`, and the stale-map note says so.
+
 The other resolution passes (references, heritage, imports, throws,
 catches) still run repo-wide every time. They're a small share of the
 cost, so an incremental run's remaining floor is those plus rendering,
@@ -665,57 +743,70 @@ unused-list output at all when omitted.
 
 **Dispatch-candidate caveat (always on) and `--dispatch` (off by
 default).** The mirror-image case of `--suspect`: a symbol *is*
-reported unused, but its own id is one of the unresolved candidates of
-some ambiguous call site elsewhere in the repo (`MapIndex.ambiguous_in`
-keyed by candidate id, the same table `--suspect`/`dekko ambiguous`
-already read). This is exactly the shape an OOP hierarchy produces
-when an abstract base calls its own virtual method (`this.method()`/
-`self.method()`) and 2+ concrete subclasses override it: the base
-never defines the method itself, every override is a same-named
-candidate, none can be picked over the others, and the resolver can
-never attribute the base's call to any single override — each
-override then shows up in `unused` with zero direct fan-in, even
-though every one of them is genuinely called through the base class.
-Unlike `--suspect`'s bare-name collision check, this is a
-same-symbol-id match, not a same-name match, so it's meaningfully more
-precise (though not perfectly so — a symbol's id can land in
-`ambiguous_in` for an unrelated collision that has nothing to do with
-polymorphic dispatch; the recommended check is still correct
-regardless of the exact reason). Because the check is cheap (one
-`dict.get()` per already-computed result row, no extra resolver pass),
-an advisory count is always printed the moment any exist — no flag
-needed — mirroring the C/C++ ABI caveat's "silent unless relevant"
-behavior:
+reported unused, but some call site elsewhere in the repo may reach it
+through dynamic dispatch the resolver can't attribute. Two shapes
+produce that:
+
+- **An ambiguous call names it.** Its own id is one of the unresolved
+  candidates of some ambiguous call site (`MapIndex.ambiguous_in`
+  keyed by candidate id, the same table `--suspect`/`dekko ambiguous`
+  already read). An abstract base calling its own virtual method
+  (`this.method()`/`self.method()`) with 2+ overriding subclasses
+  produces this, and so does a receiver call through an interface- or
+  trait-typed value: `tool.prompt(...)` where 40 tool objects each
+  define `prompt`, whether they are classes or object literals. None
+  of the candidates can be picked over the others, so each shows up in
+  `unused` with zero direct fan-in even though every one is called.
+  This is a same-symbol-id match, not a same-name match, so it's more
+  precise than `--suspect` (though a symbol's id can land in
+  `ambiguous_in` for a collision unrelated to dispatch; the
+  recommended check is correct either way).
+- **A guarded-name receiver call uses its name.** The resolver never
+  resolves a receiver call to a handful of built-in method names
+  (`description`, `parse`, `build`, `map`, `unwrap`, ...), because
+  those almost always mean a library method. Such a call goes
+  external, never ambiguous, so it can't be a candidate in the table
+  above. When 2+ repo symbols define the name and some receiver call
+  uses it (`tool.description()`), each definition counts as a
+  candidate on this weaker evidence.
+
+The check is cheap, so it runs on every `unused` call. Each candidate
+row in the main listing is marked: text rows end with `[dispatch?]`,
+JSON rows carry `"dispatch_candidate": true` (the key is absent on
+every other row). An advisory count prints the moment any exist,
+mirroring the C/C++ ABI caveat's "silent unless relevant" behavior.
+When there are 20 or more candidates and they make up at least half
+the listing, a warning also prints above the rows:
 
 ```
 note: 2 of these are unresolved-ambiguous-call candidates elsewhere in
-the repo -- may be reached via this.method()/self.method()
-polymorphic dispatch the resolver can't attribute. Run `dekko sanity
---unused <name>` before deleting any of them (see --dispatch for
-which ones).
+the repo -- may be reached via polymorphic dispatch the resolver can't
+attribute (this.method()/self.method(), or a receiver call through an
+interface/trait-typed value like tool.prompt()). They are marked
+[dispatch?]; run `dekko sanity --unused <name>` before deleting any of
+them (--dispatch lists them with the command).
 ```
 
-`--dispatch` additionally lists which flagged symbols these are, one
-row per candidate with the exact `dekko sanity --unused <qualname>`
-command to run before deleting it — `"dispatch_candidates"` JSON key /
-text section, independent of and composable with `--suspect`. As with
+`--dispatch` additionally lists the candidates, one row each with the
+exact `dekko sanity --unused <path>:<qualname>:<line>` command to run
+before deleting it: the `"dispatch_candidates"` JSON key (each row
+names its `"evidence"`, `"ambiguous"` or `"guarded-name"`) or a text
+section, independent of and composable with `--suspect`. As with
 `--suspect`, this is a lead, not a verdict: cross-check with `dekko
 sanity --unused` before deleting any flagged symbol this catches,
-especially on inheritance-heavy OOP codebases.
+especially on interface- and inheritance-heavy codebases.
 
-Both `--suspect` and `--dispatch` cap their own section at 20 rows,
-deliberately independent of the main list's `--limit`/`--budget` so
-neither section can silently steal budget from it. Before 0.43.77 that
-cap applied in silence — a header could say 258 candidates and print
-20 with no word about the other 238, and an explicit `--limit`/
-`--budget` had no effect on either section. Now each section binds its
-own `--limit` (only when it's *lower* than the 20-row cap) and its own
-`--budget` independently, and a truncated section ends with a
-`(N of M omitted · raise --limit ...)` footer — the same
-`fit_to_budget` footer shape every other capped dekko output uses.
-`--json` carries the true totals as `suspects_meta`/`dispatch_meta`
-(`{"returned": N, "total": M}`), regardless of how many rows are
-capped into `suspects`/`dispatch_candidates`.
+`--suspect` and `--dispatch` each cap their own section at 20 rows by
+default, independent of the main list's 50, so neither section can
+steal budget from it. An explicit `--limit N` replaces both defaults:
+the main list and each section show up to N rows, so `--dispatch
+--limit 2000` lists every candidate on a repo with hundreds. `--budget`
+applies to each section on its own, and a truncated section ends with
+a `(N of M omitted · raise --limit ...)` footer, the same
+`fit_to_budget` footer every other capped dekko output uses. `--json`
+carries the true totals as `suspects_meta`/`dispatch_meta`
+(`{"returned": N, "total": M}`), however many rows are capped into
+`suspects`/`dispatch_candidates`.
 
 ## Interpreting `dekko ambiguous`
 
@@ -987,7 +1078,22 @@ higher-signal exact matches are now what survives the cap.
 `--limit` lets the budget govern alone, so `query callers X --budget
 20000` returns every row that fits rather than stopping at 50. An
 explicit `--limit` is always honored. The footer names whichever cap
-actually cut the output (`raise --limit` / `raise --budget`).
+actually cut the output (`raise --limit` / `raise --budget`). `outline`
+follows the same rule with its own 200-row default.
+
+`--budget 0` means no cap, on every command and MCP tool that takes a
+budget. It's the way to get a whole result from the commands that are
+budgeted by default (`affected`, `workset`, `search`, `summary`,
+`orient`), and like any explicit budget it also lifts the default row
+limit. For the lean map, whose cap never goes away, `0` means the
+default size-scaled cap. A negative budget is a usage error.
+
+`query file` (and `query cohesion`) on a mapped file with nothing to
+list exits 0 and says why on stderr: `mapped, no symbols` for a
+docstring-only or declaration-only file, or `only test code (N symbols
+hidden by --no-tests)`. `--json` returns `symbols: []`, plus
+`hidden_test_symbols` in the second case. Exit 3 is reserved for a
+path the map doesn't hold at all.
 
 A budget can only drop whole rows, and always keeps at least one, so
 it is a promise only while rows are small. Labels that could grow

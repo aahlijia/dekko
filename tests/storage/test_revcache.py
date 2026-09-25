@@ -1,5 +1,6 @@
 """The disk-backed rev-cache: round-trip, eviction, isolation."""
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -266,3 +267,53 @@ def test_is_all_empty_body_false_for_real_hashes() -> None:
 def test_is_all_empty_body_false_for_empty_symbol_table() -> None:
     empty_snap = Snapshot(symbols={}, callers={}, body={}, imports={})
     assert not revcache._is_all_empty_body(empty_snap)
+
+
+@pytest.mark.parametrize(
+    "stamp_field", ["resolve_hash", "tool_version", "version"]
+)
+def test_load_misses_and_evicts_on_any_stale_stamp_field(
+    tmp_path: Path, stamp_field: str
+) -> None:
+    """A snapshot carries resolved callers, so an entry built by a
+    different resolver or dekko version is stale even when the
+    extraction spec is unchanged."""
+    sha = "a" * 40
+    revcache.save(tmp_path, sha, _snapshot("f"))
+    entry_path = tmp_path / ".dekko" / "rev-cache" / f"{sha}.json"
+    doc = json.loads(entry_path.read_text())
+    doc[stamp_field] = "stale"
+    entry_path.write_text(json.dumps(doc))
+
+    assert revcache.load(tmp_path, sha) is None
+    assert not entry_path.exists()
+
+
+def test_entry_without_a_stamp_is_a_miss(tmp_path: Path) -> None:
+    """Entries written before the full stamp existed carry only
+    ``spec_hash``; they miss once and are rebuilt."""
+    sha = "b" * 40
+    revcache.save(tmp_path, sha, _snapshot("f"))
+    entry_path = tmp_path / ".dekko" / "rev-cache" / f"{sha}.json"
+    doc = json.loads(entry_path.read_text())
+    for key in ("version", "tool_version", "resolve_hash"):
+        doc.pop(key)
+    entry_path.write_text(json.dumps(doc))
+
+    assert revcache.load(tmp_path, sha) is None
+
+
+def test_has_entry_false_for_a_stale_entry(tmp_path: Path) -> None:
+    """``has_entry`` feeds the daemon client's timeout choice, so a
+    stale entry (a guaranteed rebuild) must not count as a hit."""
+    _repo_with_one_commit(tmp_path)
+    sha = revcache.resolve_sha(tmp_path, "HEAD")
+    assert sha is not None
+    revcache.save(tmp_path, sha, _snapshot("f"))
+    assert revcache.has_entry(tmp_path, "HEAD")
+
+    entry_path = tmp_path / ".dekko" / "rev-cache" / f"{sha}.json"
+    doc = json.loads(entry_path.read_text())
+    doc["resolve_hash"] = "stale"
+    entry_path.write_text(json.dumps(doc))
+    assert not revcache.has_entry(tmp_path, "HEAD")

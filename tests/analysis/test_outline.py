@@ -338,3 +338,31 @@ def test_sparse_note_suppressed_when_file_failed_to_parse() -> None:
         )
         is None
     )
+
+
+def _many_functions(make_mapped_repo: RepoFactory, count: int = 250) -> str:
+    body = "".join(
+        f"def f{i}() -> int:\n    return {i}\n\n" for i in range(count)
+    )
+    return str(make_mapped_repo({"big.py": body}))
+
+
+def test_explicit_budget_lifts_the_default_row_limit(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """``--budget`` with no ``--limit`` lets the budget govern, as
+    ``query`` and the MCP ``outline`` tool already did."""
+    root = _many_functions(make_mapped_repo)
+    argv = ["outline", "big.py", "--budget", "100000", "--root", root]
+    assert cli.main(argv) == 0
+    rows = [ln for ln in capsys.readouterr().out.splitlines() if " f" in ln]
+    assert len(rows) == 250
+
+
+def test_default_outline_still_caps_at_200_rows(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = _many_functions(make_mapped_repo)
+    assert cli.main(["outline", "big.py", "--root", root]) == 0
+    rows = [ln for ln in capsys.readouterr().out.splitlines() if " f" in ln]
+    assert len(rows) == outline.DEFAULT_LIMIT

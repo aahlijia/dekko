@@ -187,6 +187,15 @@ CAUSE_QUALIFIED_CALL = (
 CAUSE_UNSUPPORTED_LANGUAGE = (
     "unparsed-language file — dekko can't parse this file at all"
 )
+# A file in a language dekko parses that the map still doesn't hold:
+# skipped as too large or generated, or excluded. Dekko has no call
+# sites there because it never read the file, so "unexplained" was the
+# wrong answer for an index fact. zed: 120 of one symbol's 407
+# unexplained rows sat in a single 1.3 MB test file.
+CAUSE_NOT_MAPPED = (
+    "file not in the map (too large, generated, or excluded) — dekko "
+    "never parsed it; see dekko map --max-file-size"
+)
 CAUSE_TEST_FILTER = (
     "likely filtered by default --no-tests; re-run with --include-tests"
 )
@@ -860,6 +869,53 @@ def _looks_like_value_reference(
     )
 
 
+# How far above a hit to look for its ``use`` opener. Rust ``use``
+# lists run longer than JS import lists (one ``use gpui::{...}`` per
+# file, rustfmt-wrapped), so this is wider than
+# ``_IMPORT_WINDOW_LINES``; a row past it stays "unexplained".
+_USE_WINDOW_LINES = 80
+
+
+def _looks_like_rust_use_line(
+    root: Path, hit: "GrepHit", bare_name: str
+) -> bool:
+    """Whether ``hit``'s line is part of a Rust ``use`` declaration
+    naming ``bare_name``: a whole ``use`` line, or one row of a
+    multi-line ``use a::{...};`` list.
+
+    Rust has no entry in ``_IMPORT_LINE_TEMPLATES``, and the multi-line
+    member check only knows JS/TS ``import {`` blocks, so every Rust
+    import fell through to "unexplained". A ``use`` declaration can't
+    contain a call, so labelling one an import can't hide a missed
+    call. Checked against tree-sitter over every line of zed's 1,923
+    Rust files: no ``use`` line missed; the only lines wrongly claimed
+    were ``use`` text inside string literals and macro bodies, which
+    aren't calls either.
+
+    A continuation row is claimed only if every line between it and
+    the nearest ``use`` opener above is itself a bare name list, and no
+    line in between (or the opener) closes the declaration with ``;``.
+    """
+    if _grammar_for_path(hit.path) != "rust":
+        return False
+    stripped = hit.snippet.strip()
+    if not re.search(rf"\b{re.escape(bare_name)}\b", stripped):
+        return False
+    if _USE_STATEMENT.match(stripped):
+        return True
+    if not _BARE_NAME_LIST_LINE.match(stripped):
+        return False
+    lines = read_lines(root, hit.path)
+    start = max(0, hit.line - 1 - _USE_WINDOW_LINES)
+    for above in reversed(lines[start : hit.line - 1]):
+        text = above.strip()
+        if _USE_STATEMENT.match(text):
+            return not text.endswith(";")
+        if not _BARE_NAME_LIST_LINE.match(text) or text.endswith(";"):
+            return False
+    return False
+
+
 # ``_looks_like_import_statement`` only catches the single-line ``import
 # { X } from "...";`` shape -- _ESM_NAMED_IMPORT_TEMPLATE is anchored at
 # line start and requires ``import``/``{``/``from`` all on the matched
@@ -1248,6 +1304,7 @@ def classify_miss(
     is_known_collision_name: bool = False,
     is_recorded_reference: bool = False,
     looks_like_value_reference: bool = False,
+    not_mapped: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
@@ -1310,8 +1367,12 @@ def classify_miss(
     Args:
         snippet: The grep-matched line's text.
         bare_name: The bare identifier being searched for.
-        is_test_file: Whether the hit's file is test code
-            (``classify.is_test_path``).
+        is_test_file: Whether the hit is test code: its path
+            (``classify.is_test_path``) or an enclosing symbol the
+            extractor flagged ``Symbol.test`` (a Rust inline ``mod
+            tests``) -- the same predicate ``MapIndex.without_tests``
+            drops callers by. Not ``classify.is_test_file``, which is
+            narrower.
         unsupported_language: Whether the hit's file is in a language
             dekko has no parser for (``languages.is_supported``).
         tests_excluded: Whether the dekko-side query this hit is being
@@ -1371,10 +1432,21 @@ def classify_miss(
             of the name used as a value in a language dekko records no
             reference edges for (``_looks_like_value_reference``).
             Callers leave it ``False`` for a type target.
+        not_mapped: Whether the hit's file is in a supported language
+            but absent from the map (skipped or excluded). An index
+            fact computed by the caller, and checked before every
+            other rung: the shape rungs explain a resolver miss, and
+            the resolver never saw this file.
 
     Returns:
         One of the ``CAUSE_*`` constants.
     """
+    # First: every rung below reads the line's shape to guess why the
+    # resolver missed it, and a file the map never parsed was never in
+    # front of the resolver. "Qualified call -- resolver blind spot"
+    # would be false there.
+    if not_mapped:
+        return CAUSE_NOT_MAPPED
     if _looks_qualified_call(snippet, bare_name):
         return CAUSE_QUALIFIED_CALL
     if _looks_like_import_statement(snippet, bare_name):
@@ -1689,6 +1761,54 @@ def _can_see(index: MapIndex, path: str, sym: Symbol) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class _MapScope:
+    """What the *unfiltered* map says about a hit's file.
+
+    ``run()`` and ``run_all()`` compare against ``index.without_tests()``
+    by default, and that view has already deleted the two facts the
+    classifier needs here: which symbols are test code by the
+    extractor's flag rather than by path, and which files the map holds
+    at all (``without_tests`` also drops test paths from
+    ``languages_by_path``). So both are taken from the full index, once
+    per run.
+
+    Attributes:
+        test_spans: Path -> ``(start_line, end_line)`` of every symbol
+            flagged ``Symbol.test`` in a file whose path isn't already
+            test code (a Rust inline ``mod tests``). Empty for every
+            language whose extractor sets no such flag.
+        mapped_paths: Every file the map holds, symbols or not.
+    """
+
+    test_spans: dict[str, tuple[tuple[int, int], ...]]
+    mapped_paths: frozenset[str]
+
+    def is_test_line(self, path: str, line: int) -> bool:
+        """Whether ``path:line`` is test code by path or enclosing span."""
+        if is_test_path(path):
+            return True
+
+        return any(a <= line <= b for a, b in self.test_spans.get(path, ()))
+
+    def is_unmapped(self, path: str) -> bool:
+        """Whether a supported-language ``path`` is absent from the map."""
+        return path not in self.mapped_paths and languages.is_supported(path)
+
+
+def _map_scope(index: MapIndex) -> _MapScope:
+    """Build a ``_MapScope`` from the full (test-inclusive) ``index``."""
+    spans: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for sym in index.symbols_by_id.values():
+        if sym.test and not is_test_path(sym.path):
+            spans[sym.path].append((sym.start_line, sym.end_line))
+
+    return _MapScope(
+        test_spans={path: tuple(v) for path, v in spans.items()},
+        mapped_paths=frozenset(index.languages_by_path),
+    )
+
+
 def _classify_grep_hits(
     hits: list[GrepHit],
     bare_name: str,
@@ -1703,6 +1823,7 @@ def _classify_grep_hits(
     ref_sites: frozenset[tuple[str, int]] = frozenset(),
     target_kinds: frozenset[str] = frozenset(),
     symbols_by_path: dict[str, list[Symbol]] | None = None,
+    scope: _MapScope | None = None,
 ) -> dict[tuple[str, int], str]:
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
@@ -1767,6 +1888,9 @@ def _classify_grep_hits(
             payload shapes need *every* kind in ``TYPE_KINDS``, the
             value-reference shape needs *none* of them to be. Empty
             (the default, and ``--usages`` mode) switches both off.
+        scope: The unfiltered map's test spans and file set (see
+            ``_MapScope``). ``None`` falls back to path-only test
+            classification and never reports a file as unmapped.
 
     Returns:
         ``(path, line) -> CAUSE_*`` for every hit not in
@@ -1795,7 +1919,11 @@ def _classify_grep_hits(
         causes[loc] = classify_miss(
             h.snippet,
             bare_name,
-            is_test_file=is_test_path(h.path),
+            is_test_file=(
+                scope.is_test_line(h.path, h.line)
+                if scope is not None
+                else is_test_path(h.path)
+            ),
             unsupported_language=not languages.is_supported(h.path),
             tests_excluded=tests_excluded,
             near_own_definition=any(
@@ -1806,8 +1934,9 @@ def _classify_grep_hits(
                 _looks_like_comment_line(h.snippet, h.path)
                 or _looks_like_block_comment_continuation(root, h)
             ),
-            looks_like_import_member=_looks_like_multiline_import_member(
-                root, h, bare_name
+            looks_like_import_member=(
+                _looks_like_multiline_import_member(root, h, bare_name)
+                or _looks_like_rust_use_line(root, h, bare_name)
             ),
             # ``.map(Prompt::as_str)`` also matches the TS-shaped
             # ``: name`` type template (on the second colon of ``::``)
@@ -1847,6 +1976,7 @@ def _classify_grep_hits(
             is_known_collision_name=is_known_collision_name,
             is_recorded_reference=is_recorded_reference,
             looks_like_value_reference=looks_like_value,
+            not_mapped=scope is not None and scope.is_unmapped(h.path),
         )
     if symbols_by_path:
         _explain_shadowing_locals(
@@ -3087,6 +3217,7 @@ def run(
         ref_sites=ref_sites,
         target_kinds=target_kinds,
         symbols_by_path=query_index.symbols_by_path,
+        scope=_map_scope(index),
     )
     grep_only_rows = [
         _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits
@@ -3201,6 +3332,7 @@ def _sweep_bare_name(
     ref_sites: frozenset[tuple[str, int]] = frozenset(),
     target_kinds: frozenset[str] = frozenset(),
     symbols_by_path: dict[str, list[Symbol]] | None = None,
+    scope: _MapScope | None = None,
 ) -> tuple[GrepSweepResult, dict[tuple[str, int], str]]:
     """One grep + classify pass for ``bare_name``, shared across every
     symbol in its fan-in group — the sweep's whole cost-saving
@@ -3229,6 +3361,8 @@ def _sweep_bare_name(
             as ``other_candidate_files``.
         target_kinds: Kinds of every symbol sharing ``bare_name``; see
             ``_classify_grep_hits`` for how a mixed group is handled.
+        scope: The unfiltered map's test spans and file set, built once
+            by ``run_all()``; see ``_MapScope``.
 
     Returns:
         ``(sweep, causes)``. ``causes`` is empty when ``sweep.error``
@@ -3250,6 +3384,7 @@ def _sweep_bare_name(
         ref_sites=ref_sites,
         target_kinds=target_kinds,
         symbols_by_path=symbols_by_path,
+        scope=scope,
     )
     return sweep, causes
 
@@ -3459,6 +3594,7 @@ def _run_all_sweeps(
     *,
     tests_excluded: bool,
     workers: int,
+    scope: _MapScope | None = None,
 ) -> dict[str, tuple[GrepSweepResult, dict[tuple[str, int], str]]]:
     """Run one grep+classify sweep per unique bare name in ``names``,
     sequentially or via a thread pool sized by ``workers`` — see
@@ -3510,6 +3646,7 @@ def _run_all_sweeps(
             ref_sites=_reference_sites(query_index, symbols_for_name),
             target_kinds=frozenset(s.kind for s in symbols_for_name),
             symbols_by_path=query_index.symbols_by_path,
+            scope=scope,
         )
         return name, sweep, causes
 
@@ -3631,6 +3768,7 @@ def run_all(
         query_index,
         tests_excluded=not include_tests,
         workers=workers,
+        scope=_map_scope(index),
     )
     sweep_error = _first_sweep_error(names, sweeps)
     if sweep_error is not None:

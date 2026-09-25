@@ -3651,6 +3651,149 @@ def test_language_filtered_unchanged_for_unrecognized_call_site_path() -> None:
     assert filtered == [candidate]
 
 
+def test_language_filtered_treats_js_dialects_as_one_language() -> None:
+    """``.ts``, ``.tsx`` and ``.js`` are one language to the resolver.
+
+    A ``.tsx`` call site must still see a ``.ts`` candidate when a
+    ``.tsx`` one also exists: the file extension says nothing about
+    which same-named function the call reaches, and dropping the
+    ``.ts`` file before the import rung runs is how a ``.tsx`` file's
+    imported helper got pinned to an unrelated ``.tsx`` namesake.
+    """
+    ts = _fn("lib/errors.ts", "errorMessage", language="typescript")
+    tsx = _fn("ui/Panel.tsx", "errorMessage", language="tsx")
+    js = _fn("legacy/util.js", "errorMessage", language="javascript")
+    py = _fn("tools/errors.py", "errorMessage")
+    call = RawCall(
+        caller_id=None,
+        path="screens/REPL.tsx",
+        text="errorMessage",
+        name="errorMessage",
+        line=1,
+    )
+    filtered = resolver_mod._language_filtered(call, [ts, tsx, js, py])
+    assert filtered == [ts, tsx, js]
+
+
+def test_language_filtered_c_cpp_keeps_same_language_first() -> None:
+    """The C/C++ family still prefers the call site's own language."""
+    c = _fn("a.c", "run", language="c")
+    cpp = _fn("b.cc", "run", language="cpp")
+    call = RawCall(caller_id=None, path="m.cc", text="run", name="run", line=1)
+    assert resolver_mod._language_filtered(call, [c, cpp]) == [cpp]
+
+
+def test_hint_match_breaks_stem_tie_by_relative_import_path() -> None:
+    """``./errors/LimitError`` names ``errors.ts``, not ``LimitError.tsx``.
+
+    The stored source appends the imported name, so a stem check
+    matches both the module file and any file named after the symbol.
+    Resolving the specifier against the caller's directory picks the
+    one file the import actually names.
+    """
+    real = _cls("sdk/providers/errors.ts", "LimitError", language="typescript")
+    rival = _cls("webview/chat/LimitError.tsx", "LimitError", language="tsx")
+    picked = resolver_mod._hint_match(
+        ["./errors/LimitError"],
+        [real, rival],
+        None,
+        "sdk/providers/builtins.ts",
+    )
+    assert picked is real
+
+
+def test_hint_match_relative_tiebreak_handles_parent_and_js_specifier() -> (
+    None
+):
+    real = _fn("app/lib/util.ts", "fmt", language="typescript")
+    rival = _fn("app/views/util.tsx", "fmt", language="tsx")
+    picked = resolver_mod._hint_match(
+        ["../lib/util.js/fmt"], [real, rival], None, "app/views/page.tsx"
+    )
+    assert picked is real
+
+
+def test_hint_match_relative_tiebreak_resolves_index_file() -> None:
+    real = _fn("ui/widgets/index.ts", "Button", language="typescript")
+    rival = _fn("ui/other/Button.tsx", "Button", language="tsx")
+    picked = resolver_mod._hint_match(
+        ["./widgets/Button"], [real, rival], None, "ui/app.tsx"
+    )
+    assert picked is real
+
+
+def test_hint_match_tie_stays_unresolved_without_an_exact_file() -> None:
+    """A tie the relative path can't settle is still a tie."""
+    a = _fn("x/errors.ts", "boom", language="typescript")
+    b = _fn("y/errors.ts", "boom", language="typescript")
+    picked = resolver_mod._hint_match(
+        ["./errors/boom"], [a, b], None, "z/caller.ts"
+    )
+    assert picked is None
+
+
+def test_hint_match_non_relative_tie_is_untouched() -> None:
+    """Package and alias specifiers get no path tiebreak."""
+    a = _fn("pkgs/core/errors.ts", "boom", language="typescript")
+    b = _fn("app/boom.tsx", "boom", language="tsx")
+    picked = resolver_mod._hint_match(
+        ["@scope/errors/boom"], [a, b], None, "app/caller.ts"
+    )
+    assert picked is None
+
+
+def test_tsx_caller_resolves_imported_ts_function_over_tsx_namesake(
+    tmp_path: Path,
+) -> None:
+    _write_tree(
+        tmp_path,
+        {
+            "lib/errors.ts": (
+                "export function errorMessage(e: unknown) {\n"
+                "  return String(e);\n}\n"
+            ),
+            "ui/Panel.tsx": (
+                "export function errorMessage(e: unknown) {\n"
+                "  return <b>{String(e)}</b>;\n}\n"
+            ),
+            "screens/REPL.tsx": (
+                "import { errorMessage } from '../lib/errors.js';\n"
+                "export function REPL(e: unknown) {\n"
+                "  return errorMessage(e);\n}\n"
+            ),
+        },
+    )
+    edges = _edges(tmp_path)
+    caller = "screens/REPL.tsx::REPL"
+    assert (caller, "lib/errors.ts::errorMessage") in edges
+    assert (caller, "ui/Panel.tsx::errorMessage") not in edges
+
+
+def test_ts_caller_keeps_imported_target_when_tsx_file_shares_the_name(
+    tmp_path: Path,
+) -> None:
+    """``import { makeError } from './errors'`` next to a ``makeError.tsx``.
+
+    Both files pass the import rung's stem check (``errors`` and
+    ``makeError``); the relative path picks ``errors.ts``.
+    """
+    _write_tree(
+        tmp_path,
+        {
+            "sdk/errors.ts": "export function makeError() {\n  return 1;\n}\n",
+            "web/makeError.tsx": (
+                "export function makeError() {\n  return <i />;\n}\n"
+            ),
+            "sdk/builtins.ts": (
+                "import { makeError } from './errors';\n"
+                "export function handle() {\n  return makeError();\n}\n"
+            ),
+        },
+    )
+    edges = _edges(tmp_path)
+    assert ("sdk/builtins.ts::handle", "sdk/errors.ts::makeError") in edges
+
+
 def test_module_matches_bare_node_builtin_specifier_denylisted() -> None:
     # A bare (non-relative) JS/TS import
     # source naming a Node core module must never match a same-named
@@ -6582,3 +6725,56 @@ def test_rust_variant_veto_is_for_calls_only() -> None:
     # can spell, and points at the owning enum.
     assert index[resolver_mod._RUST_VARIANT_KEY + "Left"] == [side]
     assert index["Left"] == [struct]
+
+
+@pytest.mark.parametrize(
+    "name", ["description", "map", "unwrap", "isEqualTo", "build", "prompt"]
+)
+def test_is_guarded_method_name_agrees_with_the_noise_guard(name: str) -> None:
+    # `unused`'s dispatch check reads the public helper; the resolver
+    # reads it through `_is_noise_call`. One list, so a receiver call
+    # is noise exactly when its name is guarded.
+    call = RawCall(
+        caller_id="a.ts::f",
+        path="a.ts",
+        text=f"tool.{name}",
+        name=name,
+        receiver="tool",
+        line=1,
+    )
+    noise = resolver_mod._is_noise_call(call, {}, set())
+    assert noise == resolver_mod.is_guarded_method_name(name)
+    assert noise == (name != "prompt")
+
+
+@_NO_FORK_ON_WINDOWS
+@pytest.mark.parametrize(
+    ("platform", "names_objc"), [("darwin", True), ("linux", False)]
+)
+def test_pool_retry_note_states_the_crash_not_a_guessed_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    platform: str,
+    names_objc: bool,
+) -> None:
+    """The note used to blame another concurrent dekko process; the
+    usual macOS cause is the Objective-C fork-safety abort, seen with
+    nothing else running."""
+    monkeypatch.setattr(
+        resolver_mod,
+        "_pool_mp_context",
+        lambda: multiprocessing.get_context("fork"),
+    )
+    monkeypatch.setattr(resolver_mod.sys, "platform", platform)
+
+    def run(w: int, ctx: BaseContext) -> str:
+        if ctx.get_start_method() == "fork":
+            raise BrokenProcessPool("simulated: process pool broken")
+        return "ok"
+
+    resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+    err = capsys.readouterr().err
+    assert "a worker process crashed" in err
+    assert "concurrent dekko" not in err
+    assert ("Objective-C" in err) is names_objc

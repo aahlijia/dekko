@@ -63,7 +63,16 @@ Spot-check — not a full re-verification — when any of these apply:
 - **You're about to delete or rename based on `dekko unused`'s
   dead-code list.** Same blind spots apply; a callback passed
   by reference rather than called directly, or a call from an
-  unparsed file, can both read as "no inbound calls."
+  unparsed file, can both read as "no inbound calls." A row ending
+  in `[dispatch?]` (`dispatch_candidate` in `--json`) shares its name
+  with an interface/trait method, so it may be reached by dispatch
+  dekko can't resolve: treat it as alive until `sanity --unused`
+  says otherwise.
+- **`impacted_tests` / `dekko affected` looks thin.** It follows
+  resolved calls only. Tests that reach the change through an
+  ambiguous call are counted in a `note:` line (strongest lead named),
+  not listed; `dekko affected --possible` lists them. Read that note
+  before trusting a short list.
 - **A heritage or throws-provenance result labels something
   `(external)`.** `query supertypes`/`subtypes` and `query throws`
   can mislabel an in-repo type-alias-as-heritage-base or a

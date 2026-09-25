@@ -30,6 +30,7 @@ from dekko.core.model import (
     Import,
     Param,
     Symbol,
+    TypeUse,
 )
 
 try:
@@ -776,6 +777,14 @@ class MapIndex:
             other new field added alongside it, there is no
             corresponding `env_reads_ambiguous`/`env_reads_external`
             side table.
+        type_uses: Every parameter/return annotation on a
+            function-shaped node that is not a symbol, repo-wide
+            (empty for maps written before the section existed) —
+            see ``model.TypeUse``. A flat list, not an index: the only
+            readers are ``query.type_usage_rows`` (a token match over
+            every record, the same scan it makes over every symbol's
+            own params/returns) and ``query.type_usage_name_index``
+            (one tokenizing pass).
         notes: Symbol id → note texts loaded from ``.dekko/notes.json``.
         provenance: Provenance stamp, or ``None`` for v1 documents.
         doc_version: The on-disk document's ``"version"`` field (``1``
@@ -792,6 +801,10 @@ class MapIndex:
             was parsed from, or ``None`` for an index built in memory.
             Read by ``index_matches_disk`` so a long-lived cache can
             tell its copy was replaced on disk.
+        hidden_test_symbols: Set by ``without_tests`` only: file path
+            → how many symbols it dropped from a file left with none,
+            so ``query file`` can say the file holds only test code
+            rather than that it isn't mapped.
     """
 
     root_label: str
@@ -853,6 +866,7 @@ class MapIndex:
     )
     catches: list[CatchSite] = field(default_factory=list)
     env_reads_by_key: dict[str, list[EnvRead]] = field(default_factory=dict)
+    type_uses: list[TypeUse] = field(default_factory=list)
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
     doc_version: int = MAP_DOC_VERSION
@@ -861,6 +875,7 @@ class MapIndex:
     # Lets a long-lived cache notice the file was replaced on disk --
     # see ``index_matches_disk``.
     map_stat: list[int] | None = None
+    hidden_test_symbols: dict[str, int] = field(default_factory=dict)
 
     @cached_property
     def externals_by_head(self) -> dict[str, list[ExternalCall]]:
@@ -900,9 +915,9 @@ class MapIndex:
         from test files. A symbol is dropped when either its file path
         is a test path (``classify.is_test_path``, works even on
         pre-v3 documents that lack the ``test`` flag) or the extractor
-        set ``Symbol.test`` (path-based classification plus
-        language-specific containers such as Rust's inline
-        ``mod tests { ... }``).
+        set ``Symbol.test`` (path-based classification plus Rust code
+        compiled only under test: ``#[cfg(test)]`` items and modules,
+        including whole files declared ``#[cfg(test)] mod x;``).
 
         Returns:
             A new ``MapIndex``; ``self`` is left untouched.
@@ -967,6 +982,12 @@ class MapIndex:
         _filter_module_graph(self, out)
         _filter_throws_catches(self, out, by_id)
         _filter_env_reads(self, out)
+        out.type_uses = [t for t in self.type_uses if not is_test_path(t.path)]
+        out.hidden_test_symbols = {
+            path: len(syms)
+            for path, syms in self.symbols_by_path.items()
+            if path not in out.symbols_by_path
+        }
         return out
 
 
@@ -975,9 +996,8 @@ def _symbol_is_test(sym: Symbol) -> bool:
 
     Two independent signals can mark test code: the defining file's
     path (``classify.is_test_path``) and the extractor's per-symbol
-    ``Symbol.test`` flag (path-based classification plus
-    language-specific containers such as Rust's inline
-    ``mod tests { ... }`` — see ``Symbol.test``'s docstring). Either
+    ``Symbol.test`` flag (path-based classification plus Rust code
+    compiled only under test — see ``Symbol.test``'s docstring). Either
     one is sufficient; this is the single place both are combined so
     ``without_tests()`` actually excludes everything ``Symbol.test``
     flags, not just what the path alone would catch.
@@ -1338,14 +1358,19 @@ def _load_notes(root: Path) -> dict[str, list[str]]:
 def callee_segments(text: str) -> list[str]:
     """Path segments of an external callee text, whitespace-stripped.
 
-    ``subprocess.run`` → ``["subprocess", "run"]``. Multi-line chains
-    are whitespace-normalized to a single space before storage, so
-    ``z\n  .object`` is stored as ``z .object`` and a naive split
-    leaves ``"z "`` as the head; 979 of claude-code's ``z.*`` externals
-    (39%) had that trailing space. Stripping here
-    is what makes a head-segment match see them.
+    ``subprocess.run`` → ``["subprocess", "run"]``. Whitespace is
+    stripped from each segment: a map written before callee text was
+    canonicalized stored a multi-line chain as ``z .object`` (979 of
+    claude-code's ``z.*`` externals had that trailing space), and the
+    head must still match on such a map. The ``…`` that
+    ``extractor._cap_callee`` puts in the middle of an over-long chain
+    is not a member and is dropped.
     """
-    return [s for s in (p.strip() for p in _BASE_SPLIT.split(text)) if s]
+    return [
+        s
+        for s in (p.strip() for p in _BASE_SPLIT.split(text))
+        if s and s != "…"
+    ]
 
 
 def _callee_base(text: str) -> str:
@@ -1485,7 +1510,7 @@ def load_map(root: Path) -> MapIndex | None:
         base = _callee_base(ext.callee)
         if base:
             index.externals_by_name.setdefault(base, []).append(ext)
-    index.ambiguous_in, index.ambiguous_out = _index_ambiguous(
+    index.ambiguous_in, index.ambiguous_out = index_ambiguous(
         (
             _resolve_ref(d.get("caller", ""), ids),
             d.get("name", ""),
@@ -1503,6 +1528,7 @@ def load_map(root: Path) -> MapIndex | None:
     _load_module_graph(index, doc, ids)
     _load_throws_catches(index, doc, ids)
     _load_env_reads(index, doc)
+    _load_type_uses(index, doc)
     return index
 
 
@@ -1530,7 +1556,7 @@ def _load_heritage(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
             "relation", "extends"
         )
     index.heritage_ambiguous_in, index.heritage_ambiguous_out = (
-        _index_ambiguous(
+        index_ambiguous(
             (
                 _resolve_ref(d.get("subtype", ""), ids),
                 d.get("name", ""),
@@ -1660,7 +1686,29 @@ def _load_env_reads(index: MapIndex, doc: dict) -> None:
         index.env_reads_by_key.setdefault(read.key, []).append(read)
 
 
-def _index_ambiguous(
+def _load_type_uses(index: MapIndex, doc: dict) -> None:
+    """Fill ``index.type_uses`` from a parsed ``map.json`` doc.
+
+    Absent from documents written before the section existed;
+    ``.get("type_uses", [])`` makes this a no-op for those. Plain
+    strings throughout, no id table (``owner_id`` is disclosure, never
+    resolved — see ``model.TypeUse``), the ``_load_env_reads`` shape.
+    """
+    for d in doc.get("type_uses", []):
+        index.type_uses.append(
+            TypeUse(
+                owner_id=d.get("owner_id"),
+                path=d.get("path", ""),
+                line=d.get("line", 0),
+                site=d.get("site", ""),
+                usage=d.get("usage", "param"),
+                param_name=d.get("param_name"),
+                type=d.get("type", ""),
+            )
+        )
+
+
+def index_ambiguous(
     entries: Iterator[tuple[str, str, list[str]]],
 ) -> tuple[dict[str, list[tuple[str, str]]], dict[str, list[str]]]:
     """Index ambiguous-call records by candidate, and by caller.
@@ -1735,7 +1783,7 @@ def index_from_maps(
         base = _callee_base(ext.callee)
         if base:
             index.externals_by_name.setdefault(base, []).append(ext)
-    index.ambiguous_in, index.ambiguous_out = _index_ambiguous(
+    index.ambiguous_in, index.ambiguous_out = index_ambiguous(
         iter(graph.ambiguous)
     )
     for edge in graph.referenced:
@@ -1748,7 +1796,7 @@ def index_from_maps(
         index.heritage_lines[(edge.subtype, edge.supertype)] = edge.lines
         index.heritage_relation[(edge.subtype, edge.supertype)] = edge.relation
     index.heritage_ambiguous_in, index.heritage_ambiguous_out = (
-        _index_ambiguous(iter(graph.heritage_ambiguous))
+        index_ambiguous(iter(graph.heritage_ambiguous))
     )
     for ext in graph.heritage_external:
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)
@@ -1761,6 +1809,7 @@ def index_from_maps(
     _index_module_graph(index, graph)
     _index_throws_catches(index, graph)
     _index_env_reads(index, graph)
+    index.type_uses = [t for fm in files for t in fm.type_uses]
     return index
 
 

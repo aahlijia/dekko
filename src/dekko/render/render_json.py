@@ -206,5 +206,12 @@ def render_json(
             }
             for r in graph.env_reads
         ],
+        # Parameter/return annotations on function-shaped nodes that
+        # are not symbols (``model.TypeUse``). Rendered from the files,
+        # not the graph: nothing resolves them, and ``owner_id`` is a
+        # plain string or ``null`` like ``env_reads``' ``caller_id``.
+        # Additive and optional: no ``MAP_DOC_VERSION`` bump, old
+        # readers ignore it, new readers tolerate its absence.
+        "type_uses": [asdict(t) for fm in files for t in fm.type_uses],
     }
     return _json_dumps(doc) + b"\n"

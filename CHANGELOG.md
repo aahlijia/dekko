@@ -9,6 +9,424 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-25
+
+Closes round 1.2's fix cycle. The code is 1.1.11; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.2 evaluated 1.0.5 on
+seven real repositories and found no regressions, but its
+edit-allowed brief turned up four Highs. Those, the Mediums and Lows,
+and three more bugs found while designing the fixes became ten fix
+tracks, all shipped, plus one Windows fix found while releasing:
+
+- **1.1.1**: `affected` reports only test files a runner would
+  discover, so test-support code under `testing/` is no longer an
+  "impacted test".
+- **1.1.2**: TypeScript arrow-function and callback parameter types
+  count as type usages (`query type`, `unused`, `workset
+  --type-impact`).
+- **1.1.3**: external callee ids are stored canonically, without call
+  arguments. The longest id on any evaluation repo went from 1,749
+  characters to under 162, and Rust turbofish and C++ template calls
+  are named correctly.
+- **1.1.4**: `sanity` explains misses in Rust inline test modules,
+  Rust `use` lines and files the map skipped. zed's `--all`
+  unexplained count fell from 6,356 to 2,800.
+- **1.1.5**: Rust code compiled only under `cargo test` is test code.
+  1,826 zed symbols moved, and `unused` dropped from 11,141 to 10,392.
+- **1.1.6**: `.ts` and `.tsx` resolve as one language, with a
+  relative-import tiebreak.
+- **1.1.7**: `unused --dispatch` marks each candidate row, and an
+  explicit `--limit` lifts the section's cap.
+- **1.1.8**: `affected` includes Rust `cfg(test)` files (zed `HEAD~1`
+  46 -> 213 impacted), and tests reached only through an ambiguous call
+  are counted in a note and listed by `--possible`.
+- **1.1.9**: a stale map's `diff`/`affected`/`workset` reuse `dekko
+  map`'s caches. A dirty-tree tensorflow `diff` went from 205 s to
+  32 s.
+- **1.1.10**: ten small fixes, including `--budget 0` meaning no cap,
+  `query file` on empty files, a fully keyed rev cache, and MCP
+  target-argument aliases.
+- **1.1.11**: test filename patterns match case-sensitively on
+  Windows, where `*Test.*` had made `test.rs` and `latest.py` test
+  files. Caught by this release's own Windows CI.
+
+The Claude Code skills and the MCP docs were brought up to date with
+these changes ahead of the release. Round 1.3 (dekko 1.1.10,
+2026-09-25) has since run on the same seven repositories: all ten
+tracks held, with no regressions. Its findings open the 1.2.x line.
+
+## [1.1.11] — 2026-09-25
+
+### Fixed
+- **Test filename patterns match case-sensitively on Windows.** The
+  `*Test.*` and `*Tests.*` patterns went through `fnmatch.fnmatch`,
+  which folds case on Windows, so `test.rs`, `ed_tests.rs` and even
+  `latest.py` counted as test files there: hidden by `--no-tests`,
+  reported by `affected`, and left out of `unused`. They now match the
+  way they always have on macOS and Linux, where nothing changes.
+
+## [1.1.10] — 2026-09-25
+
+### Fixed
+- **`query file` no longer calls mapped files unmapped.** It only
+  searched files that define symbols, so a docstring-only
+  `__init__.py`, a `package-info.java` or a barrel file got "no mapped
+  file matches" and exit 3. That's 2,374 files on spring-boot and
+  2,547 on tensorflow. With `--no-tests`, a file holding only test code
+  got the same answer. Both now exit 0 and say why the list is empty
+  (`mapped, no symbols`, or `only test code (58 symbols hidden by
+  --no-tests)`, also as `hidden_test_symbols` in `--json`). `query
+  cohesion` shares the fix. Files that define symbols are still matched
+  first, so no path that resolved before resolves differently now.
+- **`--budget 0` means no cap.** A zero budget kept exactly one row on
+  every command, and the five commands with a default budget
+  (`affected`, `workset`, `search`, `summary`, `orient`) had no way to
+  ask for everything. `0` now lifts the token cap (and, like any
+  explicit budget, the default row limit) on the CLI and every MCP
+  tool. A negative budget is a usage error.
+- **The rev cache is keyed like the other caches.** A cached old-side
+  snapshot was checked against the extraction spec only, so one built
+  before a resolver change, or by an older dekko, kept serving its old
+  caller lists to `diff`/`affected`/`workset`. It now also has to
+  match the dekko version and the resolver, and a stale entry is
+  rebuilt once. The daemon's "is this rev cached?" check reads the
+  same stamp, so a stale entry no longer gets the short cache-hit
+  timeout.
+- **A failed export says what failed.** `diff` against a valid commit
+  on a full disk printed "unknown rev or not a git repo". Every export
+  failure now carries its real reason: git's own error, the timeout, or
+  the extraction error (`No space left on device`).
+- **Rust attributes that tree-sitter can't parse no longer become
+  calls.** An attribute on a destructured struct field
+  (`#[cfg_attr(not(..), allow(..))] icon,`) is outside the grammar, and
+  error recovery turned its payload into call expressions. On zed that
+  made `Window::new` call an unrelated test helper named `not`.
+- **`outline --budget` isn't cut off at 200 rows.** An explicit budget
+  with no `--limit` now lets the budget govern, as it already did for
+  `query` and the MCP `outline` tool.
+- **MCP tools accept each other's target argument names.** The tools
+  that take a target call it `symbol`, `name`, `type` or `target`
+  depending on the tool, and agents guess by analogy. Every one of them
+  now accepts any of the four. Two different targets under different
+  names is an error rather than a silent pick.
+- **The process-pool retry note states what happened.** It blamed
+  "another concurrent dekko process", but the usual cause on macOS is
+  the Objective-C runtime aborting a forked worker, with nothing else
+  running. The note now says a worker crashed and, when the pool
+  forked on macOS, names that check.
+- **The `pre-read` hook works without a `cwd` in its payload**, and
+  when `cwd` and the read path spell the repo differently through a
+  symlink.
+
+### Internal
+- A daemon test failed intermittently with `I/O operation on closed
+  file`. Its helper returned a canned reply without waiting for the
+  daemon thread to leave its output redirect, which could then restore
+  pytest's already-closed capture stream as `sys.stdout`. The helper
+  now drains the real reply first.
+
+## [1.1.9] — 2026-09-25
+
+### Fixed
+- **`diff` and `affected` on an edited tree no longer re-resolve the
+  whole repo.** When the map was older than the working tree, the
+  current side was re-mapped from scratch on every call and never used
+  the caches `dekko map` keeps. Parsing turned out to be the small part:
+  on tensorflow, re-resolving calls was 146 of the 180 seconds. The
+  current side now reuses both the extraction cache and the cached call
+  resolution for everything the edit can't have affected, like an
+  incremental map, and still writes nothing. A one-line edit's `diff`
+  on tensorflow goes from 205s to 32s, and `affected` to 32s, with
+  byte-identical output. spring-boot's `affected` goes from 12.6s to
+  9.4s. An added, removed or renamed file, or a changed type, still
+  resolves the whole repo, as it does for `dekko map`. `cache.json` is
+  now parsed at most once per call, and not at all when neither side
+  needs it.
+- **A map built with `--follow-symlinks` is diffed with it.** `diff`,
+  `affected` and `workset` dropped the recorded setting on both sides,
+  so they compared a different set of files than the map held.
+- **Cached call resolution is never paired with an extraction cache
+  from a different run.** `dekko map` writes the two files one after
+  the other, so a `diff` reading them during a concurrent map could get
+  one of each and keep a stale edge. The mismatch is now detected and
+  the whole repo is resolved instead. After a normal run it never fires.
+- **Long waits say so first.** On repos with 5,000+ mapped files, a
+  stale map's in-memory pass (`diff`/`affected`) and the auto-regen
+  every other read command does (including `workset`: 60s of silence on
+  tensorflow) print a `note:` to stderr before they start. The
+  `diff`/`affected` note says whether cached resolution can be reused
+  or the whole repo has to be resolved. Building a missing map is
+  always announced.
+
+## [1.1.8] — 2026-09-25
+
+### Fixed
+- **`affected` reports Rust files that hold `cargo test` code.** It only
+  listed test *paths*, and most Rust unit tests live in a
+  `#[cfg(test)] mod tests` inside an ordinary source file, so zed's
+  were invisible to it. A reached symbol that only `cargo test` compiles
+  now makes its file an impacted test file. On zed, `affected HEAD~1`
+  goes from 46 to 213 test files, with nothing lost; every addition is
+  a `crates/*/src/*.rs` file whose reached symbol is a `cfg(test)` test
+  (`crates/vim/src/motion.rs`'s `test_start_end_of_paragraph`).
+  `testing/` test-support code is still never listed.
+- **`affected` says when a test reaches the change only through an
+  unresolved call.** Its walk follows resolved calls, so a test calling
+  `handler.createMessage()` (nine classes define `createMessage`) was
+  silently missing on cline. Following ambiguous calls instead reaches
+  most of a large suite (a median of 689 test files on zed), so these
+  are *possible* impacts: never in the impacted list, the runner hint or
+  the exit status. A note counts them and names the strongest lead,
+  ranked by shared directories with the code it may reach, then by
+  fewest same-named definitions. On cline, the report's missing
+  `vscode-lm-handler.test.ts` is that lead. `--possible` lists them all.
+  JSON always carries `possible_total`/`possible_example`, `workset`
+  counts them as `possible_tests_total`, and MCP `impacted_tests` shows
+  the note.
+- **`workset` keeps impacted tests when the budget runs short.** The
+  tests tier came last, after outline detail, so on zed 16 of 40
+  symbol seeds printed `impacted_tests: []` beside a nonzero
+  `impacted_tests_total`. The first 20 test rows now come right after
+  files and packs, and the rest stay last (as "more impacted tests:" in
+  text): 0 of 40 lose them all.
+- **Exit status is documented.** `affected` and `diff` `--help` state
+  0/1/2, and `docs/cli.md` no longer says to parse `--json` output only
+  on exit 0: exit 1 (`affected`, `diff`, `unused`, `status`, `trace`)
+  is a normal answer with full stdout.
+
+## [1.1.7] — 2026-09-25
+
+### Fixed
+- **`unused` shows which flagged rows dynamic dispatch might reach,
+  and lists all of them on request.** On claude-code, 250 of the
+  flagged symbols are `Tool` interface methods (`prompt`,
+  `description`, `isConcurrencySafe`, ...) defined on ~40 tool object
+  literals and called as `tool.prompt(...)`. `unused` already knew 211
+  of them were dispatch candidates and said 56% of the list was, but
+  nothing showed which rows: `--dispatch` printed 20 rows, all from
+  `src/bridge/`, and `--limit 1400` couldn't raise that cap, though
+  the footer said to raise `--limit`. Three changes:
+  - Every candidate row in the main listing is marked: text rows end
+    in `[dispatch?]`, JSON rows carry `"dispatch_candidate": true`
+    (absent on other rows; +5% JSON tokens on claude-code).
+  - An explicit `--limit` now sets the `--dispatch` and `--suspect`
+    section caps in either direction. They still default to 20, and
+    the main list to 50.
+  - Receiver calls the resolver never resolves by design (`description`,
+    `parse`, `build` and other built-in method names always go
+    external) now count as dispatch evidence when 2+ repo symbols
+    define the name. That is the other 39 of the 250, all
+    `tool.description()`. `--dispatch` JSON rows say which evidence
+    they rest on, `"ambiguous"` or `"guarded-name"`. Guarded-name
+    candidates: claude-code 46, cline 5, spring-boot 11, tensorflow
+    40, zed 85. `unused` totals are unchanged.
+
+  `--dispatch` help, the caveat and `docs/cli.md` now say the check
+  covers receiver calls through interface- or trait-typed values, not
+  only `this.method()` through a base class.
+
+## [1.1.6] — 2026-09-24
+
+### Fixed
+- **`.ts` and `.tsx` files are one language to the call resolver.**
+  Before any evidence was weighed, resolution kept only candidates in
+  the call site's exact language, and `typescript` and `tsx` counted
+  as two. A `.tsx` file calling a function it imports from a `.ts`
+  file lost the real target whenever some other `.tsx` file defined
+  the same name: on claude-code, `mcp.tsx` called
+  `ManagePlugins.tsx::getScopeLabel` instead of the
+  `services/mcp/utils.ts` one it imports, and `REPL.tsx`'s imported
+  `errorMessage` was reported as external. Interface calls went wrong
+  the same way: `tool.extractSearchText()` was pinned to BashTool's
+  implementation, the only `.tsx` one of six, so the other five read
+  as unused.
+
+  Merging the dialects exposed a tie the filter had been hiding. A
+  named import is stored as `<module>/<name>`, and the import rung
+  matches file stems, so `import { ClinePassLimitError } from
+  './errors'` matched both `errors.ts` and an unrelated
+  `ClinePassLimitError.tsx` component, and gave up. A relative
+  specifier now settles that tie: the module is resolved against the
+  caller's directory with the same extension and `index` rules the
+  module graph uses, and the one tied candidate in that file wins.
+  Package and alias specifiers are left alone.
+
+  claude-code: resolved calls 26,696 -> 26,492 (+176 -380), references
+  10,100 -> 10,209 (+157 -48). cline: calls 20,648 -> 20,749 (+121
+  -20), references 9,171 -> 8,853 (+227 -545; 545 of them were `fs`
+  and `path` module references credited to two locals in one test
+  file). Nearly every removed edge had no import behind it; 275 of the
+  added calls and 384 of the added references follow a real import.
+  Twelve removed edges did have one, and each is now honestly
+  ambiguous or was wrong. Seven added edges on claude-code are wrong:
+  bare `set(...)`/`unmount()` calls on local bindings, which a
+  weaker last-resort step now matches once a second candidate exists.
+  awesome-go, claude-buddy, spring-boot, tensorflow and zed are
+  byte-identical.
+
+## [1.1.5] — 2026-09-24
+
+### Fixed
+- **Rust code compiled only under `cargo test` is test code.** Dekko
+  recognised Rust tests by module *name* (`mod tests { }`), and Rust
+  decides by attribute. On zed 1,826 symbols the compiler builds only
+  for tests were production code to every command: 1,558 in files
+  declared out of line (`#[cfg(test)] mod editor_tests;` in
+  `editor.rs`, plus `vim/src/test.rs`, `tests.rs` and friends), 153 in
+  `#[cfg(test)]` modules with other names, 115 on single `#[cfg(test)]`
+  functions and `impl` blocks. `--no-tests` (the MCP tools' default)
+  kept them, so 174 test helpers like `StubAgentConnection.end_turn`
+  showed production callers that are really tests, and `unused`
+  flagged 749 test symbols as dead code.
+
+  The extractor now evaluates each `cfg` predicate (`test` false,
+  every other atom unknown) and flags whatever can't be built without
+  `test`: an item, a module, a whole file opening with `#![cfg(test)]`,
+  or a file declared `#[cfg(test)] mod x;` from its parent, and that
+  file's own submodules. The last is decided across files at map time,
+  never cached, so editing only the parent re-flags the child. Code
+  gated `any(test, feature = "test-support")` stays production: the
+  feature builds it into benchmarks and binaries, which call it. `unused`
+  no longer flags any test-flagged symbol.
+
+  zed: 1,826 symbols flip to test and none flip back; symbols, edges
+  and every other map section are byte-identical on all seven eval
+  repos; the `--no-tests` view drops from 50,790 symbols / 88,733
+  caller entries to 48,964 / 81,619; `unused` from 11,141 to 10,392,
+  every removed row test code. Full-map time on zed is within noise.
+  `affected` still reports by file path, so Rust `#[test]` functions
+  in ordinary source files are not yet listed as impacted tests.
+
+## [1.1.4] — 2026-09-24
+
+### Fixed
+- **`dekko sanity` stops calling ordinary Rust lines "unexplained".**
+  On zed, `sanity MultiBufferOffset` labelled 407 of its 814 grep-only
+  rows "unexplained miss — inspect manually", and `DevicePixels` 50 of
+  220, which made `--all --fail-on-unexplained` useless as a CI gate
+  on a normal Rust repo. Three causes, none of them a resolver bug:
+  - *Inline test modules.* `--no-tests` drops a caller when its path
+    is test code **or** the extractor flagged it as test code (a
+    function inside `#[cfg(test)] mod tests { ... }`). `sanity`
+    compared against the already-filtered view, where those symbols
+    no longer exist, so it could only recognise test code by path.
+    It now reads the flag from the unfiltered map, the same predicate
+    the filter applies. 186 of the 407 rows.
+  - *Rust `use` lines.* A single-line `use a::{X, Y};` and each row of
+    a multi-line `use` list are now "import/require statement naming
+    the symbol". Checked against tree-sitter over all 26,610 `use`
+    lines in zed's 1,923 Rust files: none missed; the only other lines
+    claimed are `use` text inside string literals and macro bodies,
+    which aren't calls either.
+  - *Files the map never parsed.* A supported-language file skipped as
+    too large or generated, or excluded, used to fall through every
+    rung. It now gets its own cause, "file not in the map ... dekko
+    never parsed it", checked before every other rung, since the
+    others explain a resolver miss and the resolver never saw the
+    file. 120 of the 407 rows sat in one 1.3 MB test file.
+
+  Result: `MultiBufferOffset` 407 → 39 unexplained, `DevicePixels`
+  50 → 0. The 39 left are calls inside macro arguments (`vec!`,
+  `assert_eq!`, a documented gap) and a few type positions no rule
+  covers yet; they stay "unexplained" on purpose. Across zed's whole
+  `sanity --all --max-names 300` sweep, unexplained rows drop from
+  6,356 to 2,800. On the six non-Rust eval repos the unexplained count
+  is unchanged; the only rows that move are ones in skipped files
+  (tensorflow 203, claude-code 1) taking the new cause.
+
+## [1.1.3] — 2026-09-24
+
+### Fixed
+- **External callee ids are bounded and canonical.** A call's
+  receiver used to be stored as its source text, arguments and all,
+  so `expect(result.foo).toBe` or a thirty-line array literal's
+  `.join` became the external callee id: claude-buddy's longest was
+  1,749 characters, claude-code's 122,129, and half of a TypeScript
+  or Rust repo's distinct external ids were argument-bearing chains.
+  The extractor now renders the receiver structurally, identifiers
+  and member chains verbatim, a call as `name()`, a subscript as
+  `name[]`, a literal as `""`/`[]`/`{}`, anything else as `(…)`, and
+  caps a chain of many hops to its head, `…` and member. Every head
+  token the resolver keys on (an import binding, `this`/`self`, a
+  parameter name, a Rust `std` path) is byte-identical to before.
+  Rows that differed only by an argument merge: cline's external
+  table drops from 53,600 rows / 24,646 distinct ids to 46,453 /
+  14,172, zed's from 197,553 / 97,137 to 189,714 / 77,367, and no
+  eval map has an external id over 161 bytes. `query uses` rows read
+  `[chalk.hex().bold]` instead of the source line, and its "closest
+  external names" hint now applies a quality floor (no whitespace,
+  brackets, quotes, or entries over 40 characters), so
+  `expect(result` can no longer be suggested. Resolved edges are
+  unchanged on claude-buddy, awesome-go and cline. On claude-code
+  (-3), zed (+218/-24) and spring-boot (+19/-1) every moved edge was
+  read: a multi-line chain such as `z\n .string()` used to store its
+  head as `"z "`, which matched no import or parameter, so the call
+  either resolved by bare name to an unrelated symbol (those false
+  edges are gone) or sat ambiguous where a parameter's type now
+  settles it (those edges are new and correct). A C++ template
+  member name longer than 40 characters is stored as `add<>` rather
+  than with its argument list (2,350 characters on one tensorflow
+  call); a short one such as `Get<int>` is kept, since a template
+  specialization is a symbol with exactly that name.
+- **Rust turbofish calls are named after their real callee.**
+  `xs.iter().map(f).collect::<Vec<_>>()` was named `iter`: the
+  `generic_function` node has no name field and the raw-text
+  fallback cut at the first `(`. 2,859 of zed's 7,372 turbofish
+  calls carried the wrong name and resolved to it. Found by the
+  edge gate above, where the canonical text stopped masking one;
+  103 of zed's moved edges are these.
+
+## [1.1.2] — 2026-09-24
+
+### Fixed
+- **`query type`/`find_type_usages`/`unused` now see a type used
+  only on a function-shaped site the map has no symbol for**
+  (TypeScript/TSX). A parameter or return annotation on a returned
+  or callback arrow function, a function-typed interface member, a
+  `type Fn = (a: A) => B` alias, a method/call/construct/overload
+  signature or a class-field arrow was parsed by nobody: only the
+  five named function shapes ever filled `Symbol.params`/`returns`,
+  so `query type` reported no results for a type used only there and
+  `unused --kinds types` flagged it. The extractor now records those
+  annotations as `type_uses` (a new, additive `map.json` section: one
+  record per typed parameter and per return type, attributed to the
+  innermost enclosing definition or to the module) and the read side
+  matches them with the same token rule it applies to a symbol's own
+  signature. A site row prints its file and line, the kind of site
+  and its owner: `sdk-followup-coordinator.ts:31  function type in
+  SdkFollowupCoordinatorOptions  [param: config]`; JSON entries for
+  sites carry `site`, `line` and `owner`, while entries for a
+  symbol's own signature are unchanged. `--no-tests` drops sites by
+  path, `workset --type-impact` counts them and bundles their owners.
+  On cline, `unused --kinds types` drops from 557 to 459 rows and
+  `query type AccountContext`/`SessionConfig` find their sites; on
+  claude-code, 387 to 364. Symbol, edge, reference and heritage sets
+  are byte-identical on every evaluation repo; the map gains ~7,500
+  records (+1.8 MB) on cline and none on non-TS repos. Struct/class
+  fields, generic arguments and JSX remain the documented gap.
+
+## [1.1.1] — 2026-09-24
+
+### Fixed
+- **`affected`/`impacted_tests`/`workset` no longer list test-support
+  files as impacted tests.** A file under a `testing/` directory
+  (mocks, matchers, test-case generators, a tool that only exists in
+  a test build) is test code, and stays hidden by `--no-tests` and out
+  of `unused`, but no test runner discovers tests under that
+  directory name, so it was never something to run. The path
+  classifier now has two levels: `classify.is_test_path` (test code;
+  its answer is unchanged on every mapped path of the seven evaluation
+  repos) and the new `classify.is_test_file` (test directories and
+  test filename patterns only). The impacted-tests walk reports the
+  narrow one and still passes through support code to the tests
+  beyond it. On claude-code, a repo with zero test files, `workset
+  --symbol MCPServerConnection --type-impact` reported
+  `src/tools/testing/TestingPermissionTool.tsx` as an impacted test;
+  it now reports none. tensorflow has 226 such files under
+  `lite/testing/` and its siblings. zed's `affected HEAD~1` still
+  names the same 46 tests.
+
 ## [1.1.0] — 2026-09-24
 
 Closes round 1.1's fix cycle. The code is 1.0.5; this release is the

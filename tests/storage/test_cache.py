@@ -17,7 +17,9 @@ from dekko.core.model import (
     RawHeritage,
     RawRef,
     RawThrow,
+    Submodule,
     Symbol,
+    TypeUse,
 )
 from dekko.render import mapfile
 from dekko.render.mapfile import _file_hash
@@ -584,6 +586,22 @@ def _fully_populated_filemap() -> FileMap:
         ],
         type_aliases=["Alias"],
         enum_variants=["Side::Left"],
+        type_uses=[
+            TypeUse(
+                owner_id="a.py::f",
+                path="a.py",
+                line=9,
+                site="arrow_function",
+                usage="param",
+                param_name="cb",
+                type="Alias",
+            ),
+        ],
+        submodules=[
+            Submodule(
+                candidates=["a/x.rs", "a/x/mod.rs"], test_only=True, line=2
+            ),
+        ],
         error="parse error",
         doc="module docstring",
     )

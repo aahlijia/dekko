@@ -694,7 +694,8 @@ def run(
     Args:
         index: Loaded map index.
         root: Repository root (for churn).
-        budget: Hard token cap override; ``None`` scales with repo size.
+        budget: Hard token cap override; ``None`` (or ``0``) scales
+            with repo size.
         as_json: Emit ``{"map", "meta"}`` JSON to stdout instead of text.
         out_path: When set, write the text map there (and print a
             confirmation) instead of printing the map itself; the cached,
@@ -706,6 +707,7 @@ def run(
     Returns:
         Always ``0``.
     """
+    budget = budget or None  # the lean map is always capped
     lines, report = generate(
         index, root, CapConfig(override=budget), task, dense=dense
     )

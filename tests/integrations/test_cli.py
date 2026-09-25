@@ -18,6 +18,8 @@ from dekko.render import mapfile
 from dekko.storage import filelock
 from dekko.core.model import FileMap
 
+from conftest import RepoFactory
+
 
 def test_version_flag(capsys: pytest.CaptureFixture) -> None:
     with pytest.raises(SystemExit) as exc:
@@ -53,6 +55,51 @@ def test_affected_budget_defaults_to_affected_default_budget() -> None:
     parser = cli.build_subcommand_parser()
     args = parser.parse_args(["affected"])
     assert args.budget == affected.DEFAULT_BUDGET
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["affected", "--budget", "0"],
+        ["search", "x", "--budget", "0"],
+        ["query", "callers", "f", "--budget", "0"],
+    ],
+)
+def test_budget_zero_is_kept_as_an_explicit_no_cap(argv: list[str]) -> None:
+    """``0`` stays an explicit ``0`` (``None`` means "the default" on
+    several commands); ``fit_to_budget`` reads it as uncapped."""
+    args = cli.build_subcommand_parser().parse_args(argv)
+    assert args.budget == 0
+
+
+def test_negative_budget_is_a_usage_error() -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.build_subcommand_parser().parse_args(
+            ["affected", "--budget", "-1"]
+        )
+    assert exc.value.code == 2
+
+
+def test_query_budget_zero_returns_every_row(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """``--budget 0`` lifts both the token cap and the 50-row default
+    that any explicit budget lifts."""
+    callers = "".join(
+        f"def c{i}() -> int:\n    return f()\n\n" for i in range(60)
+    )
+    root = make_mapped_repo(
+        {
+            "a.py": "def f() -> int:\n    return 1\n",
+            "b.py": f"from a import f\n\n{callers}",
+        }
+    )
+    code = cli.main(
+        ["query", "callers", "f", "--budget", "0", "--root", str(root)]
+    )
+    assert code == 0
+    rows = [ln for ln in capsys.readouterr().out.splitlines() if "b.py:" in ln]
+    assert len(rows) == 60
 
 
 def test_map_jobs_defaults_to_all_cores() -> None:

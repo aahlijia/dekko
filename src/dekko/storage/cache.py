@@ -37,6 +37,8 @@ from dekko.core.model import (
     RawHeritage,
     RawRef,
     RawThrow,
+    Submodule,
+    TypeUse,
 )
 
 CACHE_VERSION = 1
@@ -85,6 +87,8 @@ def _filemap_from_dict(d: dict) -> FileMap:
         imports=[Import(**i) for i in d.get("imports", [])],
         type_aliases=list(d.get("type_aliases", [])),
         enum_variants=list(d.get("enum_variants", [])),
+        type_uses=[TypeUse(**t) for t in d.get("type_uses", [])],
+        submodules=[Submodule(**m) for m in d.get("submodules", [])],
         error=d.get("error"),
         doc=d.get("doc"),
     )
@@ -136,6 +140,11 @@ class IncrementalCache:
         if entry is None:
             return None
         return entry.get("file", {}).get("symbols", [])
+
+    def old_hash(self, rel: str) -> str | None:
+        """Content hash the prior cache recorded for ``rel``, if any."""
+        entry = self._old.get(rel)
+        return None if entry is None else entry.get("hash")
 
     def reuse(self, root: Path, rel: str) -> FileMap | None:
         """Return the cached ``FileMap`` for an unchanged file.

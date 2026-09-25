@@ -35,6 +35,7 @@ def _index(symbols: list[Symbol], **kw: object) -> MapIndex:
         idx.symbols_by_id[sym.id] = sym
         idx.symbols_by_path.setdefault(sym.path, []).append(sym)
         idx.languages_by_path[sym.path] = sym.language
+        idx.symbols_by_name.setdefault(sym.name, []).append(sym)
     idx.calls_in = dict(kw.get("calls_in", {}))  # type: ignore[arg-type]
     idx.referenced_in = dict(  # type: ignore[arg-type]
         kw.get("referenced_in", {})
@@ -51,6 +52,9 @@ def _index(symbols: list[Symbol], **kw: object) -> MapIndex:
     )
     idx.ambiguous_out = dict(  # type: ignore[arg-type]
         kw.get("ambiguous_out", {})
+    )
+    idx.externals_by_name = dict(  # type: ignore[arg-type]
+        kw.get("externals_by_name", {})
     )
     return idx
 
@@ -86,6 +90,13 @@ def test_main_dunder_and_test_paths_are_roots() -> None:
             _sym("dead", "app.py"),
         ]
     )
+    assert [s.name for s in unused.find_unused(idx, ())] == ["dead"]
+
+
+def test_test_flagged_symbol_outside_a_test_path_is_a_root() -> None:
+    helper = _sym("helper", "src/lib.rs", language="rust")
+    helper.test = True
+    idx = _index([helper, _sym("dead", "src/lib.rs", language="rust")])
     assert [s.name for s in unused.find_unused(idx, ())] == ["dead"]
 
 
@@ -1599,3 +1610,187 @@ def test_unused_status_agrees_with_find_unused_for_every_symbol(
             status = unused.unused_status(index, sym, globs)
             assert status.flagged == (sym.id in flagged), sym.id
             assert (status.reason == unused.STATUS_FLAGGED) == status.flagged
+
+
+# --- dispatch evidence from receiver calls the noise guard sends external
+
+
+def _tool_method(tool: str, name: str = "description") -> Symbol:
+    return _sym(
+        name,
+        f"tools/{tool}.ts",
+        qualname=f"{tool}.{name}",
+        kind="method",
+        language="typescript",
+    )
+
+
+def _external(callee: str) -> ExternalCall:
+    return ExternalCall(caller="run.ts::runTool", callee=callee, lines=[3])
+
+
+def test_guarded_name_receiver_call_makes_a_dispatch_candidate() -> None:
+    # `tool.description()` never reaches the ambiguous table: the
+    # resolver's noise guard sends every receiver call named
+    # `description` external. Two tools define it, so either could be
+    # the target, same as an ambiguous call.
+    bash, grep = _tool_method("BashTool"), _tool_method("GrepTool")
+    idx = _index(
+        [bash, grep],
+        externals_by_name={"description": [_external("tool.description")]},
+    )
+    candidates = unused.find_dispatch_candidates(idx, ())
+    assert [s.id for s in candidates] == [bash.id, grep.id]
+    assert unused._dispatch_evidence(bash, idx) == "guarded-name"
+
+
+def test_ambiguous_evidence_outranks_guarded_name() -> None:
+    bash, grep = _tool_method("BashTool"), _tool_method("GrepTool")
+    idx = _index(
+        [bash, grep],
+        ambiguous_in={bash.id: [("run.ts::runTool", "description")]},
+        externals_by_name={"description": [_external("tool.description")]},
+    )
+    assert unused._dispatch_evidence(bash, idx) == "ambiguous"
+    assert unused._dispatch_evidence(grep, idx) == "guarded-name"
+
+
+def test_lone_guarded_name_definition_is_not_a_dispatch_candidate() -> None:
+    # One definition: there is nothing for a call to be ambiguous
+    # between, so it is ordinary unused code.
+    bash = _tool_method("BashTool")
+    idx = _index(
+        [bash],
+        externals_by_name={"description": [_external("tool.description")]},
+    )
+    assert unused.find_dispatch_candidates(idx, ()) == []
+
+
+def test_unguarded_external_name_is_not_a_dispatch_candidate() -> None:
+    # `prompt` is not a guarded name, so its external receiver calls
+    # went external for some other reason (an unmapped receiver type),
+    # not because the guard refused a repo candidate.
+    bash, grep = (
+        _tool_method("BashTool", "prompt"),
+        _tool_method("GrepTool", "prompt"),
+    )
+    idx = _index(
+        [bash, grep],
+        externals_by_name={"prompt": [_external("tool.prompt")]},
+    )
+    assert unused.find_dispatch_candidates(idx, ()) == []
+
+
+def test_receiverless_guarded_call_is_not_dispatch_evidence() -> None:
+    bash, grep = _tool_method("BashTool"), _tool_method("GrepTool")
+    idx = _index(
+        [bash, grep],
+        externals_by_name={"description": [_external("description")]},
+    )
+    assert unused.find_dispatch_candidates(idx, ()) == []
+
+
+def test_dispatch_json_rows_name_their_evidence() -> None:
+    bash, grep = _tool_method("BashTool"), _tool_method("GrepTool")
+    doc = unused._build_json_doc(
+        found=[bash, grep],
+        suspects=[],
+        dispatch_candidates=[bash, grep],
+        c_abi_caveat=None,
+        dispatch_caveat=None,
+        suspect=False,
+        dispatch=True,
+        budget=None,
+        limit=None,
+        evidence_by_id={bash.id: "ambiguous", grep.id: "guarded-name"},
+    )
+    rows = {r["id"]: r["evidence"] for r in doc["dispatch_candidates"]}
+    assert rows == {bash.id: "ambiguous", grep.id: "guarded-name"}
+
+
+# --- per-row dispatch marker in the main listing --------------------------
+
+DISPATCH_AND_DEAD_FIXTURE = {
+    **DISPATCH_FIXTURE,
+    "dead.ts": "function deadHelper(): void {}\n",
+}
+
+
+def test_unused_json_marks_dispatch_candidate_rows_only(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DISPATCH_AND_DEAD_FIXTURE)
+    cli.main(["unused", "--root", str(root), "--kinds", "all", "--json"])
+    doc = json.loads(capsys.readouterr().out)
+    marked = {
+        r["id"].split("::")[1]
+        for r in doc["results"]
+        if r.get("dispatch_candidate")
+    }
+    assert marked == {
+        "DiscordConnector.createCommand",
+        "SlackConnector.createCommand",
+    }
+    dead = [r for r in doc["results"] if r["id"].endswith("::deadHelper")]
+    assert len(dead) == 1
+    assert "dispatch_candidate" not in dead[0]
+
+
+def test_unused_text_marks_dispatch_candidate_rows_only(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(DISPATCH_AND_DEAD_FIXTURE)
+    cli.main(["unused", "--root", str(root), "--kinds", "all"])
+    rows = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("  ")
+    ]
+    marked = [line for line in rows if line.endswith("[dispatch?]")]
+    assert len(marked) == 2
+    assert all("createCommand" in line for line in marked)
+    assert any(
+        "deadHelper" in line and not line.endswith("[dispatch?]")
+        for line in rows
+    )
+
+
+# --- an explicit --limit sets the dispatch section's cap ------------------
+
+
+def _many_overrides(n: int) -> dict[str, str]:
+    """A base calling ``this.handle()`` with ``n`` overriding subclasses."""
+    classes = "".join(
+        f"class Impl{i} extends Base {{\n"
+        f"    handle(): void {{\n        console.log({i});\n    }}\n}}\n\n"
+        for i in range(n)
+    )
+    return {
+        "impls.ts": (
+            "abstract class Base {\n"
+            "    run(): void {\n        this.handle();\n    }\n}\n\n"
+            + classes
+            + "function main(): void {\n    new Impl0().run();\n}\n\n"
+            "main();\n"
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("extra", "returned"),
+    [((), 20), (("--limit", "25"), 25), (("--limit", "5"), 5)],
+)
+def test_unused_dispatch_section_cap_follows_explicit_limit(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    extra: tuple[str, ...],
+    returned: int,
+) -> None:
+    root = make_mapped_repo(_many_overrides(30))
+    args = ["unused", "--root", str(root), "--kinds", "all", "--dispatch"]
+    cli.main([*args, "--json", *extra])
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["dispatch_meta"] == {"returned": returned, "total": 30}
+    # 30 methods + 31 classes flagged: the main list keeps its own
+    # default of 50 rows with no --limit, and takes an explicit one.
+    assert len(doc["results"]) == (returned if extra else 50)

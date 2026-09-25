@@ -492,7 +492,7 @@ def _pack_meter(pack: Pack, text: str, budget: int | None) -> Meter:
         tokens=estimate_tokens(text),
         returned=kept,
         total=kept + pack.trimmed,
-        budget=budget,
+        budget=budget or None,
         limit=None,
         signals=signals,
     )
@@ -550,13 +550,13 @@ def trim_to_budget(
     Args:
         index: Loaded map index (for degree ranking).
         pack: Pack to trim in place.
-        budget: Approximate token budget, or ``None`` for no limit.
+        budget: Approximate token budget; ``None`` or ``0`` for no limit.
         task: Optional task context for relevance-aware trimming.
 
     Returns:
         The same pack, trimmed.
     """
-    if budget is None:
+    if not budget:
         return pack
     while pack.imports and _estimate_tokens(pack) > budget:
         pack.imports.pop()

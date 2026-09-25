@@ -40,6 +40,7 @@ DEFAULT_PACKS = 5
 _DOC_LIMIT = 80
 _TIER_TITLES = {
     "tests": "impacted tests:",
+    "tests_more": "more impacted tests:",
     "files": "files:",
     "packs": "packs:",
     "detail": "detail:",
@@ -60,7 +61,10 @@ class BlastRadius:
         type_usage: Raw count of type-usage-matching rows found
             (``query.type_usage_rows``), before deduping against
             heritage overlap — a symbol can appear in this count more
-            than once (e.g. taking and returning the same type).
+            than once (e.g. taking and returning the same type), and
+            a site row on a function-shaped node that is not a symbol
+            (a callback's parameter, a function-typed interface
+            member) counts here through its enclosing definition.
         heritage: Raw count of transitive implementors found
             (``query.walk_heritage``), before deduping.
         note: Undercount caveat when the target's heritage has
@@ -87,6 +91,9 @@ class Seed:
             ranked most-central first.
         files: Touched files, ranked by aggregate centrality.
         impacts: Impacted test files (strongest evidence first).
+        possible: Test files that call touched code only through an
+            unresolved call (see ``affected._possible_impacts``);
+            counted in the manifest, never mixed into ``impacts``.
         blast_radius: ``--type-impact``'s widened-set breakdown
             (symbol mode only), or ``None`` when the flag wasn't used.
     """
@@ -98,6 +105,7 @@ class Seed:
     touched: list[Symbol]
     files: list[str]
     impacts: list[affected.TestImpact] = field(default_factory=list)
+    possible: list[affected.PossibleImpact] = field(default_factory=list)
     blast_radius: BlastRadius | None = None
 
 
@@ -139,6 +147,7 @@ def _make_seed(
     impacts: list[affected.TestImpact],
     index: MapIndex,
     blast_radius: BlastRadius | None = None,
+    possible: list[affected.PossibleImpact] | None = None,
 ) -> Seed:
     """Rank a raw touched set into a fully-populated ``Seed``."""
     ranked = sorted(touched, key=lambda s: relevance_key(s, index))
@@ -150,6 +159,7 @@ def _make_seed(
         touched=ranked,
         files=_rank_files(touched, index),
         impacts=impacts,
+        possible=possible or [],
         blast_radius=blast_radius,
     )
 
@@ -182,8 +192,11 @@ def _type_impact_touched(
         index, sym.id, direction="in", relation=None
     )
     extra: dict[str, Symbol] = {}
-    for row_sym, _usage, _param, _raw in usage_rows:
-        extra[row_sym.id] = row_sym
+    for row in usage_rows:
+        # A module-level site (``row.symbol is None``) has no
+        # definition to bundle; it is still counted below.
+        if row.symbol is not None:
+            extra[row.symbol.id] = row.symbol
     for sub_sym, _relation, _depth in heritage_hits:
         extra[sub_sym.id] = sub_sym
     # Heritage's own ambiguity disclosure (`_run_heritage`'s ambig_in
@@ -223,10 +236,19 @@ def seed_from_rev(
     outcome = affected.changes(root, rev, index=index, jobs=jobs)
     if outcome is None:
         return None
-    impacts, result, _new, target_rev, _prov = outcome
+    impacts, result, new, target_rev, _prov = outcome
     touched = [d.symbol for d in result.added + result.changed]
     label = f"changed vs {target_rev[:12]}"
-    return _make_seed("rev", label, target_rev, None, touched, impacts, index)
+    return _make_seed(
+        "rev",
+        label,
+        target_rev,
+        None,
+        touched,
+        impacts,
+        index,
+        possible=affected.possible_from_diff(result, new, impacts),
+    )
 
 
 def seed_from_symbol(
@@ -251,7 +273,8 @@ def seed_from_symbol(
     if type_impact:
         extra, blast_radius = _type_impact_touched(index, sym)
         touched += extra
-    impacts = affected.impacts_from_symbol(index, {s.id for s in touched})
+    seed_ids = {s.id for s in touched}
+    impacts = affected.impacts_from_symbol(index, seed_ids)
     label = f"symbol {sym.path}:{sym.qualname}"
     if type_impact:
         label += " (+ type-impact)"
@@ -264,6 +287,7 @@ def seed_from_symbol(
         impacts,
         index,
         blast_radius=blast_radius,
+        possible=affected.possible_from_symbol(index, seed_ids, impacts),
     )
     return seed, candidates
 
@@ -341,6 +365,9 @@ def _manifest(ws: Workset, root: Path) -> list[str]:
     hint = affected._test_hint(seed.impacts, root)
     if hint:
         lines.append(hint)
+    note = affected.possible_note(seed.possible)
+    if note:
+        lines.append(f"  {note}")
     return lines
 
 
@@ -400,15 +427,15 @@ def _pack_block(pack: Pack) -> list[str]:
 def _rows(ws: Workset) -> list[_Row]:
     """Flatten the four value tiers into one ordered droppable list.
 
-    Impacted tests are their own tier, added *last* — after breadth
-    (files), depth (packs), and full outline detail — so they
-    participate in the same budget-fitting pass as every other
-    section without displacing the existing "breadth survives a
-    tight budget" guarantee those three tiers already give. They used
-    to bypass budget-fitting entirely: a real ~1,500-impact repo
-    dumped every path verbatim via the (unbudgeted) pytest hint,
-    blowing 3.6x past the stated budget. The manifest's
-    impacted-test count and the (separately capped) pytest hint are
+    Impacted tests are their own tier and share the one budget-fitting
+    pass. The first ``affected._MAX_HINT_PATHS`` of them come right
+    after breadth (files) and depth (packs), ahead of outline detail;
+    the rest come last. With every test row last, a budget spent on
+    large outlines dropped all of them: zed's JSON said
+    ``impacted_tests_total: 3`` beside an empty list on 16 of 40
+    seeds. A test row is one short line, so twenty cost little, and a
+    ~1,500-impact repo still can't crowd detail out. The manifest's
+    impacted-test count and the (separately capped) runner hint are
     unaffected by this tier's own trimming.
     """
     rows: list[_Row] = [
@@ -418,6 +445,11 @@ def _rows(ws: Workset) -> list[_Row]:
         rows.extend(
             _Row("packs", line, pack=index) for line in _pack_block(pack)
         )
+    tests = [
+        _Row("tests", _test_row(imp), test=imp) for imp in ws.seed.impacts
+    ]
+    head = affected._MAX_HINT_PATHS
+    rows += tests[:head]
     for fo in ws.outlines:
         if not (fo.symbols or fo.doc or fo.error):
             continue
@@ -429,10 +461,9 @@ def _rows(ws: Workset) -> list[_Row]:
             _Row("detail", outline._symbol_row(s), file=fo.path, sym=s)
             for s in fo.symbols
         )
-    rows += [
-        _Row("tests", _test_row(imp), test=imp) for imp in ws.seed.impacts
+    return rows + [
+        _Row("tests_more", row.text, test=row.test) for row in tests[head:]
     ]
-    return rows
 
 
 def _fit(
@@ -551,6 +582,7 @@ def _render_json(ws: Workset, budget: int | None, root: Path) -> int:
         # caller can tell the two apart.
         "impacted_tests": [affected._impact_json(i) for i in tests],
         "impacted_tests_total": len(seed.impacts),
+        "possible_tests_total": len(seed.possible),
         "pytest": affected._test_hint(seed.impacts, root),
         "outlines": [
             _outline_json(fo, files[fo.path])

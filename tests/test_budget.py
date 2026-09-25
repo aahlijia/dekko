@@ -85,3 +85,13 @@ def test_as_dict_shape() -> None:
         "related_label": "",
         "over_budget": False,
     }
+
+
+def test_zero_budget_means_no_cap() -> None:
+    # `--budget 0` is the documented way to lift a command's default
+    # budget; a literal zero used to keep exactly one row.
+    kept, meter = fit_to_budget(LINES, budget=0, limit=None)
+    assert kept == LINES
+    assert meter.truncated_by is None
+    assert meter.budget is None
+    assert not meter.over_budget

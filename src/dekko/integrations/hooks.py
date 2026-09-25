@@ -92,11 +92,15 @@ _HOOK_COMMAND_PREFIX = "dekko hooks run "
 
 
 def _root_from(payload: dict) -> Path:
-    """Resolve the repo root from a hook payload's ``cwd``."""
+    """Resolve the repo root from a hook payload's ``cwd``.
+
+    Falls back to the process's working directory, absolute, so an
+    absolute read path can still be made repo-relative against it.
+    """
     cwd = payload.get("cwd")
     if isinstance(cwd, str) and cwd:
         return Path(cwd)
-    return Path(".")
+    return Path.cwd()
 
 
 def _load_index(root: Path, *, allow_regen: bool) -> MapIndex | None:
@@ -310,6 +314,12 @@ def _rel_to_root(file_path: str, root: Path) -> str | None:
     try:
         return p.relative_to(root).as_posix()
     except ValueError:
+        pass
+    # One side may be spelled through a symlink (``/tmp`` is
+    # ``/private/tmp`` on macOS), so compare the real paths too.
+    try:
+        return p.resolve().relative_to(root.resolve()).as_posix()
+    except (ValueError, OSError):
         return None
 
 

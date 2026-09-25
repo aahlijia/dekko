@@ -232,9 +232,9 @@ def _outline_limit_arg(args: dict) -> int:
     here.
     """
     limit = args.get("limit")
-    if limit is not None:
-        return int(limit)
-    return query.NO_ROW_LIMIT if args.get("budget") is not None else 200
+    return outline_mod.effective_limit(
+        int(limit) if limit is not None else None, args.get("budget")
+    )
 
 
 def _require(args: dict, key: str) -> str:
@@ -251,20 +251,49 @@ def _require(args: dict, key: str) -> str:
     return value
 
 
-# Tools whose required ``symbol`` argument also accepts ``name`` as an
-# alias (see ``_resolve_symbol_alias``). Adding a new
-# ``_require(args, "symbol")`` call elsewhere? Add that tool's name
-# here too, or its ``name``-alias friction reappears silently.
-_SYMBOL_ALIAS_TOOLS = frozenset(
-    {
-        "query_symbol",
-        "get_callers",
-        "get_callees",
-        "get_supertypes",
-        "get_subtypes",
-        "add_note",
-    }
-)
+# Each target-taking tool's own name for its target argument. The
+# names differ by tool (``find_usages`` takes ``name``,
+# ``find_type_usages`` takes ``type``, ``outline`` takes ``target``),
+# and agents calling several in a row guess by analogy, so any of the
+# others is accepted in its place (see ``_resolve_target_alias``). A
+# new target-taking tool belongs here too.
+_TARGET_PARAM = {
+    "query_symbol": "symbol",
+    "get_callers": "symbol",
+    "get_callees": "symbol",
+    "get_supertypes": "symbol",
+    "get_subtypes": "symbol",
+    "add_note": "symbol",
+    "find_usages": "name",
+    "find_type_usages": "type",
+    "get_context_pack": "target",
+    "outline": "target",
+}
+_TARGET_ALIASES = ("symbol", "name", "target", "type")
+
+
+def _budget_arg(args: dict, default: int | None) -> int | None:
+    """A tool's ``budget`` argument: ``default`` when absent, ``0`` for
+    no cap (read as uncapped by ``textutil.fit_to_budget``).
+
+    Raises:
+        ToolError: For a negative or non-integer budget.
+    """
+    raw = args.get("budget")
+    if raw is None:
+        return default
+    try:
+        budget = int(raw)
+    except (TypeError, ValueError):
+        raise ToolError(
+            f"argument 'budget' must be an integer, got {raw!r}"
+        ) from None
+    if budget < 0:
+        raise ToolError(
+            f"argument 'budget' must be 0 (no cap) or more, got {budget}"
+        )
+
+    return budget
 
 
 def _limit_arg(args: dict) -> int:
@@ -276,38 +305,46 @@ def _limit_arg(args: dict) -> int:
     output they can take.
     """
     limit = args.get("limit")
-    budget = args.get("budget")
     return query.effective_limit(
         int(limit) if limit is not None else None,
-        int(budget) if budget is not None else None,
+        _budget_arg(args, None),
     )
 
 
-def _resolve_symbol_alias(tool_name: str, args: dict) -> dict:
-    """Accept ``name`` as an alias for ``symbol`` on tools that need it.
+def _resolve_target_alias(tool_name: str, args: dict) -> dict:
+    """Accept any target-argument name in place of the tool's own.
 
-    Agents repeatedly guessed ``name`` instead of
-    ``symbol`` on ``query_symbol``/``get_callers``/``get_supertypes``,
-    since ``find_usages`` uses ``name`` for its own equivalent
-    argument -- this closes that first-guess gap without renaming
-    anything callers already depend on.
+    Only fills the tool's own name when the caller didn't pass it, so
+    anything a caller already depends on is untouched.
 
     Args:
         tool_name: The tool being invoked.
         args: The call's raw arguments, as received.
 
     Returns:
-        ``args`` unchanged, unless the tool is in the alias set, the
-        caller passed ``name`` but not ``symbol``, in which case a
-        shallow copy with ``symbol`` populated from ``name`` is
-        returned instead.
+        ``args`` unchanged, or a shallow copy with the tool's own
+        target argument filled from the alias the caller used.
+
+    Raises:
+        ToolError: If two aliases name different targets and the
+            tool's own argument is absent: picking one would be a
+            guess.
     """
-    if tool_name not in _SYMBOL_ALIAS_TOOLS:
+    primary = _TARGET_PARAM.get(tool_name)
+    if primary is None or primary in args:
         return args
-    if "symbol" in args or "name" not in args:
+    given = {k: args[k] for k in _TARGET_ALIASES if k in args}
+    if not given:
         return args
-    aliased = dict(args)
-    aliased["symbol"] = aliased.pop("name")
+    if len({str(v) for v in given.values()}) > 1:
+        names = ", ".join(f"'{k}'" for k in given)
+        raise ToolError(
+            f"got {names} naming different targets; pass one "
+            f"'{primary}' argument"
+        )
+    aliased = {k: v for k, v in args.items() if k not in given}
+    aliased[primary] = next(iter(given.values()))
+
     return aliased
 
 
@@ -410,8 +447,7 @@ def _relation_tool(
     target = _require(args, "symbol")
     limit = _limit_arg(args)
     sites = bool(args.get("sites", False))
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
+    budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
     code, out, err = _capture(
         lambda: query.run(
             index,
@@ -480,8 +516,7 @@ def tool_find_usages(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     name = _require(args, "name")
     limit = _limit_arg(args)
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
+    budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
     code, out, err = _capture(
         lambda: query.run(
             index, "uses", name, as_json=False, limit=limit, budget=budget
@@ -498,8 +533,7 @@ def tool_find_type_usages(ctx: Context, args: dict) -> str:
     name = _require(args, "type")
     exact = bool(args.get("exact", False))
     limit = _limit_arg(args)
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
+    budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
     code, out, err = _capture(
         lambda: query.run(
             index,
@@ -550,8 +584,7 @@ def _heritage_tool(
     target = _require(args, "symbol")
     transitive = bool(args.get("transitive", False))
     relation = args.get("relation")
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
+    budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
     code, out, err = _capture(
         lambda: query.run(
             index,
@@ -596,8 +629,7 @@ def tool_get_context_pack(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     target = _require(args, "target")
     hops = int(args.get("hops", 1))
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else DEFAULT_RELATION_BUDGET
+    budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
     with_source = bool(args.get("with_source", False))
     root = _root_of(ctx, args)
     task = _task_of(ctx, args)
@@ -623,7 +655,7 @@ def tool_outline(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     target = _require(args, "target")
     limit = _outline_limit_arg(args)
-    budget = int(args.get("budget", DEFAULT_ORIENT_BUDGET))
+    budget = _budget_arg(args, DEFAULT_ORIENT_BUDGET)
     root = _root_of(ctx, args)
     code, out, err = _capture(
         lambda: outline_mod.run(
@@ -662,9 +694,11 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     roots = args.get("roots") or []
     if not isinstance(roots, list):
         raise ToolError("'roots' must be a list of path globs")
-    limit = _limit_arg(args)
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else None
+    budget = _budget_arg(args, None)
+    # ``None`` lets ``unused.run`` apply its defaults, including the
+    # suspects section's own cap, which any explicit limit replaces.
+    given = args.get("limit") is not None or budget is not None
+    limit = _limit_arg(args) if given else None
     suspect = bool(args.get("suspect", False))
     code, out, err = _capture(
         lambda: unused.run(
@@ -687,8 +721,7 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     rev = args.get("rev")
     rev = rev if isinstance(rev, str) and rev else None
     limit = int(args.get("limit", 8))
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else affected.DEFAULT_BUDGET
+    budget = _budget_arg(args, affected.DEFAULT_BUDGET)
     code, out, err = _capture(
         lambda: affected.run(
             root,
@@ -721,8 +754,7 @@ def tool_search_code(ctx: Context, args: dict) -> str:
         )
         index = filtered
     limit = int(args.get("limit", search.DEFAULT_LIMIT))
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else search.DEFAULT_BUDGET
+    budget = _budget_arg(args, search.DEFAULT_BUDGET)
     kinds = search.parse_kinds(args.get("kind"))
     scorer_name = args.get("scorer") or search.DEFAULT_SCORER
     code, out, err = _capture(
@@ -758,8 +790,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
             "'type_impact' requires 'symbol' (a rev diff has no single "
             "target type)"
         )
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else workset_mod.DEFAULT_BUDGET
+    budget = _budget_arg(args, workset_mod.DEFAULT_BUDGET)
     packs = int(args.get("packs", workset_mod.DEFAULT_PACKS))
     task = _task_of(ctx, args)
     code, out, err = _capture(
@@ -804,8 +835,7 @@ def tool_check_ambiguous(ctx: Context, args: dict) -> str:
     """
     index = _index_for(ctx, args)
     top = int(args.get("top", 5))
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else 500
+    budget = _budget_arg(args, 500)
     code, out, err = _capture(
         lambda: ambiguous.run(
             index,
@@ -835,7 +865,7 @@ def _summary_text(ctx: Context, args: dict, budget: int | None = None) -> str:
 
 def tool_summary(ctx: Context, args: dict) -> str:
     """Compact repo digest: directories, hotspots, entry points."""
-    budget = int(args.get("budget", DEFAULT_ORIENT_BUDGET))
+    budget = _budget_arg(args, DEFAULT_ORIENT_BUDGET)
     return _summary_text(ctx, args, budget=budget)
 
 
@@ -843,8 +873,7 @@ def tool_lean(ctx: Context, args: dict) -> str:
     """Budget-capped navigation map of the whole repo."""
     index = _index_for(ctx, args)
     root = _root_of(ctx, args)
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else None
+    budget = _budget_arg(args, None)
     task = _task_of(ctx, args)
     dense = bool(args.get("dense", False))
     code, out, err = _capture(
@@ -913,8 +942,7 @@ def tool_ledger(ctx: Context, args: dict) -> str:
     )
     session = args.get("session")
     session = session if isinstance(session, str) and session else None
-    budget = args.get("budget")
-    budget = int(budget) if budget is not None else None
+    budget = _budget_arg(args, None)
     code, out, err = _capture(
         lambda: ledger_mod.run(
             root, transcript, session, budget, as_json=False
@@ -1049,8 +1077,8 @@ _SYMBOL_PROP = {
     "description": "Symbol: name, Class.method, or file.py:name. If the "
     "reply says the target is ambiguous (an overload set sharing the "
     "same file+name), append ':LINE' from one of the printed candidate "
-    "rows, e.g. file.py:Class.method:42, to pick that one. 'name' is "
-    "also accepted as an alias for this argument.",
+    "rows, e.g. file.py:Class.method:42, to pick that one. 'name', "
+    "'target' and 'type' are also accepted as aliases for this argument.",
 }
 _SITES_PROP = {
     "type": "boolean",
@@ -1059,7 +1087,8 @@ _SITES_PROP = {
 }
 _BUDGET_PROP = {
     "type": "integer",
-    "description": "Approximate token budget (default 800); "
+    "description": "Approximate token budget (default 800; 0 = no "
+    "cap); "
     "lowest-relevance rows are dropped to fit and a cost footer is "
     "appended",
 }
@@ -1117,7 +1146,8 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "budget": {
                     "type": "integer",
-                    "description": "Token budget for the output (default 800)",
+                    "description": "Token budget for the output (default "
+                    "800; 0 = no cap)",
                 },
                 "kind": {
                     "type": "string",
@@ -1217,7 +1247,8 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "An external name: a function's "
                     "own name ('run'), an imported binding ('chalk', "
-                    "'np', 'React'), or a module ('numpy', 'node:path')",
+                    "'np', 'React'), or a module ('numpy', 'node:path'). "
+                    "'symbol', 'target' and 'type' are also accepted.",
                 },
                 "limit": {
                     "type": "integer",
@@ -1232,22 +1263,26 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "find_type_usages",
-        "description": "Every function/method that uses a type as a "
-        "parameter or return type — for 'what breaks if I change this "
+        "description": "Every parameter or return annotation that "
+        "uses a type — for 'what breaks if I change this "
         "struct/class's shape' questions the call graph alone can't "
         "answer, since a function can use a type without calling "
-        "anything on it. Matches the bare type name inside wrapper "
+        "anything on it. Covers every function-shaped site: named "
+        "functions/methods, and (TS/TSX) callbacks and returned arrow "
+        "functions, function-typed interface members, method and "
+        "overload signatures, reported under their enclosing "
+        "definition. Matches the bare type name inside wrapper "
         "syntax (Optional[Config], Vec<Config>, Config | None all match "
-        "'Config') unless exact=true. Only functions/methods carry "
-        "typed params/returns — struct/class fields typed with the "
-        "target type are not covered.",
+        "'Config') unless exact=true. Struct/class fields, generic "
+        "arguments and JSX typed with the target are not covered.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "type": {
                     "type": "string",
                     "description": "Type/class/struct/interface name "
-                    "to search for, e.g. 'Config'",
+                    "to search for, e.g. 'Config'. 'symbol', 'name' and "
+                    "'target' are also accepted.",
                 },
                 "exact": {
                     "type": "boolean",
@@ -1349,7 +1384,8 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "target": {
                     "type": "string",
-                    "description": "Symbol or repo-relative file path",
+                    "description": "Symbol or repo-relative file path. "
+                    "'symbol', 'name' and 'type' are also accepted.",
                 },
                 "hops": {
                     "type": "integer",
@@ -1358,7 +1394,7 @@ TOOLS: list[dict[str, Any]] = [
                 "budget": {
                     "type": "integer",
                     "description": "Approx token budget for the pack "
-                    "(default 800)",
+                    "(default 800; 0 = no cap)",
                 },
                 "with_source": {
                     "type": "boolean",
@@ -1385,7 +1421,8 @@ TOOLS: list[dict[str, Any]] = [
                 "target": {
                     "type": "string",
                     "description": "Mapped file path or directory "
-                    "(suffix-matched); a directory rolls up its files",
+                    "(suffix-matched); a directory rolls up its files. "
+                    "'symbol', 'name' and 'type' are also accepted.",
                 },
                 "limit": {
                     "type": "integer",
@@ -1397,8 +1434,9 @@ TOOLS: list[dict[str, Any]] = [
                 "budget": {
                     "type": "integer",
                     "description": "Approximate token budget (default "
-                    "2000); lowest-relevance rows are dropped to fit "
-                    "and a cost footer is appended. On a directory "
+                    "2000; 0 = no cap); lowest-relevance rows are "
+                    "dropped to fit and a cost footer is appended. On a "
+                    "directory "
                     "target, sparse-file caveats are separately capped "
                     "and disclosed if truncated",
                 },
@@ -1432,8 +1470,8 @@ TOOLS: list[dict[str, Any]] = [
                 "budget": {
                     "type": "integer",
                     "description": "Approximate token budget (default "
-                    f"{affected.DEFAULT_BUDGET}); weakest-tier test files "
-                    "are dropped first to fit",
+                    f"{affected.DEFAULT_BUDGET}; 0 = no cap); "
+                    "weakest-tier test files are dropped first to fit",
                 },
                 "root": _ROOT_PROP,
             },
@@ -1476,7 +1514,7 @@ TOOLS: list[dict[str, Any]] = [
                 "budget": {
                     "type": "integer",
                     "description": "Shared token budget for the whole "
-                    "bundle (default 6000)",
+                    "bundle (default 6000; 0 = no cap)",
                 },
                 "packs": {
                     "type": "integer",
@@ -1507,7 +1545,8 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "budget": {
                     "type": "integer",
-                    "description": "Approx token budget (default 500)",
+                    "description": "Approx token budget (default 500; 0 = "
+                    "no cap)",
                 },
                 "root": _ROOT_PROP,
             },
@@ -1526,7 +1565,8 @@ TOOLS: list[dict[str, Any]] = [
                 "budget": {
                     "type": "integer",
                     "description": "Approximate token cap (default "
-                    "2000); trailing sections are shed to fit and a "
+                    "2000; 0 = no cap); trailing sections are shed to fit "
+                    "and a "
                     "footer reports the omission",
                 },
                 "root": _ROOT_PROP,
@@ -1697,8 +1737,9 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
     handler = _HANDLERS.get(name)
     if handler is None:
         return _err(req_id, INVALID_PARAMS, f"unknown tool '{name}'")
-    args = _resolve_symbol_alias(name, params.get("arguments") or {})
+    args = params.get("arguments") or {}
     try:
+        args = _resolve_target_alias(name, args)
         text = _with_default_root_note(ctx, args, handler(ctx, args))
         is_error = False
     except ToolError as exc:
@@ -1741,19 +1782,15 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
     except BrokenProcessPool:
         # A process pool broke twice in a row (once on the first
         # attempt, once on the reduced-parallelism retry —
-        # see resolver.py's run_pooled_with_retry) -- persistent, not
-        # transient, contention. Most often another concurrent
-        # ``dekko`` process on this machine (e.g. a heavy `dekko map
-        # --jobs 0`) is oversubscribing the CPU badly enough that
-        # even a small worker pool can't start up. Point at the fix
-        # instead of surfacing the raw "A process in the process pool
-        # was terminated abruptly..." text.
+        # see resolver.py's run_pooled_with_retry), so a worker
+        # crashed under ``spawn`` too. Point at the fix instead of
+        # surfacing the raw "A process in the process pool was
+        # terminated abruptly..." text, without guessing a cause.
         text, is_error = (
-            "dekko: map regeneration failed twice due to a process-pool "
-            "failure (often caused by heavy CPU/multiprocessing load from "
-            "another concurrent dekko process on this machine). Try again "
-            "once system load drops, or run `dekko map --jobs 1` manually "
-            "against this repo to avoid the parallel pool entirely.",
+            "dekko: map regeneration failed twice because a process-pool "
+            "worker crashed. Try again, or run `dekko map --jobs 1` "
+            "manually against this repo to avoid the parallel pool "
+            "entirely.",
             True,
         )
     except PoolStalledError as exc:

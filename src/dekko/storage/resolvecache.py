@@ -415,6 +415,35 @@ def _name_delta_dirty(
     return extra
 
 
+def _torn(
+    cached: dict[str, dict], cache: IncrementalCache, dirty: set[str]
+) -> bool:
+    """Whether the two cache files came from different map runs.
+
+    The plan diffs each dirty file's names against the extraction
+    cache's old entry while trusting the resolve cache's edges, which
+    is only sound when both describe the same content. ``run_map``
+    saves them one after the other, so a reader that doesn't hold the
+    regen lock (``diff``, ``affected``) can load one from before a
+    concurrent run and one from after it. After any normal run the two
+    hashes agree for every file, so this never costs a reuse.
+
+    Args:
+        cached: The resolve cache's per-file entries.
+        cache: This run's extraction cache, over the prior entries.
+        dirty: Files whose content changed since the resolve cache.
+
+    Returns:
+        ``True`` when a dirty file's two recorded hashes differ.
+    """
+    for path in dirty:
+        old = cache.old_hash(path)
+        if old is not None and old != cached[path].get("hash"):
+            return True
+
+    return False
+
+
 def build_reuse(
     root: Path, files: list[FileMap], cache: IncrementalCache
 ) -> ResolveReuse | None:
@@ -478,6 +507,9 @@ def build_reuse(
             return None
         if cached[fm.path].get("hash") != known["hash"]:
             dirty.add(fm.path)
+
+    if _torn(cached, cache, dirty):
+        return None
 
     extra = _name_delta_dirty(files, cached, cache, dirty)
     if extra is None:

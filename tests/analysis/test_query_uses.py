@@ -230,7 +230,11 @@ def test_whitespace_in_a_stored_chain_does_not_hide_the_head(
     stored = [
         e.callee for exts in index.externals_by_name.values() for e in exts
     ]
-    assert any(" ." in c for c in stored), stored  # the shape under test
+    # The chain is stored canonically, with the line break and its
+    # indentation gone (``z.object``, not ``z .object``), so the head
+    # is found without any whitespace stripping at lookup time.
+    assert "z.object" in stored, stored
+    assert not any(" " in c for c in stored), stored
     assert _uses(root, "z", "--json") == 0
     doc = _json(capsys)
     assert doc["summary"]["sites"] == 2
@@ -264,3 +268,68 @@ def test_mcp_find_usages_round_trip(make_mapped_repo: RepoFactory) -> None:
     text = result["content"][0]["text"]
     assert "chalk: 2 call sites in 1 files" in text
     assert "[chalk.red]" in text
+
+
+# --- canonical receiver text in rows and in the not-found hint ------
+
+
+def test_uses_rows_show_canonical_chain_text(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "t.ts": (
+                "import chalk from 'chalk'\n"
+                "export function paint() {\n"
+                "  return chalk.hex('#fff').bold('x')\n"
+                "}\n"
+            )
+        }
+    )
+    assert _uses(root, "chalk") == 0
+    out = capsys.readouterr().out
+    assert "[chalk.hex().bold]" in out
+    assert "#fff" not in out
+
+
+def test_uses_not_found_hint_skips_markers_and_fragments(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "t.ts": (
+                "import { expect } from 'vitest'\n"
+                "export function check(result: { ok: boolean }) {\n"
+                "  expect(result.ok).toBe(true)\n"
+                "  expectation(result)\n"
+                "}\n"
+            )
+        }
+    )
+    # ``expect()`` (the canonical head of ``expect().toBe``) would be
+    # the closest match for ``expec``; the floor drops it and leaves
+    # the real names.
+    assert _uses(root, "expec") == 3
+    err = capsys.readouterr().err
+    hint = next(
+        (line for line in err.splitlines() if "closest external" in line),
+        "",
+    )
+    assert "expect" in hint
+    assert "expect()" not in hint
+    assert "(" not in hint
+
+
+def test_suggestable_floor() -> None:
+    from dekko.analysis.query import _suggestable
+
+    assert _suggestable("node:fs")
+    assert _suggestable("@scope/pkg")
+    assert _suggestable("./local")
+    assert _suggestable("chalk")
+    assert not _suggestable("expect()")
+    assert not _suggestable("expect(result")
+    assert not _suggestable("[]")
+    assert not _suggestable('""')
+    assert not _suggestable("z .object")
+    assert not _suggestable("a" * 41)

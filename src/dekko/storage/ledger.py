@@ -378,7 +378,7 @@ def render_text(view: LedgerView, budget: int | None) -> list[str]:
         f"files in context: {len(view.files)} ({fully} fully read)",
         f"symbols in context: {len(view.symbols)}",
     ]
-    if budget is not None:
+    if budget:
         lines.append(f"remaining vs {budget}: {view.remaining(budget)} tokens")
     ranked = sorted(
         view.files.values(),

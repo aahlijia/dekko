@@ -61,7 +61,8 @@ runs the same `query callers <target>` dekko would answer with (or
 across the repo, and diffs the two hit sets into matches/dekko-only/
 grep-only buckets — every grep-only hit is labeled with a likely
 cause drawn from `dekko-verify`'s own blind-spot list (a cross-package/
-qualified call, an unparsed-language file, a likely unrelated
+qualified call, an unparsed-language file, a file the map skipped, an
+import or `use` line, a likely unrelated
 external-library method sharing the target's bare name, a test-only
 call site, or a short/generic target name), never a guess presented as
 certain. Always exits `0`; a nonempty grep-only bucket is a finding to
@@ -181,10 +182,14 @@ full guidance.
 | `outline` | a file's structure without bodies |
 | `workset` | one bundle for a change (`rev` or `symbol`; `type_impact` for a type's full blast radius) |
 | `summary` | repo digest |
-| `impacted_tests` | test files impacted by changes |
+| `impacted_tests` | test files impacted by changes, plus a note counting tests that reach the change only through an ambiguous call (the CLI's `affected --possible` lists them) |
 | `check_ambiguous` | resolver-trust summary: where call resolution was ambiguous |
 | `add_note` / `list_notes` | symbol-anchored notes |
 | `map_status` / `refresh_map` | freshness check / regenerate |
+
+Tools that take a target accept it under any of `symbol`, `name`,
+`target` or `type`, so an agent doesn't have to remember which name each
+tool uses. Every `budget` argument takes `0` for no cap.
 
 `dekko --claude-install` registers this automatically for Claude Code.
 For a standalone registration: `dekko --mcp-install` (runs
