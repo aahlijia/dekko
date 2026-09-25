@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.3.3] — 2026-09-25
+
+### Changed
+- **The MCP tool schemas cost less per session.** Every tool's
+  `tools/list` entry is sent to the model at the start of each session
+  the plugin is enabled in. The eight longest tool descriptions no
+  longer repeat what their own parameters already document (`sites`,
+  `include_tests`, `transitive`, `exact`, `type_impact`) or explain
+  extractor internals; each keeps what the tool returns, when to reach
+  for it, and the one caveat that prevents misreading a result. The
+  shared symbol-argument text and a few parameter descriptions were
+  tightened the same way. The whole payload went from about 18.6k to
+  about 16.2k characters, roughly 600 tokens a session, with no change
+  to tool names, parameters, or behavior.
+
 ## [1.3.2] — 2026-09-25
 
 ### Changed
