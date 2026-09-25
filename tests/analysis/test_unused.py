@@ -1375,7 +1375,10 @@ def test_dispatch_caveat_present_with_expected_count() -> None:
     sym = _sym("createCommand", "discord.ts")
     caveat = unused._dispatch_caveat([sym])
     assert caveat is not None
-    assert "1 of these are unresolved-ambiguous-call candidates" in caveat
+    assert (
+        "1 of these are unresolved-ambiguous-call or property-read "
+        "candidates" in caveat
+    )
     assert "dekko sanity --unused <name>" in caveat
     assert "--dispatch" in caveat
 
@@ -1422,7 +1425,10 @@ def test_unused_dispatch_caveat_always_on_without_flag(
     code = cli.main(["unused", "--root", str(root), "--kinds", "all"])
     out = capsys.readouterr().out
     assert code == 1
-    assert "note: 2 of these are unresolved-ambiguous-call candidates" in out
+    assert (
+        "note: 2 of these are unresolved-ambiguous-call or property-read "
+        "candidates" in out
+    )
     assert "dispatch candidates:" not in out  # --dispatch not passed
 
 

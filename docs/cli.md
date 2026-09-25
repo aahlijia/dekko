@@ -769,6 +769,27 @@ produce that:
   above. When 2+ repo symbols define the name and some receiver call
   uses it (`tool.description()`), each definition counts as a
   candidate on this weaker evidence.
+- **A property read uses its name.** A getter or an object-literal
+  handler is used by being read, not called: `cmd.isHidden`,
+  `matchingCommand?.immediate`, `const { immediate } = cmd`. The map
+  records those reads (JS/TS/TSX) per reader and name, and a flagged
+  symbol whose name is read somewhere is a candidate when 2+
+  definitions share the name or when it is itself an object-literal
+  member. A read is never an edge and never marks a symbol used:
+  property names are far too common for a name match to pick a
+  definition (`msg.type` has thousands of reads and one definition).
+
+One shape is not a candidate but a root: an object-literal member
+whose literal is a direct argument of a call to a binding imported
+from outside the repo (`createReconciler({ hideInstance() {} })` with
+`createReconciler` imported from `react-reconciler`, a `marked.use({
+renderer: { del() {} } })` extension). That package calls the members;
+nothing in the repo ever will. They are spared the same way
+`decorated` and `exported` symbols are. The test is the import, not
+"the call went external": a literal passed through a receiver the
+resolver could not follow (`deps.callModel({...})`,
+`Promise.resolve({...})`) is consumed by in-repo code, so its members
+stay flagged, where the property-read evidence can still mark them.
 
 The check is cheap, so it runs on every `unused` call. Each candidate
 row in the main listing is marked: text rows end with `[dispatch?]`,
@@ -779,19 +800,23 @@ When there are 20 or more candidates and they make up at least half
 the listing, a warning also prints above the rows:
 
 ```
-note: 2 of these are unresolved-ambiguous-call candidates elsewhere in
-the repo -- may be reached via polymorphic dispatch the resolver can't
-attribute (this.method()/self.method(), or a receiver call through an
-interface/trait-typed value like tool.prompt()). They are marked
-[dispatch?]; run `dekko sanity --unused <name>` before deleting any of
-them (--dispatch lists them with the command).
+note: 2 of these are unresolved-ambiguous-call or property-read
+candidates elsewhere in the repo -- may be reached via polymorphic
+dispatch the resolver can't attribute (this.method()/self.method(), or
+a receiver call through an interface/trait-typed value like
+tool.prompt()) or via a getter/handler read as a property
+(cmd.isHidden). They are marked [dispatch?]; run `dekko sanity --unused
+<name>` before deleting any of them (--dispatch lists them with the
+command).
 ```
 
 `--dispatch` additionally lists the candidates, one row each with the
 exact `dekko sanity --unused <path>:<qualname>:<line>` command to run
 before deleting it: the `"dispatch_candidates"` JSON key (each row
-names its `"evidence"`, `"ambiguous"` or `"guarded-name"`) or a text
-section, independent of and composable with `--suspect`. As with
+names its `"evidence"`, `"ambiguous"`, `"guarded-name"` or
+`"property-read"`) or a text section, independent of and composable
+with `--suspect`. `dekko sanity --unused` on a property-read candidate
+prints the read sites next to its "dekko evidence" line. As with
 `--suspect`, this is a lead, not a verdict: cross-check with `dekko
 sanity --unused` before deleting any flagged symbol this catches,
 especially on interface- and inheritance-heavy codebases.
@@ -1087,6 +1112,21 @@ budgeted by default (`affected`, `workset`, `search`, `summary`,
 `orient`), and like any explicit budget it also lifts the default row
 limit. For the lean map, whose cap never goes away, `0` means the
 default size-scaled cap. A negative budget is a usage error.
+
+Row counts (`--limit`, `--top`, `--hops`, `--packs`) take `0` or more.
+`--limit 0` is the counts-only call: the header and a `N of N omitted`
+footer, no rows. `trace --max-paths` takes 1 or more. A negative
+count is a usage error, and the MCP tools reject the same values (plus
+`true`, fractions and lists) with an error that names the argument.
+
+Token counts depend on the output mode. The text footer's `(~N
+tokens)` estimates the text you're reading. Under `--json`,
+`meta.tokens` (and what `--budget` caps) estimates the result rows
+serialized as compact JSON, keys and quotes included, so the same
+query reports more: 1.5x to 2.5x the text figure is typical (`query
+callers --sites` measured 192 vs. 79). Neither number is the size of
+the printed `--json` document, which adds indentation and the
+envelope. Quote the figure for the mode an agent actually consumes.
 
 `query file` (and `query cohesion`) on a mapped file with nothing to
 list exits 0 and says why on stderr: `mapped, no symbols` for a

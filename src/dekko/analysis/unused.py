@@ -205,6 +205,8 @@ def _is_root(
         return True
     if sym.decorated or sym.exported:
         return True
+    if _consumer_is_external(sym, index):
+        return True
     if _matches_globs(sym.path, root_globs):
         return True
     if sym.test or is_test_path(sym.path):
@@ -218,6 +220,41 @@ def _is_root(
     if sym.language == "rust" and sym.kind == "method":
         return _implements_std_trait(sym, index, container_index)
     return False
+
+
+def _consumer_is_external(sym: Symbol, index: MapIndex) -> bool:
+    """Whether ``sym`` is an object-literal member handed to external code.
+
+    A member of a literal that is a direct argument of a call to a
+    binding imported from outside the repo (``createReconciler({
+    hideInstance() {} })`` with ``createReconciler`` imported from
+    ``react-reconciler``) is called by that package, never by this
+    repo: an entry point in the same sense ``decorated`` and
+    ``exported`` are, not dead code. The test is the import, not the
+    external table: a receiver call the resolver could not attribute
+    (``deps.callModel({...})``, ``Promise.resolve({...})``) also lands
+    in the external table, and the literal it carries is consumed by
+    in-repo code the map just couldn't follow. Those members stay
+    flagged, where the property-read evidence can still mark them.
+    """
+    consumer = sym.literal_consumer
+    if not consumer:
+        return False
+    head = consumer.split(".", 1)[0]
+    sources = {
+        imp.name: imp.source for imp in index.imports_by_path.get(sym.path, ())
+    }
+    source = sources.get(head)
+    if source is None:
+        return False
+    # An import's ``source`` carries the imported member too
+    # (``react-reconciler/createReconciler`` for a default import,
+    # ``pkg.mod.name`` in Python); the module graph records the bare
+    # module it failed to place (``react-reconciler``).
+    return any(
+        source == module or source.startswith((module + "/", module + "."))
+        for module in index.module_external.get(sym.path, ())
+    )
 
 
 def _mark_used(used: set[tuple[str, str]], sym: Symbol) -> None:
@@ -558,6 +595,34 @@ def find_suspects(
 
 EVIDENCE_AMBIGUOUS = "ambiguous"
 EVIDENCE_GUARDED_NAME = "guarded-name"
+EVIDENCE_PROPERTY_READ = "property-read"
+
+
+def _has_property_read(sym: Symbol, index: MapIndex) -> bool:
+    """Whether a property read somewhere in the repo might reach ``sym``.
+
+    A getter or an object-literal handler is used by being *read*
+    (``cmd.isHidden``, ``matchingCommand?.immediate``), a shape no
+    call edge covers and one the map records as a read site, never an
+    edge (see ``model.RawRead``). The read names a property, not a
+    definition, so it counts when the name is genuinely shared (2+
+    repo callables or variables define it, the same bar the
+    guarded-name rule sets) or when ``sym`` itself is an object-literal
+    member, the shape reads reach. A lone free function whose name
+    happens to be read off some unrelated object is ordinary unused
+    code.
+    """
+    if not index.reads_by_name.get(sym.name):
+        return False
+    if sym.in_literal:
+        return True
+    definitions = [
+        s
+        for s in index.symbols_by_name.get(sym.name, ())
+        if s.kind not in TYPE_KINDS
+    ]
+
+    return len(definitions) >= 2
 
 
 def _has_guarded_receiver_call(sym: Symbol, index: MapIndex) -> bool:
@@ -586,12 +651,15 @@ def _dispatch_evidence(sym: Symbol, index: MapIndex) -> str | None:
     ``EVIDENCE_AMBIGUOUS`` when its own id is a candidate of an
     unresolved call, the stronger signal; ``EVIDENCE_GUARDED_NAME``
     when only a receiver call the noise guard sent external uses its
-    name (see ``_has_guarded_receiver_call``).
+    name (see ``_has_guarded_receiver_call``); ``EVIDENCE_PROPERTY_READ``
+    when only a property read uses it (see ``_has_property_read``).
     """
     if index.ambiguous_in.get(sym.id):
         return EVIDENCE_AMBIGUOUS
     if _has_guarded_receiver_call(sym, index):
         return EVIDENCE_GUARDED_NAME
+    if _has_property_read(sym, index):
+        return EVIDENCE_PROPERTY_READ
     return None
 
 
@@ -628,7 +696,11 @@ def find_dispatch_candidates(
       object defines `prompt`); or
     - its name is one the resolver's noise guard never resolves on a
       receiver call, 2+ repo symbols share it, and some receiver call
-      uses it (see `_dispatch_evidence`).
+      uses it (see `_dispatch_evidence`); or
+    - its name is read as a property somewhere (`cmd.isHidden`, a
+      getter or object-literal handler used without a call) and
+      either 2+ repo symbols share it or it is itself an
+      object-literal member (see `_has_property_read`).
 
     Args:
         index: Loaded map index.
@@ -769,12 +841,16 @@ def _dispatch_json(sym: Symbol, evidence: str | None) -> dict:
     return doc
 
 
-def _dispatch_row_text(sym: Symbol) -> str:
+def _dispatch_row_text(sym: Symbol, evidence: str | None = None) -> str:
     """One dispatch candidate's listing row, text form."""
+    reason = (
+        "possible property-read target (getter/handler read, not called)"
+        if evidence == EVIDENCE_PROPERTY_READ
+        else "possible polymorphic-dispatch target"
+    )
     return (
         f"  {sym.path}:{sym.start_line}  {signature(sym)}  [{sym.kind}]"
-        f"  -- possible polymorphic-dispatch target "
-        f"({_dispatch_check_command(sym)})"
+        f"  -- {reason} ({_dispatch_check_command(sym)})"
     )
 
 
@@ -786,6 +862,7 @@ def _print_dispatch_text(
     dispatch_candidates: list[Symbol],
     limit: int | None = None,
     budget: int | None = None,
+    evidence_by_id: dict[str, str] | None = None,
 ) -> None:
     """Print the ``--dispatch`` section after the main unused listing.
 
@@ -796,13 +873,17 @@ def _print_dispatch_text(
     header = (
         f"dispatch candidates: {len(dispatch_candidates)} of these "
         "unused-flagged symbols share a name with an unresolved call "
-        "elsewhere in the repo -- may be reached via polymorphic "
-        "dispatch the resolver can't attribute (this.method()/"
-        "self.method(), or a receiver call through an interface/"
-        "trait-typed value like tool.prompt()). Run `dekko sanity "
-        "--unused <name>` on each before deleting."
+        "or a property read elsewhere in the repo -- may be reached "
+        "via polymorphic dispatch the resolver can't attribute "
+        "(this.method()/self.method(), or a receiver call through an "
+        "interface/trait-typed value like tool.prompt()) or via a "
+        "getter/handler read as a property (cmd.isHidden). Run `dekko "
+        "sanity --unused <name>` on each before deleting."
     )
-    rows = [_dispatch_row_text(s) for s in dispatch_candidates]
+    evidence = evidence_by_id or {}
+    rows = [
+        _dispatch_row_text(s, evidence.get(s.id)) for s in dispatch_candidates
+    ]
     _print_section(header, rows, _DISPATCH_LIMIT, limit, budget)
 
 
@@ -820,12 +901,13 @@ def _dispatch_caveat(dispatch_candidates: list[Symbol]) -> str | None:
     if n == 0:
         return None
     return (
-        f"note: {n} of these are unresolved-ambiguous-call candidates "
-        "elsewhere in the repo -- may be reached via polymorphic "
-        "dispatch the resolver can't attribute (this.method()/"
-        "self.method(), or a receiver call through an interface/"
-        "trait-typed value like tool.prompt()). They are marked "
-        "[dispatch?]; run `dekko sanity --unused <name>` before "
+        f"note: {n} of these are unresolved-ambiguous-call or "
+        "property-read candidates elsewhere in the repo -- may be "
+        "reached via polymorphic dispatch the resolver can't attribute "
+        "(this.method()/self.method(), or a receiver call through an "
+        "interface/trait-typed value like tool.prompt()) or via a "
+        "getter/handler read as a property (cmd.isHidden). They are "
+        "marked [dispatch?]; run `dekko sanity --unused <name>` before "
         "deleting any of them (--dispatch lists them with the command)."
     )
 
@@ -1108,6 +1190,8 @@ def run(
     if suspect:
         _print_suspects_text(suspects, limit, budget)
     if dispatch:
-        _print_dispatch_text(dispatch_candidates, limit, budget)
+        _print_dispatch_text(
+            dispatch_candidates, limit, budget, evidence_by_id
+        )
 
     return EXIT_FOUND if found else EXIT_NONE

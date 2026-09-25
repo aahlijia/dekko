@@ -231,9 +231,8 @@ def _outline_limit_arg(args: dict) -> int:
     never been the same, only the *precedence rule* is being mirrored
     here.
     """
-    limit = args.get("limit")
     return outline_mod.effective_limit(
-        int(limit) if limit is not None else None, args.get("budget")
+        _int_arg(args, "limit", None), _budget_arg(args, None)
     )
 
 
@@ -255,8 +254,9 @@ def _require(args: dict, key: str) -> str:
 # names differ by tool (``find_usages`` takes ``name``,
 # ``find_type_usages`` takes ``type``, ``outline`` takes ``target``),
 # and agents calling several in a row guess by analogy, so any of the
-# others is accepted in its place (see ``_resolve_target_alias``). A
-# new target-taking tool belongs here too.
+# others is accepted in its place (see ``_resolve_target_alias``). Two
+# different values under two of these names is an error, not a pick.
+# A new target-taking tool belongs here too.
 _TARGET_PARAM = {
     "query_symbol": "symbol",
     "get_callers": "symbol",
@@ -272,6 +272,68 @@ _TARGET_PARAM = {
 _TARGET_ALIASES = ("symbol", "name", "target", "type")
 
 
+def _as_int(key: str, raw: Any) -> int:
+    """Read one integer argument value, or raise ``ToolError``.
+
+    Whole-number floats (``20.0``) and numeric strings (``"20"``) are
+    accepted: JSON Schema's ``integer`` allows the first, and some
+    clients send every argument as a string. ``bool`` is rejected even
+    though Python counts it as an ``int``: ``true`` meaning ``1`` is a
+    surprise, not a row count.
+    """
+    value = None
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        value = raw
+    elif isinstance(raw, float) and raw.is_integer():
+        value = int(raw)
+    elif isinstance(raw, str):
+        try:
+            value = int(raw)
+        except ValueError:
+            value = None
+    if value is None:
+        raise ToolError(f"argument '{key}' must be an integer, got {raw!r}")
+
+    return value
+
+
+def _int_arg(
+    args: dict,
+    key: str,
+    default: int | None,
+    minimum: int = 0,
+    floor_text: str | None = None,
+) -> int | None:
+    """An integer tool argument: ``default`` when absent or null.
+
+    Args:
+        args: The tool call's arguments.
+        key: The argument's name.
+        default: Returned when the argument is absent or ``null``.
+        minimum: The smallest accepted value.
+        floor_text: How the error names the floor, when ``minimum``
+            alone doesn't say what it means (``budget``'s "0 (no
+            cap)").
+
+    Returns:
+        The argument's value, or ``default``.
+
+    Raises:
+        ToolError: For a non-integer value or one below ``minimum``.
+    """
+    raw = args.get(key)
+    if raw is None:
+        return default
+    value = _as_int(key, raw)
+    if value < minimum:
+        floor = floor_text or str(minimum)
+        raise ToolError(
+            f"argument '{key}' must be {floor} or more, got {value}"
+        )
+
+    return value
+
+
 def _budget_arg(args: dict, default: int | None) -> int | None:
     """A tool's ``budget`` argument: ``default`` when absent, ``0`` for
     no cap (read as uncapped by ``textutil.fit_to_budget``).
@@ -279,21 +341,7 @@ def _budget_arg(args: dict, default: int | None) -> int | None:
     Raises:
         ToolError: For a negative or non-integer budget.
     """
-    raw = args.get("budget")
-    if raw is None:
-        return default
-    try:
-        budget = int(raw)
-    except (TypeError, ValueError):
-        raise ToolError(
-            f"argument 'budget' must be an integer, got {raw!r}"
-        ) from None
-    if budget < 0:
-        raise ToolError(
-            f"argument 'budget' must be 0 (no cap) or more, got {budget}"
-        )
-
-    return budget
+    return _int_arg(args, "budget", default, floor_text="0 (no cap)")
 
 
 def _limit_arg(args: dict) -> int:
@@ -304,9 +352,8 @@ def _limit_arg(args: dict) -> int:
     count: only a caller who actually chose a budget has said how much
     output they can take.
     """
-    limit = args.get("limit")
     return query.effective_limit(
-        int(limit) if limit is not None else None,
+        _int_arg(args, "limit", None),
         _budget_arg(args, None),
     )
 
@@ -314,38 +361,45 @@ def _limit_arg(args: dict) -> int:
 def _resolve_target_alias(tool_name: str, args: dict) -> dict:
     """Accept any target-argument name in place of the tool's own.
 
-    Only fills the tool's own name when the caller didn't pass it, so
-    anything a caller already depends on is untouched.
+    Agents calling several target tools in a row guess the argument
+    name by analogy, so ``symbol``, ``name``, ``target`` and ``type``
+    are interchangeable on every tool that takes a target. Two of them
+    carrying different values is a caller bug (a stale value, a
+    copy-paste), and picking one would hide it behind a confident
+    answer about the wrong symbol; that case errors, whichever names
+    are involved. A ``null`` value counts as absent.
 
     Args:
         tool_name: The tool being invoked.
         args: The call's raw arguments, as received.
 
     Returns:
-        ``args`` unchanged, or a shallow copy with the tool's own
-        target argument filled from the alias the caller used.
+        ``args`` unchanged when no alias needs folding, or a shallow
+        copy with the tool's own target argument set and every alias
+        name removed.
 
     Raises:
-        ToolError: If two aliases name different targets and the
-            tool's own argument is absent: picking one would be a
-            guess.
+        ToolError: If two target names carry different values.
     """
     primary = _TARGET_PARAM.get(tool_name)
-    if primary is None or primary in args:
+    if primary is None:
         return args
-    given = {k: args[k] for k in _TARGET_ALIASES if k in args}
+    given = {k: args[k] for k in _TARGET_ALIASES if args.get(k) is not None}
     if not given:
         return args
     if len({str(v) for v in given.values()}) > 1:
-        names = ", ".join(f"'{k}'" for k in given)
+        pairs = ", ".join(f"{k}={v!r}" for k, v in given.items())
         raise ToolError(
-            f"got {names} naming different targets; pass one "
+            f"got {pairs} naming different targets; pass one "
             f"'{primary}' argument"
         )
-    aliased = {k: v for k, v in args.items() if k not in given}
-    aliased[primary] = next(iter(given.values()))
+    if [k for k in _TARGET_ALIASES if k in args] == [primary]:
+        return args
 
-    return aliased
+    folded = {k: v for k, v in args.items() if k not in _TARGET_ALIASES}
+    folded[primary] = next(iter(given.values()))
+
+    return folded
 
 
 def _root_of(ctx: Context, args: dict) -> Path:
@@ -628,7 +682,7 @@ def tool_get_context_pack(ctx: Context, args: dict) -> str:
     """Minimal signature neighborhood for editing a symbol or file."""
     index = _index_for(ctx, args)
     target = _require(args, "target")
-    hops = int(args.get("hops", 1))
+    hops = _int_arg(args, "hops", 1)
     budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
     with_source = bool(args.get("with_source", False))
     root = _root_of(ctx, args)
@@ -677,7 +731,7 @@ def tool_trace_path(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     frm = _require(args, "from")
     to = _require(args, "to")
-    max_paths = int(args.get("max_paths", 3))
+    max_paths = _int_arg(args, "max_paths", 3, minimum=1)
     code, out, err = _capture(
         lambda: trace.run(index, frm, to, max_paths=max_paths, as_json=False)
     )
@@ -697,7 +751,7 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     budget = _budget_arg(args, None)
     # ``None`` lets ``unused.run`` apply its defaults, including the
     # suspects section's own cap, which any explicit limit replaces.
-    given = args.get("limit") is not None or budget is not None
+    given = _int_arg(args, "limit", None) is not None or budget is not None
     limit = _limit_arg(args) if given else None
     suspect = bool(args.get("suspect", False))
     code, out, err = _capture(
@@ -720,7 +774,7 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     root = _root_of(ctx, args)
     rev = args.get("rev")
     rev = rev if isinstance(rev, str) and rev else None
-    limit = int(args.get("limit", 8))
+    limit = _int_arg(args, "limit", 8)
     budget = _budget_arg(args, affected.DEFAULT_BUDGET)
     code, out, err = _capture(
         lambda: affected.run(
@@ -753,7 +807,7 @@ def tool_search_code(ctx: Context, args: dict) -> str:
             filtered.symbols_by_id
         )
         index = filtered
-    limit = int(args.get("limit", search.DEFAULT_LIMIT))
+    limit = _int_arg(args, "limit", search.DEFAULT_LIMIT)
     budget = _budget_arg(args, search.DEFAULT_BUDGET)
     kinds = search.parse_kinds(args.get("kind"))
     scorer_name = args.get("scorer") or search.DEFAULT_SCORER
@@ -791,7 +845,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
             "target type)"
         )
     budget = _budget_arg(args, workset_mod.DEFAULT_BUDGET)
-    packs = int(args.get("packs", workset_mod.DEFAULT_PACKS))
+    packs = _int_arg(args, "packs", workset_mod.DEFAULT_PACKS)
     task = _task_of(ctx, args)
     code, out, err = _capture(
         lambda: workset_mod.run(
@@ -815,7 +869,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
 def tool_stats(ctx: Context, args: dict) -> str:
     """Fan-in/out hotspots, largest files, language mix."""
     index = _index_for(ctx, args)
-    top = int(args.get("top", 10))
+    top = _int_arg(args, "top", 10)
     code, out, err = _capture(lambda: stats.run(index, top, as_json=False))
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
@@ -834,7 +888,7 @@ def tool_check_ambiguous(ctx: Context, args: dict) -> str:
     not a full report.
     """
     index = _index_for(ctx, args)
-    top = int(args.get("top", 5))
+    top = _int_arg(args, "top", 5)
     budget = _budget_arg(args, 500)
     code, out, err = _capture(
         lambda: ambiguous.run(
@@ -1078,7 +1132,8 @@ _SYMBOL_PROP = {
     "reply says the target is ambiguous (an overload set sharing the "
     "same file+name), append ':LINE' from one of the printed candidate "
     "rows, e.g. file.py:Class.method:42, to pick that one. 'name', "
-    "'target' and 'type' are also accepted as aliases for this argument.",
+    "'target' and 'type' are also accepted as aliases for this argument; "
+    "two of them with different values is an error.",
 }
 _SITES_PROP = {
     "type": "boolean",
@@ -1248,7 +1303,8 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "An external name: a function's "
                     "own name ('run'), an imported binding ('chalk', "
                     "'np', 'React'), or a module ('numpy', 'node:path'). "
-                    "'symbol', 'target' and 'type' are also accepted.",
+                    "'symbol', 'target' and 'type' are also accepted; two "
+                    "with different values is an error.",
                 },
                 "limit": {
                     "type": "integer",
@@ -1282,7 +1338,8 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Type/class/struct/interface name "
                     "to search for, e.g. 'Config'. 'symbol', 'name' and "
-                    "'target' are also accepted.",
+                    "'target' are also accepted; two with different "
+                    "values is an error.",
                 },
                 "exact": {
                     "type": "boolean",
@@ -1385,7 +1442,8 @@ TOOLS: list[dict[str, Any]] = [
                 "target": {
                     "type": "string",
                     "description": "Symbol or repo-relative file path. "
-                    "'symbol', 'name' and 'type' are also accepted.",
+                    "'symbol', 'name' and 'type' are also accepted; two "
+                    "with different values is an error.",
                 },
                 "hops": {
                     "type": "integer",
@@ -1422,7 +1480,8 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Mapped file path or directory "
                     "(suffix-matched); a directory rolls up its files. "
-                    "'symbol', 'name' and 'type' are also accepted.",
+                    "'symbol', 'name' and 'type' are also accepted; two "
+                    "with different values is an error.",
                 },
                 "limit": {
                     "type": "integer",
@@ -1700,7 +1759,7 @@ def _handle_tools_list(req_id: Any) -> dict:
 
 
 def _with_default_root_note(ctx: Context, args: dict, text: str) -> str:
-    """Prefix a successful reply with the root it actually resolved to.
+    """Prefix a reply with the root it actually resolved to.
 
     Agents on four different repos/languages hit the same failure:
     omitting ``root`` silently resolves against the server's cwd —
@@ -1712,6 +1771,10 @@ def _with_default_root_note(ctx: Context, args: dict, text: str) -> str:
     this takes the minimum-viable fix: echo the resolved
     root on every reply that used the default, so a wrong-repo answer
     is visually obvious immediately instead of only discovered later.
+
+    The note stays one short line because it rides on every such
+    reply: the path is most of its cost, and it doesn't say how to
+    pass ``root`` since every tool's input schema already lists it.
 
     Args:
         ctx: Server-wide settings (for the actual default root).
@@ -1725,10 +1788,7 @@ def _with_default_root_note(ctx: Context, args: dict, text: str) -> str:
     root = args.get("root")
     if isinstance(root, str) and root:
         return text
-    return (
-        f"(root: {ctx.default_root} — no 'root' argument was given; "
-        "pass one to target a different repo)\n"
-    ) + text
+    return f"(default root: {ctx.default_root})\n" + text
 
 
 def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:

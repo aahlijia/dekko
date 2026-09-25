@@ -4,7 +4,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 from dekko.render.mapfile import MAP_DOC_VERSION, _json_dumps, build_id_table
-from dekko.core.model import CallGraph, FileMap
+from dekko.core.model import CallGraph, FileMap, Symbol
 
 
 def render_json(
@@ -57,7 +57,7 @@ def render_json(
             }
             for fm in files
         ],
-        "symbols": [asdict(sym) for fm in files for sym in fm.symbols],
+        "symbols": [_symbol_row(sym) for fm in files for sym in fm.symbols],
         "ids": ids,
         "edges": [
             {
@@ -213,5 +213,35 @@ def render_json(
         # Additive and optional: no ``MAP_DOC_VERSION`` bump, old
         # readers ignore it, new readers tolerate its absence.
         "type_uses": [asdict(t) for fm in files for t in fm.type_uses],
+        # Property reads grouped per reader and name (``model.
+        # ReadSite``), interned like ``external`` since a reader id
+        # repeats across many names. Additive and optional, same as
+        # ``type_uses``.
+        "reads": [
+            {
+                "reader": id_index[site.reader],
+                "name": id_index[site.name],
+                "lines": site.lines,
+            }
+            for site in graph.reads
+        ],
     }
+
     return _json_dumps(doc) + b"\n"
+
+
+def _symbol_row(sym: Symbol) -> dict:
+    """One ``"symbols"`` row: ``asdict`` minus the flags at their defaults.
+
+    ``in_literal``/``literal_consumer`` are set on a small minority of
+    symbols (object-literal members), so writing their defaults on
+    every row would grow the symbol table for nothing. The loader's
+    ``.get`` defaults make the absence mean the default.
+    """
+    row = asdict(sym)
+    if not row["in_literal"]:
+        del row["in_literal"]
+    if row["literal_consumer"] is None:
+        del row["literal_consumer"]
+
+    return row

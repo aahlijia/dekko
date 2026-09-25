@@ -9,6 +9,130 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-09-25
+
+Closes round 1.3's fix cycle. The code is 1.2.4; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.3 evaluated 1.1.10 on
+seven real repositories and found no regressions and nothing
+Critical: two Mediums, a few carried Lows, and one more bug found
+while re-running the MCP checks on tensorflow. Four fix tracks, all
+shipped:
+
+- **1.2.1**: conflicting MCP target names (`symbol`, `name`,
+  `target`, `type`) are always an error, including when one of them
+  is the tool's own argument. The same value under two names still
+  folds.
+- **1.2.2**: `unused` sees getters and handlers that are read rather
+  than called, and object literals handed to external packages. On
+  claude-code, flagged callables with no `[dispatch?]` mark went from
+  112 to 50.
+- **1.2.3**: the MCP default-root note is `(default root: <path>)`,
+  23 tokens instead of 38 on every call that omits `root`.
+- **1.2.4**: integer arguments are validated on MCP and the CLI. Bad
+  values used to return `dekko: internal error` (21 of 70 probe calls)
+  or be quietly misread. Also fixed: `trace --max-paths 0` reporting
+  no path, and `query callers --limit 0` printing nothing.
+
+`docs/cli.md` now says what `--json`'s `meta.tokens` measures.
+
+## [1.2.4] — 2026-09-25
+
+### Fixed
+- **MCP integer arguments fail as the caller's mistake, not dekko's.**
+  `limit`, `hops`, `packs` and `top` went through a bare `int()`, so
+  `"abc"`, a list, or (on `search_code`, `impacted_tests`,
+  `get_context_pack`, `workset` and `check_ambiguous`) `null` came
+  back as `dekko: internal error: invalid literal for int()`: 21 of 70
+  bad-value calls on one repo. Every integer argument, `budget`
+  included, now follows one rule: absent or `null` means the default;
+  an integer, a whole-number float (`20.0`) or a numeric string
+  (`"20"`) is read as that number; `true`, a fraction, a list or a
+  negative value is an error that names the argument. `true` used to
+  read as 1 and `2.5` as 2.
+- **Negative row counts are rejected on the CLI.** `--limit`, `--top`,
+  `--hops` and `--packs` took any integer, and a negative one reached
+  a `rows[:limit]` slice: `query callers X --limit -1` dropped the
+  last row and suggested raising the limit. They are usage errors
+  now, like a negative `--budget`.
+- **`trace --max-paths 0` no longer reports a missing path.** It
+  answered "no resolved call path" (exit 1) for a pair `--max-paths 1`
+  connects. `--max-paths` now takes 1 or more.
+- **`query callers`/`callees --limit 0` prints its footer.** It
+  printed nothing at all, which reads as "no callers"; it now prints
+  `(~0 tokens · N of N omitted · raise --limit)`, as `query uses`,
+  `outline`, `search` and `unused` already did. MCP `get_callers`,
+  `get_callees` and `find_type_usages` with `limit: 0` get the same
+  footer.
+
+## [1.2.3] — 2026-09-25
+
+### Changed
+- **The MCP default-root note is one short line.** Every reply to a
+  call that omits `root` now starts with `(default root: <path>)`
+  instead of `(root: <path> — no 'root' argument was given; pass one
+  to target a different repo)`: 23 tokens instead of 38 on a typical
+  path, paid on every such call. It still appears on success and
+  error replies alike, still carries the full path, and still says
+  the root was defaulted; the "pass one" hint went because every
+  tool's input schema already lists `root`.
+
+## [1.2.2] — 2026-09-25
+
+### Fixed
+- **`unused` sees getters and handlers that are read, not called, and
+  object literals handed to external code.** On claude-code, 91 of the
+  112 flagged functions that carried no `[dispatch?]` mark were
+  members of object literals: command objects whose `isHidden` and
+  `immediate` getters are read as `cmd.isHidden` (a shape no call edge
+  covers), and the 30 methods of the react-reconciler host config,
+  which `react-reconciler` calls and nothing in the repo does. Both
+  looked like dead code. Two changes:
+  - The map gains a `reads` section: property reads (`x.name` not
+    called and not assigned, `cmd?.name`, `const { name } = x`) in
+    JS/TS/TSX, grouped per reader and name, kept for the names some
+    repo callable or variable defines. A read is never an edge and
+    never marks anything used: property names are far too common for
+    a name match to pick a definition (the one repo symbol named
+    `type` had 2,735 `msg.type` reads against it). It is the third
+    `[dispatch?]` evidence, `property-read`, for a flagged symbol
+    whose name is read somewhere and that either shares the name with
+    2+ definitions or is itself an object-literal member. `--dispatch`
+    rows say which, and `sanity --unused` prints the read sites.
+  - Symbols record whether they are object-literal members and, when
+    the literal is a direct argument of a call, that call's callee.
+    A member whose literal went to a binding imported from outside
+    the repo (`createReconciler(...)` from `react-reconciler`,
+    `createContext(...)` from `react`, `marked.use(...)`) is a root,
+    like `decorated` and `exported`. The import is the test, not the
+    external table: a literal passed through a receiver the resolver
+    couldn't follow (`deps.callModel({...})`) is consumed in-repo and
+    stays flagged.
+
+  On claude-code the unmarked flagged functions drop from 112 to 50:
+  34 rows leave the list as roots and 32 gain the mark. No edge set
+  changed on any of the seven evaluation repositories.
+  Maps written before this load as before. Arrow-function properties
+  (`isEnabled: () => ...`) are not symbols at all and are unchanged.
+
+## [1.2.1] — 2026-09-25
+
+### Changed
+- **Conflicting MCP target names are always an error.** The tools that
+  take a target accept it under any of `symbol`, `name`, `target` or
+  `type`. Since 0.43.32 the tool's own name silently won when a
+  caller sent it beside a different value under another name, and
+  1.1.10 promised an error for that case without delivering one: the
+  check ran only when the tool's own name was absent, so 12 of the 24
+  name pairs picked silently and 12 errored. Two different values in
+  one call is a caller bug (a stale value, a copy-paste), and the
+  silent pick hid it behind a confident answer about the wrong
+  symbol. Every pair now errors, and the message names each key and
+  value it saw (`got symbol='f', name='g' naming different targets;
+  pass one 'symbol' argument`). The same value under several names
+  still folds to the tool's own name, and a JSON `null` counts as an
+  absent argument. Round 1.3 found this on four of seven repositories.
+
 ## [1.2.0] — 2026-09-25
 
 Closes round 1.2's fix cycle. The code is 1.1.11; this release is the

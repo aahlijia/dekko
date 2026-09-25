@@ -127,7 +127,7 @@ resolve to the same symbol. If a reply says the target is ambiguous
 one of the candidate rows it prints (`file.py:Class.method:42`) rather
 than reading the file to pick one. MCP tools accept the target under
 any of `symbol`, `name`, `target` or `type`, whichever the tool's own
-schema calls it.
+schema calls it. Pass one; two that disagree is an error.
 
 ## Get more out of each call
 

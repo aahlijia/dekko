@@ -80,6 +80,78 @@ def test_negative_budget_is_a_usage_error() -> None:
     assert exc.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["query", "callers", "f", "--limit", "-1"],
+        ["outline", "a.py", "--limit", "-2"],
+        ["search", "x", "--limit", "-1"],
+        ["search", "x", "--limit", "abc"],
+        ["diff", "HEAD", "--limit", "-1"],
+        ["affected", "--limit", "-1"],
+        ["sanity", "f", "--limit", "-1"],
+        ["unused", "--limit", "-1"],
+        ["unused", "--top", "-1"],
+        ["context", "f", "--hops", "-1"],
+        ["workset", "--packs", "-1"],
+        ["stats", "--top", "-1"],
+        ["ambiguous", "--top", "-1"],
+        ["ambiguous", "--limit", "-1"],
+        ["deps", "--top", "-1"],
+        ["deps", "--limit", "-1"],
+        ["trace", "f", "g", "--max-paths", "0"],
+    ],
+)
+def test_bad_count_flag_is_a_usage_error(
+    argv: list[str], capsys: pytest.CaptureFixture
+) -> None:
+    """A negative row count used to slice rows off the end, and
+    ``--max-paths 0`` answered "no call path" for a pair that has one."""
+    with pytest.raises(SystemExit) as exc:
+        cli.build_subcommand_parser().parse_args(argv)
+    assert exc.value.code == 2
+    assert argv[-2] in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("argv", "dest"),
+    [
+        (["query", "callers", "f", "--limit", "0"], "limit"),
+        (["context", "f", "--hops", "0"], "hops"),
+        (["workset", "--packs", "0"], "packs"),
+        (["stats", "--top", "0"], "top"),
+        (["trace", "f", "g", "--max-paths", "1"], "max_paths"),
+    ],
+)
+def test_count_flag_floor_is_accepted(argv: list[str], dest: str) -> None:
+    """``0`` stays the counts-only call; ``--max-paths`` starts at 1."""
+    args = cli.build_subcommand_parser().parse_args(argv)
+    assert getattr(args, dest) == int(argv[-1])
+
+
+def test_query_callers_limit_zero_prints_the_footer(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """``--limit 0`` has no rows to print, but the footer still says
+    what it held back; an empty reply reads as "no callers"."""
+    callers = "".join(
+        f"def c{i}() -> int:\n    return f()\n\n" for i in range(3)
+    )
+    root = make_mapped_repo(
+        {
+            "a.py": "def f() -> int:\n    return 1\n",
+            "b.py": f"from a import f\n\n{callers}",
+        }
+    )
+    code = cli.main(
+        ["query", "callers", "f", "--limit", "0", "--root", str(root)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "3 of 3 omitted" in out
+    assert "b.py:" not in out
+
+
 def test_query_budget_zero_returns_every_row(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:

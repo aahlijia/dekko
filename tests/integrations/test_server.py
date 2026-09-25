@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from concurrent.futures.process import BrokenProcessPool
+from itertools import combinations
 from pathlib import Path
 
 import pytest
@@ -132,6 +133,26 @@ def test_omitted_root_echoes_resolved_default(
     assert "f() -> int" in text
 
 
+@pytest.mark.parametrize(
+    ("symbol", "is_error"),
+    [("f", False), ("ghost", True)],
+)
+def test_default_root_note_is_exactly_one_short_line(
+    make_mapped_repo: RepoFactory,
+    symbol: str,
+    is_error: bool,
+) -> None:
+    # The note rides on every reply that omits `root`, success or
+    # error, so its wording is pinned: any growth is paid on every call.
+    root = make_mapped_repo(SRC)
+    ctx = _ctx(root)
+    result = _call(ctx, "query_symbol", {"symbol": symbol})
+    text = result["content"][0]["text"]
+    assert result["isError"] is is_error
+    first, _ = text.split("\n", 1)
+    assert first == f"(default root: {root})"
+
+
 def test_explicit_root_suppresses_the_default_note(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -140,7 +161,7 @@ def test_explicit_root_suppresses_the_default_note(
     result = _call(ctx, "query_symbol", {"symbol": "f", "root": str(root)})
     text = result["content"][0]["text"]
     assert result["isError"] is False
-    assert "no 'root' argument was given" not in text
+    assert "default root:" not in text
     assert text.startswith("f() -> int")
 
 
@@ -275,17 +296,102 @@ def test_symbol_alias_matches_symbol_argument(
     assert by_name == by_symbol
 
 
-def test_symbol_argument_takes_precedence_over_name(
+def test_conflicting_primary_and_alias_is_an_error(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # If both are given, `symbol` (the tool's real, documented
-    # argument) wins unconditionally over the `name` fallback.
+    # Two different values is a caller bug (a stale value, a
+    # copy-paste). The tool's own name used to win silently, which hid
+    # the bug behind a confident answer about the wrong symbol. Now it
+    # errors like any other conflicting pair, naming both values.
     ctx = _ctx(make_mapped_repo(SRC))
     result = _call(
         ctx, "query_symbol", {"symbol": "f", "name": "wrong_target"}
     )
-    assert result["isError"] is False
-    assert "f() -> int" in result["content"][0]["text"]
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "symbol='f'" in text
+    assert "name='wrong_target'" in text
+    assert "pass one 'symbol' argument" in text
+
+
+@pytest.mark.parametrize("tool", sorted(server._TARGET_PARAM))
+@pytest.mark.parametrize(
+    ("first", "second"), list(combinations(server._TARGET_ALIASES, 2))
+)
+def test_every_target_tool_rejects_every_conflicting_pair(
+    tool: str, first: str, second: str
+) -> None:
+    # The whole matrix, whichever names carry the two values, the
+    # tool's own included. The function is pure, so no repo is needed.
+    primary = server._TARGET_PARAM[tool]
+    with pytest.raises(server.ToolError) as excinfo:
+        server._resolve_target_alias(tool, {first: "x", second: "y"})
+    message = str(excinfo.value)
+    assert "naming different targets" in message
+    assert f"pass one '{primary}' argument" in message
+    assert f"{first}='x'" in message
+    assert f"{second}='y'" in message
+
+
+@pytest.mark.parametrize("tool", sorted(server._TARGET_PARAM))
+def test_conflicting_pair_is_an_error_reply_on_every_tool(
+    make_mapped_repo: RepoFactory, tool: str
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    primary = server._TARGET_PARAM[tool]
+    alias = next(a for a in server._TARGET_ALIASES if a != primary)
+    args = {primary: "a.py", alias: "f"}
+    if tool == "add_note":
+        args["text"] = "t"
+    result = _call(ctx, tool, args)
+    assert result["isError"] is True
+    assert "naming different targets" in result["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"symbol": "f", "name": "f"},
+        {"name": "f", "target": "f"},
+        {"symbol": "f", "name": "f", "target": "f", "type": "f"},
+        {"symbol": None, "name": "f"},
+        {"symbol": "f", "name": None, "type": None},
+    ],
+)
+def test_agreeing_or_null_aliases_fold_to_the_primary(args: dict) -> None:
+    # Hedging with the same value under two names is the reason the
+    # aliases exist; a JSON null is an absent argument, not a value.
+    args = {**args, "root": "/r"}
+    folded = server._resolve_target_alias("query_symbol", args)
+    assert folded == {"symbol": "f", "root": "/r"}
+
+
+def test_agreeing_aliases_answer_like_the_plain_call(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    plain = _call(ctx, "query_symbol", {"symbol": "f"})
+    hedged = _call(ctx, "query_symbol", {"symbol": "f", "name": "f"})
+    assert hedged == plain
+    assert hedged["isError"] is False
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("query_symbol", {"symbol": "f", "root": "/r"}),
+        ("query_symbol", {"symbol": None}),
+        ("query_symbol", {"root": "/r"}),
+        ("search_code", {"query": "x", "name": "y", "symbol": "z"}),
+    ],
+)
+def test_untouched_calls_return_the_same_arguments_object(
+    tool: str, args: dict
+) -> None:
+    # No fold needed: the tool's own name alone, nothing to fold, or a
+    # tool that takes no target. The handler sees exactly what was sent
+    # (a missing or null primary is still the handler's error to give).
+    assert server._resolve_target_alias(tool, args) is args
 
 
 @pytest.mark.parametrize(
@@ -650,10 +756,9 @@ def test_symbol_alias_tools_schema_unchanged() -> None:
             "symbol",
             "text",
         ]
-        assert (
-            "'name', 'target' and 'type' are also accepted as aliases"
-            in schema["properties"]["symbol"]["description"]
-        )
+        description = schema["properties"]["symbol"]["description"]
+        assert "'name', 'target' and 'type' are also accepted" in description
+        assert "two of them with different values is an error" in description
 
 
 def test_get_context_pack_tool(make_mapped_repo: RepoFactory) -> None:
@@ -891,7 +996,7 @@ def test_not_found_is_tool_error_not_doubled(
     # An error reply that defaulted the root now
     # carries the root line first, like a success reply always did --
     # a wrong-repo query's likeliest outcome IS a not-found error.
-    assert text.startswith("(root: ")
+    assert text.startswith("(default root: ")
     body = text.split("\n", 1)[1]
     assert body.startswith("dekko: no symbol matches")  # single prefix
     assert body.count("dekko:") == 1
@@ -2089,3 +2194,109 @@ def test_negative_budget_is_a_tool_error(
     result = _call(ctx, "get_callers", {"symbol": "f", "budget": -1})
     assert result["isError"]
     assert "budget" in result["content"][0]["text"]
+
+
+# Every registered tool's integer argument, with the arguments the tool
+# needs to get as far as reading it.
+_INT_ARG_SITES = [
+    ("search_code", {"query": "f"}, "limit"),
+    ("get_callers", {"symbol": "f"}, "limit"),
+    ("get_callees", {"symbol": "g"}, "limit"),
+    ("find_usages", {"name": "f"}, "limit"),
+    ("find_type_usages", {"type": "int"}, "limit"),
+    ("outline", {"target": "a.py"}, "limit"),
+    ("impacted_tests", {}, "limit"),
+    ("get_context_pack", {"target": "f"}, "hops"),
+    ("workset", {"symbol": "f"}, "packs"),
+    ("check_ambiguous", {}, "top"),
+    ("get_callers", {"symbol": "f"}, "budget"),
+]
+
+
+@pytest.mark.parametrize("bad", ["abc", [3], 2.5, True, -1])
+@pytest.mark.parametrize(("tool", "base", "arg"), _INT_ARG_SITES)
+def test_bad_int_arg_is_a_tool_error(
+    make_mapped_repo: RepoFactory,
+    tool: str,
+    base: dict,
+    arg: str,
+    bad: object,
+) -> None:
+    """A value that isn't a non-negative integer is the caller's
+    mistake, named as such, never an internal error and never quietly
+    read as some other number (``true`` as 1, ``2.5`` as 2, ``-1`` as
+    "all rows but the last")."""
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(ctx, tool, {**base, arg: bad})
+    text = result["content"][0]["text"]
+    assert result.get("isError"), text
+    assert f"argument '{arg}'" in text
+    assert "internal error" not in text
+
+
+@pytest.mark.parametrize(
+    ("tool", "base", "arg"),
+    [
+        site
+        for site in _INT_ARG_SITES
+        if site[0]
+        in (
+            "search_code",
+            "impacted_tests",
+            "get_context_pack",
+            "workset",
+            "check_ambiguous",
+        )
+    ],
+)
+def test_null_int_arg_reads_as_absent(
+    make_mapped_repo: RepoFactory,
+    tool: str,
+    base: dict,
+    arg: str,
+) -> None:
+    """``null`` means "not given" for every integer argument, as it
+    already did for ``budget`` and the relation tools' ``limit``."""
+    ctx = _ctx(make_mapped_repo(SRC))
+    omitted = _call(ctx, tool, dict(base))
+    nulled = _call(ctx, tool, {**base, arg: None})
+    assert nulled == omitted
+
+
+@pytest.mark.parametrize("value", [1.0, "1"])
+def test_whole_float_and_numeric_string_int_args_still_work(
+    make_mapped_repo: RepoFactory,
+    value: object,
+) -> None:
+    """No-regression guard: ``1.0`` and ``"1"`` keep meaning 1, since
+    JSON Schema allows the first and some clients send the second."""
+    ctx = _ctx(_many_callers_repo(make_mapped_repo))
+    as_int = _call(ctx, "get_callers", {"symbol": "f", "limit": 1})
+    loose = _call(ctx, "get_callers", {"symbol": "f", "limit": value})
+    assert loose == as_int
+    assert not loose.get("isError")
+
+
+def test_zero_limit_on_get_callers_says_what_it_held_back(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``limit: 0`` is the counts-only call: no rows, but the footer
+    still says how many exist, so it can't read as "no callers"."""
+    ctx = _ctx(_many_callers_repo(make_mapped_repo))
+    result = _call(ctx, "get_callers", {"symbol": "f", "limit": 0})
+    text = result["content"][0]["text"]
+    assert not result.get("isError")
+    assert "60 of 60 omitted" in text
+    assert "b.py:" not in text
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_trace_path_needs_at_least_one_path(
+    make_mapped_repo: RepoFactory,
+    bad: int,
+) -> None:
+    """Zero paths isn't a question; asking for it used to answer "no
+    call path" for a pair that has one."""
+    ctx = _ctx(make_mapped_repo(SRC))
+    with pytest.raises(server.ToolError, match="'max_paths' must be 1"):
+        server.tool_trace_path(ctx, {"from": "g", "to": "f", "max_paths": bad})
