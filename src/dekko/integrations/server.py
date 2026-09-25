@@ -1713,7 +1713,7 @@ def _handle_tools_list(req_id: Any) -> dict:
 
 
 def _with_default_root_note(ctx: Context, args: dict, text: str) -> str:
-    """Prefix a successful reply with the root it actually resolved to.
+    """Prefix a reply with the root it actually resolved to.
 
     Agents on four different repos/languages hit the same failure:
     omitting ``root`` silently resolves against the server's cwd —
@@ -1725,6 +1725,10 @@ def _with_default_root_note(ctx: Context, args: dict, text: str) -> str:
     this takes the minimum-viable fix: echo the resolved
     root on every reply that used the default, so a wrong-repo answer
     is visually obvious immediately instead of only discovered later.
+
+    The note stays one short line because it rides on every such
+    reply: the path is most of its cost, and it doesn't say how to
+    pass ``root`` since every tool's input schema already lists it.
 
     Args:
         ctx: Server-wide settings (for the actual default root).
@@ -1738,10 +1742,7 @@ def _with_default_root_note(ctx: Context, args: dict, text: str) -> str:
     root = args.get("root")
     if isinstance(root, str) and root:
         return text
-    return (
-        f"(root: {ctx.default_root} — no 'root' argument was given; "
-        "pass one to target a different repo)\n"
-    ) + text
+    return f"(default root: {ctx.default_root})\n" + text
 
 
 def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:

@@ -202,8 +202,7 @@ containing `map.json`) defaults to the server's own working directory
 when a call doesn't pass one — often not the repo an agent meant to
 query, and a wrong-repo answer otherwise looks identical in shape to a
 correct one. Any reply that used the default is prefixed with
-`(root: <path> — no 'root' argument was given; pass one to target a
-different repo)`, so a wrong-repo answer is visually obvious
+`(default root: <path>)`, so a wrong-repo answer is visually obvious
 immediately rather than discovered later. Since 0.43.77 this covers
 error replies too, not just successful ones — the likeliest outcome of
 asking one repo's question against another repo's map is a not-found

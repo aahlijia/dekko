@@ -133,6 +133,26 @@ def test_omitted_root_echoes_resolved_default(
     assert "f() -> int" in text
 
 
+@pytest.mark.parametrize(
+    ("symbol", "is_error"),
+    [("f", False), ("ghost", True)],
+)
+def test_default_root_note_is_exactly_one_short_line(
+    make_mapped_repo: RepoFactory,
+    symbol: str,
+    is_error: bool,
+) -> None:
+    # The note rides on every reply that omits `root`, success or
+    # error, so its wording is pinned: any growth is paid on every call.
+    root = make_mapped_repo(SRC)
+    ctx = _ctx(root)
+    result = _call(ctx, "query_symbol", {"symbol": symbol})
+    text = result["content"][0]["text"]
+    assert result["isError"] is is_error
+    first, _ = text.split("\n", 1)
+    assert first == f"(default root: {root})"
+
+
 def test_explicit_root_suppresses_the_default_note(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -141,7 +161,7 @@ def test_explicit_root_suppresses_the_default_note(
     result = _call(ctx, "query_symbol", {"symbol": "f", "root": str(root)})
     text = result["content"][0]["text"]
     assert result["isError"] is False
-    assert "no 'root' argument was given" not in text
+    assert "default root:" not in text
     assert text.startswith("f() -> int")
 
 
@@ -976,7 +996,7 @@ def test_not_found_is_tool_error_not_doubled(
     # An error reply that defaulted the root now
     # carries the root line first, like a success reply always did --
     # a wrong-repo query's likeliest outcome IS a not-found error.
-    assert text.startswith("(root: ")
+    assert text.startswith("(default root: ")
     body = text.split("\n", 1)[1]
     assert body.startswith("dekko: no symbol matches")  # single prefix
     assert body.count("dekko:") == 1

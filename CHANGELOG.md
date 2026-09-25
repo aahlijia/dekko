@@ -9,6 +9,18 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.2.3] — 2026-09-25
+
+### Changed
+- **The MCP default-root note is one short line.** Every reply to a
+  call that omits `root` now starts with `(default root: <path>)`
+  instead of `(root: <path> — no 'root' argument was given; pass one
+  to target a different repo)`: 23 tokens instead of 38 on a typical
+  path, paid on every such call. It still appears on success and
+  error replies alike, still carries the full path, and still says
+  the root was defaulted; the "pass one" hint went because every
+  tool's input schema already lists `root`.
+
 ## [1.2.2] — 2026-09-25
 
 ### Fixed
