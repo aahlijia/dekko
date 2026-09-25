@@ -33,14 +33,14 @@ cover yet.
 
 Spot-check — not a full re-verification — when any of these apply:
 
-- **A cross-package/cross-module qualified call is involved.**
-  `pkg.Func()`-style calls (Go), `namespace::func()` (C++), or any
-  call where the receiver is a same-repo package/module rather than a
-  local variable are a known resolver blind spot, confirmed missing
-  4 real call sites on a real repo. Same caution applies to trait/interface dispatch
-  (Rust `dyn Trait` calls, Java/Kotlin interface methods) — the
-  resolver ladder only reliably matches an explicit `Type::method()`
-  or `Type.method()` form.
+- **Dynamic dispatch or an unusual qualified call is involved.**
+  Trait/interface dispatch (Rust `dyn Trait` calls, Java/Kotlin
+  interface methods) is the main resolver blind spot: the resolver
+  only reliably matches an explicit `Type::method()` or
+  `Type.method()` form, not a call through an abstract receiver.
+  Qualified calls through a same-repo namespace or module
+  (`namespace::func()`, `pkg.Func()`) usually resolve, but a
+  re-export or alias the resolver doesn't follow can still drop one.
 - **The result doesn't disclose ambiguity.** A real ambiguous call
   should say so (`N call(s) resolved ambiguously`), not just be
   silently absent from the count. If a symbol you expect to be widely

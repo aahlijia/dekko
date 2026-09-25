@@ -437,8 +437,9 @@ _GENERIC_NAMES = frozenset(
 # Matches an identifier immediately followed by ``.name(`` or
 # ``::name(`` — the shape of a Go ``pkg.Func(``, a C++
 # ``namespace::func(``/``Type::method(``, or a Java/Python
-# ``Type.method(`` qualified call, all of which
-# ``dekko-verify/SKILL.md`` names as the resolver's known blind spot.
+# ``Type.method(`` qualified call. These usually resolve, but one
+# routed through a re-export or alias the resolver doesn't follow can
+# still drop, which ``dekko-verify/SKILL.md`` names as a cause to check.
 # Built per-hit (the bare name varies), not module-level.
 _QUALIFIED_CALL_TEMPLATE = r"[A-Za-z_][A-Za-z0-9_]*(?:\.|::){name}\s*\("
 

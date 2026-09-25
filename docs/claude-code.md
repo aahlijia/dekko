@@ -50,6 +50,7 @@ the same findings as structured data for scripting.
 ```sh
 /sanity resolve
 /sanity Path --usages
+/sanity --all
 ```
 
 Automates the `dekko-verify` skill (below): rather than relying on an
@@ -155,7 +156,7 @@ step:
 | Skill | Nudges toward |
 | --- | --- |
 | `dekko-orient` | reaching for dekko's tools instead of grep/`Read` whenever a repo has a `.dekko/` directory |
-| `dekko-verify` | a targeted grep sanity-check before trusting a suspiciously low or zero call-graph result (`get_callers`, `find_usages`, `unused`, ...) — dekko's known resolver blind spots (cross-package/qualified calls, trait/interface dispatch, unparsed-language files); the `/sanity` command (above) automates the check itself rather than only nudging toward running it |
+| `dekko-verify` | a targeted grep sanity-check before trusting a suspiciously low or zero call-graph result (`get_callers`, `find_usages`, `unused`, ...) — dekko's known resolver blind spots (trait/interface dispatch, qualified calls through a re-export or alias, unparsed-language files); the `/sanity` command (above) automates the check itself rather than only nudging toward running it |
 | `dekko-daemon` | starting `dekko daemon start` ahead of a Bash-CLI-heavy stretch of work, and how to handle a `--no-daemon`/exit-7 abandoned-request retry |
 | `dekko-notes` | reading a symbol's notes before editing it and writing one after a non-obvious change, via `dekko note add`/`add_note` |
 | `dekko-review-context` | composing `workset` + `impacted_tests` + `check_ambiguous` into structural context for a PR description or code-review flow, before reading the diff line by line |

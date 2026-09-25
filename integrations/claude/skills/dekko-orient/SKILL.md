@@ -188,6 +188,8 @@ grepping by hand:
 
 | Need | Use | Not |
 |---|---|---|
+| Just a file's symbol list with line numbers, no docs (cheaper than `outline`) | `dekko query file <path>` | reading the file to list what it defines |
+| Which files and symbols this session already pulled into context | `dekko ledger` | re-reading a file you already have |
 | Which symbols changed since a rev, with their callers | `dekko diff [REV]` | reading `git diff` and grepping each touched name |
 | What else imports/depends on this module before I change or remove it | `dekko query importers <source>` | grepping the import string across every file |
 | What other symbols probably belong in the same module (share callees with a target) | `dekko query peers <symbol>` | eyeballing and diffing call lists by hand |

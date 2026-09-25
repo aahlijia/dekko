@@ -1,6 +1,6 @@
 ---
 description: Cross-check a dekko callers/uses result against a targeted grep before trusting a low/zero count
-argument-hint: "<target> [--usages] [--include-tests] | --unused NAME"
+argument-hint: "<target> [--usages] [--include-tests] | --unused NAME | --all"
 allowed-tools: Bash(dekko:*)
 ---
 
@@ -23,3 +23,6 @@ NOT re-derive any of it yourself, and do not re-grep the repo by hand.
    symbol `dekko unused` flagged dead, each hit tagged by shape
    (`spread`/`typeof`/`subscript`/`call`/`other`). Any evidence means
    "not safe to delete on dekko's word alone" — relay it as such.
+5. In `--all` mode the report is a repo-wide triage summary: relay the
+   cause histogram and the symbols with unexplained misses, and offer
+   `/sanity <symbol>` on any of them for the full per-bucket detail.

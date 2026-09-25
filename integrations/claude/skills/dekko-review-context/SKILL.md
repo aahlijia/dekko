@@ -1,6 +1,6 @@
 ---
 name: dekko-review-context
-description: Give a code-review or PR-description flow a structural head start before reading a diff line by line. Trigger when the user asks for a PR description, a pre-merge summary, or invokes a code-review flow (this repo's `open-agent-hub:review`/`/review`, or an equivalent in another environment) against a diff in a repo with a `.dekko/` directory.
+description: Give a code-review or PR-description flow a structural head start before reading a diff line by line. Trigger when the user asks for a PR description, a pre-merge summary, or invokes a code-review flow (`/code-review`, `/review`, or an equivalent) against a diff in a repo with a `.dekko/` directory.
 ---
 
 # Structural context before reviewing a diff
@@ -53,19 +53,9 @@ bottom-up.
    reading the diff line by line.** Present structural context first,
    then read the actual diff — not appended as an afterthought.
 
-## Forward-looking note (issue #14)
-
-Steps 2-4 above are a manual composition of tools that exist today,
-built because a first-class `dekko review [REV1] [REV2]` command
-(issue #14) doesn't exist yet. When #14 lands, collapse steps 2-4 into
-a single call to that command instead — this skill's procedure should
-shrink at the same time #14 ships, not stand as a permanent example of
-the pre-#14 workaround shape.
-
 ## Boundaries
 
-- This does not replace `open-agent-hub:review` or an equivalent
-  review flow — it's a context *supplement* that fires before or
+- This does not replace `/code-review` or an equivalent review flow — it's a context *supplement* that fires before or
   alongside one, the same way `dekko-orient` supplements normal
   navigation without owning it. It composes into whatever review/PR
   flow is already invoked, not a review output format of its own.

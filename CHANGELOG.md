@@ -9,6 +9,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-09-25
+
+### Fixed
+- **Plugin skills and commands no longer give stale guidance.**
+  `dekko-verify` called Go `pkg.Func()` cross-package calls a known
+  resolver blind spot, but those have resolved since 0.31.0; it now
+  leads with trait/interface dispatch and says a qualified call can
+  still drop through a re-export or alias. `dekko-review-context`
+  named a review command that isn't part of Claude Code and pointed
+  at a `dekko review` command that doesn't exist yet; it now names
+  `/code-review` and drops the roadmap section. `dekko-orient` lists
+  `dekko query file` (a file's symbol list, cheaper than `outline`)
+  and `dekko ledger` (what the session already has in context).
+  `/sanity` lists `--all` in its argument hint and says how to relay
+  the `--all` triage summary. `docs/claude-code.md` matches.
+
 ## [1.3.0] — 2026-09-25
 
 Closes round 1.3's fix cycle. The code is 1.2.4; this release is the
