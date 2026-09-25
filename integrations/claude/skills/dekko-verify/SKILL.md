@@ -5,19 +5,19 @@ description: Sanity-check a suspiciously low or zero call-graph result from dekk
 
 # Verifying a low-confidence dekko answer
 
-dekko's call-graph resolution is real but conditional, and its
-typical failure shape is a **confident wrong answer**, not a visible
-error. A caller trusts "0
-callers" more than it should. This skill exists to catch that before
-it leads to deleting live code or missing a real impact.
+dekko's call-graph resolution usually fails as a **confident wrong
+answer**, not a visible error, and "0 callers" is easy to over-trust.
+This skill catches that before it deletes live code or hides a real
+impact. It covers resolved relationships (callers, callees, usages,
+impacted tests, `unused`, heritage, throws), not `outline`,
+`query_symbol` or `search_code`, which only describe what exists.
 
 ## How to check
 
-Run `dekko sanity <target>` (the `/sanity` command) first. It does the
-exact comparison this skill describes — dekko's answer vs. one targeted
-grep sweep, bucketed into matches / dekko-only / grep-only, with a
-likely cause named for every grep-only miss — deterministically and
-without you hand-rolling the grep:
+Run `dekko sanity` (the `/sanity` command). It compares dekko's answer
+with one targeted grep sweep, buckets the results into matches /
+dekko-only / grep-only, and names a likely cause for every grep-only
+miss:
 
 ```
 dekko sanity <symbol>              # a get_callers result
@@ -25,97 +25,51 @@ dekko sanity <name> --usages       # a find_usages result
 dekko sanity --unused <symbol>     # a `dekko unused` "dead" verdict
 ```
 
-Fall back to one targeted `grep -rn <name>` (not a full re-read) only
-for the heritage/throws-provenance cases below, which `sanity` doesn't
-cover yet.
+One run is enough. Don't read whole files or rebuild the call graph by
+hand; that defeats the point of dekko.
 
-## When to double-check before trusting a result
+## When to double-check
 
-Spot-check — not a full re-verification — when any of these apply:
+Spot-check, don't re-verify everything, when any of these apply:
 
-- **Dynamic dispatch or an unusual qualified call is involved.**
-  Trait/interface dispatch (Rust `dyn Trait` calls, Java/Kotlin
-  interface methods) is the main resolver blind spot: the resolver
-  only reliably matches an explicit `Type::method()` or
-  `Type.method()` form, not a call through an abstract receiver.
-  Qualified calls through a same-repo namespace or module
-  (`namespace::func()`, `pkg.Func()`) usually resolve, but a
-  re-export or alias the resolver doesn't follow can still drop one.
-- **The result doesn't disclose ambiguity.** A real ambiguous call
-  should say so (`N call(s) resolved ambiguously`), not just be
-  silently absent from the count. If a symbol you expect to be widely
-  used shows a low count with *no* ambiguity disclosure, that's more
-  suspicious than a low count *with* one.
-- **The repo has any unsupported/partially-parsed language files** —
-  check `dekko stats` or the map-build summary for an "unsupported"
-  note. Files dekko can't parse are tracked (not silently dropped),
-  but a symbol only ever called from an unparsed file will still read
-  as zero-caller.
-- **`get_callers` used its default test filter.** It hides test-file
-  callers by default (and says so in a footer); `get_callees` does
-  not filter. An empty callers result may just mean "no *non-test*
-  callers" — pass `include_tests=true` (CLI: leave `--no-tests` off)
-  before concluding dead code.
-- **A dense-repo common short method name** (`new`, `then`, `map`,
-  `iter_mut`, or similarly generic names in a 10k+-symbol repo) —
-  resolver precision degrades under high symbol density; treat a
-  count from these as directional, not exact.
-- **You're about to delete or rename based on `dekko unused`'s
-  dead-code list.** Same blind spots apply; a callback passed
-  by reference rather than called directly, or a call from an
-  unparsed file, can both read as "no inbound calls." A row ending
-  in `[dispatch?]` (`dispatch_candidate` in `--json`) shares its name
-  with an interface/trait method, or is a getter/handler read as a
-  property (`cmd.isHidden`), so it may be reached in a way dekko
-  can't resolve: treat it as alive until `sanity --unused` says
-  otherwise.
-- **`impacted_tests` / `dekko affected` looks thin.** It follows
-  resolved calls only. Tests that reach the change through an
-  ambiguous call are counted in a `note:` line (strongest lead named),
-  not listed; `dekko affected --possible` lists them. Read that note
-  before trusting a short list.
-- **A heritage or throws-provenance result labels something
-  `(external)`.** `query supertypes`/`subtypes` and `query throws`
-  can mislabel an in-repo type-alias-as-heritage-base or a
-  pattern-bound rethrow as a fake external entry when the extractor
-  doesn't yet model that language's specific syntax shape (confirmed
-  historically on TS `implements <type-alias>` and Java 16+
-  `instanceof`-pattern rethrows — both since fixed, but the general
-  failure shape, a present result that's mislabeled rather than a
-  missing one, can recur in a new syntax shape any of dekko's language
-  extractors hasn't seen yet). An `(external)`/`(unresolved)` label on
-  a name you're confident is first-party code is worth a `query symbol
-  <name>` check before trusting it.
+- **Dynamic dispatch or an unusual qualified call.** Trait/interface
+  dispatch (Rust `dyn Trait`, Java/Kotlin interface methods) is the
+  main blind spot: the resolver reliably matches only an explicit
+  `Type::method()` / `Type.method()`. Qualified calls through a
+  same-repo namespace or module usually resolve, but one routed
+  through a re-export or alias can still drop.
+- **A low count with no ambiguity disclosure.** A real ambiguous call
+  says so (`N call(s) resolved ambiguously`). A widely used symbol
+  with a low count and *no* disclosure is more suspicious than one
+  with it.
+- **Unsupported or partially parsed files.** `dekko stats` or the map
+  summary notes them. A symbol called only from an unparsed file
+  reads as zero-caller.
+- **`get_callers`' default test filter.** It hides test callers (and
+  says so in a footer). Pass `include_tests=true` (CLI: leave
+  `--no-tests` off) before concluding dead code.
+- **A generic short name in a dense repo** (`new`, `then`, `map`,
+  `iter_mut` in a 10k+-symbol repo): treat the count as directional.
+- **Deleting or renaming on `dekko unused`'s word.** A callback passed
+  by reference or a call from an unparsed file reads as unused. A row
+  ending in `[dispatch?]` (`dispatch_candidate` in `--json`) shares
+  its name with an interface/trait method or is a getter/handler read
+  as a property: treat it as alive until `sanity --unused` says
+  otherwise. `--unused` tags each piece of evidence by shape
+  (`spread`/`typeof`/`subscript`/`call`/`other`).
+- **A thin `impacted_tests` / `dekko affected` list.** It follows
+  resolved calls only; tests reached through an ambiguous call are
+  counted in a `note:` line, and `dekko affected --possible` lists
+  them.
+- **An `(external)` or `(unresolved)` label on a name you know is
+  first-party**, from `query supertypes`/`subtypes` or `query throws`.
+  A syntax shape the extractor doesn't model yet can mislabel an
+  in-repo entry rather than drop it. `sanity` doesn't cover this;
+  check with `dekko query symbol <name>` or one `grep -rn <name>`.
 
 ## What "good" looks like
 
-If the grep sanity check agrees with dekko's count (or turns up
-nothing dekko missed), trust the structural answer and move on —
-this is a spot check, not a mandate to re-verify every query. Most
-dekko answers on supported languages with unambiguous calls are
-correct; this skill is for the specific conditions above, not a
-blanket "always grep after dekko."
-
-## Boundaries
-
-- This is primarily about **call-graph relation tools**
-  (`get_callers`, `get_callees`, `find_usages`, `impacted_tests`,
-  `unused`) plus **heritage/throws-provenance tools**
-  (`query supertypes`/`subtypes`, `query throws`) — anything that
-  resolves a relationship or provenance rather than just describing a
-  symbol's own shape. `outline`/`query_symbol`/`search_code` describe
-  what's in the repo, not a resolved relationship to something else,
-  and don't share this failure mode the same way.
-- One `sanity` run (or one grep scoped to the symbol name) is enough
-  to sanity-check — don't fall back to reading whole files or
-  re-deriving the call graph by hand; that defeats the point of using
-  dekko at all. See `dekko-orient` for the general "reach for dekko
-  before grep" guidance this skill is a narrow exception to.
-- `dekko sanity` covers the call-graph relation tools (`callers`,
-  `--usages`, `--unused`). `--unused` starts from `unused`'s own
-  zero-evidence claim and reports every grep hit outside the symbol's
-  own definition/import/comment as reference evidence, tagged by shape
-  (`spread`/`typeof`/`subscript`/`call`/`other`), so a resolver blind
-  spot in *any* language surfaces. It doesn't cover heritage/throws
-  provenance mislabeling yet; the `query symbol <name>` check above is
-  still manual for that case.
+If the sweep agrees with dekko, or finds nothing dekko missed, trust
+the structural answer and move on. Most answers on supported languages
+with unambiguous calls are correct; this is for the conditions above,
+not a blanket "always grep after dekko."

@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-09-25
+
+### Changed
+- **The `dekko-orient` and `dekko-verify` skills cost less to load.**
+  `dekko-orient` fires before any Grep, Glob or Read, so its body is
+  paid for repeatedly in a session. It went from about 3.3k tokens to
+  about 1.15k: the ladder, one need-to-tool table with MCP and CLI
+  columns, and target syntax. The CLI-only queries, the CLI flag for
+  each knob, the digest budgets and the staleness tools moved to a
+  `reference.md` beside it that Claude reads only when it needs them.
+  The per-call knob guidance no longer repeats what the MCP tool
+  schemas already say. `dekko-verify` went from about 1.7k tokens to
+  about 1k with every trigger condition kept.
+
+### Fixed
+- **`dekko-orient` gave the wrong CLI test-filter flag for search.**
+  `dekko search` takes `--include-tests`; `dekko query callers`
+  includes tests unless given `--no-tests`.
+
 ## [1.3.1] — 2026-09-25
 
 ### Fixed
