@@ -38,7 +38,10 @@ bottom-up.
 3. **Call `impacted_tests [rev]`.** Reverse call-graph reachability
    from the changed symbols, more reliable than grepping test files
    for the changed symbol's name — this becomes the "what tests
-   should run" section.
+   should run" section. If it ends with a note counting tests that
+   reach the change only through an ambiguous call, carry that count
+   into the section as "may also be impacted" (`dekko affected
+   --possible` lists them).
 4. **Call `check_ambiguous`.** It's repo-wide, not diff-scoped, so
    cross-reference its top-colliding names/files against the touched
    symbols from step 2 yourself. Any overlap gets flagged explicitly

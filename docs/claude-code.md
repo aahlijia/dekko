@@ -182,10 +182,14 @@ full guidance.
 | `outline` | a file's structure without bodies |
 | `workset` | one bundle for a change (`rev` or `symbol`; `type_impact` for a type's full blast radius) |
 | `summary` | repo digest |
-| `impacted_tests` | test files impacted by changes |
+| `impacted_tests` | test files impacted by changes, plus a note counting tests that reach the change only through an ambiguous call (the CLI's `affected --possible` lists them) |
 | `check_ambiguous` | resolver-trust summary: where call resolution was ambiguous |
 | `add_note` / `list_notes` | symbol-anchored notes |
 | `map_status` / `refresh_map` | freshness check / regenerate |
+
+Tools that take a target accept it under any of `symbol`, `name`,
+`target` or `type`, so an agent doesn't have to remember which name each
+tool uses. Every `budget` argument takes `0` for no cap.
 
 `dekko --claude-install` registers this automatically for Claude Code.
 For a standalone registration: `dekko --mcp-install` (runs
