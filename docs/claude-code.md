@@ -189,7 +189,9 @@ full guidance.
 
 Tools that take a target accept it under any of `symbol`, `name`,
 `target` or `type`, so an agent doesn't have to remember which name each
-tool uses. Every `budget` argument takes `0` for no cap.
+tool uses. Two of those names with different values is an error,
+whichever one the tool's own is. Every `budget` argument takes `0` for
+no cap.
 
 `dekko --claude-install` registers this automatically for Claude Code.
 For a standalone registration: `dekko --mcp-install` (runs

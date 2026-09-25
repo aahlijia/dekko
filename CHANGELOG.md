@@ -9,6 +9,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-09-25
+
+### Changed
+- **Conflicting MCP target names are always an error.** The tools that
+  take a target accept it under any of `symbol`, `name`, `target` or
+  `type`. Since 0.43.32 the tool's own name silently won when a
+  caller sent it beside a different value under another name, and
+  1.1.10 promised an error for that case without delivering one: the
+  check ran only when the tool's own name was absent, so 12 of the 24
+  name pairs picked silently and 12 errored. Two different values in
+  one call is a caller bug (a stale value, a copy-paste), and the
+  silent pick hid it behind a confident answer about the wrong
+  symbol. Every pair now errors, and the message names each key and
+  value it saw (`got symbol='f', name='g' naming different targets;
+  pass one 'symbol' argument`). The same value under several names
+  still folds to the tool's own name, and a JSON `null` counts as an
+  absent argument. Round 1.3 found this on four of seven repositories.
+
 ## [1.2.0] — 2026-09-25
 
 Closes round 1.2's fix cycle. The code is 1.1.11; this release is the

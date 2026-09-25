@@ -255,8 +255,9 @@ def _require(args: dict, key: str) -> str:
 # names differ by tool (``find_usages`` takes ``name``,
 # ``find_type_usages`` takes ``type``, ``outline`` takes ``target``),
 # and agents calling several in a row guess by analogy, so any of the
-# others is accepted in its place (see ``_resolve_target_alias``). A
-# new target-taking tool belongs here too.
+# others is accepted in its place (see ``_resolve_target_alias``). Two
+# different values under two of these names is an error, not a pick.
+# A new target-taking tool belongs here too.
 _TARGET_PARAM = {
     "query_symbol": "symbol",
     "get_callers": "symbol",
@@ -314,38 +315,45 @@ def _limit_arg(args: dict) -> int:
 def _resolve_target_alias(tool_name: str, args: dict) -> dict:
     """Accept any target-argument name in place of the tool's own.
 
-    Only fills the tool's own name when the caller didn't pass it, so
-    anything a caller already depends on is untouched.
+    Agents calling several target tools in a row guess the argument
+    name by analogy, so ``symbol``, ``name``, ``target`` and ``type``
+    are interchangeable on every tool that takes a target. Two of them
+    carrying different values is a caller bug (a stale value, a
+    copy-paste), and picking one would hide it behind a confident
+    answer about the wrong symbol; that case errors, whichever names
+    are involved. A ``null`` value counts as absent.
 
     Args:
         tool_name: The tool being invoked.
         args: The call's raw arguments, as received.
 
     Returns:
-        ``args`` unchanged, or a shallow copy with the tool's own
-        target argument filled from the alias the caller used.
+        ``args`` unchanged when no alias needs folding, or a shallow
+        copy with the tool's own target argument set and every alias
+        name removed.
 
     Raises:
-        ToolError: If two aliases name different targets and the
-            tool's own argument is absent: picking one would be a
-            guess.
+        ToolError: If two target names carry different values.
     """
     primary = _TARGET_PARAM.get(tool_name)
-    if primary is None or primary in args:
+    if primary is None:
         return args
-    given = {k: args[k] for k in _TARGET_ALIASES if k in args}
+    given = {k: args[k] for k in _TARGET_ALIASES if args.get(k) is not None}
     if not given:
         return args
     if len({str(v) for v in given.values()}) > 1:
-        names = ", ".join(f"'{k}'" for k in given)
+        pairs = ", ".join(f"{k}={v!r}" for k, v in given.items())
         raise ToolError(
-            f"got {names} naming different targets; pass one "
+            f"got {pairs} naming different targets; pass one "
             f"'{primary}' argument"
         )
-    aliased = {k: v for k, v in args.items() if k not in given}
-    aliased[primary] = next(iter(given.values()))
+    if [k for k in _TARGET_ALIASES if k in args] == [primary]:
+        return args
 
-    return aliased
+    folded = {k: v for k, v in args.items() if k not in _TARGET_ALIASES}
+    folded[primary] = next(iter(given.values()))
+
+    return folded
 
 
 def _root_of(ctx: Context, args: dict) -> Path:
@@ -1078,7 +1086,8 @@ _SYMBOL_PROP = {
     "reply says the target is ambiguous (an overload set sharing the "
     "same file+name), append ':LINE' from one of the printed candidate "
     "rows, e.g. file.py:Class.method:42, to pick that one. 'name', "
-    "'target' and 'type' are also accepted as aliases for this argument.",
+    "'target' and 'type' are also accepted as aliases for this argument; "
+    "two of them with different values is an error.",
 }
 _SITES_PROP = {
     "type": "boolean",
@@ -1248,7 +1257,8 @@ TOOLS: list[dict[str, Any]] = [
                     "description": "An external name: a function's "
                     "own name ('run'), an imported binding ('chalk', "
                     "'np', 'React'), or a module ('numpy', 'node:path'). "
-                    "'symbol', 'target' and 'type' are also accepted.",
+                    "'symbol', 'target' and 'type' are also accepted; two "
+                    "with different values is an error.",
                 },
                 "limit": {
                     "type": "integer",
@@ -1282,7 +1292,8 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Type/class/struct/interface name "
                     "to search for, e.g. 'Config'. 'symbol', 'name' and "
-                    "'target' are also accepted.",
+                    "'target' are also accepted; two with different "
+                    "values is an error.",
                 },
                 "exact": {
                     "type": "boolean",
@@ -1385,7 +1396,8 @@ TOOLS: list[dict[str, Any]] = [
                 "target": {
                     "type": "string",
                     "description": "Symbol or repo-relative file path. "
-                    "'symbol', 'name' and 'type' are also accepted.",
+                    "'symbol', 'name' and 'type' are also accepted; two "
+                    "with different values is an error.",
                 },
                 "hops": {
                     "type": "integer",
@@ -1422,7 +1434,8 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Mapped file path or directory "
                     "(suffix-matched); a directory rolls up its files. "
-                    "'symbol', 'name' and 'type' are also accepted.",
+                    "'symbol', 'name' and 'type' are also accepted; two "
+                    "with different values is an error.",
                 },
                 "limit": {
                     "type": "integer",

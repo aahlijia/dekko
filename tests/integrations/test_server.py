@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from concurrent.futures.process import BrokenProcessPool
+from itertools import combinations
 from pathlib import Path
 
 import pytest
@@ -275,17 +276,102 @@ def test_symbol_alias_matches_symbol_argument(
     assert by_name == by_symbol
 
 
-def test_symbol_argument_takes_precedence_over_name(
+def test_conflicting_primary_and_alias_is_an_error(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # If both are given, `symbol` (the tool's real, documented
-    # argument) wins unconditionally over the `name` fallback.
+    # Two different values is a caller bug (a stale value, a
+    # copy-paste). The tool's own name used to win silently, which hid
+    # the bug behind a confident answer about the wrong symbol. Now it
+    # errors like any other conflicting pair, naming both values.
     ctx = _ctx(make_mapped_repo(SRC))
     result = _call(
         ctx, "query_symbol", {"symbol": "f", "name": "wrong_target"}
     )
-    assert result["isError"] is False
-    assert "f() -> int" in result["content"][0]["text"]
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "symbol='f'" in text
+    assert "name='wrong_target'" in text
+    assert "pass one 'symbol' argument" in text
+
+
+@pytest.mark.parametrize("tool", sorted(server._TARGET_PARAM))
+@pytest.mark.parametrize(
+    ("first", "second"), list(combinations(server._TARGET_ALIASES, 2))
+)
+def test_every_target_tool_rejects_every_conflicting_pair(
+    tool: str, first: str, second: str
+) -> None:
+    # The whole matrix, whichever names carry the two values, the
+    # tool's own included. The function is pure, so no repo is needed.
+    primary = server._TARGET_PARAM[tool]
+    with pytest.raises(server.ToolError) as excinfo:
+        server._resolve_target_alias(tool, {first: "x", second: "y"})
+    message = str(excinfo.value)
+    assert "naming different targets" in message
+    assert f"pass one '{primary}' argument" in message
+    assert f"{first}='x'" in message
+    assert f"{second}='y'" in message
+
+
+@pytest.mark.parametrize("tool", sorted(server._TARGET_PARAM))
+def test_conflicting_pair_is_an_error_reply_on_every_tool(
+    make_mapped_repo: RepoFactory, tool: str
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    primary = server._TARGET_PARAM[tool]
+    alias = next(a for a in server._TARGET_ALIASES if a != primary)
+    args = {primary: "a.py", alias: "f"}
+    if tool == "add_note":
+        args["text"] = "t"
+    result = _call(ctx, tool, args)
+    assert result["isError"] is True
+    assert "naming different targets" in result["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"symbol": "f", "name": "f"},
+        {"name": "f", "target": "f"},
+        {"symbol": "f", "name": "f", "target": "f", "type": "f"},
+        {"symbol": None, "name": "f"},
+        {"symbol": "f", "name": None, "type": None},
+    ],
+)
+def test_agreeing_or_null_aliases_fold_to_the_primary(args: dict) -> None:
+    # Hedging with the same value under two names is the reason the
+    # aliases exist; a JSON null is an absent argument, not a value.
+    args = {**args, "root": "/r"}
+    folded = server._resolve_target_alias("query_symbol", args)
+    assert folded == {"symbol": "f", "root": "/r"}
+
+
+def test_agreeing_aliases_answer_like_the_plain_call(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    plain = _call(ctx, "query_symbol", {"symbol": "f"})
+    hedged = _call(ctx, "query_symbol", {"symbol": "f", "name": "f"})
+    assert hedged == plain
+    assert hedged["isError"] is False
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("query_symbol", {"symbol": "f", "root": "/r"}),
+        ("query_symbol", {"symbol": None}),
+        ("query_symbol", {"root": "/r"}),
+        ("search_code", {"query": "x", "name": "y", "symbol": "z"}),
+    ],
+)
+def test_untouched_calls_return_the_same_arguments_object(
+    tool: str, args: dict
+) -> None:
+    # No fold needed: the tool's own name alone, nothing to fold, or a
+    # tool that takes no target. The handler sees exactly what was sent
+    # (a missing or null primary is still the handler's error to give).
+    assert server._resolve_target_alias(tool, args) is args
 
 
 @pytest.mark.parametrize(
@@ -650,10 +736,9 @@ def test_symbol_alias_tools_schema_unchanged() -> None:
             "symbol",
             "text",
         ]
-        assert (
-            "'name', 'target' and 'type' are also accepted as aliases"
-            in schema["properties"]["symbol"]["description"]
-        )
+        description = schema["properties"]["symbol"]["description"]
+        assert "'name', 'target' and 'type' are also accepted" in description
+        assert "two of them with different values is an error" in description
 
 
 def test_get_context_pack_tool(make_mapped_repo: RepoFactory) -> None:
