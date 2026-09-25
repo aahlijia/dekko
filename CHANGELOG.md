@@ -9,6 +9,39 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.5] — 2026-09-24
+
+### Fixed
+- **Rust code compiled only under `cargo test` is test code.** Dekko
+  recognised Rust tests by module *name* (`mod tests { }`), and Rust
+  decides by attribute. On zed 1,826 symbols the compiler builds only
+  for tests were production code to every command: 1,558 in files
+  declared out of line (`#[cfg(test)] mod editor_tests;` in
+  `editor.rs`, plus `vim/src/test.rs`, `tests.rs` and friends), 153 in
+  `#[cfg(test)]` modules with other names, 115 on single `#[cfg(test)]`
+  functions and `impl` blocks. `--no-tests` (the MCP tools' default)
+  kept them, so 174 test helpers like `StubAgentConnection.end_turn`
+  showed production callers that are really tests, and `unused`
+  flagged 749 test symbols as dead code.
+
+  The extractor now evaluates each `cfg` predicate (`test` false,
+  every other atom unknown) and flags whatever can't be built without
+  `test`: an item, a module, a whole file opening with `#![cfg(test)]`,
+  or a file declared `#[cfg(test)] mod x;` from its parent, and that
+  file's own submodules. The last is decided across files at map time,
+  never cached, so editing only the parent re-flags the child. Code
+  gated `any(test, feature = "test-support")` stays production: the
+  feature builds it into benchmarks and binaries, which call it. `unused`
+  no longer flags any test-flagged symbol.
+
+  zed: 1,826 symbols flip to test and none flip back; symbols, edges
+  and every other map section are byte-identical on all seven eval
+  repos; the `--no-tests` view drops from 50,790 symbols / 88,733
+  caller entries to 48,964 / 81,619; `unused` from 11,141 to 10,392,
+  every removed row test code. Full-map time on zed is within noise.
+  `affected` still reports by file path, so Rust `#[test]` functions
+  in ordinary source files are not yet listed as impacted tests.
+
 ## [1.1.4] — 2026-09-24
 
 ### Fixed

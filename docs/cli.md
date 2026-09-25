@@ -79,6 +79,17 @@ matchers, test-case generators, a tool that only exists in a test build)
 counts as test code for `--no-tests` and `unused`, but is never listed as an
 impacted test; the walk passes through it to whatever tests lie beyond.
 
+Rust test code is whatever the compiler builds only under `cargo test`: an
+item or module gated by a `cfg` predicate that can't hold without `test`
+(`#[cfg(test)]`, `#[cfg(all(test, ...))]`), a whole file opening with
+`#![cfg(test)]`, an inline `mod tests`, and a whole file declared out of line
+as `#[cfg(test)] mod editor_tests;` from its parent (plus that file's own
+submodules). `--no-tests` drops it, and `unused` never flags it as dead. Code
+gated `any(test, feature = "test-support")` stays production code: the
+feature builds it into benchmarks and binaries too. `affected` still reports
+by file path only, so a Rust `#[test]` inside a normal source file is not
+listed as an impacted test.
+
 `query type` covers parameter and return-type annotations at every
 function-shaped site: named functions and methods, and (TypeScript/TSX)
 the sites the map has no symbol for — a returned or callback arrow
@@ -287,9 +298,8 @@ sets by `(file, line)` into three buckets:
   (see "Receiver-mismatch detection" below), a test-only call
   site (tests are excluded from the dekko-side query by default here,
   unlike the plain `query callers` default — see `--include-tests`;
-  "test" means exactly what that filter drops, so a call inside a Rust
-  inline `#[cfg(test)] mod tests { ... }` counts, not only a call in a
-  test-named file), a
+  "test" means exactly what that filter drops, so a call inside Rust
+  `#[cfg(test)]` code counts, not only a call in a test-named file), a
   short/generic target name (resolver precision degrades in a dense
   repo), or "unexplained" when none of those fit.
 

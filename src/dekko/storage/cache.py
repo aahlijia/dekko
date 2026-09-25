@@ -37,6 +37,7 @@ from dekko.core.model import (
     RawHeritage,
     RawRef,
     RawThrow,
+    Submodule,
     TypeUse,
 )
 
@@ -87,6 +88,7 @@ def _filemap_from_dict(d: dict) -> FileMap:
         type_aliases=list(d.get("type_aliases", [])),
         enum_variants=list(d.get("enum_variants", [])),
         type_uses=[TypeUse(**t) for t in d.get("type_uses", [])],
+        submodules=[Submodule(**m) for m in d.get("submodules", [])],
         error=d.get("error"),
         doc=d.get("doc"),
     )

@@ -102,11 +102,13 @@ class Symbol:
             ``repo_ops.map_repository``; this is the broad "test code"
             level that includes test-support directories, not the
             narrower "test file" level ``affected`` reports)
-            or because the extractor found it nested inside a
-            language-specific test-only AST container (currently just
-            Rust's inline ``mod tests { ... }``; see
-            ``extractor._qualify``'s ``in_test_module`` signal). The
-            two signals only ever add ``True``, never reset a
+            or because Rust compiles it only under ``cargo test``: an
+            enclosing ``#[cfg(test)]`` item or module, an inline
+            ``mod tests``, a file opening with ``#![cfg(test)]``
+            (``rust_cfg.in_test_scope``, per symbol at extraction),
+            or a whole file declared out of line as ``#[cfg(test)]
+            mod x;`` from its parent (``repo_ops``, across files).
+            The signals only ever add ``True``, never reset a
             ``True`` back to ``False``.
     """
 
@@ -428,6 +430,30 @@ class EnvRead:
 
 
 @dataclass
+class Submodule:
+    """An out-of-line Rust module declaration: ``mod x;``.
+
+    The declaring file knows the module's name and attributes, and the
+    child file holds its code, so whether the child is test code is a
+    fact no single file's extraction can settle.
+    ``repo_ops.map_repository`` picks the first candidate that exists
+    and, for a test-only declaration, flags every symbol in that file
+    and its own submodules.
+
+    Attributes:
+        candidates: Repo-relative paths the module can live at, in
+            rustc's order (``rust_cfg.submodule_candidates``).
+        test_only: Whether the declaration sits in a test-only scope
+            (``#[cfg(test)] mod x;``, or inside a test module).
+        line: 1-based line of the declaration.
+    """
+
+    candidates: list[str]
+    test_only: bool
+    line: int
+
+
+@dataclass
 class TypeUse:
     """A type annotation on a function-shaped node the map never names.
 
@@ -522,6 +548,9 @@ class FileMap:
             ``languages.LanguageSpec.type_use_query`` and
             ``model.TypeUse``). Written to ``map.json`` as-is; no
             resolver pass involved.
+        submodules: Out-of-line ``mod x;`` declarations (Rust only,
+            see ``model.Submodule``). Not written to ``map.json``:
+            ``repo_ops`` reads them to flag test-only child files.
     """
 
     path: str
@@ -537,6 +566,7 @@ class FileMap:
     type_aliases: list[str] = field(default_factory=list)
     enum_variants: list[str] = field(default_factory=list)
     type_uses: list[TypeUse] = field(default_factory=list)
+    submodules: list[Submodule] = field(default_factory=list)
     error: str | None = None
     doc: str | None = None
 

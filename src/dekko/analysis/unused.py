@@ -205,7 +205,7 @@ def _is_root(
         return True
     if _matches_globs(sym.path, root_globs):
         return True
-    if is_test_path(sym.path):
+    if sym.test or is_test_path(sym.path):
         return True
     if sym.language == "go" and sym.name[:1].isupper():
         return True

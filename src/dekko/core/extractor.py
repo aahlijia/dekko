@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+from dekko.core import rust_cfg
 from dekko.core.languages import LanguageSpec
 from dekko.core.model import (
     TYPE_KINDS,
@@ -114,6 +115,11 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     type_aliases = _collect_type_aliases(spec, tree.root_node)
     enum_variants = _collect_enum_variants(spec, tree.root_node)
     type_uses = _collect_type_uses(spec, tree.root_node, rel, defs)
+    submodules = (
+        rust_cfg.collect_submodules(tree.root_node, rel)
+        if spec.name == "rust"
+        else []
+    )
     return FileMap(
         path=rel,
         language=spec.name,
@@ -128,6 +134,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         type_aliases=type_aliases,
         enum_variants=enum_variants,
         type_uses=type_uses,
+        submodules=submodules,
         doc=_module_doc(spec.name, tree.root_node),
     )
 
@@ -366,7 +373,7 @@ def _make_symbol(
     receiver: str | None = None,
 ) -> Symbol:
     """Build a ``Symbol`` with container qualification and unique id."""
-    containers, is_method, in_test_module = _qualify(spec, def_node)
+    containers, is_method = _qualify(spec, def_node)
     if receiver is not None:
         containers.append(receiver)
         is_method = True
@@ -402,7 +409,7 @@ def _make_symbol(
         decorated=decorated,
         exported=exported,
         doc=_doc_for_symbol(spec.name, def_node),
-        test=in_test_module,
+        test=spec.name == "rust" and rust_cfg.in_test_scope(def_node),
     )
 
 
@@ -504,19 +511,7 @@ def _modifiers_keyword(def_node: Node, keyword: str) -> bool:
     return any(child.type == keyword for child in modifiers.children)
 
 
-# Rust ``mod`` names conventionally used for inline ``#[cfg(test)]``
-# unit-test submodules co-located with the production code they test
-# (``mod tests { ... }`` at the bottom of the same file). Shares the
-# same two literal values as ``classify.TEST_DIR_PARTS``' bare-name
-# test-directory check, kept as a separate constant here since this is
-# an AST-context signal, not a path-segment one — see ``_qualify``'s
-# ``in_test_module`` return value.
-_RUST_TEST_MOD_NAMES = frozenset({"tests", "test"})
-
-
-def _qualify(
-    spec: LanguageSpec, def_node: Node
-) -> tuple[list[str], bool, bool]:
+def _qualify(spec: LanguageSpec, def_node: Node) -> tuple[list[str], bool]:
     """Collect container names above a definition, outermost first.
 
     The climb stops dead at the first enclosing function/method/
@@ -526,23 +521,20 @@ def _qualify(
     collected before reaching a boundary is discarded rather than
     attributed to a class several levels further up.
 
+    Test scope is a separate question (``rust_cfg.in_test_scope``):
+    it has to climb *through* function bodies, which this climb must
+    not.
+
     Returns:
-        ``(container_names, is_method, in_test_module)`` — ``is_method``
-        is true when the immediate class-like container makes this a
-        method; ``in_test_module`` is true when the climb passed
-        through a Rust ``mod_item`` container conventionally used for
-        inline unit tests (a bare module name of ``tests``/``test``),
-        the dominant Rust pattern for co-locating
-        ``#[cfg(test)]``-gated test code with the production code it
-        tests. Always ``False`` for every other language.
+        ``(container_names, is_method)`` — ``is_method`` is true when
+        the immediate class-like container makes this a method.
     """
     containers: list[str] = []
     is_method = False
-    in_test_module = False
     node = def_node.parent
     while node is not None:
         if node.type in spec.function_boundary_types:
-            return [], False, False
+            return [], False
 
         name_field = spec.container_types.get(node.type)
 
@@ -556,17 +548,10 @@ def _qualify(
                 if node.type in spec.method_containers:
                     is_method = True
 
-                if (
-                    spec.name == "rust"
-                    and node.type == "mod_item"
-                    and name_text in _RUST_TEST_MOD_NAMES
-                ):
-                    in_test_module = True
-
         node = node.parent
 
     containers.reverse()
-    return containers, is_method, in_test_module
+    return containers, is_method
 
 
 def _strip_generics(name: str) -> str:

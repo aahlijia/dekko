@@ -910,9 +910,9 @@ class MapIndex:
         from test files. A symbol is dropped when either its file path
         is a test path (``classify.is_test_path``, works even on
         pre-v3 documents that lack the ``test`` flag) or the extractor
-        set ``Symbol.test`` (path-based classification plus
-        language-specific containers such as Rust's inline
-        ``mod tests { ... }``).
+        set ``Symbol.test`` (path-based classification plus Rust code
+        compiled only under test: ``#[cfg(test)]`` items and modules,
+        including whole files declared ``#[cfg(test)] mod x;``).
 
         Returns:
             A new ``MapIndex``; ``self`` is left untouched.
@@ -986,9 +986,8 @@ def _symbol_is_test(sym: Symbol) -> bool:
 
     Two independent signals can mark test code: the defining file's
     path (``classify.is_test_path``) and the extractor's per-symbol
-    ``Symbol.test`` flag (path-based classification plus
-    language-specific containers such as Rust's inline
-    ``mod tests { ... }`` — see ``Symbol.test``'s docstring). Either
+    ``Symbol.test`` flag (path-based classification plus Rust code
+    compiled only under test — see ``Symbol.test``'s docstring). Either
     one is sufficient; this is the single place both are combined so
     ``without_tests()`` actually excludes everything ``Symbol.test``
     flags, not just what the path alone would catch.

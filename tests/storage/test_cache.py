@@ -17,6 +17,7 @@ from dekko.core.model import (
     RawHeritage,
     RawRef,
     RawThrow,
+    Submodule,
     Symbol,
     TypeUse,
 )
@@ -594,6 +595,11 @@ def _fully_populated_filemap() -> FileMap:
                 usage="param",
                 param_name="cb",
                 type="Alias",
+            ),
+        ],
+        submodules=[
+            Submodule(
+                candidates=["a/x.rs", "a/x/mod.rs"], test_only=True, line=2
             ),
         ],
         error="parse error",

@@ -89,6 +89,13 @@ def test_main_dunder_and_test_paths_are_roots() -> None:
     assert [s.name for s in unused.find_unused(idx, ())] == ["dead"]
 
 
+def test_test_flagged_symbol_outside_a_test_path_is_a_root() -> None:
+    helper = _sym("helper", "src/lib.rs", language="rust")
+    helper.test = True
+    idx = _index([helper, _sym("dead", "src/lib.rs", language="rust")])
+    assert [s.name for s in unused.find_unused(idx, ())] == ["dead"]
+
+
 def test_class_used_via_method_is_kept() -> None:
     method = _sym("run", "a.py", qualname="Worker.run", kind="method")
     klass = _sym("Worker", "a.py", qualname="Worker", kind="class")
