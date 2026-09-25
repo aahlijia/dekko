@@ -142,7 +142,10 @@ def _basename_is_test(base: str) -> bool:
     Returns:
         True when the basename matches a known test filename pattern.
     """
-    return any(fnmatch.fnmatch(base, pat) for pat in TEST_NAME_GLOBS)
+    # Case-sensitive on every OS: ``fnmatch.fnmatch`` folds case on
+    # Windows, where ``*Test.*`` would match ``test.rs`` and
+    # ``latest.py``.
+    return any(fnmatch.fnmatchcase(base, pat) for pat in TEST_NAME_GLOBS)
 
 
 def relevance_key(

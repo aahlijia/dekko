@@ -1,5 +1,10 @@
 """Shared path classification: test code vs production code."""
 
+import fnmatch
+
+import pytest
+
+from dekko import classify
 from dekko.classify import is_test_file, is_test_path
 
 
@@ -124,6 +129,24 @@ def test_test_support_dir_under_src_main_is_production() -> None:
     path = "core/src/main/java/org/example/testing/Helper.java"
     assert is_test_path(path) is False
     assert is_test_file(path) is False
+
+
+def test_basename_globs_match_case_sensitively_on_every_os(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Windows' ``normcase`` lowercases both sides of ``fnmatch.fnmatch``,
+    # which made ``*Test.*`` match ``test.rs`` and ``latest.py`` there.
+    monkeypatch.setattr(fnmatch.os.path, "normcase", str.lower)
+    is_test_path.cache_clear()
+    is_test_file.cache_clear()
+    try:
+        for base in ("test.rs", "ed_tests.rs", "latest.py", "contest.go"):
+            assert classify._basename_is_test(base) is False, base
+            assert is_test_path(f"crates/ed/src/{base}") is False, base
+        assert classify._basename_is_test("AppTest.java") is True
+    finally:
+        is_test_path.cache_clear()
+        is_test_file.cache_clear()
 
 
 def test_is_test_file_is_never_wider_than_is_test_path() -> None:

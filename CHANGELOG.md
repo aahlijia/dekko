@@ -9,6 +9,16 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.11] — 2026-09-25
+
+### Fixed
+- **Test filename patterns match case-sensitively on Windows.** The
+  `*Test.*` and `*Tests.*` patterns went through `fnmatch.fnmatch`,
+  which folds case on Windows, so `test.rs`, `ed_tests.rs` and even
+  `latest.py` counted as test files there: hidden by `--no-tests`,
+  reported by `affected`, and left out of `unused`. They now match the
+  way they always have on macOS and Linux, where nothing changes.
+
 ## [1.1.10] — 2026-09-25
 
 ### Fixed
