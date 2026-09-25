@@ -9,6 +9,33 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-09-25
+
+Closes round 1.3's fix cycle. The code is 1.2.4; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.3 evaluated 1.1.10 on
+seven real repositories and found no regressions and nothing
+Critical: two Mediums, a few carried Lows, and one more bug found
+while re-running the MCP checks on tensorflow. Four fix tracks, all
+shipped:
+
+- **1.2.1**: conflicting MCP target names (`symbol`, `name`,
+  `target`, `type`) are always an error, including when one of them
+  is the tool's own argument. The same value under two names still
+  folds.
+- **1.2.2**: `unused` sees getters and handlers that are read rather
+  than called, and object literals handed to external packages. On
+  claude-code, flagged callables with no `[dispatch?]` mark went from
+  112 to 50.
+- **1.2.3**: the MCP default-root note is `(default root: <path>)`,
+  23 tokens instead of 38 on every call that omits `root`.
+- **1.2.4**: integer arguments are validated on MCP and the CLI. Bad
+  values used to return `dekko: internal error` (21 of 70 probe calls)
+  or be quietly misread. Also fixed: `trace --max-paths 0` reporting
+  no path, and `query callers --limit 0` printing nothing.
+
+`docs/cli.md` now says what `--json`'s `meta.tokens` measures.
+
 ## [1.2.4] — 2026-09-25
 
 ### Fixed
