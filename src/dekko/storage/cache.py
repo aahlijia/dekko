@@ -141,6 +141,11 @@ class IncrementalCache:
             return None
         return entry.get("file", {}).get("symbols", [])
 
+    def old_hash(self, rel: str) -> str | None:
+        """Content hash the prior cache recorded for ``rel``, if any."""
+        entry = self._old.get(rel)
+        return None if entry is None else entry.get("hash")
+
     def reuse(self, root: Path, rel: str) -> FileMap | None:
         """Return the cached ``FileMap`` for an unchanged file.
 

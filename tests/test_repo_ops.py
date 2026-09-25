@@ -310,3 +310,52 @@ def test_map_repository_threads_follow_symlinks_to_discover(
     )
     assert {fm.path for fm in files} == {"src/real.py", "src/alias.py"}
     assert "src/alias.py" not in dict(skipped)
+
+
+# --- load_or_regen says so before a long regen ------------------------
+
+
+def test_regen_of_a_large_stale_map_is_announced(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """On a big repo an auto-regen is a multi-second silence that looks
+    like a hang, so it gets a note before it starts."""
+    monkeypatch.setattr(repo_ops, "_REGEN_DISCLOSURE_THRESHOLD", 1)
+    root = make_mapped_repo({"a.py": "def f() -> int:\n    return 1\n"})
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+    capsys.readouterr()
+
+    index, code = repo_ops.load_or_regen(root, no_regen=False)
+
+    assert index is not None and code == 0
+    assert (
+        "note: map is stale; regenerating 1 mapped file before answering"
+        in capsys.readouterr().err
+    )
+
+
+def test_regen_of_a_small_stale_map_stays_quiet(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def f() -> int:\n    return 1\n"})
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+    capsys.readouterr()
+
+    repo_ops.load_or_regen(root, no_regen=False)
+
+    assert "regenerating" not in capsys.readouterr().err
+
+
+def test_building_a_missing_map_is_announced(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """A first build is a cold map at any size (minutes on the largest
+    repos), and happens once, so it's always announced."""
+    (tmp_path / "a.py").write_text("def f() -> int:\n    return 1\n")
+
+    index, code = repo_ops.load_or_regen(tmp_path, no_regen=False)
+
+    assert index is not None and code == 0
+    assert "note: no usable map" in capsys.readouterr().err

@@ -1037,6 +1037,7 @@ def load_or_regen(
         return None, 5
 
     _note_foreign_build(fresh)
+    _note_regen(root, index)
     regenerated, code = _locked_regen(root)
     if regenerated is None and index is not None and fresh.process_outdated:
         # An outdated long-lived process whose delegated regen failed
@@ -1052,6 +1053,43 @@ def load_or_regen(
         return index, 0
 
     return regenerated, code
+
+
+# Mapped-file count from which a stale-map regen is announced. A
+# one-file edit's regen measured ~15-20 s on spring-boot (9,942 files)
+# and ~45 s on tensorflow (14,285), silent both times; repos up to
+# ~2,700 files regen in a few seconds. Same cut as the rev-cache note.
+_REGEN_DISCLOSURE_THRESHOLD = 5000
+
+
+def _note_regen(root: Path, index: mapfile.MapIndex | None) -> None:
+    """Announce a regen before its wait, when the wait can be long.
+
+    A missing (or unreadable) map is always announced: that build is a
+    cold map at any size, minutes on the largest repos, and happens
+    once. A stale map only on large repos.
+
+    Args:
+        root: Repository root about to be regenerated.
+        index: The stale map, or ``None`` when there is no usable one.
+    """
+    if index is None:
+        print(
+            f"note: no usable map under {root}; building one first",
+            file=sys.stderr,
+        )
+        return
+
+    count = len(index.languages_by_path)
+    if count < _REGEN_DISCLOSURE_THRESHOLD:
+        return
+
+    noun = "file" if count == 1 else "files"
+    print(
+        f"note: map is stale; regenerating {count} mapped {noun} "
+        "before answering",
+        file=sys.stderr,
+    )
 
 
 def _note_foreign_build(fresh: mapfile.Freshness | None) -> None:

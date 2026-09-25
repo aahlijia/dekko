@@ -9,6 +9,39 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.9] — 2026-09-25
+
+### Fixed
+- **`diff` and `affected` on an edited tree no longer re-resolve the
+  whole repo.** When the map was older than the working tree, the
+  current side was re-mapped from scratch on every call and never used
+  the caches `dekko map` keeps. Parsing turned out to be the small part:
+  on tensorflow, re-resolving calls was 146 of the 180 seconds. The
+  current side now reuses both the extraction cache and the cached call
+  resolution for everything the edit can't have affected, like an
+  incremental map, and still writes nothing. A one-line edit's `diff`
+  on tensorflow goes from 205s to 32s, and `affected` to 32s, with
+  byte-identical output. spring-boot's `affected` goes from 12.6s to
+  9.4s. An added, removed or renamed file, or a changed type, still
+  resolves the whole repo, as it does for `dekko map`. `cache.json` is
+  now parsed at most once per call, and not at all when neither side
+  needs it.
+- **A map built with `--follow-symlinks` is diffed with it.** `diff`,
+  `affected` and `workset` dropped the recorded setting on both sides,
+  so they compared a different set of files than the map held.
+- **Cached call resolution is never paired with an extraction cache
+  from a different run.** `dekko map` writes the two files one after
+  the other, so a `diff` reading them during a concurrent map could get
+  one of each and keep a stale edge. The mismatch is now detected and
+  the whole repo is resolved instead. After a normal run it never fires.
+- **Long waits say so first.** On repos with 5,000+ mapped files, a
+  stale map's in-memory pass (`diff`/`affected`) and the auto-regen
+  every other read command does (including `workset`: 60s of silence on
+  tensorflow) print a `note:` to stderr before they start. The
+  `diff`/`affected` note says whether cached resolution can be reused
+  or the whole repo has to be resolved. Building a missing map is
+  always announced.
+
 ## [1.1.8] — 2026-09-25
 
 ### Fixed

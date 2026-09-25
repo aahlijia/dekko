@@ -58,10 +58,17 @@ guessing. Every read command takes `--json` for structured output.
 Most also regenerate a stale map automatically (`--no-regen` to fail
 instead) — `diff`, `affected`, `status`, and `ledger` don't accept
 `--no-regen` at all: `status`/`ledger` never regenerate regardless,
-and `diff`/`affected` always re-parse the current tree in memory
+and `diff`/`affected` always re-map the current tree in memory
 rather than writing a fresh `map.json` to disk, so `dekko status`
 right after a `dekko diff`/`dekko affected` on a fresh edit can still
-report the map as stale.
+report the map as stale. That in-memory pass reuses the last `dekko
+map`'s caches the same way an incremental map does (see "Incremental
+vs. `--full` map runs"), so it costs about what `dekko map` would, and
+nothing gets cheaper on the next call until you run `dekko map`. On a
+large repo (5,000+ mapped files) both waits print a `note:` to stderr
+first: a stale map's in-memory pass, and the regen every other read
+command does. A missing map is always announced, since the first build
+is a cold one.
 
 `diff`/`affected` compare at symbol-body-hash granularity, not a whole-file
 diff: an edit outside every symbol's body span (a trailing comment after the
@@ -551,6 +558,13 @@ previous repo-wide resolve, so correctness never rests on guessing what
 an edit could have affected. Either way the output is identical; you can
 check that yourself by diffing `map.json` against a `--full` run of the
 same tree.
+
+`dekko diff`, `dekko affected` and `dekko workset` on an edited tree
+use the same reuse for the current side without saving anything. On
+tensorflow a one-line edit's `diff` takes ~32s instead of ~205s. The
+edits the reuse doesn't cover (an added, removed or renamed file, a
+changed type) still resolve the whole repo there, just as they do for
+`dekko map`, and the stale-map note says so.
 
 The other resolution passes (references, heritage, imports, throws,
 catches) still run repo-wide every time. They're a small share of the

@@ -563,7 +563,7 @@ def test_old_snapshot_concurrent_calls_serialize_and_reuse(
             None,
             (),
             10_000_000,
-            cache_mod.IncrementalCache({}),
+            dict,
         )
 
     t1 = threading.Thread(target=build, args=(0,))
@@ -612,7 +612,7 @@ def test_old_snapshot_wait_cap_timeout_still_produces_correct_result(
             None,
             (),
             10_000_000,
-            cache_mod.IncrementalCache({}),
+            dict,
         )
 
     t1 = threading.Thread(target=build, args=(0,))
@@ -642,5 +642,240 @@ def test_compare_silent_when_only_partial_fraction_changed(
     new.body[changed_id] = "different"
 
     diff.compare("HEAD", old, new)
+
+    assert capsys.readouterr().err == ""
+
+
+# --- a stale map's new side reuses dekko map's caches -----------------
+
+
+def _same_snapshot(a: diff.Snapshot, b: diff.Snapshot) -> None:
+    """Assert two snapshots agree on everything ``compare`` reads."""
+    assert a.symbols == b.symbols
+    assert a.callers == b.callers
+    assert a.ambiguous_in == b.ambiguous_in
+    assert a.imports == b.imports
+    assert a.body == b.body
+
+
+def _spy_reuse(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Record the ``reuse`` plan every ``diff.resolve`` call receives."""
+    plans: list[object] = []
+    real = diff.resolve
+
+    def spy(*args: object, **kwargs: object) -> object:
+        plans.append(kwargs.get("reuse"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(diff, "resolve", spy)
+    return plans
+
+
+def test_stale_new_side_reuses_cached_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A one-file body edit re-resolves only that file, the way an
+    incremental ``dekko map`` does, instead of the whole repo."""
+    root = _repo(tmp_path, BASE)
+    index = mapfile.load_map(root)
+    assert index is not None
+    (root / "a.py").write_text("def f() -> int:\n    return 7\n")
+    plans = _spy_reuse(monkeypatch)
+
+    reused = diff.snapshot_new_side(root, None, (), 1_000_000, index)
+
+    assert len(plans) == 1
+    assert plans[0] is not None
+    assert plans[0].dirty == {"a.py"}
+    _same_snapshot(reused, diff.snapshot(root, None, (), 1_000_000))
+
+
+EDITS = {
+    "body": {"a.py": "def f() -> int:\n    return 7\n"},
+    "added_function": {
+        "a.py": (
+            "def f() -> int:\n    return 1\n\n\n"
+            "def f2() -> int:\n    return 2\n"
+        ),
+    },
+    "renamed_function": {
+        "b.py": "from a import f\n\n\ndef g2() -> int:\n    return f()\n",
+    },
+    "added_file": {
+        "c.py": "from a import f\n\n\ndef h() -> int:\n    return f()\n",
+    },
+}
+
+
+@pytest.mark.parametrize("shape", sorted(EDITS))
+def test_stale_new_side_matches_a_cold_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """Whatever the plan decides, the result must equal a cold build:
+    a wrong plan would show up as phantom changes in ``diff``. An
+    added file changes the path set, which no plan can cover."""
+    root = _repo(tmp_path, BASE)
+    index = mapfile.load_map(root)
+    assert index is not None
+    for name, text in EDITS[shape].items():
+        (root / name).write_text(text)
+    plans = _spy_reuse(monkeypatch)
+
+    reused = diff.snapshot_new_side(root, None, (), 1_000_000, index)
+
+    assert (plans[0] is None) == (shape == "added_file")
+    _same_snapshot(reused, diff.snapshot(root, None, (), 1_000_000))
+
+
+def test_stale_new_side_writes_nothing(tmp_path: Path) -> None:
+    """``diff``/``affected`` stay read-only: reusing the caches must
+    not save them, or the map would stop matching its own caches."""
+    root = _repo(tmp_path, BASE)
+    index = mapfile.load_map(root)
+    assert index is not None
+    dekko_dir = root / ".dekko"
+    before = {
+        p.name: p.read_bytes() for p in dekko_dir.iterdir() if p.is_file()
+    }
+    (root / "a.py").write_text("def f() -> int:\n    return 7\n")
+
+    diff.snapshot_new_side(root, None, (), 1_000_000, index)
+
+    after = {
+        p.name: p.read_bytes() for p in dekko_dir.iterdir() if p.is_file()
+    }
+    assert after == before
+
+
+def _spy_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, object]]:
+    """Record the keyword arguments of every ``diff.snapshot`` call."""
+    seen: list[dict[str, object]] = []
+    real = diff.snapshot
+
+    def spy(*args: object, **kwargs: object) -> diff.Snapshot:
+        seen.append({"root": Path(args[0]), **kwargs})
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(diff, "snapshot", spy)
+    return seen
+
+
+def test_both_sides_get_their_own_cache_over_one_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The old side stores old-rev extractions into its cache, which
+    the new side's plan would read as the current tree, so each side
+    needs its own ``IncrementalCache``. The file is parsed once."""
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 7\n")
+    loads: list[Path] = []
+    real_load = cache_mod.load
+
+    def counting_load(root_arg: Path) -> dict:
+        loads.append(root_arg)
+        return real_load(root_arg)
+
+    monkeypatch.setattr(diff.cache_mod, "load", counting_load)
+    seen = _spy_snapshot(monkeypatch)
+
+    assert cli.main(["diff", "--root", str(root)]) == diff.EXIT_DIFFERENT
+
+    old, new = (
+        next(s for s in seen if s["root"] != root),
+        next(s for s in seen if s["root"] == root),
+    )
+    assert old["cache"] is not None
+    assert new["cache"] is not None
+    assert old["cache"] is not new["cache"]
+    assert new["reuse_resolution"] is True
+    assert not old.get("reuse_resolution")
+    assert len(loads) == 1
+
+
+def test_fresh_index_and_rev_cache_hit_never_load_the_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither side extracts anything on this path, so parsing the
+    extraction cache (554 MB on tensorflow) would be pure overhead."""
+    root = _repo(tmp_path, BASE)
+    _add_untracked_and_remap(root)
+    assert cli.main(["diff", "--root", str(root)]) == diff.EXIT_DIFFERENT
+
+    def forbidden(root_arg: Path) -> dict:
+        raise AssertionError("cache.json should not be loaded")
+
+    monkeypatch.setattr(diff.cache_mod, "load", forbidden)
+    assert cli.main(["diff", "--root", str(root)]) == diff.EXIT_DIFFERENT
+
+
+def test_follow_symlinks_from_provenance_reaches_both_sides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``--follow-symlinks`` map discovers symlinked files; a diff
+    that drops the option discovers a different file set on each side
+    than the map it's compared with."""
+    root = _repo(tmp_path, BASE)
+    assert cli.main(["map", str(root), "--quiet", "--follow-symlinks"]) == 0
+    (root / "a.py").write_text("def f() -> int:\n    return 7\n")
+    seen = _spy_snapshot(monkeypatch)
+
+    assert cli.main(["diff", "--root", str(root)]) == diff.EXIT_DIFFERENT
+
+    assert len(seen) == 2
+    assert all(s["follow_symlinks"] is True for s in seen)
+
+
+def test_stale_new_side_note_names_the_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A large repo's stale-map wait gets a note before it starts."""
+    monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
+    root = _repo(tmp_path, BASE)
+    index = mapfile.load_map(root)
+    (root / "a.py").write_text("def f() -> int:\n    return 7\n")
+    capsys.readouterr()
+
+    diff.snapshot_new_side(root, None, (), 1_000_000, index)
+
+    err = capsys.readouterr().err
+    assert (
+        "note: map is stale; reusing cached call resolution for all "
+        "but 1 of 2 mapped files" in err
+    )
+    assert "dekko map" in err
+
+
+def test_stale_new_side_note_when_nothing_can_be_reused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
+    monkeypatch.setattr(diff.os, "cpu_count", lambda: 11)
+    root = _repo(tmp_path, BASE)
+    index = mapfile.load_map(root)
+    (root / "c.py").write_text("def h() -> int:\n    return 3\n")
+    capsys.readouterr()
+
+    diff.snapshot_new_side(root, None, (), 1_000_000, index, jobs=11)
+
+    err = capsys.readouterr().err
+    assert "can't reuse cached call resolution" in err
+    assert "resolving all 3 mapped files with all 11 cores" in err
+
+
+def test_stale_new_side_note_silent_on_small_repos(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    index = mapfile.load_map(root)
+    (root / "a.py").write_text("def f() -> int:\n    return 7\n")
+    capsys.readouterr()
+
+    diff.snapshot_new_side(root, None, (), 1_000_000, index)
 
     assert capsys.readouterr().err == ""

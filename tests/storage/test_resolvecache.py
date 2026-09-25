@@ -601,3 +601,21 @@ def test_projection_compares_every_non_excluded_field() -> None:
     assert projected.isdisjoint(resolver_mod._RESOLUTION_BLIND_SYMBOL_FIELDS)
     for required in ("id", "name", "kind", "params", "path", "qualname"):
         assert required in projected
+
+
+def test_gate_refuses_a_torn_pair_of_cache_files(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``cache.json`` and ``resolved-calls.json.gz`` must come from one
+    map run: the plan diffs a dirty file's names against the first
+    while trusting the second's edges. A reader that loads them across
+    a concurrent ``dekko map`` sees different hashes for the same
+    file, and must resolve everything instead."""
+    root = make_mapped_repo(SRC)
+    extraction = root / ".dekko" / "cache.json"
+    doc = json.loads(extraction.read_text())
+    doc["files"]["b.py"]["hash"] = "0" * 16
+    extraction.write_text(json.dumps(doc))
+    (root / "b.py").write_text(SRC["b.py"] + "# just a comment\n")
+
+    assert _build(root) is None
