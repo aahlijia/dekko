@@ -9,6 +9,53 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-09-25
+
+Closes round 1.2's fix cycle. The code is 1.1.11; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.2 evaluated 1.0.5 on
+seven real repositories and found no regressions, but its
+edit-allowed brief turned up four Highs. Those, the Mediums and Lows,
+and three more bugs found while designing the fixes became ten fix
+tracks, all shipped, plus one Windows fix found while releasing:
+
+- **1.1.1**: `affected` reports only test files a runner would
+  discover, so test-support code under `testing/` is no longer an
+  "impacted test".
+- **1.1.2**: TypeScript arrow-function and callback parameter types
+  count as type usages (`query type`, `unused`, `workset
+  --type-impact`).
+- **1.1.3**: external callee ids are stored canonically, without call
+  arguments. The longest id on any evaluation repo went from 1,749
+  characters to under 162, and Rust turbofish and C++ template calls
+  are named correctly.
+- **1.1.4**: `sanity` explains misses in Rust inline test modules,
+  Rust `use` lines and files the map skipped. zed's `--all`
+  unexplained count fell from 6,356 to 2,800.
+- **1.1.5**: Rust code compiled only under `cargo test` is test code.
+  1,826 zed symbols moved, and `unused` dropped from 11,141 to 10,392.
+- **1.1.6**: `.ts` and `.tsx` resolve as one language, with a
+  relative-import tiebreak.
+- **1.1.7**: `unused --dispatch` marks each candidate row, and an
+  explicit `--limit` lifts the section's cap.
+- **1.1.8**: `affected` includes Rust `cfg(test)` files (zed `HEAD~1`
+  46 -> 213 impacted), and tests reached only through an ambiguous call
+  are counted in a note and listed by `--possible`.
+- **1.1.9**: a stale map's `diff`/`affected`/`workset` reuse `dekko
+  map`'s caches. A dirty-tree tensorflow `diff` went from 205 s to
+  32 s.
+- **1.1.10**: ten small fixes, including `--budget 0` meaning no cap,
+  `query file` on empty files, a fully keyed rev cache, and MCP
+  target-argument aliases.
+- **1.1.11**: test filename patterns match case-sensitively on
+  Windows, where `*Test.*` had made `test.rs` and `latest.py` test
+  files. Caught by this release's own Windows CI.
+
+The Claude Code skills and the MCP docs were brought up to date with
+these changes ahead of the release. Round 1.3 (dekko 1.1.10,
+2026-09-25) has since run on the same seven repositories: all ten
+tracks held, with no regressions. Its findings open the 1.2.x line.
+
 ## [1.1.11] — 2026-09-25
 
 ### Fixed
