@@ -9,6 +9,45 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.6] — 2026-09-24
+
+### Fixed
+- **`.ts` and `.tsx` files are one language to the call resolver.**
+  Before any evidence was weighed, resolution kept only candidates in
+  the call site's exact language, and `typescript` and `tsx` counted
+  as two. A `.tsx` file calling a function it imports from a `.ts`
+  file lost the real target whenever some other `.tsx` file defined
+  the same name: on claude-code, `mcp.tsx` called
+  `ManagePlugins.tsx::getScopeLabel` instead of the
+  `services/mcp/utils.ts` one it imports, and `REPL.tsx`'s imported
+  `errorMessage` was reported as external. Interface calls went wrong
+  the same way: `tool.extractSearchText()` was pinned to BashTool's
+  implementation, the only `.tsx` one of six, so the other five read
+  as unused.
+
+  Merging the dialects exposed a tie the filter had been hiding. A
+  named import is stored as `<module>/<name>`, and the import rung
+  matches file stems, so `import { ClinePassLimitError } from
+  './errors'` matched both `errors.ts` and an unrelated
+  `ClinePassLimitError.tsx` component, and gave up. A relative
+  specifier now settles that tie: the module is resolved against the
+  caller's directory with the same extension and `index` rules the
+  module graph uses, and the one tied candidate in that file wins.
+  Package and alias specifiers are left alone.
+
+  claude-code: resolved calls 26,696 -> 26,492 (+176 -380), references
+  10,100 -> 10,209 (+157 -48). cline: calls 20,648 -> 20,749 (+121
+  -20), references 9,171 -> 8,853 (+227 -545; 545 of them were `fs`
+  and `path` module references credited to two locals in one test
+  file). Nearly every removed edge had no import behind it; 275 of the
+  added calls and 384 of the added references follow a real import.
+  Twelve removed edges did have one, and each is now honestly
+  ambiguous or was wrong. Seven added edges on claude-code are wrong:
+  bare `set(...)`/`unmount()` calls on local bindings, which a
+  weaker last-resort step now matches once a second candidate exists.
+  awesome-go, claude-buddy, spring-boot, tensorflow and zed are
+  byte-identical.
+
 ## [1.1.5] — 2026-09-24
 
 ### Fixed

@@ -3651,6 +3651,149 @@ def test_language_filtered_unchanged_for_unrecognized_call_site_path() -> None:
     assert filtered == [candidate]
 
 
+def test_language_filtered_treats_js_dialects_as_one_language() -> None:
+    """``.ts``, ``.tsx`` and ``.js`` are one language to the resolver.
+
+    A ``.tsx`` call site must still see a ``.ts`` candidate when a
+    ``.tsx`` one also exists: the file extension says nothing about
+    which same-named function the call reaches, and dropping the
+    ``.ts`` file before the import rung runs is how a ``.tsx`` file's
+    imported helper got pinned to an unrelated ``.tsx`` namesake.
+    """
+    ts = _fn("lib/errors.ts", "errorMessage", language="typescript")
+    tsx = _fn("ui/Panel.tsx", "errorMessage", language="tsx")
+    js = _fn("legacy/util.js", "errorMessage", language="javascript")
+    py = _fn("tools/errors.py", "errorMessage")
+    call = RawCall(
+        caller_id=None,
+        path="screens/REPL.tsx",
+        text="errorMessage",
+        name="errorMessage",
+        line=1,
+    )
+    filtered = resolver_mod._language_filtered(call, [ts, tsx, js, py])
+    assert filtered == [ts, tsx, js]
+
+
+def test_language_filtered_c_cpp_keeps_same_language_first() -> None:
+    """The C/C++ family still prefers the call site's own language."""
+    c = _fn("a.c", "run", language="c")
+    cpp = _fn("b.cc", "run", language="cpp")
+    call = RawCall(caller_id=None, path="m.cc", text="run", name="run", line=1)
+    assert resolver_mod._language_filtered(call, [c, cpp]) == [cpp]
+
+
+def test_hint_match_breaks_stem_tie_by_relative_import_path() -> None:
+    """``./errors/LimitError`` names ``errors.ts``, not ``LimitError.tsx``.
+
+    The stored source appends the imported name, so a stem check
+    matches both the module file and any file named after the symbol.
+    Resolving the specifier against the caller's directory picks the
+    one file the import actually names.
+    """
+    real = _cls("sdk/providers/errors.ts", "LimitError", language="typescript")
+    rival = _cls("webview/chat/LimitError.tsx", "LimitError", language="tsx")
+    picked = resolver_mod._hint_match(
+        ["./errors/LimitError"],
+        [real, rival],
+        None,
+        "sdk/providers/builtins.ts",
+    )
+    assert picked is real
+
+
+def test_hint_match_relative_tiebreak_handles_parent_and_js_specifier() -> (
+    None
+):
+    real = _fn("app/lib/util.ts", "fmt", language="typescript")
+    rival = _fn("app/views/util.tsx", "fmt", language="tsx")
+    picked = resolver_mod._hint_match(
+        ["../lib/util.js/fmt"], [real, rival], None, "app/views/page.tsx"
+    )
+    assert picked is real
+
+
+def test_hint_match_relative_tiebreak_resolves_index_file() -> None:
+    real = _fn("ui/widgets/index.ts", "Button", language="typescript")
+    rival = _fn("ui/other/Button.tsx", "Button", language="tsx")
+    picked = resolver_mod._hint_match(
+        ["./widgets/Button"], [real, rival], None, "ui/app.tsx"
+    )
+    assert picked is real
+
+
+def test_hint_match_tie_stays_unresolved_without_an_exact_file() -> None:
+    """A tie the relative path can't settle is still a tie."""
+    a = _fn("x/errors.ts", "boom", language="typescript")
+    b = _fn("y/errors.ts", "boom", language="typescript")
+    picked = resolver_mod._hint_match(
+        ["./errors/boom"], [a, b], None, "z/caller.ts"
+    )
+    assert picked is None
+
+
+def test_hint_match_non_relative_tie_is_untouched() -> None:
+    """Package and alias specifiers get no path tiebreak."""
+    a = _fn("pkgs/core/errors.ts", "boom", language="typescript")
+    b = _fn("app/boom.tsx", "boom", language="tsx")
+    picked = resolver_mod._hint_match(
+        ["@scope/errors/boom"], [a, b], None, "app/caller.ts"
+    )
+    assert picked is None
+
+
+def test_tsx_caller_resolves_imported_ts_function_over_tsx_namesake(
+    tmp_path: Path,
+) -> None:
+    _write_tree(
+        tmp_path,
+        {
+            "lib/errors.ts": (
+                "export function errorMessage(e: unknown) {\n"
+                "  return String(e);\n}\n"
+            ),
+            "ui/Panel.tsx": (
+                "export function errorMessage(e: unknown) {\n"
+                "  return <b>{String(e)}</b>;\n}\n"
+            ),
+            "screens/REPL.tsx": (
+                "import { errorMessage } from '../lib/errors.js';\n"
+                "export function REPL(e: unknown) {\n"
+                "  return errorMessage(e);\n}\n"
+            ),
+        },
+    )
+    edges = _edges(tmp_path)
+    caller = "screens/REPL.tsx::REPL"
+    assert (caller, "lib/errors.ts::errorMessage") in edges
+    assert (caller, "ui/Panel.tsx::errorMessage") not in edges
+
+
+def test_ts_caller_keeps_imported_target_when_tsx_file_shares_the_name(
+    tmp_path: Path,
+) -> None:
+    """``import { makeError } from './errors'`` next to a ``makeError.tsx``.
+
+    Both files pass the import rung's stem check (``errors`` and
+    ``makeError``); the relative path picks ``errors.ts``.
+    """
+    _write_tree(
+        tmp_path,
+        {
+            "sdk/errors.ts": "export function makeError() {\n  return 1;\n}\n",
+            "web/makeError.tsx": (
+                "export function makeError() {\n  return <i />;\n}\n"
+            ),
+            "sdk/builtins.ts": (
+                "import { makeError } from './errors';\n"
+                "export function handle() {\n  return makeError();\n}\n"
+            ),
+        },
+    )
+    edges = _edges(tmp_path)
+    assert ("sdk/builtins.ts::handle", "sdk/errors.ts::makeError") in edges
+
+
 def test_module_matches_bare_node_builtin_specifier_denylisted() -> None:
     # A bare (non-relative) JS/TS import
     # source naming a Node core module must never match a same-named

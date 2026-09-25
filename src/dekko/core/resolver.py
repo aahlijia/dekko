@@ -164,6 +164,16 @@ _LANGUAGE_FAMILIES: dict[str, frozenset[str]] = {
     "typescript": frozenset({"javascript", "typescript", "tsx"}),
     "tsx": frozenset({"javascript", "typescript", "tsx"}),
 }
+# The JS family's dialects are one language for candidate narrowing,
+# not just one family: a ``.tsx`` file calls into ``.ts`` files as
+# freely as into other ``.tsx`` files, so the extension says nothing
+# about which same-named symbol a call reaches. Every other language
+# is its own resolution language.
+_RESOLUTION_LANGUAGE: dict[str, str] = {
+    "javascript": "javascript",
+    "typescript": "javascript",
+    "tsx": "javascript",
+}
 # Every raw-usage shape the shared candidate ladder resolves — a call,
 # a bare-value reference, and a heritage clause all expose the same
 # ``name``/``receiver`` fields and only differ in what table the
@@ -2691,6 +2701,11 @@ def _record_ambiguous(
     ambiguous.setdefault((caller_id, name), [c.id for c in ranked])
 
 
+def _resolution_language(language: str) -> str:
+    """The language ``_language_filtered``'s first stage compares."""
+    return _RESOLUTION_LANGUAGE.get(language, language)
+
+
 def _language_filtered(
     call: _Referable, candidates: list[Symbol]
 ) -> list[Symbol]:
@@ -2736,12 +2751,23 @@ def _language_filtered(
     list) rather than answered wrong. A language with no declared
     family (python, rust, go, java, ...) behaves exactly as before:
     same-language-or-nothing, since its family is itself alone.
+
+    "Same language" means same *resolution* language
+    (``_RESOLUTION_LANGUAGE``): ``.js``, ``.ts`` and ``.tsx`` count as
+    one. Ranking them apart made the first stage a pre-filter on file
+    extension: a ``.tsx`` call site with one ``.tsx`` candidate and a
+    ``.ts`` one never let the import rung see the ``.ts`` file, so a
+    function the caller imports from ``lib/errors.ts`` lost to an
+    unrelated ``errorMessage`` in some other ``.tsx`` file.
     """
     spec = languages.spec_for_path(call.path)
     if spec is None:
         return candidates
 
-    same_language = [c for c in candidates if c.language == spec.name]
+    own = _resolution_language(spec.name)
+    same_language = [
+        c for c in candidates if _resolution_language(c.language) == own
+    ]
     if same_language:
         return same_language
 
@@ -4559,12 +4585,18 @@ def _hint_match(
     docstring for why this can only ever resolve, never misresolve,
     relative to the unmodified ``len(crate_matched) == 1`` check above
     it. ``caller_path`` (``call.path``) is threaded through purely so
-    that function can apply its self-crate guard.
+    that function can apply its self-crate guard, and so
+    ``_relative_js_tiebreak`` can resolve a relative JS/TS specifier
+    against the caller's directory.
     """
     for hint in hints:
         matched = [c for c in candidates if _module_matches(hint, c.path)]
         if len(matched) == 1:
             return matched[0]
+        if len(matched) > 1:
+            by_path = _relative_js_tiebreak(hint, matched, caller_path)
+            if by_path is not None:
+                return by_path
         if crate_roots:
             crate_matched = [
                 c
@@ -4578,6 +4610,52 @@ def _hint_match(
             )
             if tiebroken is not None:
                 return tiebroken
+    return None
+
+
+def _relative_js_tiebreak(
+    hint: str,
+    matched: list[Symbol],
+    caller_path: str,
+) -> Symbol | None:
+    """Pick the one stem-matched candidate a relative import names.
+
+    ``_module_matches`` compares file stems against the import source's
+    segments, and ``extractor._imports_js`` stores a binding's source
+    as ``f"{module}/{name}"``. So ``import { LimitError } from
+    './errors'`` matches both ``errors.ts`` (on ``errors``) and any
+    ``LimitError.tsx`` (on the appended name), and the rung gave up on
+    a call its own import settles. For a relative specifier the file
+    is knowable: drop the appended name, resolve the module against
+    the caller's directory, and run the same extension/``index`` ladder
+    the module graph uses (``_js_module_candidates``).
+
+    Only breaks a tie ``_hint_match`` already gave up on, and only when
+    exactly one tied candidate lives in a file the specifier can name.
+    A package or alias specifier (``@scope/x``, ``@/x``) is left alone.
+
+    Args:
+        hint: The import source, name suffix included.
+        matched: The 2+ candidates whose stem the hint matched.
+        caller_path: Repo-relative path of the calling file.
+
+    Returns:
+        The single candidate in the imported file, or ``None``.
+    """
+    if not hint.startswith(("./", "../")):
+        return None
+    if not caller_path.endswith(_JS_TS_EXTENSIONS):
+        return None
+
+    module = hint.rsplit("/", 1)[0]
+    joined = posixpath.normpath(
+        posixpath.join(posixpath.dirname(caller_path), module)
+    )
+    files = set(_js_module_candidates(joined))
+    in_file = [c for c in matched if c.path in files]
+    if len(in_file) == 1:
+        return in_file[0]
+
     return None
 
 
