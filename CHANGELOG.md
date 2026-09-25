@@ -9,6 +9,44 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-09-25
+
+### Fixed
+- **`unused` sees getters and handlers that are read, not called, and
+  object literals handed to external code.** On claude-code, 91 of the
+  112 flagged functions that carried no `[dispatch?]` mark were
+  members of object literals: command objects whose `isHidden` and
+  `immediate` getters are read as `cmd.isHidden` (a shape no call edge
+  covers), and the 30 methods of the react-reconciler host config,
+  which `react-reconciler` calls and nothing in the repo does. Both
+  looked like dead code. Two changes:
+  - The map gains a `reads` section: property reads (`x.name` not
+    called and not assigned, `cmd?.name`, `const { name } = x`) in
+    JS/TS/TSX, grouped per reader and name, kept for the names some
+    repo callable or variable defines. A read is never an edge and
+    never marks anything used: property names are far too common for
+    a name match to pick a definition (the one repo symbol named
+    `type` had 2,735 `msg.type` reads against it). It is the third
+    `[dispatch?]` evidence, `property-read`, for a flagged symbol
+    whose name is read somewhere and that either shares the name with
+    2+ definitions or is itself an object-literal member. `--dispatch`
+    rows say which, and `sanity --unused` prints the read sites.
+  - Symbols record whether they are object-literal members and, when
+    the literal is a direct argument of a call, that call's callee.
+    A member whose literal went to a binding imported from outside
+    the repo (`createReconciler(...)` from `react-reconciler`,
+    `createContext(...)` from `react`, `marked.use(...)`) is a root,
+    like `decorated` and `exported`. The import is the test, not the
+    external table: a literal passed through a receiver the resolver
+    couldn't follow (`deps.callModel({...})`) is consumed in-repo and
+    stays flagged.
+
+  On claude-code the unmarked flagged functions drop from 112 to 50:
+  34 rows leave the list as roots and 32 gain the mark. No edge set
+  changed on any of the seven evaluation repositories.
+  Maps written before this load as before. Arrow-function properties
+  (`isEnabled: () => ...`) are not symbols at all and are unchanged.
+
 ## [1.2.1] — 2026-09-25
 
 ### Changed

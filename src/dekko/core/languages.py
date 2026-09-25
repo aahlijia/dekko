@@ -38,6 +38,13 @@ class LanguageSpec:
             types`` never register a function-like node type, so
             there is nothing to accidentally climb through (Python,
             C, C++, Go, Java as of this writing).
+        read_query: Query capturing property reads — a ``@read``
+            capture on the property name per match, plus an optional
+            ``@site`` on the member access so the extractor can drop
+            the call-position (``x.f()``) and assignment-target
+            (``x.f = 1``) cases. Fed into ``FileMap.reads``, never
+            into an edge table (see ``model.RawRead``). JS/TS/TSX
+            only as of this writing.
         reference_query: Query capturing non-call usage edges — a
             single ``@ref`` capture per match, fed into the same
             ``referenced_in``/``referenced_out`` pipeline
@@ -192,6 +199,7 @@ class LanguageSpec:
     param_style: str = "generic"
     function_boundary_types: tuple[str, ...] = ()
     reference_query: str | None = None
+    read_query: str | None = None
     heritage_query: str | None = None
     throw_query: str | None = None
     catch_query: str | None = None
@@ -685,6 +693,20 @@ _JS_REFERENCE_BASE = """
 # since keys are overwhelmingly locals. It costs one known symbol
 # across three repos (cline ``hook-factory.ts::exec``).
 
+# Property reads shared by JS/TS/TSX: a member access that is not the
+# function of a call and not an assignment target (the extractor
+# checks the ``@site`` parent), and the two destructuring shapes
+# (``const { isHidden } = cmd``, ``const { name: n } = cmd``). An
+# optional chain (``cmd?.immediate``) parses as the same
+# ``member_expression`` with an ``optional_chain`` child, so it needs
+# no separate pattern. A subscript (``cmd["dyn"]``) stays out: the
+# key is a string, not a name.
+_JS_READ_QUERY = """
+(member_expression property: (property_identifier) @read) @site
+(object_pattern (shorthand_property_identifier_pattern) @read)
+(pair_pattern key: (property_identifier) @read)
+"""
+
 # TypeScript-only: ``typeof T`` as a *type* (a ``type_query`` node),
 # e.g. ``type X = typeof TOOL_DEFAULTS;`` or ``const w: typeof T = y;``.
 # ``type_query`` is a TS-grammar-only node type -- plain JS has no type
@@ -905,6 +927,7 @@ JAVASCRIPT = LanguageSpec(
     param_style="js",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY,
+    read_query=_JS_READ_QUERY,
     binding_query=_JS_BINDING_QUERY,
     binding_function_scopes=_JS_FUNCTION_BOUNDARIES,
     binding_block_scopes=_JS_BLOCK_SCOPES,
@@ -1091,6 +1114,7 @@ TYPESCRIPT = LanguageSpec(
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     # Plain (non-JSX) TypeScript has no jsx_expression node type.
     reference_query=_JS_REFERENCE_BASE + _TS_TYPE_REFERENCE_EXTRA,
+    read_query=_JS_READ_QUERY,
     binding_query=_JS_BINDING_QUERY + _TS_BINDING_EXTRA,
     binding_function_scopes=_JS_FUNCTION_BOUNDARIES,
     binding_block_scopes=_JS_BLOCK_SCOPES,
@@ -1114,6 +1138,7 @@ TSX = LanguageSpec(
     param_style="ts",
     function_boundary_types=_JS_FUNCTION_BOUNDARIES,
     reference_query=_JS_REFERENCE_QUERY + _TS_TYPE_REFERENCE_EXTRA,
+    read_query=_JS_READ_QUERY,
     binding_query=_JS_BINDING_QUERY + _TS_BINDING_EXTRA,
     binding_function_scopes=_JS_FUNCTION_BOUNDARIES,
     binding_block_scopes=_JS_BLOCK_SCOPES,

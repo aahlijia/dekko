@@ -15,6 +15,7 @@ from dekko.core.model import (
     RawCall,
     RawCatch,
     RawHeritage,
+    RawRead,
     RawRef,
     RawThrow,
     Submodule,
@@ -521,6 +522,8 @@ def _fully_populated_filemap() -> FileMap:
                 exported=True,
                 doc="does a thing",
                 test=True,
+                in_literal=True,
+                literal_consumer="createReconciler",
             ),
         ],
         calls=[
@@ -541,6 +544,14 @@ def _fully_populated_filemap() -> FileMap:
                 name="callback",
                 receiver=None,
                 line=4,
+            ),
+        ],
+        reads=[
+            RawRead(
+                caller_id="a.py::f",
+                path="a.py",
+                name="isHidden",
+                line=5,
             ),
         ],
         heritage=[

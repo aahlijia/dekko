@@ -16,6 +16,7 @@ from dekko.core.model import (
     RawCall,
     RawCatch,
     RawHeritage,
+    RawRead,
     RawRef,
     RawThrow,
     Symbol,
@@ -107,6 +108,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         defs,
         _import_binding_bytes(import_matches),
     )
+    reads = _collect_reads(spec, tree.root_node, rel, defs)
     heritage = _collect_heritage(spec, tree.root_node, rel, defs)
     throws = _collect_throws(spec, tree.root_node, rel, defs)
     catches = _collect_catches(spec, tree.root_node, rel, defs)
@@ -126,6 +128,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         symbols=[sym for _, sym in defs],
         calls=calls,
         refs=refs,
+        reads=reads,
         heritage=heritage,
         throws=throws,
         catches=catches,
@@ -395,6 +398,7 @@ def _make_symbol(
         sym_id = f"{sym_id}#{count + 1}"
 
     decorated, exported = _symbol_flags(spec.name, def_node)
+    in_literal, literal_consumer = _literal_context(spec.name, def_node)
     return Symbol(
         id=sym_id,
         name=name,
@@ -410,7 +414,70 @@ def _make_symbol(
         exported=exported,
         doc=_doc_for_symbol(spec.name, def_node),
         test=spec.name == "rust" and rust_cfg.in_test_scope(def_node),
+        in_literal=in_literal,
+        literal_consumer=literal_consumer,
     )
+
+
+# Nodes an object literal can sit inside while still being "the same
+# literal" for ``_literal_context``'s purposes: a nested member
+# (``{ socket: { data() {} } }``), an array of literals, and the
+# TS wrappers that annotate without changing the value.
+_LITERAL_WRAPPERS = frozenset(
+    {
+        "pair",
+        "object",
+        "array",
+        "as_expression",
+        "satisfies_expression",
+        "parenthesized_expression",
+    }
+)
+
+
+def _literal_context(language: str, def_node: Node) -> tuple[bool, str | None]:
+    """``(in_literal, literal_consumer)`` for a definition node.
+
+    JS/TS/TSX only: a ``method_definition`` directly inside an
+    ``object`` node is an object-literal member (a getter, setter or
+    shorthand method). Its consumer is the callee of the call whose
+    argument the outermost enclosing literal is (``createReconciler``
+    for a react-reconciler host config, ``Bun.listen`` for a nested
+    socket handler), rendered exactly as ``_collect_calls`` renders
+    that same call so the two strings match in the map. A literal
+    that is returned, assigned or annotated instead has no consumer.
+
+    Args:
+        language: The file's language name.
+        def_node: The definition node ``_make_symbol`` is building.
+
+    Returns:
+        ``(False, None)`` for anything that is not a literal member.
+    """
+    if language not in ("javascript", "typescript", "tsx"):
+        return False, None
+    if def_node.type != "method_definition":
+        return False, None
+    literal = def_node.parent
+    if literal is None or literal.type != "object":
+        return False, None
+    node = literal.parent
+    while node is not None and node.type in _LITERAL_WRAPPERS:
+        node = node.parent
+    if node is None or node.type != "arguments" or node.parent is None:
+        return True, None
+    call = node.parent
+    callee = call.child_by_field_name("function") or call.child_by_field_name(
+        "constructor"
+    )
+    if callee is None:
+        return True, None
+    text, name, receiver = _callee_parts(callee)
+    if not name:
+        return True, None
+    text, _receiver = _cap_callee(text, name, receiver)
+
+    return True, text
 
 
 def _symbol_flags(language: str, def_node: Node) -> tuple[bool, bool]:
@@ -1691,6 +1758,73 @@ def _collect_refs(
             )
         )
     return refs
+
+
+def _collect_reads(
+    spec: LanguageSpec,
+    root: Node,
+    rel: str,
+    defs: list[tuple[Node, Symbol]],
+) -> list[RawRead]:
+    """Find property reads, attributed to enclosing definitions.
+
+    A ``read_query`` match is a member access or a destructuring
+    key. A member access that is the function of a call (``x.f()``)
+    is a call, already in ``FileMap.calls``; one that is an
+    assignment target (``x.f = 1``) is a write. Both are dropped
+    here by looking at the ``@site`` capture's parent. Everything
+    else (``cmd.immediate && ...``, ``foo(cmd.x)``, ``!cmd.isHidden``,
+    ``cmd?.immediate``, ``const { isHidden } = cmd``) is a read.
+    Returns an empty list for languages with no ``read_query``.
+    """
+    if spec.read_query is None:
+        return []
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    reads: list[RawRead] = []
+    for _, caps in _run_query(spec.grammar, spec.read_query, root):
+        read_node = _one(caps, "read")
+        if read_node is None:
+            continue
+        site = _one(caps, "site")
+        if site is not None and not _is_property_read(site):
+            continue
+        name = _text(read_node)
+        if not name:
+            continue
+        caller = _enclosing(spans, read_node.start_byte)
+        reads.append(
+            RawRead(
+                caller_id=caller.id if caller else None,
+                path=rel,
+                name=name,
+                line=read_node.start_point[0] + 1,
+            )
+        )
+    return reads
+
+
+_WRITE_PARENTS = ("assignment_expression", "augmented_assignment_expression")
+
+
+def _is_property_read(site: Node) -> bool:
+    """Whether a member access is a read, not a call or a write.
+
+    Compared with ``==``, not ``is``: py-tree-sitter hands out a fresh
+    wrapper object per ``child_by_field_name`` call, so identity never
+    matches even for the same node.
+    """
+    parent = site.parent
+    if parent is None:
+        return True
+    if parent.type in ("call_expression", "new_expression"):
+        callee = parent.child_by_field_name(
+            "function"
+        ) or parent.child_by_field_name("constructor")
+        return callee != site
+    if parent.type in _WRITE_PARENTS:
+        return parent.child_by_field_name("left") != site
+
+    return True
 
 
 # ---------------------------------------------------------------------

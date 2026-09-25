@@ -65,9 +65,10 @@ Spot-check — not a full re-verification — when any of these apply:
   by reference rather than called directly, or a call from an
   unparsed file, can both read as "no inbound calls." A row ending
   in `[dispatch?]` (`dispatch_candidate` in `--json`) shares its name
-  with an interface/trait method, so it may be reached by dispatch
-  dekko can't resolve: treat it as alive until `sanity --unused`
-  says otherwise.
+  with an interface/trait method, or is a getter/handler read as a
+  property (`cmd.isHidden`), so it may be reached in a way dekko
+  can't resolve: treat it as alive until `sanity --unused` says
+  otherwise.
 - **`impacted_tests` / `dekko affected` looks thin.** It follows
   resolved calls only. Tests that reach the change through an
   ambiguous call are counted in a `note:` line (strongest lead named),

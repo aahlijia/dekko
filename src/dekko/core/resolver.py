@@ -132,6 +132,7 @@ from dekko.core.model import (
     RawCall,
     RawHeritage,
     RawRef,
+    ReadSite,
     Symbol,
     ThrowEdge,
 )
@@ -1225,11 +1226,49 @@ def resolve(
         # dedicated resolve_env_reads() the way every other section
         # above is.
         graph.env_reads = [r for fm in files for r in fm.env_reads]
+        graph.reads = collect_reads(files)
     finally:
         if fork_pools:
             gc.unfreeze()
 
     return graph
+
+
+def collect_reads(files: list[FileMap]) -> list[ReadSite]:
+    """Group property reads per ``(reader, name)`` for repo-defined names.
+
+    Not a resolution pass (see ``model.RawRead`` for why a read never
+    becomes an edge): a read is kept when some repo callable or
+    variable defines its name, so ``unused`` can weigh it, and dropped
+    otherwise (``.length``, ``.push``: nothing in the repo to weigh it
+    against). A module-level read is attributed to the file's
+    ``::<module>`` pseudo-caller like a module-level external call.
+
+    Args:
+        files: Every extracted file.
+
+    Returns:
+        Read sites sorted by reader then name, lines sorted and
+        deduplicated.
+    """
+    names = {
+        sym.name
+        for fm in files
+        for sym in fm.symbols
+        if sym.kind not in TYPE_KINDS
+    }
+    grouped: dict[tuple[str, str], set[int]] = {}
+    for fm in files:
+        for read in fm.reads:
+            if read.name not in names:
+                continue
+            reader = read.caller_id or f"{read.path}{MODULE_CALLER_SUFFIX}"
+            grouped.setdefault((reader, read.name), set()).add(read.line)
+
+    return [
+        ReadSite(reader=reader, name=name, lines=sorted(lines))
+        for (reader, name), lines in sorted(grouped.items())
+    ]
 
 
 def _resolve_files_chunk(

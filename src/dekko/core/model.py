@@ -110,6 +110,20 @@ class Symbol:
             mod x;`` from its parent (``repo_ops``, across files).
             The signals only ever add ``True``, never reset a
             ``True`` back to ``False``.
+        in_literal: Whether the definition is a member of an object
+            literal (JS/TS/TSX ``method_definition`` whose parent is
+            an ``object``: a getter, setter or shorthand method in
+            ``{ ... }``). Such a member is reached through the object
+            it belongs to (``cmd.isHidden``, a read the call graph
+            never sees), so ``unused`` weighs property-read evidence
+            for it differently from a free function.
+        literal_consumer: For an object-literal member whose outermost
+            enclosing literal is a direct argument of a call, that
+            call's callee text as the call extractor renders it
+            (``createReconciler``, ``deps.callModel``); ``None``
+            otherwise. When the callee's head is a binding imported
+            from outside the repo, the literal was handed to that
+            package and its members are entry points, not dead code.
     """
 
     id: str
@@ -126,6 +140,8 @@ class Symbol:
     exported: bool = False
     doc: str | None = None
     test: bool = False
+    in_literal: bool = False
+    literal_consumer: str | None = None
 
 
 @dataclass
@@ -207,6 +223,34 @@ class RawRef:
     line: int = 0
     arg_count: int | None = None
     bound: str | None = None
+
+
+@dataclass
+class RawRead:
+    """A property read (``x.name``, ``const { name } = x``) as written.
+
+    A member access that is neither invoked at that site nor assigned
+    to: the shape through which a getter, an object-literal handler or
+    an interface property is used. Deliberately never resolved into an
+    edge: property names are far too common for a name match to pick
+    a definition (on one repository the single symbol named ``type``
+    had 2,735 ``msg.type`` reads against it), so a read is evidence
+    that ``dekko unused``'s dispatch check weighs, never a "used"
+    verdict. Only the name is kept: the receiver is the thing this
+    can't resolve.
+
+    Attributes:
+        caller_id: Symbol id of the enclosing definition, or ``None``
+            for module/top-level reads.
+        path: File the read appears in.
+        name: The property name read.
+        line: 1-based line of the read.
+    """
+
+    caller_id: str | None
+    path: str
+    name: str
+    line: int = 0
 
 
 @dataclass
@@ -518,6 +562,10 @@ class FileMap:
         refs: Bare-identifier value references (JS/TS/TSX only as of
             this writing — see ``languages.LanguageSpec.
             reference_query``).
+        reads: Property reads, ``x.name`` not called and not assigned
+            (JS/TS/TSX only — see ``languages.LanguageSpec.
+            read_query`` and ``RawRead`` for why these never become
+            edges).
         throws: Raise/throw sites and (Java) declared ``throws``-clause
             entries (Python/Java/C++/JS/TS only — see
             ``languages.LanguageSpec.throw_query``).
@@ -558,6 +606,7 @@ class FileMap:
     symbols: list[Symbol] = field(default_factory=list)
     calls: list[RawCall] = field(default_factory=list)
     refs: list[RawRef] = field(default_factory=list)
+    reads: list[RawRead] = field(default_factory=list)
     heritage: list[RawHeritage] = field(default_factory=list)
     throws: list[RawThrow] = field(default_factory=list)
     catches: list[RawCatch] = field(default_factory=list)
@@ -605,6 +654,27 @@ class ExternalCall:
     callee: str
     lines: list[int] = field(default_factory=list)
     relation: str | None = None
+
+
+@dataclass
+class ReadSite:
+    """Every read of one property name from one reader, aggregated.
+
+    The ``ExternalCall`` shape for ``RawRead``: grouped per
+    ``(reader, name)`` with the site lines, kept only for names some
+    repo callable or variable defines (a read of ``length`` matches
+    nothing worth weighing). Not an edge: see ``RawRead``.
+
+    Attributes:
+        reader: Symbol id of the reading definition; module-level
+            reads use the ``path::<module>`` convention.
+        name: The property name read.
+        lines: Sorted, deduplicated 1-based read-site lines.
+    """
+
+    reader: str
+    name: str
+    lines: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -747,6 +817,11 @@ class CallGraph:
             straight from each file's ``FileMap.env_reads``, no
             resolver pass involved (the literal key text is already
             the fully-resolved fact).
+        reads: Property reads grouped per reader and name (see
+            ``ReadSite``), for the names some repo callable or
+            variable defines. No resolver pass either, and never an
+            edge (see ``RawRead``): ``unused`` reads this as dispatch
+            evidence.
         heritage_synthetic_tiebreak_count: How many entries in
             ``heritage`` were resolved via the heritage crate-decoy
             tiebreak (``resolver._prefer_non_synthetic_crate_match``)
@@ -795,5 +870,6 @@ class CallGraph:
     throws_bare: list[tuple[str, str, int]] = field(default_factory=list)
     catches: list[CatchSite] = field(default_factory=list)
     env_reads: list[EnvRead] = field(default_factory=list)
+    reads: list[ReadSite] = field(default_factory=list)
     heritage_synthetic_tiebreak_count: int = 0
     heritage_unplaced_subtype_count: int = 0

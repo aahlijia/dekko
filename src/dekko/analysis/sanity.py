@@ -92,7 +92,7 @@ from dekko.analysis import ambiguous, query
 from dekko.analysis import unused as unused_mod
 from dekko.classify import is_test_path
 from dekko.core import languages
-from dekko.core.model import TYPE_KINDS, Symbol
+from dekko.core.model import TYPE_KINDS, ReadSite, Symbol
 from dekko.core.walker import DEFAULT_EXCLUDE_DIRS
 from dekko.render.mapfile import MapIndex
 from dekko.source import read_lines
@@ -2621,6 +2621,7 @@ def _build_unused_json_doc(
     noise_count: int,
     generic_name_caution: bool,
     excluded_declarations: int = 0,
+    property_reads: list[ReadSite] | None = None,
 ) -> dict:
     """Assemble ``sanity --unused``'s JSON output document.
 
@@ -2668,7 +2669,61 @@ def _build_unused_json_doc(
         doc["grep_skipped_pathological_note"] = _pathological_skip_note(
             sweep.skipped_pathological
         )
+    if property_reads:
+        doc["property_reads"] = {
+            "count": sum(len(s.lines) for s in property_reads),
+            "sites": _property_read_locations(property_reads),
+            "note": _property_reads_note(property_reads),
+        }
     return doc
+
+
+# How many property-read sites ``sanity --unused`` names in its note
+# before saying "and N more".
+_PROPERTY_READ_EXAMPLES = 3
+
+
+def _property_read_locations(sites: list[ReadSite]) -> list[str]:
+    """``path:line`` for the first few read sites, file order."""
+    out: list[str] = []
+    for site in sites:
+        path = site.reader.split("::", 1)[0]
+        out.extend(f"{path}:{line}" for line in site.lines)
+        if len(out) >= _PROPERTY_READ_EXAMPLES:
+            break
+    return out[:_PROPERTY_READ_EXAMPLES]
+
+
+def _property_reads_note(sites: list[ReadSite]) -> str:
+    """The one line that says a flagged name is read as a property.
+
+    The read is why ``unused`` marks the row ``[dispatch?]``, and it
+    is not a call: a getter or handler reached through the object it
+    belongs to. Said here so the grep hits below, which the buckets
+    can only label ``[other]``, have an explanation next to them.
+    """
+    total = sum(len(s.lines) for s in sites)
+    shown = ", ".join(_property_read_locations(sites))
+    more = total - min(total, _PROPERTY_READ_EXAMPLES)
+    tail = f" and {more} more" if more > 0 else ""
+    return (
+        f"dekko evidence (property reads): {total} site(s) read this "
+        f"name as a property, e.g. {shown}{tail} -- a read, not a "
+        "call: dispatch evidence only, which is why unused marks the "
+        "row [dispatch?], never proof it is alive"
+    )
+
+
+def _print_unused_evidence(
+    has_evidence: bool, property_reads: list[ReadSite] | None
+) -> None:
+    """The "what dekko itself knows" lines of the ``--unused`` report."""
+    evidence = (
+        "none -- this is why it was flagged" if not has_evidence else "present"
+    )
+    print(f"  dekko evidence (calls_in/referenced_in): {evidence}")
+    if property_reads:
+        print(f"  {_property_reads_note(property_reads)}")
 
 
 def _not_flagged_reason(
@@ -2687,7 +2742,8 @@ def _not_flagged_reason(
         return (
             "it is a root, which is never dead code by definition "
             "(exported, decorated, `main`, a test, re-exported, a "
-            "std-trait impl, or matched by --roots)"
+            "std-trait impl, an object-literal member handed to an "
+            "external call, or matched by --roots)"
         )
     if fan_in or referenced_by:
         return f"it is in use (fan-in {fan_in}, referenced-by {referenced_by})"
@@ -2771,6 +2827,7 @@ def _print_unused_text(
     grep_truncated: bool = False,
     skipped_pathological: int = 0,
     excluded_declarations: int = 0,
+    property_reads: list[ReadSite] | None = None,
 ) -> None:
     """Render ``sanity --unused``'s text report.
 
@@ -2793,10 +2850,7 @@ def _print_unused_text(
     # (see ``_report_not_flagged``), so "flagged" below is a checked
     # fact, no longer an assumption. Evidence can still be "present"
     # here: an overload's callers are keyed to a sibling's id.
-    evidence = (
-        "none -- this is why it was flagged" if not has_evidence else "present"
-    )
-    print(f"  dekko evidence (calls_in/referenced_in): {evidence}")
+    _print_unused_evidence(has_evidence, property_reads)
     print(
         "  reference hits found outside definition/import/comment: "
         f"{meter.total}"
@@ -2879,6 +2933,7 @@ def _run_unused_check(
     has_evidence = bool(index.calls_in.get(sym.id)) or bool(
         index.referenced_in.get(sym.id)
     )
+    property_reads = index.reads_by_name.get(bare_name, [])
 
     sweep = _run_grep(root, bare_name)
     if sweep.error is not None:
@@ -2936,6 +2991,7 @@ def _run_unused_check(
             noise_count=noise_count,
             generic_name_caution=generic_caution,
             excluded_declarations=excluded_declarations,
+            property_reads=property_reads,
         )
         print(json.dumps(doc, indent=2))
         return EXIT_OK
@@ -2951,6 +3007,7 @@ def _run_unused_check(
         grep_truncated=sweep.truncated,
         skipped_pathological=sweep.skipped_pathological,
         excluded_declarations=excluded_declarations,
+        property_reads=property_reads,
     )
     return EXIT_OK
 

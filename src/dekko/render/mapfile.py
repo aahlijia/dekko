@@ -29,6 +29,7 @@ from dekko.core.model import (
     FileMap,
     Import,
     Param,
+    ReadSite,
     Symbol,
     TypeUse,
 )
@@ -173,6 +174,9 @@ def build_id_table(graph: CallGraph) -> tuple[list[str], dict[str, int]]:
     for edge in graph.referenced:
         intern(edge.caller)
         intern(edge.callee)
+    for site in graph.reads:
+        intern(site.reader)
+        intern(site.name)
     _intern_heritage(graph, intern)
     _intern_modules(graph, intern)
     _intern_throws_catches(graph, intern)
@@ -777,6 +781,12 @@ class MapIndex:
             other new field added alongside it, there is no
             corresponding `env_reads_ambiguous`/`env_reads_external`
             side table.
+        reads_by_name: Property name → every aggregated read site of
+            it, repo-wide (empty for maps written before the section
+            existed) — see ``model.ReadSite``. Name-keyed because the
+            one consumer, ``unused``'s dispatch check, asks "is this
+            flagged symbol's name read anywhere"; never an adjacency
+            table, since a read is not an edge (``model.RawRead``).
         type_uses: Every parameter/return annotation on a
             function-shaped node that is not a symbol, repo-wide
             (empty for maps written before the section existed) —
@@ -866,6 +876,7 @@ class MapIndex:
     )
     catches: list[CatchSite] = field(default_factory=list)
     env_reads_by_key: dict[str, list[EnvRead]] = field(default_factory=dict)
+    reads_by_name: dict[str, list[ReadSite]] = field(default_factory=dict)
     type_uses: list[TypeUse] = field(default_factory=list)
     notes: dict[str, list[str]] = field(default_factory=dict)
     provenance: dict | None = None
@@ -982,6 +993,7 @@ class MapIndex:
         _filter_module_graph(self, out)
         _filter_throws_catches(self, out, by_id)
         _filter_env_reads(self, out)
+        _filter_reads(self, out, by_id)
         out.type_uses = [t for t in self.type_uses if not is_test_path(t.path)]
         out.hidden_test_symbols = {
             path: len(syms)
@@ -1176,6 +1188,21 @@ def _filter_env_reads(src: "MapIndex", out: "MapIndex") -> None:
             out.env_reads_by_key[key] = kept
 
 
+def _filter_reads(
+    src: "MapIndex", out: "MapIndex", by_id: dict[str, Symbol]
+) -> None:
+    """Fill ``out.reads_by_name`` from ``src``, test-code readers dropped.
+
+    Filtered on the reader id through ``_prod_id`` like
+    ``externals_by_name`` is on its caller: a module-level reader is
+    a ``path::<module>`` pseudo-id that falls back to the path check.
+    """
+    for name, sites in src.reads_by_name.items():
+        kept = [s for s in sites if _prod_id(s.reader, by_id)]
+        if kept:
+            out.reads_by_name[name] = kept
+
+
 @dataclass
 class Freshness:
     """Result of comparing a map's provenance to the working tree.
@@ -1331,6 +1358,8 @@ def _symbol_from_dict(d: dict) -> Symbol:
         exported=d.get("exported", False),
         doc=d.get("doc"),
         test=d.get("test", False),
+        in_literal=d.get("in_literal", False),
+        literal_consumer=d.get("literal_consumer"),
     )
 
 
@@ -1528,8 +1557,26 @@ def load_map(root: Path) -> MapIndex | None:
     _load_module_graph(index, doc, ids)
     _load_throws_catches(index, doc, ids)
     _load_env_reads(index, doc)
+    _load_reads(index, doc, ids)
     _load_type_uses(index, doc)
     return index
+
+
+def _load_reads(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
+    """Fill ``index.reads_by_name`` from a parsed ``map.json`` doc.
+
+    Absent entirely from documents written before the section
+    existed; ``.get("reads", [])`` makes this a no-op for those.
+    Reader ids and names go through the shared ``ids`` table like
+    ``external``'s caller/callee.
+    """
+    for d in doc.get("reads", []):
+        site = ReadSite(
+            reader=_resolve_ref(d.get("reader"), ids),
+            name=_resolve_ref(d.get("name", ""), ids),
+            lines=d.get("lines", []),
+        )
+        index.reads_by_name.setdefault(site.name, []).append(site)
 
 
 def _load_heritage(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
@@ -1809,8 +1856,15 @@ def index_from_maps(
     _index_module_graph(index, graph)
     _index_throws_catches(index, graph)
     _index_env_reads(index, graph)
+    _index_reads(index, graph)
     index.type_uses = [t for fm in files for t in fm.type_uses]
     return index
+
+
+def _index_reads(index: MapIndex, graph: CallGraph) -> None:
+    """The ``index_from_maps`` fill-in loop for property reads."""
+    for site in graph.reads:
+        index.reads_by_name.setdefault(site.name, []).append(site)
 
 
 def _index_module_graph(index: MapIndex, graph: CallGraph) -> None:
