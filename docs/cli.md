@@ -1113,6 +1113,12 @@ budgeted by default (`affected`, `workset`, `search`, `summary`,
 limit. For the lean map, whose cap never goes away, `0` means the
 default size-scaled cap. A negative budget is a usage error.
 
+Row counts (`--limit`, `--top`, `--hops`, `--packs`) take `0` or more.
+`--limit 0` is the counts-only call: the header and a `N of N omitted`
+footer, no rows. `trace --max-paths` takes 1 or more. A negative
+count is a usage error, and the MCP tools reject the same values (plus
+`true`, fractions and lists) with an error that names the argument.
+
 Token counts depend on the output mode. The text footer's `(~N
 tokens)` estimates the text you're reading. Under `--json`,
 `meta.tokens` (and what `--budget` caps) estimates the result rows

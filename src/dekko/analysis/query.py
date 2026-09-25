@@ -4072,6 +4072,10 @@ def run(
         )
     text = buf.getvalue()
     sys.stdout.write(text)
-    if code == EXIT_OK and not as_json and text.strip():
+    # A relation has no header line, so ``--limit 0`` leaves the text
+    # empty; the footer still has to say what was held back, or the
+    # reply reads as "no callers".
+    omitted = meter is not None and meter.omitted > 0
+    if code == EXIT_OK and not as_json and (text.strip() or omitted):
         print(meter.footer() if meter is not None else token_footer(text))
     return code

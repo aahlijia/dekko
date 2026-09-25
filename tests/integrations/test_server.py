@@ -2194,3 +2194,109 @@ def test_negative_budget_is_a_tool_error(
     result = _call(ctx, "get_callers", {"symbol": "f", "budget": -1})
     assert result["isError"]
     assert "budget" in result["content"][0]["text"]
+
+
+# Every registered tool's integer argument, with the arguments the tool
+# needs to get as far as reading it.
+_INT_ARG_SITES = [
+    ("search_code", {"query": "f"}, "limit"),
+    ("get_callers", {"symbol": "f"}, "limit"),
+    ("get_callees", {"symbol": "g"}, "limit"),
+    ("find_usages", {"name": "f"}, "limit"),
+    ("find_type_usages", {"type": "int"}, "limit"),
+    ("outline", {"target": "a.py"}, "limit"),
+    ("impacted_tests", {}, "limit"),
+    ("get_context_pack", {"target": "f"}, "hops"),
+    ("workset", {"symbol": "f"}, "packs"),
+    ("check_ambiguous", {}, "top"),
+    ("get_callers", {"symbol": "f"}, "budget"),
+]
+
+
+@pytest.mark.parametrize("bad", ["abc", [3], 2.5, True, -1])
+@pytest.mark.parametrize(("tool", "base", "arg"), _INT_ARG_SITES)
+def test_bad_int_arg_is_a_tool_error(
+    make_mapped_repo: RepoFactory,
+    tool: str,
+    base: dict,
+    arg: str,
+    bad: object,
+) -> None:
+    """A value that isn't a non-negative integer is the caller's
+    mistake, named as such, never an internal error and never quietly
+    read as some other number (``true`` as 1, ``2.5`` as 2, ``-1`` as
+    "all rows but the last")."""
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(ctx, tool, {**base, arg: bad})
+    text = result["content"][0]["text"]
+    assert result.get("isError"), text
+    assert f"argument '{arg}'" in text
+    assert "internal error" not in text
+
+
+@pytest.mark.parametrize(
+    ("tool", "base", "arg"),
+    [
+        site
+        for site in _INT_ARG_SITES
+        if site[0]
+        in (
+            "search_code",
+            "impacted_tests",
+            "get_context_pack",
+            "workset",
+            "check_ambiguous",
+        )
+    ],
+)
+def test_null_int_arg_reads_as_absent(
+    make_mapped_repo: RepoFactory,
+    tool: str,
+    base: dict,
+    arg: str,
+) -> None:
+    """``null`` means "not given" for every integer argument, as it
+    already did for ``budget`` and the relation tools' ``limit``."""
+    ctx = _ctx(make_mapped_repo(SRC))
+    omitted = _call(ctx, tool, dict(base))
+    nulled = _call(ctx, tool, {**base, arg: None})
+    assert nulled == omitted
+
+
+@pytest.mark.parametrize("value", [1.0, "1"])
+def test_whole_float_and_numeric_string_int_args_still_work(
+    make_mapped_repo: RepoFactory,
+    value: object,
+) -> None:
+    """No-regression guard: ``1.0`` and ``"1"`` keep meaning 1, since
+    JSON Schema allows the first and some clients send the second."""
+    ctx = _ctx(_many_callers_repo(make_mapped_repo))
+    as_int = _call(ctx, "get_callers", {"symbol": "f", "limit": 1})
+    loose = _call(ctx, "get_callers", {"symbol": "f", "limit": value})
+    assert loose == as_int
+    assert not loose.get("isError")
+
+
+def test_zero_limit_on_get_callers_says_what_it_held_back(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``limit: 0`` is the counts-only call: no rows, but the footer
+    still says how many exist, so it can't read as "no callers"."""
+    ctx = _ctx(_many_callers_repo(make_mapped_repo))
+    result = _call(ctx, "get_callers", {"symbol": "f", "limit": 0})
+    text = result["content"][0]["text"]
+    assert not result.get("isError")
+    assert "60 of 60 omitted" in text
+    assert "b.py:" not in text
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_trace_path_needs_at_least_one_path(
+    make_mapped_repo: RepoFactory,
+    bad: int,
+) -> None:
+    """Zero paths isn't a question; asking for it used to answer "no
+    call path" for a pair that has one."""
+    ctx = _ctx(make_mapped_repo(SRC))
+    with pytest.raises(server.ToolError, match="'max_paths' must be 1"):
+        server.tool_trace_path(ctx, {"from": "g", "to": "f", "max_paths": bad})

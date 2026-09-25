@@ -389,6 +389,53 @@ def _token_budget(value: str) -> int:
     return budget
 
 
+def _count_at_least(value: str, minimum: int) -> int:
+    """Parse a count flag, rejecting non-integers and values below
+    ``minimum``.
+
+    A negative row count used to reach a ``rows[:limit]`` slice and
+    drop rows off the end instead of capping anything.
+
+    Args:
+        value: The raw command-line value.
+        minimum: The smallest accepted count.
+
+    Returns:
+        The count.
+
+    Raises:
+        argparse.ArgumentTypeError: For a non-integer value or one
+            below ``minimum``.
+    """
+    try:
+        count = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid count {value!r}: expected an integer"
+        ) from None
+    if count < minimum:
+        raise argparse.ArgumentTypeError(
+            f"invalid count {count}: must be {minimum} or more"
+        )
+
+    return count
+
+
+def _row_count(value: str) -> int:
+    """``--limit``/``--top``/``--hops``/``--packs`` values: 0 or more.
+
+    ``0`` is the counts-only call: the header and an "N of N omitted"
+    footer, no rows.
+    """
+    return _count_at_least(value, 0)
+
+
+def _positive_count(value: str) -> int:
+    """``trace --max-paths``: 1 or more, since zero paths answers no
+    question and used to print a false "no call path"."""
+    return _count_at_least(value, 1)
+
+
 def build_subcommand_parser() -> argparse.ArgumentParser:
     """Construct the subcommand parser (map/query/context/status)."""
     parser = argparse.ArgumentParser(
@@ -490,7 +537,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_query.add_argument(
         "--limit",
-        type=int,
+        type=_row_count,
         default=None,
         help=(
             "max text result lines (default: 50; with --budget and no "
@@ -590,7 +637,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_outline.add_argument(
         "--limit",
-        type=int,
+        type=_row_count,
         default=None,
         help=f"max symbol rows (default: {outline_mod.DEFAULT_LIMIT}, "
         "or no row cap when --budget is given)",
@@ -613,7 +660,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_ctx.add_argument(
         "--hops",
-        type=int,
+        type=_row_count,
         default=1,
         help="neighborhood radius (default: 1)",
     )
@@ -664,7 +711,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_trace.add_argument(
         "--max-paths",
-        type=int,
+        type=_positive_count,
         default=3,
         help="max distinct shortest paths to report (default: 3)",
     )
@@ -699,7 +746,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_diff.add_argument(
         "--limit",
-        type=int,
+        type=_row_count,
         default=8,
         help="max impacted callers shown per symbol (default: 8)",
     )
@@ -742,7 +789,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_affected.add_argument(
         "--limit",
-        type=int,
+        type=_row_count,
         default=8,
         help="max impacted symbols shown per test file (default: 8)",
     )
@@ -814,7 +861,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_workset.add_argument(
         "--packs",
-        type=int,
+        type=_row_count,
         default=workset_mod.DEFAULT_PACKS,
         help=f"top-centrality touched symbols to deep-pack "
         f"(default: {workset_mod.DEFAULT_PACKS})",
@@ -860,7 +907,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_search.add_argument(
         "--limit",
-        type=int,
+        type=_row_count,
         default=search.DEFAULT_LIMIT,
         help=f"max hits to return (default: {search.DEFAULT_LIMIT})",
     )
@@ -1028,7 +1075,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_sanity.add_argument(
         "--limit",
-        type=int,
+        type=_row_count,
         default=sanity_mod.DEFAULT_REPORT_LIMIT,
         help="max rendered rows per bucket (matches/dekko-only/"
         f"grep-only) (default: {sanity_mod.DEFAULT_REPORT_LIMIT})",
@@ -1257,7 +1304,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_unused.add_argument(
         "--limit",
-        type=int,
+        type=_row_count,
         default=None,
         help="max result rows (default: 50); when given, also the row "
         "cap for the --suspect and --dispatch sections (default: 20 "
@@ -1266,7 +1313,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_unused.add_argument(
         "--top",
         dest="limit",
-        type=int,
+        type=_row_count,
         default=argparse.SUPPRESS,
         help="alias for --limit, kept for cross-command habit "
         "(stats/ambiguous/deps all use --top for a ranked-list size; "
@@ -1326,7 +1373,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_stats.add_argument(
         "--top",
-        type=int,
+        type=_row_count,
         default=10,
         help="entries per ranked list (default: 10)",
     )
@@ -1354,13 +1401,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_ambig.add_argument(
         "--top",
-        type=int,
+        type=_row_count,
         default=10,
         help="entries to keep in each ranked list (default: 10)",
     )
     p_ambig.add_argument(
         "--limit",
-        type=int,
+        type=_row_count,
         default=100,
         help="max text result rows for --by/--name views (default: 100)",
     )
@@ -1403,13 +1450,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_deps.add_argument(
         "--top",
-        type=int,
+        type=_row_count,
         default=10,
         help="entries in the most-depended-on ranking (default: 10)",
     )
     p_deps.add_argument(
         "--limit",
-        type=int,
+        type=_row_count,
         default=100,
         help="max text result rows for --file/--cycles (default: 100)",
     )

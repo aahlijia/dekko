@@ -231,9 +231,8 @@ def _outline_limit_arg(args: dict) -> int:
     never been the same, only the *precedence rule* is being mirrored
     here.
     """
-    limit = args.get("limit")
     return outline_mod.effective_limit(
-        int(limit) if limit is not None else None, args.get("budget")
+        _int_arg(args, "limit", None), _budget_arg(args, None)
     )
 
 
@@ -273,6 +272,68 @@ _TARGET_PARAM = {
 _TARGET_ALIASES = ("symbol", "name", "target", "type")
 
 
+def _as_int(key: str, raw: Any) -> int:
+    """Read one integer argument value, or raise ``ToolError``.
+
+    Whole-number floats (``20.0``) and numeric strings (``"20"``) are
+    accepted: JSON Schema's ``integer`` allows the first, and some
+    clients send every argument as a string. ``bool`` is rejected even
+    though Python counts it as an ``int``: ``true`` meaning ``1`` is a
+    surprise, not a row count.
+    """
+    value = None
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        value = raw
+    elif isinstance(raw, float) and raw.is_integer():
+        value = int(raw)
+    elif isinstance(raw, str):
+        try:
+            value = int(raw)
+        except ValueError:
+            value = None
+    if value is None:
+        raise ToolError(f"argument '{key}' must be an integer, got {raw!r}")
+
+    return value
+
+
+def _int_arg(
+    args: dict,
+    key: str,
+    default: int | None,
+    minimum: int = 0,
+    floor_text: str | None = None,
+) -> int | None:
+    """An integer tool argument: ``default`` when absent or null.
+
+    Args:
+        args: The tool call's arguments.
+        key: The argument's name.
+        default: Returned when the argument is absent or ``null``.
+        minimum: The smallest accepted value.
+        floor_text: How the error names the floor, when ``minimum``
+            alone doesn't say what it means (``budget``'s "0 (no
+            cap)").
+
+    Returns:
+        The argument's value, or ``default``.
+
+    Raises:
+        ToolError: For a non-integer value or one below ``minimum``.
+    """
+    raw = args.get(key)
+    if raw is None:
+        return default
+    value = _as_int(key, raw)
+    if value < minimum:
+        floor = floor_text or str(minimum)
+        raise ToolError(
+            f"argument '{key}' must be {floor} or more, got {value}"
+        )
+
+    return value
+
+
 def _budget_arg(args: dict, default: int | None) -> int | None:
     """A tool's ``budget`` argument: ``default`` when absent, ``0`` for
     no cap (read as uncapped by ``textutil.fit_to_budget``).
@@ -280,21 +341,7 @@ def _budget_arg(args: dict, default: int | None) -> int | None:
     Raises:
         ToolError: For a negative or non-integer budget.
     """
-    raw = args.get("budget")
-    if raw is None:
-        return default
-    try:
-        budget = int(raw)
-    except (TypeError, ValueError):
-        raise ToolError(
-            f"argument 'budget' must be an integer, got {raw!r}"
-        ) from None
-    if budget < 0:
-        raise ToolError(
-            f"argument 'budget' must be 0 (no cap) or more, got {budget}"
-        )
-
-    return budget
+    return _int_arg(args, "budget", default, floor_text="0 (no cap)")
 
 
 def _limit_arg(args: dict) -> int:
@@ -305,9 +352,8 @@ def _limit_arg(args: dict) -> int:
     count: only a caller who actually chose a budget has said how much
     output they can take.
     """
-    limit = args.get("limit")
     return query.effective_limit(
-        int(limit) if limit is not None else None,
+        _int_arg(args, "limit", None),
         _budget_arg(args, None),
     )
 
@@ -636,7 +682,7 @@ def tool_get_context_pack(ctx: Context, args: dict) -> str:
     """Minimal signature neighborhood for editing a symbol or file."""
     index = _index_for(ctx, args)
     target = _require(args, "target")
-    hops = int(args.get("hops", 1))
+    hops = _int_arg(args, "hops", 1)
     budget = _budget_arg(args, DEFAULT_RELATION_BUDGET)
     with_source = bool(args.get("with_source", False))
     root = _root_of(ctx, args)
@@ -685,7 +731,7 @@ def tool_trace_path(ctx: Context, args: dict) -> str:
     index = _index_for(ctx, args)
     frm = _require(args, "from")
     to = _require(args, "to")
-    max_paths = int(args.get("max_paths", 3))
+    max_paths = _int_arg(args, "max_paths", 3, minimum=1)
     code, out, err = _capture(
         lambda: trace.run(index, frm, to, max_paths=max_paths, as_json=False)
     )
@@ -705,7 +751,7 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     budget = _budget_arg(args, None)
     # ``None`` lets ``unused.run`` apply its defaults, including the
     # suspects section's own cap, which any explicit limit replaces.
-    given = args.get("limit") is not None or budget is not None
+    given = _int_arg(args, "limit", None) is not None or budget is not None
     limit = _limit_arg(args) if given else None
     suspect = bool(args.get("suspect", False))
     code, out, err = _capture(
@@ -728,7 +774,7 @@ def tool_impacted_tests(ctx: Context, args: dict) -> str:
     root = _root_of(ctx, args)
     rev = args.get("rev")
     rev = rev if isinstance(rev, str) and rev else None
-    limit = int(args.get("limit", 8))
+    limit = _int_arg(args, "limit", 8)
     budget = _budget_arg(args, affected.DEFAULT_BUDGET)
     code, out, err = _capture(
         lambda: affected.run(
@@ -761,7 +807,7 @@ def tool_search_code(ctx: Context, args: dict) -> str:
             filtered.symbols_by_id
         )
         index = filtered
-    limit = int(args.get("limit", search.DEFAULT_LIMIT))
+    limit = _int_arg(args, "limit", search.DEFAULT_LIMIT)
     budget = _budget_arg(args, search.DEFAULT_BUDGET)
     kinds = search.parse_kinds(args.get("kind"))
     scorer_name = args.get("scorer") or search.DEFAULT_SCORER
@@ -799,7 +845,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
             "target type)"
         )
     budget = _budget_arg(args, workset_mod.DEFAULT_BUDGET)
-    packs = int(args.get("packs", workset_mod.DEFAULT_PACKS))
+    packs = _int_arg(args, "packs", workset_mod.DEFAULT_PACKS)
     task = _task_of(ctx, args)
     code, out, err = _capture(
         lambda: workset_mod.run(
@@ -823,7 +869,7 @@ def tool_workset(ctx: Context, args: dict) -> str:
 def tool_stats(ctx: Context, args: dict) -> str:
     """Fan-in/out hotspots, largest files, language mix."""
     index = _index_for(ctx, args)
-    top = int(args.get("top", 10))
+    top = _int_arg(args, "top", 10)
     code, out, err = _capture(lambda: stats.run(index, top, as_json=False))
     if code != 0:
         raise ToolError(err.strip() or out.strip() or f"exit {code}")
@@ -842,7 +888,7 @@ def tool_check_ambiguous(ctx: Context, args: dict) -> str:
     not a full report.
     """
     index = _index_for(ctx, args)
-    top = int(args.get("top", 5))
+    top = _int_arg(args, "top", 5)
     budget = _budget_arg(args, 500)
     code, out, err = _capture(
         lambda: ambiguous.run(

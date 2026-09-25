@@ -9,6 +9,35 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.2.4] — 2026-09-25
+
+### Fixed
+- **MCP integer arguments fail as the caller's mistake, not dekko's.**
+  `limit`, `hops`, `packs` and `top` went through a bare `int()`, so
+  `"abc"`, a list, or (on `search_code`, `impacted_tests`,
+  `get_context_pack`, `workset` and `check_ambiguous`) `null` came
+  back as `dekko: internal error: invalid literal for int()`: 21 of 70
+  bad-value calls on one repo. Every integer argument, `budget`
+  included, now follows one rule: absent or `null` means the default;
+  an integer, a whole-number float (`20.0`) or a numeric string
+  (`"20"`) is read as that number; `true`, a fraction, a list or a
+  negative value is an error that names the argument. `true` used to
+  read as 1 and `2.5` as 2.
+- **Negative row counts are rejected on the CLI.** `--limit`, `--top`,
+  `--hops` and `--packs` took any integer, and a negative one reached
+  a `rows[:limit]` slice: `query callers X --limit -1` dropped the
+  last row and suggested raising the limit. They are usage errors
+  now, like a negative `--budget`.
+- **`trace --max-paths 0` no longer reports a missing path.** It
+  answered "no resolved call path" (exit 1) for a pair `--max-paths 1`
+  connects. `--max-paths` now takes 1 or more.
+- **`query callers`/`callees --limit 0` prints its footer.** It
+  printed nothing at all, which reads as "no callers"; it now prints
+  `(~0 tokens · N of N omitted · raise --limit)`, as `query uses`,
+  `outline`, `search` and `unused` already did. MCP `get_callers`,
+  `get_callees` and `find_type_usages` with `limit: 0` get the same
+  footer.
+
 ## [1.2.3] — 2026-09-25
 
 ### Changed
