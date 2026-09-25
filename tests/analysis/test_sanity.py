@@ -4717,3 +4717,194 @@ def test_miss_tier1_labels_a_true_ref_beside_a_shadowing_local(
     rows = _grep_only_causes(root, "errors.ts:describeErr", capsys)
     assert rows.get(3) == sanity.CAUSE_VALUE_REFERENCE
     assert rows.get(7) != sanity.CAUSE_VALUE_REFERENCE
+
+
+# --- Rust: use lines, inline test modules, unmapped files -------------
+
+
+def _rust_use_hit(
+    tmp_path: Path, text: str, line: int, path: str = "src/lib.rs"
+) -> sanity.GrepHit:
+    """Write ``text`` to ``path`` under ``tmp_path``; return a hit on it."""
+    file = tmp_path / path
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(text)
+    snippet = text.splitlines()[line - 1]
+    return sanity.GrepHit(path=path, line=line, snippet=snippet)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "use editor::{HighlightKey, Target};",
+        "pub(crate) use editor::{Target, Other};",
+        "use crate::display::Target;",
+        "use crate::x::{Target as Renamed};",
+        "    use super::Target;",
+    ],
+)
+def test_rust_use_line_single_line(tmp_path: Path, line: str) -> None:
+    hit = _rust_use_hit(tmp_path, line + "\n", 1)
+    assert sanity._looks_like_rust_use_line(tmp_path, hit, "Target")
+
+
+def test_rust_use_line_continuation_rows(tmp_path: Path) -> None:
+    text = (
+        "use editor::{\n"
+        "    display_map::{\n"
+        "        DisplayPoint, Target,\n"
+        "    },\n"
+        "    Bias, Target,\n"
+        "    Target};\n"
+    )
+    for line in (3, 5, 6):
+        hit = _rust_use_hit(tmp_path, text, line)
+        assert sanity._looks_like_rust_use_line(tmp_path, hit, "Target")
+
+
+def test_rust_use_line_rejects_non_use_name_lists(tmp_path: Path) -> None:
+    struct_literal = "let v = Wrapper {\n    a,\n    Target,\n};\n"
+    enum_after_use = "use a::B;\nenum E {\n    A,\n    Target,\n}\n"
+    for text, line in ((struct_literal, 3), (enum_after_use, 4)):
+        hit = _rust_use_hit(tmp_path, text, line)
+        assert not sanity._looks_like_rust_use_line(tmp_path, hit, "Target")
+
+
+def test_rust_use_line_needs_whole_word_and_rust(tmp_path: Path) -> None:
+    hit = _rust_use_hit(tmp_path, "use a::TargetExt;\n", 1)
+    assert not sanity._looks_like_rust_use_line(tmp_path, hit, "Target")
+    ts_hit = _rust_use_hit(tmp_path, "use a::Target;\n", 1, path="src/a.ts")
+    assert not sanity._looks_like_rust_use_line(tmp_path, ts_hit, "Target")
+
+
+def test_classify_miss_not_mapped() -> None:
+    cause = sanity.classify_miss(
+        "    target();",
+        "target",
+        is_test_file=False,
+        unsupported_language=False,
+        tests_excluded=True,
+        not_mapped=True,
+    )
+    assert cause == sanity.CAUSE_NOT_MAPPED
+
+
+def test_map_scope_unmapped_needs_supported_language() -> None:
+    scope = sanity._MapScope(
+        test_spans={}, mapped_paths=frozenset({"src/lib.rs"})
+    )
+    assert scope.is_unmapped("src/big.rs")
+    assert not scope.is_unmapped("src/lib.rs")
+    assert not scope.is_unmapped("docs/notes.txt")
+
+
+def test_map_scope_test_line_by_path_or_span() -> None:
+    scope = sanity._MapScope(
+        test_spans={"src/lib.rs": ((10, 20),)},
+        mapped_paths=frozenset(),
+    )
+    assert scope.is_test_line("src/lib.rs", 15)
+    assert not scope.is_test_line("src/lib.rs", 21)
+    assert scope.is_test_line("tests/it.rs", 1)
+
+
+RUST_TEST_MODULE_REPO = {
+    "src/lib.rs": (
+        "pub fn target() -> u32 {\n"
+        "    1\n"
+        "}\n"
+        "\n"
+        "pub fn caller() -> u32 {\n"
+        "    target()\n"
+        "}\n"
+        "\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    use super::*;\n"
+        "\n"
+        "    #[test]\n"
+        "    fn uses_target() {\n"
+        "        let v = target();\n"
+        "        assert!(v == 1);\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/other.rs": "use crate::{caller, target};\n",
+}
+
+
+def _causes_in_file(doc: dict, path: str) -> set[str]:
+    return {row["cause"] for row in doc["grep_only"] if row["file"] == path}
+
+
+def test_sanity_inline_test_module_is_test_filter(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(RUST_TEST_MODULE_REPO)
+    code = cli.main(["sanity", "target", "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert _causes_in_file(doc, "src/lib.rs") == {sanity.CAUSE_TEST_FILTER}
+    assert _causes_in_file(doc, "src/other.rs") == {
+        sanity.CAUSE_IMPORT_STATEMENT
+    }
+
+
+def test_sanity_inline_test_module_call_matches_with_tests_included(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(RUST_TEST_MODULE_REPO)
+    code = cli.main(
+        ["sanity", "target", "--root", str(root), "--json", "--include-tests"]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    matched = {(row["file"], row["line"]) for row in doc["matches"]}
+    assert ("src/lib.rs", 15) in matched
+    assert _causes_in_file(doc, "src/lib.rs") == set()
+
+
+def test_sanity_all_agrees_with_single_target_on_test_module(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(RUST_TEST_MODULE_REPO)
+    index = mapfile.load_map(root)
+    assert index is not None
+    code = sanity.run_all(index, root, jobs=1, as_json=True)
+    assert code == sanity.EXIT_OK
+    doc = json.loads(capsys.readouterr().out)
+    causes = doc["aggregate_causes"]
+    assert causes.get(sanity.CAUSE_TEST_FILTER, 0) >= 1
+    assert sanity.CAUSE_UNEXPLAINED not in causes
+
+
+def test_sanity_file_skipped_by_map_is_not_mapped(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    files = {
+        "src/lib.rs": "pub fn target() -> u32 {\n    1\n}\n",
+        "src/big.rs": (
+            "pub fn big() -> u32 {\n    crate::target()\n}\n"
+            + "// padding\n" * 200
+        ),
+        "tests/it.rs": "#[test]\nfn it() {\n    let _ = target();\n}\n",
+    }
+    for name, text in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    assert (
+        cli.main(["map", str(tmp_path), "--quiet", "--max-file-size", "1000"])
+        == 0
+    )
+    code = cli.main(["sanity", "target", "--root", str(tmp_path), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert _causes_in_file(doc, "src/big.rs") == {sanity.CAUSE_NOT_MAPPED}
+    # A test file is absent from the tests-excluded view, never from the
+    # map: it must keep its test-filter cause.
+    assert _causes_in_file(doc, "tests/it.rs") == {sanity.CAUSE_TEST_FILTER}

@@ -61,7 +61,8 @@ runs the same `query callers <target>` dekko would answer with (or
 across the repo, and diffs the two hit sets into matches/dekko-only/
 grep-only buckets — every grep-only hit is labeled with a likely
 cause drawn from `dekko-verify`'s own blind-spot list (a cross-package/
-qualified call, an unparsed-language file, a likely unrelated
+qualified call, an unparsed-language file, a file the map skipped, an
+import or `use` line, a likely unrelated
 external-library method sharing the target's bare name, a test-only
 call site, or a short/generic target name), never a guess presented as
 certain. Always exits `0`; a nonempty grep-only bucket is a finding to

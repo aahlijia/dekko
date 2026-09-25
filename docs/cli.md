@@ -277,12 +277,19 @@ sets by `(file, line)` into three buckets:
   is labeled with a likely cause: a cross-package/qualified call
   (`pkg.Func(`, `Type::method(`, `Type.method(`), a bare
   import/require statement naming the symbol (`import { X } from
-  '...'`, `from x import X`, `const { X } = require('...')` — not a
-  call site), a file in a language dekko can't parse, a likely
+  '...'`, `from x import X`, `const { X } = require('...')`, a Rust
+  `use a::{X, Y};` line or one row of a multi-line `use` list — not a
+  call site), a file in a language dekko can't parse, a file in a
+  language it does parse that the map doesn't hold (skipped as too
+  large or generated, or excluded; checked first, since no other
+  cause can apply to a file dekko never read), a likely
   unrelated external-library method sharing the target's bare name
   (see "Receiver-mismatch detection" below), a test-only call
   site (tests are excluded from the dekko-side query by default here,
-  unlike the plain `query callers` default — see `--include-tests`), a
+  unlike the plain `query callers` default — see `--include-tests`;
+  "test" means exactly what that filter drops, so a call inside a Rust
+  inline `#[cfg(test)] mod tests { ... }` counts, not only a call in a
+  test-named file), a
   short/generic target name (resolver precision degrades in a dense
   repo), or "unexplained" when none of those fit.
 

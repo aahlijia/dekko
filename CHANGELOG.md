@@ -9,6 +9,43 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.4] — 2026-09-24
+
+### Fixed
+- **`dekko sanity` stops calling ordinary Rust lines "unexplained".**
+  On zed, `sanity MultiBufferOffset` labelled 407 of its 814 grep-only
+  rows "unexplained miss — inspect manually", and `DevicePixels` 50 of
+  220, which made `--all --fail-on-unexplained` useless as a CI gate
+  on a normal Rust repo. Three causes, none of them a resolver bug:
+  - *Inline test modules.* `--no-tests` drops a caller when its path
+    is test code **or** the extractor flagged it as test code (a
+    function inside `#[cfg(test)] mod tests { ... }`). `sanity`
+    compared against the already-filtered view, where those symbols
+    no longer exist, so it could only recognise test code by path.
+    It now reads the flag from the unfiltered map, the same predicate
+    the filter applies. 186 of the 407 rows.
+  - *Rust `use` lines.* A single-line `use a::{X, Y};` and each row of
+    a multi-line `use` list are now "import/require statement naming
+    the symbol". Checked against tree-sitter over all 26,610 `use`
+    lines in zed's 1,923 Rust files: none missed; the only other lines
+    claimed are `use` text inside string literals and macro bodies,
+    which aren't calls either.
+  - *Files the map never parsed.* A supported-language file skipped as
+    too large or generated, or excluded, used to fall through every
+    rung. It now gets its own cause, "file not in the map ... dekko
+    never parsed it", checked before every other rung, since the
+    others explain a resolver miss and the resolver never saw the
+    file. 120 of the 407 rows sat in one 1.3 MB test file.
+
+  Result: `MultiBufferOffset` 407 → 39 unexplained, `DevicePixels`
+  50 → 0. The 39 left are calls inside macro arguments (`vec!`,
+  `assert_eq!`, a documented gap) and a few type positions no rule
+  covers yet; they stay "unexplained" on purpose. Across zed's whole
+  `sanity --all --max-names 300` sweep, unexplained rows drop from
+  6,356 to 2,800. On the six non-Rust eval repos the unexplained count
+  is unchanged; the only rows that move are ones in skipped files
+  (tensorflow 203, claude-code 1) taking the new cause.
+
 ## [1.1.3] — 2026-09-24
 
 ### Fixed
