@@ -850,13 +850,24 @@ def _pool_retry_note(what: str, retry_workers: int, forked: bool) -> None:
     ``fork``, the retry also switches start method to ``spawn`` (see
     ``run_pooled_with_retry``), and the note says so -- the disclosure
     should name the actual mechanism change, not just the worker count.
+
+    The note states what happened, not a guessed cause. It used to
+    blame "another concurrent dekko process", but on macOS the common
+    failure is the Objective-C runtime aborting a ``fork()``ed worker
+    (``+[NSString initialize] may have been in progress in another
+    thread when fork() was called``), seen with no other dekko running.
     """
     plural = "" if retry_workers == 1 else "s"
     switched = ", switching fork -> spawn" if forked else ""
+    cause = (
+        "; on macOS that is usually the Objective-C runtime's fork-safety "
+        "check"
+        if forked and sys.platform == "darwin"
+        else ""
+    )
     print(
-        f"note: process pool failed during {what} (likely CPU "
-        "contention from another concurrent dekko process on this "
-        f"machine) -- retrying with reduced parallelism "
+        f"note: process pool failed during {what} (a worker process "
+        f"crashed{cause}) -- retrying with reduced parallelism "
         f"({retry_workers} worker{plural}{switched})",
         file=sys.stderr,
     )
@@ -955,8 +966,8 @@ def run_pooled_with_retry(
         raise PoolStalledError(
             f"process pool made no progress during {what} within "
             f"{POOL_RESULT_TIMEOUT_S}s -- a worker likely failed to "
-            "start or stalled (e.g. under heavy CPU contention from "
-            "another concurrent dekko process on this machine). "
+            "start or stalled (e.g. under heavy CPU contention on this "
+            "machine). "
             "Retry with --jobs 1, or after system load has "
             "subsided."
         ) from exc

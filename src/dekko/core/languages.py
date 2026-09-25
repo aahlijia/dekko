@@ -1436,6 +1436,14 @@ _RUST_MACRO_CALL_RECOVERY_VERSION = 1
 # the repos already mapped.
 _CALLEE_TEXT_CANONICAL_VERSION = 1
 
+# Bumped whenever ``extractor._rust_error_attribute_spans`` changes
+# which calls it drops. tree-sitter-rust can't parse an attribute on a
+# struct-pattern field, and its error recovery leaves the attribute's
+# payload (``cfg_attr(not(..), allow(..))``) as real call nodes; those
+# calls are now dropped. Same blind spot as the constants above: a
+# ``.dekko`` cache built before the change keeps serving them.
+_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.
@@ -1446,8 +1454,10 @@ def spec_fingerprint() -> str:
     driven by ``dataclasses.fields``, not a hand-kept list, so a new
     field is covered automatically) — plus
     ``_HEADER_DISPATCH_HEURISTIC_VERSION``,
-    ``_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION`` and
-    ``_RUST_MACRO_CALL_RECOVERY_VERSION``, which each cover
+    ``_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION``,
+    ``_RUST_MACRO_CALL_RECOVERY_VERSION``,
+    ``_CALLEE_TEXT_CANONICAL_VERSION`` and
+    ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION``, which each cover
     one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments). Used to
     invalidate a stale ``.dekko`` cache entry or flag a stale
@@ -1465,6 +1475,8 @@ def spec_fingerprint() -> str:
         f"{_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION}",
         f"rust_macro_call_recovery={_RUST_MACRO_CALL_RECOVERY_VERSION}",
         f"callee_text_canonical={_CALLEE_TEXT_CANONICAL_VERSION}",
+        "rust_error_attribute_recovery="
+        f"{_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):

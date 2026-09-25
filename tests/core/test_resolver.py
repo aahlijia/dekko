@@ -6745,3 +6745,36 @@ def test_is_guarded_method_name_agrees_with_the_noise_guard(name: str) -> None:
     noise = resolver_mod._is_noise_call(call, {}, set())
     assert noise == resolver_mod.is_guarded_method_name(name)
     assert noise == (name != "prompt")
+
+
+@_NO_FORK_ON_WINDOWS
+@pytest.mark.parametrize(
+    ("platform", "names_objc"), [("darwin", True), ("linux", False)]
+)
+def test_pool_retry_note_states_the_crash_not_a_guessed_cause(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    platform: str,
+    names_objc: bool,
+) -> None:
+    """The note used to blame another concurrent dekko process; the
+    usual macOS cause is the Objective-C fork-safety abort, seen with
+    nothing else running."""
+    monkeypatch.setattr(
+        resolver_mod,
+        "_pool_mp_context",
+        lambda: multiprocessing.get_context("fork"),
+    )
+    monkeypatch.setattr(resolver_mod.sys, "platform", platform)
+
+    def run(w: int, ctx: BaseContext) -> str:
+        if ctx.get_start_method() == "fork":
+            raise BrokenProcessPool("simulated: process pool broken")
+        return "ok"
+
+    resolver_mod.run_pooled_with_retry(run, workers=8, what="test")
+
+    err = capsys.readouterr().err
+    assert "a worker process crashed" in err
+    assert "concurrent dekko" not in err
+    assert ("Objective-C" in err) is names_objc

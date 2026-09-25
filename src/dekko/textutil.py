@@ -308,7 +308,8 @@ def fit_to_budget(
     greedily until adding the next would push the estimated token cost
     of ``prefix`` plus the kept rows past ``budget``. At least one row is
     always kept when any exist, even under a tiny budget. ``None`` for
-    either bound disables it. Deterministic for a fixed input order.
+    either bound disables it, and so does a ``budget`` of ``0``
+    (``--budget 0``). Deterministic for a fixed input order.
 
     Args:
         lines: Candidate output rows, most-relevant first.
@@ -325,6 +326,7 @@ def fit_to_budget(
     Returns:
         ``(kept_lines, meter)``.
     """
+    budget = budget or None  # an explicit 0 asks for no cap
     total = len(lines)
     capped = lines if limit is None else lines[:limit]
     kept: list[str] = []

@@ -1,5 +1,6 @@
 """The diff subcommand: added/removed/changed symbols and exit codes."""
 
+import errno
 import json
 import os
 import subprocess
@@ -134,6 +135,35 @@ def test_diff_bad_rev(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     root = _repo(tmp_path, BASE)
     assert cli.main(["diff", "nope-not-a-rev", "--root", str(root)]) == 2
     assert "cannot export git rev" in capsys.readouterr().err
+
+
+def test_diff_bad_rev_carries_gits_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    root = _repo(tmp_path, BASE)
+    assert cli.main(["diff", "nope-not-a-rev", "--root", str(root)]) == 2
+    err = capsys.readouterr().err
+    assert "cannot export git rev 'nope-not-a-rev': fatal:" in err
+
+
+def test_diff_export_extraction_failure_is_not_called_a_bad_rev(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A full disk during extraction used to read "unknown rev or not
+    a git repo" for a perfectly valid rev."""
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+
+    def full_disk(tf: object, dest: Path) -> None:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr(diff, "_safe_extractall", full_disk)
+    assert cli.main(["diff", "--root", str(root)]) == 2
+    err = capsys.readouterr().err
+    assert os.strerror(errno.ENOSPC) in err
+    assert "unknown rev" not in err
 
 
 def test_diff_uses_no_tar_binary(
@@ -423,7 +453,7 @@ def test_diff_rev_cache_hit_skips_reexport(
     calls: list[str] = []
     real_export_rev = diff.export_rev
 
-    def spy(root_arg: Path, rev: str, dest: Path) -> bool:
+    def spy(root_arg: Path, rev: str, dest: Path) -> None:
         calls.append(rev)
         return real_export_rev(root_arg, rev, dest)
 

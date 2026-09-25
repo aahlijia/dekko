@@ -353,6 +353,42 @@ def _add_task_option(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _token_budget(value: str) -> int:
+    """``--budget`` values: a token count, where ``0`` means no cap.
+
+    ``0`` stays an explicit ``0`` rather than becoming ``None``:
+    ``None`` means "use this command's default" in several places
+    (``context``'s pack budget, ``query``'s relation budget), and an
+    explicit budget also lifts row-count defaults
+    (``query.effective_limit``). ``textutil.fit_to_budget`` and the
+    few direct comparisons read ``0`` as uncapped. On the commands
+    with a default budget (``affected``, ``workset``, ``search``,
+    ``summary``, ``orient``) it is the only way to ask for the whole
+    result.
+
+    Args:
+        value: The raw command-line value.
+
+    Returns:
+        The budget; ``0`` for no cap.
+
+    Raises:
+        argparse.ArgumentTypeError: For a negative or non-integer value.
+    """
+    try:
+        budget = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid token budget {value!r}: expected an integer"
+        ) from None
+    if budget < 0:
+        raise argparse.ArgumentTypeError(
+            f"invalid token budget {budget}: must be 0 (no cap) or more"
+        )
+
+    return budget
+
+
 def build_subcommand_parser() -> argparse.ArgumentParser:
     """Construct the subcommand parser (map/query/context/status)."""
     parser = argparse.ArgumentParser(
@@ -463,7 +499,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_query.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=None,
         metavar="TOKENS",
         help="approximate token budget; drops lowest-relevance rows",
@@ -555,12 +591,13 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_outline.add_argument(
         "--limit",
         type=int,
-        default=200,
-        help="max symbol rows (default: 200)",
+        default=None,
+        help=f"max symbol rows (default: {outline_mod.DEFAULT_LIMIT}, "
+        "or no row cap when --budget is given)",
     )
     p_outline.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=None,
         metavar="TOKENS",
         help="approximate token budget for the outline",
@@ -582,7 +619,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_ctx.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=None,
         metavar="TOKENS",
         help="approximate token budget for the pack",
@@ -711,11 +748,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_affected.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=affected.DEFAULT_BUDGET,
         metavar="TOKENS",
         help="approximate token budget; drops weakest-tier files first "
-        f"(default: {affected.DEFAULT_BUDGET})",
+        f"(default: {affected.DEFAULT_BUDGET}; 0 = no cap)",
     )
     p_affected.add_argument(
         "--jobs",
@@ -769,11 +806,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_workset.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=workset_mod.DEFAULT_BUDGET,
         metavar="TOKENS",
         help=f"shared token budget for the bundle "
-        f"(default: {workset_mod.DEFAULT_BUDGET})",
+        f"(default: {workset_mod.DEFAULT_BUDGET}; 0 = no cap)",
     )
     p_workset.add_argument(
         "--packs",
@@ -829,11 +866,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_search.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=search.DEFAULT_BUDGET,
         metavar="TOKENS",
         help="approximate token budget for the rendered output "
-        f"(default: {search.DEFAULT_BUDGET})",
+        f"(default: {search.DEFAULT_BUDGET}; 0 = no cap)",
     )
     p_search.add_argument(
         "--kind",
@@ -998,7 +1035,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_sanity.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=None,
         metavar="TOKENS",
         help="approximate token budget, applied independently to each "
@@ -1050,7 +1087,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_ledger.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=None,
         metavar="TOKENS",
         help="report remaining tokens against this session budget",
@@ -1238,7 +1275,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_unused.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=None,
         metavar="TOKENS",
         help="approximate token budget for the result rows",
@@ -1329,7 +1366,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_ambig.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=None,
         metavar="TOKENS",
         help="approximate token budget for the result rows",
@@ -1378,7 +1415,7 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_deps.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=None,
         metavar="TOKENS",
         help="approximate token budget for the result rows",
@@ -1412,11 +1449,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_summary.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=summary.DEFAULT_BUDGET,
         metavar="TOKENS",
         help="approximate token cap; trailing sections are shed to fit "
-        f"(default: {summary.DEFAULT_BUDGET})",
+        f"(default: {summary.DEFAULT_BUDGET}; 0 = no cap)",
     )
     _add_read_options(p_summary)
     p_summary.set_defaults(func=run_summary)
@@ -1428,10 +1465,10 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     _add_read_options(p_lean)
     p_lean.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=None,
         metavar="TOKENS",
-        help="hard token cap (default: scales with repo size; never "
+        help="hard token cap (default or 0: scales with repo size; never "
         "below the file-backbone floor)",
     )
     p_lean.add_argument(
@@ -1464,11 +1501,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     )
     p_orient.add_argument(
         "--budget",
-        type=int,
+        type=_token_budget,
         default=orient_mod.DEFAULT_BUDGET,
         metavar="TOKENS",
         help=f"session digest token budget "
-        f"(default: {orient_mod.DEFAULT_BUDGET})",
+        f"(default: {orient_mod.DEFAULT_BUDGET}; 0 = no cap)",
     )
     p_orient.add_argument(
         "--threshold",
@@ -1955,7 +1992,7 @@ def run_outline(args: argparse.Namespace) -> int:
         args.target,
         root=Path(args.root).resolve(),
         budget=args.budget,
-        limit=args.limit,
+        limit=outline_mod.effective_limit(args.limit, args.budget),
         as_json=args.as_json,
     )
 

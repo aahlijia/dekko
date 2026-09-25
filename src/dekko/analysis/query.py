@@ -3548,6 +3548,83 @@ def _run_symbol(
     return EXIT_OK, None
 
 
+def _locate_file(index: MapIndex, target: str) -> tuple[str | None, int]:
+    """Resolve a ``file``/``cohesion`` target, reporting a miss.
+
+    Symbol-bearing files are matched first, exactly as before, so an
+    answer that used to resolve still resolves the same way. Only on a
+    miss does the lookup widen to every mapped file: one with no
+    symbols at all (a docstring-only ``__init__.py``, a
+    ``package-info.java``) or one whose symbols ``--no-tests`` hid.
+    Both used to be reported as not mapped.
+
+    Args:
+        index: Loaded map index (possibly a ``without_tests`` view).
+        target: Repo-relative path or trailing path suffix.
+
+    Returns:
+        ``(path, EXIT_OK)`` on a unique match, else ``(None, code)``
+        with the not-found/ambiguous message already printed.
+    """
+    matches = paths_matching(index, target)
+    if not matches:
+        wider = index.languages_by_path.keys() | index.hidden_test_symbols
+        matches = paths_matching(index, target, wider)
+    if not matches:
+        print(f"dekko: no mapped file matches '{target}'", file=sys.stderr)
+        coverage = _coverage_note(index)
+        if coverage:
+            print(f"  note: {coverage}", file=sys.stderr)
+        return None, EXIT_NOT_FOUND
+    if len(matches) > 1:
+        print(
+            f"dekko: '{target}' is ambiguous; candidates:",
+            file=sys.stderr,
+        )
+        for p in matches:
+            print(f"  {p}", file=sys.stderr)
+        return None, EXIT_AMBIGUOUS
+
+    return matches[0], EXIT_OK
+
+
+def _no_symbols_note(index: MapIndex, path: str) -> str:
+    """Why a mapped file shows no symbols in this view."""
+    hidden = index.hidden_test_symbols.get(path)
+    if hidden:
+        noun = "symbol" if hidden == 1 else "symbols"
+        return f"{path}: only test code ({hidden} {noun} hidden by --no-tests)"
+
+    return f"{path}: mapped, no symbols"
+
+
+def _with_hidden_count(doc: dict, index: MapIndex, path: str) -> dict:
+    """Add ``hidden_test_symbols`` to a JSON doc when tests hid any."""
+    hidden = index.hidden_test_symbols.get(path)
+    if hidden:
+        doc["hidden_test_symbols"] = hidden
+
+    return doc
+
+
+def _run_file_without_symbols(
+    index: MapIndex, path: str, as_json: bool
+) -> int:
+    """The ``file`` action for a mapped file with no symbols to list."""
+    if as_json:
+        doc = {
+            "path": path,
+            "language": index.languages_by_path.get(path, ""),
+            "symbols": [],
+            "meta": fit_to_budget([], None, None)[1].as_dict(),
+        }
+        print(json.dumps(_with_hidden_count(doc, index, path), indent=2))
+    else:
+        print(_no_symbols_note(index, path), file=sys.stderr)
+
+    return EXIT_OK
+
+
 def _run_file(
     index: MapIndex,
     target: str,
@@ -3556,23 +3633,11 @@ def _run_file(
     budget: int | None,
 ) -> tuple[int, Meter | None]:
     """Execute the file action: list a file's symbols."""
-    matches = paths_matching(index, target)
-    if not matches:
-        print(f"dekko: no mapped file matches '{target}'", file=sys.stderr)
-        coverage = _coverage_note(index)
-        if coverage:
-            print(f"  note: {coverage}", file=sys.stderr)
-        return EXIT_NOT_FOUND, None
-    if len(matches) > 1:
-        print(
-            f"dekko: '{target}' is ambiguous; candidates:",
-            file=sys.stderr,
-        )
-        for p in matches:
-            print(f"  {p}", file=sys.stderr)
-        return EXIT_AMBIGUOUS, None
-
-    path = matches[0]
+    path, code = _locate_file(index, target)
+    if path is None:
+        return code, None
+    if path not in index.symbols_by_path:
+        return _run_file_without_symbols(index, path, as_json), None
     symbols = index.symbols_by_path[path]
     if as_json:
         entries = [_sym_json(index, s) for s in symbols]
@@ -3765,23 +3830,16 @@ def _run_cohesion(
         ``(exit_code, meter)`` — meter is ``None`` for JSON output or
         a not-found/ambiguous result.
     """
-    matches = paths_matching(index, target)
-    if not matches:
-        print(f"dekko: no mapped file matches '{target}'", file=sys.stderr)
-        coverage = _coverage_note(index)
-        if coverage:
-            print(f"  note: {coverage}", file=sys.stderr)
-        return EXIT_NOT_FOUND, None
-    if len(matches) > 1:
-        print(
-            f"dekko: '{target}' is ambiguous; candidates:",
-            file=sys.stderr,
-        )
-        for p in matches:
-            print(f"  {p}", file=sys.stderr)
-        return EXIT_AMBIGUOUS, None
-
-    path = matches[0]
+    path, code = _locate_file(index, target)
+    if path is None:
+        return code, None
+    if path not in index.symbols_by_path:
+        if as_json:
+            doc = _cohesion_json(path, 0, 0, [], [], {})
+            print(json.dumps(_with_hidden_count(doc, index, path), indent=2))
+        else:
+            print(_no_symbols_note(index, path), file=sys.stderr)
+        return EXIT_OK, None
     symbols = index.symbols_by_path[path]
     ids = [s.id for s in symbols]
     edges = _intra_file_edges(index, path)
@@ -3815,7 +3873,7 @@ def _run_cohesion(
     for row in kept:
         print(row)
     print(_COHESION_NOTE)
-    if budget is not None and meter.tokens > budget:
+    if budget and meter.tokens > budget:
         # fit_to_budget never splits mid-row (a connected component is
         # reported whole or not at all -- see the module's own "never
         # split mid-row" convention), so a budget tighter than even

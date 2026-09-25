@@ -21,6 +21,7 @@ diffed against many different revs over time doesn't grow
 ``.dekko/rev-cache/`` unboundedly.
 """
 
+import re
 import subprocess
 import sys
 from dataclasses import asdict
@@ -33,8 +34,10 @@ from dekko.render.mapfile import (
     _symbol_from_dict,
     atomic_write_bytes,
 )
+from dekko import selfcheck
 from dekko.core.languages import spec_fingerprint
 from dekko.core.model import Import
+from dekko.core.resolver import resolve_fingerprint
 
 if TYPE_CHECKING:
     from dekko.analysis.diff import Snapshot
@@ -48,6 +51,51 @@ _MAP_DIR = ".dekko"
 # last few revisions someone's actively iterating against" doesn't
 # need more.
 MAX_ENTRIES = 20
+
+# Bumped when the entry document's shape changes. An entry is only
+# served when this, the dekko version, the extraction spec and the
+# resolver all match the running process -- the same key the
+# extraction and resolution caches use, since a snapshot carries both
+# extracted symbols and resolved callers.
+REV_CACHE_VERSION = 1
+
+# The stamp fields lead every entry (see ``_stamp``), so a 162 MB
+# tensorflow entry can be checked from its first few KB.
+_HEADER_BYTES = 4096
+_HEADER_FIELD = re.compile(
+    r'"(version|tool_version|spec_hash|resolve_hash)"'
+    r'\s*:\s*("[^"]*"|\d+)'
+)
+
+
+def _stamp() -> dict:
+    """The fields an entry must match to be served, in write order."""
+    return {
+        "version": REV_CACHE_VERSION,
+        "tool_version": selfcheck.loaded_version(),
+        "spec_hash": spec_fingerprint(),
+        "resolve_hash": resolve_fingerprint(),
+    }
+
+
+def _is_current(doc: dict) -> bool:
+    """Whether an entry's stamp matches this process."""
+    return all(doc.get(k) == v for k, v in _stamp().items())
+
+
+def _header_is_current(path: Path) -> bool:
+    """:func:`_is_current` from the entry's leading bytes alone."""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(_HEADER_BYTES).decode("utf-8", "replace")
+    except OSError:
+        return False
+    found = {
+        key: _json_loads(value.encode())
+        for key, value in _HEADER_FIELD.findall(head)
+    }
+
+    return _is_current(found)
 
 
 def resolve_sha(root: Path, rev: str) -> str | None:
@@ -94,11 +142,13 @@ def has_entry(root: Path, rev: str) -> bool:
 
     Returns:
         ``True`` only if ``rev`` resolves to a SHA *and* that SHA has
-        an on-disk cache entry; ``False`` otherwise (unresolvable rev,
-        or resolvable rev with no cached entry yet).
+        an on-disk entry :func:`load` would serve (checked from the
+        entry's leading stamp, not a full parse); ``False`` otherwise
+        (unresolvable rev, no entry yet, or a stale one left by an
+        earlier dekko, which ``load`` will rebuild).
     """
     sha = resolve_sha(root, rev)
-    return sha is not None and _entry_path(root, sha).exists()
+    return sha is not None and _header_is_current(_entry_path(root, sha))
 
 
 def _cache_dir(root: Path) -> Path:
@@ -120,18 +170,17 @@ def load(root: Path, sha: str) -> "Snapshot | None":
 
     Returns:
         The cached ``Snapshot``, or ``None`` on a cache miss, a
-        corrupt/unreadable entry, or an entry stamped with a
-        ``spec_hash`` that no longer matches this process's own
-        ``spec_fingerprint()`` (all treated as a miss, never an error —
-        the caller falls back to a fresh export + re-map). The
-        spec-hash check catches an entry built by a different
-        extractor version (a new symbol kind, a heritage-relation
-        change, a resolver fix that changes what counts as
-        "resolved"). Previously such an entry
-        was served forever, and ``diff``/``workset``/``affected``
-        reported the schema drift as a genuine code change. Mirrors
-        ``mapfile.py``'s own ``built_spec_hash``/``running_spec_hash``
-        check for ``map.json``, the precedented mechanism this reuses.
+        corrupt/unreadable entry, or an entry whose stamp (entry
+        format, dekko version, ``spec_fingerprint()``,
+        ``resolve_fingerprint()``) doesn't match this process (all
+        treated as a miss, never an error — the caller falls back to
+        a fresh export + re-map, and the stale entry is deleted). The
+        spec hash catches a different extractor; the resolver hash
+        and version catch a resolution change that moves the
+        snapshot's caller lists without touching any spec. Before
+        either check such an entry was served forever, and
+        ``diff``/``workset``/``affected`` reported the drift as a
+        genuine code change.
     """
     path = _entry_path(root, sha)
     try:
@@ -144,7 +193,7 @@ def load(root: Path, sha: str) -> "Snapshot | None":
         return None
     if not isinstance(doc, dict):
         return None
-    if doc.get("spec_hash") != spec_fingerprint():
+    if not _is_current(doc):
         path.unlink(missing_ok=True)
         return None
     snap = _snapshot_from_dict(doc)
@@ -228,7 +277,7 @@ def _evict(cache_dir: Path) -> None:
 def _snapshot_to_dict(snap: "Snapshot") -> dict:
     """Serialize a ``Snapshot`` to a JSON-able dict."""
     return {
-        "spec_hash": spec_fingerprint(),
+        **_stamp(),
         "symbols": [asdict(s) for s in snap.symbols.values()],
         "callers": snap.callers,
         "body": snap.body,

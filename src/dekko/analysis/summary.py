@@ -585,7 +585,7 @@ def run(
         print(json.dumps(compute(index), indent=2))
         return 0
     text = render_text(index)
-    if budget is None:
+    if not budget:
         print(text)
         return 0
     kept, meter = fit_to_budget(text.splitlines(), budget, None)

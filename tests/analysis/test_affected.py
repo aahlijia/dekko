@@ -234,7 +234,7 @@ def test_affected_rev_cache_hit_skips_reexport(
     calls: list[str] = []
     real_export_rev = diff.export_rev
 
-    def spy(root_arg: Path, rev: str, dest: Path) -> bool:
+    def spy(root_arg: Path, rev: str, dest: Path) -> None:
         calls.append(rev)
         return real_export_rev(root_arg, rev, dest)
 
@@ -260,7 +260,7 @@ def test_affected_shares_rev_cache_with_diff(
     calls: list[str] = []
     real_export_rev = diff.export_rev
 
-    def spy(root_arg: Path, rev: str, dest: Path) -> bool:
+    def spy(root_arg: Path, rev: str, dest: Path) -> None:
         calls.append(rev)
         return real_export_rev(root_arg, rev, dest)
 

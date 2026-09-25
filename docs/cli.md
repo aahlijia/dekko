@@ -1078,7 +1078,22 @@ higher-signal exact matches are now what survives the cap.
 `--limit` lets the budget govern alone, so `query callers X --budget
 20000` returns every row that fits rather than stopping at 50. An
 explicit `--limit` is always honored. The footer names whichever cap
-actually cut the output (`raise --limit` / `raise --budget`).
+actually cut the output (`raise --limit` / `raise --budget`). `outline`
+follows the same rule with its own 200-row default.
+
+`--budget 0` means no cap, on every command and MCP tool that takes a
+budget. It's the way to get a whole result from the commands that are
+budgeted by default (`affected`, `workset`, `search`, `summary`,
+`orient`), and like any explicit budget it also lifts the default row
+limit. For the lean map, whose cap never goes away, `0` means the
+default size-scaled cap. A negative budget is a usage error.
+
+`query file` (and `query cohesion`) on a mapped file with nothing to
+list exits 0 and says why on stderr: `mapped, no symbols` for a
+docstring-only or declaration-only file, or `only test code (N symbols
+hidden by --no-tests)`. `--json` returns `symbols: []`, plus
+`hidden_test_symbols` in the second case. Exit 3 is reserved for a
+path the map doesn't hold at all.
 
 A budget can only drop whole rows, and always keeps at least one, so
 it is a promise only while rows are small. Labels that could grow

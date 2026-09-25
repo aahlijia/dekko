@@ -1096,10 +1096,17 @@ def _collect_calls(
 ) -> list[RawCall]:
     """Find call expressions and attribute them to enclosing defs."""
     spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    attrs = (
+        _rust_error_attribute_spans(root)
+        if spec.name == "rust" and root.has_error
+        else []
+    )
     calls: list[RawCall] = []
     for _, caps in _run_query(spec.grammar, spec.call_query, root):
         callee = _one(caps, "callee")
         if callee is None:
+            continue
+        if any(a <= callee.start_byte < b for a, b in attrs):
             continue
         text, name, receiver = _callee_parts(callee)
         if not name:
@@ -1122,6 +1129,67 @@ def _collect_calls(
             )
         )
     return calls
+
+
+def _rust_error_attribute_spans(root: Node) -> list[tuple[int, int]]:
+    """Byte spans of Rust attributes that error recovery left unparsed.
+
+    tree-sitter-rust has no rule for an attribute on a struct-pattern
+    field (``#[cfg_attr(not(..), allow(..))] icon,`` in a ``let``
+    destructure). Recovery leaves a stray ``#`` leaf and parses the
+    bracketed payload as ordinary expressions, so ``cfg_attr``,
+    ``not`` and ``allow`` came out as calls, and ``not`` resolved to
+    an unrelated function of that name. A parsed attribute is an
+    ``attribute_item`` whose payload is a token tree, which never
+    yields calls, so only ``#`` leaves outside one open a span: from
+    the ``#`` (and an optional ``!``) through the ``]`` matching the
+    ``[`` that follows it.
+
+    Args:
+        root: The file's root node; callers only pass a tree with
+            ``has_error`` set.
+
+    Returns:
+        ``(start_byte, end_byte)`` spans, in source order.
+    """
+    leaves: list[Node] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node.type in ("attribute_item", "inner_attribute_item"):
+            continue
+        if node.child_count == 0:
+            leaves.append(node)
+        else:
+            stack.extend(node.children)
+    leaves.sort(key=lambda n: n.start_byte)
+    spans: list[tuple[int, int]] = []
+    for i, leaf in enumerate(leaves):
+        if leaf.type != "#":
+            continue
+        end = _matching_bracket_end(leaves, i + 1)
+        if end is not None:
+            spans.append((leaf.start_byte, end))
+    return spans
+
+
+def _matching_bracket_end(leaves: list[Node], i: int) -> int | None:
+    """End byte of the ``]`` closing a ``[`` at ``leaves[i]`` (after an
+    optional ``!``), or ``None`` when no bracket opens there."""
+    if i < len(leaves) and leaves[i].type == "!":
+        i += 1
+    if i >= len(leaves) or leaves[i].type != "[":
+        return None
+    depth = 0
+    for leaf in leaves[i:]:
+        if leaf.type == "[":
+            depth += 1
+        elif leaf.type == "]":
+            depth -= 1
+            if depth == 0:
+                return leaf.end_byte
+
+    return None
 
 
 # Rust macros whose arguments are ordinary expressions in practice

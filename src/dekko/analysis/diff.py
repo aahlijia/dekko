@@ -334,7 +334,7 @@ def old_snapshot(
     load_cache: Callable[[], dict[str, dict]],
     jobs: int = 1,
     follow_symlinks: bool = False,
-) -> Snapshot | None:
+) -> Snapshot:
     """Old-side snapshot for ``target_rev``, from the rev-cache when possible.
 
     Shared by ``diff.run`` and ``affected.changes`` — both need the
@@ -365,8 +365,11 @@ def old_snapshot(
         follow_symlinks: The map's recorded setting.
 
     Returns:
-        The old-side ``Snapshot``, or ``None`` if ``target_rev`` cannot
-        be exported (unknown rev, not a git repo).
+        The old-side ``Snapshot``.
+
+    Raises:
+        ExportError: If ``target_rev`` can't be exported (unknown rev,
+            not a git repo, or a failed extraction such as a full disk).
     """
     sha = revcache.resolve_sha(root, target_rev)
     if sha is not None:
@@ -503,20 +506,20 @@ def snapshot_pair(
     # Parsed at most once, and only if a side actually extracts: a
     # rev-cache hit with a fresh index needs neither side's cache.
     load_cache = memoize(lambda: cache_mod.load(root))
-    old = old_snapshot(
-        root,
-        target_rev,
-        subpath,
-        excludes,
-        max_file_size,
-        load_cache,
-        jobs=jobs,
-        follow_symlinks=follow_symlinks,
-    )
-    if old is None:
+    try:
+        old = old_snapshot(
+            root,
+            target_rev,
+            subpath,
+            excludes,
+            max_file_size,
+            load_cache,
+            jobs=jobs,
+            follow_symlinks=follow_symlinks,
+        )
+    except ExportError as exc:
         print(
-            f"dekko: cannot export git rev '{target_rev}' "
-            f"(unknown rev or not a git repo)",
+            f"dekko: cannot export git rev '{target_rev}': {exc}",
             file=sys.stderr,
         )
         return None
@@ -584,7 +587,7 @@ def _build_and_cache_old_snapshot(
     sha: str | None,
     jobs: int = 1,
     follow_symlinks: bool = False,
-) -> Snapshot | None:
+) -> Snapshot:
     """Export, re-parse, and (if resolvable) cache the old-side snapshot.
 
     The always-correct fallback path shared by every branch of
@@ -598,8 +601,7 @@ def _build_and_cache_old_snapshot(
     """
     with tempfile.TemporaryDirectory(prefix="dekko-diff-") as tmp:
         old_root = Path(tmp)
-        if not export_rev(root, target_rev, old_root):
-            return None
+        export_rev(root, target_rev, old_root)
         candidates = tracked_at_rev(root, target_rev)
         _maybe_warn_sequential(jobs, candidates)
         old = snapshot(
@@ -801,33 +803,56 @@ def _safe_extractall(tf: tarfile.TarFile, dest: Path) -> None:
     tf.extractall(dest, members=safe)
 
 
-def export_rev(root: Path, rev: str, dest: Path) -> bool:
+class ExportError(RuntimeError):
+    """``git archive`` of a rev, or extracting it, failed; the message
+    says which, in words a user can act on."""
+
+
+_ARCHIVE_TIMEOUT_S = 120
+
+
+def export_rev(root: Path, rev: str, dest: Path) -> None:
     """Extract the tracked sources at ``rev`` into ``dest``.
+
+    Every failure used to collapse into one "unknown rev or not a git
+    repo" message, including a full disk during extraction, which sent
+    the user hunting for a typo in a valid SHA.
 
     Args:
         root: Repository root.
         rev: Git revision to export.
         dest: Empty directory to receive the sources.
 
-    Returns:
-        ``True`` on success, ``False`` if the rev or git is unavailable.
+    Raises:
+        ExportError: Naming git's own error, the timeout, or the
+            extraction failure.
     """
     try:
         archive = subprocess.run(
             ["git", "-C", str(root), "archive", "--format=tar", rev],
             capture_output=True,
-            timeout=120,
+            timeout=_ARCHIVE_TIMEOUT_S,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    except subprocess.TimeoutExpired:
+        raise ExportError(
+            f"git archive timed out after {_ARCHIVE_TIMEOUT_S}s"
+        ) from None
+    except OSError as exc:
+        raise ExportError(f"could not run git: {exc.strerror}") from None
     if archive.returncode != 0:
-        return False
+        detail = archive.stderr.decode("utf-8", "replace").strip()
+        first = detail.splitlines()[0] if detail else "git archive failed"
+        raise ExportError(f"{first} (unknown rev or not a git repo?)")
     try:
         with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tf:
             _safe_extractall(tf, dest)
-    except (tarfile.TarError, OSError):
-        return False
-    return True
+    except tarfile.TarError as exc:
+        raise ExportError(f"could not read git's archive: {exc}") from None
+    except OSError as exc:
+        reason = exc.strerror or str(exc)
+        raise ExportError(
+            f"could not extract it to {dest}: {reason}"
+        ) from None
 
 
 def _render_caller(caller_id: str, syms: dict[str, Symbol]) -> str:

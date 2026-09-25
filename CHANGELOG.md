@@ -9,6 +9,66 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.10] — 2026-09-25
+
+### Fixed
+- **`query file` no longer calls mapped files unmapped.** It only
+  searched files that define symbols, so a docstring-only
+  `__init__.py`, a `package-info.java` or a barrel file got "no mapped
+  file matches" and exit 3. That's 2,374 files on spring-boot and
+  2,547 on tensorflow. With `--no-tests`, a file holding only test code
+  got the same answer. Both now exit 0 and say why the list is empty
+  (`mapped, no symbols`, or `only test code (58 symbols hidden by
+  --no-tests)`, also as `hidden_test_symbols` in `--json`). `query
+  cohesion` shares the fix. Files that define symbols are still matched
+  first, so no path that resolved before resolves differently now.
+- **`--budget 0` means no cap.** A zero budget kept exactly one row on
+  every command, and the five commands with a default budget
+  (`affected`, `workset`, `search`, `summary`, `orient`) had no way to
+  ask for everything. `0` now lifts the token cap (and, like any
+  explicit budget, the default row limit) on the CLI and every MCP
+  tool. A negative budget is a usage error.
+- **The rev cache is keyed like the other caches.** A cached old-side
+  snapshot was checked against the extraction spec only, so one built
+  before a resolver change, or by an older dekko, kept serving its old
+  caller lists to `diff`/`affected`/`workset`. It now also has to
+  match the dekko version and the resolver, and a stale entry is
+  rebuilt once. The daemon's "is this rev cached?" check reads the
+  same stamp, so a stale entry no longer gets the short cache-hit
+  timeout.
+- **A failed export says what failed.** `diff` against a valid commit
+  on a full disk printed "unknown rev or not a git repo". Every export
+  failure now carries its real reason: git's own error, the timeout, or
+  the extraction error (`No space left on device`).
+- **Rust attributes that tree-sitter can't parse no longer become
+  calls.** An attribute on a destructured struct field
+  (`#[cfg_attr(not(..), allow(..))] icon,`) is outside the grammar, and
+  error recovery turned its payload into call expressions. On zed that
+  made `Window::new` call an unrelated test helper named `not`.
+- **`outline --budget` isn't cut off at 200 rows.** An explicit budget
+  with no `--limit` now lets the budget govern, as it already did for
+  `query` and the MCP `outline` tool.
+- **MCP tools accept each other's target argument names.** The tools
+  that take a target call it `symbol`, `name`, `type` or `target`
+  depending on the tool, and agents guess by analogy. Every one of them
+  now accepts any of the four. Two different targets under different
+  names is an error rather than a silent pick.
+- **The process-pool retry note states what happened.** It blamed
+  "another concurrent dekko process", but the usual cause on macOS is
+  the Objective-C runtime aborting a forked worker, with nothing else
+  running. The note now says a worker crashed and, when the pool
+  forked on macOS, names that check.
+- **The `pre-read` hook works without a `cwd` in its payload**, and
+  when `cwd` and the read path spell the repo differently through a
+  symlink.
+
+### Internal
+- A daemon test failed intermittently with `I/O operation on closed
+  file`. Its helper returned a canned reply without waiting for the
+  daemon thread to leave its output redirect, which could then restore
+  pytest's already-closed capture stream as `sys.stdout`. The helper
+  now drains the real reply first.
+
 ## [1.1.9] — 2026-09-25
 
 ### Fixed

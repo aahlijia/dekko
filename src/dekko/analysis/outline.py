@@ -18,7 +18,7 @@ from pathlib import Path
 from dekko.classify import is_test_path
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
-from dekko.analysis.query import paths_matching
+from dekko.analysis.query import NO_ROW_LIMIT, paths_matching
 from dekko.source import read_lines
 from dekko.textutil import Meter, estimate_tokens, fit_to_budget, oneline
 
@@ -27,6 +27,27 @@ EXIT_NOT_FOUND = 3
 EXIT_AMBIGUOUS = 4
 
 _DOC_LIMIT = 80
+
+DEFAULT_LIMIT = 200
+
+
+def effective_limit(limit: int | None, budget: int | None) -> int:
+    """Row cap for ``outline``: ``query.effective_limit``'s rule with
+    outline's own 200-row default.
+
+    An explicit budget with no explicit limit lets the budget govern
+    alone. The CLI's ``--limit`` default used to be a plain 200, so
+    ``outline big/ --budget 20000`` stopped at 200 rows while the MCP
+    tool (which already applied this rule) returned them all.
+
+    Args:
+        limit: The caller's explicit row limit, or ``None``.
+        budget: The caller's explicit token budget, or ``None``.
+    """
+    if limit is not None:
+        return limit
+
+    return NO_ROW_LIMIT if budget is not None else DEFAULT_LIMIT
 
 
 @dataclass

@@ -801,6 +801,10 @@ class MapIndex:
             was parsed from, or ``None`` for an index built in memory.
             Read by ``index_matches_disk`` so a long-lived cache can
             tell its copy was replaced on disk.
+        hidden_test_symbols: Set by ``without_tests`` only: file path
+            → how many symbols it dropped from a file left with none,
+            so ``query file`` can say the file holds only test code
+            rather than that it isn't mapped.
     """
 
     root_label: str
@@ -871,6 +875,7 @@ class MapIndex:
     # Lets a long-lived cache notice the file was replaced on disk --
     # see ``index_matches_disk``.
     map_stat: list[int] | None = None
+    hidden_test_symbols: dict[str, int] = field(default_factory=dict)
 
     @cached_property
     def externals_by_head(self) -> dict[str, list[ExternalCall]]:
@@ -978,6 +983,11 @@ class MapIndex:
         _filter_throws_catches(self, out, by_id)
         _filter_env_reads(self, out)
         out.type_uses = [t for t in self.type_uses if not is_test_path(t.path)]
+        out.hidden_test_symbols = {
+            path: len(syms)
+            for path, syms in self.symbols_by_path.items()
+            if path not in out.symbols_by_path
+        }
         return out
 
 

@@ -288,17 +288,53 @@ def test_symbol_argument_takes_precedence_over_name(
     assert "f() -> int" in result["content"][0]["text"]
 
 
-def test_symbol_alias_not_applied_to_unlisted_tools(
+@pytest.mark.parametrize(
+    ("tool", "alias"),
+    [
+        ("get_context_pack", "name"),
+        ("get_context_pack", "symbol"),
+        ("outline", "symbol"),
+        ("find_usages", "symbol"),
+        ("get_callers", "target"),
+    ],
+)
+def test_target_aliases_work_across_tools(
+    make_mapped_repo: RepoFactory, tool: str, alias: str
+) -> None:
+    """Each target-taking tool accepts the other tools' names for its
+    target, since agents calling several in a row guess by analogy."""
+    ctx = _ctx(make_mapped_repo(SRC))
+    target = "a.py" if tool == "outline" else "f"
+    text = _call(ctx, tool, {alias: target})["content"][0]["text"]
+    # ``find_usages`` rejects the internal ``f`` on its merits; what
+    # matters is that no tool reports its target argument missing.
+    assert "missing required argument" not in text
+    assert "f" in text or "a.py" in text
+
+
+def test_find_type_usages_accepts_symbol(
     make_mapped_repo: RepoFactory,
 ) -> None:
-    # get_context_pack's real argument is `target`, not `symbol`, and
-    # it isn't in `_SYMBOL_ALIAS_TOOLS` — passing `name` must still
-    # raise the existing missing-argument error, not be silently
-    # reinterpreted.
+    ctx = _ctx(
+        make_mapped_repo(
+            {
+                "app.py": "class Config:\n    pass\n\n\n"
+                "def load(c: Config) -> None:\n    pass\n"
+            }
+        )
+    )
+    result = _call(ctx, "find_type_usages", {"symbol": "Config"})
+    assert result["isError"] is False
+    assert "load" in result["content"][0]["text"]
+
+
+def test_conflicting_target_aliases_are_an_error(
+    make_mapped_repo: RepoFactory,
+) -> None:
     ctx = _ctx(make_mapped_repo(SRC))
-    result = _call(ctx, "get_context_pack", {"name": "f"})
+    result = _call(ctx, "get_context_pack", {"name": "f", "symbol": "g"})
     assert result["isError"] is True
-    assert "target" in result["content"][0]["text"]
+    assert "pass one 'target' argument" in result["content"][0]["text"]
 
 
 def test_find_type_usages_tool(make_mapped_repo: RepoFactory) -> None:
@@ -596,7 +632,7 @@ def test_get_subtypes_tool_schema_shape() -> None:
 def test_symbol_alias_tools_schema_unchanged() -> None:
     # The `name` alias is resolved at the dispatch chokepoint, not in
     # `inputSchema` — `required` must still read exactly `["symbol"]`
-    # for every tool in `_SYMBOL_ALIAS_TOOLS`, and the shared
+    # for every `symbol` tool in `_TARGET_PARAM`, and the shared
     # `_SYMBOL_PROP` description should document the alias.
     alias_tools = {
         "query_symbol",
@@ -615,7 +651,7 @@ def test_symbol_alias_tools_schema_unchanged() -> None:
             "text",
         ]
         assert (
-            "'name' is also accepted as an alias"
+            "'name', 'target' and 'type' are also accepted as aliases"
             in schema["properties"]["symbol"]["description"]
         )
 
@@ -2022,3 +2058,34 @@ def test_require_distinguishes_wrong_type_from_missing() -> None:
         server._require({}, "symbol")
     with pytest.raises(server.ToolError, match="missing required argument"):
         server._require({"symbol": ""}, "symbol")
+
+
+def _many_callers_repo(make_mapped_repo: RepoFactory) -> Path:
+    callers = "".join(
+        f"def c{i}() -> int:\n    return f()\n\n" for i in range(60)
+    )
+    return make_mapped_repo(
+        {
+            "a.py": "def f() -> int:\n    return 1\n",
+            "b.py": f"from a import f\n\n{callers}",
+        }
+    )
+
+
+def test_budget_zero_uncaps_a_tool(make_mapped_repo: RepoFactory) -> None:
+    """``budget: 0`` returns every row instead of the one row a
+    literal zero budget used to keep."""
+    ctx = _ctx(_many_callers_repo(make_mapped_repo))
+    result = _call(ctx, "get_callers", {"symbol": "f", "budget": 0})
+    assert not result.get("isError")
+    text = result["content"][0]["text"]
+    assert sum("b.py:" in ln for ln in text.splitlines()) == 60
+
+
+def test_negative_budget_is_a_tool_error(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(_many_callers_repo(make_mapped_repo))
+    result = _call(ctx, "get_callers", {"symbol": "f", "budget": -1})
+    assert result["isError"]
+    assert "budget" in result["content"][0]["text"]

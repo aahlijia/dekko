@@ -1509,11 +1509,19 @@ def _route_cold_affected(
     monkeypatch.setattr(
         daemon.diff_mod, "tracked_at_rev", lambda r, rev: candidates
     )
-    monkeypatch.setattr(
-        daemon,
-        "_recv_daemon_response",
-        lambda sock: (0, "out\n", daemon_stderr),
-    )
+    real_recv = daemon._recv_daemon_response
+
+    def canned(sock: object) -> tuple[int, str, str]:
+        # Drain the daemon's real reply first. It's sent only after the
+        # in-thread request leaves its stdout/stderr redirect, which
+        # saved whatever stream was current (capsys's, for a test that
+        # takes it). Returning early let capsys close that stream at
+        # teardown and the redirect then restore it as sys.stdout,
+        # breaking the fixture's ``daemon.stop`` print.
+        real_recv(sock)
+        return 0, "out\n", daemon_stderr
+
+    monkeypatch.setattr(daemon, "_recv_daemon_response", canned)
     args = cli.build_subcommand_parser().parse_args(
         ["affected", "--root", str(root)]
     )

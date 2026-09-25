@@ -885,6 +885,66 @@ def test_file_not_found(
     assert code == 3
 
 
+_EMPTY_AND_TEST_FILES = {
+    **TWO_FILES,
+    "pkg/__init__.py": '"""Package docstring only."""\n',
+    "tests/test_a.py": "def test_helper() -> None:\n    pass\n",
+}
+
+
+@pytest.mark.parametrize("action", ["file", "cohesion"])
+def test_file_with_no_symbols_is_mapped_not_missing(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    action: str,
+) -> None:
+    """A docstring-only file is mapped; it just has nothing to list."""
+    root = make_mapped_repo(_EMPTY_AND_TEST_FILES)
+    code = cli.main(["query", action, "pkg/__init__.py", "--root", str(root)])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "pkg/__init__.py: mapped, no symbols" in err
+    assert "no mapped file matches" not in err
+
+
+@pytest.mark.parametrize("action", ["file", "cohesion"])
+def test_test_only_file_under_no_tests_says_why_it_is_empty(
+    make_mapped_repo: RepoFactory,
+    capsys: pytest.CaptureFixture,
+    action: str,
+) -> None:
+    root = make_mapped_repo(_EMPTY_AND_TEST_FILES)
+    argv = ["query", action, "tests/test_a.py", "--no-tests"]
+    code = cli.main([*argv, "--root", str(root)])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "only test code (1 symbol hidden by --no-tests)" in err
+
+
+def test_test_only_file_json_reports_the_hidden_count(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(_EMPTY_AND_TEST_FILES)
+    argv = ["query", "file", "test_a.py", "--no-tests", "--json"]
+    assert cli.main([*argv, "--root", str(root)]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["path"] == "tests/test_a.py"
+    assert doc["symbols"] == []
+    assert doc["hidden_test_symbols"] == 1
+
+
+def test_symbol_files_still_win_a_suffix_match(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    """Widening the lookup never makes a previously unique suffix
+    ambiguous: symbol-bearing files are matched first."""
+    root = make_mapped_repo(
+        {**TWO_FILES, "pkg/a.py": '"""Docstring only."""\n'}
+    )
+    assert cli.main(["query", "file", "a.py", "--root", str(root)]) == 0
+    assert "helper(x: int) -> int" in capsys.readouterr().out
+
+
 def test_double_colon_path_target_resolves(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
