@@ -9,6 +9,37 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.7] — 2026-09-25
+
+### Fixed
+- **`unused` shows which flagged rows dynamic dispatch might reach,
+  and lists all of them on request.** On claude-code, 250 of the
+  flagged symbols are `Tool` interface methods (`prompt`,
+  `description`, `isConcurrencySafe`, ...) defined on ~40 tool object
+  literals and called as `tool.prompt(...)`. `unused` already knew 211
+  of them were dispatch candidates and said 56% of the list was, but
+  nothing showed which rows: `--dispatch` printed 20 rows, all from
+  `src/bridge/`, and `--limit 1400` couldn't raise that cap, though
+  the footer said to raise `--limit`. Three changes:
+  - Every candidate row in the main listing is marked: text rows end
+    in `[dispatch?]`, JSON rows carry `"dispatch_candidate": true`
+    (absent on other rows; +5% JSON tokens on claude-code).
+  - An explicit `--limit` now sets the `--dispatch` and `--suspect`
+    section caps in either direction. They still default to 20, and
+    the main list to 50.
+  - Receiver calls the resolver never resolves by design (`description`,
+    `parse`, `build` and other built-in method names always go
+    external) now count as dispatch evidence when 2+ repo symbols
+    define the name. That is the other 39 of the 250, all
+    `tool.description()`. `--dispatch` JSON rows say which evidence
+    they rest on, `"ambiguous"` or `"guarded-name"`. Guarded-name
+    candidates: claude-code 46, cline 5, spring-boot 11, tensorflow
+    40, zed 85. `unused` totals are unchanged.
+
+  `--dispatch` help, the caveat and `docs/cli.md` now say the check
+  covers receiver calls through interface- or trait-typed values, not
+  only `this.method()` through a base class.
+
 ## [1.1.6] — 2026-09-24
 
 ### Fixed

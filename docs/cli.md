@@ -37,7 +37,7 @@ dekko unused                         # symbols nothing calls (dead-code leads)
 dekko unused --kinds types           # unused types only (heritage + type-usage aware)
 dekko unused --kinds all             # callables + types, unioned
 dekko unused --suspect               # + flag excluded symbols whose name is a proven collider
-dekko unused --dispatch              # + list flagged symbols that are unresolved dispatch candidates
+dekko unused --dispatch              # + list flagged symbols dynamic dispatch might reach
 dekko ambiguous                      # resolver-trust report: where resolution was ambiguous
 dekko deps                           # module-level dependency graph: edge/file counts, cycle count
 dekko deps src/app.py                # one file's resolved imports/importers/external sources
@@ -699,57 +699,70 @@ unused-list output at all when omitted.
 
 **Dispatch-candidate caveat (always on) and `--dispatch` (off by
 default).** The mirror-image case of `--suspect`: a symbol *is*
-reported unused, but its own id is one of the unresolved candidates of
-some ambiguous call site elsewhere in the repo (`MapIndex.ambiguous_in`
-keyed by candidate id, the same table `--suspect`/`dekko ambiguous`
-already read). This is exactly the shape an OOP hierarchy produces
-when an abstract base calls its own virtual method (`this.method()`/
-`self.method()`) and 2+ concrete subclasses override it: the base
-never defines the method itself, every override is a same-named
-candidate, none can be picked over the others, and the resolver can
-never attribute the base's call to any single override — each
-override then shows up in `unused` with zero direct fan-in, even
-though every one of them is genuinely called through the base class.
-Unlike `--suspect`'s bare-name collision check, this is a
-same-symbol-id match, not a same-name match, so it's meaningfully more
-precise (though not perfectly so — a symbol's id can land in
-`ambiguous_in` for an unrelated collision that has nothing to do with
-polymorphic dispatch; the recommended check is still correct
-regardless of the exact reason). Because the check is cheap (one
-`dict.get()` per already-computed result row, no extra resolver pass),
-an advisory count is always printed the moment any exist — no flag
-needed — mirroring the C/C++ ABI caveat's "silent unless relevant"
-behavior:
+reported unused, but some call site elsewhere in the repo may reach it
+through dynamic dispatch the resolver can't attribute. Two shapes
+produce that:
+
+- **An ambiguous call names it.** Its own id is one of the unresolved
+  candidates of some ambiguous call site (`MapIndex.ambiguous_in`
+  keyed by candidate id, the same table `--suspect`/`dekko ambiguous`
+  already read). An abstract base calling its own virtual method
+  (`this.method()`/`self.method()`) with 2+ overriding subclasses
+  produces this, and so does a receiver call through an interface- or
+  trait-typed value: `tool.prompt(...)` where 40 tool objects each
+  define `prompt`, whether they are classes or object literals. None
+  of the candidates can be picked over the others, so each shows up in
+  `unused` with zero direct fan-in even though every one is called.
+  This is a same-symbol-id match, not a same-name match, so it's more
+  precise than `--suspect` (though a symbol's id can land in
+  `ambiguous_in` for a collision unrelated to dispatch; the
+  recommended check is correct either way).
+- **A guarded-name receiver call uses its name.** The resolver never
+  resolves a receiver call to a handful of built-in method names
+  (`description`, `parse`, `build`, `map`, `unwrap`, ...), because
+  those almost always mean a library method. Such a call goes
+  external, never ambiguous, so it can't be a candidate in the table
+  above. When 2+ repo symbols define the name and some receiver call
+  uses it (`tool.description()`), each definition counts as a
+  candidate on this weaker evidence.
+
+The check is cheap, so it runs on every `unused` call. Each candidate
+row in the main listing is marked: text rows end with `[dispatch?]`,
+JSON rows carry `"dispatch_candidate": true` (the key is absent on
+every other row). An advisory count prints the moment any exist,
+mirroring the C/C++ ABI caveat's "silent unless relevant" behavior.
+When there are 20 or more candidates and they make up at least half
+the listing, a warning also prints above the rows:
 
 ```
 note: 2 of these are unresolved-ambiguous-call candidates elsewhere in
-the repo -- may be reached via this.method()/self.method()
-polymorphic dispatch the resolver can't attribute. Run `dekko sanity
---unused <name>` before deleting any of them (see --dispatch for
-which ones).
+the repo -- may be reached via polymorphic dispatch the resolver can't
+attribute (this.method()/self.method(), or a receiver call through an
+interface/trait-typed value like tool.prompt()). They are marked
+[dispatch?]; run `dekko sanity --unused <name>` before deleting any of
+them (--dispatch lists them with the command).
 ```
 
-`--dispatch` additionally lists which flagged symbols these are, one
-row per candidate with the exact `dekko sanity --unused <qualname>`
-command to run before deleting it — `"dispatch_candidates"` JSON key /
-text section, independent of and composable with `--suspect`. As with
+`--dispatch` additionally lists the candidates, one row each with the
+exact `dekko sanity --unused <path>:<qualname>:<line>` command to run
+before deleting it: the `"dispatch_candidates"` JSON key (each row
+names its `"evidence"`, `"ambiguous"` or `"guarded-name"`) or a text
+section, independent of and composable with `--suspect`. As with
 `--suspect`, this is a lead, not a verdict: cross-check with `dekko
 sanity --unused` before deleting any flagged symbol this catches,
-especially on inheritance-heavy OOP codebases.
+especially on interface- and inheritance-heavy codebases.
 
-Both `--suspect` and `--dispatch` cap their own section at 20 rows,
-deliberately independent of the main list's `--limit`/`--budget` so
-neither section can silently steal budget from it. Before 0.43.77 that
-cap applied in silence — a header could say 258 candidates and print
-20 with no word about the other 238, and an explicit `--limit`/
-`--budget` had no effect on either section. Now each section binds its
-own `--limit` (only when it's *lower* than the 20-row cap) and its own
-`--budget` independently, and a truncated section ends with a
-`(N of M omitted · raise --limit ...)` footer — the same
-`fit_to_budget` footer shape every other capped dekko output uses.
-`--json` carries the true totals as `suspects_meta`/`dispatch_meta`
-(`{"returned": N, "total": M}`), regardless of how many rows are
-capped into `suspects`/`dispatch_candidates`.
+`--suspect` and `--dispatch` each cap their own section at 20 rows by
+default, independent of the main list's 50, so neither section can
+steal budget from it. An explicit `--limit N` replaces both defaults:
+the main list and each section show up to N rows, so `--dispatch
+--limit 2000` lists every candidate on a repo with hundreds. `--budget`
+applies to each section on its own, and a truncated section ends with
+a `(N of M omitted · raise --limit ...)` footer, the same
+`fit_to_budget` footer every other capped dekko output uses. `--json`
+carries the true totals as `suspects_meta`/`dispatch_meta`
+(`{"returned": N, "total": M}`), however many rows are capped into
+`suspects`/`dispatch_candidates`.
 
 ## Interpreting `dekko ambiguous`
 

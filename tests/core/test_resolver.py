@@ -6725,3 +6725,23 @@ def test_rust_variant_veto_is_for_calls_only() -> None:
     # can spell, and points at the owning enum.
     assert index[resolver_mod._RUST_VARIANT_KEY + "Left"] == [side]
     assert index["Left"] == [struct]
+
+
+@pytest.mark.parametrize(
+    "name", ["description", "map", "unwrap", "isEqualTo", "build", "prompt"]
+)
+def test_is_guarded_method_name_agrees_with_the_noise_guard(name: str) -> None:
+    # `unused`'s dispatch check reads the public helper; the resolver
+    # reads it through `_is_noise_call`. One list, so a receiver call
+    # is noise exactly when its name is guarded.
+    call = RawCall(
+        caller_id="a.ts::f",
+        path="a.ts",
+        text=f"tool.{name}",
+        name=name,
+        receiver="tool",
+        line=1,
+    )
+    noise = resolver_mod._is_noise_call(call, {}, set())
+    assert noise == resolver_mod.is_guarded_method_name(name)
+    assert noise == (name != "prompt")

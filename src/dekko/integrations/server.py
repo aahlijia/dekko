@@ -662,9 +662,12 @@ def tool_find_unused(ctx: Context, args: dict) -> str:
     roots = args.get("roots") or []
     if not isinstance(roots, list):
         raise ToolError("'roots' must be a list of path globs")
-    limit = _limit_arg(args)
     budget = args.get("budget")
     budget = int(budget) if budget is not None else None
+    # ``None`` lets ``unused.run`` apply its defaults, including the
+    # suspects section's own cap, which any explicit limit replaces.
+    given = args.get("limit") is not None or budget is not None
+    limit = _limit_arg(args) if given else None
     suspect = bool(args.get("suspect", False))
     code, out, err = _capture(
         lambda: unused.run(

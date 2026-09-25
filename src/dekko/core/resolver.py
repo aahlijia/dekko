@@ -3490,6 +3490,33 @@ _AMBIENT_GLOBAL_RECEIVERS = frozenset(
 )  # fmt: skip
 
 
+def is_guarded_method_name(name: str) -> bool:
+    """Whether a receiver call with this method name is never resolved.
+
+    The five method-name denylists that ``_is_noise_call`` applies to a
+    receiver call (``x.name(...)``, receiver not exactly ``self``/
+    ``this``): built-in methods, chain-builder methods, Rust std
+    methods, Java assertions and ``build``. Such a call goes external
+    however many same-named repo symbols exist, so it never shows up as
+    ambiguous either. ``unused``'s dispatch check reads this, the one
+    copy of the lists, to see those calls as possible dispatch sites.
+
+    Args:
+        name: A call's bare method name.
+
+    Returns:
+        True when the noise guard sends a receiver call with this name
+        external.
+    """
+    return (
+        name in _BUILTIN_METHOD_NAMES
+        or name in _CHAIN_BUILDER_METHOD_NAMES
+        or name in _RUST_STD_METHOD_NAMES
+        or name in _JAVA_ASSERTION_METHOD_NAMES
+        or name in _BUILDER_METHOD_NAMES
+    )
+
+
 def _is_noise_call(
     call: _Referable,
     file_imports: dict[str, Import],
@@ -3534,13 +3561,7 @@ def _is_noise_call(
     first = _PATH_SPLIT.split(call.receiver)[0]
     if first in _AMBIENT_GLOBAL_RECEIVERS:
         return True
-    return (
-        call.name in _BUILTIN_METHOD_NAMES
-        or call.name in _CHAIN_BUILDER_METHOD_NAMES
-        or call.name in _RUST_STD_METHOD_NAMES
-        or call.name in _JAVA_ASSERTION_METHOD_NAMES
-        or call.name in _BUILDER_METHOD_NAMES
-    )
+    return is_guarded_method_name(call.name)
 
 
 def _shadowed_by_external_import(
