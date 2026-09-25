@@ -92,11 +92,16 @@ SCORER_CHOICES = ("lexical", "embedding", "both")
 # not tuned against any corpus this repo indexes. See _fuse_both.
 _RRF_K = 60
 
-# Lexical relevance dominates ranking; centrality only breaks
-# near-ties between otherwise-comparable matches. Contrast with
-# relevance.DEFAULT_W_REL (0.5), tuned for workset's already-curated
-# candidate set where centrality carries most of the initial signal —
-# here the query *is* the whole task, so there is no such prior.
+# Lexical relevance dominates ranking, but centrality is a real signal
+# at 0.15, not just a tie-breaker: on the known-answer benchmark it
+# lifts a weakly matching hub (`isEnvTruthy`, 28% of the top hit's
+# relevance) from 28th to 9th. It stays because it lifts a right hub
+# answer about as often as a wrong one; every alternative blend tried
+# scored the same top-1 and buried the hubs (benchmarks/README.md).
+# Contrast with relevance.DEFAULT_W_REL (0.5), tuned for workset's
+# already-curated candidate set where centrality carries most of the
+# initial signal -- here the query *is* the whole task, so there is no
+# such prior.
 SEARCH_W_REL = 0.85
 
 _DOC_LIMIT = 80

@@ -1113,6 +1113,15 @@ budgeted by default (`affected`, `workset`, `search`, `summary`,
 limit. For the lean map, whose cap never goes away, `0` means the
 default size-scaled cap. A negative budget is a usage error.
 
+Token counts depend on the output mode. The text footer's `(~N
+tokens)` estimates the text you're reading. Under `--json`,
+`meta.tokens` (and what `--budget` caps) estimates the result rows
+serialized as compact JSON, keys and quotes included, so the same
+query reports more: 1.5x to 2.5x the text figure is typical (`query
+callers --sites` measured 192 vs. 79). Neither number is the size of
+the printed `--json` document, which adds indentation and the
+envelope. Quote the figure for the mode an agent actually consumes.
+
 `query file` (and `query cohesion`) on a mapped file with nothing to
 list exits 0 and says why on stderr: `mapped, no symbols` for a
 docstring-only or declaration-only file, or `only test code (N symbols
