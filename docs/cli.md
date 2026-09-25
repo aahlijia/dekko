@@ -31,7 +31,8 @@ dekko search "..." --scorer embedding        # optional; needs dekko[search]
 dekko search "..." --scorer both             # fuses lexical+embedding; needs dekko[search]
 dekko workset                        # one bundle for your current change
 dekko workset --symbol Config --type-impact  # + type-usage + heritage impact, unioned
-dekko affected                       # test files impacted by your changes
+dekko affected                       # test files impacted by your changes (exit 0/1)
+dekko affected --possible            # + tests reaching the change only through unresolved calls
 dekko diff                           # symbols changed since the map's commit (exit 0/1)
 dekko unused                         # symbols nothing calls (dead-code leads)
 dekko unused --kinds types           # unused types only (heritage + type-usage aware)
@@ -86,9 +87,34 @@ item or module gated by a `cfg` predicate that can't hold without `test`
 as `#[cfg(test)] mod editor_tests;` from its parent (plus that file's own
 submodules). `--no-tests` drops it, and `unused` never flags it as dead. Code
 gated `any(test, feature = "test-support")` stays production code: the
-feature builds it into benchmarks and binaries too. `affected` still reports
-by file path only, so a Rust `#[test]` inside a normal source file is not
-listed as an impacted test.
+feature builds it into benchmarks and binaries too. `affected` lists a
+source file holding such code as an impacted test file when the walk reaches
+its test code: `crates/vim/src/motion.rs` for a `#[gpui::test]` in its
+`#[cfg(test)] mod test`. That's where most Rust unit tests live, so on a Rust
+repo most impacted files are ordinary source paths. The runner hint stays
+`cargo test`.
+
+`affected` follows resolved calls only. A test that calls changed code
+through a call dekko couldn't pin to one target (`handler.createMessage()`,
+with nine classes defining `createMessage`) is a *possible* impact. It is
+never mixed into the impacted list, the runner hint or the exit status,
+because following those calls reaches most of a large suite. Instead a note
+counts them and names the strongest lead, and `--possible` lists them all:
+
+```
+note: 8 more test file(s) call changed code through a call dekko couldn't
+resolve to one target (strongest:
+apps/vscode/src/sdk/vscode-lm/vscode-lm-handler.test.ts -> createMessage, 9
+candidates); they may be impacted. --possible lists them.
+```
+
+Leads are ranked by how many leading directories the test shares with the
+code it may reach (tests usually sit beside what they test), then by how few
+same-named definitions the call matched. `--json` always carries
+`possible_total` and `possible_example`, and adds a `possible` list (with
+`via`, `candidates`, `shared_dirs` and `callers`) under `--possible`.
+`workset` counts them too (`possible_tests_total`), and the MCP
+`impacted_tests` tool includes the note.
 
 `query type` covers parameter and return-type annotations at every
 function-shaped site: named functions and methods, and (TypeScript/TSX)
@@ -245,13 +271,17 @@ has ambiguous inbound edges dekko couldn't resolve — the disclosed
 counts are then a conservative undercount, never an overcount, since
 ambiguous and external matches are excluded rather than guessed at.
 
-`--json` governs the shape of *successful* (exit 0) output only. Any
-error — an ambiguous match, a not-found symbol, a stale map under
-`--no-regen`, an invalid argument — is always reported as a plain-text
-message on stderr with a distinct nonzero exit code, regardless of
-`--json`. This is deliberate and consistent project-wide, not a
-per-command gap: check the exit code first, and only parse stdout as
-JSON when it is 0.
+Exit status 0 and 1 are both answers, with normal stdout (`--json`
+included). 1 means the command found what it looks for: `affected`
+impacted tests, `diff` changed symbols, `unused` unused symbols,
+`status` a stale or missing map, `trace` no resolved path. That's the
+`git diff --exit-code` convention, so a CI step can gate on it. Any
+error (an ambiguous match, a not-found symbol, a stale map under
+`--no-regen`, an unknown rev, an invalid argument) is always a
+plain-text message on stderr with an exit status of 2 or more,
+regardless of `--json`. The one opt-in exception is `sanity
+--fail-on-unexplained`, which exits 3 on a completed sweep. So parse
+stdout as JSON when the status is 0 or 1.
 
 Run `dekko <command> --help` for the full flag list, or see
 `dekko --help` for every subcommand (`trace`, `stats`, `lean`, `note`,

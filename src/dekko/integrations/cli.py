@@ -635,7 +635,11 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_trace.set_defaults(func=run_trace)
 
     p_diff = sub.add_parser(
-        "diff", help="changed symbols since a git rev, with callers"
+        "diff",
+        help="changed symbols since a git rev, with callers",
+        description="Changed symbols since a git rev, with callers. "
+        "Exit status: 0 no changes, 1 changes found (normal output, "
+        "--json included), 2 unknown rev or not a git repo.",
     )
     p_diff.add_argument(
         "rev",
@@ -673,7 +677,12 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
     p_diff.set_defaults(func=run_diff)
 
     p_affected = sub.add_parser(
-        "affected", help="test files impacted by changes since a git rev"
+        "affected",
+        help="test files impacted by changes since a git rev",
+        description="Test files impacted by changes since a git rev. "
+        "Exit status: 0 no impacted tests, 1 impacted tests found "
+        "(normal output, --json included), 2 unknown rev or not a git "
+        "repo. Possible impacts (see --possible) never change it.",
     )
     p_affected.add_argument(
         "rev",
@@ -715,6 +724,18 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="parallel workers for a rev-cache-miss old-side re-parse/"
         "resolve (0 = all cores, 1 = sequential; default: 0)",
+    )
+    p_affected.add_argument(
+        "--possible",
+        dest="show_possible",
+        action="store_true",
+        help="also list test files that call changed code only through "
+        "a call dekko couldn't resolve to one target (e.g. "
+        "handler.createMessage() with several same-named definitions), "
+        "nearest the changed code first. They are always counted in a "
+        "note; "
+        "they never join the impacted list, the runner hint or the "
+        "exit status",
     )
     p_affected.set_defaults(func=run_affected)
 
@@ -1996,6 +2017,7 @@ def run_affected(args: argparse.Namespace) -> int:
         limit=args.limit,
         budget=args.budget,
         jobs=repo_ops.resolve_workers(getattr(args, "jobs", 0)),
+        show_possible=getattr(args, "show_possible", False),
     )
 
 

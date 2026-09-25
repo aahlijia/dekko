@@ -1,7 +1,7 @@
 {
   "name": "dekko",
   "description": "Static code map for LLM agents. /map parses the repository with tree-sitter into MAP.md and map.json (every file, function, signature, type, and call edge) without spending model tokens; an 18-tool MCP server (search_code, outline, query_symbol, get_callers, workset, impacted_tests, ...) answers structural questions from that map instead of grep/Read; /doctor and /sanity diagnose the install and cross-check low call counts; five skills steer Claude toward the map.",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "author": {
     "name": "Austin Ahlijian"
   }

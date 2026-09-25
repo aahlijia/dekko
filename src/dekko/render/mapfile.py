@@ -1500,7 +1500,7 @@ def load_map(root: Path) -> MapIndex | None:
         base = _callee_base(ext.callee)
         if base:
             index.externals_by_name.setdefault(base, []).append(ext)
-    index.ambiguous_in, index.ambiguous_out = _index_ambiguous(
+    index.ambiguous_in, index.ambiguous_out = index_ambiguous(
         (
             _resolve_ref(d.get("caller", ""), ids),
             d.get("name", ""),
@@ -1546,7 +1546,7 @@ def _load_heritage(index: MapIndex, doc: dict, ids: list[str] | None) -> None:
             "relation", "extends"
         )
     index.heritage_ambiguous_in, index.heritage_ambiguous_out = (
-        _index_ambiguous(
+        index_ambiguous(
             (
                 _resolve_ref(d.get("subtype", ""), ids),
                 d.get("name", ""),
@@ -1698,7 +1698,7 @@ def _load_type_uses(index: MapIndex, doc: dict) -> None:
         )
 
 
-def _index_ambiguous(
+def index_ambiguous(
     entries: Iterator[tuple[str, str, list[str]]],
 ) -> tuple[dict[str, list[tuple[str, str]]], dict[str, list[str]]]:
     """Index ambiguous-call records by candidate, and by caller.
@@ -1773,7 +1773,7 @@ def index_from_maps(
         base = _callee_base(ext.callee)
         if base:
             index.externals_by_name.setdefault(base, []).append(ext)
-    index.ambiguous_in, index.ambiguous_out = _index_ambiguous(
+    index.ambiguous_in, index.ambiguous_out = index_ambiguous(
         iter(graph.ambiguous)
     )
     for edge in graph.referenced:
@@ -1786,7 +1786,7 @@ def index_from_maps(
         index.heritage_lines[(edge.subtype, edge.supertype)] = edge.lines
         index.heritage_relation[(edge.subtype, edge.supertype)] = edge.relation
     index.heritage_ambiguous_in, index.heritage_ambiguous_out = (
-        _index_ambiguous(iter(graph.heritage_ambiguous))
+        index_ambiguous(iter(graph.heritage_ambiguous))
     )
     for ext in graph.heritage_external:
         index.heritage_external_out.setdefault(ext.caller, []).append(ext)

@@ -9,6 +9,42 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.1.8] — 2026-09-25
+
+### Fixed
+- **`affected` reports Rust files that hold `cargo test` code.** It only
+  listed test *paths*, and most Rust unit tests live in a
+  `#[cfg(test)] mod tests` inside an ordinary source file, so zed's
+  were invisible to it. A reached symbol that only `cargo test` compiles
+  now makes its file an impacted test file. On zed, `affected HEAD~1`
+  goes from 46 to 213 test files, with nothing lost; every addition is
+  a `crates/*/src/*.rs` file whose reached symbol is a `cfg(test)` test
+  (`crates/vim/src/motion.rs`'s `test_start_end_of_paragraph`).
+  `testing/` test-support code is still never listed.
+- **`affected` says when a test reaches the change only through an
+  unresolved call.** Its walk follows resolved calls, so a test calling
+  `handler.createMessage()` (nine classes define `createMessage`) was
+  silently missing on cline. Following ambiguous calls instead reaches
+  most of a large suite (a median of 689 test files on zed), so these
+  are *possible* impacts: never in the impacted list, the runner hint or
+  the exit status. A note counts them and names the strongest lead,
+  ranked by shared directories with the code it may reach, then by
+  fewest same-named definitions. On cline, the report's missing
+  `vscode-lm-handler.test.ts` is that lead. `--possible` lists them all.
+  JSON always carries `possible_total`/`possible_example`, `workset`
+  counts them as `possible_tests_total`, and MCP `impacted_tests` shows
+  the note.
+- **`workset` keeps impacted tests when the budget runs short.** The
+  tests tier came last, after outline detail, so on zed 16 of 40
+  symbol seeds printed `impacted_tests: []` beside a nonzero
+  `impacted_tests_total`. The first 20 test rows now come right after
+  files and packs, and the rest stay last (as "more impacted tests:" in
+  text): 0 of 40 lose them all.
+- **Exit status is documented.** `affected` and `diff` `--help` state
+  0/1/2, and `docs/cli.md` no longer says to parse `--json` output only
+  on exit 0: exit 1 (`affected`, `diff`, `unused`, `status`, `trace`)
+  is a normal answer with full stdout.
+
 ## [1.1.7] — 2026-09-25
 
 ### Fixed

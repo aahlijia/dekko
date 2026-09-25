@@ -12,12 +12,23 @@ kinds of evidence are combined:
    that touch changed code through fixtures, references, or deleted
    symbols, where no static call edge survives.
 
-Only test *files* are reported (``classify.is_test_file``: test
-directories and test filename patterns). Test-support code under a
+Only test *files* are reported: test directories and test filename
+patterns (``classify.is_test_file``), plus Rust source files holding
+code compiled only under ``cargo test`` (an inline ``#[cfg(test)] mod
+tests``, or a whole file declared ``#[cfg(test)] mod x;``), which is
+where most Rust unit tests live. Test-support code under a
 ``testing/`` directory (mocks, matchers, fixtures, generators) is test
 code for ``--no-tests``/``unused`` purposes but is not something a
 runner executes, so reaching it is not an impacted test; the walk
 still passes through it to any test file beyond.
+
+The walk follows resolved calls only. A test calling changed code
+through a call the resolver couldn't pin to one target
+(``handler.createMessage()`` with nine same-named definitions) is a
+*possible* impact: counted and named in a note, listed by
+``--possible``, never mixed into the impacted list, the runner hint or
+the exit code. Following those calls instead reaches most of a large
+test suite.
 
 Static analysis cannot see fixture injection, parametrization, or
 dynamic dispatch, so the report is a set of strong leads — run them,
@@ -26,13 +37,14 @@ don't treat the absence of a test as proof it is unaffected.
 
 import json
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from dekko import repo_ops
 from dekko.analysis import diff
 from dekko.render import mapfile
-from dekko.classify import is_test_file
+from dekko.classify import is_test_file, is_test_path
 from dekko.core.model import Import, Symbol
 from dekko.textutil import fit_to_budget, signature
 from dekko.core.resolver import _module_matches
@@ -67,6 +79,43 @@ class TestImpact:
     path: str
     tier: str
     symbols: list[Symbol] = field(default_factory=list)
+
+
+@dataclass
+class PossibleImpact:
+    """A test file that calls reached code through an unresolved call.
+
+    Attributes:
+        path: Repo-relative path of the test file.
+        name: The ambiguous call's name; when the file makes several
+            such calls, the strongest (see ``shared_dirs``).
+        candidates: How many repo symbols share ``name``.
+        shared_dirs: Leading directories the test file shares with the
+            reached symbol that call may target. Tests usually sit
+            beside the code they test, so this ranks before
+            ``candidates``.
+        callers: Test caller ids in the file making such calls.
+    """
+
+    path: str
+    name: str
+    candidates: int
+    shared_dirs: int = 0
+    callers: list[str] = field(default_factory=list)
+
+    def rank(self) -> tuple[int, int, str]:
+        """Sort key, strongest first: nearest, then fewest candidates."""
+        return (-self.shared_dirs, self.candidates, self.name)
+
+
+def _shared_dirs(a: str, b: str) -> int:
+    """How many leading directory components two repo paths share."""
+    shared = 0
+    for x, y in zip(a.split("/")[:-1], b.split("/")[:-1]):
+        if x != y:
+            break
+        shared += 1
+    return shared
 
 
 def _changed_for_calls(result: diff.DiffResult) -> set[str]:
@@ -110,6 +159,23 @@ def _id_path(sym_id: str) -> str:
     return sym_id.split("::", 1)[0]
 
 
+def _is_test_unit(sym_id: str, symbols: dict[str, Symbol]) -> bool:
+    """Whether a symbol or module id lives in a file a runner executes.
+
+    A test file by path, or a symbol flagged as test code whose path is
+    *not* test code. The second case is Rust's ``cfg(test)`` scope (the
+    only source of ``Symbol.test`` besides the path): the file is
+    ordinary source that ``cargo test`` compiles tests from. Path-based
+    test-support code (``testing/``) passes ``is_test_path`` and so
+    stays excluded.
+    """
+    path = _id_path(sym_id)
+    if is_test_file(path):
+        return True
+    sym = symbols.get(sym_id)
+    return sym is not None and sym.test and not is_test_path(path)
+
+
 def _call_impacts(
     seed_ids: set[str],
     callers: dict[str, list[str]],
@@ -126,9 +192,9 @@ def _call_impacts(
     dist = _reverse_hops(seed_ids, callers)
     impacts: dict[str, TestImpact] = {}
     for sym_id, hop in dist.items():
-        path = _id_path(sym_id)
-        if not is_test_file(path):
+        if not _is_test_unit(sym_id, symbols):
             continue
+        path = _id_path(sym_id)
         tier = "direct" if hop <= 1 else "transitive"
         impact = impacts.get(path)
         if impact is None:
@@ -140,6 +206,120 @@ def _call_impacts(
         if sym is not None and sym.test:
             impact.symbols.append(sym)
     return impacts
+
+
+def _possible_impacts(
+    seed_ids: set[str],
+    callers: dict[str, list[str]],
+    ambiguous_in: dict[str, list[tuple[str, str]]],
+    symbols: dict[str, Symbol],
+    confirmed: set[str],
+) -> list[PossibleImpact]:
+    """Test files calling reached code through an unresolved call.
+
+    Walks the resolved callers back from the seeds, then takes one
+    step through ``ambiguous_in``: a test caller whose ambiguous call
+    names a reached symbol. Only that one step, and only into test
+    code: walking ambiguous edges further reaches most of a large
+    suite. Files already in ``confirmed`` are skipped.
+
+    Returns:
+        One entry per file, strongest first (``PossibleImpact.rank``),
+        then by path.
+    """
+    found: dict[str, PossibleImpact] = {}
+    counts: Counter[str] | None = None
+    for sym_id in _reverse_hops(seed_ids, callers):
+        for caller, name in ambiguous_in.get(sym_id, ()):
+            path = _id_path(caller)
+            if path in confirmed or not _is_test_unit(caller, symbols):
+                continue
+            if counts is None:
+                counts = Counter(s.name for s in symbols.values())
+            here = PossibleImpact(
+                path=path,
+                name=name,
+                candidates=counts[name],
+                shared_dirs=_shared_dirs(path, _id_path(sym_id)),
+            )
+            hit = found.setdefault(path, here)
+            if here.rank() < hit.rank():
+                hit.name = here.name
+                hit.candidates = here.candidates
+                hit.shared_dirs = here.shared_dirs
+            if caller not in hit.callers:
+                hit.callers.append(caller)
+    return sorted(found.values(), key=lambda p: (p.rank(), p.path))
+
+
+def possible_from_diff(
+    result: diff.DiffResult,
+    new: diff.Snapshot,
+    impacts: list[TestImpact],
+) -> list[PossibleImpact]:
+    """``analyze()``'s possible impacts: tests past an unresolved call.
+
+    Args:
+        result: The diff between the rev and the working tree.
+        new: Snapshot of the working tree.
+        impacts: ``analyze()``'s confirmed impacts, never repeated.
+    """
+    return _possible_impacts(
+        _changed_for_calls(result),
+        new.callers,
+        new.ambiguous_in,
+        new.symbols,
+        {i.path for i in impacts},
+    )
+
+
+def possible_from_symbol(
+    index: mapfile.MapIndex,
+    seed_ids: set[str],
+    impacts: list[TestImpact],
+) -> list[PossibleImpact]:
+    """``impacts_from_symbol()``'s possible impacts, for a symbol seed."""
+    return _possible_impacts(
+        seed_ids,
+        index.calls_in,
+        index.ambiguous_in,
+        index.symbols_by_id,
+        {i.path for i in impacts},
+    )
+
+
+def possible_note(possible: list[PossibleImpact]) -> str | None:
+    """The always-on one-line disclosure for possible impacts, or ``None``.
+
+    Names the strongest lead (nearest the code it may reach, then fewest
+    same-named candidates) so the note points somewhere instead of
+    saying "might be incomplete".
+    """
+    if not possible:
+        return None
+    top = possible[0]
+    return (
+        f"note: {len(possible)} more test file(s) call changed code "
+        "through a call dekko couldn't resolve to one target "
+        f"(strongest: {top.path} -> {top.name}, {top.candidates} "
+        "candidates); they may be impacted. --possible lists them."
+    )
+
+
+def _possible_json(p: PossibleImpact) -> dict:
+    """Structured rendering of one possible impact."""
+    return {
+        "path": p.path,
+        "via": p.name,
+        "candidates": p.candidates,
+        "shared_dirs": p.shared_dirs,
+        "callers": p.callers,
+    }
+
+
+def _possible_row(p: PossibleImpact) -> str:
+    """One possible impact's text row."""
+    return f"  {p.path}  via {p.name} ({p.candidates} candidates)"
 
 
 def _finalize(impacts: dict[str, TestImpact]) -> list[TestImpact]:
@@ -255,8 +435,15 @@ def render(
     root: Path,
     budget: int | None = None,
     provenance: dict | None = None,
+    possible: list[PossibleImpact] | None = None,
+    show_possible: bool = False,
 ) -> None:
     """Emit the impacted-test report as text or JSON.
+
+    ``possible`` (see ``_possible_impacts``) is always counted, in a
+    note line (text) or ``possible_total``/``possible_example`` (JSON),
+    and listed only when ``show_possible`` is set, budgeted on its own
+    so it can't displace the confirmed list.
 
     ``provenance`` (a map's provenance dict, see ``mapfile.load_map``)
     qualifies the report with the same "some files weren't mapped"
@@ -268,19 +455,11 @@ def render(
     callers that don't have a provenance dict handy are unaffected.
     """
     coverage = mapfile.format_unsupported(provenance)
+    possible = possible or []
     if as_json:
-        entries = [_impact_json(i) for i in impacts]
-        serialized = [json.dumps(e) for e in entries]
-        kept_ser, meter = fit_to_budget(serialized, budget, None)
-        doc = {
-            "rev": rev,
-            "impacted": entries[: len(kept_ser)],
-            "command": _test_hint(impacts, root),
-            "meta": meter.as_dict(),
-        }
-        if coverage:
-            doc["coverage_warning"] = coverage
-        print(json.dumps(doc, indent=2))
+        _render_json(
+            impacts, rev, root, budget, coverage, possible, show_possible
+        )
         return
     if not impacts:
         print(f"dekko: no impacted tests vs {rev[:12]}")
@@ -289,17 +468,81 @@ def render(
                 f"  note: {coverage} — this answer may be incomplete",
                 file=sys.stderr,
             )
+    else:
+        header = f"dekko: {len(impacts)} impacted test files vs {rev[:12]}"
+        rows = _impact_rows(impacts, limit)
+        kept, meter = fit_to_budget(rows, budget, None, prefix=header)
+        print(header)
+        for row in kept:
+            print(row)
+        hint = _test_hint(impacts, root)
+        if hint:
+            print(f"\n{hint}")
+        print(meter.footer())
+    _print_possible(possible, show_possible, budget)
+
+
+def _render_json(
+    impacts: list[TestImpact],
+    rev: str,
+    root: Path,
+    budget: int | None,
+    coverage: str | None,
+    possible: list[PossibleImpact],
+    show_possible: bool,
+) -> None:
+    """``render``'s JSON form."""
+    entries = [_impact_json(i) for i in impacts]
+    serialized = [json.dumps(e) for e in entries]
+    kept_ser, meter = fit_to_budget(serialized, budget, None)
+    doc = {
+        "rev": rev,
+        "impacted": entries[: len(kept_ser)],
+        "command": _test_hint(impacts, root),
+        "meta": meter.as_dict(),
+        "possible_total": len(possible),
+        "possible_example": (
+            _possible_json(possible[0]) if possible else None
+        ),
+    }
+    if show_possible:
+        rows = [_possible_json(p) for p in possible]
+        kept_rows, possible_meter = fit_to_budget(
+            [json.dumps(r) for r in rows], budget, None
+        )
+        doc["possible"] = rows[: len(kept_rows)]
+        doc["possible_meta"] = possible_meter.as_dict()
+    if coverage:
+        doc["coverage_warning"] = coverage
+    print(json.dumps(doc, indent=2))
+
+
+def _print_possible(
+    possible: list[PossibleImpact], show: bool, budget: int | None
+) -> None:
+    """The possible-impact note, and with ``show`` its own listing."""
+    note = possible_note(possible)
+    if note is None:
         return
-    header = f"dekko: {len(impacts)} impacted test files vs {rev[:12]}"
-    rows = _impact_rows(impacts, limit)
-    kept, meter = fit_to_budget(rows, budget, None, prefix=header)
+    if not show:
+        print(note)
+        return
+    header = (
+        f"possible: {len(possible)} test file(s) call changed code "
+        "through a call dekko couldn't resolve to one target (nearest "
+        "the changed code first, then fewest same-named candidates). "
+        "Not in the list above or the runner hint; check before "
+        "trusting it."
+    )
+    kept, meter = fit_to_budget(
+        [_possible_row(p) for p in possible], budget, None, prefix=header
+    )
+    print()
     print(header)
     for row in kept:
         print(row)
-    hint = _test_hint(impacts, root)
-    if hint:
-        print(f"\n{hint}")
-    print(meter.footer())
+    if meter.omitted:
+        print(f"  {meter.footer()}")
 
 
 # Cap on how many paths a "ready to paste" test-runner invocation
@@ -489,6 +732,7 @@ def run(
     limit: int,
     budget: int | None = None,
     jobs: int = 1,
+    show_possible: bool = False,
 ) -> int:
     """Execute ``dekko affected`` against a repository.
 
@@ -499,13 +743,28 @@ def run(
         limit: Max impacted symbols shown per test file.
         budget: Approximate token budget for the report, or ``None``.
         jobs: Resolved worker count — see ``changes``.
+        show_possible: List the possible impacts too, not just their
+            count (``--possible``).
 
     Returns:
         ``0`` no impact, ``1`` impacted tests found, ``2`` bad rev.
+        Possible impacts never change the code: they are leads, and
+        ``1`` means a runner has confirmed tests to execute.
     """
     outcome = changes(root, rev, jobs=jobs)
     if outcome is None:
         return EXIT_ERROR
-    impacts, _result, _new, target_rev, prov = outcome
-    render(impacts, target_rev, as_json, limit, root, budget, prov)
+    impacts, result, new, target_rev, prov = outcome
+    possible = possible_from_diff(result, new, impacts)
+    render(
+        impacts,
+        target_rev,
+        as_json,
+        limit,
+        root,
+        budget,
+        prov,
+        possible=possible,
+        show_possible=show_possible,
+    )
     return EXIT_IMPACTED if impacts else EXIT_NONE

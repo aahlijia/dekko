@@ -80,12 +80,20 @@ class Snapshot:
         body: Symbol id → short hash of the definition's source text.
         imports: File path → imports declared in it (used by
             ``affected`` for its import-edge fallback).
+        ambiguous_in: Candidate id → ``(caller_id, name)`` pairs for
+            calls that matched it among 2+ candidates, same as
+            ``MapIndex.ambiguous_in`` (used by ``affected``'s possible
+            impacts). Only the working-tree side fills it; the
+            rev-cache neither stores nor needs it.
     """
 
     symbols: dict[str, Symbol] = field(default_factory=dict)
     callers: dict[str, list[str]] = field(default_factory=dict)
     body: dict[str, str] = field(default_factory=dict)
     imports: dict[str, list[Import]] = field(default_factory=dict)
+    ambiguous_in: dict[str, list[tuple[str, str]]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -210,6 +218,7 @@ def snapshot(
             snap.imports[fm.path] = fm.imports
     snap.body = _body_hashes(root, all_syms)
     snap.callers = graph.calls_in
+    snap.ambiguous_in, _ = mapfile.index_ambiguous(iter(graph.ambiguous))
     return snap
 
 
@@ -235,6 +244,7 @@ def snapshot_from_index(index: mapfile.MapIndex, root: Path) -> Snapshot:
     snap = Snapshot()
     snap.symbols = dict(index.symbols_by_id)
     snap.callers = index.calls_in
+    snap.ambiguous_in = index.ambiguous_in
     # Match snapshot()'s own construction exactly: only files with at
     # least one import get an entry. index.imports_by_path (loaded from
     # map.json) has a key for every mapped file, even ones with an
