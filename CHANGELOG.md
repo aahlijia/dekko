@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.3.4] — 2026-09-26
+
+### Added
+- **`dekko-refactor` skill.** Fires before a rename, move, or
+  signature change and again after the edits. Before: pin the target
+  with `query_symbol`, then list every site from the map by kind of
+  change (call sites with `sites` and `include_tests` on, type
+  annotations and implementors for a type, import lines and their
+  aliases via `deps --file` / `query importers`), with no budget-
+  omitted rows. After: `find_usages <old name>` lists exactly the
+  direct calls still pointing at a name that no longer exists, `query
+  importers` the leftover import lines an alias would otherwise hide,
+  then `impacted_tests` and the `note list --orphaned` sweep, and one
+  grep only for the text dekko doesn't model. This guidance was spread
+  across `dekko-orient`'s CLI-only table, `dekko-verify` and
+  `dekko-notes`; the plugin now ships six skills.
+
 ## [1.3.3] — 2026-09-25
 
 ### Changed

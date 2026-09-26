@@ -82,3 +82,5 @@ Read `reference.md` in this skill's directory when you need:
   exact lines you change.
 - `get_callers` and `search_code` hide test paths by default; an empty
   result isn't dead code. See `dekko-verify` before acting on a zero.
+- Renaming, moving or re-signing something? `dekko-refactor` lists
+  every site first and checks for leftovers after.
