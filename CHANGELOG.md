@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.3.6] — 2026-09-26
+
+### Added
+- **`dekko-debug` skill.** Fires on a traceback, exception, failing
+  test error, or a "why does this raise / who handles it / how did
+  control get here / where is this env var read" question in a mapped
+  repo. Rather than opening each frame's file, it starts from the
+  innermost in-repo frame with `query_symbol` (notes first), finds
+  the raise with `query throws` (walking callees with `--transitive`
+  and treating the depth-cap and re-raise notes as instructions, not
+  footnotes), checks handling with `query catches` plus the type's
+  supertypes since matching is exact-name, reconstructs a truncated
+  or async path with `get_callers` or `trace`, rules out
+  configuration with `query env`, and finishes with `impacted_tests`.
+  The one grep it expects is for the error message text, which dekko
+  doesn't model. The plugin now ships eight skills.
+
 ## [1.3.5] — 2026-09-26
 
 ### Added

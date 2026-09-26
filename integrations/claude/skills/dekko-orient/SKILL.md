@@ -85,3 +85,4 @@ Read `reference.md` in this skill's directory when you need:
 - Renaming, moving or re-signing something? `dekko-refactor` lists
   every site first and checks for leftovers after. Dispatching a
   subagent? `dekko-delegate` puts this orientation in its prompt.
+  Holding a traceback? `dekko-debug` works it from the map.
