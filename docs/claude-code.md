@@ -148,7 +148,7 @@ never blocks a session or a tool call, it just produces no output (for
 
 ## Skills
 
-`dekko --claude-install` also ships six Claude Code skills alongside
+`dekko --claude-install` also ships seven Claude Code skills alongside
 the `/map` command and MCP server — Claude discovers and invokes them
 automatically when their trigger conditions match, no separate install
 step:
@@ -161,6 +161,7 @@ step:
 | `dekko-notes` | reading a symbol's notes before editing it and writing one after a non-obvious change, via `dekko note add`/`add_note` |
 | `dekko-review-context` | composing `workset` + `impacted_tests` + `check_ambiguous` into structural context for a PR description or code-review flow, before reading the diff line by line |
 | `dekko-refactor` | listing every site a rename, move, or signature change must touch before editing (`get_callers` with `sites` and `include_tests`, `find_type_usages`, `get_subtypes`, `deps --file` / `query importers` for import lines and aliases), then proving nothing was missed after: `find_usages <old name>` for leftover direct calls, `query importers` for leftover imports, `impacted_tests`, and the `note list --orphaned` sweep |
+| `dekko-delegate` | briefing a subagent before dispatching it into a mapped repo: paste one budgeted digest (`dekko orient --budget 800` to explore, `dekko workset --budget 2000` to implement) into its prompt with a paragraph telling it the dekko tools exist and how to use them, since a subagent gets no session-start orientation and otherwise re-explores with grep and whole-file reads |
 
 See each skill's `SKILL.md` under `integrations/claude/skills/` for the
 full guidance.

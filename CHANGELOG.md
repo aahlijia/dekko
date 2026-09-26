@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.3.5] — 2026-09-26
+
+### Added
+- **`dekko-delegate` skill.** Fires before a subagent is dispatched
+  into a repo with a `.dekko/` directory. A subagent starts with an
+  empty context and no session-start orientation, so it re-explores
+  with grep and whole-file reads and then reports that exploration
+  back, which the parent pays for twice. The skill has the parent
+  compute one budgeted digest scoped to the agent's job (`dekko
+  orient --budget 800` to explore, `dekko workset --budget 2000` to
+  implement, `dekko context` or `outline` for one symbol or file),
+  paste it verbatim under its own heading, and add a short paragraph
+  naming the MCP tools and the ladder, with the rule that the agent
+  must never stop or kill the parent's dekko processes. It also
+  covers fan-out (one `orient`, one `outline <dir>` per agent, the
+  daemon for CLI-heavy agents) and asks agents for `path:line`
+  reports instead of pasted source. The plugin now ships seven
+  skills.
+
 ## [1.3.4] — 2026-09-26
 
 ### Added

@@ -6,12 +6,12 @@
   },
   "metadata": {
     "description": "dekko — static code map generator for Claude Code",
-    "version": "1.3.4"
+    "version": "1.3.5"
   },
   "plugins": [
     {
       "name": "dekko",
-      "description": "Adds /map, /doctor, /sanity, an 18-tool MCP server, and six skills: maps every file, function, type, and call edge with tree-sitter, then answers who-calls-what and what-tests-break questions without grep or whole-file reads.",
+      "description": "Adds /map, /doctor, /sanity, an 18-tool MCP server, and seven skills: maps every file, function, type, and call edge with tree-sitter, then answers who-calls-what and what-tests-break questions without grep or whole-file reads.",
       "source": "./"
     }
   ]
