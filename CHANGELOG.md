@@ -9,6 +9,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.3.7] — 2026-09-26
+
+### Added
+- **`/impact [REV] [--possible]` command.** Runs `dekko affected` and
+  relays the impacted test files by tier with the ready-to-run test
+  command the report ends with, so "which tests should I run for
+  this change" is one slash command in Claude Code instead of a CLI
+  call plus reading its output. Claude is told to rerun with
+  `--budget 0` when the runner line says `+N more impacted test files
+  not shown`, so a budget-capped report never becomes a partial test
+  run; to relay the count of tests reached only through an ambiguous
+  call and offer `--possible`; and to treat a `no impacted tests`
+  answer against the default rev as a prompt to pick an older base
+  when the change is already committed. `dekko-orient`'s table names
+  it next to `dekko affected`.
+
 ## [1.3.6] — 2026-09-26
 
 ### Added

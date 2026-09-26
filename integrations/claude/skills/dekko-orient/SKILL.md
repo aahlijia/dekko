@@ -43,7 +43,7 @@ don't fall back to grep because "the map might be stale now."
 | A symbol's whole neighborhood, optionally with source | `get_context_pack` | `dekko context <sym>` |
 | A file's or directory's shape, no bodies (~1/10 a Read) | `outline` | `dekko outline <path>` |
 | Everything for a change or symbol, one budget | `workset` | `dekko workset [REV] \| --symbol NAME` |
-| Tests a change impacts | `impacted_tests` | `dekko affected [REV]` |
+| Tests a change impacts, with a runnable test command | `impacted_tests` | `dekko affected [REV]` or `/impact [REV]` |
 | In-repo call sites of a third-party name (`requests.get`) | `find_usages` | `dekko query uses <name>` |
 | What takes or returns a type | `find_type_usages` | `dekko query type <type>` |
 | What a type extends, and what extends it | `get_supertypes` / `get_subtypes` | `dekko query supertypes\|subtypes <type>` |

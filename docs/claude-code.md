@@ -78,6 +78,27 @@ sweep for catching a classification regression or a systemic
 grep-vs-dekko disagreement, not a per-symbol spot check. See
 [cli.md](cli.md#dekko-sanity---all--sweeping-every-symbol-instead-of-one-target).
 
+## The `/impact` command
+
+```sh
+/impact                 # vs the commit the map was generated at (else HEAD)
+/impact main            # vs a base branch
+/impact HEAD~3 --possible
+```
+
+Runs `dekko affected [REV]` and relays the impacted test files by
+tier (`[direct]`, `[transitive]`, `[import]`) together with the ready-to-run
+test command the report ends with (`pytest a.py b.py`, `cargo test`,
+`go test ./...`, the repo's `package.json` test script, or a
+Gradle/Maven invocation, one per language group). The command tells
+Claude to rerun with `--budget 0` when the runner line is marked
+`# +N more impacted test files not shown`, so a budget-capped report
+never becomes a partial test run, and to relay the note counting
+tests reached only through an ambiguous call (`--possible` lists
+them). Leads, not verdicts: static analysis misses fixtures and
+dynamic dispatch. The same answer is available to the MCP tools as
+`impacted_tests`.
+
 ## A persistent usage policy in CLAUDE.md (opt-in)
 
 `dekko hooks` (below) injects per-turn context an agent can weigh
