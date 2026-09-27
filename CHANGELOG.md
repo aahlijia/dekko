@@ -9,6 +9,31 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-09-26
+
+Closes round 1.5's fix cycle. The code is 1.4.4; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.5 evaluated 1.3.7 on
+seven real repositories and found two Medium and two Low issues, no
+regressions. All four are fixed:
+
+- **1.4.1**: `affected` printed the same test command once per file
+  extension (`bun run test` twice for `.ts` + `.tsx`); hints now group
+  by runner family.
+- **1.4.2**: `affected --budget 0` still cut the runner line at 20
+  paths, so `/impact`'s "rerun with `--budget 0`" gave the same
+  truncated command. `--budget 0` now lists every impacted path
+  (tensorflow: all 1,286 instead of 20), and a capped line says how to
+  get the rest.
+- **1.4.3**: `sanity` names three JS/TS non-call shapes (string or
+  template text, recorded property reads, object keys/fields/typed
+  parameters) and re-exports. `sanity --all` unexplained rows dropped
+  127 -> 30 (claude-buddy), 4,319 -> 1,383 (claude-code) and
+  4,406 -> 1,767 (cline), with the real misses still flagged.
+- **1.4.4**: `--mcp-install --dry-run` registered for real. The MCP
+  actions now preview their `claude mcp` command, and every action
+  that can't preview refuses `--dry-run` instead of writing.
+
 ## [1.4.4] — 2026-09-26
 
 ### Fixed
