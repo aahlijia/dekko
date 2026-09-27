@@ -26,9 +26,12 @@ the changed names.
    ready-to-run command. Show them verbatim in a code block. If the
    user asked to run the tests, run that command; otherwise offer to.
 3. If a runner line ends with `# +N more impacted test files not
-   shown`, the report was budget-capped and the command is incomplete.
-   Rerun `dekko affected $ARGUMENTS --budget 0` and take the command
-   from that output before running anything.
+   shown; --budget 0 lists all`, the report was budget-capped and the
+   command is incomplete. Rerun `dekko affected $ARGUMENTS --budget 0`
+   and take the command from that output before running anything. If
+   that lists hundreds of files, say so: running the whole suite is
+   often the saner call, and on Windows a command line that long won't
+   start.
 4. `no impacted tests vs REV` means no changed callable reaches a
    test file. Say so plainly. If the user expected a change to show,
    the default REV is the commit the map was generated at (else

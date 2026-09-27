@@ -350,7 +350,7 @@ def build(index: MapIndex, seed: Seed, packs: int) -> Workset:
     return Workset(seed=seed, outlines=outlines, packs=pack_objs)
 
 
-def _manifest(ws: Workset, root: Path) -> list[str]:
+def _manifest(ws: Workset, root: Path, budget: int | None) -> list[str]:
     """The non-droppable header: seed, counts, and the test-runner hint."""
     seed = ws.seed
     lines = [
@@ -362,7 +362,11 @@ def _manifest(ws: Workset, root: Path) -> list[str]:
         lines.append(_blast_radius_line(seed.blast_radius))
         if seed.blast_radius.note:
             lines.append(f"  note: {seed.blast_radius.note}")
-    hint = affected._test_hint(seed.impacts, root)
+    hint = affected._test_hint(
+        seed.impacts,
+        root,
+        affected.hint_path_cap(budget),
+    )
     if hint:
         lines.append(hint)
     note = affected.possible_note(seed.possible)
@@ -471,7 +475,7 @@ def _fit(
 ) -> tuple[list[_Row], object]:
     """Apply the shared budget over the manifest prefix plus all rows."""
     rows = _rows(ws)
-    prefix = "\n".join(_manifest(ws, root))
+    prefix = "\n".join(_manifest(ws, root, budget))
     kept, meter = fit_to_budget([r.text for r in rows], budget, None, prefix)
     return rows[: len(kept)], meter
 
@@ -479,7 +483,7 @@ def _fit(
 def _render_text(ws: Workset, budget: int | None, root: Path) -> int:
     """Render the bundle as text: manifest, tiered rows, cost footer."""
     kept, meter = _fit(ws, budget, root)
-    for line in _manifest(ws, root):
+    for line in _manifest(ws, root, budget):
         print(line)
     current: str | None = None
     for row in kept:
@@ -583,7 +587,11 @@ def _render_json(ws: Workset, budget: int | None, root: Path) -> int:
         "impacted_tests": [affected._impact_json(i) for i in tests],
         "impacted_tests_total": len(seed.impacts),
         "possible_tests_total": len(seed.possible),
-        "pytest": affected._test_hint(seed.impacts, root),
+        "pytest": affected._test_hint(
+            seed.impacts,
+            root,
+            affected.hint_path_cap(budget),
+        ),
         "outlines": [
             _outline_json(fo, files[fo.path])
             for fo in ws.outlines

@@ -5,7 +5,7 @@ import json
 import subprocess
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from importlib.metadata import version
 from pathlib import Path
 
@@ -859,6 +859,92 @@ def test_legacy_parser_dry_run_wired_to_claude_install(
     assert cli.main(["--claude-install", "--dry-run"]) == 0
     assert calls == []
     assert "would run" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        (
+            cli.mcp_install,
+            "/usr/bin/claude mcp add dekko -- dekko serve --mcp",
+        ),
+        (cli.mcp_uninstall, "/usr/bin/claude mcp remove dekko"),
+    ],
+)
+def test_mcp_dry_run_prints_command_without_running(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    action: Callable[..., int],
+    expected: str,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/bin/claude")
+
+    def fail(cmd: list[str]) -> None:
+        raise AssertionError(f"ran {cmd}")
+
+    monkeypatch.setattr(cli, "_run_subprocess", fail)
+    assert action(dry_run=True) == 0
+    out = capsys.readouterr().out
+    assert "would run" in out
+    assert expected in out
+
+
+def test_mcp_dry_run_still_requires_claude_cli(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+    assert cli.mcp_install(dry_run=True) == 1
+    assert "claude" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--mcp-install", "--mcp-uninstall"])
+def test_legacy_parser_dry_run_wired_to_mcp_actions(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    flag: str,
+) -> None:
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/usr/bin/claude")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "_run_subprocess", lambda cmd: calls.append(cmd))
+
+    assert cli.main([flag, "--dry-run"]) == 0
+    assert calls == []
+    assert "would run" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--cline-install"],
+        ["--cline-uninstall"],
+        ["--claude-md-install"],
+        ["--claude-md-uninstall"],
+        ["--map"],
+    ],
+)
+def test_dry_run_refused_where_it_has_no_preview(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    extra: list[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    for name in ("install", "uninstall"):
+        monkeypatch.setattr(
+            cli.cline_mod,
+            name,
+            lambda *_a, **_kw: pytest.fail("cline config written"),
+        )
+    argv = [*extra, "--dry-run"]
+    if extra == ["--map"]:
+        argv = ["--map", str(tmp_path), "--dry-run"]
+    else:
+        argv += ["--root", str(tmp_path)]
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == 2
+    assert "--dry-run works with" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_mcp_uninstall_removes_server(

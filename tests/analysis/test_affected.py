@@ -300,6 +300,65 @@ def test_pytest_hint_caps_a_large_impact_set(tmp_path: Path) -> None:
     shown = hint.split("#")[0].split()
     assert len(shown) == 1 + affected._MAX_HINT_PATHS  # "pytest" + paths
     assert "+30 more impacted test files not shown" in hint
+    assert hint.endswith("--budget 0 lists all")
+
+
+def _many(ext: str, n: int = 50) -> list[affected.TestImpact]:
+    return [
+        affected.TestImpact(path=f"tests/test_{i:02d}{ext}", tier="direct")
+        for i in range(n)
+    ]
+
+
+def test_uncapped_pytest_hint_lists_every_path(tmp_path: Path) -> None:
+    hint = affected._test_hint(_many(".py"), tmp_path, max_paths=None)
+    assert "#" not in hint
+    assert len(hint.split()) == 1 + 50
+
+
+def test_named_hint_tail_points_at_budget_zero(tmp_path: Path) -> None:
+    hint = affected._test_hint(_many(".rs"), tmp_path)
+    assert hint.endswith("+30 more (--budget 0 lists all)")
+
+
+def test_uncapped_named_hint_lists_every_path(tmp_path: Path) -> None:
+    hint = affected._test_hint(_many(".rs"), tmp_path, max_paths=None)
+    assert "more" not in hint
+    assert hint.count(".rs") == 50
+
+
+def test_hint_path_cap_is_lifted_only_by_budget_zero() -> None:
+    assert affected.hint_path_cap(0) is None
+    assert affected.hint_path_cap(None) == affected._MAX_HINT_PATHS
+    assert affected.hint_path_cap(6000) == affected._MAX_HINT_PATHS
+
+
+def _hint_line(out: str) -> str:
+    return next(ln for ln in out.splitlines() if ln.startswith("pytest "))
+
+
+@pytest.mark.parametrize(("budget", "shown"), [(0, 50), (6000, 20)])
+def test_render_text_runner_line_follows_budget(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    budget: int,
+    shown: int,
+) -> None:
+    affected.render(_many(".py"), "abc", False, 8, tmp_path, budget=budget)
+    line = _hint_line(capsys.readouterr().out)
+    assert len(line.split("#")[0].split()) == 1 + shown
+
+
+@pytest.mark.parametrize(("budget", "shown"), [(0, 50), (6000, 20)])
+def test_render_json_command_follows_budget(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    budget: int,
+    shown: int,
+) -> None:
+    affected.render(_many(".py"), "abc", True, 8, tmp_path, budget=budget)
+    command = json.loads(capsys.readouterr().out)["command"]
+    assert len(command.split("#")[0].split()) == 1 + shown
 
 
 def test_json_shape(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
@@ -484,6 +543,45 @@ def test_test_hint_groups_mixed_languages_into_separate_lines(
     lines = hint.splitlines()
     assert any(ln.startswith("pytest ") for ln in lines)
     assert any(ln.startswith("go test ./...") for ln in lines)
+
+
+def test_test_hint_ts_and_tsx_share_one_js_runner_line(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "bun test"}}')
+    (tmp_path / "bun.lock").write_text("")
+    impacts = [
+        affected.TestImpact(path="src/a.test.ts", tier="direct"),
+        affected.TestImpact(path="src/b.test.tsx", tier="direct"),
+        affected.TestImpact(path="src/c.test.js", tier="import"),
+    ]
+    assert affected._test_hint(impacts, tmp_path) == "bun run test"
+
+
+def test_test_hint_java_and_kotlin_share_one_gradle_line(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "gradlew").write_text("")
+    impacts = [
+        affected.TestImpact(path="src/test/FooTest.java", tier="direct"),
+        affected.TestImpact(path="src/test/BarTest.kt", tier="direct"),
+    ]
+    assert affected._test_hint(impacts, tmp_path) == "./gradlew test"
+
+
+def test_test_hint_keeps_first_seen_family_order(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}')
+    impacts = [
+        affected.TestImpact(path="tests/test_a.py", tier="direct"),
+        affected.TestImpact(path="web/a.test.ts", tier="direct"),
+        affected.TestImpact(path="tests/test_b.py", tier="import"),
+        affected.TestImpact(path="web/b.test.tsx", tier="import"),
+    ]
+    hint = affected._test_hint(impacts, tmp_path)
+    assert hint.splitlines() == [
+        "pytest tests/test_a.py tests/test_b.py",
+        "npm test",
+    ]
 
 
 # --- 1.5-remainder: import-tier fallback for a symbol seed -------------

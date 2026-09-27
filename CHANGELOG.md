@@ -9,6 +9,89 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-09-26
+
+Closes round 1.5's fix cycle. The code is 1.4.4; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.5 evaluated 1.3.7 on
+seven real repositories and found two Medium and two Low issues, no
+regressions. All four are fixed:
+
+- **1.4.1**: `affected` printed the same test command once per file
+  extension (`bun run test` twice for `.ts` + `.tsx`); hints now group
+  by runner family.
+- **1.4.2**: `affected --budget 0` still cut the runner line at 20
+  paths, so `/impact`'s "rerun with `--budget 0`" gave the same
+  truncated command. `--budget 0` now lists every impacted path
+  (tensorflow: all 1,286 instead of 20), and a capped line says how to
+  get the rest.
+- **1.4.3**: `sanity` names three JS/TS non-call shapes (string or
+  template text, recorded property reads, object keys/fields/typed
+  parameters) and re-exports. `sanity --all` unexplained rows dropped
+  127 -> 30 (claude-buddy), 4,319 -> 1,383 (claude-code) and
+  4,406 -> 1,767 (cline), with the real misses still flagged.
+- **1.4.4**: `--mcp-install --dry-run` registered for real. The MCP
+  actions now preview their `claude mcp` command, and every action
+  that can't preview refuses `--dry-run` instead of writing.
+
+## [1.4.4] — 2026-09-26
+
+### Fixed
+- **`--mcp-install --dry-run` registered the MCP server for real.**
+  `--dry-run` only worked with `--claude-install`/`--claude-uninstall`;
+  every other action accepted it and ignored it, so the careful person
+  who asked for a preview got a live write. `--mcp-install` and
+  `--mcp-uninstall` now print the `claude mcp add|remove` command they
+  would run and change nothing. Every other action (`--cline-*`,
+  `--claude-md-*`, `--map`, bare `dekko DIR`) now refuses `--dry-run`
+  with exit 2 instead of writing.
+
+## [1.4.3] — 2026-09-26
+
+### Fixed
+- **`sanity` called plain TS/JS non-calls "unexplained miss".** On
+  every TypeScript repo measured, `sanity --all --fail-on-unexplained`
+  failed on lines a person dismisses at a glance, so the CI gate cried
+  wolf. Three JS/TS-only shapes now get a named cause: the name only
+  inside string or template text (`mention inside a string or template
+  text`; the biggest shape by far, mostly log messages), a property
+  read the map records at that line (`a property read of a same-named
+  field`), and an object key, one-line interface/type field or typed
+  parameter (the local-binding cause, whose text now says "object
+  key/field"). `export { X } from` re-exports read as import
+  statements. A line that also calls the name bare, or a string that
+  calls it (`eval("x()")`), is never explained this way, so a real
+  missed call still shows. Other languages are unchanged.
+  `sanity --all` unexplained rows, same maps: claude-buddy 127 -> 30,
+  claude-code 4,319 -> 1,383, cline 4,406 -> 1,767; total rows
+  unchanged, and the known real misses (`new WebSocketTransport(...)`)
+  still show.
+
+## [1.4.2] — 2026-09-26
+
+### Fixed
+- **`affected --budget 0` still cut the runner line at 20 paths.** The
+  line said `# +N more impacted test files not shown`, and `/impact`
+  told the agent to rerun with `--budget 0` to get the full command,
+  but the rerun printed the same 20 paths: on tensorflow, an agent
+  following it ran 20 of 1,286 impacted `.py` files. `--budget 0` now
+  lifts the cap on `affected` and `workset` (text, JSON `command` and
+  `pytest`, and the MCP tools' `budget: 0`), so the line lists every
+  impacted path. Any other budget keeps the 20-path cap, which still
+  keeps a workset inside its budget, and the truncation tail now says
+  `--budget 0 lists all`. `/impact` adds that on a set of hundreds the
+  whole suite is often the saner run.
+
+## [1.4.1] — 2026-09-26
+
+### Fixed
+- **`affected` printed the same test command once per file
+  extension.** A change impacting both `.ts` and `.tsx` tests gave
+  `bun run test` twice (text and the JSON `command`), so an agent
+  following the hint ran the whole suite twice; mixed Java/Kotlin
+  Gradle repos did the same with `./gradlew test`. Runner hints now
+  group by runner family, one line per family, first-seen order.
+
 ## [1.4.0] — 2026-09-26
 
 Closes round 1.4's fix cycle. The code is 1.3.8; this release is the
