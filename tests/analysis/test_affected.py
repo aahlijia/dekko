@@ -300,6 +300,65 @@ def test_pytest_hint_caps_a_large_impact_set(tmp_path: Path) -> None:
     shown = hint.split("#")[0].split()
     assert len(shown) == 1 + affected._MAX_HINT_PATHS  # "pytest" + paths
     assert "+30 more impacted test files not shown" in hint
+    assert hint.endswith("--budget 0 lists all")
+
+
+def _many(ext: str, n: int = 50) -> list[affected.TestImpact]:
+    return [
+        affected.TestImpact(path=f"tests/test_{i:02d}{ext}", tier="direct")
+        for i in range(n)
+    ]
+
+
+def test_uncapped_pytest_hint_lists_every_path(tmp_path: Path) -> None:
+    hint = affected._test_hint(_many(".py"), tmp_path, max_paths=None)
+    assert "#" not in hint
+    assert len(hint.split()) == 1 + 50
+
+
+def test_named_hint_tail_points_at_budget_zero(tmp_path: Path) -> None:
+    hint = affected._test_hint(_many(".rs"), tmp_path)
+    assert hint.endswith("+30 more (--budget 0 lists all)")
+
+
+def test_uncapped_named_hint_lists_every_path(tmp_path: Path) -> None:
+    hint = affected._test_hint(_many(".rs"), tmp_path, max_paths=None)
+    assert "more" not in hint
+    assert hint.count(".rs") == 50
+
+
+def test_hint_path_cap_is_lifted_only_by_budget_zero() -> None:
+    assert affected.hint_path_cap(0) is None
+    assert affected.hint_path_cap(None) == affected._MAX_HINT_PATHS
+    assert affected.hint_path_cap(6000) == affected._MAX_HINT_PATHS
+
+
+def _hint_line(out: str) -> str:
+    return next(ln for ln in out.splitlines() if ln.startswith("pytest "))
+
+
+@pytest.mark.parametrize(("budget", "shown"), [(0, 50), (6000, 20)])
+def test_render_text_runner_line_follows_budget(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    budget: int,
+    shown: int,
+) -> None:
+    affected.render(_many(".py"), "abc", False, 8, tmp_path, budget=budget)
+    line = _hint_line(capsys.readouterr().out)
+    assert len(line.split("#")[0].split()) == 1 + shown
+
+
+@pytest.mark.parametrize(("budget", "shown"), [(0, 50), (6000, 20)])
+def test_render_json_command_follows_budget(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    budget: int,
+    shown: int,
+) -> None:
+    affected.render(_many(".py"), "abc", True, 8, tmp_path, budget=budget)
+    command = json.loads(capsys.readouterr().out)["command"]
+    assert len(command.split("#")[0].split()) == 1 + shown
 
 
 def test_json_shape(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:

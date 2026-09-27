@@ -90,10 +90,11 @@ Runs `dekko affected [REV]` and relays the impacted test files by
 tier (`[direct]`, `[transitive]`, `[import]`) together with the ready-to-run
 test command the report ends with (`pytest a.py b.py`, `cargo test`,
 `go test ./...`, the repo's `package.json` test script, or a
-Gradle/Maven invocation, one per language group). The command tells
+Gradle/Maven invocation, one per runner family). The command tells
 Claude to rerun with `--budget 0` when the runner line is marked
-`# +N more impacted test files not shown`, so a budget-capped report
-never becomes a partial test run, and to relay the note counting
+`# +N more impacted test files not shown` (`--budget 0` lifts the
+20-path cap and lists every one), so a budget-capped report never
+becomes a partial test run, and to relay the note counting
 tests reached only through an ambiguous call (`--possible` lists
 them). Leads, not verdicts: static analysis misses fixtures and
 dynamic dispatch. The same answer is available to the MCP tools as

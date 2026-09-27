@@ -663,6 +663,45 @@ def test_first_impacted_tests_come_before_outline_detail() -> None:
     assert tiers[-1] == "tests_more"
 
 
+def _many_impacts_workset() -> workset.Workset:
+    seed = workset.Seed(
+        mode="symbol",
+        label="symbol src/a.py:f",
+        rev=None,
+        symbol="f",
+        touched=[],
+        files=[],
+        impacts=[_impact(i) for i in range(50)],
+    )
+    return workset.Workset(seed=seed, outlines=[])
+
+
+def _pytest_paths(hint: str) -> int:
+    return len(hint.split("#")[0].split()) - 1
+
+
+def test_budget_zero_uncaps_the_manifest_runner_hint(tmp_path: Path) -> None:
+    ws = _many_impacts_workset()
+    uncapped = workset._manifest(ws, tmp_path, 0)
+    capped = workset._manifest(ws, tmp_path, workset.DEFAULT_BUDGET)
+    hint = next(ln for ln in uncapped if ln.startswith("pytest "))
+    assert _pytest_paths(hint) == 50
+    hint = next(ln for ln in capped if ln.startswith("pytest "))
+    assert _pytest_paths(hint) == affected._MAX_HINT_PATHS
+
+
+@pytest.mark.parametrize(("budget", "shown"), [(0, 50), (3000, 20)])
+def test_json_pytest_hint_follows_budget(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    budget: int,
+    shown: int,
+) -> None:
+    workset._render_json(_many_impacts_workset(), budget, tmp_path)
+    doc = json.loads(capsys.readouterr().out)
+    assert _pytest_paths(doc["pytest"]) == shown
+
+
 def test_tight_budget_keeps_impacted_tests_over_detail(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:

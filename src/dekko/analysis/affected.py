@@ -475,7 +475,7 @@ def render(
         print(header)
         for row in kept:
             print(row)
-        hint = _test_hint(impacts, root)
+        hint = _test_hint(impacts, root, hint_path_cap(budget))
         if hint:
             print(f"\n{hint}")
         print(meter.footer())
@@ -498,7 +498,7 @@ def _render_json(
     doc = {
         "rev": rev,
         "impacted": entries[: len(kept_ser)],
-        "command": _test_hint(impacts, root),
+        "command": _test_hint(impacts, root, hint_path_cap(budget)),
         "meta": meter.as_dict(),
         "possible_total": len(possible),
         "possible_example": (
@@ -551,7 +551,8 @@ def _print_possible(
 # in this one line, blowing a workset budget 3.6x over its stated
 # cap. A command holding hundreds/thousands of paths also
 # stops being "ready to paste" long before it stops being technically
-# valid.
+# valid. ``--budget 0`` lifts it: with no budget to blow, the runner
+# line lists every impacted path.
 _MAX_HINT_PATHS = 20
 
 # Extensions grouped by their (confidently known, static) test runner.
@@ -580,32 +581,56 @@ _JS_LOCKFILE_RUNNERS = (
 )
 
 
-def _cap_paths(paths: list[str]) -> tuple[list[str], int]:
-    """Cap a path list at ``_MAX_HINT_PATHS``; return (shown, extra)."""
-    if len(paths) <= _MAX_HINT_PATHS:
+def hint_path_cap(budget: int | None) -> int | None:
+    """How many paths a runner hint may embed under ``budget``.
+
+    ``0`` is the documented "no cap" budget, so the hint lists every
+    impacted path; any other budget (or none) keeps
+    ``_MAX_HINT_PATHS``.
+    """
+    return None if budget == 0 else _MAX_HINT_PATHS
+
+
+def _cap_paths(
+    paths: list[str],
+    max_paths: int | None,
+) -> tuple[list[str], int]:
+    """Cap a path list at ``max_paths`` (``None``: no cap).
+
+    Returns:
+        The shown paths and how many were left out.
+    """
+    if max_paths is None or len(paths) <= max_paths:
         return paths, 0
-    return paths[:_MAX_HINT_PATHS], len(paths) - _MAX_HINT_PATHS
+    return paths[:max_paths], len(paths) - max_paths
 
 
-def _py_hint(paths: list[str]) -> str:
+def _py_hint(paths: list[str], max_paths: int | None) -> str:
     """A ready-to-paste ``pytest`` invocation for impacted ``.py`` files."""
-    shown, extra = _cap_paths(paths)
+    shown, extra = _cap_paths(paths, max_paths)
     hint = "pytest " + " ".join(shown)
     if extra:
-        hint += f"  # +{extra} more impacted test files not shown"
+        hint += (
+            f"  # +{extra} more impacted test files not shown;"
+            " --budget 0 lists all"
+        )
     return hint
 
 
-def _named_hint(command: str, paths: list[str]) -> str:
+def _named_hint(
+    command: str,
+    paths: list[str],
+    max_paths: int | None,
+) -> str:
     """A whole-suite runner invocation, with impacted paths as a comment.
 
     Used for runners (``cargo test``, ``go test ./...``) that don't
     accept arbitrary source paths the way ``pytest`` does.
     """
-    shown, extra = _cap_paths(paths)
+    shown, extra = _cap_paths(paths, max_paths)
     names = ", ".join(shown)
     if extra:
-        names += f", +{extra} more"
+        names += f", +{extra} more (--budget 0 lists all)"
     return f"{command}  # impacted: {names}"
 
 
@@ -640,14 +665,19 @@ def _jvm_hint(root: Path) -> str:
     return ""
 
 
-def _group_hint(family: str, paths: list[str], root: Path) -> str:
+def _group_hint(
+    family: str,
+    paths: list[str],
+    root: Path,
+    max_paths: int | None,
+) -> str:
     """One runner family's hint, or empty when none applies."""
     if family == "py":
-        return _py_hint(paths)
+        return _py_hint(paths, max_paths)
     if family == "rust":
-        return _named_hint("cargo test", paths)
+        return _named_hint("cargo test", paths, max_paths)
     if family == "go":
-        return _named_hint("go test ./...", paths)
+        return _named_hint("go test ./...", paths, max_paths)
     if family == "js":
         return _js_hint(root)
     if family == "jvm":
@@ -655,7 +685,11 @@ def _group_hint(family: str, paths: list[str], root: Path) -> str:
     return ""
 
 
-def _test_hint(impacts: list[TestImpact], root: Path) -> str:
+def _test_hint(
+    impacts: list[TestImpact],
+    root: Path,
+    max_paths: int | None = _MAX_HINT_PATHS,
+) -> str:
     """Ready-to-paste test-runner invocation(s), one per runner family.
 
     Impacted files are grouped by runner family (every JS/TS extension
@@ -668,8 +702,8 @@ def _test_hint(impacts: list[TestImpact], root: Path) -> str:
     lockfile-inferred package manager) for JS/TS, and a Gradle/Maven
     invocation for JVM languages. A group with no confident mapping is
     silently omitted, same as today's "no impacts -> empty string"
-    contract. Each group is capped at ``_MAX_HINT_PATHS`` paths
-    independently.
+    contract. Each group is capped at ``max_paths`` paths
+    independently (``None``: uncapped, see ``hint_path_cap``).
     """
     if not impacts:
         return ""
@@ -682,7 +716,7 @@ def _test_hint(impacts: list[TestImpact], root: Path) -> str:
     hints = [
         hint
         for family, paths in groups.items()
-        if (hint := _group_hint(family, paths, root))
+        if (hint := _group_hint(family, paths, root, max_paths))
     ]
     return "\n".join(hints)
 

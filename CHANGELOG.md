@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.4.2] — 2026-09-26
+
+### Fixed
+- **`affected --budget 0` still cut the runner line at 20 paths.** The
+  line said `# +N more impacted test files not shown`, and `/impact`
+  told the agent to rerun with `--budget 0` to get the full command,
+  but the rerun printed the same 20 paths: on tensorflow, an agent
+  following it ran 20 of 1,286 impacted `.py` files. `--budget 0` now
+  lifts the cap on `affected` and `workset` (text, JSON `command` and
+  `pytest`, and the MCP tools' `budget: 0`), so the line lists every
+  impacted path. Any other budget keeps the 20-path cap, which still
+  keeps a workset inside its budget, and the truncation tail now says
+  `--budget 0 lists all`. `/impact` adds that on a set of hundreds the
+  whole suite is often the saner run.
+
 ## [1.4.1] — 2026-09-26
 
 ### Fixed

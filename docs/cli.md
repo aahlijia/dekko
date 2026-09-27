@@ -107,6 +107,16 @@ its test code: `crates/vim/src/motion.rs` for a `#[gpui::test]` in its
 repo most impacted files are ordinary source paths. The runner hint stays
 `cargo test`.
 
+The report ends with a ready-to-run runner line per runner family
+(`pytest a.py b.py`, `cargo test`, `go test ./...`, the repo's
+`package.json` test script, `./gradlew test`/`mvn test`). Under a budget
+it names at most 20 impacted paths per family and says how many it left
+out (`# +1266 more impacted test files not shown; --budget 0 lists all`).
+`--budget 0` lifts that cap too: the line lists every impacted path. The
+same holds for `workset`'s runner line. On a very large set, the whole
+suite is often the saner run, and on Windows a command line past about
+32,000 characters won't start.
+
 `affected` follows resolved calls only. A test that calls changed code
 through a call dekko couldn't pin to one target (`handler.createMessage()`,
 with nine classes defining `createMessage`) is a *possible* impact. It is
@@ -1116,7 +1126,7 @@ follows the same rule with its own 200-row default.
 budget. It's the way to get a whole result from the commands that are
 budgeted by default (`affected`, `workset`, `search`, `summary`,
 `orient`), and like any explicit budget it also lifts the default row
-limit. For the lean map, whose cap never goes away, `0` means the
+limit and, on `affected`/`workset`, the runner line's 20-path cap. For the lean map, whose cap never goes away, `0` means the
 default size-scaled cap. A negative budget is a usage error.
 
 Row counts (`--limit`, `--top`, `--hops`, `--packs`) take `0` or more.

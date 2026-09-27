@@ -799,7 +799,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=affected.DEFAULT_BUDGET,
         metavar="TOKENS",
         help="approximate token budget; drops weakest-tier files first "
-        f"(default: {affected.DEFAULT_BUDGET}; 0 = no cap)",
+        f"(default: {affected.DEFAULT_BUDGET}; 0 = no cap, including "
+        "the runner line's path list)",
     )
     p_affected.add_argument(
         "--jobs",
@@ -857,7 +858,8 @@ def build_subcommand_parser() -> argparse.ArgumentParser:
         default=workset_mod.DEFAULT_BUDGET,
         metavar="TOKENS",
         help=f"shared token budget for the bundle "
-        f"(default: {workset_mod.DEFAULT_BUDGET}; 0 = no cap)",
+        f"(default: {workset_mod.DEFAULT_BUDGET}; 0 = no cap, including "
+        "the runner line's path list)",
     )
     p_workset.add_argument(
         "--packs",
