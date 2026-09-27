@@ -4908,3 +4908,218 @@ def test_sanity_file_skipped_by_map_is_not_mapped(
     # A test file is absent from the tests-excluded view, never from the
     # map: it must keep its test-filter cause.
     assert _causes_in_file(doc, "tests/it.rs") == {sanity.CAUSE_TEST_FILTER}
+
+
+# --- JS/TS non-call shapes: string text, property reads, keys ----------
+
+
+def _classify_one(
+    root: Path,
+    path: str,
+    snippet: str,
+    name: str = "warn",
+    *,
+    read_sites: frozenset[tuple[str, int]] = frozenset(),
+) -> str:
+    """Classify one grep hit at line 1 of ``path``, written under ``root``."""
+    (root / path).parent.mkdir(parents=True, exist_ok=True)
+    (root / path).write_text(snippet + "\n")
+    hit = sanity.GrepHit(path=path, line=1, snippet=snippet)
+    causes = sanity._classify_grep_hits(
+        [hit],
+        name,
+        root,
+        own_def_locs=frozenset(),
+        tests_excluded=True,
+        read_sites=read_sites,
+    )
+    return causes[(path, 1)]
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "logForDebugging('CCRClient: warn mismatch')",
+        "throw new Error(`CCRClient: GET ${url} warn failed`)",
+        "const msg = `a ${b} warn`",
+    ],
+)
+def test_js_name_only_in_string_text_is_string_mention(
+    tmp_path: Path, snippet: str
+) -> None:
+    cause = _classify_one(tmp_path, "src/a.ts", snippet)
+    assert cause == sanity.CAUSE_STRING_MENTION
+
+
+def test_js_call_inside_template_body_stays_unexplained(
+    tmp_path: Path,
+) -> None:
+    cause = _classify_one(tmp_path, "src/a.ts", "const msg = `x ${warn()}`")
+    assert cause == sanity.CAUSE_UNEXPLAINED
+
+
+def test_js_bare_call_beside_quoted_name_is_not_string_mention(
+    tmp_path: Path,
+) -> None:
+    cause = _classify_one(tmp_path, "src/a.ts", "log('warn' + warn())")
+    assert cause != sanity.CAUSE_STRING_MENTION
+
+
+@pytest.mark.parametrize(
+    "snippet", ['eval("warn()")', "setTimeout('warn()', 10)"]
+)
+def test_js_call_written_as_string_text_stays_unexplained(
+    tmp_path: Path, snippet: str
+) -> None:
+    cause = _classify_one(tmp_path, "src/a.ts", snippet)
+    assert cause == sanity.CAUSE_UNEXPLAINED
+
+
+def test_js_prose_parenthetical_is_string_mention(tmp_path: Path) -> None:
+    snippet = 'story: "Header with a warn (yellow) border."'
+    cause = _classify_one(tmp_path, "src/a.ts", snippet)
+    assert cause == sanity.CAUSE_STRING_MENTION
+
+
+def test_python_string_mention_keeps_its_label(tmp_path: Path) -> None:
+    cause = _classify_one(tmp_path, "src/a.py", 'log("please warn now")')
+    assert cause == sanity.CAUSE_UNEXPLAINED
+
+
+def test_js_recorded_read_is_property_read(tmp_path: Path) -> None:
+    cause = _classify_one(
+        tmp_path,
+        "src/a.ts",
+        "const n = result.warn.length",
+        read_sites=frozenset({("src/a.ts", 1)}),
+    )
+    assert cause == sanity.CAUSE_PROPERTY_READ
+
+
+def test_js_recorded_read_with_bare_call_stays_unexplained(
+    tmp_path: Path,
+) -> None:
+    cause = _classify_one(
+        tmp_path,
+        "src/a.ts",
+        "const n = result.warn || warn()",
+        read_sites=frozenset({("src/a.ts", 1)}),
+    )
+    assert cause == sanity.CAUSE_UNEXPLAINED
+
+
+def test_js_unrecorded_read_is_not_property_read(tmp_path: Path) -> None:
+    cause = _classify_one(tmp_path, "src/a.ts", "const n = result.warn.length")
+    assert cause != sanity.CAUSE_PROPERTY_READ
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "return { ok: [], warn: [] }",
+        "interface R { ok: string[]; warn: string[] }",
+        "getDisplayText: (warn: string) => void",
+        "type R = { warn?: string }",
+    ],
+)
+def test_js_key_field_or_param_is_local_binding(
+    tmp_path: Path, snippet: str
+) -> None:
+    cause = _classify_one(tmp_path, "src/a.ts", snippet)
+    assert cause == sanity.CAUSE_LOCAL_BINDING_OR_LITERAL
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "return { warn: warn }",
+        "const f = cond ? warn : other",
+    ],
+)
+def test_js_key_that_is_also_a_value_stays_unexplained(
+    tmp_path: Path, snippet: str
+) -> None:
+    cause = _classify_one(tmp_path, "src/a.ts", snippet)
+    assert cause == sanity.CAUSE_UNEXPLAINED
+
+
+def test_go_map_key_keeps_its_label(tmp_path: Path) -> None:
+    cause = _classify_one(tmp_path, "a.go", "m := map[string]int{warn: 1}")
+    assert cause == sanity.CAUSE_UNEXPLAINED
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "export { ClickEvent } from './events.js'",
+        'export type { ClickEvent, Other } from "./events"',
+    ],
+)
+def test_js_reexport_is_import_statement(tmp_path: Path, snippet: str) -> None:
+    cause = _classify_one(tmp_path, "src/a.ts", snippet, "ClickEvent")
+    assert cause == sanity.CAUSE_IMPORT_STATEMENT
+
+
+def test_usages_mode_passes_no_read_sites(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "a.ts": (
+                "import path from 'path';\n"
+                "export function f(): string {\n"
+                "    return path.join('a', 'b');\n"
+                "}\n"
+            )
+        }
+    )
+    seen: list[frozenset] = []
+    original = sanity._classify_grep_hits
+
+    def spy(*args: Any, **kwargs: Any) -> dict:
+        seen.append(kwargs.get("read_sites", frozenset()))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(sanity, "_classify_grep_hits", spy)
+    cli.main(["sanity", "join", "--usages", "--root", str(root)])
+    assert seen == [frozenset()]
+
+
+FLAG_WIDGET_REPO = {
+    "src/widget.ts": (
+        "export function flagWidget(): number {\n    return 1;\n}\n"
+    ),
+    "src/use.ts": (
+        "import { flagWidget } from './widget';\n"
+        "\n"
+        "export function report(result: any): number {\n"
+        "    console.log('flagWidget: starting');\n"
+        "    const shape = { ok: [], flagWidget: [] };\n"
+        "    return result.flagWidget.length + shape.ok.length;\n"
+        "}\n"
+        "\n"
+        "export function missed(): number {\n"
+        "    return flagWidget();\n"
+        "}\n"
+    ),
+    "src/index.ts": "export { flagWidget } from './widget';\n",
+}
+
+
+def test_sanity_all_explains_ts_non_call_shapes(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(FLAG_WIDGET_REPO)
+    _force_no_dekko_hits(monkeypatch)
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    causes = json.loads(capsys.readouterr().out)["aggregate_causes"]
+    # Only the planted real call is left to inspect.
+    assert causes.get(sanity.CAUSE_UNEXPLAINED) == 1
+    assert causes.get(sanity.CAUSE_STRING_MENTION) == 1
+    assert causes.get(sanity.CAUSE_PROPERTY_READ) == 1
+    assert causes.get(sanity.CAUSE_LOCAL_BINDING_OR_LITERAL) == 1
+    assert causes.get(sanity.CAUSE_IMPORT_STATEMENT) == 2

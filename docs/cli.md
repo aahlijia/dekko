@@ -373,9 +373,9 @@ between "dekko dropped results" and "dekko excluded declarations."
 The identity holds unless `grep_truncated` is set, in which case the
 sweep hit its safety cap and discarded hits past it by design.
 
-**Comments, value references, Rust constructions.** Four line shapes
-a person classifies at a glance get a named cause instead of
-`unexplained miss`:
+**Comments, value references, Rust constructions, JS/TS non-calls.**
+Line shapes a person classifies at a glance get a named cause instead
+of `unexplained miss`:
 
 - *A comment line, anywhere.* Near the symbol's definition or in its
   file's header it reads `comment mention ... (near the symbol's own
@@ -405,11 +405,33 @@ a person classifies at a glance get a named cause instead of
   `let loc = AbortLoc {`, `Variant(AbortLoc),`,
   `struct Wrapper(pub AbortLoc);` read `type position (annotation,
   generic argument, construction, or enum payload)`.
+- *JS/TS only, since 1.4.3*, three shapes that were most of the
+  unexplained rows on TypeScript repos (64-68% on the three measured):
+  - The name only inside string or template text, once quoted text
+    is blanked and `${...}` bodies kept:
+    `logForDebugging('CCRClient: Epoch mismatch')` reads `mention
+    inside a string or template text`. Not when the string text
+    calls it (`eval("cleanup()")`, `setTimeout("cleanup()")`), which
+    is a real reference the resolver can't see.
+  - A property read the map records at that line (`result.warn.map(...)`)
+    reads `a property read of a same-named field`. Not in `--usages`
+    mode, where a `this.handler` passed along could be the reference
+    being looked for.
+  - An object key, one-line interface/type-literal field or typed
+    parameter: `{ ok: [], warn: [] }`, `interface R { warn: string[] }`,
+    `(action: string) => void` read `... an object key/field ...`. Not
+    `{ warn: warn }`, where the name is also the value.
 
-Two shapes are left unexplained on purpose. A name *inside* a longer
-string (`"settings.json cleanup complete."`) also matches
-`eval("cleanup()")` and dispatch by string, which are real
-references. And a name in the middle of a multi-line Python docstring
+  A line that also calls the name bare (`x.warn || warn()`) gets none
+  of the three, so a real missed call can't hide behind a same-line
+  string or key. `export { X } from './x'` re-exports read as import
+  statements.
+
+Two shapes are left unexplained on purpose. Outside JS/TS, a name
+*inside* a longer string (`"settings.json cleanup complete."`) also
+matches `eval("cleanup()")` and dispatch by string, which are real
+references, and Python f-strings, Go map keys and Kotlin/Ruby
+interpolation make "inside a string" mean something else. And a name in the middle of a multi-line Python docstring
 can't be told from code one line at a time. None of this moves a
 count: `matches`, `dekko-only` and `grep-only` are untouched, only the
 cause on a grep-only row changes. `--fail-on-unexplained` will fail

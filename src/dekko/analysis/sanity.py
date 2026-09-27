@@ -238,8 +238,23 @@ CAUSE_VALUE_REFERENCE_UNRESOLVED = (
     "known blind spot, not a call the resolver missed"
 )
 CAUSE_LOCAL_BINDING_OR_LITERAL = (
-    "matches an unrelated local variable/parameter declaration, or a "
-    "string literal value — not a reference to the target"
+    "matches an unrelated local variable/parameter declaration, an "
+    "object key/field, or a string literal value — not a reference to "
+    "the target"
+)
+# JS/TS only (see ``_JS_SHAPE_GRAMMARS``): once string and template
+# text is blanked, the name is gone from the line. The biggest
+# unexplained shape on the TS repos measured (claude-code: 2,116 of
+# 4,319 rows), mostly log messages naming a class.
+CAUSE_STRING_MENTION = (
+    "mention inside a string or template text — not a call site"
+)
+# Tier 1, JS/TS: the map records a property read of this name at this
+# exact line (``MapIndex.reads_by_name``), and the line has no bare call
+# of it.
+CAUSE_PROPERTY_READ = (
+    "a property read of a same-named field (`x.name`), not a call — "
+    "dekko records it as a read"
 )
 CAUSE_LIKELY_EXTERNAL_COLLISION = (
     "likely an unrelated external-library method sharing this bare "
@@ -509,8 +524,14 @@ _JAVA_IMPORT_TEMPLATE = r"^import\s+(?:static\s+)?[\w.]*\.{name}\s*;"
 # would risk false-positiving on Java's own semicolon-required style):
 # no terminating ``;``, and an optional trailing ``as Alias`` rename.
 _KOTLIN_IMPORT_TEMPLATE = r"^import\s+[\w.]*\.{name}(?:\s+as\s+\w+)?\s*$"
+# ``export { X } from './x.js'`` / ``export type { X } from`` re-exports
+# a name without calling it: the same binding shape as a named import.
+_ESM_REEXPORT_TEMPLATE = (
+    r"^export\s+(?:type\s+)?\{{[^}}]*\b{name}\b[^}}]*\}}\s*from\s+['\"]"
+)
 _IMPORT_LINE_TEMPLATES = (
     _ESM_NAMED_IMPORT_TEMPLATE,
+    _ESM_REEXPORT_TEMPLATE,
     _ESM_DEFAULT_IMPORT_TEMPLATE,
     _PY_FROM_IMPORT_TEMPLATE,
     _JAVA_IMPORT_TEMPLATE,
@@ -795,6 +816,129 @@ def _looks_like_local_binding_or_literal(snippet: str, bare_name: str) -> bool:
     return (
         re.search(_STRING_LITERAL_TEMPLATE.format(name=name), stripped)
         is not None
+    )
+
+
+# Three JS/TS line shapes that name the target without calling it:
+# the name only inside string/template text, a recorded property read,
+# and an object key/field/typed parameter (``{ ok: [], warn: [] }``,
+# ``(action: string) => void``). JS/TS only: Python f-strings and dict
+# keys, Go map-literal keys and Kotlin/Ruby interpolation give "inside
+# a string" or ``name:`` other meanings, and the evidence was TS.
+_JS_SHAPE_GRAMMARS = frozenset({"typescript", "tsx", "javascript"})
+# A bare call of the name, not a method call on something else. A line
+# holding one is never explained by these shapes, so a real missed call
+# can't hide behind a same-line string or key.
+_JS_BARE_CALL_TEMPLATE = r"(?<![.\w]){name}\s*\("
+# ``name:`` / ``name?:`` right after ``{``, ``,``, ``(``, ``;`` or the
+# line start, never ``name::``.
+_JS_KEY_TEMPLATE = r"(?:^|(?<=[{{,(;]))\s*{name}\s*\??:(?!:)"
+
+
+@dataclass(frozen=True)
+class _JsShapes:
+    """Which non-call JS/TS shapes explain one grep hit's line."""
+
+    string_mention: bool = False
+    property_read: bool = False
+    key_or_field: bool = False
+
+
+def _skip_quoted(line: str, i: int) -> int:
+    """Index just past the ``'``/``"`` string that opens at ``i``."""
+    quote, j = line[i], i + 1
+    while j < len(line) and line[j] != quote:
+        j += 2 if line[j] == "\\" else 1
+    return j + 1
+
+
+def _template_code(line: str, i: int) -> tuple[str, int]:
+    """The ``${...}`` bodies of the template literal opening at ``i``.
+
+    Returns:
+        The kept code (bodies, space-separated) and the index just past
+        the closing backtick, or the line's end for an unclosed one.
+    """
+    kept: list[str] = []
+    j = i + 1
+    while j < len(line) and line[j] != "`":
+        if line[j] == "\\":
+            j += 2
+        elif line.startswith("${", j):
+            depth, k = 1, j + 2
+            while k < len(line) and depth:
+                depth += {"{": 1, "}": -1}.get(line[k], 0)
+                k += 1
+            kept.append(line[j + 2 : k - 1])
+            j = k
+        else:
+            j += 1
+    return " " + " ".join(kept) + " ", j + 1
+
+
+def _js_code_only(line: str) -> str:
+    """``line`` with JS string and template text blanked.
+
+    Quoted strings become ``""``; a template literal keeps only its
+    ``${...}`` bodies (brace-depth aware), so a template holding
+    ``${warn()}`` still shows the call. One line at a time: the
+    continuation line of a multi-line template has no backtick and
+    reads as code.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c in "'\"":
+            out.append('""')
+            i = _skip_quoted(line, i)
+        elif c == "`":
+            code, i = _template_code(line, i)
+            out.append(f'"{code}"')
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _js_shapes(
+    snippet: str,
+    bare_name: str,
+    path: str,
+    is_read_site: bool,
+) -> _JsShapes:
+    """Classify ``snippet`` against the three JS/TS non-call shapes.
+
+    Args:
+        snippet: The grep-matched line.
+        bare_name: The bare identifier being searched for.
+        path: The hit's file; any non-JS/TS file gets no shape.
+        is_read_site: Whether the map records a property read of
+            ``bare_name`` at this line (``_read_sites``).
+
+    Returns:
+        The shapes that hold. At most one matters: ``classify_miss``
+        checks them in field order.
+    """
+    if _grammar_for_path(path) not in _JS_SHAPE_GRAMMARS:
+        return _JsShapes()
+    name = re.escape(bare_name)
+    code = _js_code_only(snippet.strip())
+    word = re.compile(rf"\b{name}\b")
+    if not word.search(code):
+        # ``eval("warn()")``, ``setTimeout("warn()")``: a call written
+        # as string text is a real reference the resolver can't see.
+        # No space before ``(``: prose like ``"border color (blue)"``
+        # has one, and code in a string doesn't.
+        called_in_text = re.search(rf"\b{name}\(", snippet)
+        return _JsShapes(string_mention=called_in_text is None)
+    bare_call = re.search(_JS_BARE_CALL_TEMPLATE.format(name=name), code)
+    if bare_call:
+        return _JsShapes()
+    rest = re.sub(_JS_KEY_TEMPLATE.format(name=name), " ", code)
+    return _JsShapes(
+        property_read=is_read_site,
+        key_or_field=rest != code and not word.search(rest),
     )
 
 
@@ -1306,6 +1450,8 @@ def classify_miss(
     is_recorded_reference: bool = False,
     looks_like_value_reference: bool = False,
     not_mapped: bool = False,
+    looks_like_string_mention: bool = False,
+    is_recorded_read: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
@@ -1438,6 +1584,12 @@ def classify_miss(
             fact computed by the caller, and checked before every
             other rung: the shape rungs explain a resolver miss, and
             the resolver never saw this file.
+        looks_like_string_mention: Whether a JS/TS line names the
+            target only inside string or template text
+            (``_js_shapes``). Checked after the type rung.
+        is_recorded_read: Whether the map records a property read of
+            the name at this JS/TS line and the line has no bare call
+            of it (``_js_shapes``). Checked after the string rung.
 
     Returns:
         One of the ``CAUSE_*`` constants.
@@ -1463,12 +1615,17 @@ def classify_miss(
         if near_own_definition or in_leading_header_comment:
             return CAUSE_COMMENT_MENTION
         return CAUSE_COMMENT_ELSEWHERE
-    if is_recorded_reference:
-        return CAUSE_VALUE_REFERENCE
-    if looks_like_type_annotation:
-        return CAUSE_TYPE_ANNOTATION
-    if looks_like_local_binding_or_literal:
-        return CAUSE_LOCAL_BINDING_OR_LITERAL
+    non_call = _non_call_cause(
+        is_recorded_reference=is_recorded_reference,
+        looks_like_type_annotation=looks_like_type_annotation,
+        looks_like_string_mention=looks_like_string_mention,
+        is_recorded_read=is_recorded_read,
+        looks_like_local_binding_or_literal=(
+            looks_like_local_binding_or_literal
+        ),
+    )
+    if non_call is not None:
+        return non_call
     return _classify_miss_remaining(
         bare_name,
         is_test_file=is_test_file,
@@ -1479,6 +1636,32 @@ def classify_miss(
         likely_unrelated_external=likely_unrelated_external,
         is_known_collision_name=is_known_collision_name,
     )
+
+
+def _non_call_cause(
+    *,
+    is_recorded_reference: bool,
+    looks_like_type_annotation: bool,
+    looks_like_string_mention: bool,
+    is_recorded_read: bool,
+    looks_like_local_binding_or_literal: bool,
+) -> str | None:
+    """``classify_miss``'s middle rungs: the line names the target
+    without calling it. Index facts first, then line shapes; ``None``
+    when none holds. Split out to keep ``classify_miss`` under the
+    complexity ceiling.
+    """
+    if is_recorded_reference:
+        return CAUSE_VALUE_REFERENCE
+    if looks_like_type_annotation:
+        return CAUSE_TYPE_ANNOTATION
+    if looks_like_string_mention:
+        return CAUSE_STRING_MENTION
+    if is_recorded_read:
+        return CAUSE_PROPERTY_READ
+    if looks_like_local_binding_or_literal:
+        return CAUSE_LOCAL_BINDING_OR_LITERAL
+    return None
 
 
 def _classify_miss_remaining(
@@ -1736,6 +1919,26 @@ def _reference_sites(
     return frozenset(sites)
 
 
+def _read_sites(index: MapIndex, bare_name: str) -> frozenset[tuple[str, int]]:
+    """Every ``(path, line)`` where the map records a property read of
+    ``bare_name`` (``MapIndex.reads_by_name``; JS/TS only).
+
+    The reader's path comes off its symbol, else off the id's
+    ``path::`` prefix for a module-level reader, the way
+    ``_reference_sites`` takes it.
+    """
+    sites: set[tuple[str, int]] = set()
+    for site in index.reads_by_name.get(bare_name, []):
+        reader = index.symbols_by_id.get(site.reader)
+        path = (
+            reader.path
+            if reader is not None
+            else site.reader.split("::", 1)[0]
+        )
+        sites.update((path, ln) for ln in site.lines)
+    return frozenset(sites)
+
+
 # Languages where a sibling file in the same directory shares a
 # package/namespace and needs no import to name the target.
 _SAME_DIR_PACKAGE_GRAMMARS = frozenset({"go", "java"})
@@ -1825,6 +2028,7 @@ def _classify_grep_hits(
     target_kinds: frozenset[str] = frozenset(),
     symbols_by_path: dict[str, list[Symbol]] | None = None,
     scope: _MapScope | None = None,
+    read_sites: frozenset[tuple[str, int]] = frozenset(),
 ) -> dict[tuple[str, int], str]:
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
@@ -1892,6 +2096,11 @@ def _classify_grep_hits(
         scope: The unfiltered map's test spans and file set (see
             ``_MapScope``). ``None`` falls back to path-only test
             classification and never reports a file as unmapped.
+        read_sites: ``_read_sites`` for ``bare_name``: a JS/TS hit at
+            one of these with no bare call is a property read. Empty
+            by default, and always in ``--usages`` mode, where a
+            ``this.handler`` passed along could be the very reference
+            that mode is looking for.
 
     Returns:
         ``(path, line) -> CAUSE_*`` for every hit not in
@@ -1917,6 +2126,7 @@ def _classify_grep_hits(
         # shadowing local never becomes an edge, so an edge that is in
         # the map (and passed ``_can_see``) is one to trust.
         is_recorded_reference = loc in ref_sites
+        js = _js_shapes(h.snippet, bare_name, h.path, loc in read_sites)
         causes[loc] = classify_miss(
             h.snippet,
             bare_name,
@@ -1953,8 +2163,11 @@ def _classify_grep_hits(
                 )
             ),
             looks_like_local_binding_or_literal=(
-                _looks_like_local_binding_or_literal(h.snippet, bare_name)
+                js.key_or_field
+                or _looks_like_local_binding_or_literal(h.snippet, bare_name)
             ),
+            looks_like_string_mention=js.string_mention,
+            is_recorded_read=js.property_read,
             in_leading_header_comment=(
                 _looks_like_comment_line(h.snippet, h.path)
                 and _in_leading_header_comment(root, h)
@@ -3173,6 +3386,7 @@ def run(
     # Callers mode only, like everything above: an external base
     # identifier has neither a reference edge nor a kind.
     ref_sites: frozenset[tuple[str, int]] = frozenset()
+    read_sites: frozenset[tuple[str, int]] = frozenset()
     target_kinds: frozenset[str] = frozenset()
 
     if usages:
@@ -3214,6 +3428,7 @@ def run(
         )
         declaring_type = _resolve_declaring_type(query_index, sym)
         ref_sites = _reference_sites(query_index, [sym])
+        read_sites = _read_sites(query_index, sym.name)
         target_kinds = frozenset({sym.kind})
         sym_target = f"{sym.path}:{sym.qualname}:{sym.start_line}"
         try:
@@ -3276,6 +3491,7 @@ def run(
         target_kinds=target_kinds,
         symbols_by_path=query_index.symbols_by_path,
         scope=_map_scope(index),
+        read_sites=read_sites,
     )
     grep_only_rows = [
         _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits
@@ -3391,6 +3607,7 @@ def _sweep_bare_name(
     target_kinds: frozenset[str] = frozenset(),
     symbols_by_path: dict[str, list[Symbol]] | None = None,
     scope: _MapScope | None = None,
+    read_sites: frozenset[tuple[str, int]] = frozenset(),
 ) -> tuple[GrepSweepResult, dict[tuple[str, int], str]]:
     """One grep + classify pass for ``bare_name``, shared across every
     symbol in its fan-in group — the sweep's whole cost-saving
@@ -3421,6 +3638,8 @@ def _sweep_bare_name(
             ``_classify_grep_hits`` for how a mixed group is handled.
         scope: The unfiltered map's test spans and file set, built once
             by ``run_all()``; see ``_MapScope``.
+        read_sites: Recorded property-read sites of ``bare_name``
+            (``_read_sites``).
 
     Returns:
         ``(sweep, causes)``. ``causes`` is empty when ``sweep.error``
@@ -3443,6 +3662,7 @@ def _sweep_bare_name(
         target_kinds=target_kinds,
         symbols_by_path=symbols_by_path,
         scope=scope,
+        read_sites=read_sites,
     )
     return sweep, causes
 
@@ -3705,6 +3925,7 @@ def _run_all_sweeps(
             target_kinds=frozenset(s.kind for s in symbols_for_name),
             symbols_by_path=query_index.symbols_by_path,
             scope=scope,
+            read_sites=_read_sites(query_index, name),
         )
         return name, sweep, causes
 

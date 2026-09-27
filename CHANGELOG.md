@@ -9,6 +9,27 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.4.3] — 2026-09-26
+
+### Fixed
+- **`sanity` called plain TS/JS non-calls "unexplained miss".** On
+  every TypeScript repo measured, `sanity --all --fail-on-unexplained`
+  failed on lines a person dismisses at a glance, so the CI gate cried
+  wolf. Three JS/TS-only shapes now get a named cause: the name only
+  inside string or template text (`mention inside a string or template
+  text`; the biggest shape by far, mostly log messages), a property
+  read the map records at that line (`a property read of a same-named
+  field`), and an object key, one-line interface/type field or typed
+  parameter (the local-binding cause, whose text now says "object
+  key/field"). `export { X } from` re-exports read as import
+  statements. A line that also calls the name bare, or a string that
+  calls it (`eval("x()")`), is never explained this way, so a real
+  missed call still shows. Other languages are unchanged.
+  `sanity --all` unexplained rows, same maps: claude-buddy 127 -> 30,
+  claude-code 4,319 -> 1,383, cline 4,406 -> 1,767; total rows
+  unchanged, and the known real misses (`new WebSocketTransport(...)`)
+  still show.
+
 ## [1.4.2] — 2026-09-26
 
 ### Fixed
