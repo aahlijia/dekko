@@ -359,3 +359,124 @@ def test_building_a_missing_map_is_announced(
 
     assert index is not None and code == 0
     assert "note: no usable map" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------
+# load_current_side: judge the map from its provenance sidecar, parse
+# map.json only when it is fresh.
+# ---------------------------------------------------------------------
+
+
+_SIDE_SRC = {"a.py": "def f() -> int:\n    return 1\n"}
+
+
+def _refuse_load_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(root: Path) -> None:
+        raise AssertionError("load_map must not run on a stale map")
+
+    monkeypatch.setattr(mapfile, "load_map", refuse)
+
+
+def test_load_current_side_loads_a_fresh_map(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_SIDE_SRC)
+
+    side = repo_ops.load_current_side(root)
+
+    assert side.fresh
+    assert side.index is not None
+    assert "a.py" in side.index.symbols_by_path
+    assert side.provenance["files"]
+
+
+def test_load_current_side_never_parses_a_stale_map(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parsing map.json only to reject it cost 5.7 s per stale call on
+    tensorflow; the sidecar answers the freshness question alone."""
+    root = make_mapped_repo(_SIDE_SRC)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+    _refuse_load_map(monkeypatch)
+
+    side = repo_ops.load_current_side(root)
+
+    assert not side.fresh
+    assert side.index is None
+    assert side.freshness is not None
+    assert side.freshness.changed == ["a.py"]
+    assert side.provenance["files"]
+
+
+def test_load_current_side_falls_back_without_a_sidecar(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """An older map (or a partial write) has no usable sidecar: parse
+    map.json once and judge the index instead."""
+    root = make_mapped_repo(_SIDE_SRC)
+    (root / ".dekko" / "provenance.json").unlink()
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+
+    side = repo_ops.load_current_side(root)
+
+    assert not side.fresh
+    assert side.index is None
+    assert side.freshness is not None
+    assert side.freshness.changed == ["a.py"]
+    assert side.provenance["files"]
+
+
+def test_load_current_side_without_a_map(tmp_path: Path) -> None:
+    side = repo_ops.load_current_side(tmp_path)
+
+    assert not side.fresh
+    assert side.index is None
+    assert side.provenance == {}
+    assert side.freshness is None
+
+
+def test_load_current_side_takes_a_daemon_cache_hit(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(_SIDE_SRC)
+    warm = mapfile.load_map(root)
+    assert warm is not None
+    _refuse_load_map(monkeypatch)
+    monkeypatch.setattr(repo_ops, "_daemon_cache_get", lambda r: warm)
+    monkeypatch.setattr(repo_ops, "_daemon_cache_put", None)
+
+    side = repo_ops.load_current_side(root)
+
+    assert side.fresh
+    assert side.index is warm
+
+
+def test_load_current_side_warms_the_daemon_cache_only_when_fresh(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(_SIDE_SRC)
+    put: list[object] = []
+    monkeypatch.setattr(repo_ops, "_daemon_cache_get", lambda r: None)
+    monkeypatch.setattr(
+        repo_ops, "_daemon_cache_put", lambda r, i: put.append(i)
+    )
+
+    repo_ops.load_current_side(root)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+    repo_ops.load_current_side(root)
+
+    assert len(put) == 1
+
+
+def test_current_side_from_index_drops_a_stale_index(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_SIDE_SRC)
+    index = mapfile.load_map(root)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+
+    side = repo_ops.current_side_from_index(root, index)
+
+    assert not side.fresh
+    assert side.index is None
+    assert side.provenance["files"]

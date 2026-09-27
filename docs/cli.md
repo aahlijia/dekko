@@ -63,8 +63,14 @@ rather than writing a fresh `map.json` to disk, so `dekko status`
 right after a `dekko diff`/`dekko affected` on a fresh edit can still
 report the map as stale. That in-memory pass reuses the last `dekko
 map`'s caches the same way an incremental map does (see "Incremental
-vs. `--full` map runs"), so it costs about what `dekko map` would, and
-nothing gets cheaper on the next call until you run `dekko map`. On a
+vs. `--full` map runs"), so it costs about what `dekko map` would. From
+a plain shell, nothing gets cheaper on the next call until you run
+`dekko map`. Under the daemon or the MCP server (`impacted_tests`), a
+repeat call on a tree that hasn't changed since the last one reuses
+that call's in-memory pass instead of redoing it; any edit, or a new
+`dekko map`, starts over. A stale map is also never parsed just to be
+rejected: freshness is judged from the small provenance sidecar, and
+`map.json` is loaded only when it's current. On a
 large repo (5,000+ mapped files) both waits print a `note:` to stderr
 first: a stale map's in-memory pass, and the regen every other read
 command does. A missing map is always announced, since the first build
@@ -1336,6 +1342,16 @@ a fresh map, which is what a bare `workset`/`affected`/`diff` sees
 right after a commit or checkout: the old side would only rebuild
 what's already on disk, so both sides come from the current map, no
 old-side reparse runs, and no rev-cache entry is written.
+
+On a stale map the current-tree side is the in-memory re-map described
+under the read commands above. The daemon keeps the last one it built
+and reuses it while the working tree holds the same content, so an
+agent that edits once and then calls `affected` several times pays for
+the re-map once (cline: ~3.3 s per call before, ~0.4 s for a repeat;
+tensorflow: ~29 s before, ~3 s). That costs memory: one extra
+current-tree snapshot, about the size of the map, held while the tree
+stays dirty and unmapped, and dropped as soon as a call finds the map
+fresh again. The MCP server does the same.
 
 Even for the current-tree side, the warm cache's win is specifically
 skipping map *loading* (re-parsing `map.json` into an in-memory

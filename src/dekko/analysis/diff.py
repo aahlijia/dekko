@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from functools import cache as memoize
 from pathlib import Path
 
 from dekko import repo_ops
+from dekko import selfcheck
 from dekko.storage import cache as cache_mod
 from dekko.render import mapfile
 from dekko.storage import filelock, resolvecache, revcache
@@ -286,6 +288,7 @@ def snapshot_new_side(
     jobs: int = 1,
     load_cache: Callable[[], dict[str, dict]] | None = None,
     follow_symlinks: bool = False,
+    fresh: bool | None = None,
 ) -> Snapshot:
     """New-side (working tree) snapshot, reusing a fresh index when possible.
 
@@ -309,9 +312,15 @@ def snapshot_new_side(
             ``snapshot_pair`` parse the file once for both sides.
             ``None`` loads it here.
         follow_symlinks: The map's recorded setting.
+        fresh: ``index``'s freshness verdict when the caller already
+            has one (``snapshot_pair``); ``None`` checks it here.
     """
-    if index is not None and mapfile.check_freshness(root, index).fresh:
-        return snapshot_from_index(index, root)
+    if index is not None:
+        if fresh is None:
+            fresh = mapfile.check_freshness(root, index).fresh
+        if fresh:
+            return snapshot_from_index(index, root)
+
     entries = load_cache() if load_cache is not None else cache_mod.load(root)
     return snapshot(
         root,
@@ -466,23 +475,28 @@ def worktree_matches_rev(root: Path, rev: str) -> bool:
 def snapshot_pair(
     root: Path,
     target_rev: str,
-    index: mapfile.MapIndex | None,
+    current: repo_ops.CurrentSide,
     jobs: int = 1,
 ) -> tuple[Snapshot, Snapshot] | None:
     """Old- and new-side snapshots for working tree vs. ``target_rev``.
 
     Shared by ``diff.run`` and ``affected.changes``. When the working
     tree provably equals ``target_rev`` (see
-    :func:`worktree_matches_rev`) and ``index`` is fresh, both sides are
-    the same snapshot built from ``index``, and the export + re-parse
+    :func:`worktree_matches_rev`) and the map is fresh, both sides are
+    the same snapshot built from the index, and the export + re-parse
     of ``target_rev`` is skipped: it could only rebuild what is
     already on disk. No rev-cache entry is written on that path, since
     the rev-cache only holds snapshots built from the commit itself.
 
+    A stale map's new side is re-mapped in memory; in a long-lived
+    process that result is kept for the next call on the same tree
+    (see ``_recall_new_side``).
+
     Args:
         root: Repository root (its working tree is the new side).
         target_rev: Git rev for the old side, already defaulted.
-        index: The current-tree index, or ``None``.
+        current: The current-tree map and its freshness verdict
+            (``repo_ops.load_current_side``).
         jobs: Worker count for a rev-cache-miss old side or a
             stale-index new side; see ``snapshot``.
 
@@ -490,15 +504,13 @@ def snapshot_pair(
         ``(old, new)``, or ``None`` when ``target_rev`` can't be
         exported (the reason is printed to stderr first).
     """
-    if (
-        index is not None
-        and worktree_matches_rev(root, target_rev)
-        and mapfile.check_freshness(root, index).fresh
-    ):
-        same = snapshot_from_index(index, root)
-        return same, same
+    if current.fresh:
+        _forget_new_side(root)
+        if worktree_matches_rev(root, target_rev):
+            same = snapshot_from_index(current.index, root)
+            return same, same
 
-    prov = (index.provenance if index else None) or {}
+    prov = current.provenance
     subpath = prov.get("subpath")
     excludes = tuple(prov.get("excludes", []))
     max_file_size = prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE)
@@ -524,17 +536,131 @@ def snapshot_pair(
         )
         return None
 
+    new = _recall_new_side(root, current)
+    if new is not None:
+        return old, new
+
+    # Hashed before the new side reads a byte: see _NewSideMemo.
+    changes = _memo_changes(root, current)
     new = snapshot_new_side(
         root,
         subpath,
         excludes,
         max_file_size,
-        index,
+        current.index,
         jobs=jobs,
         load_cache=load_cache,
         follow_symlinks=follow_symlinks,
+        fresh=current.fresh,
     )
+    if changes is not None:
+        _remember_new_side(root, changes, new)
     return old, new
+
+
+@dataclass
+class _NewSideMemo:
+    """A stale map's in-memory new side, kept for the next call.
+
+    A stale-map ``diff``/``affected`` re-maps the working tree and
+    throws the result away, so an agent's edit, ``impacted_tests``,
+    ``impacted_tests`` pays the full re-map every time (3 s on cline,
+    28 s on tensorflow). A long-lived process (the daemon, the MCP
+    server) keeps the last one here and reuses it while the tree
+    still holds the same content.
+
+    Attributes:
+        root: The repository it was built for.
+        map_signature: ``mapfile.map_signature`` of the map it was
+            judged against. A rewritten map (a ``dekko map`` from
+            anywhere) misses.
+        changes: ``mapfile.content_changes`` for that map's stale
+            verdict, hashed *before* the snapshot read the files. A
+            file edited after the hash but before the read leaves the
+            snapshot newer than ``changes``, and the next call's
+            hashes then differ: a miss, never a stale hit. A file
+            outside the verdict edited mid-build shows up in the next
+            verdict's lists: also a miss.
+        snapshot: The new-side ``Snapshot``. Nothing downstream
+            mutates one, so it is safe to hand out again.
+    """
+
+    root: Path
+    map_signature: list[int]
+    changes: dict[str, str | None]
+    snapshot: Snapshot
+
+
+# One entry for the whole process, the most recent root's: the
+# snapshot is map-sized, and a daemon serves one root anyway.
+_new_side_memo: _NewSideMemo | None = None
+_new_side_memo_lock = threading.Lock()
+
+
+def _memo_changes(
+    root: Path, current: repo_ops.CurrentSide
+) -> dict[str, str | None] | None:
+    """The memo key for this call's new side, or ``None`` to not keep it.
+
+    Only a long-lived process keeps anything (a one-shot CLI never
+    makes a second call), and only on a content verdict, the one kind
+    that says exactly which files moved. A version-stale map lists
+    none, and a map-less tree has nothing to compare against.
+    """
+    freshness = current.freshness
+    if (
+        not selfcheck.is_long_lived()
+        or freshness is None
+        or freshness.reason != "content"
+    ):
+        return None
+    return mapfile.content_changes(root, freshness)
+
+
+def _forget_new_side(root: Path) -> None:
+    """Drop ``root``'s memo entry: its map is fresh again.
+
+    From then on the fresh path is cheap and the snapshot is dead
+    weight.
+    """
+    global _new_side_memo
+    with _new_side_memo_lock:
+        if _new_side_memo is not None and _new_side_memo.root == root:
+            _new_side_memo = None
+
+
+def _recall_new_side(
+    root: Path, current: repo_ops.CurrentSide
+) -> Snapshot | None:
+    """The kept new side when the tree still matches it, else ``None``."""
+    with _new_side_memo_lock:
+        memo = _new_side_memo
+    if memo is None or memo.root != root:
+        return None
+
+    changes = _memo_changes(root, current)
+    if (
+        changes is None
+        or changes != memo.changes
+        or mapfile.map_signature(root) != memo.map_signature
+    ):
+        return None
+    return memo.snapshot
+
+
+def _remember_new_side(
+    root: Path, changes: dict[str, str | None], snapshot: Snapshot
+) -> None:
+    """Keep ``snapshot`` as the process's one new-side memo entry."""
+    global _new_side_memo
+    memo = _NewSideMemo(
+        root=root,
+        map_signature=mapfile.map_signature(root),
+        changes=changes,
+        snapshot=snapshot,
+    )
+    with _new_side_memo_lock:
+        _new_side_memo = memo
 
 
 def _wait_for_other_rev_cache_build(root: Path, sha: str) -> Snapshot | None:
@@ -1014,10 +1140,9 @@ def run(
     Returns:
         Process exit code (0 no changes, 1 changes, 2 error).
     """
-    index = repo_ops.load_current_index_no_regen(root)
-    prov = (index.provenance if index else None) or {}
-    target_rev = rev or prov.get("git_commit") or "HEAD"
-    pair = snapshot_pair(root, target_rev, index, jobs=jobs)
+    current = repo_ops.load_current_side(root)
+    target_rev = rev or current.provenance.get("git_commit") or "HEAD"
+    pair = snapshot_pair(root, target_rev, current, jobs=jobs)
     if pair is None:
         return EXIT_ERROR
 

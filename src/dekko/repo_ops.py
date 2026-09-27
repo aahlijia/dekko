@@ -5,7 +5,7 @@ module alongside ``classify.py``/``textutil.py``/``source.py`` --
 this is the one contiguous "discover, extract, resolve, render, and
 persist a repo map" pipeline that used to live inside ``cli.py``
 (``map_repository``, ``load_or_regen``,
-``load_current_index_no_regen``, and everything ``run_map`` calls).
+``load_current_side``, and everything ``run_map`` calls).
 ``integrations/cli.py`` keeps the argparse-Namespace-in/exit-code-out
 CLI adapters (``run_map`` dispatch, argument parsing) and now calls
 into this module; ``analysis/affected.py``, ``analysis/workset.py``,
@@ -23,6 +23,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from multiprocessing.context import BaseContext
 from pathlib import Path
 
@@ -1116,61 +1117,127 @@ def _note_foreign_build(fresh: mapfile.Freshness | None) -> None:
     )
 
 
-def load_current_index_no_regen(root: Path) -> mapfile.MapIndex | None:
-    """Load the current-tree map, checking the daemon's warm cache first.
+@dataclass
+class CurrentSide:
+    """The working tree's map as ``diff``/``affected`` see it.
+
+    Attributes:
+        index: The loaded map, only when ``freshness`` says it still
+            matches the tree. A stale map is never parsed: past the
+            freshness verdict, the stale path needs only its
+            provenance (options, ``git_commit``), and parsing
+            ``map.json`` costs seconds on a large repo.
+        provenance: The map's provenance dict, ``{}`` when there is no
+            map (or one without provenance).
+        freshness: The verdict ``index``/``provenance`` were judged
+            by, or ``None`` when there is no map to judge.
+    """
+
+    index: mapfile.MapIndex | None
+    provenance: dict
+    freshness: mapfile.Freshness | None
+
+    @property
+    def fresh(self) -> bool:
+        """Whether ``index`` is loaded and matches the working tree."""
+        return (
+            self.index is not None
+            and self.freshness is not None
+            and self.freshness.fresh
+        )
+
+
+def current_side_from_index(
+    root: Path, index: mapfile.MapIndex | None
+) -> CurrentSide:
+    """Wrap an index a caller already holds, judging it once.
+
+    ``workset`` loads its own index through ``load_or_regen`` before
+    calling ``affected.changes``; this gives that index the same shape
+    ``load_current_side`` returns. A stale ``index`` is dropped, the
+    same as ``load_current_side`` never loading one.
+
+    Args:
+        root: Repository root.
+        index: The caller's index, or ``None``.
+
+    Returns:
+        The index with its freshness verdict.
+    """
+    if index is None:
+        return CurrentSide(index=None, provenance={}, freshness=None)
+    freshness = mapfile.check_freshness(root, index)
+    return CurrentSide(
+        index=index if freshness.fresh else None,
+        provenance=index.provenance or {},
+        freshness=freshness,
+    )
+
+
+def _current_side_from_provenance(root: Path, prov: dict) -> CurrentSide:
+    """``load_current_side``'s sidecar path: judge, then load if fresh."""
+    freshness = mapfile.check_freshness_provenance(root, prov)
+    if not freshness.fresh:
+        return CurrentSide(index=None, provenance=prov, freshness=freshness)
+
+    index = mapfile.load_map(root)
+    if index is None:
+        # map.json went away between the sidecar read and now.
+        return CurrentSide(index=None, provenance={}, freshness=None)
+
+    return CurrentSide(
+        index=index,
+        provenance=index.provenance or prov,
+        freshness=freshness,
+    )
+
+
+def load_current_side(root: Path) -> CurrentSide:
+    """Judge the current-tree map, loading it only when it is fresh.
 
     ``diff.run``/``affected.changes`` are the one partial exception to
-    ``load_or_regen`` being the single daemon-cache chokepoint every
-    other read subcommand funnels through: their
-    current-tree side calls ``mapfile.load_map`` directly, so a
-    daemon-routed ``diff``/``affected`` request previously always paid
-    a full JSON-parse/index-rebuild, even with a warm cache populated
-    by a prior ``query``/``search``/... request against the same
-    root. This function is the fix — it checks the same
-    ``_daemon_cache_get``/``_daemon_cache_put`` hooks
-    ``load_or_regen`` uses, so a cache hit here skips the reload the
-    same way it would for any other daemon-eligible command.
+    ``load_or_regen`` being the single daemon-cache chokepoint: a
+    stale map makes ``load_or_regen`` write a fresh ``map.json``
+    (``regen_map``), a side effect ``diff``/``affected`` have never
+    had. They re-map a stale tree in memory instead
+    (``diff.snapshot_new_side`` -> ``diff.snapshot()``), so this only
+    ever *reads*. It checks the same ``_daemon_cache_get``/``_put``
+    hooks ``load_or_regen`` uses, so a daemon-routed ``diff`` shares
+    the warm index a prior ``query`` left.
 
-    It deliberately does **not** reuse ``load_or_regen`` itself,
-    because that function's stale/missing-map behavior is to call
-    ``regen_map`` (writing a fresh ``map.json`` to disk) — a side
-    effect ``diff``/``affected`` don't want and have never had: they
-    already tolerate a stale on-disk index by falling back to an
-    in-memory re-parse (``diff.snapshot_new_side`` -> ``diff.
-    snapshot()``) that never touches ``map.json``. Adopting
-    ``load_or_regen``'s regen-on-stale behavior here would be a
-    real behavior change (an on-disk write a plain ``diff``/
-    ``affected`` call never made before), not just a cache-hit
-    optimization, so this seam only ever *reads* — same contract as
-    the ``mapfile.load_map(root)`` call it replaces.
-
-    Outside the daemon process (``_daemon_cache_get``/``_put`` are
-    both ``None``, true for every direct CLI invocation), this is
-    exactly ``mapfile.load_map(root)`` — same return value, same
-    possibly-``None``/possibly-stale semantics ``diff.run``/
-    ``affected.changes`` already handle via their own freshness checks
-    downstream (``diff.snapshot_new_side``).
+    Freshness comes from the provenance sidecar first
+    (``mapfile.load_sidecar_provenance``, a few KB), and ``map.json``
+    is parsed only on a fresh verdict. A stale map used to be parsed
+    in full just so the verdict could reject it: 0.4 s on cline,
+    5.7 s on tensorflow, on every stale call. A missing or desynced
+    sidecar (an older map, a partial write) falls back to parsing
+    ``map.json`` once and judging the index.
 
     Args:
         root: Repository root containing map.json.
 
     Returns:
-        The loaded index (possibly stale, possibly ``None``) — never
+        The map's verdict, provenance and (when fresh) index; never
         regenerated as a side effect of this call.
     """
     if _daemon_cache_get is not None:
         cached = _daemon_cache_get(root)
         if cached is not None:
-            return cached
+            # The cache re-validates on every access: a hit is fresh.
+            return CurrentSide(
+                index=cached,
+                provenance=cached.provenance or {},
+                freshness=mapfile.Freshness(fresh=True),
+            )
 
-    index = mapfile.load_map(root)
-    if (
-        index is not None
-        and _daemon_cache_put is not None
-        and mapfile.check_freshness(root, index).fresh
-    ):
-        _daemon_cache_put(root, index)
-    return index
+    prov = mapfile.load_sidecar_provenance(root)
+    if prov is None:
+        side = current_side_from_index(root, mapfile.load_map(root))
+    else:
+        side = _current_side_from_provenance(root, prov)
+    if side.fresh and _daemon_cache_put is not None:
+        _daemon_cache_put(root, side.index)
+    return side
 
 
 # Generous: the child is a full `dekko map` on the largest repo this

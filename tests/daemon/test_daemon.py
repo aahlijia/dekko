@@ -2035,7 +2035,7 @@ def test_daemon_status_reports_cache_state_after_a_request(
 # diff.run/affected.changes used to call mapfile.load_map(root)
 # directly, bypassing load_or_regen (and therefore the daemon's
 # warm-cache hook) entirely -- a "partial exception" to cache
-# sharing. repo_ops.load_current_index_no_regen()
+# sharing. repo_ops.load_current_side()
 # closes that gap: it checks the same _daemon_cache_get/_put hooks
 # load_or_regen uses, without adopting its regen-on-stale side
 # effect (diff/affected never wrote map.json as a side effect before,
@@ -2166,11 +2166,11 @@ def test_daemon_diff_cache_miss_on_edit_still_reports_correctly(
 ) -> None:
     """A working-tree edit between a warming ``query`` and a following
     ``diff`` must not be served a stale answer: the shared cache
-    reports a miss (forcing a fresh ``mapfile.load_map``), and
-    ``diff.run``'s own stale-index fallback (an in-memory re-parse via
-    ``diff.snapshot()``, never touching ``map.json``) still reports
-    the edit correctly -- correctness is unchanged by this seam, only
-    the cache-hit rate is."""
+    reports a miss, and ``diff.run``'s stale-map fallback (an
+    in-memory re-parse via ``diff.snapshot()``, never touching
+    ``map.json``) still reports the edit correctly. The stale map is
+    judged from its provenance sidecar and never parsed: parsing it
+    only to reject it was pure cost (5.7 s on tensorflow)."""
     root = daemon_thread_git_root
     calls: list[Path] = []
     real_load_map = mapfile.load_map
@@ -2191,7 +2191,7 @@ def test_daemon_diff_cache_miss_on_edit_still_reports_correctly(
     assert result2 is not None
     assert result2[0] == 1  # a real change detected (f's body changed)
     assert "~ a.py:1" in result2[1]
-    assert len(calls) == 2  # cache miss on the now-stale index: reloaded
+    assert len(calls) == 1  # stale: judged by the sidecar, not reloaded
 
 
 # ---------------------------------------------------------------------

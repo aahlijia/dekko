@@ -9,6 +9,26 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.3.8] — 2026-09-26
+
+### Performance
+- **Repeat `diff`/`affected` calls on an edited, unmapped tree are fast
+  under the daemon and the MCP server.** With a stale map, both
+  commands re-map the working tree in memory (they never write the
+  map) and used to throw that work away, so an agent's edit,
+  `impacted_tests`, `impacted_tests` paid the full re-map every time.
+  The daemon and `dekko serve --mcp` now keep the last one and reuse it
+  while the tree holds the same content: repeat calls went from 3.3 s
+  to ~0.4 s on cline and from ~30 s to ~3 s on tensorflow, with
+  byte-identical output. Any edit, or a new `dekko map`, starts over.
+  The cost is one extra current-tree snapshot in memory, about the
+  size of the map, dropped once a call finds the map fresh again.
+- **A stale map is no longer parsed just to be rejected.** `diff` and
+  `affected` judge freshness from the small provenance sidecar and load
+  `map.json` only when it is current, which takes a map load off every
+  stale call, including from a plain shell (cline 3.3 s to 2.8 s,
+  tensorflow 30 s to 23 s).
+
 ## [1.3.7] — 2026-09-26
 
 ### Added

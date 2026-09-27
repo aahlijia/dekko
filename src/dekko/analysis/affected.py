@@ -694,9 +694,10 @@ def changes(
         index: An already-loaded current-tree index, if the caller has
             one (e.g. ``workset.seed_from_rev``, which loads its own
             index before calling here). Avoids a second, redundant
-            ``mapfile.load_map`` for the same map.json. Falls back to
-            loading it here when ``None``, matching prior behavior for
-            callers with no index to hand in (``affected.run``).
+            ``mapfile.load_map`` for the same map.json. ``None``
+            (``affected.run``) goes through
+            ``repo_ops.load_current_side``, which parses map.json only
+            when it is fresh.
         jobs: Resolved worker count passed through to
             ``diff.old_snapshot``/``diff.snapshot_new_side`` — see
             ``diff.snapshot``. This is the dominant cost on a
@@ -712,10 +713,12 @@ def changes(
         does — see ``render``.
     """
     if index is None:
-        index = repo_ops.load_current_index_no_regen(root)
-    prov = (index.provenance if index else None) or {}
+        current = repo_ops.load_current_side(root)
+    else:
+        current = repo_ops.current_side_from_index(root, index)
+    prov = current.provenance
     target_rev = rev or prov.get("git_commit") or "HEAD"
-    pair = diff.snapshot_pair(root, target_rev, index, jobs=jobs)
+    pair = diff.snapshot_pair(root, target_rev, current, jobs=jobs)
     if pair is None:
         return None
 
