@@ -152,8 +152,9 @@ def build_legacy_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="with --claude-install/--claude-uninstall, print the "
-        "command(s) that would run instead of running them",
+        help="with --claude-install/--claude-uninstall/--mcp-install/"
+        "--mcp-uninstall, print the command(s) that would run instead "
+        "of running them",
     )
     parser.add_argument(
         "--claude-md-install",
@@ -1822,8 +1823,12 @@ def claude_uninstall(dry_run: bool = False) -> int:
     return 0
 
 
-def mcp_install() -> int:
+def mcp_install(dry_run: bool = False) -> int:
     """Register the MCP server with Claude Code via ``claude mcp add``.
+
+    Args:
+        dry_run: Print the command that would run instead of running
+            it; leaves Claude Code's config untouched.
 
     Returns:
         Process exit code.
@@ -1832,9 +1837,13 @@ def mcp_install() -> int:
     if exe is None:
         return 1
 
-    added = _run_subprocess(
-        [exe, "mcp", "add", "dekko", "--", "dekko", "serve", "--mcp"]
-    )
+    cmd = [exe, "mcp", "add", "dekko", "--", "dekko", "serve", "--mcp"]
+    if dry_run:
+        print("dekko: --dry-run, would run:")
+        print(f"  {' '.join(cmd)}")
+        return 0
+
+    added = _run_subprocess(cmd)
     if added.returncode != 0:
         print(added.stderr.strip(), file=sys.stderr)
         return 1
@@ -1843,12 +1852,16 @@ def mcp_install() -> int:
     return 0
 
 
-def mcp_uninstall() -> int:
+def mcp_uninstall(dry_run: bool = False) -> int:
     """Remove the standalone MCP server via ``claude mcp remove``.
 
     Reverses :func:`mcp_install`. A "not found" report (the server was
     never registered, or only via the plugin's bundled ``.mcp.json``) is
     surfaced as a warning rather than a failure.
+
+    Args:
+        dry_run: Print the command that would run instead of running
+            it; leaves Claude Code's config untouched.
 
     Returns:
         Process exit code (``1`` only when the ``claude`` CLI is missing).
@@ -1857,7 +1870,13 @@ def mcp_uninstall() -> int:
     if exe is None:
         return 1
 
-    removed = _run_subprocess([exe, "mcp", "remove", "dekko"])
+    cmd = [exe, "mcp", "remove", "dekko"]
+    if dry_run:
+        print("dekko: --dry-run, would run:")
+        print(f"  {' '.join(cmd)}")
+        return 0
+
+    removed = _run_subprocess(cmd)
     if removed.returncode != 0:
         print(
             "dekko: 'claude mcp remove dekko' failed (already removed?): "
@@ -2718,6 +2737,7 @@ def _legacy_main(args_list: list[str]) -> int:
     """Parse and dispatch the legacy flag-based invocation."""
     parser = build_legacy_parser()
     args = parser.parse_args(args_list)
+    _reject_stray_dry_run(parser, args)
 
     if args.claude_install:
         return claude_install(dry_run=args.dry_run)
@@ -2732,10 +2752,10 @@ def _legacy_main(args_list: list[str]) -> int:
         return claude_md_mod.uninstall(Path(args.root).resolve())
 
     if args.mcp_install:
-        return mcp_install()
+        return mcp_install(dry_run=args.dry_run)
 
     if args.mcp_uninstall:
-        return mcp_uninstall()
+        return mcp_uninstall(dry_run=args.dry_run)
 
     if args.cline_install:
         config = Path(args.cline_config) if args.cline_config else None
@@ -2750,6 +2770,29 @@ def _legacy_main(args_list: list[str]) -> int:
         )
 
     return _legacy_map_dispatch(args)
+
+
+def _reject_stray_dry_run(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> None:
+    """Exit 2 when ``--dry-run`` rides on an action that can't honor it.
+
+    Only the four ``claude`` CLI actions have a preview; every other
+    action would ignore the flag and write for real, the opposite of
+    what the person asked for.
+    """
+    previewable = (
+        args.claude_install
+        or args.claude_uninstall
+        or args.mcp_install
+        or args.mcp_uninstall
+    )
+    if args.dry_run and not previewable:
+        parser.error(
+            "--dry-run works with --claude-install, --claude-uninstall, "
+            "--mcp-install and --mcp-uninstall only"
+        )
 
 
 def _legacy_map_dispatch(args: argparse.Namespace) -> int:

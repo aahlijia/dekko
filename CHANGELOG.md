@@ -9,6 +9,18 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.4.4] — 2026-09-26
+
+### Fixed
+- **`--mcp-install --dry-run` registered the MCP server for real.**
+  `--dry-run` only worked with `--claude-install`/`--claude-uninstall`;
+  every other action accepted it and ignored it, so the careful person
+  who asked for a preview got a live write. `--mcp-install` and
+  `--mcp-uninstall` now print the `claude mcp add|remove` command they
+  would run and change nothing. Every other action (`--cline-*`,
+  `--claude-md-*`, `--map`, bare `dekko DIR`) now refuses `--dry-run`
+  with exit 2 instead of writing.
+
 ## [1.4.3] — 2026-09-26
 
 ### Fixed

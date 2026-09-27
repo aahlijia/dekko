@@ -221,7 +221,8 @@ no cap.
 
 `dekko --claude-install` registers this automatically for Claude Code.
 For a standalone registration: `dekko --mcp-install` (runs
-`claude mcp add dekko -- dekko serve --mcp`).
+`claude mcp add dekko -- dekko serve --mcp`; add `--dry-run` to print
+the command instead).
 
 **Every tool call that omits `root` says so.** `root` (the repo
 containing `map.json`) defaults to the server's own working directory

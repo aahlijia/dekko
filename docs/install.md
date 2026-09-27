@@ -48,6 +48,11 @@ Then add the `/map` command + MCP server to Claude Code:
 dekko --claude-install     # restart Claude Code afterward
 ```
 
+Add `--dry-run` to `--claude-install`, `--claude-uninstall`,
+`--mcp-install` or `--mcp-uninstall` to print the `claude` commands it
+would run without running them. Any other action refuses `--dry-run`
+(exit 2) rather than ignore it and write for real.
+
 ## From a local clone
 
 ```sh
