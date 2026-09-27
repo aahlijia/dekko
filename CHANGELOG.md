@@ -9,6 +9,31 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-09-26
+
+Closes round 1.4's fix cycle. The code is 1.3.8; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.4 evaluated 1.3.0 on
+seven real repositories: the agents found no bugs and no regressions,
+and re-timing cline turned up one Low. Between the round and its fix,
+1.3.1 through 1.3.7 went to the Claude Code plugin. Everything since
+1.3.0:
+
+- **1.3.1-1.3.3**: plugin skills and commands no longer give stale
+  guidance; `dekko-orient` and `dekko-verify` cost about 2.9k fewer
+  tokens to load; the MCP tool schemas cost about 600 fewer tokens a
+  session.
+- **1.3.4-1.3.6**: three new skills. `dekko-refactor` lists every site
+  a rename, move or signature change must touch and proves nothing was
+  missed; `dekko-delegate` briefs a subagent with a dekko digest before
+  it's dispatched; `dekko-debug` works a traceback from the map.
+- **1.3.7**: the `/impact` command, impacted tests plus a ready-to-run
+  test command.
+- **1.3.8** (the round's fix): repeat `diff`/`affected` calls on an
+  edited, unmapped tree reuse the last in-memory re-map under the
+  daemon and the MCP server (cline 3.3 s to ~0.4 s, tensorflow ~30 s to
+  ~3 s), and a stale map is no longer parsed just to be rejected.
+
 ## [1.3.8] — 2026-09-26
 
 ### Performance
