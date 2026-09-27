@@ -1129,9 +1129,8 @@ _ROOT_PROP = {
 _SYMBOL_PROP = {
     "type": "string",
     "description": "Symbol: name, Class.method, or file.py:name. If the "
-    "reply says the target is ambiguous (an overload set sharing the "
-    "same file+name), append ':LINE' from one of the printed candidate "
-    "rows, e.g. file.py:Class.method:42, to pick that one. 'name', "
+    "reply says the target is ambiguous, append ':LINE' from a printed "
+    "candidate row (file.py:Class.method:42) to pick one. 'name', "
     "'target' and 'type' are also accepted as aliases for this argument; "
     "two of them with different values is an error.",
 }
@@ -1180,13 +1179,11 @@ _TASK_PROP = {
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "search_code",
-        "description": "Rank symbols by free-text relevance to a "
-        "natural-language description — for when you know what the code "
-        "should do but not its name. Matches against names, signatures, "
-        "and doc lines with BM25-style scoring, not substring matching. "
-        "Falls back to zero hits (not an error) when nothing matches; try "
-        "broader or different terms. Use query_symbol/get_callers instead "
-        "once you have an exact name.",
+        "description": "Rank symbols by free-text relevance (BM25 over "
+        "names, signatures and doc lines, not substring matching) — for "
+        "when you know what the code should do but not its name. Zero "
+        "hits is not an error: try broader terms. Once you have an exact "
+        "name, use query_symbol/get_callers instead.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1247,10 +1244,8 @@ TOOLS: list[dict[str, Any]] = [
         "name": "get_callers",
         "description": "Every symbol (and module-level site) that calls "
         "a symbol — exact call edges, unlike grep, which can't tell a "
-        "call from a same-named string. Set sites=true for the precise "
-        "path:line of each call. Use for impact analysis before a "
-        "change. Test-file callers are excluded by default — set "
-        "include_tests=true to see them.",
+        "call from a same-named string. Use for impact analysis before "
+        "a change.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1266,11 +1261,9 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "get_callees",
-        "description": "Every in-repo symbol a symbol calls (set "
-        "sites=true for call-site lines) — what this code depends on, "
-        "without reading its body. Walks the resolved call graph "
-        "directly instead of grepping the body for names that look "
-        "like calls.",
+        "description": "Every in-repo symbol a symbol calls — what this "
+        "code depends on, without reading its body. Resolved call "
+        "edges, not a grep of the body for call-shaped names.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1285,16 +1278,12 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "find_usages",
-        "description": "List the symbols that call into an external "
-        "(out-of-repo) name, with call sites and a summary line "
-        "(site/file counts, top members used, importing-file count). "
-        "Ask by function ('run' finds subprocess.run), by import "
-        "binding ('chalk' finds every chalk.red/chalk.dim call; 'np' "
-        "finds np.array), or by module ('numpy', 'node:path', 'fs' "
-        "find calls through whatever the file bound them to). Calls "
-        "only: type-position, JSX and property reads are not recorded, "
-        "and the summary says how many files import the name so a low "
-        "count isn't read as the whole story.",
+        "description": "The symbols that call into an external "
+        "(out-of-repo) name — a function, an imported binding, or a "
+        "whole module — with call sites and a summary line. Calls only: "
+        "type positions, JSX and property reads are not recorded; the "
+        "summary's importing-file count shows what a low count leaves "
+        "out.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1320,17 +1309,11 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "find_type_usages",
         "description": "Every parameter or return annotation that "
-        "uses a type — for 'what breaks if I change this "
-        "struct/class's shape' questions the call graph alone can't "
-        "answer, since a function can use a type without calling "
-        "anything on it. Covers every function-shaped site: named "
-        "functions/methods, and (TS/TSX) callbacks and returned arrow "
-        "functions, function-typed interface members, method and "
-        "overload signatures, reported under their enclosing "
-        "definition. Matches the bare type name inside wrapper "
-        "syntax (Optional[Config], Vec<Config>, Config | None all match "
-        "'Config') unless exact=true. Struct/class fields, generic "
-        "arguments and JSX typed with the target are not covered.",
+        "uses a type — 'what breaks if I change this struct/class's "
+        "shape', which the call graph can't answer since code can use "
+        "a type without calling it. Covers named functions/methods "
+        "plus TS callbacks and interface method signatures. Not "
+        "covered: fields, generic arguments, JSX.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1344,8 +1327,9 @@ TOOLS: list[dict[str, Any]] = [
                 "exact": {
                     "type": "boolean",
                     "description": "Match the declared type text "
-                    "exactly instead of the bare identifier inside "
-                    "wrapper syntax (default false)",
+                    "exactly; by default the bare name matches inside "
+                    "wrappers (Optional[Config], Vec<Config>, Config | "
+                    "None all match 'Config'). Default false",
                 },
                 "limit": {
                     "type": "integer",
@@ -1361,15 +1345,10 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_supertypes",
         "description": "What a class/interface/struct/trait extends, "
-        "implements, or is impl'd for — its own declared heritage. Set "
-        "transitive=true for the full ancestor chain/DAG (multiple "
-        "inheritance and multi-interface implementation both fan out, "
-        "not a single line). Covers Python/JavaScript/TypeScript/Java/"
-        "Rust/C++. Go struct embedding is not extracted (only answers "
-        "composition, not interface satisfaction, so not worth the "
-        "confusion) and Go's structural interface satisfaction has no "
-        "declaring syntax to extract at all — no tree-sitter query can "
-        "see it.",
+        "implements, or is impl'd for — its own declared heritage "
+        "(Python/JS/TS/Java/Rust/C++). Go is not covered: struct "
+        "embedding is not extracted and structural interface "
+        "satisfaction has no declaring syntax to see.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1383,9 +1362,8 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": list(query.HERITAGE_RELATIONS),
                     "description": "Filter to one heritage-relation "
-                    "kind ('embeds' is Go struct embedding, not "
-                    "extracted, and never appears in current "
-                    "results)",
+                    "kind ('embeds' never appears: Go struct embedding "
+                    "is not extracted)",
                 },
                 "budget": _BUDGET_PROP,
                 "include_tests": _INCLUDE_TESTS_DEFAULT_TRUE_PROP,
@@ -1398,13 +1376,9 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "get_subtypes",
         "description": "What extends, implements, or is impl'd for a "
-        "class/interface/struct/trait — the 'if I change this, who's "
-        "affected' blast-radius question for type declarations. Set "
-        "transitive=true for every direct and indirect implementor, "
-        "not just direct ones. Does not include each implementor's own "
-        "callers — pair with get_callers on individual results for "
-        "that. Test-file subtypes are excluded by default — set "
-        "include_tests=true to see them.",
+        "class/interface/struct/trait — the blast radius of changing a "
+        "type declaration. Does not include each implementor's own "
+        "callers; pair with get_callers for that.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1419,9 +1393,8 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": list(query.HERITAGE_RELATIONS),
                     "description": "Filter to one heritage-relation "
-                    "kind ('embeds' is Go struct embedding, not "
-                    "extracted, and never appears in current "
-                    "results)",
+                    "kind ('embeds' never appears: Go struct embedding "
+                    "is not extracted)",
                 },
                 "budget": _BUDGET_PROP,
                 "include_tests": _INCLUDE_TESTS_PROP,
@@ -1494,10 +1467,7 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "integer",
                     "description": "Approximate token budget (default "
                     "2000; 0 = no cap); lowest-relevance rows are "
-                    "dropped to fit and a cost footer is appended. On a "
-                    "directory "
-                    "target, sparse-file caveats are separately capped "
-                    "and disclosed if truncated",
+                    "dropped to fit and a cost footer is appended",
                 },
                 "root": _ROOT_PROP,
             },
@@ -1509,10 +1479,9 @@ TOOLS: list[dict[str, Any]] = [
         "name": "impacted_tests",
         "description": "Test files a runner should exercise after a "
         "change: reverse call-graph reachability from changed symbols "
-        "plus an import-edge fallback (leads, not verdicts — static "
-        "analysis misses fixtures and dynamic dispatch). More reliable "
-        "than grepping test files for the changed symbol's name, which "
-        "misses indirect callers and matches unrelated same-named text.",
+        "plus an import-edge fallback. Leads, not verdicts (static "
+        "analysis misses fixtures and dynamic dispatch), but it finds "
+        "the indirect callers a grep for the changed name misses.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1542,13 +1511,8 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Task work-set: for a change (git rev) or a "
         "symbol, bundle the touched files' outlines plus call-graph "
         "packs for the most central touched symbols under one token "
-        "budget. One call replaces affected + N outlines + N packs — "
-        "and grepping a diff for touched names then reading each file "
-        "whole to work it. Set type_impact=true when the target is a "
-        "class/interface/struct/trait to also union in every type-usage "
-        "site and implementor into the touched set — the full blast "
-        "radius of changing a shared type's shape, not just its direct "
-        "callers.",
+        "budget. One call replaces impacted_tests + N outlines + N "
+        "packs when starting on a change.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1565,10 +1529,11 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "type_impact": {
                     "type": "boolean",
-                    "description": "Also include type-usage sites and "
-                    "implementors in the touched set (only meaningful "
-                    "when 'symbol' is a class/interface/struct/trait; "
-                    "no-op otherwise). Requires 'symbol'. default false",
+                    "description": "Also union every type-usage site "
+                    "and implementor into the touched set: the full "
+                    "blast radius of changing a shared type's shape. "
+                    "Requires 'symbol' naming a class/interface/struct/"
+                    "trait (no-op otherwise). Default false",
                 },
                 "budget": {
                     "type": "integer",
@@ -1588,13 +1553,12 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "check_ambiguous",
-        "description": "Repo-wide resolver-trust summary: total ambiguous "
-        "call sites, the ambiguous rate, and the top colliding names/files. "
-        "Run this before leaning on get_callers/get_callees/workset for an "
-        "impact-analysis decision on a repo with generic/common method "
-        "names — a low ambiguous rate means the call graph is trustworthy "
-        "as-is; a high one concentrated in a few files means spot-check "
-        "those files' call sites by hand before trusting the graph there.",
+        "description": "Repo-wide resolver-trust summary: ambiguous "
+        "call-site count and rate, top colliding names/files. Run "
+        "before an impact decision built on get_callers/get_callees/"
+        "workset in a repo with common method names: a low rate means "
+        "trust the graph; a high rate concentrated in a few files means "
+        "spot-check those call sites by hand.",
         "inputSchema": {
             "type": "object",
             "properties": {

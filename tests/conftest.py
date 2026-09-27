@@ -18,6 +18,7 @@ import pytest
 os.environ["DEKKO_TOKENIZER"] = "chars4"
 
 from dekko import selfcheck as _selfcheck_mod
+from dekko.analysis import diff as _diff_mod
 from dekko.core import resolver as _resolver_mod
 from dekko.integrations import cli
 
@@ -52,6 +53,18 @@ def _reset_selfcheck() -> Iterator[None]:
     _selfcheck_mod._reset_for_tests()
     yield
     _selfcheck_mod._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _reset_new_side_memo() -> Iterator[None]:
+    """Clear ``diff``'s process-wide stale-map new-side memo per test.
+
+    One long-lived-process test would otherwise leave a snapshot keyed
+    by its tmp root for every later test to trip over.
+    """
+    _diff_mod._new_side_memo = None
+    yield
+    _diff_mod._new_side_memo = None
 
 
 RepoFactory = Callable[[dict[str, str]], Path]

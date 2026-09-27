@@ -9,6 +9,170 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-09-26
+
+Closes round 1.4's fix cycle. The code is 1.3.8; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.4 evaluated 1.3.0 on
+seven real repositories: the agents found no bugs and no regressions,
+and re-timing cline turned up one Low. Between the round and its fix,
+1.3.1 through 1.3.7 went to the Claude Code plugin. Everything since
+1.3.0:
+
+- **1.3.1-1.3.3**: plugin skills and commands no longer give stale
+  guidance; `dekko-orient` and `dekko-verify` cost about 2.9k fewer
+  tokens to load; the MCP tool schemas cost about 600 fewer tokens a
+  session.
+- **1.3.4-1.3.6**: three new skills. `dekko-refactor` lists every site
+  a rename, move or signature change must touch and proves nothing was
+  missed; `dekko-delegate` briefs a subagent with a dekko digest before
+  it's dispatched; `dekko-debug` works a traceback from the map.
+- **1.3.7**: the `/impact` command, impacted tests plus a ready-to-run
+  test command.
+- **1.3.8** (the round's fix): repeat `diff`/`affected` calls on an
+  edited, unmapped tree reuse the last in-memory re-map under the
+  daemon and the MCP server (cline 3.3 s to ~0.4 s, tensorflow ~30 s to
+  ~3 s), and a stale map is no longer parsed just to be rejected.
+
+## [1.3.8] — 2026-09-26
+
+### Performance
+- **Repeat `diff`/`affected` calls on an edited, unmapped tree are fast
+  under the daemon and the MCP server.** With a stale map, both
+  commands re-map the working tree in memory (they never write the
+  map) and used to throw that work away, so an agent's edit,
+  `impacted_tests`, `impacted_tests` paid the full re-map every time.
+  The daemon and `dekko serve --mcp` now keep the last one and reuse it
+  while the tree holds the same content: repeat calls went from 3.3 s
+  to ~0.4 s on cline and from ~30 s to ~3 s on tensorflow, with
+  byte-identical output. Any edit, or a new `dekko map`, starts over.
+  The cost is one extra current-tree snapshot in memory, about the
+  size of the map, dropped once a call finds the map fresh again.
+- **A stale map is no longer parsed just to be rejected.** `diff` and
+  `affected` judge freshness from the small provenance sidecar and load
+  `map.json` only when it is current, which takes a map load off every
+  stale call, including from a plain shell (cline 3.3 s to 2.8 s,
+  tensorflow 30 s to 23 s).
+
+## [1.3.7] — 2026-09-26
+
+### Added
+- **`/impact [REV] [--possible]` command.** Runs `dekko affected` and
+  relays the impacted test files by tier with the ready-to-run test
+  command the report ends with, so "which tests should I run for
+  this change" is one slash command in Claude Code instead of a CLI
+  call plus reading its output. Claude is told to rerun with
+  `--budget 0` when the runner line says `+N more impacted test files
+  not shown`, so a budget-capped report never becomes a partial test
+  run; to relay the count of tests reached only through an ambiguous
+  call and offer `--possible`; and to treat a `no impacted tests`
+  answer against the default rev as a prompt to pick an older base
+  when the change is already committed. `dekko-orient`'s table names
+  it next to `dekko affected`.
+
+## [1.3.6] — 2026-09-26
+
+### Added
+- **`dekko-debug` skill.** Fires on a traceback, exception, failing
+  test error, or a "why does this raise / who handles it / how did
+  control get here / where is this env var read" question in a mapped
+  repo. Rather than opening each frame's file, it starts from the
+  innermost in-repo frame with `query_symbol` (notes first), finds
+  the raise with `query throws` (walking callees with `--transitive`
+  and treating the depth-cap and re-raise notes as instructions, not
+  footnotes), checks handling with `query catches` plus the type's
+  supertypes since matching is exact-name, reconstructs a truncated
+  or async path with `get_callers` or `trace`, rules out
+  configuration with `query env`, and finishes with `impacted_tests`.
+  The one grep it expects is for the error message text, which dekko
+  doesn't model. The plugin now ships eight skills.
+
+## [1.3.5] — 2026-09-26
+
+### Added
+- **`dekko-delegate` skill.** Fires before a subagent is dispatched
+  into a repo with a `.dekko/` directory. A subagent starts with an
+  empty context and no session-start orientation, so it re-explores
+  with grep and whole-file reads and then reports that exploration
+  back, which the parent pays for twice. The skill has the parent
+  compute one budgeted digest scoped to the agent's job (`dekko
+  orient --budget 800` to explore, `dekko workset --budget 2000` to
+  implement, `dekko context` or `outline` for one symbol or file),
+  paste it verbatim under its own heading, and add a short paragraph
+  naming the MCP tools and the ladder, with the rule that the agent
+  must never stop or kill the parent's dekko processes. It also
+  covers fan-out (one `orient`, one `outline <dir>` per agent, the
+  daemon for CLI-heavy agents) and asks agents for `path:line`
+  reports instead of pasted source. The plugin now ships seven
+  skills.
+
+## [1.3.4] — 2026-09-26
+
+### Added
+- **`dekko-refactor` skill.** Fires before a rename, move, or
+  signature change and again after the edits. Before: pin the target
+  with `query_symbol`, then list every site from the map by kind of
+  change (call sites with `sites` and `include_tests` on, type
+  annotations and implementors for a type, import lines and their
+  aliases via `deps --file` / `query importers`), with no budget-
+  omitted rows. After: `find_usages <old name>` lists exactly the
+  direct calls still pointing at a name that no longer exists, `query
+  importers` the leftover import lines an alias would otherwise hide,
+  then `impacted_tests` and the `note list --orphaned` sweep, and one
+  grep only for the text dekko doesn't model. This guidance was spread
+  across `dekko-orient`'s CLI-only table, `dekko-verify` and
+  `dekko-notes`; the plugin now ships six skills.
+
+## [1.3.3] — 2026-09-25
+
+### Changed
+- **The MCP tool schemas cost less per session.** Every tool's
+  `tools/list` entry is sent to the model at the start of each session
+  the plugin is enabled in. The eight longest tool descriptions no
+  longer repeat what their own parameters already document (`sites`,
+  `include_tests`, `transitive`, `exact`, `type_impact`) or explain
+  extractor internals; each keeps what the tool returns, when to reach
+  for it, and the one caveat that prevents misreading a result. The
+  shared symbol-argument text and a few parameter descriptions were
+  tightened the same way. The whole payload went from about 18.6k to
+  about 16.2k characters, roughly 600 tokens a session, with no change
+  to tool names, parameters, or behavior.
+
+## [1.3.2] — 2026-09-25
+
+### Changed
+- **The `dekko-orient` and `dekko-verify` skills cost less to load.**
+  `dekko-orient` fires before any Grep, Glob or Read, so its body is
+  paid for repeatedly in a session. It went from about 3.3k tokens to
+  about 1.15k: the ladder, one need-to-tool table with MCP and CLI
+  columns, and target syntax. The CLI-only queries, the CLI flag for
+  each knob, the digest budgets and the staleness tools moved to a
+  `reference.md` beside it that Claude reads only when it needs them.
+  The per-call knob guidance no longer repeats what the MCP tool
+  schemas already say. `dekko-verify` went from about 1.7k tokens to
+  about 1k with every trigger condition kept.
+
+### Fixed
+- **`dekko-orient` gave the wrong CLI test-filter flag for search.**
+  `dekko search` takes `--include-tests`; `dekko query callers`
+  includes tests unless given `--no-tests`.
+
+## [1.3.1] — 2026-09-25
+
+### Fixed
+- **Plugin skills and commands no longer give stale guidance.**
+  `dekko-verify` called Go `pkg.Func()` cross-package calls a known
+  resolver blind spot, but those have resolved since 0.31.0; it now
+  leads with trait/interface dispatch and says a qualified call can
+  still drop through a re-export or alias. `dekko-review-context`
+  named a review command that isn't part of Claude Code and pointed
+  at a `dekko review` command that doesn't exist yet; it now names
+  `/code-review` and drops the roadmap section. `dekko-orient` lists
+  `dekko query file` (a file's symbol list, cheaper than `outline`)
+  and `dekko ledger` (what the session already has in context).
+  `/sanity` lists `--all` in its argument hint and says how to relay
+  the `--all` triage summary. `docs/claude-code.md` matches.
+
 ## [1.3.0] — 2026-09-25
 
 Closes round 1.3's fix cycle. The code is 1.2.4; this release is the

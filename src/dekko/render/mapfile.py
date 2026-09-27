@@ -2103,6 +2103,72 @@ def _content_freshness(root: Path, prov: dict) -> Freshness:
     )
 
 
+def content_changes(root: Path, freshness: Freshness) -> dict[str, str | None]:
+    """What a content verdict says moved, with each file's hash now.
+
+    Every path ``freshness`` lists as added or changed maps to its
+    current content hash, every removed path to ``None``. Two calls
+    against the same map return equal dicts exactly when the tree
+    holds the same content both times (up to the stat fast path every
+    freshness check already trusts): a path outside the lists matched
+    the map by stat or hash both times, and a path inside them is
+    compared by content here. Costs one hash per listed file, not a
+    tree walk.
+
+    Args:
+        root: Repository root.
+        freshness: A ``reason == "content"`` verdict for ``root``.
+
+    Returns:
+        Repo-relative path -> content hash, or ``None`` for a removal.
+    """
+    changes: dict[str, str | None] = dict.fromkeys(freshness.removed)
+    for rel in (*freshness.added, *freshness.changed):
+        changes[rel] = _file_hash(root / rel)
+    return changes
+
+
+def map_signature(root: Path) -> list[int]:
+    """``map.json``'s ``[mtime_ns, size]``, empty when there is none.
+
+    Changes whenever the map is rewritten, so a cache built against
+    one map can tell it was replaced.
+    """
+    return _stat_sig(root / _MAP_DIR / "map.json")
+
+
+def load_sidecar_provenance(root: Path) -> dict | None:
+    """The provenance sidecar's dict, only while it matches ``map.json``.
+
+    ``load_provenance`` without its fallback: ``None`` means the
+    sidecar is missing, unreadable, or recorded against a different
+    ``map.json`` (see ``write_provenance_sidecar``), and the caller
+    decides what a full parse is worth. ``repo_ops.load_current_side``
+    needs that distinction, since on a fallback it parses ``map.json``
+    once for the index rather than once for the provenance and again
+    for the index.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        The provenance dict, or ``None`` when the sidecar can't vouch
+        for the ``map.json`` on disk (including when there is none).
+    """
+    current_sig = _stat_sig(root / _MAP_DIR / "map.json")
+    if not current_sig:
+        return None
+    sidecar = root / _MAP_DIR / _PROVENANCE_FILE
+    try:
+        doc = _json_loads(sidecar.read_bytes())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("map_stat") != current_sig:
+        return None
+    prov = doc.get("provenance")
+    return prov if isinstance(prov, dict) else None
+
+
 def load_provenance(root: Path, *, check_version: bool = False) -> dict | None:
     """Freshness-only load: read the provenance sidecar, not the map.
 
@@ -2151,18 +2217,11 @@ def load_provenance(root: Path, *, check_version: bool = False) -> dict | None:
             fallback path, when its ``"version"`` field is malformed.
     """
     map_path = root / _MAP_DIR / "map.json"
-    current_sig = _stat_sig(map_path)
-    if not current_sig:
+    if not _stat_sig(map_path):
         return None
-    sidecar = root / _MAP_DIR / _PROVENANCE_FILE
-    try:
-        doc = _json_loads(sidecar.read_bytes())
-    except (OSError, ValueError):
-        doc = None
-    if isinstance(doc, dict) and doc.get("map_stat") == current_sig:
-        prov = doc.get("provenance")
-        if isinstance(prov, dict):
-            return prov
+    prov = load_sidecar_provenance(root)
+    if prov is not None:
+        return prov
     try:
         full_doc = _json_loads(map_path.read_bytes())
     except (OSError, ValueError):

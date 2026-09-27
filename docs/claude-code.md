@@ -50,6 +50,7 @@ the same findings as structured data for scripting.
 ```sh
 /sanity resolve
 /sanity Path --usages
+/sanity --all
 ```
 
 Automates the `dekko-verify` skill (below): rather than relying on an
@@ -76,6 +77,27 @@ symbol in the repo instead of one human-picked target — a repo-wide
 sweep for catching a classification regression or a systemic
 grep-vs-dekko disagreement, not a per-symbol spot check. See
 [cli.md](cli.md#dekko-sanity---all--sweeping-every-symbol-instead-of-one-target).
+
+## The `/impact` command
+
+```sh
+/impact                 # vs the commit the map was generated at (else HEAD)
+/impact main            # vs a base branch
+/impact HEAD~3 --possible
+```
+
+Runs `dekko affected [REV]` and relays the impacted test files by
+tier (`[direct]`, `[transitive]`, `[import]`) together with the ready-to-run
+test command the report ends with (`pytest a.py b.py`, `cargo test`,
+`go test ./...`, the repo's `package.json` test script, or a
+Gradle/Maven invocation, one per language group). The command tells
+Claude to rerun with `--budget 0` when the runner line is marked
+`# +N more impacted test files not shown`, so a budget-capped report
+never becomes a partial test run, and to relay the note counting
+tests reached only through an ambiguous call (`--possible` lists
+them). Leads, not verdicts: static analysis misses fixtures and
+dynamic dispatch. The same answer is available to the MCP tools as
+`impacted_tests`.
 
 ## A persistent usage policy in CLAUDE.md (opt-in)
 
@@ -147,7 +169,7 @@ never blocks a session or a tool call, it just produces no output (for
 
 ## Skills
 
-`dekko --claude-install` also ships five Claude Code skills alongside
+`dekko --claude-install` also ships eight Claude Code skills alongside
 the `/map` command and MCP server — Claude discovers and invokes them
 automatically when their trigger conditions match, no separate install
 step:
@@ -155,10 +177,13 @@ step:
 | Skill | Nudges toward |
 | --- | --- |
 | `dekko-orient` | reaching for dekko's tools instead of grep/`Read` whenever a repo has a `.dekko/` directory |
-| `dekko-verify` | a targeted grep sanity-check before trusting a suspiciously low or zero call-graph result (`get_callers`, `find_usages`, `unused`, ...) — dekko's known resolver blind spots (cross-package/qualified calls, trait/interface dispatch, unparsed-language files); the `/sanity` command (above) automates the check itself rather than only nudging toward running it |
+| `dekko-verify` | a targeted grep sanity-check before trusting a suspiciously low or zero call-graph result (`get_callers`, `find_usages`, `unused`, ...) — dekko's known resolver blind spots (trait/interface dispatch, qualified calls through a re-export or alias, unparsed-language files); the `/sanity` command (above) automates the check itself rather than only nudging toward running it |
 | `dekko-daemon` | starting `dekko daemon start` ahead of a Bash-CLI-heavy stretch of work, and how to handle a `--no-daemon`/exit-7 abandoned-request retry |
 | `dekko-notes` | reading a symbol's notes before editing it and writing one after a non-obvious change, via `dekko note add`/`add_note` |
 | `dekko-review-context` | composing `workset` + `impacted_tests` + `check_ambiguous` into structural context for a PR description or code-review flow, before reading the diff line by line |
+| `dekko-refactor` | listing every site a rename, move, or signature change must touch before editing (`get_callers` with `sites` and `include_tests`, `find_type_usages`, `get_subtypes`, `deps --file` / `query importers` for import lines and aliases), then proving nothing was missed after: `find_usages <old name>` for leftover direct calls, `query importers` for leftover imports, `impacted_tests`, and the `note list --orphaned` sweep |
+| `dekko-delegate` | briefing a subagent before dispatching it into a mapped repo: paste one budgeted digest (`dekko orient --budget 800` to explore, `dekko workset --budget 2000` to implement) into its prompt with a paragraph telling it the dekko tools exist and how to use them, since a subagent gets no session-start orientation and otherwise re-explores with grep and whole-file reads |
+| `dekko-debug` | working a traceback or error report from the map: `query_symbol` on the innermost in-repo frame (notes first), `query throws` (`--transitive`) for where the exception can come from, `query catches` for who handles it, `get_callers` / `trace` to reconstruct a truncated or async call path, `query env` for environment-dependent failures, then `impacted_tests` after the fix; grep is reserved for the error message text, which dekko doesn't model |
 
 See each skill's `SKILL.md` under `integrations/claude/skills/` for the
 full guidance.
