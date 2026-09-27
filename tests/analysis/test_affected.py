@@ -486,6 +486,45 @@ def test_test_hint_groups_mixed_languages_into_separate_lines(
     assert any(ln.startswith("go test ./...") for ln in lines)
 
 
+def test_test_hint_ts_and_tsx_share_one_js_runner_line(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "bun test"}}')
+    (tmp_path / "bun.lock").write_text("")
+    impacts = [
+        affected.TestImpact(path="src/a.test.ts", tier="direct"),
+        affected.TestImpact(path="src/b.test.tsx", tier="direct"),
+        affected.TestImpact(path="src/c.test.js", tier="import"),
+    ]
+    assert affected._test_hint(impacts, tmp_path) == "bun run test"
+
+
+def test_test_hint_java_and_kotlin_share_one_gradle_line(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "gradlew").write_text("")
+    impacts = [
+        affected.TestImpact(path="src/test/FooTest.java", tier="direct"),
+        affected.TestImpact(path="src/test/BarTest.kt", tier="direct"),
+    ]
+    assert affected._test_hint(impacts, tmp_path) == "./gradlew test"
+
+
+def test_test_hint_keeps_first_seen_family_order(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}')
+    impacts = [
+        affected.TestImpact(path="tests/test_a.py", tier="direct"),
+        affected.TestImpact(path="web/a.test.ts", tier="direct"),
+        affected.TestImpact(path="tests/test_b.py", tier="import"),
+        affected.TestImpact(path="web/b.test.tsx", tier="import"),
+    ]
+    hint = affected._test_hint(impacts, tmp_path)
+    assert hint.splitlines() == [
+        "pytest tests/test_a.py tests/test_b.py",
+        "npm test",
+    ]
+
+
 # --- 1.5-remainder: import-tier fallback for a symbol seed -------------
 
 

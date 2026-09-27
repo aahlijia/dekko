@@ -558,11 +558,18 @@ _MAX_HINT_PATHS = 20
 # Extensions not covered here get no hint line at all — silence beats
 # a wrong guess, matching the existing "no impacts -> empty string"
 # contract.
-_PY_EXTS = frozenset({".py"})
-_RUST_EXTS = frozenset({".rs"})
-_GO_EXTS = frozenset({".go"})
-_JS_EXTS = frozenset({".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"})
-_JVM_EXTS = frozenset({".java", ".kt", ".kts", ".groovy"})
+# Several extensions share one runner (``.ts``/``.tsx``, ``.java``/
+# ``.kt``), so paths group by family: one family, one hint line.
+_RUNNER_FAMILIES = {
+    "py": (".py",),
+    "rust": (".rs",),
+    "go": (".go",),
+    "js": (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"),
+    "jvm": (".java", ".kt", ".kts", ".groovy"),
+}
+_FAMILY_OF_EXT = {
+    ext: family for family, exts in _RUNNER_FAMILIES.items() for ext in exts
+}
 
 # Lockfile -> package-manager test invocation, strongest signal first.
 _JS_LOCKFILE_RUNNERS = (
@@ -633,25 +640,27 @@ def _jvm_hint(root: Path) -> str:
     return ""
 
 
-def _group_hint(ext: str, paths: list[str], root: Path) -> str:
-    """One language group's runner hint, or empty when none applies."""
-    if ext in _PY_EXTS:
+def _group_hint(family: str, paths: list[str], root: Path) -> str:
+    """One runner family's hint, or empty when none applies."""
+    if family == "py":
         return _py_hint(paths)
-    if ext in _RUST_EXTS:
+    if family == "rust":
         return _named_hint("cargo test", paths)
-    if ext in _GO_EXTS:
+    if family == "go":
         return _named_hint("go test ./...", paths)
-    if ext in _JS_EXTS:
+    if family == "js":
         return _js_hint(root)
-    if ext in _JVM_EXTS:
+    if family == "jvm":
         return _jvm_hint(root)
     return ""
 
 
 def _test_hint(impacts: list[TestImpact], root: Path) -> str:
-    """Ready-to-paste test-runner invocation(s), one per language group.
+    """Ready-to-paste test-runner invocation(s), one per runner family.
 
-    Impacted files are grouped by extension; each group with a
+    Impacted files are grouped by runner family (every JS/TS extension
+    is one family, every JVM extension another), in first-seen order,
+    so a runner shared across extensions prints once; each group with a
     confidently known, static runner gets its own hint line — ``pytest``
     for Python (byte-identical to the historical Python-only behavior),
     ``cargo test``/``go test ./...`` for Rust/Go, the repo's own
@@ -666,11 +675,14 @@ def _test_hint(impacts: list[TestImpact], root: Path) -> str:
         return ""
     groups: dict[str, list[str]] = {}
     for impact in impacts:
-        groups.setdefault(Path(impact.path).suffix, []).append(impact.path)
+        family = _FAMILY_OF_EXT.get(Path(impact.path).suffix)
+        if family is not None:
+            groups.setdefault(family, []).append(impact.path)
+
     hints = [
         hint
-        for ext, paths in groups.items()
-        if (hint := _group_hint(ext, paths, root))
+        for family, paths in groups.items()
+        if (hint := _group_hint(family, paths, root))
     ]
     return "\n".join(hints)
 

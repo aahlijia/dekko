@@ -9,6 +9,16 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-09-26
+
+### Fixed
+- **`affected` printed the same test command once per file
+  extension.** A change impacting both `.ts` and `.tsx` tests gave
+  `bun run test` twice (text and the JSON `command`), so an agent
+  following the hint ran the whole suite twice; mixed Java/Kotlin
+  Gradle repos did the same with `./gradlew test`. Runner hints now
+  group by runner family, one line per family, first-seen order.
+
 ## [1.4.0] — 2026-09-26
 
 Closes round 1.4's fix cycle. The code is 1.3.8; this release is the
