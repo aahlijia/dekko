@@ -976,6 +976,282 @@ def test_java_constructor_same_name_pair_not_ambiguous() -> None:
     assert graph.ambiguous == []
 
 
+_ERROR_PAGE = """package web;
+public class ErrorPage {
+    public ErrorPage(String path) { }
+    public ErrorPage(HttpStatus status, String path) { }
+    public ErrorPage(Class<? extends Throwable> exception, String path) { }
+}
+"""
+
+_SPRING_APPLICATION = """package app;
+public class SpringApplication {
+    public SpringApplication(Class<?>... sources) { }
+    public SpringApplication(ResourceLoader loader, Class<?>... sources) { }
+}
+"""
+
+_EP = "web/ErrorPage.java::ErrorPage"
+_SA = "app/SpringApplication.java::SpringApplication"
+
+
+def _graph(root: Path, sources: dict[str, str]) -> CallGraph:
+    for rel, text in sources.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    files, _ = map_repository(
+        root,
+        subpath=None,
+        excludes=(),
+        max_file_size=1_000_000,
+    )
+    return resolve(files)
+
+
+def _pairs(graph: CallGraph, caller: str) -> set[str]:
+    return {e.callee for e in graph.edges if e.caller == caller}
+
+
+def _ambiguous_for(graph: CallGraph, caller: str) -> dict[str, list[str]]:
+    return {name: ids for c, name, ids in graph.ambiguous if c == caller}
+
+
+def _java_caller(body: str) -> str:
+    return (
+        "package app;\n"
+        "import web.ErrorPage;\n"
+        "public class Builder {\n"
+        f"    Object build(Object a, Object b, Object c) {{ {body} }}\n"
+        "}\n"
+    )
+
+
+_BUILD = "app/Builder.java::Builder.build"
+
+
+def test_overloaded_constructor_credited_by_exact_arg_count(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "web/ErrorPage.java": _ERROR_PAGE,
+            "app/Builder.java": _java_caller('return new ErrorPage("/x");'),
+        },
+    )
+    assert _pairs(graph, _BUILD) == {_EP, f"{_EP}.ErrorPage"}
+    assert _ambiguous_for(graph, _BUILD) == {}
+
+
+def test_same_arity_constructor_overloads_are_disclosed_not_guessed(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "web/ErrorPage.java": _ERROR_PAGE,
+            "app/Builder.java": _java_caller(
+                'new ErrorPage(HttpStatus.NOT_FOUND, "/404");'
+                ' return new ErrorPage(Oops.class, "/500");'
+            ),
+        },
+    )
+    assert _pairs(graph, _BUILD) == {_EP}
+    assert _ambiguous_for(graph, _BUILD) == {
+        "ErrorPage": [f"{_EP}.ErrorPage#2", f"{_EP}.ErrorPage#3"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("args", "ctor"),
+    [
+        ("A.class", f"{_SA}.SpringApplication"),
+        ("a, b", f"{_SA}.SpringApplication#2"),
+        ("", f"{_SA}.SpringApplication"),
+    ],
+)
+def test_varargs_constructor_exact_count_beats_range_fit(
+    tmp_path: Path,
+    args: str,
+    ctor: str,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "app/SpringApplication.java": _SPRING_APPLICATION,
+            "app/Builder.java": _java_caller(
+                f"return new SpringApplication({args});"
+            ),
+        },
+    )
+    assert _pairs(graph, _BUILD) == {_SA, ctor}
+    assert _ambiguous_for(graph, _BUILD) == {}
+
+
+def test_varargs_constructors_both_fitting_stay_ambiguous(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "app/SpringApplication.java": _SPRING_APPLICATION,
+            "app/Builder.java": _java_caller(
+                "return new SpringApplication(a, b, c);"
+            ),
+        },
+    )
+    assert _pairs(graph, _BUILD) == {_SA}
+    assert _ambiguous_for(graph, _BUILD) == {
+        "SpringApplication": [
+            f"{_SA}.SpringApplication",
+            f"{_SA}.SpringApplication#2",
+        ],
+    }
+
+
+def test_construction_fitting_no_constructor_keeps_only_the_class_edge(
+    tmp_path: Path,
+) -> None:
+    pair = (
+        "package app;\n"
+        "public class Pair {\n"
+        "    public Pair() { }\n"
+        "    public Pair(Object a) { }\n"
+        "}\n"
+    )
+    graph = _graph(
+        tmp_path,
+        {
+            "app/Pair.java": pair,
+            "app/Builder.java": _java_caller("return new Pair(a, b);"),
+        },
+    )
+    assert _pairs(graph, _BUILD) == {"app/Pair.java::Pair"}
+    assert _ambiguous_for(graph, _BUILD) == {}
+
+
+@pytest.mark.parametrize("receiver", ["self", "inner_self"])
+def test_python_init_arity_ignores_the_receiver(
+    tmp_path: Path,
+    receiver: str,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "util.py": (
+                "class Config:\n"
+                f"    def __init__({receiver}, path, strict=False):\n"
+                f"        {receiver}.path = path\n"
+            ),
+            "main.py": (
+                "from util import Config\n\n\n"
+                "def run():\n"
+                "    return Config('x')\n"
+            ),
+        },
+    )
+    assert _pairs(graph, "main.py::run") == {
+        "util.py::Config",
+        "util.py::Config.__init__",
+    }
+
+
+def _two_ctors(arg_count: int | None) -> tuple[list[FileMap], str]:
+    cls = Symbol(
+        id="Foo.java::Foo",
+        name="Foo",
+        qualname="Foo",
+        kind="class",
+        path="Foo.java",
+        language="java",
+    )
+    ctors = [
+        Symbol(
+            id=f"Foo.java::Foo.Foo{suffix}",
+            name="Foo",
+            qualname="Foo.Foo",
+            kind="method",
+            path="Foo.java",
+            language="java",
+            params=[Param(name=f"p{i}") for i in range(count)],
+            start_line=line,
+        )
+        for suffix, count, line in (("", 0, 2), ("#2", 1, 3))
+    ]
+    caller = _fn("Foo.java", "make", "Foo.make", language="java")
+    call = RawCall(
+        caller_id=caller.id,
+        path="Foo.java",
+        text="new Foo",
+        name="Foo",
+        line=9,
+        arg_count=arg_count,
+    )
+    files = [
+        FileMap(
+            "Foo.java",
+            "java",
+            symbols=[cls, *ctors, caller],
+            calls=[call],
+        ),
+    ]
+    return files, caller.id
+
+
+def test_overloaded_constructors_without_arg_count_are_ambiguous() -> None:
+    files, caller = _two_ctors(None)
+    graph = resolve(files)
+    assert _pairs(graph, caller) == {"Foo.java::Foo"}
+    assert _ambiguous_for(graph, caller) == {
+        "Foo": ["Foo.java::Foo.Foo", "Foo.java::Foo.Foo#2"],
+    }
+
+
+def test_cpp_inline_constructors_credited_by_arg_count(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "foo.h": (
+                "class Foo {\n"
+                " public:\n"
+                "  Foo(int a) {}\n"
+                "  Foo(int a, int b) {}\n"
+                "};\n"
+                "inline void one() { Foo(1); }\n"
+                "inline void two() { Foo(1, 2); }\n"
+            ),
+        },
+    )
+    assert "foo.h::Foo.Foo" in _pairs(graph, "foo.h::one")
+    assert "foo.h::Foo.Foo#2" not in _pairs(graph, "foo.h::one")
+    assert "foo.h::Foo.Foo#2" in _pairs(graph, "foo.h::two")
+    assert "foo.h::Foo.Foo" not in _pairs(graph, "foo.h::two")
+
+
+def test_record_ambiguous_merges_candidate_lists() -> None:
+    def sym(path: str) -> Symbol:
+        return _fn(path, "Foo", "Foo.Foo")
+
+    acc: dict[tuple[str, str], list[str]] = {}
+    resolver_mod._record_ambiguous(
+        "c", "Foo", [sym("tests/b.py"), sym("src/a.py")], acc
+    )
+    resolver_mod._record_ambiguous(
+        "c", "Foo", [sym("src/z.py"), sym("src/a.py")], acc
+    )
+    assert acc == {
+        ("c", "Foo"): [
+            "src/a.py::Foo.Foo",
+            "src/z.py::Foo.Foo",
+            "tests/b.py::Foo.Foo",
+        ],
+    }
+    resolver_mod._record_ambiguous("c", "Foo", [sym("src/a.py")], acc)
+    assert len(acc[("c", "Foo")]) == 3
+
+
 def test_real_ambiguity_between_two_unrelated_classes_still_ambiguous() -> (
     None
 ):

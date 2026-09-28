@@ -918,11 +918,15 @@ def _params_python(params_node: Node) -> list[Param]:
             name_node = child.child_by_field_name("name")
             if name_node is None:
                 name_node = child.named_children[0]
+            # ``*args: T`` / ``**kwargs: T`` wrap the splat pattern in a
+            # typed_parameter; they're still variadic.
             out.append(
                 Param(
                     name=_text(name_node),
                     type=_text(type_node) if type_node else None,
                     has_default=kind == "typed_default_parameter",
+                    variadic=name_node.type
+                    in ("list_splat_pattern", "dictionary_splat_pattern"),
                 )
             )
         elif kind == "default_parameter":
@@ -983,6 +987,15 @@ def _params_generic(params_node: Node) -> list[Param]:
             continue
         if child.type == "spread_parameter":
             out.append(Param(name=_text(child), variadic=True))
+            continue
+        if child.type == "ERROR" and "..." in _text(child):
+            # tree-sitter-java can't parse a type annotation before
+            # the ellipsis (``Resolver @Nullable ... resolvers``), so
+            # that varargs parameter arrives as an ERROR node. It is
+            # still varargs: capping it would reject a correct
+            # constructor that a call with fewer arguments selects.
+            text = _text(child).lstrip(", ").strip()
+            out.append(Param(name=text, variadic=True))
             continue
         name_node = child.child_by_field_name(
             "name"
@@ -1181,9 +1194,7 @@ def _collect_calls(
         text, receiver = _cap_callee(text, name, receiver)
         caller = _enclosing(spans, callee.start_byte)
         args_node = _one(caps, "args")
-        arg_count = (
-            len(args_node.named_children) if args_node is not None else None
-        )
+        arg_count = _call_arg_count(args_node)
         calls.append(
             RawCall(
                 caller_id=caller.id if caller else None,
@@ -1563,6 +1574,44 @@ def _rust_skip_generic_args(children: list[Node], j: int) -> int:
 # parameters (``|a, b| ..``) and generic arguments (``Map::<K, V>``)
 # both put their commas at the argument list's own depth.
 _RUST_UNCOUNTABLE_ARG_TOKENS = frozenset({"|", "||", "<", ">", "<<", ">>"})
+
+
+# Argument shapes that unpack a sequence or mapping at the call site
+# (``f(*xs)``, ``f(**kw)``, ``f(...xs)``, ``f(xs...)``, ``f(args...)``):
+# how many arguments they supply is only known at run time.
+_UNPACKING_ARGUMENT_TYPES = frozenset(
+    {
+        "list_splat",
+        "dictionary_splat",
+        "spread_element",
+        "variadic_argument",
+        "parameter_pack_expansion",
+    }
+)
+
+
+def _call_arg_count(args_node: Node | None) -> int | None:
+    """How many arguments a call writes, or ``None`` when unknowable.
+
+    Comments are named "extra" nodes that can sit between arguments
+    (``undefined, // modelId``), so they don't count. An unpacking
+    argument makes the count unknowable, and ``None`` is the value the
+    resolver's arity checks read as "no signal" rather than as a
+    mismatch.
+
+    Args:
+        args_node: The call's captured argument list, if any.
+
+    Returns:
+        The written argument count, or ``None``.
+    """
+    if args_node is None:
+        return None
+    args = [a for a in args_node.named_children if not a.is_extra]
+    if any(a.type in _UNPACKING_ARGUMENT_TYPES for a in args):
+        return None
+
+    return len(args)
 
 
 def _rust_token_arg_count(args: Node) -> int | None:

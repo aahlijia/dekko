@@ -1670,3 +1670,56 @@ def test_query_symbol_json_reports_type_alias_kind(
     doc = json.loads(capsys.readouterr().out)
     assert doc["kind"] == "type_alias"
     assert doc["id"] == "types.ts::PermissionMode"
+
+
+SAME_ARITY_CONSTRUCTORS = {
+    "web/ErrorPage.java": (
+        "package web;\n"
+        "public class ErrorPage {\n"
+        "    public ErrorPage(String path) { }\n"
+        "    public ErrorPage(HttpStatus status, String path) { }\n"
+        "    public ErrorPage(Class<?> exception, String path) { }\n"
+        "}\n"
+    ),
+    "app/Pages.java": (
+        "package app;\n"
+        "import web.ErrorPage;\n"
+        "public class Pages {\n"
+        "    Object make() {\n"
+        '        return new ErrorPage(HttpStatus.NOT_FOUND, "/404");\n'
+        "    }\n"
+        "}\n"
+    ),
+}
+
+
+def test_later_constructor_with_ambiguous_sites_says_so(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A 2-arg construction can't be told apart between two 2-arg
+    # overloads by count alone, so neither is credited; each must
+    # disclose the site instead of reading "no callers", and the 1-arg
+    # overload must not claim it.
+    root = make_mapped_repo(SAME_ARITY_CONSTRUCTORS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            "web/ErrorPage.java:ErrorPage.ErrorPage:4",
+            "--root",
+            str(root),
+        ]
+    )
+    assert code == 0
+    err = capsys.readouterr().err
+    assert (
+        "1 additional call site(s) named 'ErrorPage' resolved ambiguously"
+        in err
+    )
+    index = mapfile.load_map(root)
+    first = next(
+        s
+        for s in index.symbols_by_qualname["ErrorPage.ErrorPage"]
+        if s.start_line == 3
+    )
+    assert index.calls_in.get(first.id, []) == []

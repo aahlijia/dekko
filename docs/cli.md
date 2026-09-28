@@ -899,6 +899,15 @@ matched against dozens of same-named repo-wide candidates) truncates
 the same way an unresolved-target error does, rather than dumping every
 candidate unconditionally.
 
+**Constructor overloads.** `new X(...)` always resolves to the class
+`X`. When `X` declares several constructors, the call's argument count
+picks one: an exact declared-count match first, then a unique varargs
+or default-argument fit. Overloads with the same count (Java's
+`ErrorPage(HttpStatus, String)` and `ErrorPage(Class, String)`) can
+only be told apart by argument types, which dekko doesn't have, so the
+call shows under `ambiguous --name X` and as "resolved ambiguously" on
+each of those constructors rather than being credited to one.
+
 **Standing high-ambiguous-rate flag.** A repo whose repo-wide
 ambiguous rate is **30% or higher** doesn't stay silent until you think
 to run this command — that threshold (`ambiguous.HIGH_AMBIGUOUS_RATE`,

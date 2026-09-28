@@ -35,7 +35,7 @@ same-file step — see ``_typed_param_match``. A call/construction that
 resolves to a class-shaped symbol also credits that class's own
 explicit constructor method (JS/TS ``constructor``, Python
 ``__init__``, Java's same-named ``constructor_declaration``) when one
-was extracted, via ``_constructor_of`` — without this, ``new
+was extracted, via ``_constructors_of`` — without this, ``new
 ClassName(...)`` construction was invisible to the constructor
 method's fan-in even though it resolved fine to the class itself (or,
 for Java specifically, fell into ``ambiguous`` entirely, since a Java
@@ -44,6 +44,11 @@ constructor's own bare name is the class name — see
 (cline's ``get_callers("Controller.initTask")`` finding 2 of 9 real
 callers; cline/spring-boot's ``Controller.constructor``/
 ``AutoConfigurations.of`` reading fan-in 0 despite real call sites).
+When the class declares several constructors, the construction's
+argument count picks one (``_pick_constructor``); overloads it can't
+separate are recorded as ambiguous under the class's name, and credit
+no constructor, while the class edge itself is still recorded, since
+the class was resolved.
 
 Bare-identifier *references* (a callback passed by value rather than
 invoked — see ``model.RawRef``) go through the same candidate ladder
@@ -515,7 +520,7 @@ class NameDelta:
             or JS/TS's ``constructor``), its enclosing type's own bare
             name is added too. Without this, adding an ``__init__`` to
             an existing class would go undetected by any cached
-            caller's *own* name-scan: ``_constructor_of`` looks up the
+            caller's *own* name-scan: ``_constructors_of`` looks up the
             new method by a name (``__init__``) that never appears in
             an already-cached ``MyClass()`` edge, whose callee id ends
             in ``MyClass``, not ``__init__``. Adding the class's own
@@ -2666,7 +2671,7 @@ def _resolve_call(
         alias = _alias_candidates(call, file_imports, index)
         if len(alias) == 1:
             _add_call_and_constructor(
-                caller_id, alias[0], call.line, by_name_path, edges
+                caller_id, alias[0], call, by_name_path, edges, ambiguous
             )
             return
         if len(alias) > 1:
@@ -2692,7 +2697,7 @@ def _resolve_call(
         return
     if target is not None:
         _add_call_and_constructor(
-            caller_id, target, call.line, by_name_path, edges
+            caller_id, target, call, by_name_path, edges, ambiguous
         )
         return
     _record_ambiguous(caller_id, call.name, candidates, ambiguous)
@@ -2712,21 +2717,42 @@ def _add_edge(
 def _add_call_and_constructor(
     caller_id: str,
     target: Symbol,
-    line: int,
+    call: RawCall,
     by_name_path: dict[tuple[str, str], list[Symbol]],
     edges: dict[tuple[str, str], set[int]],
+    ambiguous: dict[tuple[str, str], list[str]],
 ) -> None:
     """Record the resolved call edge, plus a constructor edge if any.
 
-    See ``_constructor_of`` (module docstring): a call or
+    See ``_constructors_of`` (module docstring): a call or
     construction that resolves to a class-shaped symbol also counts
     toward that class's own explicit constructor method's fan-in, when
-    the language extracted one as its own symbol.
+    the language extracted one as its own symbol. The class edge is
+    recorded whatever happens next, so "who constructs this class"
+    never depends on the overload pick. When the class has several
+    constructors, ``_pick_constructor`` chooses by argument count; a
+    call it can't narrow to one is recorded as ambiguous among the
+    overloads it couldn't tell apart, under the class's name.
+
+    Args:
+        caller_id: Id of the calling symbol (or a module pseudo-id).
+        target: The symbol the call resolved to.
+        call: The raw call, for its line and written argument count.
+        by_name_path: ``(bare name, file path)`` → same-file symbols.
+        edges: The graph's edge accumulator, mutated in place.
+        ambiguous: The graph's ambiguous-call accumulator, mutated in
+            place.
     """
-    _add_edge(caller_id, target.id, line, edges)
-    ctor = _constructor_of(target, by_name_path)
+    _add_edge(caller_id, target.id, call.line, edges)
+    ctors = _constructors_of(target, by_name_path)
+    if not ctors:
+        return
+
+    ctor, overloads = _pick_constructor(ctors, call)
     if ctor is not None:
-        _add_edge(caller_id, ctor.id, line, edges)
+        _add_edge(caller_id, ctor.id, call.line, edges)
+    elif overloads:
+        _record_ambiguous(caller_id, call.name, overloads, ambiguous)
 
 
 def _record_ambiguous(
@@ -2737,6 +2763,12 @@ def _record_ambiguous(
 ) -> None:
     """Record a call/alias name with 2+ same-name candidates.
 
+    A second record for the same ``(caller_id, name)`` merges into the
+    first rather than being dropped: one caller can construct a class
+    through two different sets of undecidable overloads (a 2-arg and
+    a 3-arg ``new Foo(...)``), and both sets belong in the disclosure.
+    A repeated identical record leaves the list unchanged.
+
     Args:
         caller_id: Id of the calling symbol (or a module pseudo-id).
         name: The bare callee name (as written at the call site).
@@ -2746,9 +2778,14 @@ def _record_ambiguous(
             ``(caller_id, name)``, mutated in place.
     """
     # Candidate lists are presentation data: production code first,
-    # test/fixture symbols last.
-    ranked = sorted(candidates, key=lambda c: (is_test_path(c.path), c.id))
-    ambiguous.setdefault((caller_id, name), [c.id for c in ranked])
+    # test/fixture symbols last. A symbol id is ``<path>::<qualname>``,
+    # so ids already on record rank by their own path prefix.
+    ids = set(ambiguous.get((caller_id, name), []))
+    ids.update(c.id for c in candidates)
+    ambiguous[(caller_id, name)] = sorted(
+        ids,
+        key=lambda i: (is_test_path(i.partition("::")[0]), i),
+    )
 
 
 def _resolution_language(language: str) -> str:
@@ -4428,10 +4465,10 @@ _CONSTRUCTOR_NAMES = ("constructor", "__init__")
 _CONSTRUCTOR_NAME_SET = frozenset(_CONSTRUCTOR_NAMES)
 
 
-def _constructor_of(
+def _constructors_of(
     cls: Symbol, by_name_path: dict[tuple[str, str], list[Symbol]]
-) -> Symbol | None:
-    """The class's own explicit constructor method, if extracted.
+) -> list[Symbol]:
+    """The class's own explicit constructor methods, if extracted.
 
     ``new ClassName(...)``/bare ``ClassName(...)`` construction always
     resolves to the class symbol itself, which under-counts a class's
@@ -4443,24 +4480,126 @@ def _constructor_of(
     the class-level edge, so both "who constructs this class" and
     "who calls the constructor body" are counted.
 
+    Every overload is returned, not the first: Java ctor ids are
+    ``X.X``, ``X.X#2``, ... with one shared qualname, and crediting
+    the first match put every construction site of an overloaded
+    class on its first-declared constructor.
+
     Args:
         cls: A resolved symbol, checked only when it is class-shaped
             (``model.TYPE_KINDS``) — a plain function/method target
-            returns ``None`` immediately.
+            returns an empty list immediately.
         by_name_path: ``(bare name, file path)`` → same-file symbols.
 
     Returns:
-        The constructor method symbol, or ``None`` when ``cls`` isn't
-        a type-kind symbol or has no matching constructor definition.
+        The constructor method symbols in declaration order, or an
+        empty list when ``cls`` isn't a type-kind symbol or has no
+        matching constructor definition.
     """
     if cls.kind not in TYPE_KINDS:
-        return None
+        return []
     for name in (*_CONSTRUCTOR_NAMES, cls.name):
-        for sym in by_name_path.get((name, cls.path), []):
-            qual = f"{cls.qualname}.{name}"
-            if sym.kind == "method" and sym.qualname == qual:
-                return sym
-    return None
+        qual = f"{cls.qualname}.{name}"
+        found = [
+            sym
+            for sym in by_name_path.get((name, cls.path), [])
+            if sym.kind == "method" and sym.qualname == qual
+        ]
+        if found:
+            return sorted(found, key=lambda sym: sym.start_line)
+    return []
+
+
+def _constructor_params(ctor: Symbol) -> list[Param]:
+    """A constructor's parameters as a construction site supplies them.
+
+    A construction never writes the receiver, so Python's first
+    ``__init__`` parameter comes off whatever it's named (``self``,
+    ``inner_self``) and whether or not the call has a receiver:
+    ``Foo(1)`` against ``__init__(self, x)`` is one argument, not a
+    mismatch. A leading ``*args`` absorbs the receiver and stays.
+
+    Args:
+        ctor: A constructor method symbol.
+
+    Returns:
+        The parameters a construction's arguments bind to.
+    """
+    params = ctor.params
+    if (
+        ctor.language == "python"
+        and params
+        and not params[0].variadic
+        and params[0].name not in _ARITY_SYNTAX_MARKER_NAMES
+    ):
+        return params[1:]
+
+    return params
+
+
+def _declared_param_count(ctor: Symbol) -> int:
+    """How many parameters ``ctor`` declares, receiver excluded.
+
+    Args:
+        ctor: A constructor method symbol.
+
+    Returns:
+        The declared count: every parameter, defaulted or variadic
+        included, less the receiver and syntax markers.
+    """
+    return sum(
+        1
+        for p in _constructor_params(ctor)
+        if p.name not in _ARITY_SYNTAX_MARKER_NAMES
+    )
+
+
+def _arity_fits(ctor: Symbol, arg_count: int) -> bool:
+    """Whether ``arg_count`` written arguments fit ``ctor``."""
+    min_count, max_count = _param_arity(_constructor_params(ctor))
+    if arg_count < min_count:
+        return False
+    return max_count is None or arg_count <= max_count
+
+
+def _pick_constructor(
+    ctors: list[Symbol], call: RawCall
+) -> tuple[Symbol | None, list[Symbol]]:
+    """The constructor overload a construction's argument count selects.
+
+    Exact declared-count matches win over range fits, the way Java
+    tries fixed-arity applicability before variable-arity: for
+    ``SpringApplication(Class<?>...)`` and ``(ResourceLoader,
+    Class<?>...)``, one argument picks the first and two the second,
+    though both fit either count. Overloads the count can't separate
+    (``ErrorPage(HttpStatus, String)`` vs ``(Class, String)``) are
+    returned undecided, never guessed: only argument types tell them
+    apart, and dekko has none.
+
+    Args:
+        ctors: The class's constructors, from ``_constructors_of``.
+        call: The construction call.
+
+    Returns:
+        ``(ctor, [])`` when one constructor is selected;
+        ``(None, overloads)`` when 2+ remain undecided; ``(None, [])``
+        when none fits the written argument count, which points at a
+        wrong class match rather than at a constructor.
+    """
+    n = call.arg_count
+    if n is None:
+        if len(ctors) == 1:
+            return ctors[0], []
+        return None, ctors
+    fitting = [c for c in ctors if _arity_fits(c, n)]
+    exact = [c for c in fitting if _declared_param_count(c) == n]
+    for tier in (exact, fitting):
+        if len(tier) == 1:
+            return tier[0], []
+        if tier:
+            return None, tier
+
+    return None, []
 
 
 def _construction_pick(
@@ -4491,9 +4630,9 @@ def _construction_pick(
     """
     a, b = candidates
     for cls, ctor in ((a, b), (b, a)):
-        found = _constructor_of(cls, by_name_path)
-        if found is not None and found.id == ctor.id:
+        if any(c.id == ctor.id for c in _constructors_of(cls, by_name_path)):
             return cls
+
     return None
 
 

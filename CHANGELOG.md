@@ -9,6 +9,50 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-09-28
+
+### Fixed
+- **`new X(...)` always credited the class's first-declared
+  constructor, whatever the arguments.** On spring-boot, 481 classes
+  declare two or more constructors; every construction site sat on
+  the first one and all 637 later constructors read zero callers, with
+  nothing disclosed. `query callers` on `ErrorPage(HttpStatus, String)`
+  said "no callers" while the 1-arg `ErrorPage(String)` listed its
+  2-arg call sites. The written argument count now picks the overload:
+  an exact declared-count match first, then a unique varargs or
+  default-argument fit, so `new SpringApplication(loader, sources)`
+  reaches the 2-arg constructor. Overloads that only argument types
+  could separate, like `ErrorPage(HttpStatus, String)` and
+  `(Class, String)`, are disclosed as "resolved ambiguously" on each
+  of them instead of guessed. The same applies to a C++ class with
+  several constructors defined in its header. Class-level callers are
+  unchanged. On
+  spring-boot, 1,032 caller edges moved to a later constructor and 954
+  construction sites are now disclosed as ambiguous. Because `unused`
+  lists ambiguous candidates tagged `[dispatch?]`, constructors whose
+  only construction sites are ambiguous now show up there with that
+  tag (47 on spring-boot), where the first constructor's false credit
+  used to hide the whole overload set.
+- **A Java varargs parameter with a type annotation before the
+  ellipsis (`Resolver @Nullable ... resolvers`) lost its varargs
+  flag.** tree-sitter-java parses that shape as an error node, so the
+  parameter counted as one fixed argument. It is varargs again, which
+  keeps calls with fewer arguments on that constructor or method.
+- **A comment between call arguments counted as an argument.**
+  A multi-line `new ClineError(raw, undefined, // modelId` ...
+  `"cline")` read as four arguments, and a call with four commented
+  lines as nine instead of five, in every language. The count feeds the arity checks that keep
+  a call off a target it can't be calling, so a commented call could
+  be kept off the right one. Comments no longer count.
+- **A typed Python `*args: T` / `**kwargs: T` parameter wasn't marked
+  variadic** (the untyped forms were), so `List(a, b, c)` against
+  `__init__(self, *components: TraceType)` read as a mismatch.
+- **An unpacking argument counted as one argument.**
+  `SparseTensor(*iterator.get_next())`, `f(**kw)`, `f(...rest)`,
+  `f(xs...)` and C++ `f(args...)` supply a number of arguments only
+  known at run time. Their count is now "unknown", which the arity
+  checks never treat as a mismatch.
+
 ## [1.5.0] — 2026-09-26
 
 Closes round 1.5's fix cycle. The code is 1.4.4; this release is the
