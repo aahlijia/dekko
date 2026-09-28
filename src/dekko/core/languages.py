@@ -552,8 +552,14 @@ CPP = LanguageSpec(
   name: (type_identifier) @classname
   body: (field_declaration_list)) @classdef
 """,
+    # ``new_expression``'s type alternation leaves out primitive and
+    # sized types (``new int[5]``): they construct no class.
     call_query="""
 (call_expression function: (_) @callee arguments: (_)? @args) @call
+
+(new_expression
+  type: [(type_identifier) (qualified_identifier) (template_type)] @callee
+  arguments: (_)? @args) @call
 """,
     import_query="""
 (preproc_include path: (_) @module)
@@ -1469,6 +1475,14 @@ _CALLEE_TEXT_CANONICAL_VERSION = 1
 # ``.dekko`` cache built before the change keeps serving them.
 _RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION = 1
 
+# Bumped whenever the extractor changes how it reads a C++
+# construction outside ``call_query``: ``std::make_unique<T>(..)`` /
+# ``make_shared`` emit a second call naming ``T``, ``new T`` with no
+# argument list counts zero arguments, a constructed type's template
+# arguments come off its name, and ``= delete`` functions are no
+# longer symbols. Same blind spot as the constants above.
+_CPP_CONSTRUCTION_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.
@@ -1481,8 +1495,9 @@ def spec_fingerprint() -> str:
     ``_HEADER_DISPATCH_HEURISTIC_VERSION``,
     ``_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION``,
     ``_RUST_MACRO_CALL_RECOVERY_VERSION``,
-    ``_CALLEE_TEXT_CANONICAL_VERSION`` and
-    ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION``, which each cover
+    ``_CALLEE_TEXT_CANONICAL_VERSION``,
+    ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION`` and
+    ``_CPP_CONSTRUCTION_VERSION``, which each cover
     one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments). Used to
     invalidate a stale ``.dekko`` cache entry or flag a stale
@@ -1502,6 +1517,7 @@ def spec_fingerprint() -> str:
         f"callee_text_canonical={_CALLEE_TEXT_CANONICAL_VERSION}",
         "rust_error_attribute_recovery="
         f"{_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION}",
+        f"cpp_construction={_CPP_CONSTRUCTION_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):

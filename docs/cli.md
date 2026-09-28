@@ -908,6 +908,20 @@ only be told apart by argument types, which dekko doesn't have, so the
 call shows under `ambiguous --name X` and as "resolved ambiguously" on
 each of those constructors rather than being credited to one.
 
+In C++, `new X(...)`, `std::make_unique<X>(...)`/`make_shared` (and
+the `absl::` spellings) and a temporary `X(...)` all count as
+constructing `X`, and `query callers` on the class lists them. The
+constructors are found wherever they're defined, so out-of-line
+`X::X(...)` definitions in a `.cc` are credited too. A definition
+outside the class body doesn't show the default arguments its header
+declaration gives, so any argument count up to its parameter count fits
+it. A stack declaration `X x(args);` isn't counted yet: without type
+information it reads the same as a function declaration. A
+namespace-qualified construction (`absl::Status()`) never reaches an
+in-repo type outside that namespace. One reached through a `using`
+alias (`ops::NodeOut` for `NodeBuilder::NodeOut`) is left unresolved
+too. `= delete` functions aren't symbols, since nothing can call them.
+
 **Standing high-ambiguous-rate flag.** A repo whose repo-wide
 ambiguous rate is **30% or higher** doesn't stay silent until you think
 to run this command — that threshold (`ambiguous.HIGH_AMBIGUOUS_RATE`,

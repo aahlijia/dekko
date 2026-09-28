@@ -258,7 +258,7 @@ def _collect_definitions(
 
         if _looks_like_c_macro_invocation(
             spec.name, _text(name_node), params_node
-        ):
+        ) or _is_deleted_function(def_node):
             continue
 
         ret_node = _one(caps, "ret")
@@ -287,6 +287,18 @@ def _collect_definitions(
         defs.append((def_node, sym))
 
     return defs
+
+
+def _is_deleted_function(def_node: Node) -> bool:
+    """Whether a C++ definition is ``= delete``.
+
+    A deleted function declares that it can't be called, so as a
+    symbol it can only mislead: a deleted copy constructor has the
+    same bare name and often the same arity as the real constructors,
+    so it blocks their overload pick and lands in ``unused``. ``=
+    default`` is callable and stays.
+    """
+    return any(c.type == "delete_method_clause" for c in def_node.children)
 
 
 # ALL-CAPS-with-underscores is the near-universal C/C++ convention for
@@ -1188,25 +1200,131 @@ def _collect_calls(
             continue
         if any(a <= callee.start_byte < b for a, b in attrs):
             continue
-        text, name, receiver = _callee_parts(callee)
-        if not name:
-            continue
-        text, receiver = _cap_callee(text, name, receiver)
-        caller = _enclosing(spans, callee.start_byte)
-        args_node = _one(caps, "args")
-        arg_count = _call_arg_count(args_node)
-        calls.append(
-            RawCall(
-                caller_id=caller.id if caller else None,
-                path=rel,
-                text=text,
-                name=name,
-                receiver=receiver,
-                line=callee.start_point[0] + 1,
-                arg_count=arg_count,
-            )
+        call_node = _one(caps, "call")
+        cpp_new = (
+            spec.name == "cpp"
+            and call_node is not None
+            and call_node.type == "new_expression"
         )
+        args_node = _one(caps, "args")
+        # C++ ``new T`` with no argument list is a default
+        # construction: zero arguments, not "no signal".
+        arg_count = (
+            0 if cpp_new and args_node is None else _call_arg_count(args_node)
+        )
+        call = _raw_call(callee, rel, spans, arg_count, constructs=cpp_new)
+        if call is None:
+            continue
+        calls.append(call)
+        made = _cpp_factory_type(callee) if spec.name == "cpp" else None
+        if made is not None:
+            built = _raw_call(made, rel, spans, arg_count, constructs=True)
+            if built is not None:
+                calls.append(built)
     return calls
+
+
+def _raw_call(
+    callee: Node,
+    rel: str,
+    spans: list[tuple[int, int, Symbol]],
+    arg_count: int | None,
+    *,
+    constructs: bool,
+) -> RawCall | None:
+    """Build the ``RawCall`` for one callee node.
+
+    Args:
+        callee: The callee node, or for a construction the type node.
+        rel: Repo-relative POSIX path of the file.
+        spans: ``(start_byte, end_byte, symbol)`` of every definition,
+            to attribute the call to its enclosing one.
+        arg_count: The written argument count, or ``None``.
+        constructs: Whether ``callee`` names a type being constructed.
+            Its trailing template arguments are then dropped, so
+            ``new ns::Box<int>(3)`` matches the class ``Box``.
+
+    Returns:
+        The call, or ``None`` when the callee has no usable name.
+    """
+    text, name, receiver = _callee_parts(callee)
+    if constructs:
+        name, text = _strip_trailing_template_args(name, text)
+    if not name:
+        return None
+    text, receiver = _cap_callee(text, name, receiver)
+    caller = _enclosing(spans, callee.start_byte)
+    return RawCall(
+        caller_id=caller.id if caller else None,
+        path=rel,
+        text=text,
+        name=name,
+        receiver=receiver,
+        line=callee.start_point[0] + 1,
+        arg_count=arg_count,
+    )
+
+
+def _strip_trailing_template_args(name: str, text: str) -> tuple[str, str]:
+    """``(Box<int>, ns::Box<int>)`` → ``(Box, ns::Box)``.
+
+    Only the name's own template arguments come off the text, so an
+    enclosing template (``Outer<int>::Inner``) is left as written.
+    """
+    bare = _strip_generics(name)
+    if bare != name and text.endswith(name):
+        text = text[: len(text) - len(name)] + bare
+    return bare, text
+
+
+# Standard factories that construct their one template type argument
+# (``std::make_unique<Graph>(reg)`` builds a ``Graph``). A same-named
+# function in any other namespace is ordinary code, so both parts of
+# the name must match.
+_CPP_FACTORY_NAMESPACES = frozenset({"std", "absl"})
+_CPP_FACTORY_NAMES = frozenset({"make_unique", "make_shared"})
+_CPP_CONSTRUCTIBLE_TYPES = frozenset(
+    {"type_identifier", "qualified_identifier", "template_type"}
+)
+
+
+def _cpp_factory_type(callee: Node) -> Node | None:
+    """The type a ``std::make_unique<T>``-shaped callee constructs.
+
+    Args:
+        callee: A C++ call's ``function`` node.
+
+    Returns:
+        The node naming ``T``, or ``None`` when the callee isn't a
+        ``std``/``absl`` ``make_unique``/``make_shared`` with exactly
+        one class-shaped type argument (``make_unique<int>`` and the
+        array form ``make_unique<T[]>`` construct no class).
+    """
+    if callee.type != "qualified_identifier":
+        return None
+    scope = callee.child_by_field_name("scope")
+    func = callee.child_by_field_name("name")
+    if (
+        scope is None
+        or func is None
+        or func.type != "template_function"
+        or _text(scope) not in _CPP_FACTORY_NAMESPACES
+        or _text(func.child_by_field_name("name")) not in _CPP_FACTORY_NAMES
+    ):
+        return None
+    targs = func.child_by_field_name("arguments")
+    named = [a for a in targs.named_children if not a.is_extra]
+    if (
+        len(named) != 1
+        or named[0].type != "type_descriptor"
+        or named[0].child_by_field_name("declarator") is not None
+    ):
+        return None
+    made = named[0].child_by_field_name("type")
+    if made is None or made.type not in _CPP_CONSTRUCTIBLE_TYPES:
+        return None
+
+    return made
 
 
 def _rust_error_attribute_spans(root: Node) -> list[tuple[int, int]]:

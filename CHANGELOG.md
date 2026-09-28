@@ -9,6 +9,50 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.2] — 2026-09-28
+
+### Fixed
+- **No C++ construction site reached the call graph.** `new
+  Graph(reg)`, `new tensorflow::Graph(reg)` and
+  `std::make_unique<Graph>(reg)` weren't extracted as calls at all,
+  so `query callers` on tensorflow's `Graph` said "no callers" against
+  hundreds of construction sites, and `affected` stopped at its
+  constructors. `new T(...)` (brace, placement and argument-less forms
+  too) and `std::`/`absl::` `make_unique`/`make_shared<T>(...)` now
+  construct `T`. The class gets the edge, and so does the constructor
+  the argument count picks, including constructors defined out of line
+  in a `.cc`, with header default arguments allowed for. Overloads the
+  count can't separate are disclosed as "resolved ambiguously" (both
+  of `Graph`'s one-argument constructors). On tensorflow, `Graph` went
+  from 0 callers to 399, `EagerContext` from 0 to 36, C++ constructors
+  listed by `unused --kinds all` from 6,225 to 4,312, and C++ classes
+  from 3,890 to 3,461. Stack declarations `T x(args);` are still not
+  counted: without types they parse as function declarations.
+- **A class and its own constructors counted as rivals.** Java and C++
+  constructors share their class's name, so a construction whose class
+  had two or more constructors went ambiguous whenever no other rung
+  settled it. Now they collapse to the class before resolution. On
+  spring-boot, 1,094 construction edges were added and 548 ambiguous
+  records went away. A Java class with a builder method named
+  `constructor(...)` no longer gets that method credited as its
+  constructor.
+- **`= delete` functions were symbols.** A deleted copy constructor
+  was credited with real construction sites (93 edges on tensorflow),
+  showed in `outline` and filled `unused`: copy/move-shaped constructor
+  rows went from 716 to 85. Deleted functions are no longer extracted.
+  `= default` ones still are.
+- **A namespace-qualified C++ name could resolve to a same-named type
+  in another namespace.** `absl::Status()` credited
+  `tensorflow::experimental::cc::Status`, `xla::Parameter(...)` a
+  `tensorflow::data::model::Parameter`, and `class X : public
+  ::testing::Environment` a `tflite::gpu::cl::Environment`. A `q::Name`
+  usage now resolves to a type only when `q` is one of its enclosing
+  namespaces or classes. On tensorflow that removed 602 call edges and
+  11 heritage edges, all wrong except about 100 `ops::NodeOut` sites.
+  A qualifier that works through a `using`/`typedef` alias is left
+  unresolved too, which is what happens to those (`ops::NodeOut` is
+  `NodeBuilder::NodeOut`).
+
 ## [1.5.1] — 2026-09-28
 
 ### Fixed

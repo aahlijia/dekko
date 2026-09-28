@@ -34,13 +34,14 @@ declared type before falling back to the (purely coincidental)
 same-file step — see ``_typed_param_match``. A call/construction that
 resolves to a class-shaped symbol also credits that class's own
 explicit constructor method (JS/TS ``constructor``, Python
-``__init__``, Java's same-named ``constructor_declaration``) when one
-was extracted, via ``_constructors_of`` — without this, ``new
-ClassName(...)`` construction was invisible to the constructor
-method's fan-in even though it resolved fine to the class itself (or,
-for Java specifically, fell into ``ambiguous`` entirely, since a Java
-constructor's own bare name is the class name — see
-``_construction_pick``). These three gaps undercounted callers
+``__init__``, Java's and C++'s same-named constructors, which for C++
+may be defined out of line in another file) when one was extracted,
+via ``_constructors_of`` — without this, ``new ClassName(...)``
+construction was invisible to the constructor method's fan-in even
+though it resolved fine to the class itself (or, for Java and C++,
+fell into ``ambiguous`` entirely, since such a constructor's own bare
+name is the class name — see ``_without_own_constructors``). These
+three gaps undercounted callers
 (cline's ``get_callers("Controller.initTask")`` finding 2 of 9 real
 callers; cline/spring-boot's ``Controller.constructor``/
 ``AutoConfigurations.of`` reading fan-in 0 despite real call sites).
@@ -1660,7 +1661,6 @@ def _resolve_ref(
         same_file,
         file_imports,
         symbols_by_id.get(ref.caller_id or ""),
-        by_name_path,
         index,
     )
     if (
@@ -1725,6 +1725,7 @@ _REF_VISIBILITY_LANGUAGES = frozenset(
     {"python", "javascript", "typescript", "tsx"}
 )
 _JS_FAMILY = _LANGUAGE_FAMILIES["javascript"]
+_CPP_FAMILY = _LANGUAGE_FAMILIES["cpp"]
 
 
 def _ref_target_visible(
@@ -2173,7 +2174,6 @@ def _resolve_one_heritage(
         same_file,
         file_imports,
         None,
-        by_name_path,
         index,
         repo_stems,
         raw_imports,
@@ -2671,7 +2671,13 @@ def _resolve_call(
         alias = _alias_candidates(call, file_imports, index)
         if len(alias) == 1:
             _add_call_and_constructor(
-                caller_id, alias[0], call, by_name_path, edges, ambiguous
+                caller_id,
+                alias[0],
+                call,
+                by_name_path,
+                index,
+                edges,
+                ambiguous,
             )
             return
         if len(alias) > 1:
@@ -2687,7 +2693,6 @@ def _resolve_call(
         same_file,
         file_imports,
         symbols_by_id.get(call.caller_id or ""),
-        by_name_path,
         index,
         repo_stems,
         raw_imports,
@@ -2697,7 +2702,7 @@ def _resolve_call(
         return
     if target is not None:
         _add_call_and_constructor(
-            caller_id, target, call, by_name_path, edges, ambiguous
+            caller_id, target, call, by_name_path, index, edges, ambiguous
         )
         return
     _record_ambiguous(caller_id, call.name, candidates, ambiguous)
@@ -2719,6 +2724,7 @@ def _add_call_and_constructor(
     target: Symbol,
     call: RawCall,
     by_name_path: dict[tuple[str, str], list[Symbol]],
+    index: dict[str, list[Symbol]],
     edges: dict[tuple[str, str], set[int]],
     ambiguous: dict[tuple[str, str], list[str]],
 ) -> None:
@@ -2739,16 +2745,18 @@ def _add_call_and_constructor(
         target: The symbol the call resolved to.
         call: The raw call, for its line and written argument count.
         by_name_path: ``(bare name, file path)`` → same-file symbols.
+        index: Bare name → every symbol with it, for C++ constructors
+            defined outside the class's own file.
         edges: The graph's edge accumulator, mutated in place.
         ambiguous: The graph's ambiguous-call accumulator, mutated in
             place.
     """
     _add_edge(caller_id, target.id, call.line, edges)
-    ctors = _constructors_of(target, by_name_path)
+    ctors = _constructors_of(target, by_name_path, index)
     if not ctors:
         return
 
-    ctor, overloads = _pick_constructor(ctors, call)
+    ctor, overloads = _pick_constructor(target, ctors, call)
     if ctor is not None:
         _add_edge(caller_id, ctor.id, call.line, edges)
     elif overloads:
@@ -3030,7 +3038,6 @@ def _pick_candidate_ladder(
     same_file: list[Symbol],
     file_imports: dict[str, Import],
     caller: Symbol | None,
-    by_name_path: dict[tuple[str, str], list[Symbol]],
     index: dict[str, list[Symbol]],
     repo_stems: set[str] | None = None,
     raw_imports: list[Import] | None = None,
@@ -3112,7 +3119,10 @@ def _pick_candidate_ladder(
     already, by construction, in the same file (and therefore the
     same language) as the call site.
     """
-    candidates = _language_filtered(call, candidates)
+    candidates = _without_own_constructors(
+        _language_filtered(call, candidates)
+    )
+    same_file = _without_own_constructors(same_file)
     candidates, same_file, shape_narrowed = _rust_shape_narrowed_candidates(
         call, candidates, same_file, index, file_imports, repo_stems
     )
@@ -3152,10 +3162,10 @@ def _pick_candidate_ladder(
 
     if len(candidates) == 1:
         return _sole_candidate_match(
-            call, candidates[0], by_name_path, repo_stems is not None, index
+            call, candidates[0], repo_stems is not None, index
         )
 
-    return _last_resort_match(call, candidates, by_name_path)
+    return _last_resort_match(call, candidates)
 
 
 def _pick_candidate(
@@ -3164,7 +3174,6 @@ def _pick_candidate(
     same_file: list[Symbol],
     file_imports: dict[str, Import],
     caller: Symbol | None,
-    by_name_path: dict[tuple[str, str], list[Symbol]],
     index: dict[str, list[Symbol]],
     repo_stems: set[str] | None = None,
     raw_imports: list[Import] | None = None,
@@ -3196,7 +3205,6 @@ def _pick_candidate(
         same_file,
         file_imports,
         caller,
-        by_name_path,
         index,
         repo_stems,
         raw_imports,
@@ -3214,14 +3222,54 @@ def _pick_candidate(
         # (``handler.Update()``, Windows COM, landing on
         # ``struct Update``).
         return _NOISE if repo_stems is not None else None
+    if isinstance(picked, Symbol) and _cpp_qualifier_contradicts(call, picked):
+        return _NOISE if repo_stems is not None else None
 
     return picked
+
+
+# A template argument list on one qualifier (``Foo<int>::Bar``).
+_TEMPLATE_ARGS = re.compile(r"<.*>")
+
+
+def _cpp_qualifier_contradicts(call: _Referable, target: Symbol) -> bool:
+    """Whether a C++ ``ns::Name`` usage names a scope ``target`` lacks.
+
+    ``absl::Status()`` can't construct ``tensorflow::experimental::cc
+    ::Status``, and ``xla::Parameter(..)`` can't reach
+    ``tensorflow::data::model::Parameter``: the written qualifier is
+    no enclosing namespace or class of the target. Neither is in the
+    repo, so without this their one same-named in-repo type won the
+    ``#include`` stem match or the sole-candidate rung. Only types are
+    checked, the targets constructions reach. A scope reached through
+    a ``using``/``typedef`` alias (``ops::NodeOut`` for
+    ``NodeBuilder::NodeOut``) is invisible here and is vetoed too; a
+    veto only removes an edge.
+
+    Args:
+        call: The raw call or heritage clause being resolved.
+        target: The symbol the ladder picked.
+
+    Returns:
+        True when ``call`` is written ``q::Name`` and ``q`` is not one
+        of ``target``'s enclosing scopes.
+    """
+    receiver = getattr(call, "receiver", None)
+    if (
+        not receiver
+        or target.kind not in TYPE_KINDS
+        or target.language not in _CPP_FAMILY
+        or not getattr(call, "text", "").endswith(f"::{call.name}")
+    ):
+        return False
+    scopes = set(_PATH_SPLIT.split(target.qualname)[:-1])
+    written = (_TEMPLATE_ARGS.sub("", q) for q in receiver.split("::"))
+    return any(q and q not in scopes for q in written)
 
 
 def _sole_candidate_match(
     call: _Referable,
     only: Symbol,
-    by_name_path: dict[tuple[str, str], list[Symbol]],
     noise_aware: bool,
     index: dict[str, list[Symbol]],
 ) -> "Symbol | _Noise | None":
@@ -3251,42 +3299,36 @@ def _sole_candidate_match(
     Args:
         call: The raw call/reference/heritage clause being resolved.
         only: The single language-filtered candidate.
-        by_name_path: ``(name, path)`` → same-file symbols.
         noise_aware: Whether the caller handles ``_NOISE`` (it passed
             a non-``None`` ``repo_stems`` to ``_pick_candidate``).
             ``_resolve_ref`` doesn't, and has no external bucket to
             feed, so it keeps the plain ``None``.
     """
-    if _arity_plausible(only, call) and not _rust_name_is_also_a_variant(
-        call, only, index
+    if (
+        only.kind in TYPE_KINDS and _class_named_constructors(only, index)
+    ) or (
+        _arity_plausible(only, call)
+        and not _rust_name_is_also_a_variant(call, only, index)
     ):
+        # A class with named constructors stands for them after
+        # ``_without_own_constructors``; its own symbol has no
+        # parameters, and ``_pick_constructor`` checks the overloads.
         return only
     if noise_aware:
         return _NOISE
-    return _last_resort_match(call, [], by_name_path)
+    return _last_resort_match(call, [])
 
 
 def _last_resort_match(
-    call: _Referable,
-    candidates: list[Symbol],
-    by_name_path: dict[tuple[str, str], list[Symbol]],
+    call: _Referable, candidates: list[Symbol]
 ) -> Symbol | None:
-    """The final two ``_pick_candidate`` ladder steps for 2+ candidates.
+    """The final ``_pick_candidate`` ladder step for 2+ candidates.
 
-    Split out from ``_pick_candidate`` itself purely to keep that
-    function's cyclomatic complexity under the project's Ruff limit —
-    behaviorally this is still just the next two rungs of the same
-    ladder, tried in order: the class/own-constructor pair collapse
-    (``_construction_pick``, only ever applicable to exactly 2
-    candidates), then the bare-call/non-method fallback
-    (``_bare_call_non_method_match``, which works for any candidate
-    count).
+    The bare-call/non-method fallback
+    (``_bare_call_non_method_match``). A class and its own
+    constructors never reach here as rivals: the ladder collapses them
+    first (``_without_own_constructors``).
     """
-    if len(candidates) == 2:
-        pair = _construction_pick(candidates, by_name_path)
-        if pair is not None:
-            return pair
-
     return _bare_call_non_method_match(call, candidates)
 
 
@@ -4466,7 +4508,9 @@ _CONSTRUCTOR_NAME_SET = frozenset(_CONSTRUCTOR_NAMES)
 
 
 def _constructors_of(
-    cls: Symbol, by_name_path: dict[tuple[str, str], list[Symbol]]
+    cls: Symbol,
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    index: dict[str, list[Symbol]],
 ) -> list[Symbol]:
     """The class's own explicit constructor methods, if extracted.
 
@@ -4485,11 +4529,18 @@ def _constructors_of(
     the first match put every construction site of an overloaded
     class on its first-declared constructor.
 
+    A C++ class is looked up repo-wide: its header declares the
+    constructors and a ``.cc`` defines them out of line
+    (``Graph::Graph(...)``), and only definitions are extracted. The
+    extractor builds an out-of-line definition's qualname from its
+    ``Graph::`` scope, so it matches the class's own.
+
     Args:
         cls: A resolved symbol, checked only when it is class-shaped
             (``model.TYPE_KINDS``) — a plain function/method target
             returns an empty list immediately.
         by_name_path: ``(bare name, file path)`` → same-file symbols.
+        index: Bare name → every symbol with it.
 
     Returns:
         The constructor method symbols in declaration order, or an
@@ -4498,7 +4549,10 @@ def _constructors_of(
     """
     if cls.kind not in TYPE_KINDS:
         return []
-    for name in (*_CONSTRUCTOR_NAMES, cls.name):
+    named = _class_named_constructors(cls, index)
+    if named:
+        return named
+    for name in _CONSTRUCTOR_NAMES:
         qual = f"{cls.qualname}.{name}"
         found = [
             sym
@@ -4508,6 +4562,37 @@ def _constructors_of(
         if found:
             return sorted(found, key=lambda sym: sym.start_line)
     return []
+
+
+def _class_named_constructors(
+    cls: Symbol, index: dict[str, list[Symbol]]
+) -> list[Symbol]:
+    """A type's constructors that carry its own name (Java, C++).
+
+    Looked up in ``index[cls.name]``, the same small list the
+    construction's own candidates came from. Java constructors live
+    in the class's file; C++ ones anywhere in the family (see
+    ``_constructors_of``).
+
+    Args:
+        cls: A type-kind symbol.
+        index: Bare name → every symbol with it.
+
+    Returns:
+        The constructors, by file then line.
+    """
+    qual = f"{cls.qualname}.{cls.name}"
+    repo_wide = cls.language in _CPP_FAMILY
+    found = [
+        sym
+        for sym in index.get(cls.name, [])
+        if sym.kind == "method"
+        and sym.qualname == qual
+        and (
+            sym.language in _CPP_FAMILY if repo_wide else sym.path == cls.path
+        )
+    ]
+    return sorted(found, key=lambda sym: (sym.path, sym.start_line))
 
 
 def _constructor_params(ctor: Symbol) -> list[Param]:
@@ -4554,16 +4639,35 @@ def _declared_param_count(ctor: Symbol) -> int:
     )
 
 
-def _arity_fits(ctor: Symbol, arg_count: int) -> bool:
-    """Whether ``arg_count`` written arguments fit ``ctor``."""
+def _arity_fits(cls: Symbol, ctor: Symbol, arg_count: int) -> bool:
+    """Whether ``arg_count`` written arguments fit ``cls``'s ``ctor``.
+
+    A C++ constructor defined outside its class body shows no default
+    arguments: they belong to the in-class declaration, which isn't
+    extracted. ``InterpreterBuilder(model, resolver)`` calls a ctor
+    whose ``.cc`` definition lists three parameters, the third
+    defaulted in the header. Any count up to the declared one fits
+    such a constructor; ``_pick_constructor``'s exact tier still
+    prefers the overload that declares exactly the written count.
+    """
     min_count, max_count = _param_arity(_constructor_params(ctor))
+    if _out_of_class_cpp_constructor(cls, ctor):
+        min_count = 0
     if arg_count < min_count:
         return False
     return max_count is None or arg_count <= max_count
 
 
+def _out_of_class_cpp_constructor(cls: Symbol, ctor: Symbol) -> bool:
+    """Whether ``ctor`` is a C++ definition outside ``cls``'s body."""
+    return ctor.language in _CPP_FAMILY and not (
+        ctor.path == cls.path
+        and cls.start_line <= ctor.start_line <= cls.end_line
+    )
+
+
 def _pick_constructor(
-    ctors: list[Symbol], call: RawCall
+    cls: Symbol, ctors: list[Symbol], call: RawCall
 ) -> tuple[Symbol | None, list[Symbol]]:
     """The constructor overload a construction's argument count selects.
 
@@ -4577,6 +4681,7 @@ def _pick_constructor(
     apart, and dekko has none.
 
     Args:
+        cls: The constructed class.
         ctors: The class's constructors, from ``_constructors_of``.
         call: The construction call.
 
@@ -4591,7 +4696,7 @@ def _pick_constructor(
         if len(ctors) == 1:
             return ctors[0], []
         return None, ctors
-    fitting = [c for c in ctors if _arity_fits(c, n)]
+    fitting = [c for c in ctors if _arity_fits(cls, c, n)]
     exact = [c for c in fitting if _declared_param_count(c) == n]
     for tier in (exact, fitting):
         if len(tier) == 1:
@@ -4602,38 +4707,47 @@ def _pick_constructor(
     return None, []
 
 
-def _construction_pick(
-    candidates: list[Symbol],
-    by_name_path: dict[tuple[str, str], list[Symbol]],
-) -> Symbol | None:
-    """Collapse a same-name {class, own-constructor} pair to the class.
+def _without_own_constructors(candidates: list[Symbol]) -> list[Symbol]:
+    """Drop constructors whose own class is also a candidate.
 
-    Java's ``constructor_declaration`` shares its bare name with its
-    own class (no distinct keyword the way JS/TS's ``constructor`` or
-    Python's ``__init__`` is), so ``new Foo(...)`` finds two same-
-    named candidates — the class ``Foo`` and its constructor method
-    ``Foo.Foo`` — and used to be recorded as unresolvably ambiguous,
-    undercounting fan-in for *both*. This isn't a real
-    ambiguity: the two symbols are one class and its own constructor,
-    so the class wins as the primary target (matching JS/TS/Python's
-    convention elsewhere in this ladder) — ``_add_call_and_constructor``
-    then finds and adds the constructor edge alongside it automatically.
+    Java and C++ name a constructor after its class, so ``new
+    Graph(reg)`` finds the class ``Graph`` and every ``Graph.Graph``
+    overload (C++ out-of-line ones in the ``.cc``, the class in the
+    ``.h``) under one bare name. They are one class, not rivals: the
+    class stays, and ``_add_call_and_constructor`` credits the
+    overload afterwards. Collapsing before the ladder lets every rung
+    (the ``#include`` tiebreak above all) compare classes with
+    classes. JS/TS ``constructor`` and Python ``__init__`` never share
+    a candidate list with their class, so this never fires for them.
 
     Args:
-        candidates: Exactly two same-named symbols (the caller only
-            invokes this when ``len(candidates) == 2``).
-        by_name_path: ``(bare name, file path)`` → same-file symbols.
+        candidates: Same-bare-name symbols.
 
     Returns:
-        The class symbol when ``candidates`` is one class and its own
-        constructor method, else ``None`` (a real ambiguity).
+        ``candidates`` less every method whose qualname is
+        ``<C.qualname>.<C.name>`` for a type-kind candidate ``C`` in
+        the same language family.
     """
-    a, b = candidates
-    for cls, ctor in ((a, b), (b, a)):
-        if any(c.id == ctor.id for c in _constructors_of(cls, by_name_path)):
-            return cls
+    classes = {
+        (c.qualname, _constructor_family(c.language))
+        for c in candidates
+        if c.kind in TYPE_KINDS
+    }
+    if not classes:
+        return candidates
 
-    return None
+    return [
+        c
+        for c in candidates
+        if c.kind != "method"
+        or (c.qualname.rpartition(".")[0], _constructor_family(c.language))
+        not in classes
+    ]
+
+
+def _constructor_family(language: str) -> str:
+    """One key per language family, for matching a class to its ctors."""
+    return min(_LANGUAGE_FAMILIES.get(language, frozenset({language})))
 
 
 def _self_container(call: _Referable, caller: Symbol | None) -> str | None:

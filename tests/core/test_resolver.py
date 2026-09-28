@@ -1230,6 +1230,257 @@ def test_cpp_inline_constructors_credited_by_arg_count(
     assert "foo.h::Foo.Foo" not in _pairs(graph, "foo.h::two")
 
 
+# A class declared in a header with its constructors defined out of
+# line in a ``.cc``, a same-named class in another namespace and two
+# same-named Python classes: the shape of tensorflow's ``Graph``.
+_CPP_GRAPH_FILES = {
+    "core/graph.h": (
+        "namespace tensorflow {\n"
+        "class Registry;\n"
+        "class Library;\n"
+        "class Graph {\n"
+        " public:\n"
+        "  explicit Graph(const Registry* ops);\n"
+        "  explicit Graph(const Library& lib);\n"
+        "  int num_nodes() const { return 0; }\n"
+        " private:\n"
+        "  Graph(const Graph&) = delete;\n"
+        "};\n"
+        "class Sized {\n"
+        " public:\n"
+        "  Sized(int a);\n"
+        "  Sized(int a, int b);\n"
+        "};\n"
+        "class Solo {\n"
+        " public:\n"
+        "  Solo(int a, int b) {}\n"
+        "};\n"
+        "}\n"
+    ),
+    "core/graph.cc": (
+        '#include "core/graph.h"\n'
+        "namespace tensorflow {\n"
+        "Graph::Graph(const Registry* ops) {}\n"
+        "Graph::Graph(const Library& lib) {}\n"
+        "Sized::Sized(int a) {}\n"
+        "Sized::Sized(int a, int b) {}\n"
+        "}\n"
+    ),
+    "lite/model.h": (
+        "namespace tflite { class Graph { public: Graph() {} }; }\n"
+    ),
+    "py/ops.py": "class Graph:\n    def __init__(self):\n        pass\n",
+    "py/cfg.py": "class Graph:\n    pass\n",
+}
+_GRAPH = "core/graph.h::tensorflow.Graph"
+
+
+def _cpp_user(body: str) -> str:
+    return (
+        '#include "core/graph.h"\n'
+        "namespace tensorflow {\n"
+        f"void Build(const Registry* reg) {{\n{body}\n}}\n"
+        "}\n"
+    )
+
+
+_CPP_BUILD = "core/user.cc::tensorflow.Build"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "  new Graph(reg);",
+        "  new tensorflow::Graph(reg);",
+        "  auto g = std::make_unique<Graph>(reg);",
+    ],
+)
+def test_cpp_construction_resolves_to_the_included_class(
+    tmp_path: Path, body: str
+) -> None:
+    graph = _graph(
+        tmp_path, {**_CPP_GRAPH_FILES, "core/user.cc": _cpp_user(body)}
+    )
+    pairs = _pairs(graph, _CPP_BUILD)
+    assert _GRAPH in pairs
+    assert not any("lite/" in p or "py/" in p for p in pairs)
+    # The two real constructors take one argument each: only their
+    # types tell them apart, so the call is disclosed against both.
+    assert _ambiguous_for(graph, _CPP_BUILD) == {
+        "Graph": [
+            "core/graph.cc::tensorflow.Graph.Graph",
+            "core/graph.cc::tensorflow.Graph.Graph#2",
+        ],
+    }
+
+
+def test_cpp_out_of_line_constructor_credited_by_arg_count(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            **_CPP_GRAPH_FILES,
+            "core/user.cc": _cpp_user("  new Sized(1);\n  new Sized(1, 2);"),
+        },
+    )
+    pairs = _pairs(graph, _CPP_BUILD)
+    assert {
+        "core/graph.h::tensorflow.Sized",
+        "core/graph.cc::tensorflow.Sized.Sized",
+        "core/graph.cc::tensorflow.Sized.Sized#2",
+    } <= pairs
+    lines = {e.callee: e.lines for e in graph.edges if e.caller == _CPP_BUILD}
+    assert lines["core/graph.cc::tensorflow.Sized.Sized"] == [4]
+    assert lines["core/graph.cc::tensorflow.Sized.Sized#2"] == [5]
+    assert _ambiguous_for(graph, _CPP_BUILD) == {}
+
+
+def test_cpp_out_of_line_constructor_fits_calls_using_header_defaults(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "b/builder.h": (
+                "class Builder {\n"
+                " public:\n"
+                "  Builder(int model, int resolver, int* options = nullptr);\n"
+                "};\n"
+                "class Two {\n"
+                " public:\n"
+                "  Two(int a, int b = 0);\n"
+                "  Two(int* a, int b = 0, int c = 0);\n"
+                "};\n"
+            ),
+            "b/builder.cc": (
+                '#include "b/builder.h"\n'
+                "Builder::Builder(int model, int resolver, int* options) {}\n"
+                "Two::Two(int a, int b) {}\n"
+                "Two::Two(int* a, int b, int c) {}\n"
+            ),
+            "b/user.cc": (
+                '#include "b/builder.h"\n'
+                "void Use() { new Builder(1, 2); new Two(nullptr); }\n"
+            ),
+        },
+    )
+    assert "b/builder.cc::Builder.Builder" in _pairs(graph, "b/user.cc::Use")
+    assert _ambiguous_for(graph, "b/user.cc::Use") == {
+        "Two": ["b/builder.cc::Two.Two", "b/builder.cc::Two.Two#2"],
+    }
+
+
+def test_cpp_construction_through_a_foreign_namespace_stays_external(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "tf/status.h": (
+                "namespace tensorflow { namespace cc {\n"
+                "class Status {\n"
+                " public:\n"
+                "  Status() {}\n"
+                "  Status(int code) {}\n"
+                "};\n"
+                "} }\n"
+            ),
+            "tf/user.cc": (
+                '#include "absl/status/status.h"\n'
+                "namespace tensorflow {\n"
+                "void Use() { absl::Status(); new absl::Status(3); }\n"
+                "}\n"
+            ),
+        },
+    )
+    assert _pairs(graph, "tf/user.cc::tensorflow.Use") == set()
+    externals = {
+        e.callee
+        for e in graph.external
+        if e.caller == "tf/user.cc::tensorflow.Use"
+    }
+    assert externals == {"absl::Status"}
+
+
+def test_cpp_class_qualified_construction_resolves(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "b/builder.h": (
+                "namespace tf {\n"
+                "class Builder {\n"
+                " public:\n"
+                "  struct Out { Out(int a) {} };\n"
+                "};\n"
+                "}\n"
+            ),
+            "b/user.cc": (
+                '#include "b/builder.h"\n'
+                "namespace tf {\n"
+                "void Use() { Builder::Out(1); }\n"
+                "}\n"
+            ),
+        },
+    )
+    assert "b/builder.h::tf.Builder.Out" in _pairs(graph, "b/user.cc::tf.Use")
+
+
+def test_cpp_inline_single_constructor_still_credited(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {**_CPP_GRAPH_FILES, "core/user.cc": _cpp_user("  new Solo(1, 2);")},
+    )
+    assert {
+        "core/graph.h::tensorflow.Solo",
+        "core/graph.h::tensorflow.Solo.Solo",
+    } <= _pairs(graph, _CPP_BUILD)
+
+
+def test_cpp_heritage_through_include_reaches_the_class(
+    tmp_path: Path,
+) -> None:
+    sources = {
+        **_CPP_GRAPH_FILES,
+        "core/sub.h": (
+            '#include "core/graph.h"\n'
+            "namespace tensorflow {\n"
+            "class Sub : public Graph {\n"
+            " public:\n"
+            "  int x() { return 0; }\n"
+            "};\n"
+            "}\n"
+        ),
+    }
+    for rel, text in sources.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    heritage = resolve_heritage(files)[0]
+    parents = {
+        h.supertype
+        for h in heritage
+        if h.subtype == "core/sub.h::tensorflow.Sub"
+    }
+    assert parents == {_GRAPH}
+
+
+def test_java_class_and_all_its_constructors_collapse_to_the_class(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "web/ErrorPage.java": _ERROR_PAGE,
+            "app/Builder.java": _java_caller("return new ErrorPage();"),
+        },
+    )
+    assert _EP in _pairs(graph, _BUILD)
+    assert "ErrorPage" not in _ambiguous_for(graph, _BUILD)
+
+
 def test_record_ambiguous_merges_candidate_lists() -> None:
     def sym(path: str) -> Symbol:
         return _fn(path, "Foo", "Foo.Foo")
@@ -4680,7 +4931,6 @@ def test_pick_candidate_returns_none_when_language_filtered_empty() -> None:
         same_file=[],
         file_imports={},
         caller=None,
-        by_name_path={},
         index={},
         repo_stems=set(),
     )
