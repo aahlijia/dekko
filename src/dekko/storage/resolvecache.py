@@ -55,6 +55,7 @@ from pathlib import Path
 from dekko.core.resolver import (
     ResolveReuse,
     alias_original_name,
+    cpp_scope_names,
     name_delta,
     resolve_fingerprint,
     resolved_id_name,
@@ -384,8 +385,9 @@ def _name_delta_dirty(
     Returns:
         Additional paths to fold into ``dirty``, or ``None`` when any
         dirty file's delta includes a type-kind name -- see
-        ``resolver.NameDelta.blocks_reuse`` -- and the caller must fall
-        back to a full resolve instead.
+        ``resolver.NameDelta.blocks_reuse`` -- or changes its C/C++
+        ``using``-declarations or qualname scope names, and the caller
+        must fall back to a full resolve instead.
     """
     changed: set[str] = set()
     newly_defined: set[str] = set()
@@ -394,6 +396,12 @@ def _name_delta_dirty(
             continue
         old = cache.old_symbols(fm.path)
         if old is None:
+            return None
+        if cache.old_cpp_using(fm.path) != fm.cpp_using or cpp_scope_names(
+            old
+        ) != cpp_scope_names(fm.symbols):
+            # Repo-wide inputs of a C/C++ ``ns::Name`` call that no
+            # name delta can see; see resolver._namespace_head_match.
             return None
         # Whole-file compare first: cheaper than the grouped analysis
         # below, and this is the dominant agent-loop edit (a body edit,

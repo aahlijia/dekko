@@ -116,6 +116,9 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     imports = _collect_imports(spec, rel, import_matches)
     type_aliases = _collect_type_aliases(spec, tree.root_node)
     enum_variants = _collect_enum_variants(spec, tree.root_node)
+    cpp_using = (
+        _collect_cpp_using(tree.root_node) if spec.name in ("c", "cpp") else []
+    )
     type_uses = _collect_type_uses(spec, tree.root_node, rel, defs)
     submodules = (
         rust_cfg.collect_submodules(tree.root_node, rel)
@@ -136,6 +139,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         imports=imports,
         type_aliases=type_aliases,
         enum_variants=enum_variants,
+        cpp_using=cpp_using,
         type_uses=type_uses,
         submodules=submodules,
         doc=_module_doc(spec.name, tree.root_node),
@@ -4178,6 +4182,97 @@ def _collect_enum_variants(spec: LanguageSpec, root: Node) -> list[str]:
         if owner is not None and variant is not None:
             out.append(f"{_text(owner)}::{_text(variant)}")
     return out
+
+
+# Nodes a namespace-scope declaration can sit in: the file, a
+# namespace body, an ``extern "C++" { }`` block, or a preprocessor
+# conditional. A class body (``field_declaration_list``) is not one:
+# ``using Base::f;`` there is about members, not namespaces.
+_CPP_NAMESPACE_SCOPE_NODES = frozenset(
+    {
+        "translation_unit",
+        "namespace_definition",
+        "declaration_list",
+        "linkage_specification",
+        "preproc_if",
+        "preproc_ifdef",
+        "preproc_else",
+        "preproc_elif",
+        "preproc_elifdef",
+    }
+)
+
+
+def _collect_cpp_using(root: Node) -> list[str]:
+    """``"<namespace>=<path>"`` for every namespace-scope C++
+    ``using``-declaration (see ``FileMap.cpp_using``).
+
+    ``using namespace x;`` shares the node type but names no single
+    symbol, so it's skipped, as is anything inside a class body.
+    """
+    out: list[str] = []
+    _walk_cpp_using(root, (), out)
+    return out
+
+
+def _walk_cpp_using(
+    node: Node, chain: tuple[str, ...], out: list[str]
+) -> None:
+    """Append ``node``'s using-declarations, in source order."""
+    for child in node.named_children:
+        if child.type == "using_declaration":
+            path = _cpp_using_path(child)
+            if path is not None:
+                out.append(f"{'.'.join(chain)}={path}")
+        elif child.type == "namespace_definition":
+            name = child.child_by_field_name("name")
+            inner = chain
+            if name is not None:
+                inner = chain + tuple(
+                    seg.strip()
+                    for seg in _text(name).split("::")
+                    if seg.strip()
+                )
+            _walk_cpp_using(child, inner, out)
+        elif child.type in _CPP_NAMESPACE_SCOPE_NODES:
+            _walk_cpp_using(child, chain, out)
+
+
+def _cpp_using_path(node: Node) -> str | None:
+    """``a::b::Name`` (or ``::a::Name``) of a ``using a::b::Name;``.
+
+    ``None`` for ``using namespace x;`` and for a bare ``using x;``.
+    Template arguments come off each scope, since qualnames carry none.
+    """
+    target = next(
+        (c for c in node.named_children if c.type == "qualified_identifier"),
+        None,
+    )
+    if target is None or any(c.type == "namespace" for c in node.children):
+        return None
+    segments: list[str] = []
+    rooted = target.child_by_field_name("scope") is None
+    current: Node | None = target
+    while current is not None and current.type == "qualified_identifier":
+        scope = current.child_by_field_name("scope")
+        if scope is not None:
+            segments.append(_cpp_scope_text(scope))
+        current = current.child_by_field_name("name")
+    if current is None or not all(segments):
+        return None
+    segments.append(_canonical_member_name(current))
+    path = "::".join(segments)
+
+    return f"::{path}" if rooted else path
+
+
+def _cpp_scope_text(scope: Node) -> str:
+    """One scope of a C++ path, without template arguments."""
+    if scope.type == "template_type":
+        name = scope.child_by_field_name("name")
+        return _text(name) if name is not None else ""
+
+    return _text(scope).strip()
 
 
 def _collect_type_aliases(spec: LanguageSpec, root: Node) -> list[str]:

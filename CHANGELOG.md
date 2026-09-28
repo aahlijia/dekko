@@ -9,6 +9,40 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.6] — 2026-09-28
+
+### Fixed
+- **A C++ call written through one namespace ignored that namespace.**
+  `absl::OkStatus()` resolved to tensorflow's own `tensorflow::OkStatus`
+  wrapper because it was the only in-repo `OkStatus`, `std::max(a, b)`
+  landed on a repo `std::numeric_limits` specialization's `max`, and
+  `gtl::MakeCleanup`, `xla::ConvertElementType` and the generated
+  `ops::Add` all reached unrelated namesakes. Now, when the written
+  scope is a namespace, the call only reaches symbols directly inside a
+  namespace of that name, plus what a namespace-scope
+  `using`-declaration there re-exports (`namespace tensorflow { using
+  tsl::StatusFromTF_Status; }`). The ordinary resolver still picks among
+  those, so `reference_ops::ResizeNearestNeighbor` now reaches the
+  `reference_ops` one instead of `optimized_ops`. `std::` never resolves
+  into the repo. A call through a class (`TensorShape::IsValid()`,
+  `View<T>::Next()`) or a namespace alias resolves as before. On
+  tensorflow this removes 11,312 wrong call sites (9,504 `absl::`,
+  1,113 `std::`; `OkStatus` drops from 10,031 callers' sites to its
+  real 806), adds 473 right ones, mostly from ambiguous rows that now
+  have exactly one candidate in the right namespace (`mlrt::Execute`,
+  `DeviceFactory::GetFactory`, `flags::Global`), and turns 5,698
+  ambiguous rows with no candidate in the written namespace into
+  external calls. `unused` loses 87 entries that did have callers. Of
+  its 25 new entries, 16 had only wrong callers before. The other 9 are
+  real functions whose namespace dekko misreads (below). Other
+  languages are unaffected.
+
+### Known limitations
+- Functions after an unterminated macro line (`PYBIND11_MAKE_OPAQUE(T)`
+  with no `;`) can lose their enclosing namespace in dekko's map, so a
+  correctly qualified call to them (`tensorflow::InputTFE_Context(..)`)
+  now counts as external. tensorflow has 79 such call sites.
+
 ## [1.5.5] — 2026-09-28
 
 ### Fixed

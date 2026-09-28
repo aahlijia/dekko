@@ -143,6 +143,17 @@ def test_spec_fingerprint_changes_with_cpp_qualified_path_version(
     assert languages.spec_fingerprint() != baseline
 
 
+def test_spec_fingerprint_changes_with_cpp_using_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # extractor._collect_cpp_using records namespace-scope C++
+    # `using`-declarations outside any query; a cached FileMap from
+    # before it has no `cpp_using` at all.
+    baseline = languages.spec_fingerprint()
+    monkeypatch.setattr(languages, "_CPP_USING_VERSION", 999999)
+    assert languages.spec_fingerprint() != baseline
+
+
 def test_javascript() -> None:
     files, edges = _map("js")
     syms = _symbols(files)

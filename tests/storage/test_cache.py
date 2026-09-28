@@ -597,6 +597,7 @@ def _fully_populated_filemap() -> FileMap:
         ],
         type_aliases=["Alias"],
         enum_variants=["Side::Left"],
+        cpp_using=["tensorflow=tsl::StatusFromTF_Status"],
         type_uses=[
             TypeUse(
                 owner_id="a.py::f",

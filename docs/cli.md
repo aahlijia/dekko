@@ -885,7 +885,20 @@ with its full path (`a::b::Name(..)`, or from the root, `::ns::Name(..)`)
 only reaches symbols whose qualified name ends with that path (from the
 root, whose qualified name *is* that path). So its row lists only the
 overloads on that path, and a path that names no repo symbol, or any
-`std::` path, is counted external. A low ambiguous rate
+`std::` path, is counted external. A call written through one
+namespace (`absl::OkStatus()`, `ops::Add(..)`) only reaches symbols
+directly inside a namespace of that name, plus the ones a
+namespace-scope `using`-declaration there re-exports (`namespace
+tensorflow { using tsl::F; }` makes `tensorflow::F()` the `tsl`
+function). A call nothing qualifies for is counted external rather
+than listed, and several that qualify are the only ones its row lists.
+When exactly one qualifies but its parameters don't fit the call's
+argument count (dekko doesn't see defaults a header declares), the call
+resolves the way it did before this rule, except that a target outside
+the written namespace is counted external. A one-scope call through a
+class (`TensorShape::IsValid()`, which may reach a base class, or
+`View<T>::Next()`) or through a name dekko never saw as a namespace (a
+namespace alias) resolves as before. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output

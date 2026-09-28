@@ -367,6 +367,33 @@ def _projected_symbol_fields() -> tuple[str, ...]:
     return _PROJECTED_SYMBOL_FIELDS
 
 
+def cpp_scope_names(symbols: list[Symbol] | list[dict]) -> frozenset[str]:
+    """Every scope name the C/C++ qualnames in ``symbols`` carry.
+
+    ``_namespace_head_match`` reads this repo-wide set (through
+    ``_CPP_SCOPE_KEY``) to decide whether ``ns::Name`` names a
+    namespace, so a file that adds or drops one changes how calls in
+    *other* files resolve, even calls to names it never defines.
+
+    Args:
+        symbols: One file's symbols, as ``Symbol`` objects or the plain
+            dicts the extraction cache stores.
+
+    Returns:
+        The scope names, empty for a file with no C/C++ symbols.
+    """
+    out: set[str] = set()
+    for sym in symbols:
+        if isinstance(sym, dict):
+            language, qualname = sym["language"], sym["qualname"]
+        else:
+            language, qualname = sym.language, sym.qualname
+        if language in _CPP_FAMILY:
+            scopes = _PATH_SPLIT.split(qualname)[:-1]
+            out.update(s for s in scopes if s)
+    return frozenset(out)
+
+
 def symbol_projection(symbols: list[Symbol] | list[dict]) -> str:
     """Canonical form of the parts of ``symbols`` resolution can read.
 
@@ -2736,14 +2763,14 @@ def _resolve_call(
         return
 
     same_file = by_name_path.get((call.name, call.path), [])
-    on_path = _qualified_path_match(call, candidates)
-    if on_path is not None:
-        if len(on_path) == 1:
+    scoped = _written_scope_match(call, candidates, index)
+    if scoped is not None:
+        if scoped.trusted and len(scoped.candidates) == 1:
             # The written path names the target's scopes outright; see
             # _qualified_path_match. No denylist second-guesses it.
             _add_call_and_constructor(
                 caller_id,
-                on_path[0],
+                scoped.candidates[0],
                 call,
                 by_name_path,
                 index,
@@ -2751,18 +2778,20 @@ def _resolve_call(
                 ambiguous,
             )
             return
-        candidates = on_path
-        on_path_ids = {c.id for c in on_path}
-        same_file = [s for s in same_file if s.id in on_path_ids]
-    target = _pick_candidate(
-        call,
-        candidates,
-        same_file,
-        file_imports,
-        symbols_by_id.get(call.caller_id or ""),
-        index,
-        repo_stems,
-        raw_imports,
+        candidates = scoped.candidates
+        same_file = [s for s in same_file if s in candidates]
+    target = _within_scope(
+        scoped,
+        _pick_candidate(
+            call,
+            candidates,
+            same_file,
+            file_imports,
+            symbols_by_id.get(call.caller_id or ""),
+            index,
+            repo_stems,
+            raw_imports,
+        ),
     )
     if target is _NOISE:
         external.setdefault((caller_id, call.text), set()).add(call.line)
@@ -3403,26 +3432,25 @@ def _strip_template_args(text: str) -> str:
 _NOT_A_SCOPE = frozenset('()[].->"{}…')
 
 
-def _cpp_written_path(call: _Referable) -> tuple[list[str], bool] | None:
-    """The whole path of a C/C++ usage written with 2+ scopes or a
-    leading ``::``, and whether it's anchored at the root.
+def _cpp_scope_parts(call: _Referable) -> tuple[list[str], bool] | None:
+    """The scopes a C/C++ usage is written through, and whether the
+    path starts at the root.
 
-    ``a::b::Name`` gives ``(["a", "b", "Name"], False)``, ``::ns::Name``
-    gives ``(["ns", "Name"], True)``. A one-scope ``a::Name``, a
-    root-only ``::Name`` and an unqualified name give ``None``: the
-    ordinary ladder handles those. So does a member call on a chain
-    that merely contains a path (``ns::Registry::Global()->LookUp``,
-    ``std::move(x).status``): the name has to follow a ``::``, and the
-    receiver has to be scopes only, with no call, subscript or member
-    access in it. Template arguments come off every scope, since
-    qualnames carry none; the name is kept as written, the way the
-    index keys it.
+    ``a::b::Name`` gives ``(["a", "b"], False)``, ``::ns::Name`` gives
+    ``(["ns"], True)``, ``ns::Name`` gives ``(["ns"], False)``. An
+    unqualified name gives ``None``, and so does a member call on a
+    chain that merely contains a path
+    (``ns::Registry::Global()->LookUp``, ``std::move(x).status``): the
+    name has to follow a ``::``, and the receiver has to be scopes
+    only, with no call, subscript or member access in it. Template
+    arguments come off every scope, since qualnames carry none.
 
     Args:
         call: The raw call or heritage clause being resolved.
 
     Returns:
-        ``(path, anchored)``, or ``None`` when the rule doesn't apply.
+        ``(scopes, anchored)``, or ``None`` when the usage isn't
+        written through bare scopes from a C/C++ file.
     """
     receiver = _strip_template_args(getattr(call, "receiver", None) or "")
     text = _strip_template_args(getattr(call, "text", "")).strip()
@@ -3432,16 +3460,39 @@ def _cpp_written_path(call: _Referable) -> tuple[list[str], bool] | None:
         or not text.endswith(name)
         or not text[: len(text) - len(name)].rstrip().endswith("::")
         or any(ch in _NOT_A_SCOPE for ch in receiver)
+        or _site_language(call.path) not in _CPP_FAMILY
     ):
         return None
-    anchored = text.startswith("::")
-    if not anchored and "::" not in receiver:
-        return None
-    if _site_language(call.path) not in _CPP_FAMILY:
-        return None
-    path = [q.strip() for q in receiver.split("::") if q.strip()]
+    scopes = [q.strip() for q in receiver.split("::") if q.strip()]
 
-    return [*path, call.name], anchored
+    return scopes, text.startswith("::")
+
+
+def _cpp_written_path(call: _Referable) -> tuple[list[str], bool] | None:
+    """The whole path of a C/C++ usage written with 2+ scopes or a
+    leading ``::``, and whether it's anchored at the root.
+
+    ``a::b::Name`` gives ``(["a", "b", "Name"], False)``, ``::ns::Name``
+    gives ``(["ns", "Name"], True)``. A one-scope ``a::Name`` (see
+    ``_namespace_head_match``), a root-only ``::Name`` and an
+    unqualified name give ``None``, as does anything
+    ``_cpp_scope_parts`` rejects. The name is kept as written, the way
+    the index keys it.
+
+    Args:
+        call: The raw call or heritage clause being resolved.
+
+    Returns:
+        ``(path, anchored)``, or ``None`` when the rule doesn't apply.
+    """
+    parts = _cpp_scope_parts(call)
+    if parts is None:
+        return None
+    scopes, anchored = parts
+    if not scopes or (not anchored and len(scopes) < 2):
+        return None
+
+    return [*scopes, call.name], anchored
 
 
 def _on_written_path(qualname: str, path: list[str], anchored: bool) -> bool:
@@ -3511,6 +3562,163 @@ def _qualified_path_match(
         for c in candidates
         if _on_written_path(c.qualname, ctor_path, anchored)
     ]
+
+
+@dataclass(frozen=True)
+class _Scoped:
+    """What the scopes a C/C++ call is written through leave it.
+
+    Attributes:
+        candidates: What the ladder picks among.
+        allowed: The only symbols the pick may be, or ``None`` when any
+            pick stands.
+        trusted: Whether a lone candidate is the target outright.
+    """
+
+    candidates: list[Symbol]
+    allowed: list[Symbol] | None
+    trusted: bool
+
+
+def _written_scope_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> _Scoped | None:
+    """Narrow a C/C++ call by the scopes it's written through.
+
+    A full path (``_qualified_path_match``) is trusted: a unique match
+    is the target. One namespace scope (``_namespace_head_match``)
+    narrows, the ladder still picks, and the pick has to be one the
+    namespace allows.
+
+    Returns:
+        ``None`` when neither rule applies.
+    """
+    on_path = _qualified_path_match(call, candidates)
+    if on_path is not None:
+        return _Scoped(on_path, None, True)
+    in_namespace = _namespace_head_match(call, candidates, index)
+    if in_namespace is None:
+        return None
+    allowed, confident = in_namespace
+
+    return _Scoped(allowed if confident else candidates, allowed, False)
+
+
+def _within_scope(
+    scoped: _Scoped | None, target: Symbol | _Noise | None
+) -> Symbol | _Noise | None:
+    """``target``, unless the ladder picked a symbol the call's written
+    namespace rules out (a rung that reads the index itself can, and
+    so can one run over the unnarrowed list); then noise, so the call
+    goes external. See ``_namespace_head_match``."""
+    if (
+        scoped is None
+        or scoped.allowed is None
+        or not isinstance(target, Symbol)
+    ):
+        return target
+
+    return target if target in scoped.allowed else _NOISE
+
+
+def _namespace_head_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> tuple[list[Symbol], bool] | None:
+    """What a C/C++ ``ns::Name`` call can reach in the namespace it names.
+
+    ``absl::OkStatus()`` can't reach ``tensorflow::OkStatus``, and
+    ``reference_ops::F(..)`` means the ``reference_ops`` one even when
+    the ladder would favor ``optimized_ops::F``. When the one written
+    scope is a namespace, a candidate counts only when its qualname
+    ends with ``ns.Name`` or ``ns.Name.Name`` (a constructor: the
+    ladder has always been free to pick a same-file out-of-line one),
+    or when a namespace-scope
+    ``using``-declaration in a namespace named ``ns`` re-exports it
+    (``namespace tensorflow { using tsl::StatusFromTF_Status; }``).
+    ``std`` is always a namespace, and nothing in the repo answers it:
+    the standard reserves it, and the only repo symbols there are
+    specializations whose qualnames lost their template arguments
+    (``std.numeric_limits.max`` for every ``std::max``).
+
+    Any other scope name that some C/C++ qualname carries, and that no
+    C/C++ type is named, counts as a namespace, which also covers a
+    class whose own declaration wasn't extracted but whose out-of-line
+    methods carry its name. A type head (``TensorShape::IsValid``,
+    reachable through a base class), a head written with template
+    arguments, which no namespace takes, and a head the map never saw
+    (a namespace alias, an external class) are left to the ladder.
+
+    One written scope is weaker evidence than a full path, so the
+    ladder still picks. A lone survivor whose parameters don't fit the
+    call's argument count is the one case the narrowing can't settle:
+    it may be an unrelated namesake on the same path (the
+    five-parameter ``tensorflow::ops::Identity`` in ``c/experimental``
+    for the generated two-argument ``ops::Identity`` that isn't in the
+    repo),
+    or the real target whose defaults live in a header dekko doesn't
+    read (``GetTypeFromTFTensorShape(shape, type)``). Narrowing to it
+    would hand it to the ``#include`` rung, which runs before any
+    arity check, and turn ambiguous rows into guesses. So that case
+    doesn't narrow: the ladder runs over every candidate, as it would
+    without this rule, and only its pick is held to the namespace.
+
+    Args:
+        call: The raw call being resolved.
+        candidates: Its language-filtered same-name candidates.
+        index: The bare-name index, with the ``_CPP_SCOPE_KEY`` and
+            ``_CPP_USING_KEY`` entries.
+
+    Returns:
+        ``None`` when the call isn't a one-scope namespace-head call
+        (the ordinary ladder applies). Otherwise the candidates it can
+        reach, possibly empty, and whether the ladder may be narrowed
+        to them.
+    """
+    parts = _cpp_scope_parts(call)
+    if parts is None or parts[1] or len(parts[0]) != 1:
+        return None
+    head = parts[0][0]
+    if head == "std":
+        return [], True
+    if "<" in (getattr(call, "receiver", None) or "") or not (
+        _names_a_namespace(head, index)
+    ):
+        # Template arguments (``View<Attr>::Next``) make the head a
+        # class even when, as a specialization, it isn't a symbol.
+        return None
+    reexported = {
+        s.id for s in index.get(f"{_CPP_USING_KEY}{head}::{call.name}", [])
+    }
+    ctor_path = [head, call.name, call.name]
+    hits = [
+        c
+        for c in candidates
+        if c.id in reexported
+        or _on_written_path(c.qualname, [head, call.name], False)
+        or _on_written_path(c.qualname, ctor_path, False)
+    ]
+    confident = (
+        len(hits) != 1
+        or hits[0].kind in TYPE_KINDS
+        or _arity_plausible(hits[0], call)
+    )
+
+    return hits, confident
+
+
+def _names_a_namespace(head: str, index: dict[str, list[Symbol]]) -> bool:
+    """Whether ``head`` is a C/C++ qualname scope that no type is named."""
+    if not index.get(_CPP_SCOPE_KEY + head):
+        return False
+
+    return not any(
+        s.kind in TYPE_KINDS and s.language in _CPP_FAMILY
+        for s in index.get(head, [])
+    )
 
 
 def _sole_candidate_match(
@@ -5862,19 +6070,66 @@ def _rust_crate_hint_matches(
 _RUST_VARIANT_KEY = "::variant::"
 
 
+# Reserved ``index`` namespaces for C/C++ one-scope calls
+# (``_namespace_head_match``), riding in the index for the same reason
+# as ``_RUST_VARIANT_KEY``. ``_CPP_SCOPE_KEY + H`` is present when ``H``
+# is a scope of some C/C++ symbol's qualname; its one symbol is just
+# the witness. ``_CPP_USING_KEY + "H::Name"`` holds the symbols a
+# namespace-scope ``using``-declaration in a namespace named ``H``
+# re-exports as ``H::Name``.
+_CPP_SCOPE_KEY = "::cpp-scope::"
+_CPP_USING_KEY = "::cpp-using::"
+
+
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
-    ``_RUST_VARIANT_KEY`` entries for tuple enum variants."""
+    ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY`` and ``_CPP_USING_KEY``
+    entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
             index.setdefault(sym.name, []).append(sym)
+            if sym.language in _CPP_FAMILY:
+                for scope in _PATH_SPLIT.split(sym.qualname)[:-1]:
+                    if scope:
+                        index.setdefault(_CPP_SCOPE_KEY + scope, [sym])
         for entry in fm.enum_variants:
             owner, _, variant = entry.partition("::")
             index.setdefault(_RUST_VARIANT_KEY + variant, []).extend(
                 s for s in fm.symbols if s.kind == "enum" and s.name == owner
             )
+    for fm in files:
+        for entry in fm.cpp_using:
+            _index_cpp_using(entry, index)
     return index
+
+
+def _index_cpp_using(entry: str, index: dict[str, list[Symbol]]) -> None:
+    """Record what one ``FileMap.cpp_using`` entry re-exports.
+
+    ``tensorflow=tsl::StatusFromTF_Status`` makes every C/C++
+    ``StatusFromTF_Status`` on the path ``tsl::StatusFromTF_Status``
+    reachable as ``tensorflow::StatusFromTF_Status``. A declaration in
+    the global namespace re-exports nothing a one-scope call can name.
+    """
+    namespace, _, written = entry.partition("=")
+    if not namespace:
+        return
+    head = namespace.rsplit(".", 1)[-1]
+    anchored = written.startswith("::")
+    path = [seg for seg in written.split("::") if seg]
+    if len(path) < 2:
+        return
+    name = path[-1]
+    hits = [
+        s
+        for s in index.get(name, [])
+        if s.language in _CPP_FAMILY
+        and _on_written_path(s.qualname, path, anchored)
+    ]
+    if hits:
+        bucket = index.setdefault(f"{_CPP_USING_KEY}{head}::{name}", [])
+        bucket.extend(s for s in hits if s not in bucket)
 
 
 def _rust_name_is_also_a_variant(

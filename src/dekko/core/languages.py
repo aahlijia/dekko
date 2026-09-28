@@ -1583,6 +1583,11 @@ _CPP_CONSTRUCTION_VERSION = 1
 # extractor, outside any query. Same blind spot as the constants above.
 _CPP_QUALIFIED_PATH_VERSION = 1
 
+# Bump when the extractor changes how it records C++ namespace-scope
+# ``using``-declarations (``FileMap.cpp_using``). Another tree walk
+# outside any query, so the spec loop below can't see it.
+_CPP_USING_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.
@@ -1597,7 +1602,8 @@ def spec_fingerprint() -> str:
     ``_RUST_MACRO_CALL_RECOVERY_VERSION``,
     ``_CALLEE_TEXT_CANONICAL_VERSION``,
     ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION``,
-    ``_CPP_CONSTRUCTION_VERSION`` and ``_CPP_QUALIFIED_PATH_VERSION``,
+    ``_CPP_CONSTRUCTION_VERSION``, ``_CPP_QUALIFIED_PATH_VERSION`` and
+    ``_CPP_USING_VERSION``,
     which each cover
     one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments). Used to
@@ -1620,6 +1626,7 @@ def spec_fingerprint() -> str:
         f"{_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION}",
         f"cpp_construction={_CPP_CONSTRUCTION_VERSION}",
         f"cpp_qualified_path={_CPP_QUALIFIED_PATH_VERSION}",
+        f"cpp_using={_CPP_USING_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):
