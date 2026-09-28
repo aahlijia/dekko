@@ -9,6 +9,48 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.3] — 2026-09-28
+
+### Added
+- **Kotlin is a Tier-1 language.** `.kt` and `.kts` files parse
+  offline with the `tree-sitter-kotlin` grammar, now a core dependency,
+  so a default install needs no `dekko[all]` for them. Classes,
+  interfaces, enums, objects, functions and both kinds of constructor
+  are symbols with typed parameters (defaults and `vararg` included,
+  so argument counts check out), plus calls with receivers and
+  argument counts, imports with aliases, supertypes and
+  `System.getenv` reads. Java and Kotlin resolve against each other,
+  each preferring its own language first: a Kotlin import of a Java
+  class reaches the `.java` file, and a type that exists in both (the
+  Java/Kotlin twins in docs samples) resolves to the importer's own
+  language. A top-level function imported by package
+  (`import org.springframework.boot.runApplication`) resolves to the
+  file that defines it. `object : Base(x) { ... }` constructs `Base`,
+  like Java's `new Base(x) { ... }`. Not yet for Kotlin:
+  `throws`/`catches`, `::fn` references, type-only uses, and calls to
+  extension functions through their receiver.
+
+### Fixed
+- **Kotlin files extracted no symbols.** The language pack's Kotlin
+  grammar has no field names on declarations, and the generic
+  extractor only accepts a named definition, so all 492 of
+  spring-boot's `.kt` files mapped as "no symbols". A test-covered
+  change to `runApplication` got "no symbol changes" from `diff` and
+  "no impacted tests" from `affected`. Now spring-boot has 1,165 Kotlin
+  symbols, `diff` reports the change, and `affected` names
+  `SpringApplicationExtensionsTests.kt` as possibly impacted (its calls
+  can't be pinned to one of `runApplication`'s two overloads). The
+  Kotlin files gained 273 call edges (166 into Java) and 31 supertypes.
+  309 wrong edges from the old path went away: `.gradle.kts` scripts
+  "calling" unrelated Java methods, annotations counted as calls, and
+  Kotlin docs samples resolving to their Java twin.
+
+### Changed
+- `query throws` on a language it doesn't cover says "not covered by
+  this query" unless the language has no exception syntax at all
+  (Rust, Go, C), which stay "permanently excluded". It used to call
+  every uncovered language permanent.
+
 ## [1.5.2] — 2026-09-28
 
 ### Fixed

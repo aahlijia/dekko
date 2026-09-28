@@ -27,6 +27,7 @@ _TIER1: dict[str, tuple[str, str]] = {
     "go": ("tree_sitter_go", "language"),
     "java": ("tree_sitter_java", "language"),
     "javascript": ("tree_sitter_javascript", "language"),
+    "kotlin": ("tree_sitter_kotlin", "language"),
     "python": ("tree_sitter_python", "language"),
     "rust": ("tree_sitter_rust", "language"),
     "typescript": ("tree_sitter_typescript", "language_typescript"),

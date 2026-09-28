@@ -30,9 +30,10 @@ class Param:
     Attributes:
         name: Parameter name as written (display-oriented — carries a
             ``*``/``**``/``...`` prefix for a splat/rest/variadic
-            parameter, a trailing ``?`` for a TS optional parameter,
-            and the raw ``self``/``&self``/``&mut self`` text for a
-            Rust ``self_parameter``; not a normalized identifier).
+            parameter (Kotlin: ``vararg``), a trailing ``?`` for a TS
+            optional parameter, and the raw ``self``/``&self``/``&mut
+            self`` text for a Rust ``self_parameter``; not a
+            normalized identifier).
         type: Declared type, or ``None``.
         has_default: Whether the parameter carries a default value
             (Python ``default_parameter``/``typed_default_parameter``,

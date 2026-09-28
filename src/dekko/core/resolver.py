@@ -160,13 +160,18 @@ _WHOLE_FILE_IMPORT_LANGUAGES = frozenset({"c", "cpp"})
 # same pairing/triple ``_WHOLE_FILE_IMPORT_LANGUAGES`` and
 # ``_IMPORT_RESOLVERS`` (below) already encode for import resolution --
 # see ``_language_filtered``'s docstring for why this is the boundary
-# a same-bare-name candidate is allowed to cross. Every language with
-# no declared family here (python, rust, go, java, ...) has no such
-# precedent anywhere in the resolver and defaults to a same-language-
-# only singleton family in ``_language_filtered``.
+# a same-bare-name candidate is allowed to cross. Java and Kotlin
+# share one JVM: a Kotlin file imports and calls Java classes directly
+# (most of spring-boot's in-repo Kotlin imports name a ``.java`` file),
+# and Java can call Kotlin. Every language with no declared family
+# here (python, rust, go, ...) has no such precedent anywhere in the
+# resolver and defaults to a same-language-only singleton family in
+# ``_language_filtered``.
 _LANGUAGE_FAMILIES: dict[str, frozenset[str]] = {
     "c": frozenset({"c", "cpp"}),
     "cpp": frozenset({"c", "cpp"}),
+    "java": frozenset({"java", "kotlin"}),
+    "kotlin": frozenset({"java", "kotlin"}),
     "javascript": frozenset({"javascript", "typescript", "tsx"}),
     "typescript": frozenset({"javascript", "typescript", "tsx"}),
     "tsx": frozenset({"javascript", "typescript", "tsx"}),
@@ -4914,7 +4919,11 @@ def _hint_match(
     against the caller's directory.
     """
     for hint in hints:
-        matched = [c for c in candidates if _module_matches(hint, c.path)]
+        matched = [
+            c
+            for c in candidates
+            if _module_matches(hint, c.path) or _kotlin_member_matches(hint, c)
+        ]
         if len(matched) == 1:
             return matched[0]
         if len(matched) > 1:
@@ -4935,6 +4944,27 @@ def _hint_match(
             if tiebroken is not None:
                 return tiebroken
     return None
+
+
+def _kotlin_member_matches(source: str, candidate: Symbol) -> bool:
+    """Whether a Kotlin import names this top-level Kotlin symbol.
+
+    A Kotlin file can define functions and properties outside any
+    class, and they are imported as package members:
+    ``import org.springframework.boot.runApplication`` names
+    ``runApplication`` in whichever file of that package defines it
+    (``SpringApplicationExtensions.kt``). The file's stem never appears
+    in the import, so ``_module_matches`` can't see it. The package is
+    read off the file's directory under its source root, which is
+    where Kotlin, like Java, keeps it by convention.
+    """
+    if candidate.language != "kotlin" or "." in candidate.qualname:
+        return False
+    package, _, name = source.rpartition(".")
+    if name != candidate.name or not package:
+        return False
+
+    return _jvm_package_dir(candidate.path) == package.replace(".", "/")
 
 
 def _relative_js_tiebreak(
@@ -6106,10 +6136,13 @@ class _ImportResolveContext:
             packages sit directly at the repo root.
         java_suffix_index: Path suffix (with any of the well-known
             Maven/Gradle source-root prefixes stripped, plus the raw
-            path itself) → matching real ``.java`` file path(s). Lets
-            ``import com.foo.Bar;`` resolve against ``src/main/java/
-            com/foo/Bar.java``-style layouts without hardcoding one
-            specific root.
+            path itself) → matching real ``.java``/``.kt`` file
+            path(s). Lets ``import com.foo.Bar;`` resolve against
+            ``src/main/java/com/foo/Bar.java``-style layouts without
+            hardcoding one specific root.
+        kotlin_package_members: ``(package directory, name)`` → the
+            Kotlin file(s) defining that top-level function or
+            property (see ``_kotlin_package_members``).
         cpp_basename_index: C/C++ header/source basename → matching
             real path(s), scoped to C/C++-shaped extensions only (a
             same-named Python/JS file must never satisfy a ``#include``
@@ -6148,6 +6181,9 @@ class _ImportResolveContext:
     paths: frozenset[str]
     py_package_roots: dict[str, list[str]] = field(default_factory=dict)
     java_suffix_index: dict[str, list[str]] = field(default_factory=dict)
+    kotlin_package_members: dict[tuple[str, str], list[str]] = field(
+        default_factory=dict
+    )
     cpp_basename_index: dict[str, list[str]] = field(default_factory=dict)
     crate_roots: dict[str, list[str]] = field(default_factory=dict)
     workspace_manifests: dict[str, "_WorkspaceManifest"] = field(
@@ -7505,12 +7541,58 @@ def _resolve_import_java(
     java`` rather than the repo root. ``ctx.java_suffix_index`` (built
     once, see ``_java_suffix_index``) already indexes every file under
     both its raw path and its root-stripped suffix, so this is a
-    single dict lookup, not a per-import scan.
+    single dict lookup, not a per-import scan. A class written in
+    Kotlin is imported the same way, so ``C.kt`` is the fallback.
     """
     del importer_path
-    target = imp.source.replace(".", "/") + ".java"
-    matches = sorted(set(ctx.java_suffix_index.get(target, [])))
-    return matches[0] if len(matches) == 1 else None
+    return _jvm_type_file(imp.source, (".java", ".kt"), ctx)
+
+
+def _resolve_import_kotlin(
+    imp: Import, importer_path: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a Kotlin ``import`` to a repo file.
+
+    Kotlin keeps Java's package-equals-directory convention, and
+    imports Java classes as freely as Kotlin ones. In order:
+
+    1. ``a.b.C`` as ``a/b/C.kt``, then ``a/b/C.java``. Kotlin first, so
+       a Kotlin importer of a type that exists in both languages (docs
+       samples ship as Java/Kotlin twins) gets the Kotlin one.
+    2. A package member: a top-level function or property defined in
+       exactly one Kotlin file of package ``a.b``.
+    3. A nested type or a static member (``a.b.Outer.Inner``): the
+       enclosing ``a.b.Outer`` once more, by step 1.
+    """
+    del importer_path
+    found = _jvm_type_file(imp.source, (".kt", ".java"), ctx)
+    if found is not None:
+        return found
+    package, _, name = imp.source.rpartition(".")
+    members = ctx.kotlin_package_members.get((package.replace(".", "/"), name))
+    if members is not None and len(members) == 1:
+        return members[0]
+    if package:
+        return _jvm_type_file(package, (".kt", ".java"), ctx)
+
+    return None
+
+
+def _jvm_type_file(
+    source: str, extensions: tuple[str, ...], ctx: _ImportResolveContext
+) -> str | None:
+    """The one file declaring JVM type ``source``, trying each extension.
+
+    Only a unique match counts; the first extension that has one wins.
+    """
+    stem = source.replace(".", "/")
+    for ext in extensions:
+        matches = sorted(set(ctx.java_suffix_index.get(stem + ext, [])))
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            return None
+    return None
 
 
 _CPP_EXTENSIONS = (
@@ -7569,6 +7651,7 @@ _IMPORT_RESOLVERS: dict[
     "tsx": _resolve_import_js,
     "rust": _resolve_import_rust,
     "java": _resolve_import_java,
+    "kotlin": _resolve_import_kotlin,
     "c": _resolve_import_cpp,
     "cpp": _resolve_import_cpp,
 }
@@ -7689,15 +7772,17 @@ def _py_package_roots(paths: frozenset[str]) -> dict[str, list[str]]:
 _JAVA_ROOT_SEGMENTS = (
     ("src", "main", "java"),
     ("src", "test", "java"),
+    ("src", "main", "kotlin"),
+    ("src", "test", "kotlin"),
     ("src",),
 )
 
 
 def _java_suffix_index(paths: frozenset[str]) -> dict[str, list[str]]:
-    """Java file path/root-stripped-suffix → matching real path(s).
+    """JVM file path/root-stripped-suffix → matching real path(s).
 
-    Every ``.java`` file is indexed under its own full path *and*
-    (when one of the well-known Maven/Gradle source-root segment
+    Every ``.java`` and ``.kt`` file is indexed under its own full
+    path *and* (when one of the well-known Maven/Gradle source-root segment
     sequences appears anywhere in its path, at a directory boundary)
     the path with everything up to and including that root stripped —
     so ``_resolve_import_java``'s single dict lookup works whether the
@@ -7713,7 +7798,7 @@ def _java_suffix_index(paths: frozenset[str]) -> dict[str, list[str]]:
     """
     index: dict[str, list[str]] = {}
     for p in paths:
-        if not p.endswith(".java"):
+        if not p.endswith((".java", ".kt")):
             continue
         index.setdefault(p, []).append(p)
         segs = p.split("/")
@@ -7721,6 +7806,38 @@ def _java_suffix_index(paths: frozenset[str]) -> dict[str, list[str]]:
         if suffix is not None:
             index.setdefault(suffix, []).append(p)
     return index
+
+
+def _kotlin_package_members(
+    files: list[FileMap],
+) -> dict[tuple[str, str], list[str]]:
+    """``(package directory, top-level name)`` → Kotlin file(s).
+
+    The package directory is the file's directory under its source
+    root (``_strip_java_root``), so ``import a.b.fn`` looks up
+    ``("a/b", "fn")``. Only top-level symbols count: a member of a
+    class is imported through the class.
+    """
+    index: dict[tuple[str, str], list[str]] = {}
+    for fm in files:
+        if fm.language != "kotlin":
+            continue
+        package = _jvm_package_dir(fm.path)
+        if package is None:
+            continue
+        for name in {s.name for s in fm.symbols if "." not in s.qualname}:
+            index.setdefault((package, name), []).append(fm.path)
+    return index
+
+
+def _jvm_package_dir(path: str) -> str | None:
+    """A JVM file's directory under its source root: its package path.
+
+    ``core/x/src/main/kotlin/org/a/F.kt`` → ``org/a``; ``""`` for the
+    default package; ``None`` when no source root is in the path.
+    """
+    directory = _strip_java_root([*path.split("/")[:-1], ""])
+    return directory.rstrip("/") if directory is not None else None
 
 
 def _strip_java_root(segs: list[str]) -> str | None:
@@ -7808,6 +7925,7 @@ def resolve_imports(
         paths=paths,
         py_package_roots=_py_package_roots(paths),
         java_suffix_index=_java_suffix_index(paths),
+        kotlin_package_members=_kotlin_package_members(files),
         cpp_basename_index=_cpp_basename_index(paths),
         crate_roots=_rust_crate_roots_index_all(paths),
         ts_path_aliases=(

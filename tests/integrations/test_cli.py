@@ -615,9 +615,9 @@ def test_summary_separates_missing_grammar_from_real_parse_errors() -> None:
     dependency needed to reproduce the message shape)."""
     files = [
         FileMap(
-            path="gen/file.kt",
-            language="kotlin",
-            error="grammar 'kotlin' is not in the offline Tier-1 set; "
+            path="gen/file.scala",
+            language="scala",
+            error="grammar 'scala' is not in the offline Tier-1 set; "
             "install the extras with `pip install dekko[all]`",
         ),
         FileMap(
@@ -634,8 +634,8 @@ def test_summary_separates_missing_grammar_from_real_parse_errors() -> None:
     # it must not be counted (or listed by language) as "mapped".
     first = out.splitlines()[0]
     assert first.startswith("dekko: mapped 2 files (python 2)")
-    assert "kotlin" not in first
-    assert "NOT parsed (no symbols, no edges): kotlin 1" in out
+    assert "scala" not in first
+    assert "NOT parsed (no symbols, no edges): scala 1" in out
     assert "dekko[all]" in out
 
 

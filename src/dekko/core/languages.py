@@ -1365,6 +1365,99 @@ JAVA = LanguageSpec(
 """,
 )
 
+# Kotlin runs on the tree-sitter-grammars ``tree-sitter-kotlin`` wheel,
+# not the language pack's Kotlin grammar: the pack's declarations have
+# no field names at all, so nothing can key on a ``name``. This one
+# fields ``name`` on every class, object and function declaration.
+#
+# Constructors borrow the enclosing class's own ``name`` as ``@name``,
+# so a primary or secondary constructor of ``Foo`` becomes the method
+# ``Foo.Foo``, the same shape as a Java constructor. That is what the
+# resolver's class-named constructor pick keys on: ``Foo(1)`` resolves
+# to the class, then its argument count picks the overload. Both kinds
+# are symbols or neither would be: with only secondary ones, a call to
+# the primary constructor would be credited to a secondary one.
+#
+# ``companion_object`` is deliberately not a container: callers write
+# ``Foo.create()``, never ``Foo.Companion.create()``, so a companion's
+# members qualify as ``Foo.create``.
+#
+# Calls are walked by ``extractor._collect_kotlin_calls``, not through
+# the shared ``@callee`` path: Kotlin's ``navigation_expression`` has
+# no fields, and a trailing lambda wraps its call in a second
+# ``call_expression`` that must not count as another call. An object
+# expression with a superclass (``object : Base(x) { ... }``) constructs
+# ``Base``, the way Java's ``new Base(x) { ... }`` does.
+KOTLIN = LanguageSpec(
+    name="kotlin",
+    grammar="kotlin",
+    extensions=(".kt", ".kts"),
+    definition_query="""
+(function_declaration
+  name: (identifier) @name
+  (function_value_parameters) @params
+  .
+  [(user_type) (nullable_type) (function_type)]? @ret) @def
+
+(class_declaration
+  name: (identifier) @name
+  (primary_constructor (class_parameters) @params) @def)
+
+(class_declaration
+  name: (identifier) @name
+  (class_body
+    (secondary_constructor (function_value_parameters) @params) @def))
+
+(class_declaration
+  name: (identifier) @name
+  (enum_class_body
+    (secondary_constructor (function_value_parameters) @params) @def))
+
+(class_declaration name: (identifier) @classname) @classdef
+(object_declaration name: (identifier) @classname) @classdef
+""",
+    call_query="""
+(call_expression) @call
+(object_literal
+  (delegation_specifiers
+    (delegation_specifier (constructor_invocation) @ctor)))
+""",
+    import_query="""
+(import (qualified_identifier) @module (identifier)? @alias)
+""",
+    container_types={
+        "class_declaration": "name",
+        "object_declaration": "name",
+    },
+    method_containers=("class_declaration", "object_declaration"),
+    param_style="kotlin",
+    function_boundary_types=(
+        "function_declaration",
+        "secondary_constructor",
+        "lambda_literal",
+        "anonymous_function",
+    ),
+    # Kotlin writes a superclass as a constructor call (``: Base(p)``)
+    # and an interface bare (``: Iface``), and a class has at most one
+    # superclass, so the clause says which relation each entry is.
+    heritage_query="""
+(class_declaration
+  name: (identifier) @classname
+  (delegation_specifiers) @heritage) @classdef
+
+(object_declaration
+  name: (identifier) @classname
+  (delegation_specifiers) @heritage) @classdef
+""",
+    # ``System.getenv("X")``: Kotlin reads the environment through the
+    # same Java API, so ``extractor._env_read_java`` checks the names.
+    env_read_query="""
+(call_expression
+  (navigation_expression (identifier) @sys (identifier) @fn)
+  (value_arguments . (value_argument . (string_literal) @key))) @call
+""",
+)
+
 # ``RUST``, ``GO``, and ``C`` above deliberately leave ``throw_query``/
 # ``catch_query`` at their default ``None`` — a **permanent** exclusion,
 # not a placeholder awaiting a future pass (contrast with
@@ -1384,6 +1477,7 @@ TIER1_SPECS: tuple[LanguageSpec, ...] = (
     TSX,
     GO,
     JAVA,
+    KOTLIN,
 )
 
 EXTENSION_MAP: dict[str, LanguageSpec] = {
@@ -1537,8 +1631,6 @@ TIER2_GRAMMARS: dict[str, str] = {
     ".rake": "ruby",
     ".php": "php",
     ".cs": "csharp",
-    ".kt": "kotlin",
-    ".kts": "kotlin",
     ".swift": "swift",
     ".scala": "scala",
     ".sc": "scala",

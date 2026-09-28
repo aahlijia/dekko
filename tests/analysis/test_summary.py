@@ -227,11 +227,11 @@ def test_no_grammar_skips_are_not_labeled_parse_errors() -> None:
     # errors and a separate "grammars not installed" bucket instead.
     index = MapIndex(root_label="repo")
     for i in range(20):
-        path = f"gen/file{i}.kt"
+        path = f"gen/file{i}.scala"
         index.errors_by_path[path] = (
-            "grammar 'kotlin' is not in the offline Tier-1 set"
+            "grammar 'scala' is not in the offline Tier-1 set"
         )
-        index.languages_by_path[path] = "kotlin"
+        index.languages_by_path[path] = "scala"
 
     doc = summary.compute(index)
     assert doc["parse_errors"] == []
@@ -244,7 +244,7 @@ def test_no_grammar_skips_are_not_labeled_parse_errors() -> None:
     assert "grammars not installed:" in text
     hidden = 20 - summary._MAX_PARSE_ERRORS
     assert f"... and {hidden} more" in text
-    assert "kotlin (20)" in text
+    assert "scala (20)" in text
 
 
 def test_mixed_real_errors_and_no_grammar_skips_split_correctly() -> None:
@@ -253,22 +253,22 @@ def test_mixed_real_errors_and_no_grammar_skips_split_correctly() -> None:
     index = MapIndex(root_label="repo")
     index.errors_by_path["src/broken.py"] = "unexpected EOF"
     index.languages_by_path["src/broken.py"] = "python"
-    index.errors_by_path["gen/file.kt"] = (
-        "grammar 'kotlin' is not in the offline Tier-1 set"
+    index.errors_by_path["gen/file.scala"] = (
+        "grammar 'scala' is not in the offline Tier-1 set"
     )
-    index.languages_by_path["gen/file.kt"] = "kotlin"
+    index.languages_by_path["gen/file.scala"] = "scala"
 
     doc = summary.compute(index)
     assert doc["parse_errors_total"] == 1
     assert doc["parse_errors"][0]["path"] == "src/broken.py"
     assert doc["no_grammar_installed_total"] == 1
-    assert doc["no_grammar_installed"][0]["path"] == "gen/file.kt"
+    assert doc["no_grammar_installed"][0]["path"] == "gen/file.scala"
 
     text = summary.render_text(index)
     assert "parse errors:" in text
     assert "src/broken.py: unexpected EOF" in text
     assert "grammars not installed:" in text
-    assert "gen/file.kt: grammar 'kotlin'" in text
+    assert "gen/file.scala: grammar 'scala'" in text
 
 
 def test_no_tests_filter(

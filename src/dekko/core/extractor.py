@@ -206,12 +206,17 @@ def _collect_definitions(
             kind_type = (
                 kind_node.type if kind_node is not None else def_node.type
             )
+            kind = (
+                _kotlin_class_kind(def_node)
+                if spec.name == "kotlin"
+                else _CLASSDEF_KIND.get(kind_type, "class")
+            )
             sym = _make_symbol(
                 spec,
                 rel,
                 def_node,
                 _text(class_name),
-                _CLASSDEF_KIND.get(kind_type, "class"),
+                kind,
                 params=_tuple_struct_fields(def_node),
                 returns=None,
                 seen=seen,
@@ -277,7 +282,7 @@ def _collect_definitions(
             spec,
             rel,
             def_node,
-            _text(name_node),
+            _definition_name(spec.name, name_node),
             "function",
             params=params,
             returns=returns,
@@ -287,6 +292,39 @@ def _collect_definitions(
         defs.append((def_node, sym))
 
     return defs
+
+
+def _definition_name(language: str, name_node: Node) -> str:
+    """A definition's name as callers write it.
+
+    Kotlin allows any text in backticks (``fun `does a thing`()``,
+    the usual shape of a test name). The backticks only quote it, the
+    way a string's quotes do, so they are not part of the name.
+    """
+    text = _text(name_node)
+    if language == "kotlin":
+        return text.strip("`")
+
+    return text
+
+
+def _kotlin_class_kind(def_node: Node) -> str:
+    """``Symbol.kind`` of a Kotlin ``class_declaration``.
+
+    One node type covers classes, interfaces and enums. An interface
+    has an ``interface`` keyword child (``fun interface`` and
+    ``sealed interface`` too), an enum an ``enum`` class modifier.
+    """
+    if any(child.type == "interface" for child in def_node.children):
+        return "interface"
+    modifiers = _modifiers_node(def_node)
+    if modifiers is not None and any(
+        child.type == "class_modifier" and _text(child) == "enum"
+        for child in modifiers.named_children
+    ):
+        return "enum"
+
+    return "class"
 
 
 def _is_deleted_function(def_node: Node) -> bool:
@@ -519,6 +557,8 @@ def _is_decorated(language: str, def_node: Node) -> bool:
         return _has_prev_sibling(def_node, "attribute_item")
     if language == "java":
         return _modifiers_have(def_node, ("annotation", "marker_annotation"))
+    if language == "kotlin":
+        return _modifiers_have(def_node, ("annotation",))
     if language in ("javascript", "typescript", "tsx"):
         return _has_child(def_node, "decorator") or _has_prev_sibling(
             def_node, "decorator"
@@ -532,9 +572,27 @@ def _is_exported(language: str, def_node: Node) -> bool:
         return _has_child(def_node, "visibility_modifier")
     if language == "java":
         return _modifiers_keyword(def_node, "public")
+    if language == "kotlin":
+        return not _kotlin_restricted(def_node)
     if language in ("javascript", "typescript", "tsx"):
         return _ancestor_is(def_node, "export_statement", depth=4)
     return False
+
+
+# Kotlin declarations are public unless one of these says otherwise.
+_KOTLIN_RESTRICTED_VISIBILITY = frozenset({"private", "internal", "protected"})
+
+
+def _kotlin_restricted(def_node: Node) -> bool:
+    """Whether a Kotlin declaration has a non-public visibility."""
+    modifiers = _modifiers_node(def_node)
+    if modifiers is None:
+        return False
+    return any(
+        child.type == "visibility_modifier"
+        and _text(child) in _KOTLIN_RESTRICTED_VISIBILITY
+        for child in modifiers.named_children
+    )
 
 
 def _has_child(node: Node, child_type: str) -> bool:
@@ -1162,6 +1220,67 @@ def _params_go(params_node: Node) -> list[Param]:
     return out
 
 
+# Children of a Kotlin parameter that are neither its name, its type
+# nor its default value.
+_KOTLIN_PARAM_SKIP = frozenset(
+    {"modifiers", "parameter_modifiers", "binding_pattern_kind"}
+)
+
+
+def _params_kotlin(params_node: Node) -> list[Param]:
+    """Parse ``function_value_parameters`` or ``class_parameters``.
+
+    The two place a default differently. A function parameter's
+    default is the next sibling in the list (``x: Int = 1`` is
+    ``parameter`` then an expression), a class parameter's is its own
+    third child after the name and type. ``vararg`` is a
+    ``parameter_modifiers`` sibling just before a function parameter,
+    and a ``modifiers`` child inside a class parameter. Defaults are
+    everywhere in Kotlin, so without them every call that leaves one
+    out would fail the resolver's arity check.
+    """
+    out: list[Param] = []
+    vararg_next = False
+    for child in params_node.named_children:
+        if child.is_extra:
+            continue
+        if child.type == "parameter_modifiers":
+            vararg_next = _has_vararg(child)
+            continue
+        if child.type not in ("parameter", "class_parameter"):
+            if out:
+                out[-1].has_default = True
+            continue
+        variadic = vararg_next or any(
+            _has_vararg(c)
+            for c in child.named_children
+            if c.type == "modifiers"
+        )
+        vararg_next = False
+        parts = [
+            c
+            for c in child.named_children
+            if c.type not in _KOTLIN_PARAM_SKIP and not c.is_extra
+        ]
+        if not parts:
+            continue
+        name = _text(parts[0])
+        out.append(
+            Param(
+                name=f"vararg {name}" if variadic else name,
+                type=_text(parts[1]) if len(parts) > 1 else None,
+                has_default=len(parts) > 2,
+                variadic=variadic,
+            )
+        )
+    return out
+
+
+def _has_vararg(modifiers: Node) -> bool:
+    """Whether a Kotlin modifier list includes ``vararg``."""
+    return any(_text(m) == "vararg" for m in modifiers.named_children)
+
+
 _PARAM_PARSERS: dict[str, Callable[[Node], list[Param]]] = {
     "python": _params_python,
     "rust": _params_rust,
@@ -1169,6 +1288,7 @@ _PARAM_PARSERS: dict[str, Callable[[Node], list[Param]]] = {
     "js": _params_js,
     "ts": _params_ts,
     "go": _params_go,
+    "kotlin": _params_kotlin,
     "generic": _params_generic,
 }
 
@@ -1187,6 +1307,8 @@ def _collect_calls(
     spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
 ) -> list[RawCall]:
     """Find call expressions and attribute them to enclosing defs."""
+    if spec.name == "kotlin":
+        return _collect_kotlin_calls(spec, root, rel, defs)
     spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
     attrs = (
         _rust_error_attribute_spans(root)
@@ -1222,6 +1344,158 @@ def _collect_calls(
             if built is not None:
                 calls.append(built)
     return calls
+
+
+def _collect_kotlin_calls(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawCall]:
+    """Kotlin calls, attributed to their enclosing definitions.
+
+    A call with a trailing lambda and parentheses
+    (``run(x) { ... }``) parses as a ``call_expression`` wrapping
+    another one. The inner call is the real one, and the lambda is
+    its last argument; the wrapper is skipped so the call isn't
+    recorded twice.
+    """
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    calls: list[RawCall] = []
+    for _, caps in _run_query(spec.grammar, spec.call_query, root):
+        ctor = _one(caps, "ctor")
+        call_node = ctor or _one(caps, "call")
+        if call_node is None:
+            continue
+        parts = (
+            _kotlin_constructed_type(ctor)
+            if ctor is not None
+            else _kotlin_callee_parts(call_node)
+        )
+        if parts is None:
+            continue
+        text, name, receiver = parts
+        text, receiver = _cap_callee(text, name, receiver)
+        caller = _enclosing(spans, call_node.start_byte)
+        calls.append(
+            RawCall(
+                caller_id=caller.id if caller else None,
+                path=rel,
+                text=text,
+                name=name,
+                receiver=receiver,
+                line=call_node.start_point[0] + 1,
+                arg_count=_kotlin_arg_count(call_node),
+            )
+        )
+    return calls
+
+
+def _kotlin_callee_parts(call: Node) -> tuple[str, str, str | None] | None:
+    """``(text, name, receiver)`` of a Kotlin ``call_expression``.
+
+    ``None`` for the trailing-lambda wrapper (see
+    ``_collect_kotlin_calls``) and for callees with no name to resolve:
+    an invoked call result (``f()()``), a parenthesized lambda.
+    """
+    head = call.named_children[0] if call.named_children else None
+    if head is None:
+        return None
+    if head.type == "identifier":
+        name = _text(head)
+        return name, name, None
+    if head.type != "navigation_expression":
+        return None
+    member = head.named_children[-1]
+    if member.type != "identifier" or head.named_child_count < 2:
+        return None
+    name = _text(member)
+    receiver = _kotlin_canonical(head.named_children[0])
+    return f"{receiver}.{name}", name, receiver
+
+
+def _kotlin_constructed_type(
+    ctor: Node,
+) -> tuple[str, str, str | None] | None:
+    """``(text, name, receiver)`` of an object expression's superclass.
+
+    ``object : a.Base<T>(x) { ... }``: the ``constructor_invocation``'s
+    ``user_type``, generic arguments dropped, split at its last dot.
+    """
+    user_type = _first_child_of_type(ctor, "user_type")
+    if user_type is None:
+        return None
+    text = _strip_generics(_text(user_type))
+    receiver, _, name = text.rpartition(".")
+    if not name:
+        return None
+
+    return text, name, receiver or None
+
+
+def _kotlin_canonical(node: Node) -> str:
+    """Argument-free text of a Kotlin receiver: ``a.b.C``, ``f().g``.
+
+    Kotlin's ``navigation_expression`` has no fields, so the shared
+    ``_canonical_expr`` can't find the member name and would reduce
+    ``a.b.Util`` to ``a.(…)``. Walked iteratively, like that one:
+    builder chains can be long.
+    """
+    suffixes: list[str] = []
+    current = node
+    while True:
+        kids = current.named_children
+        if (
+            current.type == "navigation_expression"
+            and len(kids) >= 2
+            and kids[-1].type == "identifier"
+        ):
+            suffixes.append("." + _text(kids[-1]))
+            current = kids[0]
+        elif current.type == "call_expression" and kids:
+            suffixes.append("()")
+            current = kids[0]
+        else:
+            break
+    if current.type == "this_expression":
+        head = "this"
+    elif current.type == "super_expression":
+        head = "super"
+    else:
+        head = _canonical_expr(current)
+
+    return head + "".join(reversed(suffixes))
+
+
+def _kotlin_arg_count(call: Node) -> int | None:
+    """Arguments a Kotlin call writes, or ``None`` when unknowable.
+
+    Each ``value_argument`` counts once (a named argument too), and a
+    trailing lambda counts as the last argument, whether it sits on
+    this node or on the wrapper around it. A spread (``*args``) makes
+    the count unknowable, the same as an unpacking argument elsewhere.
+    """
+    count = 0
+    for child in call.named_children:
+        if child.type == "annotated_lambda":
+            count += 1
+        elif child.type == "value_arguments":
+            args = [a for a in child.named_children if not a.is_extra]
+            if any(
+                c.type == "spread_expression"
+                for a in args
+                for c in a.named_children
+            ):
+                return None
+            count += len(args)
+    parent = call.parent
+    if (
+        parent is not None
+        and parent.type == "call_expression"
+        and parent.named_children[0] == call
+    ):
+        count += sum(
+            1 for c in parent.named_children if c.type == "annotated_lambda"
+        )
+
+    return count
 
 
 def _raw_call(
@@ -2806,6 +3080,39 @@ def _heritage_java(caps: dict[str, list[Node]]) -> list[tuple[Node, str]]:
     return out
 
 
+def _heritage_kotlin(specifiers: Node) -> list[tuple[Node, str]]:
+    """Walk Kotlin ``delegation_specifiers`` into ``(type, relation)``.
+
+    A superclass is written as a constructor call (``: Base(p)``,
+    a ``constructor_invocation``) and an interface bare (``: Iface``)
+    or delegated (``: Iface by impl``). A class has at most one
+    superclass, so the shape alone gives the relation. An interface's
+    supertypes are interfaces it extends, never implements.
+    """
+    owner = specifiers.parent
+    is_interface = owner is not None and any(
+        child.type == "interface" for child in owner.children
+    )
+    out: list[tuple[Node, str]] = []
+    for spec_node in specifiers.named_children:
+        if spec_node.type != "delegation_specifier":
+            continue
+        inner = (
+            spec_node.named_children[0] if spec_node.named_children else None
+        )
+        if inner is None:
+            continue
+        relation = "implements"
+        if inner.type == "constructor_invocation":
+            relation = "extends"
+        if inner.type in ("constructor_invocation", "explicit_delegation"):
+            inner = _first_child_of_type(inner, "user_type")
+        if inner is None or inner.type != "user_type":
+            continue
+        out.append((inner, "extends" if is_interface else relation))
+    return out
+
+
 def _heritage_cpp(clause_node: Node) -> list[tuple[Node, str]]:
     """Walk a C++ ``base_class_clause`` into ``(type_node, "extends")``.
 
@@ -2946,6 +3253,9 @@ def _heritage_entries(
         return _heritage_ts(heritage) if heritage is not None else []
     if language == "java":
         return _heritage_java(caps)
+    if language == "kotlin":
+        heritage = _one(caps, "heritage")
+        return _heritage_kotlin(heritage) if heritage is not None else []
     if language == "cpp":
         heritage = _one(caps, "heritage")
         return _heritage_cpp(heritage) if heritage is not None else []
@@ -3683,6 +3993,7 @@ _ENV_READ_DISPATCH: dict[
     "typescript": _env_read_js,
     "tsx": _env_read_js,
     "java": _env_read_java,
+    "kotlin": _env_read_java,
     "rust": _env_read_rust,
     "go": _env_read_go,
     "c": _env_read_c_cpp,

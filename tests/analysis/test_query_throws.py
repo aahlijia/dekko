@@ -448,8 +448,22 @@ def test_throws_unsupported_language_target_is_disclosed_not_generic_empty(
     assert code == 0
     out = capsys.readouterr().out
     assert "not tracked for" in out
-    assert "rust" in out
+    assert "rust is permanently excluded" in out
     assert "no throws found" not in out
+
+
+def test_throws_uncovered_language_is_not_called_permanent(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Kotlin has exceptions; throws/catches just has no Kotlin query
+    # yet. Only Rust/Go/C, which have no exception syntax, are
+    # permanent.
+    root = make_mapped_repo({"App.kt": "fun foo() {\n    bar()\n}\n"})
+    code = cli.main(["query", "throws", "foo", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "kotlin is not covered by this query" in out
+    assert "permanently" not in out
 
 
 def test_throws_json_language_supported_false_for_rust_target(

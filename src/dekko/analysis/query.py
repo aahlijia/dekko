@@ -1124,6 +1124,13 @@ def _run_peers(
 # docstring).
 
 
+# Languages whose errors aren't exception syntax at all (``Result``/
+# ``?``, returned ``error`` values, no exceptions), so throws/catches
+# can never cover them. Any other uncovered language just has no
+# query yet.
+_NO_EXCEPTION_SYNTAX = frozenset({"rust", "go", "c"})
+
+
 def _caller_label(index: MapIndex, caller_id: str) -> str:
     """Human-readable label for a throws/catches ``caller`` id.
 
@@ -1561,10 +1568,14 @@ def _run_throws(
     )
     if not rows:
         if not language_supported:
+            scope = (
+                "permanently excluded from"
+                if sym.language in _NO_EXCEPTION_SYNTAX
+                else "not covered by"
+            )
             print(
                 f"(throws not tracked for {sym.id} — {sym.language} is "
-                "permanently excluded from this query; see `dekko "
-                "query throws --help`)"
+                f"{scope} this query; see `dekko query throws --help`)"
             )
         else:
             print(f"(no throws found for {sym.id})")

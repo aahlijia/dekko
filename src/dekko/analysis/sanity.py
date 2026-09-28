@@ -1941,7 +1941,7 @@ def _read_sites(index: MapIndex, bare_name: str) -> frozenset[tuple[str, int]]:
 
 # Languages where a sibling file in the same directory shares a
 # package/namespace and needs no import to name the target.
-_SAME_DIR_PACKAGE_GRAMMARS = frozenset({"go", "java"})
+_SAME_DIR_PACKAGE_GRAMMARS = frozenset({"go", "java", "kotlin"})
 
 
 def _can_see(index: MapIndex, path: str, sym: Symbol) -> bool:

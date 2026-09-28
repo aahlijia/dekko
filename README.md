@@ -116,7 +116,7 @@ dekko summary               # ~40-line digest: dirs, hotspots, entry points
 `.dekko/` is git-ignored by default; the map regenerates on demand, so
 you rarely need to run `dekko map` again by hand. If your repo has
 languages outside the default Tier-1 set (Python, C, C++, JS/TS, Go,
-Java, Rust), `dekko map` will say so per file; install `dekko[all]` for
+Java, Kotlin, Rust), `dekko map` will say so per file; install `dekko[all]` for
 ~55 more languages (see [Install](#install)) and re-run.
 
 ## Documentation

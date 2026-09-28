@@ -1098,6 +1098,7 @@ every other `query` action:
   typed match. `dekko query catches` always prints this caveat in its
   own output (not just here), so a near-empty result on a JS/TS-heavy
   repo isn't mistaken for "nothing catches this."
+- **Kotlin: not covered yet.** `throws` says so in its output.
 - **Rust, Go, C: not supported, permanently** — not a coverage gap
   waiting on a future pass. Rust's `Result<T, E>`/`?` propagation and
   Go's returned-`error`-value convention are type-inference questions,
@@ -1251,7 +1252,8 @@ allowlist of known `getenv`-shaped call idioms per language: Python's
 `os.getenv(...)`/`os.environ.get(...)`/`os.environ[...]`, JS/TS's
 `process.env.X`/`process.env["X"]`, Java's `System.getenv(...)`,
 Rust's `std::env::var(...)`/`env::var(...)`/their `_os` variants, Go's
-`os.Getenv(...)`/`os.LookupEnv(...)`, and C/C++'s bare `getenv(...)`.
+`os.Getenv(...)`/`os.LookupEnv(...)`, C/C++'s bare `getenv(...)`, and
+Kotlin's `System.getenv(...)`.
 All Tier-1 languages are covered (unlike `throws`/`catches`, there's
 no Rust/Go/C exclusion here — an env-var read is just a call/member
 expression, not a language feature some languages structurally lack).
@@ -1455,6 +1457,15 @@ calls.
 ## Language support
 
 Tier 1 (full fidelity, offline): Python, Rust, C, C++, JavaScript,
-TypeScript/TSX, Go, Java. Tier 2 (generic fallback — names and calls,
-no types): everything else `tree-sitter-language-pack` supports (Ruby,
-PHP, C#, Kotlin, Swift, Lua, and more), via `pip install dekko[all]`.
+TypeScript/TSX, Go, Java, Kotlin. Tier 2 (generic fallback — names and
+calls, no types): everything else `tree-sitter-language-pack` supports
+(Ruby, PHP, C#, Swift, Lua, and more), via `pip install dekko[all]`.
+
+Java and Kotlin resolve against each other: a Kotlin file's imports
+reach Java classes and Kotlin ones alike, and each language still
+prefers its own symbols first. A Kotlin constructor is `Foo.Foo` like
+a Java one, so `Foo(1)` credits the class and the constructor the
+argument count picks. Companion-object members read as `Foo.create`,
+the way callers write them. Not tracked yet for Kotlin: `throws`/
+`catches`, callable references (`::fn`) and type-only uses, and calls
+to extension functions through their receiver.
