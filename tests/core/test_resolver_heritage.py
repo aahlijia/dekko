@@ -550,6 +550,41 @@ def test_rust_impl_trait_resolves_cross_file_via_import(
     assert graph.heritage_out["circle.rs::Circle"] == ["shapes.rs::Shape"]
 
 
+def test_rust_impl_of_a_foreign_trait_skips_same_file_structs(
+    tmp_path: Path,
+) -> None:
+    # `impl workspace::Provider for Provider` names a trait; the
+    # same-named struct beside it can't be the target, and neither can
+    # an unrelated same-file struct named like the trait.
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "workspace.rs").write_text(
+        "pub trait Provider {}\npub trait Delegate {}\n"
+    )
+    (tmp_path / "panel.rs").write_text(
+        "struct Provider;\n"
+        "impl workspace::Provider for Provider {}\n"
+        "pub struct Delegate;\n"
+        "struct Background;\n"
+        "impl workspace::Delegate for Background {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    graph = resolve(
+        [
+            extract_file(tmp_path, "workspace.rs", spec),
+            extract_file(tmp_path, "panel.rs", spec),
+        ]
+    )
+    assert graph.heritage_out["panel.rs::Provider"] == [
+        "workspace.rs::Provider"
+    ]
+    assert graph.heritage_out["panel.rs::Background"] == [
+        "workspace.rs::Delegate"
+    ]
+
+
 def test_rust_impl_unknown_trait_is_external(tmp_path: Path) -> None:
     from dekko.core import languages
     from dekko.core.extractor import extract_file

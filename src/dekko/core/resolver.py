@@ -2182,10 +2182,17 @@ def _resolve_one_heritage(
         _record_external_heritage(h, external, relations)
         return
 
+    # Same-file types only count when the repo-wide list kept them. For
+    # ``impl ws::Provider for Provider`` the repo-wide list narrows to
+    # the trait, but a same-file list with no trait in it keeps its
+    # struct (see _narrow_impl_candidates_to_traits), and the same-file
+    # rung used to pick it. A fully written C++ path narrows the same
+    # way (_heritage_candidates).
+    candidate_ids = {c.id for c in candidates}
     same_file = [
         c
         for c in by_name_path.get((h.name, h.path), [])
-        if c.kind in TYPE_KINDS
+        if c.kind in TYPE_KINDS and c.id in candidate_ids
     ]
     if h.relation == "impl":
         same_file = _narrow_impl_candidates_to_traits(same_file)
@@ -2225,8 +2232,10 @@ def _heritage_candidates(
     candidates = [c for c in index.get(h.name, []) if c.kind in TYPE_KINDS]
     if h.relation == "impl":
         candidates = _narrow_impl_candidates_to_traits(candidates)
+    candidates = _language_filtered(h, candidates)
+    on_path = _qualified_path_match(h, candidates)
 
-    return _language_filtered(h, candidates)
+    return candidates if on_path is None else on_path
 
 
 def _hintless_decoy_tiebreak(
@@ -2727,6 +2736,24 @@ def _resolve_call(
         return
 
     same_file = by_name_path.get((call.name, call.path), [])
+    on_path = _qualified_path_match(call, candidates)
+    if on_path is not None:
+        if len(on_path) == 1:
+            # The written path names the target's scopes outright; see
+            # _qualified_path_match. No denylist second-guesses it.
+            _add_call_and_constructor(
+                caller_id,
+                on_path[0],
+                call,
+                by_name_path,
+                index,
+                edges,
+                ambiguous,
+            )
+            return
+        candidates = on_path
+        on_path_ids = {c.id for c in on_path}
+        same_file = [s for s in same_file if s.id in on_path_ids]
     target = _pick_candidate(
         call,
         candidates,
@@ -3354,6 +3381,136 @@ def _cpp_qualifier_contradicts(call: _Referable, target: Symbol) -> bool:
     scopes = set(_PATH_SPLIT.split(target.qualname)[:-1])
     written = (_TEMPLATE_ARGS.sub("", q) for q in receiver.split("::"))
     return any(q and q not in scopes for q in written)
+
+
+def _strip_template_args(text: str) -> str:
+    """``A<x<y>>::B<z>`` → ``A::B``: every balanced ``<…>`` removed."""
+    out: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch == "<":
+            depth += 1
+        elif ch == ">" and depth:
+            depth -= 1
+        elif not depth:
+            out.append(ch)
+    return "".join(out)
+
+
+# Characters a canonical receiver only has when it isn't bare scopes:
+# a call ``f()``, a subscript ``x[]``, member access ``.``/``->``, a
+# literal or an opaque ``(…)``.
+_NOT_A_SCOPE = frozenset('()[].->"{}…')
+
+
+def _cpp_written_path(call: _Referable) -> tuple[list[str], bool] | None:
+    """The whole path of a C/C++ usage written with 2+ scopes or a
+    leading ``::``, and whether it's anchored at the root.
+
+    ``a::b::Name`` gives ``(["a", "b", "Name"], False)``, ``::ns::Name``
+    gives ``(["ns", "Name"], True)``. A one-scope ``a::Name``, a
+    root-only ``::Name`` and an unqualified name give ``None``: the
+    ordinary ladder handles those. So does a member call on a chain
+    that merely contains a path (``ns::Registry::Global()->LookUp``,
+    ``std::move(x).status``): the name has to follow a ``::``, and the
+    receiver has to be scopes only, with no call, subscript or member
+    access in it. Template arguments come off every scope, since
+    qualnames carry none; the name is kept as written, the way the
+    index keys it.
+
+    Args:
+        call: The raw call or heritage clause being resolved.
+
+    Returns:
+        ``(path, anchored)``, or ``None`` when the rule doesn't apply.
+    """
+    receiver = _strip_template_args(getattr(call, "receiver", None) or "")
+    text = _strip_template_args(getattr(call, "text", "")).strip()
+    name = _strip_template_args(call.name).strip()
+    if (
+        not receiver
+        or not text.endswith(name)
+        or not text[: len(text) - len(name)].rstrip().endswith("::")
+        or any(ch in _NOT_A_SCOPE for ch in receiver)
+    ):
+        return None
+    anchored = text.startswith("::")
+    if not anchored and "::" not in receiver:
+        return None
+    if _site_language(call.path) not in _CPP_FAMILY:
+        return None
+    path = [q.strip() for q in receiver.split("::") if q.strip()]
+
+    return [*path, call.name], anchored
+
+
+def _on_written_path(qualname: str, path: list[str], anchored: bool) -> bool:
+    """Whether ``qualname`` ends with ``path``, segment by segment.
+
+    Anchored, it has to be all of it. Qualnames join with ``.`` but an
+    out-of-class definition can carry ``::`` too
+    (``tensorflow.data.DatasetOp::Dataset.Iterator``), so both split.
+    """
+    segs = [s for s in _PATH_SPLIT.split(qualname) if s]
+    n = len(path)
+    if segs[-n:] != path:
+        return False
+
+    return not anchored or len(segs) == n
+
+
+def _qualified_path_match(
+    call: _Referable, candidates: list[Symbol]
+) -> list[Symbol] | None:
+    """Narrow a fully written C/C++ path's candidates to that path.
+
+    ``test::function::GDef()`` and ``::tensorflow::OpRegistry::Global()``
+    name their target's scopes outright, and C++ qualnames spell them
+    (``tensorflow.test.function.GDef``), so a candidate counts only
+    when its qualname ends with the written path. A path written
+    relative to the enclosing namespace (``grappler::X`` inside
+    ``tensorflow``) is still a suffix. A path from the root has to be
+    the whole qualname: ``::absl::OkStatus()`` is not the repo's
+    ``tensorflow.OkStatus`` wrapper. A ``std``-rooted path matches
+    nothing: the standard reserves ``std``, and the only repo symbols
+    that can live there are template specializations whose qualnames
+    lost their arguments (``std.numeric_limits.max``), which every
+    ``std::numeric_limits<int>::max()`` would otherwise reach. A path
+    no candidate is on reaches something dekko can't see (a
+    ``using``-declaration, a namespace alias, another library) and is
+    never guessed at. A class's constructors (``a.b.Graph.Graph``) are
+    off the path ``a::b::Graph``, so a construction narrows to the
+    class, and its constructor is picked from there; only a
+    constructor whose class isn't a symbol here matches by its own
+    name.
+
+    Args:
+        call: The raw call or heritage clause being resolved.
+        candidates: Its language-filtered same-name candidates.
+
+    Returns:
+        ``None`` when the call isn't a fully written C/C++ path (the
+        ordinary ladder applies). Otherwise the candidates on the
+        path, possibly empty.
+    """
+    written = _cpp_written_path(call)
+    if written is None:
+        return None
+    path, anchored = written
+    if path[0] == "std":
+        return []
+    hits = [
+        c for c in candidates if _on_written_path(c.qualname, path, anchored)
+    ]
+    if hits:
+        return hits
+    ctor_path = [*path, path[-1]]
+
+    return [
+        c
+        for c in candidates
+        if _on_written_path(c.qualname, ctor_path, anchored)
+    ]
 
 
 def _sole_candidate_match(

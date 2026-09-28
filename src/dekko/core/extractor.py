@@ -2877,18 +2877,67 @@ def _callee_parts(node: Node) -> tuple[str, str, str | None]:
             return _callee_parts(inner)
     name_node = _callee_name_node(node)
     if name_node is not None:
-        name = _canonical_member_name(name_node)
-        for field_name in _RECEIVER_FIELDS:
-            recv_node = node.child_by_field_name(field_name)
-            if recv_node is not None:
-                receiver = _canonical_expr(recv_node)
-                joiner = _joiner_text(node, recv_node, name_node)
-                return receiver + joiner + name, name, receiver
-        return _text(node), name, None
+        text, name, receiver = _access_parts(node, name_node)
+        flat = _cpp_flat_qualifier(node)
+        if flat is not None:
+            name, receiver = flat
+        return text, name, receiver
     text = _text(node)
     if node.named_child_count == 0:
         return text, text, None
     return text, *_split_callee_text(text)
+
+
+def _access_parts(node: Node, name_node: Node) -> tuple[str, str, str | None]:
+    """(text, name, receiver) of an access-shaped callee."""
+    name = _canonical_member_name(name_node)
+    for field_name in _RECEIVER_FIELDS:
+        recv_node = node.child_by_field_name(field_name)
+        if recv_node is not None:
+            receiver = _canonical_expr(recv_node)
+            joiner = _joiner_text(node, recv_node, name_node)
+            return receiver + joiner + name, name, receiver
+    return _text(node), name, None
+
+
+def _cpp_flat_qualifier(node: Node) -> tuple[str, str | None] | None:
+    """(name, receiver) of a C++ path with 2+ scopes or a leading ``::``.
+
+    tree-sitter-cpp nests ``qualified_identifier`` to the right:
+    ``a::b::Name`` is scope ``a`` with name ``b::Name``, and ``::t::G``
+    has no scope at all, just name ``t::G``. Read field by field, that
+    named the call ``b::Name`` (no symbol has that name, so it never
+    resolved) and kept one scope out of two. Rust's paths nest to the
+    left and never had the problem. This walks the nested names down
+    to the last one and returns every scope as the receiver
+    (``a::b``), the shape a one-scope ``a::Name`` already has.
+
+    Args:
+        node: A callee or type node.
+
+    Returns:
+        ``None`` unless ``node`` is a C++ ``qualified_identifier`` with
+        a nested qualifier or no scope; the one-scope shape is already
+        split right.
+    """
+    if node.type != "qualified_identifier":
+        return None
+    scope = node.child_by_field_name("scope")
+    inner = node.child_by_field_name("name")
+    if inner is None or (
+        scope is not None and inner.type != "qualified_identifier"
+    ):
+        return None
+    scopes = [] if scope is None else [_canonical_expr(scope)]
+    while inner.type == "qualified_identifier":
+        nested_scope = inner.child_by_field_name("scope")
+        nested_name = inner.child_by_field_name("name")
+        if nested_name is None:
+            return None
+        if nested_scope is not None:
+            scopes.append(_canonical_expr(nested_scope))
+        inner = nested_name
+    return _canonical_member_name(inner), "::".join(scopes) or None
 
 
 _TEMPLATE_NAME_TYPES = frozenset({"template_method", "template_function"})
@@ -3275,6 +3324,10 @@ def _heritage_name_parts(node: Node) -> tuple[str, str, str | None]:
     argument list already is).
     """
     text = _text(node)
+    flat = _cpp_flat_qualifier(node)
+    if flat is not None:
+        name, receiver = flat
+        return text, _strip_generics(name), receiver
     name, receiver = _split_callee_text(text)
     return text, name, receiver
 

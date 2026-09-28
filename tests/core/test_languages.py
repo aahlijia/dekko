@@ -132,6 +132,17 @@ def test_spec_fingerprint_changes_with_rust_macro_call_recovery_version(
     assert languages.spec_fingerprint() != baseline
 
 
+def test_spec_fingerprint_changes_with_cpp_qualified_path_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # extractor._cpp_flat_qualifier changed how `a::b::Name` and
+    # `::ns::Name` split into a name and a receiver. Python logic, so
+    # without this marker a cached FileMap keeps the old `b::Name`.
+    baseline = languages.spec_fingerprint()
+    monkeypatch.setattr(languages, "_CPP_QUALIFIED_PATH_VERSION", 999999)
+    assert languages.spec_fingerprint() != baseline
+
+
 def test_javascript() -> None:
     files, edges = _map("js")
     syms = _symbols(files)

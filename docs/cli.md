@@ -880,7 +880,12 @@ its language family (C/C++; Java/Kotlin; JS/TS/TSX; Swift calling C
 functions): a Python `print(...)` is never listed against a C++
 `print`, and a call whose only namesakes live in other languages is
 counted external instead. Tier-2 files (shell, Starlark, Gradle, ...)
-follow the same rule, keyed on their grammar. A low ambiguous rate
+follow the same rule, keyed on their grammar. A C/C++ call written
+with its full path (`a::b::Name(..)`, or from the root, `::ns::Name(..)`)
+only reaches symbols whose qualified name ends with that path (from the
+root, whose qualified name *is* that path). So its row lists only the
+overloads on that path, and a path that names no repo symbol, or any
+`std::` path, is counted external. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output

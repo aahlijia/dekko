@@ -9,6 +9,37 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.5] — 2026-09-28
+
+### Fixed
+- **C++ calls written with a full path never resolved.**
+  `tensorflow::Scope::NewRootScope()`, `test::function::GDef()`,
+  `::tflite::ops::builtin::Register_ADD()`: any call with two or more
+  scopes, or written from the root, came out named `Scope::NewRootScope`
+  (or `tensorflow::Foo`) instead of `NewRootScope`, so it never matched a
+  symbol and was counted external. Now the name is the last segment and
+  the whole path must match the target's qualified name: `a::b::F()`
+  only reaches a `F` whose scopes end in `a::b`, a path from the root
+  (`::a::F()`) only reaches `a::F` itself, and a path that names no repo
+  symbol stays external instead of being guessed. `std::` paths never
+  resolve into the repo, so tensorflow's `std::numeric_limits`
+  specialization isn't credited with every `numeric_limits<int>::max()`.
+  On tensorflow this adds 3,510 caller → callee edges (4,067 call sites;
+  `Scope::NewRootScope` alone gains 560) and drops 583 symbols from
+  `unused` that were never dead, with no edge lost. Calls whose path
+  names several overloads become ambiguous rows listing only those
+  (+553). The same rule applies to base classes: 444 gtest fixtures
+  written `: public ::testing::Test` no longer inherit from TFLite's own
+  `tflite::testing::Test` wrapper.
+- **A Rust `impl other::Trait for Name` could resolve to a same-file
+  struct.** When the file also defined a struct named like the trait
+  (or the implementing type shared the trait's name), the struct won,
+  which is impossible, since only a trait can be implemented. The
+  clause then either vanished as a self-reference or pointed at the
+  wrong type. It now resolves to the trait: zed gains 12 impl edges
+  (`impl workspace::DebuggerProvider for DebuggerProvider`, `impl
+  sum_tree::Summary for Summary`, ...) and corrects one.
+
 ## [1.5.4] — 2026-09-28
 
 ### Fixed

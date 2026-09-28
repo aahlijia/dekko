@@ -1577,6 +1577,12 @@ _RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION = 1
 # longer symbols. Same blind spot as the constants above.
 _CPP_CONSTRUCTION_VERSION = 1
 
+# Bumped whenever the extractor changes how it splits a C++ path with
+# more than one scope, or one written from the root (``a::b::Name``,
+# ``::ns::Name``), into a name and a receiver. That walk lives in the
+# extractor, outside any query. Same blind spot as the constants above.
+_CPP_QUALIFIED_PATH_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every Tier-1 extraction spec into one invalidation key.
@@ -1590,8 +1596,9 @@ def spec_fingerprint() -> str:
     ``_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION``,
     ``_RUST_MACRO_CALL_RECOVERY_VERSION``,
     ``_CALLEE_TEXT_CANONICAL_VERSION``,
-    ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION`` and
-    ``_CPP_CONSTRUCTION_VERSION``, which each cover
+    ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION``,
+    ``_CPP_CONSTRUCTION_VERSION`` and ``_CPP_QUALIFIED_PATH_VERSION``,
+    which each cover
     one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments). Used to
     invalidate a stale ``.dekko`` cache entry or flag a stale
@@ -1612,6 +1619,7 @@ def spec_fingerprint() -> str:
         "rust_error_attribute_recovery="
         f"{_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION}",
         f"cpp_construction={_CPP_CONSTRUCTION_VERSION}",
+        f"cpp_qualified_path={_CPP_QUALIFIED_PATH_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):
