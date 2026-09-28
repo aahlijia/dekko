@@ -368,6 +368,22 @@ def _files_importing(
     return found
 
 
+def _cpp_decl_names(entries: set[str]) -> set[str]:
+    """Bare names of ``FileMap.cpp_decls`` entries.
+
+    Args:
+        entries: ``"<qualname>/<count>=<defaults>"`` entries.
+
+    Returns:
+        The last qualname segment of each.
+    """
+    names: set[str] = set()
+    for entry in entries:
+        qualname = entry.rpartition("/")[0]
+        names.add(qualname.replace("::", ".").rsplit(".", 1)[-1])
+    return names
+
+
 def _name_delta_dirty(
     files: list[FileMap],
     cached: dict[str, dict],
@@ -403,6 +419,11 @@ def _name_delta_dirty(
             # Repo-wide inputs of a C/C++ ``ns::Name`` call that no
             # name delta can see; see resolver._namespace_head_match.
             return None
+        # A prototype's declared arity only changes what calls named
+        # like it resolve to, wherever its definition lives.
+        changed |= _cpp_decl_names(
+            set(cache.old_cpp_decls(fm.path) or []) ^ set(fm.cpp_decls)
+        )
         # Whole-file compare first: cheaper than the grouped analysis
         # below, and this is the dominant agent-loop edit (a body edit,
         # a new call, a literal fix -- none of which touch any symbol's

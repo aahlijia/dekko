@@ -596,6 +596,15 @@ class FileMap:
             and not written to ``map.json``: a registry the resolver
             reads so ``tensorflow::StatusFromTF_Status(..)`` reaches
             the ``tsl`` function it re-exports.
+        cpp_decls: ``"<qualname>/<count>=<defaults>"`` for every C++
+            function prototype in this file (C++ only):
+            ``"tf.Scope.ToGraph/2=1"`` for ``Status ToGraph(Graph* g,
+            Options opts = {});`` in ``class Scope`` in ``namespace
+            tf``. The count is the non-variadic parameters, the
+            defaults the trailing defaulted ones. Not symbols and not
+            written to ``map.json``: a registry the resolver reads so
+            a ``.cc`` definition's arity takes the defaults its header
+            declares.
         type_aliases: Bare names of type-alias declarations in this
             file (TS/TSX only — see ``languages.LanguageSpec.
             type_alias_query``). Not full symbols, just names: a
@@ -626,6 +635,7 @@ class FileMap:
     type_aliases: list[str] = field(default_factory=list)
     enum_variants: list[str] = field(default_factory=list)
     cpp_using: list[str] = field(default_factory=list)
+    cpp_decls: list[str] = field(default_factory=list)
     type_uses: list[TypeUse] = field(default_factory=list)
     submodules: list[Submodule] = field(default_factory=list)
     error: str | None = None

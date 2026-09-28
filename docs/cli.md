@@ -892,10 +892,14 @@ namespace-scope `using`-declaration there re-exports (`namespace
 tensorflow { using tsl::F; }` makes `tensorflow::F()` the `tsl`
 function). A call nothing qualifies for is counted external rather
 than listed, and several that qualify are the only ones its row lists.
-When exactly one qualifies but its parameters don't fit the call's
-argument count (dekko doesn't see defaults a header declares), the call
-resolves the way it did before this rule, except that a target outside
-the written namespace is counted external. A one-scope call through a
+A C/C++ definition's argument count is read with the defaults its
+header prototype declares (same qualified name and parameter count),
+since a `.cc` definition can't repeat them. When exactly one symbol
+qualifies but its parameters don't fit the call's argument count even
+with those defaults, the call is counted external. When no prototype
+of it was found, so dekko can't know its defaults, the call resolves
+the way it did before this rule, except that a target outside the
+written namespace is counted external. A one-scope call through a
 class (`TensorShape::IsValid()`, which may reach a base class, or
 `View<T>::Next()`) or through a name dekko never saw as a namespace (a
 namespace alias) resolves as before. A low ambiguous rate

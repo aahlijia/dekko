@@ -90,6 +90,7 @@ def _filemap_from_dict(d: dict) -> FileMap:
         type_aliases=list(d.get("type_aliases", [])),
         enum_variants=list(d.get("enum_variants", [])),
         cpp_using=list(d.get("cpp_using", [])),
+        cpp_decls=list(d.get("cpp_decls", [])),
         type_uses=[TypeUse(**t) for t in d.get("type_uses", [])],
         submodules=[Submodule(**m) for m in d.get("submodules", [])],
         error=d.get("error"),
@@ -154,6 +155,17 @@ class IncrementalCache:
         if entry is None:
             return None
         return entry.get("file", {}).get("cpp_using", [])
+
+    def old_cpp_decls(self, rel: str) -> list[str] | None:
+        """Previously cached ``FileMap.cpp_decls`` for ``rel``, if any.
+
+        ``None`` when this file had no prior cache entry at all, like
+        ``old_symbols``.
+        """
+        entry = self._old.get(rel)
+        if entry is None:
+            return None
+        return entry.get("file", {}).get("cpp_decls", [])
 
     def old_hash(self, rel: str) -> str | None:
         """Content hash the prior cache recorded for ``rel``, if any."""

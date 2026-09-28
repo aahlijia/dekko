@@ -2857,7 +2857,7 @@ def _add_call_and_constructor(
     if not ctors:
         return
 
-    ctor, overloads = _pick_constructor(target, ctors, call)
+    ctor, overloads = _pick_constructor(target, ctors, call, index)
     if ctor is not None:
         _add_edge(caller_id, ctor.id, call.line, edges)
     elif overloads:
@@ -3137,7 +3137,11 @@ def _candidate_arity(
     return _param_arity(params)
 
 
-def _arity_plausible(candidate: Symbol, call: _Referable) -> bool:
+def _arity_plausible(
+    candidate: Symbol,
+    call: _Referable,
+    index: dict[str, list[Symbol]],
+) -> bool:
     """Whether ``call``'s written argument count fits ``candidate``.
 
     The safe default is ``True`` (never suppress) whenever
@@ -3150,9 +3154,14 @@ def _arity_plausible(candidate: Symbol, call: _Referable) -> bool:
     missing arity signal must never itself become a new false-positive
     suppression.
 
+    A C/C++ definition is read with the defaults its prototypes
+    declare (``_declared``).
+
     Args:
         candidate: The sole remaining candidate symbol.
         call: The raw call/reference/heritage clause being resolved.
+        index: The bare-name index, with the ``_CPP_DECLARED_KEY``
+            entries.
 
     Returns:
         True when ``call.arg_count`` is unavailable, or falls within
@@ -3162,7 +3171,7 @@ def _arity_plausible(candidate: Symbol, call: _Referable) -> bool:
     arg_count = getattr(call, "arg_count", None)
     if arg_count is None:
         return True
-    min_count, max_count = _candidate_arity(candidate, call)
+    min_count, max_count = _candidate_arity(_declared(candidate, index), call)
     if arg_count < min_count:
         return False
     return max_count is None or arg_count <= max_count
@@ -3654,13 +3663,13 @@ def _namespace_head_match(
 
     One written scope is weaker evidence than a full path, so the
     ladder still picks. A lone survivor whose parameters don't fit the
-    call's argument count is the one case the narrowing can't settle:
-    it may be an unrelated namesake on the same path (the
-    five-parameter ``tensorflow::ops::Identity`` in ``c/experimental``
-    for the generated two-argument ``ops::Identity`` that isn't in the
-    repo),
-    or the real target whose defaults live in a header dekko doesn't
-    read (``GetTypeFromTFTensorShape(shape, type)``). Narrowing to it
+    call's argument count may be an unrelated namesake on the same
+    path: the four-parameter ``tensorflow::ops::Identity`` in
+    ``c/experimental`` for the generated two-argument
+    ``ops::Identity`` that isn't in the repo. When a prototype
+    declares its arity (``_arity_known``), the mismatch is real and
+    nothing on the path is the target. When none does, it may also be
+    the real target with defaults dekko never saw, and narrowing to it
     would hand it to the ``#include`` rung, which runs before any
     arity check, and turn ambiguous rows into guesses. So that case
     doesn't narrow: the ladder runs over every candidate, as it would
@@ -3669,8 +3678,8 @@ def _namespace_head_match(
     Args:
         call: The raw call being resolved.
         candidates: Its language-filtered same-name candidates.
-        index: The bare-name index, with the ``_CPP_SCOPE_KEY`` and
-            ``_CPP_USING_KEY`` entries.
+        index: The bare-name index, with the ``_CPP_SCOPE_KEY``,
+            ``_CPP_USING_KEY`` and ``_CPP_DECLARED_KEY`` entries.
 
     Returns:
         ``None`` when the call isn't a one-scope namespace-head call
@@ -3704,8 +3713,12 @@ def _namespace_head_match(
     confident = (
         len(hits) != 1
         or hits[0].kind in TYPE_KINDS
-        or _arity_plausible(hits[0], call)
+        or _arity_plausible(hits[0], call, index)
     )
+    if not confident and _arity_known(hits[0], index):
+        # Its declared arity doesn't fit either: nothing on the path
+        # is the target.
+        return [], True
 
     return hits, confident
 
@@ -3761,7 +3774,7 @@ def _sole_candidate_match(
     if (
         only.kind in TYPE_KINDS and _class_named_constructors(only, index)
     ) or (
-        _arity_plausible(only, call)
+        _arity_plausible(only, call, index)
         and not _rust_name_is_also_a_variant(call, only, index)
     ):
         # A class with named constructors stands for them after
@@ -4750,7 +4763,7 @@ def _owned_by_receiver_type(
     # without an arity check (live-testing on zed: 7 ``Point::zero()``
     # calls moved from ``point.rs``'s inherent fn to the ``Dimension``
     # impl sitting in the caller's own file).
-    plausible = [c for c in kept if _arity_plausible(c, call)]
+    plausible = [c for c in kept if _arity_plausible(c, call, index)]
     return plausible or kept
 
 
@@ -5093,19 +5106,29 @@ def _declared_param_count(ctor: Symbol) -> int:
     )
 
 
-def _arity_fits(cls: Symbol, ctor: Symbol, arg_count: int) -> bool:
+def _arity_fits(
+    cls: Symbol,
+    ctor: Symbol,
+    arg_count: int,
+    index: dict[str, list[Symbol]],
+) -> bool:
     """Whether ``arg_count`` written arguments fit ``cls``'s ``ctor``.
 
     A C++ constructor defined outside its class body shows no default
-    arguments: they belong to the in-class declaration, which isn't
-    extracted. ``InterpreterBuilder(model, resolver)`` calls a ctor
-    whose ``.cc`` definition lists three parameters, the third
-    defaulted in the header. Any count up to the declared one fits
-    such a constructor; ``_pick_constructor``'s exact tier still
-    prefers the overload that declares exactly the written count.
+    arguments: they belong to the in-class declaration.
+    ``InterpreterBuilder(model, resolver)`` calls a ctor whose ``.cc``
+    definition lists three parameters, the third defaulted in the
+    header. When that declaration matched (``_declared``), its
+    defaults set the minimum. Otherwise any count up to the declared
+    one fits such a constructor; ``_pick_constructor``'s exact tier
+    still prefers the overload that declares exactly the written
+    count.
     """
-    min_count, max_count = _param_arity(_constructor_params(ctor))
-    if _out_of_class_cpp_constructor(cls, ctor):
+    declared = _declared(ctor, index)
+    min_count, max_count = _param_arity(_constructor_params(declared))
+    if not _arity_known(ctor, index) and _out_of_class_cpp_constructor(
+        cls, ctor
+    ):
         min_count = 0
     if arg_count < min_count:
         return False
@@ -5121,7 +5144,10 @@ def _out_of_class_cpp_constructor(cls: Symbol, ctor: Symbol) -> bool:
 
 
 def _pick_constructor(
-    cls: Symbol, ctors: list[Symbol], call: RawCall
+    cls: Symbol,
+    ctors: list[Symbol],
+    call: RawCall,
+    index: dict[str, list[Symbol]],
 ) -> tuple[Symbol | None, list[Symbol]]:
     """The constructor overload a construction's argument count selects.
 
@@ -5138,6 +5164,8 @@ def _pick_constructor(
         cls: The constructed class.
         ctors: The class's constructors, from ``_constructors_of``.
         call: The construction call.
+        index: The bare-name index, for each constructor's declared
+            arity (``_arity_fits``).
 
     Returns:
         ``(ctor, [])`` when one constructor is selected;
@@ -5150,7 +5178,7 @@ def _pick_constructor(
         if len(ctors) == 1:
             return ctors[0], []
         return None, ctors
-    fitting = [c for c in ctors if _arity_fits(cls, c, n)]
+    fitting = [c for c in ctors if _arity_fits(cls, c, n, index)]
     exact = [c for c in fitting if _declared_param_count(c) == n]
     for tier in (exact, fitting):
         if len(tier) == 1:
@@ -6080,11 +6108,18 @@ _RUST_VARIANT_KEY = "::variant::"
 _CPP_SCOPE_KEY = "::cpp-scope::"
 _CPP_USING_KEY = "::cpp-using::"
 
+# Reserved ``index`` namespace for C/C++ definitions whose arity a
+# prototype declares: ``_CPP_DECLARED_KEY + sym.id`` holds one copy of
+# ``sym`` with the prototype's trailing defaults applied. The key's
+# presence means the definition's arity is known, not just guessed
+# from a ``.cc`` definition that can't repeat its header's defaults.
+_CPP_DECLARED_KEY = "::cpp-declared::"
+
 
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
-    ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY`` and ``_CPP_USING_KEY``
-    entries."""
+    ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY`` and
+    ``_CPP_DECLARED_KEY`` entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
@@ -6101,7 +6136,84 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     for fm in files:
         for entry in fm.cpp_using:
             _index_cpp_using(entry, index)
+    _index_cpp_declared(files, index)
     return index
+
+
+def _index_cpp_declared(
+    files: list[FileMap], index: dict[str, list[Symbol]]
+) -> None:
+    """Record each C/C++ definition's arity as its prototypes declare it.
+
+    A default argument belongs to the first declaration, almost always
+    the header prototype, and the ``.cc`` definition may not repeat
+    it: ``ToGraph(Graph* g, Options opts = {})`` in ``scope.h`` is
+    ``ToGraph(Graph* g, Options opts)`` in ``scope.cc``. A definition
+    matches every prototype with the same qualname (``::`` inside a
+    segment read as ``.``, since ``namespace a::b {`` is one segment)
+    and the same parameter count, and takes the most defaults any of
+    them declares: later declarations may add defaults, and one class
+    declared twice under two build configurations can disagree.
+
+    The symbol itself is never changed, so ``map.json``'s params and
+    the extraction cache keep what the definition says.
+    """
+    declared: dict[tuple[str, int], int] = {}
+    for fm in files:
+        for entry in fm.cpp_decls:
+            qualname, _, arity = entry.rpartition("/")
+            count, _, defaults = arity.partition("=")
+            key = (_dotted_qualname(qualname), int(count))
+            declared[key] = max(declared.get(key, 0), int(defaults))
+    if not declared:
+        return
+
+    for fm in files:
+        for sym in fm.symbols:
+            if sym.language not in _CPP_FAMILY or sym.kind not in (
+                "function",
+                "method",
+            ):
+                continue
+            plain = [p for p in sym.params if not p.variadic]
+            defaults = declared.get(
+                (_dotted_qualname(sym.qualname), len(plain))
+            )
+            if defaults is not None:
+                index[_CPP_DECLARED_KEY + sym.id] = [
+                    _with_trailing_defaults(sym, defaults)
+                ]
+
+
+def _dotted_qualname(qualname: str) -> str:
+    """``qualname`` with every ``::`` read as ``.``."""
+    return ".".join(
+        seg for seg in qualname.replace("::", ".").split(".") if seg
+    )
+
+
+def _with_trailing_defaults(sym: Symbol, defaults: int) -> Symbol:
+    """``sym``, or a copy whose last ``defaults`` params are defaulted."""
+    plain = [i for i, p in enumerate(sym.params) if not p.variadic]
+    lowered = plain[len(plain) - defaults :] if defaults else []
+    if all(sym.params[i].has_default for i in lowered):
+        return sym
+
+    params = list(sym.params)
+    for i in lowered:
+        params[i] = replace(params[i], has_default=True)
+    return replace(sym, params=params)
+
+
+def _declared(sym: Symbol, index: dict[str, list[Symbol]]) -> Symbol:
+    """``sym`` with its prototypes' defaults, when a prototype matched."""
+    shadow = index.get(_CPP_DECLARED_KEY + sym.id)
+    return shadow[0] if shadow else sym
+
+
+def _arity_known(sym: Symbol, index: dict[str, list[Symbol]]) -> bool:
+    """Whether a prototype declares ``sym``'s arity (see ``_declared``)."""
+    return _CPP_DECLARED_KEY + sym.id in index
 
 
 def _index_cpp_using(entry: str, index: dict[str, list[Symbol]]) -> None:

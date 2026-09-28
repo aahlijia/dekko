@@ -119,6 +119,9 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     cpp_using = (
         _collect_cpp_using(tree.root_node) if spec.name in ("c", "cpp") else []
     )
+    cpp_decls = (
+        _collect_cpp_decls(tree.root_node) if spec.name == "cpp" else []
+    )
     type_uses = _collect_type_uses(spec, tree.root_node, rel, defs)
     submodules = (
         rust_cfg.collect_submodules(tree.root_node, rel)
@@ -140,6 +143,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         type_aliases=type_aliases,
         enum_variants=enum_variants,
         cpp_using=cpp_using,
+        cpp_decls=cpp_decls,
         type_uses=type_uses,
         submodules=submodules,
         doc=_module_doc(spec.name, tree.root_node),
@@ -4273,6 +4277,131 @@ def _cpp_scope_text(scope: Node) -> str:
         return _text(name) if name is not None else ""
 
     return _text(scope).strip()
+
+
+# Where a C++ prototype can sit: namespace, class, template, linkage
+# and preprocessor scope. A function body is never walked, since a
+# local ``Graph g(ops);`` parses as a function declaration.
+_CPP_DECL_SCOPE_NODES = frozenset(
+    {
+        "translation_unit",
+        "declaration_list",
+        "field_declaration_list",
+        "linkage_specification",
+        "template_declaration",
+        "preproc_if",
+        "preproc_ifdef",
+        "preproc_else",
+        "preproc_elif",
+        "preproc_elifdef",
+    }
+)
+_CPP_DECLARATOR_WRAPPERS = frozenset(
+    {"pointer_declarator", "reference_declarator", "attributed_declarator"}
+)
+_CPP_TEMPLATE_ARGS = re.compile(r"<[^<>]*(?:<[^<>]*>[^<>]*)*>")
+
+
+def _collect_cpp_decls(root: Node) -> list[str]:
+    """``"<qualname>/<count>=<defaults>"`` for every C++ function
+    prototype (see ``FileMap.cpp_decls``), in source order."""
+    out: list[str] = []
+    _walk_cpp_decls(root, (), out)
+    return out
+
+
+def _walk_cpp_decls(
+    node: Node, chain: tuple[str, ...], out: list[str]
+) -> None:
+    """Append the prototypes under ``node``, whose scope is ``chain``."""
+    for child in node.named_children:
+        kind = child.type
+        if kind == "namespace_definition":
+            name = child.child_by_field_name("name")
+            body = child.child_by_field_name("body")
+            if body is not None:
+                inner = chain + (_cpp_decl_path(name) if name else ())
+                _walk_cpp_decls(body, inner, out)
+        elif kind in ("class_specifier", "struct_specifier"):
+            name = child.child_by_field_name("name")
+            body = child.child_by_field_name("body")
+            if name is not None and body is not None:
+                _walk_cpp_decls(body, chain + _cpp_decl_path(name), out)
+        elif kind in ("declaration", "field_declaration"):
+            out.extend(_cpp_prototypes(child, chain))
+        elif kind in _CPP_DECL_SCOPE_NODES:
+            _walk_cpp_decls(child, chain, out)
+
+
+def _cpp_prototypes(decl: Node, chain: tuple[str, ...]) -> list[str]:
+    """One entry per function declarator of a (field) declaration.
+
+    The count is what ``_params_c`` counts for a definition of the
+    same function, so the two join on equal terms; the defaults are
+    its trailing defaulted parameters.
+    """
+    found: list[str] = []
+    for declarator in decl.children_by_field_name("declarator"):
+        func = _cpp_function_declarator(declarator)
+        if func is None:
+            continue
+        name = func.child_by_field_name("declarator")
+        params_node = func.child_by_field_name("parameters")
+        if (
+            name is None
+            or params_node is None
+            or name.type == "parenthesized_declarator"
+        ):
+            # ``int (*fp)(int);`` declares a pointer, not a function.
+            continue
+        path = _cpp_decl_path(name)
+        if not path:
+            continue
+        params = [p for p in _params_c(params_node) if not p.variadic]
+        defaults = 0
+        for param in reversed(params):
+            if not param.has_default:
+                break
+            defaults += 1
+        qualname = ".".join(chain + path)
+        found.append(f"{qualname}/{len(params)}={defaults}")
+    return found
+
+
+def _cpp_function_declarator(node: Node) -> Node | None:
+    """The ``function_declarator`` a declaration's declarator wraps.
+
+    ``None`` for a declarator that isn't a function's.
+    """
+    current: Node | None = node
+    while current is not None and current.type in _CPP_DECLARATOR_WRAPPERS:
+        inner = current.child_by_field_name("declarator")
+        if inner is None:
+            inner = next(
+                (c for c in current.named_children if "declarator" in c.type),
+                None,
+            )
+        current = inner
+    if current is not None and current.type == "function_declarator":
+        return current
+
+    return None
+
+
+def _cpp_decl_path(name: Node) -> tuple[str, ...]:
+    """A written C++ name as qualname segments, template arguments off.
+
+    ``a::b`` (a nested namespace, or an out-of-line ``Outer::Inner``)
+    becomes two segments, as the resolver reads a qualname.
+    """
+    text = _text(name)
+    previous = None
+    while previous != text:
+        previous, text = text, _CPP_TEMPLATE_ARGS.sub("", text)
+
+    return tuple(
+        seg.strip() for seg in text.lstrip(":").split("::") if seg.strip()
+    )
 
 
 def _collect_type_aliases(spec: LanguageSpec, root: Node) -> list[str]:

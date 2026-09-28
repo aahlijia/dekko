@@ -9,6 +9,40 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.7] — 2026-09-28
+
+### Fixed
+- **C++ argument counts ignored the defaults a header declares.** A
+  default argument lives on the header prototype, and the `.cc`
+  definition can't repeat it, so dekko read `Status ToGraph(Graph* g,
+  GraphConstructorOptions opts = {})` as needing two arguments and
+  counted every `scope.ToGraph(&g)` as external. dekko now reads C++
+  prototypes (in headers, classes, namespaces and templates) and gives
+  each definition with the same qualified name and parameter count the
+  defaults they declare. Three things change. Calls that leave out a
+  declared default resolve (`Scope::ToGraph` gains 88 call sites on
+  tensorflow, `GetTypeFromTFTensorShape` 35). A call through one
+  namespace that can't fit the one function on that path even with its
+  defaults is counted external instead of reaching it through an
+  `#include`: 542 generated `ops::Identity(scope, x)`-style calls no
+  longer land on the unrelated `c/experimental/ops` functions. And an
+  out-of-line constructor with a known declaration keeps its real
+  minimum, so the kernel-builder call `Name("X").Device(DEVICE_CPU)` no
+  longer credits `Device::Device` (117 sites). On tensorflow: 663 wrong
+  call sites removed, 266 added, 518 ambiguous rows resolved, none new.
+  A definition with no matching prototype resolves as before, and
+  `map.json`'s parameter lists still show what the definition says.
+  Editing a header prototype re-resolves only the files that call that
+  name. Other languages are unaffected.
+
+### Known limitations
+- A generated `ops::X(scope, ..)` call whose argument count happens to
+  fit the `c/experimental/ops` function of the same name still reaches
+  it (19 sites on tensorflow). Only argument types could tell them
+  apart, and the generated headers aren't in the repo.
+- `Device::Device` now shows up in `unused`: its real callers are
+  subclass constructors' initializer lists, which dekko doesn't read.
+
 ## [1.5.6] — 2026-09-28
 
 ### Fixed

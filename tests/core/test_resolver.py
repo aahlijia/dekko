@@ -2399,7 +2399,7 @@ def test_arity_plausible_python_strips_self_for_receiver_qualified_call() -> (
         receiver="task",
         arg_count=1,
     )
-    assert resolver_mod._arity_plausible(method, call) is True
+    assert resolver_mod._arity_plausible(method, call, {}) is True
 
     bare_call = RawCall(
         caller_id=None,
@@ -2410,7 +2410,7 @@ def test_arity_plausible_python_strips_self_for_receiver_qualified_call() -> (
     )
     # Bare call: `self` is not stripped (no receiver expression could
     # have supplied it), so the effective minimum is 2, not 1.
-    assert resolver_mod._arity_plausible(method, bare_call) is False
+    assert resolver_mod._arity_plausible(method, bare_call, {}) is False
 
 
 def test_arity_plausible_rust_strips_self_parameter_variants() -> None:
@@ -2425,7 +2425,7 @@ def test_arity_plausible_rust_strips_self_parameter_variants() -> None:
             receiver="p",
             arg_count=1,
         )
-        assert resolver_mod._arity_plausible(method, call) is True
+        assert resolver_mod._arity_plausible(method, call, {}) is True
 
 
 def test_param_arity_excludes_python_syntax_marker_params() -> None:

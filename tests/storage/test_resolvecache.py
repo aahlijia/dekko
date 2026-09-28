@@ -688,3 +688,53 @@ def test_cpp_namespace_inputs_keep_incremental_equal_to_full(
     full = _graph_json(root)
 
     assert incremental == full
+
+
+# A prototype's defaults change what calls named like it resolve to,
+# though no symbol changes: the header holds only the declaration.
+DECL_SRC = {
+    "shape.h": "namespace tf {\nint GetType(int a, int b);\n}\n",
+    "shape.cc": "namespace tf {\nint GetType(int a, int b) { return a; }\n}\n",
+    "user.cc": "namespace app {\nint Use() { return GetType(1); }\n}\n",
+    "other.cc": "namespace app {\nint Other() { return Use(); }\n}\n",
+}
+_DEFAULTED = "namespace tf {\nint GetType(int a, int b = 0);\n}\n"
+
+
+def test_gate_widens_to_callers_when_a_prototype_default_changes(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(DECL_SRC)
+    (root / "shape.h").write_text(_DEFAULTED)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"shape.h", "user.cc"}
+
+
+def test_gate_fires_on_a_header_body_only_edit(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(DECL_SRC)
+    (root / "shape.h").write_text(DECL_SRC["shape.h"] + "// a comment\n")
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"shape.h"}
+
+
+def test_prototype_default_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(DECL_SRC)
+    (root / "shape.h").write_text(_DEFAULTED)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    assert ("user.cc::app.Use", "shape.cc::tf.GetType") in {
+        (ids[e["caller"]], ids[e["callee"]]) for e in incremental["edges"]
+    }

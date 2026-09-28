@@ -154,6 +154,17 @@ def test_spec_fingerprint_changes_with_cpp_using_version(
     assert languages.spec_fingerprint() != baseline
 
 
+def test_spec_fingerprint_changes_with_cpp_decls_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # extractor._collect_cpp_decls records C++ prototypes outside any
+    # query; a cached FileMap from before it has no `cpp_decls`, so
+    # every definition would lose its header's defaults.
+    baseline = languages.spec_fingerprint()
+    monkeypatch.setattr(languages, "_CPP_DECLS_VERSION", 999999)
+    assert languages.spec_fingerprint() != baseline
+
+
 def test_javascript() -> None:
     files, edges = _map("js")
     syms = _symbols(files)

@@ -118,12 +118,11 @@ def test_call_picks_the_namesake_in_the_written_namespace(
     assert _pairs(graph, caller) == {"lib/ref.h::tflite.reference_ops.Resize"}
 
 
-def test_lone_namesake_that_does_not_fit_is_left_to_the_ladder(
+def test_lone_namesake_fitting_its_header_default_becomes_the_edge(
     tmp_path: Path,
 ) -> None:
     # The header gives ``encoding`` a default the ``.cc`` definition
-    # doesn't show, so a 2-argument call looks like it can't fit. The
-    # include still settles it, the way it does without the rule.
+    # doesn't show; read with it, a 2-argument call fits.
     graph = _graph(
         tmp_path,
         {
