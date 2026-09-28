@@ -481,10 +481,10 @@ def test_aliased_import_reference_resolves_to_real_target() -> None:
     # local import alias must resolve into referenced/_in/_out, not
     # be silently dropped just because the alias misses the by-name
     # index.
-    real = _fn("target.py", "resolveBug")
+    real = _fn("target.ts", "resolveBug", language="typescript")
     wire_up = _fn("caller.ts", "wireUp")
     files = [
-        FileMap("target.py", "python", symbols=[real]),
+        FileMap("target.ts", "typescript", symbols=[real]),
         FileMap(
             "caller.ts",
             "typescript",
@@ -783,7 +783,7 @@ def test_typed_parameter_match_strips_generic_wrapper() -> None:
 def test_untyped_parameter_falls_back_to_existing_ladder() -> None:
     # No declared type on the parameter: unchanged behavior — falls
     # through to the same-file step, exactly like before this fix.
-    same_file_fn = _fn("caller.ts", "initTask", line=1)
+    same_file_fn = _fn("caller.ts", "initTask", line=1, language="typescript")
     caller = Symbol(
         id="caller.ts::setup",
         name="setup",
@@ -1610,8 +1610,8 @@ def test_bare_call_to_same_file_builtin_named_function_still_resolves() -> (
     # genuinely local bare call to a same-file function sharing a
     # built-in method name (dekko's real cline callers: bare
     # ``trim(value)``, no receiver) must still resolve normally.
-    trim_fn = _fn("util.ts", "trim")
-    caller = _fn("util.ts", "run", line=5)
+    trim_fn = _fn("util.ts", "trim", language="typescript")
+    caller = _fn("util.ts", "run", line=5, language="typescript")
     files = [
         FileMap(
             "util.ts",
@@ -1645,7 +1645,7 @@ def test_exact_self_receiver_builtin_named_method_still_resolves() -> None:
         language="typescript",
         symbols=[
             _fn("c.ts", "C", "C"),
-            _fn("c.ts", "trim", "C.trim", line=2),
+            _fn("c.ts", "trim", "C.trim", line=2, language="typescript"),
             _fn("c.ts", "m", "C.m", line=4),
         ],
         calls=[
@@ -4937,15 +4937,14 @@ def test_pick_candidate_returns_none_when_language_filtered_empty() -> None:
     assert result is None
 
 
-def test_resolve_call_records_cross_family_miss_as_ambiguous() -> None:
-    """Full ``_resolve_call``/``resolve()`` integration test for the
-    residual tensorflow gap: the real C++ target lives outside the
-    map entirely (simulating a vendored/excluded directory), leaving
-    only a same-bare-name, unrelated-language Python class as the sole
-    candidate. This must land in ``graph.ambiguous`` -- not silently
-    resolve to the Python symbol as an edge -- so
-    ``query.py``'s existing ambiguous-call disclosure surfaces it
-    instead of reporting a confidently wrong fan-in."""
+def test_resolve_call_counts_cross_family_miss_as_external() -> None:
+    """The real C++ target lives outside the map (a vendored or
+    excluded directory), leaving only a same-bare-name Python class.
+    The call must not resolve to it, and it must not be recorded as
+    ambiguous either: a C++ call can never reach a Python class, so
+    listing it would say "+N resolved ambiguously" on a symbol no C++
+    code calls (2,882 such rows on tensorflow's ``InvalidArgumentError``
+    alone). With no live candidate the call is external."""
     python_class = Symbol(
         id="tensorflow/python/framework/errors_impl.py::InvalidArgumentError",
         name="InvalidArgumentError",
@@ -4987,11 +4986,10 @@ def test_resolve_call_records_cross_family_miss_as_ambiguous() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, python_class.id) not in edges
     assert edges == set()
-    assert len(graph.ambiguous) == 1
-    ambiguous_caller, ambiguous_name, ambiguous_cands = graph.ambiguous[0]
-    assert ambiguous_caller == caller.id
-    assert ambiguous_name == "InvalidArgumentError"
-    assert ambiguous_cands == [python_class.id]
+    assert graph.ambiguous == []
+    assert [ext.callee for ext in graph.external] == [
+        "errors::InvalidArgumentError"
+    ]
 
 
 def test_cross_language_bare_call_no_longer_resolves_to_wrong_symbol() -> None:

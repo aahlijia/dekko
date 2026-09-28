@@ -163,10 +163,12 @@ _WHOLE_FILE_IMPORT_LANGUAGES = frozenset({"c", "cpp"})
 # a same-bare-name candidate is allowed to cross. Java and Kotlin
 # share one JVM: a Kotlin file imports and calls Java classes directly
 # (most of spring-boot's in-repo Kotlin imports name a ``.java`` file),
-# and Java can call Kotlin. Every language with no declared family
-# here (python, rust, go, ...) has no such precedent anywhere in the
-# resolver and defaults to a same-language-only singleton family in
-# ``_language_filtered``.
+# and Java can call Kotlin. Swift (Tier-2) calls C functions directly
+# (tensorflow's Swift API is written over the TfLite C API); C and C++
+# can't call Swift back, so the pairing is one-way. Every language
+# with no declared family here (python, rust, go, bash, groovy, ...)
+# has no such precedent anywhere in the resolver and defaults to a
+# same-language-only singleton family in ``_language_filtered``.
 _LANGUAGE_FAMILIES: dict[str, frozenset[str]] = {
     "c": frozenset({"c", "cpp"}),
     "cpp": frozenset({"c", "cpp"}),
@@ -175,6 +177,18 @@ _LANGUAGE_FAMILIES: dict[str, frozenset[str]] = {
     "javascript": frozenset({"javascript", "typescript", "tsx"}),
     "typescript": frozenset({"javascript", "typescript", "tsx"}),
     "tsx": frozenset({"javascript", "typescript", "tsx"}),
+    "swift": frozenset({"swift", "c", "cpp"}),
+}
+# The symbol kinds a family's *other* languages can supply, where that
+# is narrower than everything, and then only to a bare call. Swift
+# imports C functions as globals, not C++ classes or methods:
+# tensorflow's Swift API reaches 63 TfLite C API functions with bare
+# calls, and every other Swift edge that crossed into C/C++ was a
+# namesake (``Bundle.path(..)`` landing on a C++ test fixture's
+# ``path``, ``Int(..)`` on a header's ``Type.Int``, a pointer's
+# ``buffer.deallocate()`` on a C++ ``deallocate`` function).
+_FAMILY_FOREIGN_KINDS: dict[str, frozenset[str]] = {
+    "swift": frozenset({"function"}),
 }
 # The JS family's dialects are one language for candidate narrowing,
 # not just one family: a ``.tsx`` file calls into ``.ts`` files as
@@ -1644,7 +1658,7 @@ def _resolve_ref(
     falls through to ``external`` with nothing further tracked.
     """
     caller_id = ref.caller_id or f"{ref.path}{MODULE_CALLER_SUFFIX}"
-    candidates = index.get(ref.name, [])
+    candidates = _language_filtered(ref, index.get(ref.name, []))
     if ref.bound is not None:
         # The identifier names a parameter or a local. Not the candidate
         # pre-filter ``_pick_candidate`` warns about: nothing is being
@@ -1655,7 +1669,9 @@ def _resolve_ref(
             edges.setdefault((caller_id, fixture.id), set()).add(ref.line)
         return
     if not candidates:
-        alias = _alias_candidates(ref, file_imports, index)
+        alias = _language_filtered(
+            ref, _alias_candidates(ref, file_imports, index)
+        )
         if len(alias) == 1 and alias[0].id != caller_id:
             edges.setdefault((caller_id, alias[0].id), set()).add(ref.line)
         return
@@ -2148,13 +2164,13 @@ def _resolve_one_heritage(
         _record_external_heritage(h, external, relations)
         return
 
-    candidates = [c for c in index.get(h.name, []) if c.kind in TYPE_KINDS]
-    if h.relation == "impl":
-        candidates = _narrow_impl_candidates_to_traits(candidates)
+    candidates = _heritage_candidates(h, index)
     if not candidates:
         alias = [
             c
-            for c in _alias_candidates(h, file_imports, index)
+            for c in _language_filtered(
+                h, _alias_candidates(h, file_imports, index)
+            )
             if c.kind in TYPE_KINDS
         ]
         if len(alias) == 1:
@@ -2195,7 +2211,22 @@ def _resolve_one_heritage(
     if decoy_free is not None:
         _add_heritage_edge(h, decoy_free.id, edges, relations)
         return
+    if len(candidates) < 2:
+        _record_external_heritage(h, external, relations)
+        return
+
     _record_ambiguous(h.subtype_id, h.name, candidates, ambiguous)
+
+
+def _heritage_candidates(
+    h: RawHeritage, index: dict[str, list[Symbol]]
+) -> list[Symbol]:
+    """The types a heritage clause's name can reach from its language."""
+    candidates = [c for c in index.get(h.name, []) if c.kind in TYPE_KINDS]
+    if h.relation == "impl":
+        candidates = _narrow_impl_candidates_to_traits(candidates)
+
+    return _language_filtered(h, candidates)
 
 
 def _hintless_decoy_tiebreak(
@@ -2350,7 +2381,9 @@ def _resolve_type_name(
         genuinely ambiguous (``candidates`` has 2+ entries, a real
         same-name-in-two-files collision).
     """
-    candidates = [c for c in index.get(name, []) if c.kind in TYPE_KINDS]
+    candidates = _language_filtered_at(
+        path, [c for c in index.get(name, []) if c.kind in TYPE_KINDS]
+    )
     if not candidates:
         return None, []
     if len(candidates) == 1:
@@ -2671,9 +2704,11 @@ def _resolve_call(
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
 
-    candidates = index.get(call.name, [])
+    candidates = _language_filtered(call, index.get(call.name, []))
     if not candidates:
-        alias = _alias_candidates(call, file_imports, index)
+        alias = _language_filtered(
+            call, _alias_candidates(call, file_imports, index)
+        )
         if len(alias) == 1:
             _add_call_and_constructor(
                 caller_id,
@@ -2710,6 +2745,11 @@ def _resolve_call(
             caller_id, target, call, by_name_path, index, edges, ambiguous
         )
         return
+    if len(candidates) < 2:
+        # Nothing live to be ambiguous among; see _sole_candidate_match.
+        external.setdefault((caller_id, call.text), set()).add(call.line)
+        return
+
     _record_ambiguous(caller_id, call.name, candidates, ambiguous)
 
 
@@ -2819,10 +2859,12 @@ def _language_filtered(
     ``errors::InvalidArgumentError`` calls resolving to a same-
     named, unrelated Python class purely because it was the sole
     non-method candidate left once ``_bare_call_non_method_match``
-    ran). ``call.path``'s registry language (Tier-1 only — every
-    symbol candidate comes from Tier-1 extraction, so a Tier-2/
-    unrecognized call-site path has nothing meaningful to compare
-    against) is the source of truth for the call site's own language.
+    ran). ``call.path``'s registry language is the source of truth for
+    the call site's own language: the Tier-1 spec name, or for a Tier-2
+    file its grammar name, which is also the ``language`` its symbols
+    carry. A shell script's ``exit`` is not a Python ``exit``, and a
+    ``.gradle`` script's ``id "java"`` is not a Java ``id()`` method.
+    Only a path no registry recognizes keeps every candidate.
 
     Two-stage narrowing, not a single same-language check: same-
     language candidates win outright when any exist. Otherwise, the
@@ -2844,12 +2886,14 @@ def _language_filtered(
     Removing candidates that can never legitimately be the right
     answer must never turn a resolvable call into an unresolvable one
     *when a same-family candidate exists*; a call that can only
-    "resolve" via a definitively unrelated language family is
-    intentionally downgraded to unresolved/ambiguous (via
-    ``_pick_candidate``'s caller falling through to
-    ``_record_ambiguous`` with the original, unfiltered candidate
-    list) rather than answered wrong. A language with no declared
-    family (python, rust, go, java, ...) behaves exactly as before:
+    "resolve" via a definitively unrelated language family is counted
+    external rather than answered wrong. It is not ambiguous either:
+    ``_resolve_call`` and its heritage/throws siblings filter at entry
+    and record an ambiguous row only among the 2+ candidates that
+    survive here, so a disclosure never names a symbol the call could
+    not have reached (a C++ ``errors::InvalidArgumentError(..)`` once
+    showed as an ambiguous call to tensorflow's Python class). A
+    language with no declared family (python, rust, go, ...) is
     same-language-or-nothing, since its family is itself alone.
 
     "Same language" means same *resolution* language
@@ -2860,19 +2904,63 @@ def _language_filtered(
     function the caller imports from ``lib/errors.ts`` lost to an
     unrelated ``errorMessage`` in some other ``.tsx`` file.
     """
-    spec = languages.spec_for_path(call.path)
-    if spec is None:
+    return _language_filtered_at(
+        call.path, candidates, bare=_written_bare(call)
+    )
+
+
+def _written_bare(call: _Referable) -> bool:
+    """Whether a usage is written with no receiver at all.
+
+    Checks the text too: the Tier-2 extractor leaves ``receiver`` unset
+    for a receiver it can't name, so Swift's
+    ``UnsafeMutablePointer<CChar>.allocate(..)`` arrives as text
+    ``.allocate`` with no receiver.
+    """
+    if getattr(call, "receiver", None):
+        return False
+
+    return "." not in (getattr(call, "text", None) or "")
+
+
+def _site_language(path: str) -> str | None:
+    """A usage site's language: its Tier-1 spec, else its Tier-2 grammar."""
+    spec = languages.spec_for_path(path)
+    if spec is not None:
+        return spec.name
+
+    return languages.tier2_grammar_for_path(path)
+
+
+def _language_filtered_at(
+    path: str, candidates: list[Symbol], bare: bool = True
+) -> list[Symbol]:
+    """``_language_filtered`` for a usage site known by its path.
+
+    ``bare`` is whether the site is written without a receiver; see
+    ``_FAMILY_FOREIGN_KINDS``.
+    """
+    language = _site_language(path)
+    if language is None:
         return candidates
 
-    own = _resolution_language(spec.name)
+    own = _resolution_language(language)
     same_language = [
         c for c in candidates if _resolution_language(c.language) == own
     ]
     if same_language:
         return same_language
 
-    family = _LANGUAGE_FAMILIES.get(spec.name, frozenset({spec.name}))
-    return [c for c in candidates if c.language in family]
+    family = _LANGUAGE_FAMILIES.get(language, frozenset({language}))
+    kinds = _FAMILY_FOREIGN_KINDS.get(language)
+    if kinds is not None and not bare:
+        return []
+
+    return [
+        c
+        for c in candidates
+        if c.language in family and (kinds is None or c.kind in kinds)
+    ]
 
 
 # Structural layer 2: the single-candidate
@@ -3111,15 +3199,11 @@ def _pick_candidate_ladder(
     language *family* (see ``_language_filtered`` and
     ``_LANGUAGE_FAMILIES``) — a same-bare-name candidate in a language
     that can never legitimately be the target is removed before it
-    gets a chance to win one of the later, weaker heuristics. This
-    narrowing can leave ``candidates`` empty
-    (no same-language *or* same-family candidate exists), in which
-    case every remaining ladder step below is a no-op over an empty
-    list and this function returns ``None`` — the caller
-    (``_resolve_call``/``_resolve_ref``/``_resolve_one_heritage``)
-    then records the call as ambiguous against the original,
-    unfiltered candidate list, rather than silently resolving through
-    a candidate in a definitively unrelated language family.
+    gets a chance to win one of the later, weaker heuristics. The
+    callers (``_resolve_call``/``_resolve_ref``/
+    ``_resolve_one_heritage``) already pass a filtered list and count
+    an empty one external before getting here; filtering again is a
+    no-op for them and keeps the ladder safe for any other caller.
     ``same_file`` needs no equivalent filtering: every symbol in it is
     already, by construction, in the same file (and therefore the
     same language) as the call site.

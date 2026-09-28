@@ -874,7 +874,13 @@ carries the true totals as `suspects_meta`/`dispatch_meta`
 ## Interpreting `dekko ambiguous`
 
 `ambiguous` aggregates every call site where a bare name matched 2+
-repo-wide candidates and couldn't be resolved — a low ambiguous rate
+repo-wide candidates the call could actually reach, and couldn't be
+resolved. "Reach" means the call site's own language, or failing that
+its language family (C/C++; Java/Kotlin; JS/TS/TSX; Swift calling C
+functions): a Python `print(...)` is never listed against a C++
+`print`, and a call whose only namesakes live in other languages is
+counted external instead. Tier-2 files (shell, Starlark, Gradle, ...)
+follow the same rule, keyed on their grammar. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output

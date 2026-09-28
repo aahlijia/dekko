@@ -9,6 +9,41 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.4] — 2026-09-28
+
+### Fixed
+- **Ambiguous-call disclosures named candidates the call could never
+  reach.** The resolver already ignored other-language namesakes when
+  picking a target, but it wrote the ambiguous row from the full
+  same-name list. So a Python `print(...)` was "ambiguous" among 33 C++
+  `print`s, and tensorflow's C++ `errors::InvalidArgumentError(...)`
+  calls showed as 2,882 ambiguous calls to a Python class. Now a row
+  lists only the 2+ candidates in the caller's language (or language
+  family), and a call whose only namesakes are in other languages is
+  counted external. Every ambiguous row now has at least two
+  candidates. tensorflow goes from 260,507 ambiguous rows to 238,166
+  (101k more got shorter), spring-boot from 70,727 to 69,970, zed from
+  87,315 to 86,742, cline from 5,628 to 5,564. `query symbol Graph` on
+  tensorflow no longer counts Python `tf.Graph()` calls against the C++
+  class. The same rule now covers supertypes (`heritage_ambiguous`),
+  thrown and caught types, and import aliases: cline's
+  `import { main as generateHostBridgeClient } from "./….mjs"` used to
+  be ambiguous with two Rust `main`s and now resolves.
+- **Shell, Starlark, Gradle and other Tier-2 files resolved calls into
+  any language.** A shell script's `exit` edged to a Python
+  `control_flow_ops.exit`, `command -v` to a TypeScript variable, and
+  a `.gradle` file's `id "java"` and `description = ...` to Java
+  methods. Tier-2 calls now resolve only within their own grammar.
+  Swift is the one cross-language exception: a bare Swift call can
+  still reach a C function, since Swift imports C APIs directly, so
+  tensorflow's 62 Swift → TfLite C API edges stay. This removes 1,331
+  false edges on spring-boot, 208 on tensorflow, 29 on zed, 7 on
+  claude-buddy and 1 on cline. It also drops 13 existing Swift edges
+  into C++ methods and classes, which were all namesakes (Foundation's
+  `URL(...)` landing on `tensorflow::data::URL`). Swift constructions
+  of Swift types that used to be ambiguous next to C++ namesakes now
+  resolve (19 on tensorflow).
+
 ## [1.5.3] — 2026-09-28
 
 ### Added
