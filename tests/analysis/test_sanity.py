@@ -2515,9 +2515,9 @@ def test_sanity_cross_file_collision_flags_call_shaped_reference(
     grep_only_by_loc = {
         (row["file"], row["line"]): row["cause"] for row in doc["grep_only"]
     }
-    assert (
-        grep_only_by_loc.get(("b.py", 6)) == sanity.CAUSE_CROSS_FILE_COLLISION
-    )
+    # File B's call is a site the map attributes to B's own ``icon``,
+    # so the exact, index-backed cause wins over the file-shape one.
+    assert grep_only_by_loc.get(("b.py", 6)) == sanity.CAUSE_RESOLVED_ELSEWHERE
 
 
 def test_sanity_cross_file_collision_absent_with_single_candidate(
@@ -2625,7 +2625,13 @@ def test_sanity_all_cross_file_collision_two_candidates_flagged(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED) is None
-    assert doc["aggregate_causes"].get(sanity.CAUSE_CROSS_FILE_COLLISION) == 2
+    # Each file's call is a site the map attributes to that file's own
+    # ``icon``, so for the other one it is the exact resolved-elsewhere
+    # cause, not the file-shape collision cause.
+    assert doc["aggregate_causes"].get(sanity.CAUSE_RESOLVED_ELSEWHERE) == 2
+    assert (
+        doc["aggregate_causes"].get(sanity.CAUSE_CROSS_FILE_COLLISION) is None
+    )
 
 
 # --- ``sanity --unused``: classify_unused_reference (pure) -------------

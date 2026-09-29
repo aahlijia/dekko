@@ -82,6 +82,7 @@ import re
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from dataclasses import dataclass
@@ -264,6 +265,18 @@ CAUSE_LIKELY_EXTERNAL_COLLISION = (
 CAUSE_CROSS_FILE_COLLISION = (
     "call-shaped reference to a different, same-named declaration "
     "elsewhere in the repo — not a miss on the target"
+)
+# Tier 1: the map records this exact (path, line) as a call site or a
+# value reference of a *different* symbol with the target's bare name
+# (``_attributed_sites``). The shape rule above only sees a hit inside
+# a sibling's own file, so a call from any third file to a reused
+# helper name (claude-code's ``errorMessage``: 367 rows on one target)
+# fell through to "unexplained". The map's attribution is exact to
+# the line, and the row names it (``resolved_to``), so the label says
+# what dekko decided rather than that it decided right.
+CAUSE_RESOLVED_ELSEWHERE = (
+    "dekko attributes this line to a different, same-named declaration "
+    "(see resolved_to) — a miss only if that attribution is wrong"
 )
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
 # Tier 2: a value-position use of a same-named local declared earlier
@@ -1919,6 +1932,111 @@ def _reference_sites(
     return frozenset(sites)
 
 
+def _caller_path(index: MapIndex, caller: str) -> str:
+    """The file a caller id lives in; a ``path::<module>`` pseudo-id
+    never enters ``symbols_by_id``, so the path comes off the id."""
+    caller_sym = index.symbols_by_id.get(caller)
+    if caller_sym is not None:
+        return caller_sym.path
+
+    return caller.split("::", 1)[0]
+
+
+def _attributed_sites(
+    index: MapIndex, bare_name: str
+) -> dict[tuple[str, int], set[str]]:
+    """Every ``(path, line)`` the map attributes a use of ``bare_name``
+    to, and to which symbol(s).
+
+    A call site of any symbol sharing the name (``calls_in`` +
+    ``edge_lines``, the tables ``query callers`` answers from) or a
+    visible value reference of one (``referenced_in`` + ``ref_lines``,
+    gated by ``_can_see`` like ``_reference_sites``). Read off the
+    same, tests-filtered index the dekko-side callers set is built
+    from, so under the default ``--no-tests`` a test-file site is not
+    a site here and keeps its test-filter cause.
+
+    Args:
+        index: The query index.
+        bare_name: The bare name being cross-checked.
+
+    Returns:
+        ``(path, line)`` → the ids of the same-named symbols the map
+        attributes that line to. Usually one; two when one line calls
+        the name twice or a class and its constructor share it.
+    """
+    sites: dict[tuple[str, int], set[str]] = {}
+    for sym in index.symbols_by_name.get(bare_name, []):
+        for caller in index.calls_in.get(sym.id, []):
+            path = _caller_path(index, caller)
+            for ln in index.edge_lines.get((caller, sym.id), []):
+                sites.setdefault((path, ln), set()).add(sym.id)
+        for caller in index.referenced_in.get(sym.id, []):
+            path = _caller_path(index, caller)
+            if not _can_see(index, path, sym):
+                continue
+            for ln in index.ref_lines.get((caller, sym.id), []):
+                sites.setdefault((path, ln), set()).add(sym.id)
+
+    return sites
+
+
+def _resolved_elsewhere(
+    sites: dict[tuple[str, int], set[str]],
+    own_id: str,
+    locs: Iterable[tuple[str, int]],
+) -> dict[tuple[str, int], list[str]]:
+    """The grep-only ``locs`` the map attributes to a symbol other than
+    ``own_id``, each with the sibling ids it names.
+
+    The target's own call sites are matches and never grep-only, but
+    its own *reference* sites are grep-only rows with the tier-1
+    value-reference cause, and ``--all`` classifies one shared row
+    set per bare name for every symbol sharing it, so this is decided
+    per target, after the shared classification, never inside it.
+
+    Args:
+        sites: ``_attributed_sites`` for the bare name.
+        own_id: The target symbol's id.
+        locs: The grep-only ``(path, line)`` locations to check.
+
+    Returns:
+        ``loc`` → sorted sibling ids, for every loc that qualifies. A
+        row in it takes ``CAUSE_RESOLVED_ELSEWHERE`` over whatever the
+        shape ladder said: the ladder's rungs guess why the resolver
+        missed the line, and the map says it didn't.
+    """
+    out: dict[tuple[str, int], list[str]] = {}
+    for loc in locs:
+        ids = sites.get(loc)
+        # A line the map also attributes to the target itself (a value
+        # reference of it beside a call of a sibling) keeps the
+        # target's own tier-1 reference cause: that is the answer to
+        # "why is this not a call of the target", not the sibling.
+        if ids and own_id not in ids:
+            out[loc] = sorted(ids)
+
+    return out
+
+
+def _apply_resolved_elsewhere(
+    causes: dict[tuple[str, int], str],
+    attributed: dict[tuple[str, int], set[str]],
+    own_id: str,
+    grep_only_hits: "list[GrepHit]",
+) -> dict[tuple[str, int], list[str]]:
+    """``run()``'s form of ``_resolved_elsewhere``: relabel the
+    qualifying grep-only rows in ``causes`` in place and return the
+    sibling ids per row for ``_grep_row``'s ``resolved_to``."""
+    resolved = _resolved_elsewhere(
+        attributed, own_id, [(h.path, h.line) for h in grep_only_hits]
+    )
+    for loc in resolved:
+        causes[loc] = CAUSE_RESOLVED_ELSEWHERE
+
+    return resolved
+
+
 def _read_sites(index: MapIndex, bare_name: str) -> frozenset[tuple[str, int]]:
     """Every ``(path, line)`` where the map records a property read of
     ``bare_name`` (``MapIndex.reads_by_name``; JS/TS only).
@@ -2422,7 +2540,11 @@ def _cap_snippet(snippet: str) -> str:
     return snippet[:_SNIPPET_MAX_CHARS] + "...(truncated)"
 
 
-def _grep_row(hit: GrepHit, cause: str | None = None) -> dict:
+def _grep_row(
+    hit: GrepHit,
+    cause: str | None = None,
+    resolved_to: list[str] | None = None,
+) -> dict:
     row = {
         "file": hit.path,
         "line": hit.line,
@@ -2433,6 +2555,9 @@ def _grep_row(hit: GrepHit, cause: str | None = None) -> dict:
     decl = _shadow_decl_lines.get((hit.path, hit.line))
     if decl is not None and cause == CAUSE_SHADOWING_LOCAL:
         row["decl_line"] = decl
+    if resolved_to:
+        row["resolved_to"] = resolved_to
+
     return row
 
 
@@ -2647,6 +2772,9 @@ def _print_bucket_text(title: str, rows: list[dict], meter: Meter) -> None:
             cause = row["cause"]
             if "decl_line" in row:
                 cause = f"{cause} (declared at line {row['decl_line']})"
+            if "resolved_to" in row:
+                targets = ", ".join(row["resolved_to"])
+                cause = f"{cause} (resolved to {targets})"
             print(f"    {loc}  [{cause}]")
             print(f"      {row['snippet']}")
         else:
@@ -3388,6 +3516,11 @@ def run(
     ref_sites: frozenset[tuple[str, int]] = frozenset()
     read_sites: frozenset[tuple[str, int]] = frozenset()
     target_kinds: frozenset[str] = frozenset()
+    # The map's own attribution of every use of the bare name, for the
+    # tier-1 resolved-elsewhere cause (``_resolved_elsewhere``). Callers
+    # mode only, like everything above; ``own_id`` is the target.
+    attributed: dict[tuple[str, int], set[str]] = {}
+    own_id = ""
 
     if usages:
         bare_name = target
@@ -3430,6 +3563,8 @@ def run(
         ref_sites = _reference_sites(query_index, [sym])
         read_sites = _read_sites(query_index, sym.name)
         target_kinds = frozenset({sym.kind})
+        attributed = _attributed_sites(query_index, sym.name)
+        own_id = sym.id
         sym_target = f"{sym.path}:{sym.qualname}:{sym.start_line}"
         try:
             dekko_hits, module_level = _dekko_hits_callers(
@@ -3493,8 +3628,12 @@ def run(
         scope=_map_scope(index),
         read_sites=read_sites,
     )
+    resolved = _apply_resolved_elsewhere(
+        causes, attributed, own_id, grep_only_hits
+    )
     grep_only_rows = [
-        _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits
+        _grep_row(h, causes[(h.path, h.line)], resolved.get((h.path, h.line)))
+        for h in grep_only_hits
     ]
     match_rows = [_grep_row(grep_by_loc[loc]) for loc in matched_locs]
     dekko_only_rows = [_hit_row(*loc) for loc in dekko_only_locs]
@@ -3695,13 +3834,18 @@ def _diff_symbol(
     query_index: MapIndex,
     sym: Symbol,
     causes: dict[tuple[str, int], str],
+    attributed: dict[tuple[str, int], set[str]] | None = None,
 ) -> "_SymbolSweepResult | None":
     """Diff one symbol's own dekko-side callers hits against its bare
     name's shared classified grep hit set (``causes``).
 
     Mirrors ``run()``'s own matches/dekko-only/grep-only split, just
     keyed off ``causes`` (already computed once per bare name) instead
-    of re-running ``_classify_grep_hits`` per symbol.
+    of re-running ``_classify_grep_hits`` per symbol. ``attributed``
+    (``_attributed_sites`` for the name, computed once per name by the
+    caller) is what lets this one place, which knows which symbol the
+    shared sweep is being diffed for, apply the resolved-elsewhere
+    cause per symbol; the shared ``causes`` is never mutated.
 
     Returns:
         ``None`` if the symbol's own internal query unexpectedly fails
@@ -3721,7 +3865,13 @@ def _diff_symbol(
     grep_locs = set(causes)
     matches = len(dekko_set & grep_locs)
     dekko_only = len(dekko_set - grep_locs)
-    grep_only_causes = [causes[loc] for loc in grep_locs - dekko_set]
+    grep_only = grep_locs - dekko_set
+    resolved = _resolved_elsewhere(attributed or {}, sym.id, grep_only)
+    grep_only_causes = [
+        CAUSE_RESOLVED_ELSEWHERE if loc in resolved else causes[loc]
+        for loc in grep_only
+    ]
+
     return _SymbolSweepResult(
         target=f"{sym.path}:{sym.qualname}",
         bare_name=sym.name,
@@ -3965,10 +4115,12 @@ def _diff_all_symbols(
     results: list[_SymbolSweepResult] = []
     for name in names:
         _sweep, causes = sweeps[name]
+        attributed = _attributed_sites(query_index, name)
         for sym in groups[name]:
-            diffed = _diff_symbol(query_index, sym, causes)
+            diffed = _diff_symbol(query_index, sym, causes, attributed)
             if diffed is not None:
                 results.append(diffed)
+
     return results
 
 

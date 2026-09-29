@@ -9,6 +9,38 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.9] — 2026-09-28
+
+### Fixed
+- **`dekko sanity` called a call to a same-named sibling an
+  "unexplained miss".** When two unrelated symbols share a bare name
+  (claude-code has a 1-arg `errorMessage(e)` in `utils/errors.ts` and
+  a 2-arg one in `remote-setup.tsx`), a grep hit that is really a call
+  to the other one was explained only when it sat inside that other
+  symbol's own file; a call from any third file, the normal case for a
+  reused helper name, fell through to "unexplained miss — inspect
+  manually". The map already records which sites it attributed to
+  each symbol, so such a row now gets an exact cause, `dekko attributes
+  this line to a different, same-named declaration (see resolved_to) —
+  a miss only if that attribution is wrong`, with the sibling's id in
+  the row (`resolved_to` in JSON, `(resolved to <id>)` in text). It
+  applies in single-target and `--all` mode, to recorded calls and
+  recorded value references alike, and never to a line the map also
+  attributes to the target itself. On claude-code, `sanity --all`'s
+  unexplained count drops 1,383 → 957 and `remote-setup.tsx:
+  errorMessage`'s 367 → 6; on cline 2,394 → 1,439, and single-target
+  `sanity` on one of its three `ClineAccountService` classes no longer
+  reports the other two classes' `getInstance()` bodies as misses (8
+  → 1). The older file-shape cause ("call-shaped reference to a
+  different, same-named declaration elsewhere in the repo") remains
+  for a hit in a sibling's file that the map attributed to nobody.
+
+### Known limitations
+- A site the resolver left **ambiguous** among several same-named
+  candidates is attributed to none of them and has no line in the map,
+  so it still reads as unexplained or as the generic-name caution
+  (claude-code's three one-arg `debug(msg)` helpers, 34 rows each).
+
 ## [1.5.8] — 2026-09-28
 
 ### Fixed

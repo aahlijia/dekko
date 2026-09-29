@@ -437,6 +437,25 @@ count: `matches`, `dekko-only` and `grep-only` are untouched, only the
 cause on a grep-only row changes. `--fail-on-unexplained` will fail
 less often as a result.
 
+**A site the map attributed to a same-named sibling, since 1.5.9.**
+When two unrelated symbols share a bare name (a 1-arg `errorMessage(e)`
+helper and a 2-arg one elsewhere), a grep-only row for one of them
+whose `(path, line)` the map records as a call site or a value
+reference of the *other* reads `dekko attributes this line to a
+different, same-named declaration (see resolved_to) — a miss only if
+that attribution is wrong`, with the sibling's id on the row
+(`resolved_to` in `--json`, `(resolved to <id>)` in text). It is an
+index fact, exact to the line, so it takes precedence over every shape
+rule above, in single-target and `--all` mode alike; it never applies
+to a line the map also attributes to the target itself (that keeps
+`dekko has this as a reference`), nor to a test-file line under the
+default `--no-tests`. A row under it that does not in fact call or
+reference the named symbol is a resolver error worth reporting. The
+older `call-shaped reference to a different, same-named declaration
+elsewhere in the repo` cause remains for a call-shaped hit inside a
+sibling's own file that the map attributed to nobody, which is what an
+ambiguous site among several same-named candidates looks like.
+
 **Same-named locals (JS/TS only), since 0.43.76.** A second pass over
 whatever is still `unexplained` after every shape above: a value-
 position use of a local (a `const`/`let`/`var`, a destructured
