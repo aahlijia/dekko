@@ -129,8 +129,35 @@ def test_value_use_below_a_const_in_the_same_function(tmp_path: Path) -> None:
     assert sanity._shadow_decl_lines[("f.ts", 3)] == 2
 
 
-def test_guard_1_never_on_a_call_shaped_line(tmp_path: Path) -> None:
-    src = "function f() {\n  const count = () => 1\n  return count()\n}\n"
+def test_a_call_shaped_line_with_no_declaration_stays_unexplained(
+    tmp_path: Path,
+) -> None:
+    src = "function f() {\n  const other = 1\n  return count()\n}\n"
+    cause = _classify(tmp_path, src, 3, _sym("f", 1, 4), "count")
+    assert cause == sanity.CAUSE_UNEXPLAINED
+
+
+def test_a_call_of_a_local_declared_in_scope_is_explained(
+    tmp_path: Path,
+) -> None:
+    # ``const [state, dispatch] = useReducer(...)`` then ``dispatch({``
+    # calls the local by the language's own rule; the resolver vetoes
+    # exactly this edge, so the missing edge is not a miss.
+    src = (
+        "function f() {\n"
+        "  const [state, dispatch] = useReducer(r)\n"
+        "  dispatch({ kind: 1 })\n"
+        "}\n"
+    )
+    cause = _classify(tmp_path, src, 3, _sym("f", 1, 4), "dispatch")
+    assert cause == sanity.CAUSE_SHADOWING_LOCAL
+    assert sanity._shadow_decl_lines[("f.ts", 3)] == 2
+
+
+def test_a_method_call_on_something_else_is_never_a_local(
+    tmp_path: Path,
+) -> None:
+    src = "function f() {\n  const count = 1\n  return x.count()\n}\n"
     cause = _classify(tmp_path, src, 3, _sym("f", 1, 4), "count")
     assert cause == sanity.CAUSE_UNEXPLAINED
 
@@ -220,9 +247,28 @@ def test_python_files_are_untouched(tmp_path: Path) -> None:
     assert causes[("f.py", 3)] == sanity.CAUSE_UNEXPLAINED
 
 
-def test_module_level_hit_has_no_enclosing_symbol(tmp_path: Path) -> None:
-    src = "const count = 3\nexport const n = { count }\n"
-    cause = _classify(tmp_path, src, 2, _sym("unrelated", 5, 9), "count")
+def test_module_level_block_local_with_no_enclosing_symbol(
+    tmp_path: Path,
+) -> None:
+    # Module-level code inside an ``if`` block is not an indexed
+    # symbol; the scan runs to the first indent-0 line above.
+    src = "if (menagerie) {\n  const count = 3\n  register({ count })\n}\n"
+    cause = _classify(tmp_path, src, 3, _sym("unrelated", 6, 9), "count")
+    assert cause == sanity.CAUSE_SHADOWING_LOCAL
+    assert sanity._shadow_decl_lines[("f.ts", 3)] == 2
+
+
+def test_module_level_scan_stops_at_the_first_indent_0_line(
+    tmp_path: Path,
+) -> None:
+    src = (
+        "const count = 3\n"
+        "export function g() {}\n"
+        "if (x) {\n"
+        "  register({ count })\n"
+        "}\n"
+    )
+    cause = _classify(tmp_path, src, 4, _sym("g", 2, 2), "count")
     assert cause == sanity.CAUSE_UNEXPLAINED
 
 

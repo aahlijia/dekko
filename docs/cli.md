@@ -456,22 +456,145 @@ elsewhere in the repo` cause remains for a call-shaped hit inside a
 sibling's own file that the map attributed to nobody, which is what an
 ambiguous site among several same-named candidates looks like.
 
-**Same-named locals (JS/TS only), since 0.43.76.** A second pass over
-whatever is still `unexplained` after every shape above: a value-
-position use of a local (a `const`/`let`/`var`, a destructured
-binding, a `catch (e)` parameter, or a function parameter) declared
-earlier in the enclosing function reads as `use of a same-named local
-declared earlier in the enclosing function — not a reference to the
-target; scope heuristic, not a parse`, with the declaration's own line
-riding on the row (`decl_line` in `--json`, `(declared at line N)` in
-text) — never a per-hit line in the cause string itself, so `--all`
-keeps this in one bucket instead of fragmenting by line number. Four
-guards keep it from ever overriding a real miss: never a call-shaped
-line (a genuinely missed call stays a miss), never the target's own
-definition, never a declaration indented deeper than the use (out of
-scope), and the check only ever *upgrades* an `unexplained` row, never
-a row a more specific cause already claimed. On claude-code's own
-worst-case sample this closed 759 of 4,104 unexplained rows (18.5%).
+**Four more index facts, since 1.5.10.** Each is read off the map, not
+the line, and named as such:
+
+- *A type-declaration body.* A hit whose innermost enclosing symbol is
+  an interface, type alias or enum (an interface member signature,
+  `readonly count?: number`, a generic parameter default, an enum
+  member, any comment or string in there) reads `inside an interface,
+  type-alias or enum body — a type context, never a call site`. Not
+  `class`/`struct`/`trait` bodies, which hold code. It sits below the
+  comment rungs and below a recorded reference of the target (a fact
+  about the target beats one about the line), above every other shape.
+- *A recursive self-call.* A bare `name(` inside the target's own span
+  reads `recursive call inside the symbol's own body — dekko records
+  no self edges by design`. Decided per target: the same line is a
+  plain call for a same-named sibling.
+- *A name bound to a different import in this file.* When the hit's
+  file imports the bare name from a source the map could not place in
+  the repo (`import { appendFileSync } from 'fs'`) or from a repo file
+  other than the target's, the row reads `this file imports a
+  different declaration of the name (see bound_to) — the resolver
+  bound the name to that import, not the target`, with the module
+  string or repo path on the row (`bound_to` in `--json`, `(bound to
+  fs)` in text). Applied only to rows the ladder left `unexplained` or
+  under one of its trailing causes (generic name, test filter, ...): a
+  comment line that names `appendFileSync` is still best described as
+  a comment.
+- *A heritage clause the map recorded.* `export class FocusEvent
+  extends TerminalEvent {` on a type target whose subtype the map
+  resolved reads `heritage clause (extends/implements) the map records
+  — not a call site; see: dekko query subtypes <target>`, over any
+  shape cause. A clause the map resolved to a same-named *sibling*
+  reads as resolved elsewhere; a clause the map did not resolve keeps
+  the `extends`/`implements` shape under `type position`.
+
+**Two file-state shapes and the leftover line shapes (JS/TS), since
+1.5.10.** A one-line rule cannot see that a line sits inside a template
+literal or a `/* */` block opened above it, which is what a prompt's
+continuation line or a JSDoc body without `*` prefixes is. A small
+three-state lexer over the file (quoted strings end at their line,
+template literals with brace-aware `${}` bodies and block comments
+carry across lines, `//` ends the line) now gives every JS/TS line its
+starting state: a line that starts inside a template and loses the
+name once the template text is blanked reads `mention inside a string
+or template text` outright (the `eval("name()")` exception is for a
+one-line string that *is* code, not for prompt prose and generated-
+code templates that hold `name(` all the time), and a line that starts
+inside a block comment reads as a comment line. A file the lexer does
+not leave in code state (a backtick in JSX text, a regex literal: 11
+of claude-code's 1,902 JS/TS files) gets no state-based cause at all.
+The line shapes that rode in with this:
+
+- A trailing comment after code (`since: number; // timestamp of last
+  mood change`) reads `comment mention — not a call site (a trailing
+  comment after code on the line)`: the name is in the comment part
+  and absent from the code part, strings blanked first. JS/TS, the `#`
+  grammars (Python, Bash, Ruby) and the C family.
+- Type positions the anchored templates missed read `type position`:
+  a union or generic member (`Promise<Svc | undefined>`, `x: A | Svc`),
+  `typeof Name`, an `extends`/`implements` clause, and for a type
+  target only `as`/`satisfies Name`, a namespace-qualified `x: ns.Name`,
+  a function-type return `) => Name`, a return type `): ...Name... {`
+  (no space before the colon, which a ternary `) : x` has), a type-alias
+  body and an indexed-access type `Name["key"]`.
+- A method call on an expression result (`foo().name(`, `items[0].
+  name(`, `x!.name(`, `x?.name(`) or a line-start `.name(` chain
+  continuation reads as the qualified-call blind spot, in any grammar.
+- A JSX attribute `name="..."`/`name={...}` (`.tsx`/`.jsx`) reads as an
+  object key does; `action={action}` keeps a bare `action` and falls
+  through to the shadow pass. JSX text between `>` and `<`
+  (`<span>debug this</span>`) reads `JSX text content — literal text,
+  not a call site`; a text line with no tag on it is left alone.
+- An `abstract`/`declare` method, an interface member `name(params):
+  Type;` or a `function name(params): Type;` overload with no body reads
+  `a method or function signature with this name (abstract, interface
+  member or overload) — a declaration, not a call site`.
+- `x.name` with no `(` after it, on a line the map records no read for,
+  reads `a property access of a same-named member (`x.name`), not a
+  call — line-shape match; the map records no read at this line`, the
+  shape twin of the tier-1 property read.
+- An alias-only re-export `export { a as b };` and a member line of a
+  multi-line `export {` list read as import statements; a
+  destructuring declaration (`const [state, name] =`, `const { name }
+  =`, a member line of a multi-line one), a bare `let name`, a `for`-of
+  binding, an arrow or `function` parameter list and `readonly name: T`
+  read as declarations; Rust `let mut name =` joins the declaration
+  shape.
+- A shell line whose only mention is inside quotes (a jq filter, a
+  `POOLS=("...")` literal) reads `mention inside a string or template
+  text`: Bash is Tier 2 but does yield call links, so "unparsed
+  language" would be false.
+- Two older rules were fixed alongside: a quoted string *inside* a
+  `${...}` body is blanked too (`${isLoading ? "animate-pulse" : ""}`
+  used to keep `animate` visible), and the `eval("name()")` exception
+  now requires some string on the line to be *nothing but* a call
+  expression; a string that merely contains `name(` among other text is
+  string text.
+
+Every one of these refuses a line that also calls the name bare, so a
+real missed call never hides behind it. Still left unexplained on
+purpose: regex literals naming the target, JSX text lines with no tag
+on them, multi-line Bash strings and heredocs, Python and Rust twins of
+the JS/TS-only rules (attribute reads, f-strings, docstring prose, bare
+uses of a `let` local), files the lexer desyncs on, and ambiguous
+sites, which have no line in the map. Measured with `sanity --all`
+(unexplained rows): claude-buddy 30 → 1, claude-code 957 → 51, cline
+1,439 → 218; the grep-only totals are unchanged, since only causes on
+grep-only rows move.
+
+**Same-named locals (JS/TS only), since 0.43.76; widened in 1.5.10.**
+A second pass over whatever is still `unexplained` after every shape
+above: a use of a local declared earlier in an enclosing scope reads
+as `use of a same-named local declared earlier in an enclosing scope —
+not a reference to the target; scope heuristic, not a parse`, with the
+declaration's own line riding on the row (`decl_line` in `--json`,
+`(declared at line N)` in text) — never a per-hit line in the cause
+string itself, so `--all` keeps this in one bucket instead of
+fragmenting by line number. A binding is a `const`/`let`/`var` (plain
+or destructured, including a member line of a multi-line `const {`),
+a `catch (e)` parameter, an arrow or `function` parameter on a line
+above (`xs.map(count => ...)`, `({ action }) =>`), a `for`-of binding,
+or a parameter of any enclosing symbol, read off the map (a
+destructured parameter `{ slots, activeSlot }` and an optional one
+`count?` count). Scope is every enclosing symbol, then the file's top
+level: an inner arrow sees the outer function's locals, and a hit with
+no indexed enclosing symbol at all (an inline `server.tool(...)`
+callback, module-level code inside an `if` block) is scanned up to the
+first indent-0 line above it. A bare call of the name with such a
+binding in scope (`const [state, dispatch] = useReducer(..)` then
+`dispatch({...})`) is explained too: it calls the local by the
+language's own rule, and the resolver vetoes exactly that edge on the
+same evidence. The guards that keep it from hiding a real miss: never
+a `x.name(` method call, never a call-shaped line with no binding in
+scope, never a declaration found by the scan that is the target's own
+definition line (the nearest binding is then the target itself), never
+a declaration indented deeper than the use, and the check only ever
+*upgrades* an `unexplained` row, never a row a more specific cause
+already claimed. On claude-code's own worst-case sample the first
+version closed 759 of 4,104 unexplained rows (18.5%); the widening
+closed 194 more of the 957 that were left after 1.5.9.
 
 Also since 0.43.76: the `x: Name` colon-annotation shape (an object
 literal's `error: errorMessage,`, a variable's `let x: Name`) counts

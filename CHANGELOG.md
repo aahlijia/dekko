@@ -9,6 +9,68 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.10] — 2026-09-29
+
+### Fixed
+- **`dekko sanity` left whole families of non-call lines "unexplained".**
+  On the TypeScript repos measured, most of what survived 1.5.9's
+  ladder was a line the map rightly has no edge for and the ladder had
+  no name for: a JSX attribute (`<KeyboardShortcutHint action="copy" />`,
+  175 rows on one claude-code target), a continuation line of a
+  multi-line template literal (prompt text, generated-code templates),
+  an interface or enum member, a trailing `// comment` after code, a
+  method call on an expression result (`foo().name(`), a union or
+  generic type member (`Promise<Svc | undefined>`), a recursive
+  self-call, a call of `appendFileSync` in a file that imports it from
+  `fs`, an `extends X` clause, an abstract or overload signature, a
+  destructuring member line, an alias-only `export { a as b };`, a jq
+  filter in a shell script. Each now gets a cause. Four are read off
+  the map: `inside an interface, type-alias or enum body — a type
+  context, never a call site`, `recursive call inside the symbol's own
+  body — dekko records no self edges by design`, `this file imports a
+  different declaration of the name (see bound_to) — the resolver
+  bound the name to that import, not the target` (with the module or
+  repo path on the row: `bound_to` in JSON, `(bound to fs)` in text),
+  and `heritage clause (extends/implements) the map records — not a
+  call site` (a clause the map resolved to a same-named sibling reads
+  as resolved elsewhere). A small three-state lexer over each JS/TS
+  file gives a line its starting state, so a line inside a template
+  literal or a `/* */` block opened above reads as string text or as a
+  comment (a file the lexer cannot follow gets no state-based cause).
+  The rest are line shapes, JS/TS unless noted: a trailing comment
+  (also the `#` grammars and the C family), the missed type positions,
+  chained calls in any grammar, JSX attribute and text, signatures, a
+  `x.name` property access the map has no read for, declaration lines,
+  multi-line `export {` members, Rust `let mut`, and quoted shell text.
+  Every one refuses a line that also calls the name bare. Two older
+  rules were fixed on the way: a string nested in a `${...}` body is
+  blanked (`${isLoading ? "animate-pulse" : ""}` kept `animate`
+  visible), and the `eval("name()")` exception now needs a string that
+  is *only* a call expression. `sanity --all` unexplained rows:
+  claude-buddy 30 → 1, claude-code 957 → 51 (flagged targets 109 →
+  28), cline 1,439 → 218 (200 → 20); grep-only totals unchanged, since
+  only causes on grep-only rows move; every report target from the
+  round reaches zero unexplained.
+- **The same-named-local pass only looked inside the innermost
+  function.** claude-buddy's `activeSlot` at `server/index.ts:1113`
+  sits in an inline `server.tool(..., async () => {...})` callback that
+  is not an indexed symbol, so the pass never ran; a local declared in
+  an outer function was invisible from an inner arrow; a destructured
+  parameter (`{ slots, cursor, activeSlot }`) never matched; and a
+  bare call of a local (`const [state, dispatch] = useReducer(..)` then
+  `dispatch({...})`) was refused as "call-shaped" although the resolver
+  vetoes exactly that edge on the same evidence. The pass now scans
+  every enclosing symbol and then the file's top level (up to the first
+  indent-0 line when there is no enclosing symbol), matches parameters
+  inside destructuring patterns and optional `name?` parameters, knows
+  arrow and `function` parameters, `for`-of bindings and multi-line
+  destructuring members, and explains a call of a bound local. The
+  cause reads `... declared earlier in an enclosing scope ...` (was
+  "in the enclosing function"). The guards stand: never a `x.name(`
+  method call, never a call with no binding in scope, never a scanned
+  declaration that is the target's own definition line, never a
+  declaration indented deeper than the use.
+
 ## [1.5.9] — 2026-09-28
 
 ### Fixed

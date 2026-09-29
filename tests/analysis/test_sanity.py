@@ -4627,7 +4627,9 @@ def test_miss_rust_end_to_end_struct_target(
         }
     )
     rows = _grep_only_causes(root, "AbortLoc", capsys)
-    assert rows.get(3) == sanity.CAUSE_TYPE_ANNOTATION
+    # The payload sits inside ``enum Abort``'s body: the index-backed
+    # type-context cause outranks the payload shape.
+    assert rows.get(3) == sanity.CAUSE_TYPE_CONTEXT
     assert rows.get(6) == sanity.CAUSE_TYPE_ANNOTATION
 
 
