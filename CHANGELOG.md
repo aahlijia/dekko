@@ -9,6 +9,40 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.8] — 2026-09-28
+
+### Fixed
+- **A Rust call through a `use std::` binding could reach a repo type of
+  the same name.** dekko decides whether a `use` points into the repo by
+  asking whether any segment of its path is a file's stem, so in a repo
+  with a `path.rs` or a `collections.rs` (zed has `crates/path` and
+  `crates/collections`), `use std::path::Path;` looked in-repo and
+  `Path::new(..)` resolved to gpui's own `Path.new` at 1,377 call sites.
+  `Command::new`, `Stdio::piped`, `PathBuf::from` and `HashMap::new`
+  went wrong the same way. A Rust `use` rooted at `std`, `core` or
+  `alloc` is now never in-repo, the same rule the full-path form
+  (`std::path::Path::new(..)`) has always had. On zed: 2,087 wrong call
+  sites removed, 0 added, 1,313 ambiguous rows counted external
+  instead. On cline: 5 wrong `Command::new` sites removed.
+- **An ambiguous Rust `Type::name(..)` call disclosed every namesake in
+  the repo.** The resolver narrows such a call to `Type`'s own members
+  before it picks, but when the pick failed, the ambiguous row recorded
+  the list from before the narrowing: all 1,520 ambiguous `new` rows on
+  zed named all 1,386 `new` functions, and every `new`'s callers note
+  said "+1,520 ambiguous sites". The row now lists what the type path
+  left (the `Editor::new(..)` row in `thread_view.rs`: 1,386 → 2
+  candidates; `Editor.new`'s note: 1,520 → 243 sites). On zed, 2,053
+  rows narrowed, none widened; edges are unchanged by this rule. A
+  dot-call (`x.new(..)`) is not narrowed, as before.
+
+### Known limitations
+- A `Type::f(..)` call on a std type that reaches an in-repo extension
+  trait's function (`PathBuf::try_from_bytes(..)` through zed's
+  `PathExt`, 2 sites) now counts as external, like the full-path form
+  always has. Telling that case from `Path::new` needs to know whether
+  the std type implements the trait, which a blanket
+  `impl<T: AsRef<Path>> PathExt for T` doesn't say.
+
 ## [1.5.7] — 2026-09-28
 
 ### Fixed

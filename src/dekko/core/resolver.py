@@ -2806,7 +2806,53 @@ def _resolve_call(
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
 
-    _record_ambiguous(caller_id, call.name, candidates, ambiguous)
+    disclosed = _ambiguous_candidates(
+        call, candidates, index, file_imports, repo_stems
+    )
+    _record_ambiguous(caller_id, call.name, disclosed, ambiguous)
+
+
+def _ambiguous_candidates(
+    call: RawCall,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+) -> list[Symbol]:
+    """The candidates an ambiguous call is disclosed among.
+
+    The ladder narrows a Rust ``Type::name(..)`` path to ``Type``'s own
+    members before it picks (``_rust_shape_narrowed_candidates``), but
+    when the pick fails, ``_resolve_call`` only has the list it passed
+    in: every same-named symbol in the language. Recording that list
+    named all 1,386 ``new`` functions in zed on every one of its 1,520
+    ambiguous ``new`` rows, when ``Editor::new(..)`` could only mean
+    the two ``Editor`` types' constructors. So the shape narrowing is
+    run again here, on the ambiguous path only, and its result is what
+    the row records whenever it applied and left two or more. A
+    dot-call is not narrowed (the dot-call rule is a veto on the pick,
+    see ``_pick_candidate``), and nothing else about the ladder's
+    verdict changes: the call is ambiguous either way.
+
+    Args:
+        call: The raw call the ladder could not resolve.
+        candidates: The 2+ language-filtered candidates it ran over.
+        index: Bare symbol name to every symbol sharing it.
+        file_imports: The calling file's import bindings by local name.
+        repo_stems: Every repo file's matching stem.
+
+    Returns:
+        The narrowed list when the Rust type-path shape applied and
+        left at least two candidates, else ``candidates`` unchanged.
+    """
+    live = _without_own_constructors(_language_filtered(call, candidates))
+    narrowed, _, applied = _rust_shape_narrowed_candidates(
+        call, live, [], index, file_imports, repo_stems
+    )
+    if applied and len(narrowed) >= 2:
+        return narrowed
+
+    return candidates
 
 
 def _add_edge(
@@ -6552,6 +6598,22 @@ _RUST_IN_CRATE_PREFIXES = ("crate::", "super::", "self::")
 _RELATIVE_SOURCE_PREFIXES = ("./", "../")
 
 
+def _rust_std_import(imp: Import) -> bool:
+    """Whether ``imp`` is a Rust ``use`` rooted at ``std``/``core``/``alloc``.
+
+    Args:
+        imp: An import record; the file's language comes from its path.
+
+    Returns:
+        True for a ``use`` in a ``.rs`` file whose source's first ``::``
+        segment is one of ``_RUST_STD_NAMESPACE_ROOTS``.
+    """
+    if not imp.path.endswith(".rs"):
+        return False
+
+    return imp.source.split("::", 1)[0] in _RUST_STD_NAMESPACE_ROOTS
+
+
 def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     """Whether an import binding plausibly points into this repo.
 
@@ -6564,6 +6626,17 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     """
     if isinstance(imp, _WorkspaceImport):
         return True
+    if _rust_std_import(imp):
+        # ``use std::path::Path;`` is external by definition, whatever
+        # file stems its later segments match. The stem test passed it
+        # whenever the repo had a file named like a std module (zed's
+        # ``crates/path`` and ``crates/collections``), so ``Path::new``
+        # reached gpui's own ``Path.new`` at 1,377 sites and
+        # ``HashMap::new()`` was disclosed as ambiguous among every
+        # ``new`` in the repo. The full-path form (``std::path::Path::
+        # new``) was already external (``_rust_std_namespace_root_
+        # path``); this is the same call through a ``use``.
+        return False
     if imp.source.startswith(_RUST_IN_CRATE_PREFIXES):
         # ``use crate::{AgentTool};`` is in-repo by definition, whatever
         # the file stems say. The stem test fails it whenever the crate

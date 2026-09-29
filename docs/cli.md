@@ -902,7 +902,12 @@ the way it did before this rule, except that a target outside the
 written namespace is counted external. A one-scope call through a
 class (`TensorShape::IsValid()`, which may reach a base class, or
 `View<T>::Next()`) or through a name dekko never saw as a namespace (a
-namespace alias) resolves as before. A low ambiguous rate
+namespace alias) resolves as before. A Rust `Type::name(..)` call
+only reaches `Type`'s own members, so its row lists only those (the
+same call written `x.name(..)` is not narrowed), and a Rust call
+through a `use` rooted at `std`, `core` or `alloc` (`use std::path::
+Path; Path::new(..)`) is counted external even when the repo defines a
+type of that name. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output
