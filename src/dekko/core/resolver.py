@@ -102,6 +102,7 @@ tests for a change a same-package unit test directly covered.
 """
 
 import fnmatch
+import functools
 import gc
 import hashlib
 import json
@@ -1193,7 +1194,7 @@ def resolve(
     workspace_pkgs = {n: m.package_dir for n, m in manifests.items()}
     imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
-    repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+    repo_stems = _repo_stems(files)
 
     # Under fork-context pools, CPython refcounting
     # dirties copy-on-write pages on mere *reads*, so each worker
@@ -1602,7 +1603,7 @@ def resolve_refs(
     by_name_path = _build_name_path_index(files)
     imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
-    repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+    repo_stems = _repo_stems(files)
 
     total_refs = sum(len(fm.refs) for fm in files)
     pool_workers = _pool_workers(workers, total_refs)
@@ -1939,7 +1940,7 @@ def resolve_heritage(
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
     imports_by_file = _imports_by_file(files, workspace_pkgs)
-    repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+    repo_stems = _repo_stems(files)
     crate_roots = _rust_crate_roots_index_all(
         frozenset(fm.path for fm in files)
     )
@@ -5797,6 +5798,109 @@ def _repo_stem(path: PurePosixPath) -> str:
     return stem
 
 
+_JVM_EXTENSIONS = (".java", ".kt")
+
+
+@functools.lru_cache(maxsize=None)
+def _jvm_file_keys(path: str) -> frozenset[str]:
+    """Every path-shaped key a Java/Kotlin file answers an import by.
+
+    A qualified JVM name is a path: ``org.acme.json.JsonContent`` names
+    the one file ``org/acme/json/JsonContent.java`` under a source
+    root. A file under a root contributes that root-stripped path
+    without its extension and its package directory with a trailing
+    slash (what a wildcard or package import names). A file under no
+    root (a Bazel-style ``.../java/org/x/Y.java``) can only be matched
+    as a path suffix, so it contributes every directory-boundary
+    suffix of two or more segments, marked with a leading ``/`` so a
+    rooted path can never collide with it. A single segment is never a
+    key: that would be the file-stem test again, which bound every
+    external class to whichever repo class shared its simple name.
+
+    Args:
+        path: Repo-relative file path.
+
+    Returns:
+        The keys, empty for a non-JVM path.
+    """
+    if not path.endswith(_JVM_EXTENSIONS):
+        return frozenset()
+    stripped = _strip_java_root(path.split("/"))
+    if stripped is not None:
+        noext = stripped.rsplit(".", 1)[0]
+        keys = {noext}
+        package, sep, _ = noext.rpartition("/")
+        if sep:
+            keys.add(package + "/")
+        return frozenset(keys)
+    segs = path.rsplit(".", 1)[0].split("/")
+    return frozenset("/" + "/".join(segs[i:]) for i in range(len(segs) - 1))
+
+
+@functools.lru_cache(maxsize=None)
+def _jvm_import_keys(source: str) -> frozenset[str]:
+    """Every path-shaped key a Java/Kotlin import source could name.
+
+    ``a.b.C.m`` yields each dotted prefix of two or more segments
+    (``a/b/C/m``, ``a/b/C``, ``a/b``): a class import names its file
+    outright, and a static or nested-class import reaches the
+    declaring file through a shorter prefix. The whole name as a
+    package (``a/b/C/m/``) lets a wildcard import, recorded with the
+    package as its source, match the package directory. The
+    ``/``-marked dotted suffixes of two or more segments (``/a/b/C/m``
+    down to ``/C/m``) are for files under no source root (see
+    ``_jvm_file_keys``). A one-segment source (Kotlin's ``import Foo``
+    of a default-package class) keeps its own name as the key.
+
+    Args:
+        source: The import's qualified name.
+
+    Returns:
+        The keys, compared against ``_repo_stems`` or a candidate
+        file's ``_jvm_file_keys``.
+    """
+    segs = source.split(".")
+    keys = {"/".join(segs[:k]) for k in range(2, len(segs) + 1)}
+    keys.add("/".join(segs) + "/")
+    keys.update("/" + "/".join(segs[i:]) for i in range(len(segs) - 1))
+    if len(segs) == 1:
+        keys.add(source)
+    return frozenset(keys)
+
+
+def _repo_stems(files: list[FileMap]) -> set[str]:
+    """Every key an import is tested against to count as in-repo.
+
+    The file stems every language's ``_import_is_in_repo`` test uses,
+    plus, for Java/Kotlin files, the path-shaped keys of
+    ``_jvm_file_keys`` and each Kotlin top-level function or property
+    as ``package/dir/name`` (it is imported as a package member, so no
+    file stem ever spells it). A stem never contains ``/`` and every
+    JVM key of a packaged file does, so neither test can see the
+    other's keys and one set travels through every resolve pass and
+    pool initializer unchanged.
+
+    Args:
+        files: Every mapped file.
+
+    Returns:
+        The combined key set.
+    """
+    keys = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+    for fm in files:
+        file_keys = _jvm_file_keys(fm.path)
+        keys.update(file_keys)
+        if fm.language != "kotlin" or not file_keys:
+            continue
+        package = _jvm_package_dir(fm.path)
+        if package is None:
+            continue
+        for sym in fm.symbols:
+            if "." not in sym.qualname:
+                keys.add(f"{package}/{sym.name}" if package else sym.name)
+    return keys
+
+
 def _module_matches(source: str, candidate_path: str) -> bool:
     """Check whether an import source plausibly names a file.
 
@@ -5827,6 +5931,14 @@ def _module_matches(source: str, candidate_path: str) -> bool:
     on the stem actually containing a dot, so every undotted file
     matches exactly as before.
 
+    A Java/Kotlin candidate is matched by qualified path only (see
+    ``_jvm_file_keys``), never by stem: the stem test resolved an
+    external ``org.springframework.test.json.JsonContent`` import to
+    spring-boot's own ``JsonContent`` before the external-import veto
+    could run, and matched an in-repo import of one of three shaded
+    ``JSONObject`` classes to all three, so the hint gave up and the
+    call went ambiguous.
+
     Checked against ``source.split("/", 1)[0]``, not the whole
     ``source`` string -- ``extractor._imports_js`` encodes every
     *named* import's ``source`` as ``f"{module}/{name}"`` (e.g.
@@ -5844,6 +5956,8 @@ def _module_matches(source: str, candidate_path: str) -> bool:
         and candidate_path.endswith(_JS_TS_EXTENSIONS)
     ):
         return False
+    if candidate_path.endswith(_JVM_EXTENSIONS):
+        return bool(_jvm_file_keys(candidate_path) & _jvm_import_keys(source))
     stem = _repo_stem(PurePosixPath(candidate_path))
     if stem in _import_segments(source):
         return True
@@ -6622,10 +6736,20 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     file-shaped test, which a package-shaped specifier can only ever
     pass by coincidence. A dotted filename's stem is never a single
     segment, hence the second, component-wise check (see
-    ``_dotted_components``).
+    ``_dotted_components``). A Java/Kotlin import is tested by its
+    qualified path instead (see ``_jvm_import_keys``).
     """
     if isinstance(imp, _WorkspaceImport):
         return True
+    if imp.path.endswith(_JVM_EXTENSIONS):
+        # A qualified JVM name is a path, not a bag of words: the
+        # import is in-repo iff it names a repo file, package or
+        # Kotlin top-level member (``_repo_stems``). The stem test
+        # called ``import java.util.jar.Manifest`` in-repo because
+        # spring-boot has a ``Manifest.java`` of its own, and bound 40
+        # ``Manifest`` call sites to the buildpack's class; 4,564 of
+        # the repo's 23,528 "in-repo" imports named no repo file.
+        return bool(_jvm_import_keys(imp.source) & repo_stems)
     if _rust_std_import(imp):
         # ``use std::path::Path;`` is external by definition, whatever
         # file stems its later segments match. The stem test passed it
@@ -8444,19 +8568,14 @@ def _py_package_roots(paths: frozenset[str]) -> dict[str, list[str]]:
     return roots
 
 
-# Segment sequences tried in order — a directory-boundary subsequence
-# match anywhere in the path, not just a literal prefix at position 0,
-# since a real multi-module Maven/Gradle repo nests each module's own
-# "src/main/java" under a module directory (``spring-core/src/main/
-# java/...``, confirmed live against spring-boot), not
-# at the repo root.
-_JAVA_ROOT_SEGMENTS = (
-    ("src", "main", "java"),
-    ("src", "test", "java"),
-    ("src", "main", "kotlin"),
-    ("src", "test", "kotlin"),
-    ("src",),
-)
+# Segment sequences tried, after the source-set scan in
+# ``_strip_java_root``, as a directory-boundary subsequence match
+# anywhere in the path, not just a literal prefix at position 0, since
+# a real multi-module Maven/Gradle repo nests each module's own
+# ``src`` under a module directory (``spring-core/src/main/java/...``,
+# confirmed live against spring-boot), not at the repo root. The bare
+# ``src`` catches layouts with no language directory at all.
+_JAVA_ROOT_SEGMENTS = (("src",),)
 
 
 def _java_suffix_index(paths: frozenset[str]) -> dict[str, list[str]]:
@@ -8522,9 +8641,20 @@ def _jvm_package_dir(path: str) -> str | None:
 
 
 def _strip_java_root(segs: list[str]) -> str | None:
-    """First matching source-root segment sequence stripped from
-    ``segs``, or ``None`` when none of ``_JAVA_ROOT_SEGMENTS`` appears.
+    """The path under the JVM source root stripped from ``segs``, or
+    ``None`` when no root appears.
+
+    Any ``src/<sourceSet>/java*`` or ``src/<sourceSet>/kotlin*``
+    directory is a source root first: Gradle names source sets freely
+    (``intTest``, ``dockerTest``, ``testFixtures``, ``json-shade``) and
+    the language directory may be ``javaTemplates`` or a multi-release
+    ``java9``; spring-boot keeps 348 JVM files under such roots, whose
+    imports went unresolved when only ``main`` and ``test`` counted.
+    Then ``_JAVA_ROOT_SEGMENTS``, whose bare ``src`` catches the rest.
     """
+    for i in range(len(segs) - 3):
+        if segs[i] == "src" and segs[i + 2].startswith(("java", "kotlin")):
+            return "/".join(segs[i + 3 :])
     for root_segs in _JAVA_ROOT_SEGMENTS:
         n = len(root_segs)
         for i in range(len(segs) - n):

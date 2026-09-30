@@ -9,6 +9,46 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.11] — 2026-09-30
+
+### Fixed
+- **A Java/Kotlin import of an external class bound calls, `new`,
+  `extends` and `throws` to a same-named class elsewhere in the repo.**
+  `import java.util.jar.Manifest;` counted as in-repo because
+  spring-boot has a `Manifest.java` of its own (the in-repo test asked
+  whether any segment of the qualified name was a repo file's stem),
+  so `Manifest.read(..)` edged to the buildpack's `Manifest` at 40
+  sites, `jakarta.servlet.http.Cookie` to the web server's `Cookie`,
+  Thymeleaf's `Context` to the jarmode `Context`, and Spring Data's
+  `Repository` became the supertype of 29 classes that extend nothing
+  in the repo. On spring-boot 4,564 of 23,528 "in-repo" imports named
+  no repo file. A qualified JVM name is now matched as a path: the
+  import is in-repo only when it names a repo file, a repo package (a
+  wildcard import) or a Kotlin top-level function or property, and the
+  import hint that picks among same-named candidates matches a
+  Java/Kotlin file by that path alone, never by simple name. The same
+  hint used to match an in-repo import of one of several namesakes
+  (three shaded `JSONObject`s, two `Library`s, `TextResourceOrigin.
+  Location`) to all of them and give up, so those calls went
+  ambiguous; they now resolve to the file the import names. A file
+  under no source root (a Bazel-style `java/org/x/Y.java`) is matched
+  by path suffix of two or more segments. spring-boot: 139 wrong call
+  edges gone (every one checked), 336 gained, heritage +10 / −51,
+  throws resolved 204 → 219, 828 ambiguous rows gone (634 now
+  external, 200 now edges); tensorflow 15 wrong edges gone (twelve
+  `android.util.Size`), 90 ambiguous rows gone. Repos with no Java or
+  Kotlin are unchanged.
+- **Only `src/main` and `src/test` counted as JVM source roots.**
+  Gradle names source sets freely, and spring-boot keeps 348 Java files
+  under `src/intTest/java`, `src/dockerTest/java`,
+  `src/testFixtures/java`, `src/systemTest/java`, `src/json-shade/java`
+  and `src/main/javaTemplates`; imports of those files never resolved
+  in `dekko deps` (210 missing module edges), and with the path match
+  above they would have gone external. Any `src/<sourceSet>/java*` or
+  `src/<sourceSet>/kotlin*` directory is now a source root. spring-boot
+  `deps`: +213 module edges; tensorflow +2 (`src/gen/java`,
+  `src/testhelper/java`).
+
 ## [1.5.10] — 2026-09-29
 
 ### Fixed

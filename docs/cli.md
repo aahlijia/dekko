@@ -1074,6 +1074,16 @@ matched against dozens of same-named repo-wide candidates) truncates
 the same way an unresolved-target error does, rather than dumping every
 candidate unconditionally.
 
+**External JVM imports.** A Java or Kotlin file's `import` names a
+class by qualified path, and dekko trusts it: a call, `new`, `extends`
+or `throws` on a name imported from a package that is not in the repo
+(`import java.util.jar.Manifest;` next to a repo `Manifest.java`) is
+counted external, not listed as ambiguous among the repo's namesakes
+and never resolved to one of them. The other way round, an import of
+one of several same-named repo classes resolves to the one it spells
+instead of going ambiguous, so `ambiguous --name JSONObject` on a repo
+with three shaded copies lists only a copy's own constructor overloads.
+
 **Constructor overloads.** `new X(...)` always resolves to the class
 `X`. When `X` declares several constructors, the call's argument count
 picks one: an exact declared-count match first, then a unique varargs
@@ -1225,11 +1235,22 @@ file could plausibly be meant:
   best-effort crate-root/module-tree walk (the nearest ancestor
   directory with `lib.rs`/`main.rs`, absent any `Cargo.toml` parsing).
   A bare crate name (`use serde::Deserialize`) is external.
-- **Java**: `import com.foo.Bar;` maps mechanically to `.../com/foo/
-  Bar.java`, searched against the repo regardless of whether sources
-  sit at the repo root or nested under a Maven/Gradle `src/main/java`
-  (or `src/test/java`) module directory — confirmed against
-  `spring-boot`'s real multi-module layout.
+- **Java/Kotlin**: `import com.foo.Bar;` maps mechanically to
+  `.../com/foo/Bar.java`, searched against the repo regardless of
+  whether sources sit at the repo root or nested under a Maven/Gradle
+  module directory — confirmed against `spring-boot`'s real
+  multi-module layout. Any `src/<sourceSet>/java*` or
+  `src/<sourceSet>/kotlin*` directory is a source root (`main`, `test`,
+  Gradle's `intTest`, `dockerTest`, `testFixtures`, a `json-shade` or
+  `javaTemplates` set alike), and a file under no such root is matched
+  by the trailing segments of its path. A qualified import is matched
+  as a path, never by simple name: `import java.util.jar.Manifest;`
+  stays external even when the repo has a `Manifest.java` of its own,
+  and an import of one of several same-named repo classes names
+  exactly the one whose package it spells. A static import
+  (`import static a.b.Checks.check;`) and a nested-class import
+  (`import a.b.Outer.Inner;`) reach the declaring file; a Kotlin
+  top-level function or property is reached through its package.
 - **C/C++**: `#include` resolves by filename search (no
   package-qualified path the way Java's `import` has); two headers
   sharing a basename in different directories are left external rather
