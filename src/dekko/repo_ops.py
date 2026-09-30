@@ -849,6 +849,9 @@ def _map_is_fresh(root: Path, args: argparse.Namespace) -> bool:
         note = mapfile.format_unsupported(prov)
         if note:
             print(f"  {note}")
+        scripts = mapfile.format_build_scripts(prov)
+        if scripts:
+            print(f"  build scripts: {scripts}")
     return True
 
 

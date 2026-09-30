@@ -45,6 +45,35 @@ def test_discover_reports_known_unsupported_language(tmp_path: Path) -> None:
     assert "notes.txt" not in reasons
 
 
+def test_discover_reports_build_scripts_and_groovy_apart(
+    tmp_path: Path,
+) -> None:
+    # A Gradle script and a Groovy source file are both recognized and
+    # both skipped, under different reasons: one is configuration dekko
+    # leaves out by design, the other a language with no usable parser.
+    _touch(tmp_path / "src" / "App.java", "class App {}\n")
+    _touch(tmp_path / "build.gradle", 'plugins { id "java" }\n')
+    _touch(tmp_path / "sub" / "settings.gradle", "include 'a'\n")
+    _touch(tmp_path / "src" / "AppSpec.groovy", "class AppSpec {}\n")
+    _touch(tmp_path / "build.gradle.kts", "val x = 1\n")
+
+    files, skipped = discover(tmp_path)
+    assert files == ["build.gradle.kts", "src/App.java"]
+    assert dict(skipped) == {
+        "build.gradle": "build script (gradle)",
+        "sub/settings.gradle": "build script (gradle)",
+        "src/AppSpec.groovy": "no parser (groovy)",
+    }
+
+
+def test_discover_build_script_respects_excludes(tmp_path: Path) -> None:
+    _touch(tmp_path / "src" / "app.py")
+    _touch(tmp_path / "build.gradle", 'plugins { id "java" }\n')
+
+    _, skipped = discover(tmp_path, excludes=("*.gradle",))
+    assert dict(skipped)["build.gradle"] == "excluded"
+
+
 def test_discover_unsupported_language_respects_subpath(
     tmp_path: Path,
 ) -> None:

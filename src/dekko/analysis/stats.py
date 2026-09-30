@@ -3,7 +3,11 @@
 import json
 from collections import Counter
 
-from dekko.render.mapfile import MapIndex, format_unsupported
+from dekko.render.mapfile import (
+    MapIndex,
+    format_build_scripts,
+    format_unsupported,
+)
 from dekko.core.model import Symbol
 from dekko.textutil import signature
 
@@ -123,10 +127,15 @@ def run(index: MapIndex, top: int, as_json: bool) -> int:
     # per-target "only on a no-match reply" one -- stats has no
     # target/no-match branch for this to attach to.
     coverage = format_unsupported(index.provenance)
+    # Build scripts are skipped by design, not a parse gap, so they get
+    # a line of their own rather than a place in the coverage warning.
+    scripts = format_build_scripts(index.provenance)
     if as_json:
         doc = compute(index, top)
         if coverage:
             doc["coverage_warning"] = coverage
+        if scripts:
+            doc["build_scripts"] = index.provenance["build_scripts"]
         print(json.dumps(doc, indent=2))
         return 0
 
@@ -140,6 +149,8 @@ def run(index: MapIndex, top: int, as_json: bool) -> int:
     print(f"languages: {mix}")
     if coverage:
         print(f"coverage: {coverage} — results below may be incomplete")
+    if scripts:
+        print(f"build scripts: {scripts}")
     _print_hotspots("top fan-in:", _hotspots(index, index.calls_in, top))
     _print_hotspots("top fan-out:", _hotspots(index, index.calls_out, top))
     largest = _largest_files(index, top)

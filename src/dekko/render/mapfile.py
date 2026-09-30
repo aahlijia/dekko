@@ -84,6 +84,7 @@ class MapFormatInvalidError(Exception):
 
 _BASE_SPLIT = re.compile(r"::|\.|->|/")
 _UNSUPPORTED_PREFIX = "no parser ("
+_BUILD_SCRIPT_PREFIX = "build script ("
 _VENDORED_PREFIX = "vendored ("
 _TOO_LARGE_REASON = "too large"
 _SYMLINK_REASON = "symlink"
@@ -356,6 +357,41 @@ def _unsupported_summary(
     }
 
 
+def _build_script_summary(
+    skipped: list[tuple[str, str]] | None,
+) -> dict | None:
+    """Aggregate skipped build scripts into their own coverage bucket.
+
+    Counts only ``"build script (<language>)"`` reasons, the files
+    ``languages.BUILD_SCRIPTS`` names. Kept apart from
+    ``_unsupported_summary`` on purpose: a build script calls build
+    logic, not the code a query is usually about, so it is reported
+    once per repo rather than attached to every empty answer.
+
+    Args:
+        skipped: ``(path, reason)`` pairs from ``walker.discover``.
+
+    Returns:
+        ``{"count": N, "languages": {lang: N, ...}}``, or ``None``
+        when no build script was skipped.
+    """
+    if not skipped:
+        return None
+
+    by_lang: Counter[str] = Counter()
+    for _, reason in skipped:
+        if reason.startswith(_BUILD_SCRIPT_PREFIX) and reason.endswith(")"):
+            by_lang[reason[len(_BUILD_SCRIPT_PREFIX) : -1]] += 1
+
+    if not by_lang:
+        return None
+
+    return {
+        "count": sum(by_lang.values()),
+        "languages": dict(sorted(by_lang.items())),
+    }
+
+
 def _vendored_summary(
     skipped: list[tuple[str, str]] | None,
 ) -> dict | None:
@@ -532,6 +568,31 @@ def format_unsupported(provenance: dict | None) -> str | None:
     return "\n  ".join(parts)
 
 
+def format_build_scripts(provenance: dict | None) -> str | None:
+    """The build-script line from a provenance dict, or ``None``.
+
+    Deliberately separate from ``format_unsupported``: that note rides
+    on every empty ``query`` reply, and a repo's build scripts are
+    irrelevant to almost all of them. This one is for the whole-repo
+    reports (``dekko stats``, ``dekko status``, ``map_status``,
+    ``dekko summary``), and for the one targeted note on build logic.
+
+    Args:
+        provenance: A map's provenance dict, or ``None``.
+
+    Returns:
+        E.g. ``"736 not indexed: gradle (736)"``, or ``None`` when the
+        map skipped no build script.
+    """
+    scripts = (provenance or {}).get("build_scripts")
+    if not scripts:
+        return None
+
+    by_lang = scripts.get("languages", {})
+    detail = ", ".join(f"{lang} ({n})" for lang, n in by_lang.items())
+    return f"{scripts.get('count', 0)} not indexed: {detail}"
+
+
 def compute_provenance(
     root: Path,
     paths: list[str],
@@ -557,6 +618,7 @@ def compute_provenance(
         skipped: ``(path, reason)`` pairs from the same ``walker.
             discover`` call that produced ``paths``, used to record
             coverage notes for confirmed-unsupported languages, for
+            build scripts, for
             files skipped only because they live under a
             default-excluded (vendored/build-output) directory, for
             files that exceeded ``max_file_size``, and for symlinked
@@ -583,6 +645,7 @@ def compute_provenance(
         "files": {rel: _file_hash(root / rel) for rel in paths},
         "stat": {rel: _stat_sig(root / rel) for rel in paths},
         "unsupported": _unsupported_summary(skipped),
+        "build_scripts": _build_script_summary(skipped),
         "vendored_excluded": _vendored_summary(skipped),
         "too_large": _too_large_summary(skipped),
         "symlink_excluded": _symlink_summary(skipped),

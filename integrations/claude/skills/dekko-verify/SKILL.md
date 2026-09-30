@@ -42,9 +42,11 @@ Spot-check, don't re-verify everything, when any of these apply:
   says so (`N call(s) resolved ambiguously`). A widely used symbol
   with a low count and *no* disclosure is more suspicious than one
   with it.
-- **Unsupported or partially parsed files.** `dekko stats` or the map
-  summary notes them. A symbol called only from an unparsed file
-  reads as zero-caller.
+- **Unsupported or partially parsed files, and build scripts.** `dekko
+  stats` or the map summary notes them (`coverage:` for unparsed
+  languages such as Groovy, `build scripts:` for Gradle scripts). A
+  symbol called only from an unparsed file or a build script reads as
+  zero-caller.
 - **`get_callers`' default test filter.** It hides test callers (and
   says so in a footer). Pass `include_tests=true` (CLI: leave
   `--no-tests` off) before concluding dead code.

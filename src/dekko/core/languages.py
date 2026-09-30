@@ -1671,8 +1671,6 @@ TIER2_GRAMMARS: dict[str, str] = {
     ".clj": "clojure",
     ".gleam": "gleam",
     ".nim": "nim",
-    ".groovy": "groovy",
-    ".gradle": "groovy",
     ".sol": "solidity",
     ".sh": "bash",
     ".bash": "bash",
@@ -1718,8 +1716,36 @@ TIER2_GRAMMARS: dict[str, str] = {
 # are confirmed; it intentionally does not attempt to enumerate every non-code
 # extension (``.md``, ``.json``, images, ...), which stay silently ignored as
 # before.
+#
+# A language also belongs here when a grammar exists and yields nothing
+# usable. Groovy is the case: the language pack's grammar is a token
+# tree with no declaration nodes, so it produced no symbols and recorded
+# whole statements as callee names; the only Groovy wheel on PyPI is a
+# fork of the Java grammar that reads a Spock feature method
+# (``def "does a thing"() { ... }``) as a constructor named ``def``. A
+# language that looks supported carries no caveat, so a disclosed gap is
+# the more accurate answer until a grammar reads idiomatic Groovy.
 KNOWN_UNSUPPORTED: dict[str, str] = {
     ".astro": "astro",
+    ".groovy": "groovy",
+}
+
+# Build scripts: recognized, skipped, and counted apart from
+# ``KNOWN_UNSUPPORTED``. A Gradle script written in Groovy is
+# configuration. It calls the Gradle API and, now and then, the repo's
+# own build logic, never the product code a map is asked about, so
+# filing it as an unparsed language would append "this answer may be
+# incomplete" to every empty result in every Gradle-built repo. It gets
+# its own skip reason and its own line on the whole-repo reports
+# instead. ``.gradle.kts`` is not listed: its extension is ``.kts``, it
+# is Kotlin, and it is indexed as Kotlin.
+BUILD_SCRIPTS: dict[str, str] = {
+    ".gradle": "gradle",
+}
+
+# How each build-script language reads in a sentence.
+_BUILD_SCRIPT_LABELS: dict[str, str] = {
+    "gradle": "Gradle",
 }
 
 
@@ -1779,3 +1805,49 @@ def known_unsupported_language(filename: str) -> str | None:
         return None
 
     return KNOWN_UNSUPPORTED.get(filename[dot:].lower())
+
+
+def build_script_language(filename: str) -> str | None:
+    """Return the build-script language of a filename, or ``None``.
+
+    The twin of ``known_unsupported_language`` for ``BUILD_SCRIPTS``:
+    files dekko recognizes as build configuration and does not index.
+
+    Args:
+        filename: Any path or basename; only the extension is used.
+
+    Returns:
+        The build-script language's name (``"gradle"``), or ``None``.
+    """
+    dot = filename.rfind(".")
+    if dot == -1:
+        return None
+
+    return BUILD_SCRIPTS.get(filename[dot:].lower())
+
+
+def unindexed_reason(filename: str) -> str | None:
+    """Say why dekko recognizes a file and still does not index it.
+
+    For the messages that answer "why isn't this path in the map":
+    a lookup that misses on a build script or on a file in a
+    confirmed-unsupported language can name the cause instead of
+    reporting a bare miss.
+
+    Args:
+        filename: Any path or basename; only the extension is used.
+
+    Returns:
+        A clause that completes "``<path>`` is ...", or ``None`` when
+        the extension is in neither registry.
+    """
+    script = build_script_language(filename)
+    if script is not None:
+        label = _BUILD_SCRIPT_LABELS.get(script, script)
+        return f"a {label} build script; dekko does not index build scripts"
+
+    unsupported = known_unsupported_language(filename)
+    if unsupported is not None:
+        return f"{unsupported}; dekko has no parser for it"
+
+    return None

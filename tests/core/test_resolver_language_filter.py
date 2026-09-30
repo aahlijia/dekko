@@ -236,8 +236,8 @@ def test_tier2_shell_call_still_reaches_a_shell_function() -> None:
     assert _edges(graph) == {("ci/any.sh::<module>", tfrun.id)}
 
 
-def test_gradle_dsl_word_does_not_reach_a_java_method() -> None:
-    # ``id "java"`` in a plugins block: one argument, like the setter.
+def test_ruby_dsl_word_does_not_reach_a_java_method() -> None:
+    # ``id 7`` in a Ruby DSL block: one argument, like the setter.
     java_id = replace(
         _sym(
             "src/KafkaProperties.java",
@@ -252,9 +252,9 @@ def test_gradle_dsl_word_does_not_reach_a_java_method() -> None:
         [
             _file("src/KafkaProperties.java", "java", java_id),
             _file(
-                "build.gradle",
-                "groovy",
-                calls=[_module_call("build.gradle", "id", arg_count=1)],
+                "tasks/build.rb",
+                "ruby",
+                calls=[_module_call("tasks/build.rb", "id", arg_count=1)],
             ),
         ]
     )

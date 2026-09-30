@@ -15,7 +15,11 @@ from pathlib import Path
 
 from dekko.core import grammars
 from dekko.analysis import ambiguous, stats
-from dekko.render.mapfile import MapIndex, format_unsupported
+from dekko.render.mapfile import (
+    MapIndex,
+    format_build_scripts,
+    format_unsupported,
+)
 from dekko.core.model import TYPE_KINDS
 from dekko.core.resolver import MODULE_CALLER_SUFFIX
 from dekko.textutil import dir_of, fit_to_budget, oneline, signature
@@ -161,6 +165,7 @@ def compute(index: MapIndex) -> dict:
             index, no_grammar_errors
         ),
         "unsupported": (index.provenance or {}).get("unsupported"),
+        "build_scripts": (index.provenance or {}).get("build_scripts"),
         "too_large": (index.provenance or {}).get("too_large"),
     }
 
@@ -288,6 +293,20 @@ def _fmt_module(sym_id: str) -> str:
     return sym_id
 
 
+def _skip_lines(index: MapIndex) -> list[str]:
+    """What the map left out: the coverage note, then build scripts."""
+    lines: list[str] = []
+    note = format_unsupported(index.provenance)
+    if note:
+        lines.append(f"coverage: {note} — results below may be incomplete")
+
+    scripts = format_build_scripts(index.provenance)
+    if scripts:
+        lines.append(f"build scripts: {scripts}")
+
+    return lines
+
+
 def render_text(index: MapIndex) -> str:
     """Render the digest as compact text."""
     doc = compute(index)
@@ -300,9 +319,7 @@ def render_text(index: MapIndex) -> str:
         for lng in doc["languages"]
     )
     lines.append(f"languages: {mix}")
-    note = format_unsupported(index.provenance)
-    if note:
-        lines.append(f"coverage: {note} — results below may be incomplete")
+    lines += _skip_lines(index)
     ambiguous_note = ambiguous.high_rate_note(index)
     if ambiguous_note:
         lines.append(ambiguous_note)

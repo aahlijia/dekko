@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from dekko.classify import is_test_path
+from dekko.core import languages
 from dekko.render.mapfile import MapIndex
 from dekko.core.model import TYPE_KINDS, Symbol
 from dekko.analysis.query import NO_ROW_LIMIT, paths_matching
@@ -243,7 +244,7 @@ def _sparse_note(
         symbol_count: Number of symbols the outline lists.
         error: The file's ``FileOutline.error``, if any. A file that
             failed to parse at all (most often an unsupported/
-            uninstalled grammar — Kotlin/Groovy without ``pip install
+            uninstalled grammar — Scala/Swift without ``pip install
             dekko[all]``) always has 0 symbols, which used to trip this
             heuristic en masse even though the real cause is already
             shown in the file's own ``(parse error: ...)`` header line,
@@ -424,8 +425,11 @@ def run(
     else:
         outlines = collect_dir(index, target)
     if not outlines:
+        reason = languages.unindexed_reason(target)
+        why = f" ({reason})" if reason else ""
         print(
-            f"dekko: no mapped file or directory '{target}'", file=sys.stderr
+            f"dekko: no mapped file or directory '{target}'{why}",
+            file=sys.stderr,
         )
         return EXIT_NOT_FOUND
 

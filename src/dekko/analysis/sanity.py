@@ -188,6 +188,15 @@ CAUSE_QUALIFIED_CALL = (
 CAUSE_UNSUPPORTED_LANGUAGE = (
     "unparsed-language file — dekko can't parse this file at all"
 )
+# A build script is skipped by design, so a call written in one is real
+# and still never in the map. Reading that line's shape instead gave a
+# different wrong answer per shape: a bare call was "unexplained", a
+# receiver call a "resolver blind spot", a common name "an unrelated
+# external-library method".
+CAUSE_BUILD_SCRIPT = (
+    "build script: dekko does not index build scripts, so a call here "
+    "never becomes an edge"
+)
 # A file in a language dekko parses that the map still doesn't hold:
 # skipped as too large or generated, or excluded. Dekko has no call
 # sites there because it never read the file, so "unexplained" was the
@@ -2002,7 +2011,11 @@ _COMMENT_PREFIXES_BY_GRAMMAR: dict[str, tuple[str, ...]] = {
     "dart": _SLASH_STYLE,
     "zig": _SLASH_STYLE,
     "gleam": _SLASH_STYLE,
+    # Not grammars: the names ``_comment_style_for_path`` falls back to
+    # for a Groovy file or a Gradle build script, neither of which is
+    # parsed. A comment there is still a comment to ``sanity --unused``.
     "groovy": _SLASH_STYLE,
+    "gradle": _SLASH_STYLE,
     "solidity": _SLASH_STYLE,
     "d": _SLASH_STYLE,
     "hare": _SLASH_STYLE,
@@ -2064,6 +2077,44 @@ def _grammar_for_path(path: str) -> str | None:
     return languages.tier2_grammar_for_path(path)
 
 
+def _comment_style_for_path(path: str) -> str:
+    """The ``_COMMENT_PREFIXES_BY_GRAMMAR`` key for ``path``, or ``""``.
+
+    ``_grammar_for_path`` first. A file dekko recognizes and doesn't
+    parse has no grammar, so it falls back to the language name its
+    registry gives it.
+    """
+    return (
+        _grammar_for_path(path)
+        or languages.build_script_language(path)
+        or languages.known_unsupported_language(path)
+        or ""
+    )
+
+
+def _unindexed_cause(path: str) -> str | None:
+    """The cause for a hit in a file dekko recognizes and never parses.
+
+    A file fact, decided before any rung that reads the line's shape:
+    those rungs guess why the resolver missed a call, and the resolver
+    never saw this file. Limited to the two registries of recognized
+    files, so a hit in a README keeps the ladder it had.
+
+    Args:
+        path: The hit's repo-relative path.
+
+    Returns:
+        ``CAUSE_BUILD_SCRIPT``, ``CAUSE_UNSUPPORTED_LANGUAGE``, or
+        ``None`` for every other file.
+    """
+    if languages.build_script_language(path) is not None:
+        return CAUSE_BUILD_SCRIPT
+    if languages.known_unsupported_language(path) is not None:
+        return CAUSE_UNSUPPORTED_LANGUAGE
+
+    return None
+
+
 def _looks_like_comment_line(snippet: str, path: str) -> bool:
     """Whether ``snippet``, considered alone, has the shape of a
     comment/docstring line in ``path``'s own grammar.
@@ -2081,7 +2132,7 @@ def _looks_like_comment_line(snippet: str, path: str) -> bool:
     attribute, and an attribute can name a class), and a line whose
     leading ``/* ... */`` closes with real code after it.
     """
-    grammar = _grammar_for_path(path) or ""
+    grammar = _comment_style_for_path(path)
     prefixes = _COMMENT_PREFIXES_BY_GRAMMAR.get(grammar)
     if not prefixes:
         return False
@@ -2143,7 +2194,7 @@ def _looks_like_block_comment_continuation(root: Path, hit: "GrepHit") -> bool:
         guess.
     """
     prefixes = _COMMENT_PREFIXES_BY_GRAMMAR.get(
-        _grammar_for_path(hit.path) or ""
+        _comment_style_for_path(hit.path)
     )
     if not prefixes or "/*" not in prefixes:
         return False
@@ -3202,6 +3253,10 @@ def _classify_grep_hits(
     for h in hits:
         loc = (h.path, h.line)
         if loc in own_def_locs:
+            continue
+        unindexed = _unindexed_cause(h.path)
+        if unindexed is not None:
+            causes[loc] = unindexed
             continue
         looks_like_value = allow_value_shape and _looks_like_value_reference(
             h.snippet, bare_name, h.path

@@ -1080,6 +1080,10 @@ def tool_map_status(ctx: Context, args: dict) -> str:
         fresh = mapfile.check_freshness(root, index)
         prov = index.provenance
     note = mapfile.format_unsupported(prov)
+    scripts = mapfile.format_build_scripts(prov)
+    if scripts:
+        line = f"build scripts: {scripts}"
+        note = f"{note}\n{line}" if note else line
     if fresh.fresh:
         prov = prov or {}
         commit = (prov.get("git_commit") or "no git")[:12]

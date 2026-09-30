@@ -346,6 +346,8 @@ def discover(
         map, and ``(path, reason)`` pairs for files that were skipped
         — including files in a confirmed-unsupported language (reason
         ``"no parser (<language>)"``, see ``languages.KNOWN_UNSUPPORTED``),
+        build scripts (reason ``"build script (<language>)"``, see
+        ``languages.BUILD_SCRIPTS``),
         files under a default-excluded directory that sometimes holds
         first-party code (reason ``"vendored (<dirname>)"``, see
         ``_VENDORED_DIRS`` — distinct from the purely-silent VCS/cache
@@ -446,9 +448,28 @@ def _classify(
         # a user debugging a vanished file knows where to look.
         return "ignored"
     if not languages.is_supported(rel):
-        unsupported = languages.known_unsupported_language(rel)
-        return f"no parser ({unsupported})" if unsupported else None
+        return _unindexed_verdict(rel)
     return _size_and_content_gate(root, rel, max_file_size)
+
+
+def _unindexed_verdict(rel: str) -> str | None:
+    """The skip reason for a file no registered language handles.
+
+    Args:
+        rel: Repo-relative candidate path.
+
+    Returns:
+        ``"build script (<language>)"`` for a build script,
+        ``"no parser (<language>)"`` for a confirmed-unsupported
+        language, or ``None`` for an extension dekko doesn't recognize
+        at all (non-code files, ignored without an entry).
+    """
+    script = languages.build_script_language(rel)
+    if script is not None:
+        return f"build script ({script})"
+
+    unsupported = languages.known_unsupported_language(rel)
+    return f"no parser ({unsupported})" if unsupported else None
 
 
 def _size_and_content_gate(

@@ -490,6 +490,18 @@ the line, and named as such:
   reads as resolved elsewhere; a clause the map did not resolve keeps
   the `extends`/`implements` shape under `type position`.
 
+**Files dekko does not index, since 1.5.12.** A hit in a Gradle build
+script reads `build script: dekko does not index build scripts, so a
+call here never becomes an edge`, and a hit in a file of an unparsed
+language (`.groovy`, `.astro`) reads `unparsed-language file`. Both are
+decided before any rung that reads the line's shape, the same way a
+file the map skipped is: those rungs guess why the resolver missed a
+call, and the resolver never saw the file. A bare `normalizeLiveReloadPort()`
+inside a `tasks.register(...) { ... }` closure used to read
+`unexplained miss`, and `version.forAntora()` a `qualified call`. Hits
+in files dekko does not recognize at all (`README.md`, `package.json`)
+keep the labels they had.
+
 **Two file-state shapes and the leftover line shapes (JS/TS), since
 1.5.10.** A one-line rule cannot see that a line sits inside a template
 literal or a `/* */` block opened above it, which is what a prompt's
@@ -1656,6 +1668,27 @@ Tier 1 (full fidelity, offline): Python, Rust, C, C++, JavaScript,
 TypeScript/TSX, Go, Java, Kotlin. Tier 2 (generic fallback — names and
 calls, no types): everything else `tree-sitter-language-pack` supports
 (Ruby, PHP, C#, Swift, Lua, and more), via `pip install dekko[all]`.
+
+Recognized and not indexed, on either install:
+
+- **Groovy (`.groovy`)** has no usable parser. The files are skipped
+  as `no parser (groovy)` and counted in the coverage note that
+  `stats`, `status`, `summary`, `search`, `affected` and every empty
+  `query` answer carry: `24 files unparsed — no parser for: groovy
+  (24)`. If a repo's tests are Spock specs, read "no callers" and "no
+  impacted tests" with that note in mind.
+- **Gradle build scripts (`.gradle`)** are skipped as `build script
+  (gradle)` and reported on their own line by `stats`, `status`,
+  `summary` and `map_status`: `build scripts: 736 not indexed: gradle
+  (736)` (`build_scripts` in their JSON). They are left out of the
+  per-query coverage note, because a build script calls the Gradle API
+  and the build's own logic rather than product code. The exception is
+  a symbol under `buildSrc/`: an empty `query callers` there adds a
+  note that a build script may be the caller, with the `dekko sanity`
+  command to check. `build.gradle.kts` is Kotlin and is indexed.
+
+`query file` and `outline` on either kind of path say which of the two
+it is instead of a bare "no mapped file".
 
 Java and Kotlin resolve against each other: a Kotlin file's imports
 reach Java classes and Kotlin ones alike, and each language still

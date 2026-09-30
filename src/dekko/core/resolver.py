@@ -167,7 +167,7 @@ _WHOLE_FILE_IMPORT_LANGUAGES = frozenset({"c", "cpp"})
 # and Java can call Kotlin. Swift (Tier-2) calls C functions directly
 # (tensorflow's Swift API is written over the TfLite C API); C and C++
 # can't call Swift back, so the pairing is one-way. Every language
-# with no declared family here (python, rust, go, bash, groovy, ...)
+# with no declared family here (python, rust, go, bash, ruby, ...)
 # has no such precedent anywhere in the resolver and defaults to a
 # same-language-only singleton family in ``_language_filtered``.
 _LANGUAGE_FAMILIES: dict[str, frozenset[str]] = {
@@ -2966,7 +2966,7 @@ def _language_filtered(
     the call site's own language: the Tier-1 spec name, or for a Tier-2
     file its grammar name, which is also the ``language`` its symbols
     carry. A shell script's ``exit`` is not a Python ``exit``, and a
-    ``.gradle`` script's ``id "java"`` is not a Java ``id()`` method.
+    Ruby script's ``puts`` is not a Java ``puts()`` method.
     Only a path no registry recognizes keeps every candidate.
 
     Two-stage narrowing, not a single same-language check: same-

@@ -27,6 +27,46 @@ def test_known_unsupported_language_ignores_ordinary_non_code() -> None:
         assert known_unsupported_language(name) is None
 
 
+def test_groovy_is_a_known_unsupported_language() -> None:
+    # No installable grammar reads idiomatic Groovy, so it is a
+    # disclosed gap rather than a Tier-2 language with no symbols.
+    assert known_unsupported_language("src/test/groovy/FooSpec.groovy") == (
+        "groovy"
+    )
+    assert not is_supported("FooSpec.groovy")
+    assert languages.tier2_grammar_for_path("FooSpec.groovy") is None
+    assert languages.build_script_language("FooSpec.groovy") is None
+
+
+def test_gradle_groovy_script_is_a_build_script() -> None:
+    for name in ("build.gradle", "sub/settings.gradle", "x/extra.GRADLE"):
+        assert languages.build_script_language(name) == "gradle"
+        assert not is_supported(name)
+        assert languages.tier2_grammar_for_path(name) is None
+        # A build script is not an unparsed language: it has its own
+        # bucket, so it stays out of the per-query coverage note.
+        assert known_unsupported_language(name) is None
+
+
+def test_kotlin_build_script_is_kotlin_not_a_build_script() -> None:
+    assert languages.build_script_language("build.gradle.kts") is None
+    assert languages.spec_for_path("build.gradle.kts") is languages.KOTLIN
+
+
+def test_unindexed_reason_names_each_registry() -> None:
+    assert languages.unindexed_reason("app/build.gradle") == (
+        "a Gradle build script; dekko does not index build scripts"
+    )
+    assert languages.unindexed_reason("FooSpec.groovy") == (
+        "groovy; dekko has no parser for it"
+    )
+    assert languages.unindexed_reason("Card.astro") == (
+        "astro; dekko has no parser for it"
+    )
+    for name in ("a.py", "README.md", "Makefile", "build.gradle.kts"):
+        assert languages.unindexed_reason(name) is None
+
+
 def _map(lang_dir: str) -> tuple[list[FileMap], set[tuple[str, str]]]:
     files, _ = map_repository(
         FIXTURES / lang_dir,

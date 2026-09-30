@@ -9,6 +9,69 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.12] — 2026-09-30
+
+### Changed
+- **Groovy files and Gradle build scripts are no longer mapped as
+  empty files.** Both used to go through the generic extractor on the
+  language pack's Groovy grammar, which has no declaration nodes: on
+  spring-boot 760 files (736 `.gradle`, 24 `.groovy`) produced 0
+  symbols, 0 edges, and 9,376 `external` rows whose "callee" was often
+  a whole statement (`tasks.named("compileTestJava") { ... }`, 240
+  times). `dekko stats` read `groovy 760f/0s`, `query file` said
+  `mapped, no symbols`, and nothing said a class of files went unread.
+  No installable Groovy grammar is good enough to fix that the way
+  Kotlin was fixed: the one on PyPI is a fork of the Java grammar that
+  reads a Spock feature method (`def "does a thing"() { ... }`) as a
+  constructor named `def`, and fails on 93% of Spock's own files. So
+  dekko now says what it does instead:
+  - **`.groovy` is an unparsed language**, like `.astro`. The files
+    are skipped with `no parser (groovy)` and counted in the coverage
+    note that `stats`, `status`, `summary`, `search`, `affected` and
+    every empty `query` answer already carry (`24 files unparsed — no
+    parser for: groovy (24)`). A repo whose tests are Spock specs now
+    gets that caveat on "no callers" and "no impacted tests".
+  - **`.gradle` is a build script**, skipped with `build script
+    (gradle)` and counted on its own line: `build scripts: 736 not
+    indexed: gradle (736)` in `stats`, `status`, `summary` and the MCP
+    `map_status` tool, and a `build_scripts` key in their JSON. It
+    stays out of the per-query coverage note on purpose. A build
+    script calls the Gradle API and the build's own logic, not the code
+    most questions are about, and a caveat on every empty answer in
+    every Gradle-built repo would be noise.
+  - **The one place a build script does matter gets its own note.**
+    Empty `query callers` on a symbol under `buildSrc/` now adds
+    `build scripts: ... and this symbol is under buildSrc/; a build
+    script may call it`, with the `dekko sanity` command to check
+    (`build_script_warning` in JSON).
+  - `.gradle.kts` is Kotlin and is indexed as before. Editing a
+    `.gradle` file no longer makes the map stale.
+
+  spring-boot: 760 fewer files, 9,376 fewer external rows, and every
+  symbol, edge, ambiguous row, supertype and module edge identical.
+  Repos with no Groovy or Gradle files are unchanged.
+
+### Fixed
+- **A default install told every Gradle repo to install `dekko[all]`
+  for files the extra cannot map.** `dekko map` printed `NOT parsed (no
+  symbols, no edges): groovy N -- grammar not installed; install the
+  extras to map them`, and installing them gave 0 symbols. The files
+  are now skipped with their real reason on both install types.
+- **`dekko sanity` guessed at calls written in a build script.** A
+  real call from `build.gradle` into build logic was labeled by the
+  shape of its line: `unexplained miss` for a bare call in a closure,
+  `cross-package/qualified call — known resolver blind spot` for
+  `version.forAntora()`, `likely an unrelated external-library method`
+  for a common name. All three describe a resolver that never saw the
+  file. A hit in a build script now reads `build script: dekko does
+  not index build scripts, so a call here never becomes an edge`, and
+  a hit in a Groovy or Astro file reads `unparsed-language file`
+  whatever the line looks like. Hits in other unrecognized files
+  (`README.md`, `package.json`) are labeled as before.
+- **`query file` and `outline` on a skipped path said only "no mapped
+  file".** They now say why: `(a Gradle build script; dekko does not
+  index build scripts)` or `(groovy; dekko has no parser for it)`.
+
 ## [1.5.11] — 2026-09-30
 
 ### Fixed
