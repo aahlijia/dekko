@@ -91,6 +91,43 @@ same repos, which is the current headline. The correctness caveats
 the original study raised were all fixed in the intervening rounds;
 that section says which and where.
 
+## Tier-2 languages: one real repository per grammar
+
+`tier2_corpus.py` is the gate a Tier-2 language passes before it is
+listed as supported. For each grammar it runs the Tier-2 extractor over
+one open-source repository, pinned by commit in `tier2_corpus.json`,
+and compares the function and type names it yields with a per-language
+line regex. It needs the grammar pack (`dekko[all]`) and, to clone, the
+network.
+
+```sh
+# clone the 43 pinned repos (about 600 MB) and measure every grammar
+python benchmarks/tier2_corpus.py --repos-dir ../corpus --clone
+
+# one grammar, with the names it missed and the ones the regex lacks
+python benchmarks/tier2_corpus.py --repos-dir ../corpus \
+    --grammar zig --detail zig.txt
+```
+
+| Status | Functions found | Types found (20+ in the repo) | Calls |
+|---|---|---|---|
+| supported | 90% or more | 80% or more | extracted |
+| partial | 75% or more | 50% or more | extracted |
+
+It exits 1 when a grammar measures below the status pinned for it, so
+it is the check to run after upgrading the grammar pack or editing a
+row in `src/dekko/core/tier2.py`.
+
+**Measurement (dekko 1.5.13, `tree-sitter-language-pack` 1.20.0,
+2026-09-30):** 39 supported, 4 partial. The partial four are limited by
+their grammars, which fail to parse 28-38% of the bytes in these
+repositories: Pascal 89% of functions, Zsh 89%, Crystal 86%, Haxe 82%
+(77% of types). `docs/cli.md` "Language support" carries the list.
+
+One repository per language is a thin sample. A second one could move
+a number by a few points either way, which is why the bar has slack and
+the regex "truth" is only trusted to tell 0% from 60% from 95%.
+
 ## Search ranking: known-answer queries
 
 `search_known_answers.py` checks `dekko search` against

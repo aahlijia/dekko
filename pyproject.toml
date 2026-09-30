@@ -1,6 +1,6 @@
 [project]
 name = "dekko"
-version = "1.5.12"
+version = "1.5.13"
 description = "Static code map generator: MAP.md + map.json for any repo, plus a Claude Code /map plugin"
 readme = "README.md"
 license = "MIT"
@@ -53,16 +53,19 @@ tokenizer = ["tiktoken>=0.7"]
 # stays offline). Optional: without it, `dekko search` still works
 # via its always-on BM25 lexical scorer (the unflagged default).
 search = ["numpy>=1.24"]
-# Tier-2: the ~55 extra languages, parsed generically. Pulls in the
-# grammar pack, which downloads grammars on demand. `pip install
-# dekko[all]` to enable them. `all` also carries fast JSON (round 33
-# Track 6g: the eval tool was installed as `dekko[all]` and every
-# map.json load/write ran on stdlib json because `all` wasn't).
+# Tier-2: 43 more languages, each read through its own row of rules
+# (`src/dekko/core/tier2.py`). Pulls in the grammar pack, which
+# downloads grammars on demand. `pip install dekko[all]` to enable
+# them. The floor is the pack version the rows were measured on: a
+# row names the grammar's node types, and an older pack ships older
+# grammars (its Haxe grammar yields no calls for the same row). `all`
+# also carries fast JSON: a tool installed as `dekko[all]` should not
+# run every map.json load and write on the stdlib json module.
 # Deliberately NOT in `all`: `tokenizer` (tiktoken changes what
 # --budget measures, so every budgeted output and eval baseline would
 # shift) and `search` (numpy is a heavy install for one optional
 # scorer).
-all = ["tree-sitter-language-pack>=0.6", "orjson>=3.9"]
+all = ["tree-sitter-language-pack>=1.20", "orjson>=3.9"]
 # Faster JSON parse/serialize for map.json (up to hundreds of MB on
 # large repos) and the per-file extraction cache. Optional: without
 # it, dekko falls back to the stdlib json module.

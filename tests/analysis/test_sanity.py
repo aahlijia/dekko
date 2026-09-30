@@ -376,6 +376,20 @@ def test_looks_like_comment_line_vue_deliberately_unmapped() -> None:
     )
 
 
+def test_looks_like_comment_line_in_files_dekko_does_not_parse() -> None:
+    # Mojo is a disclosed gap and an OCaml interface file is not
+    # indexed at all. A comment in either is still only a comment.
+    assert sanity._looks_like_comment_line(
+        "# Helper does X", "src/helper.mojo"
+    )
+    assert sanity._looks_like_comment_line(
+        "(* Helper does X *)", "src/helper.mli"
+    )
+    assert not sanity._looks_like_comment_line(
+        "val helper : int -> int", "src/helper.mli"
+    )
+
+
 def test_looks_like_comment_line_unsupported_language() -> None:
     assert not sanity._looks_like_comment_line(
         "// Helper does X", "src/Helper.astro"

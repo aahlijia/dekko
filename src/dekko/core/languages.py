@@ -1,12 +1,15 @@
 """Language registry: extensions, grammars, and tree-sitter queries.
 
 Tier-1 languages get dedicated queries with full parameter/return-type
-fidelity. Tier-2 languages (everything else in the language pack) are
-handled by the generic fallback extractor and only need a grammar name.
+fidelity. Tier-2 languages are read by the generic extractor, each
+through its own row in ``tier2.TIER2_SPECS``; here they need only an
+extension and a grammar name.
 """
 
 import hashlib
 from dataclasses import dataclass, field, fields
+
+from dekko.core.tier2 import TIER2_SPECS, canonical
 
 
 @dataclass(frozen=True)
@@ -1592,9 +1595,14 @@ _CPP_USING_VERSION = 1
 # prototypes (``FileMap.cpp_decls``). The same kind of tree walk.
 _CPP_DECLS_VERSION = 1
 
+# Bump when the Tier-2 engine (``extractor_generic.py``) changes what
+# it yields for an unchanged row. The rows themselves are hashed below,
+# so editing one needs no bump.
+_TIER2_ENGINE_VERSION = 1
+
 
 def spec_fingerprint() -> str:
-    """Hash every Tier-1 extraction spec into one invalidation key.
+    """Hash every extraction spec, both tiers, into one invalidation key.
 
     Captures everything that changes what ``extractor.py`` pulls out
     of a file — queries, container/method-container types, parameter
@@ -1607,10 +1615,13 @@ def spec_fingerprint() -> str:
     ``_CALLEE_TEXT_CANONICAL_VERSION``,
     ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION``,
     ``_CPP_CONSTRUCTION_VERSION``, ``_CPP_QUALIFIED_PATH_VERSION``,
-    ``_CPP_USING_VERSION`` and ``_CPP_DECLS_VERSION``,
+    ``_CPP_USING_VERSION``, ``_CPP_DECLS_VERSION`` and
+    ``_TIER2_ENGINE_VERSION``,
     which each cover
     one piece of dispatch/recovery logic that lives outside any
-    ``LanguageSpec`` (see those constants' own comments). Used to
+    ``LanguageSpec`` (see those constants' own comments), plus every
+    Tier-2 row (``tier2.TIER2_SPECS``), so editing a row re-extracts
+    that language's files the same way editing a query does. Used to
     invalidate a stale ``.dekko`` cache entry or flag a stale
     ``map.json`` even when the released package version string hasn't
     changed — a dev iteration or hotfix that reuses the same version,
@@ -1632,6 +1643,7 @@ def spec_fingerprint() -> str:
         f"cpp_qualified_path={_CPP_QUALIFIED_PATH_VERSION}",
         f"cpp_using={_CPP_USING_VERSION}",
         f"cpp_decls={_CPP_DECLS_VERSION}",
+        f"tier2_engine={_TIER2_ENGINE_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):
@@ -1639,13 +1651,25 @@ def spec_fingerprint() -> str:
             if isinstance(value, dict):
                 value = tuple(sorted(value.items()))
             parts.append(f"{f.name}={value!r}")
-    canonical = "\x1f".join(parts)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    parts.extend(
+        f"tier2:{grammar}={canonical(TIER2_SPECS[grammar])!r}"
+        for grammar in sorted(TIER2_SPECS)
+    )
+    joined = "\x1f".join(parts)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 # Tier-2: extension → tree-sitter-language-pack grammar name. These are
-# handled by the generic extractor (names + calls, raw parameter text).
-# Grammars are downloaded on demand by the language pack on first use.
+# handled by the generic extractor (names + calls, raw parameter text),
+# each through its own row in ``tier2.TIER2_SPECS``. An extension
+# belongs here only if its grammar has a row, and a grammar gets a row
+# only after the row is measured on a real repository
+# (``benchmarks/tier2_corpus.py``). Grammars are downloaded on demand
+# by the language pack on first use.
+#
+# Not here: ``.mli``. An OCaml interface file restates the signatures
+# its ``.ml`` defines, so indexing it would give every function a twin
+# and make every call to one ambiguous.
 TIER2_GRAMMARS: dict[str, str] = {
     ".rb": "ruby",
     ".rake": "ruby",
@@ -1667,7 +1691,6 @@ TIER2_GRAMMARS: dict[str, str] = {
     ".erl": "erlang",
     ".hrl": "erlang",
     ".ml": "ocaml",
-    ".mli": "ocaml_interface",
     ".clj": "clojure",
     ".gleam": "gleam",
     ".nim": "nim",
@@ -1696,12 +1719,9 @@ TIER2_GRAMMARS: dict[str, str] = {
     ".cr": "crystal",
     ".hx": "haxe",
     ".gd": "gdscript",
-    ".mojo": "mojo",
     ".nix": "nix",
     ".bzl": "starlark",
     ".cmake": "cmake",
-    ".vue": "vue",
-    ".svelte": "svelte",
 }
 
 # Extensions dekko recognizes as source code but has no grammar for at
@@ -1725,9 +1745,17 @@ TIER2_GRAMMARS: dict[str, str] = {
 # (``def "does a thing"() { ... }``) as a constructor named ``def``. A
 # language that looks supported carries no caveat, so a disclosed gap is
 # the more accurate answer until a grammar reads idiomatic Groovy.
+#
+# Vue and Svelte: the grammar returns a component's ``<script>`` block
+# as one raw-text node, so nothing in it is parsed. Mojo: the grammar
+# predates the language's current syntax and fails on most files of a
+# real Mojo repository.
 KNOWN_UNSUPPORTED: dict[str, str] = {
     ".astro": "astro",
     ".groovy": "groovy",
+    ".mojo": "mojo",
+    ".svelte": "svelte",
+    ".vue": "vue",
 }
 
 # Build scripts: recognized, skipped, and counted apart from

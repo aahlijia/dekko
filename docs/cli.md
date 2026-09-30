@@ -1033,7 +1033,7 @@ resolved. "Reach" means the call site's own language, or failing that
 its language family (C/C++; Java/Kotlin; JS/TS/TSX; Swift calling C
 functions): a Python `print(...)` is never listed against a C++
 `print`, and a call whose only namesakes live in other languages is
-counted external instead. Tier-2 files (shell, Starlark, Gradle, ...)
+counted external instead. Tier-2 files (shell, Starlark, Ruby, ...)
 follow the same rule, keyed on their grammar. A C/C++ call written
 with its full path (`a::b::Name(..)`, or from the root, `::ns::Name(..)`)
 only reaches symbols whose qualified name ends with that path (from the
@@ -1665,12 +1665,68 @@ calls.
 ## Language support
 
 Tier 1 (full fidelity, offline): Python, Rust, C, C++, JavaScript,
-TypeScript/TSX, Go, Java, Kotlin. Tier 2 (generic fallback — names and
-calls, no types): everything else `tree-sitter-language-pack` supports
-(Ruby, PHP, C#, Swift, Lua, and more), via `pip install dekko[all]`.
+TypeScript/TSX, Go, Java, Kotlin.
+
+Tier 2 (names and calls, no types, no imports), via `pip install
+dekko[all]`: 43 languages. Each one is read through its own set of
+rules for its grammar, and each was measured on a real open-source
+repository before it was listed
+([`benchmarks/tier2_corpus.py`](../benchmarks/README.md#tier-2-languages-one-real-repository-per-grammar)).
+A language dekko cannot read well is not on this list, and dekko says
+so when it meets one.
+
+- **Supported (39):** Ada, Bash, C#, Clojure, CMake, Common Lisp, D,
+  Dart, Elixir, Elm, Emacs Lisp, Erlang, F#, Fortran, GDScript, Gleam,
+  Hare, Haskell, Julia, Lua, Nim, Nix, OCaml, Odin, Perl, PHP,
+  PowerShell, R, Racket, Ruby, Scala, Scheme, Solidity, SQL, Starlark,
+  Swift, Tcl, Vim script, Zig. On its repository dekko finds at least
+  90% of the functions and 80% of the types a line regex finds, and
+  attributes calls to the function they sit in.
+- **Partial (4):** Pascal (89% of functions), Zsh (89%), Crystal
+  (86%), Haxe (82% of functions, 77% of types). The grammar fails to
+  parse parts of real files in these languages, and a definition in
+  such a part is missed. What dekko does report is right; "no symbol"
+  and "no callers" are weaker evidence here than elsewhere.
+
+What Tier 2 does not do, in any of them:
+
+- **Imports.** A call resolves by name among the symbols of its own
+  language, so two functions with one name make a call ambiguous
+  where an import would have settled it.
+- **Types.** Parameters are raw text; there is no heritage
+  (`supertypes`/`subtypes`), `throws` or type-use data.
+- **Constructor calls** (`new X()` in C#, PHP, Dart, Haxe) are not
+  recorded as calls.
+- **Case-insensitive matching.** Pascal, Fortran, PowerShell, SQL and
+  CMake ignore case; dekko matches a call to a definition by exact
+  spelling.
+- **Calls with no call syntax:** a Pascal procedure called without
+  parentheses, Haskell's `f $ x` and `f . g`, a function passed by
+  name.
+- **Project-defined definition macros.** A Lisp or Elixir macro that
+  defines functions is a call; what it defines is not a symbol.
+
+In SQL the symbols are tables (`CREATE TABLE`), functions and
+procedures. A table is never called, so expect tables in `dekko
+unused`.
 
 Recognized and not indexed, on either install:
 
+- **Vue and Svelte components (`.vue`, `.svelte`)** and **Mojo
+  (`.mojo`)** have no usable parser. The Vue and Svelte grammars return
+  a component's `<script>` block as one piece of raw text, and the Mojo
+  grammar predates the language's current syntax. The files are
+  skipped as `no parser (vue)` and counted in the same coverage note
+  as Groovy below: `76 files unparsed — no parser for: vue (76)`. A
+  TypeScript file's import of a `.vue` file is not a module edge in
+  `dekko deps`.
+- **tree-sitter query files.** `.scm` is Scheme, and it is also what
+  tree-sitter names its query files (`highlights.scm`). A `.scm` file
+  with a capture (`(identifier) @name`) and no `define` is skipped as
+  `tree-sitter query`, shown on `dekko map`'s `skipped:` line.
+- **OCaml interface files (`.mli`)** are not read. Each restates the
+  signatures of its `.ml`, so indexing it would give every function a
+  twin and make every call to one ambiguous.
 - **Groovy (`.groovy`)** has no usable parser. The files are skipped
   as `no parser (groovy)` and counted in the coverage note that
   `stats`, `status`, `summary`, `search`, `affected` and every empty
@@ -1687,8 +1743,8 @@ Recognized and not indexed, on either install:
   note that a build script may be the caller, with the `dekko sanity`
   command to check. `build.gradle.kts` is Kotlin and is indexed.
 
-`query file` and `outline` on either kind of path say which of the two
-it is instead of a bare "no mapped file".
+`query file` and `outline` on an unparsed-language file or a build
+script say which of the two it is instead of a bare "no mapped file".
 
 Java and Kotlin resolve against each other: a Kotlin file's imports
 reach Java classes and Kotlin ones alike, and each language still

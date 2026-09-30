@@ -18,7 +18,9 @@ uv build                   # sdist + wheel
 
 A plain `uv sync` installs only the Tier-1 grammars; Tier-2 and tokenizer
 tests skip on a default install (same as a user install). CI runs across
-{ubuntu, macos, windows} × {3.10, 3.13}.
+{ubuntu, macos, windows} × {3.10, 3.13}. One of those legs (ubuntu, 3.13)
+installs with `--all-extras`, so the Tier-2 tests run somewhere on every
+push; the other five are a default install.
 
 ## Ground rules
 
@@ -41,6 +43,44 @@ tests skip on a default install (same as a user install). CI runs across
   cross-cutting/behavioral tests and top-level-module tests stay flat
   under `tests/`. Fixtures (tiny sample-language files) live in
   `tests/fixtures/`.
+
+## Adding or changing a Tier-2 language
+
+A Tier-2 language is one row in `src/dekko/core/tier2.py`: which of its
+grammar's node types define a function or a type, where the name sits,
+and which node types are calls. Nothing is guessed from how a node type
+is spelled, so a language without a row is not read at all. To add one,
+or to change a row:
+
+1. **Look at the tree.** Parse a few real files with the grammar and
+   find the node that holds a definition's *body* (not just its header
+   line, or no call in the body gets a caller), the path from it to its
+   name, and the call nodes. The module docstring of `tier2.py` has the
+   path syntax.
+2. **Write the row**, and map the extension in `TIER2_GRAMMARS`
+   (`src/dekko/core/languages.py`). Make `split` and `call_split` agree:
+   a call has to come out named the way the definition is.
+3. **Add a fixture** at `tests/fixtures/tier2/<grammar>.<ext>`, ten to
+   twenty lines with a function, a type, a method, a call in a body and
+   a call at module level, and its entry in
+   `tests/fixtures/tier2/expected.json`. Read the entry before you
+   commit it: it is what you are asserting the language means.
+4. **Measure it on a real repository.** Add the repo to
+   `benchmarks/tier2_corpus.json`, pinned by commit, add the truth
+   regexes for the language to `benchmarks/tier2_corpus.py`, and run
+   `python benchmarks/tier2_corpus.py --repos-dir <dir> --clone
+   --grammar <grammar> --detail detail.txt`. The bar: **supported** is
+   90% of functions and 80% of types found, with calls extracted;
+   **partial** is 75% and 50%; below that the language does not ship.
+   Read the `extra` names in the detail file too. They are what the
+   regex did not find, and each one should be a real definition.
+5. **List it** in `docs/cli.md` under "Language support", with its
+   number if it is partial.
+
+Run the whole benchmark again when `tree-sitter-language-pack` is
+upgraded. A row names node types, and a grammar update can rename them;
+`tests/core/test_tier2_rows.py` fails on a name the grammar no longer
+has, and the benchmark shows whether recall moved.
 
 ## Commit messages
 

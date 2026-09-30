@@ -1,0 +1,260 @@
+[
+  {
+    "grammar": "ada",
+    "url": "https://github.com/alire-project/alire",
+    "commit": "338896abcdeb948835553fec79b473599931e90f",
+    "status": "supported"
+  },
+  {
+    "grammar": "bash",
+    "url": "https://github.com/nvm-sh/nvm",
+    "commit": "a8bb4974008be929325ae286335702f1a84c5854",
+    "status": "supported"
+  },
+  {
+    "grammar": "clojure",
+    "url": "https://github.com/ring-clojure/ring",
+    "commit": "f14beaf7d7e261a701c4912be3929e0d5c01a881",
+    "status": "supported"
+  },
+  {
+    "grammar": "cmake",
+    "url": "https://github.com/Kitware/CMake",
+    "commit": "46e63b50252246eeffa0b4d289f83d0ba2c65547",
+    "status": "supported"
+  },
+  {
+    "grammar": "commonlisp",
+    "url": "https://github.com/edicl/hunchentoot",
+    "commit": "65a3a3cca7e6e91fb068efc2ef8069b5c78ee91f",
+    "status": "supported"
+  },
+  {
+    "grammar": "crystal",
+    "url": "https://github.com/kemalcr/kemal",
+    "commit": "80777f648d03b67e0467dfd43d2e74ebfc1c9595",
+    "status": "partial"
+  },
+  {
+    "grammar": "csharp",
+    "url": "https://github.com/serilog/serilog",
+    "commit": "bebc7719004f76187ae72e64ce138ec2540f2070",
+    "status": "supported"
+  },
+  {
+    "grammar": "d",
+    "url": "https://github.com/dlang/dub",
+    "commit": "122f66fd474e1cba0f25ff073eb789f74f9fd7ae",
+    "status": "supported"
+  },
+  {
+    "grammar": "dart",
+    "url": "https://github.com/rrousselGit/provider",
+    "commit": "3ed4c6d6b1700c08256f25a034bb93f943bd7236",
+    "status": "supported"
+  },
+  {
+    "grammar": "elisp",
+    "url": "https://github.com/magit/magit",
+    "commit": "5c73c1c411574a3561356d77907dbb1ce90b4e0b",
+    "status": "supported"
+  },
+  {
+    "grammar": "elixir",
+    "url": "https://github.com/elixir-plug/plug",
+    "commit": "73404f851852a00ffb2014be95d4598900fa77b8",
+    "status": "supported"
+  },
+  {
+    "grammar": "elm",
+    "url": "https://github.com/elm/core",
+    "commit": "65cea00afa0de03d7dda0487d964a305fc3d58e3",
+    "status": "supported"
+  },
+  {
+    "grammar": "erlang",
+    "url": "https://github.com/ninenines/cowboy",
+    "commit": "c965d1a3bffa0708b0570e83233ddd3bf77b97c1",
+    "status": "supported"
+  },
+  {
+    "grammar": "fortran",
+    "url": "https://github.com/jacobwilliams/json-fortran",
+    "commit": "d9ed2e4ee53745f4ed98d7536e17bee5198aa3b0",
+    "status": "supported"
+  },
+  {
+    "grammar": "fsharp",
+    "url": "https://github.com/giraffe-fsharp/Giraffe",
+    "commit": "279fe3a30c27bd647d2655745f71190c74bdd749",
+    "status": "supported"
+  },
+  {
+    "grammar": "gdscript",
+    "url": "https://github.com/bitwes/Gut",
+    "commit": "cf45f668709d988346e766afee916d4169a9283b",
+    "status": "supported"
+  },
+  {
+    "grammar": "gleam",
+    "url": "https://github.com/gleam-lang/stdlib",
+    "commit": "84ac8c701824b5b004897562c30cdd9c9aced346",
+    "status": "supported"
+  },
+  {
+    "grammar": "hare",
+    "url": "https://git.sr.ht/~sircmpwn/hare",
+    "commit": "45d0bacad8496df014a74ac38f9c3004bcd4a0b0",
+    "status": "supported"
+  },
+  {
+    "grammar": "haskell",
+    "url": "https://github.com/haskell/aeson",
+    "commit": "6cf159922074e044c25725f278e288cccc932b5a",
+    "status": "supported"
+  },
+  {
+    "grammar": "haxe",
+    "url": "https://github.com/HaxeFlixel/flixel",
+    "commit": "5e147e81bb59a441f4afed72ab9a8299d8211216",
+    "status": "partial"
+  },
+  {
+    "grammar": "julia",
+    "url": "https://github.com/JuliaIO/JSON.jl",
+    "commit": "a69c082751529014ceeac89a2b803dd4d79945eb",
+    "status": "supported"
+  },
+  {
+    "grammar": "lua",
+    "url": "https://github.com/nvim-lua/plenary.nvim",
+    "commit": "74b06c6c75e4eeb3108ec01852001636d85a932b",
+    "status": "supported"
+  },
+  {
+    "grammar": "nim",
+    "url": "https://github.com/nim-lang/nimble",
+    "commit": "ae7a6ca7434e4123901053fcb46bb9a481b16a70",
+    "status": "supported"
+  },
+  {
+    "grammar": "nix",
+    "url": "https://github.com/nix-community/home-manager",
+    "commit": "0aefa652eb6fd8b7396af25e8c81cb0790f12cc2",
+    "status": "supported"
+  },
+  {
+    "grammar": "ocaml",
+    "url": "https://github.com/mirage/ocaml-cohttp",
+    "commit": "1193aaeef7dcb9590e999ea9ed455c3649d7bc15",
+    "status": "supported"
+  },
+  {
+    "grammar": "odin",
+    "url": "https://github.com/odin-lang/examples",
+    "commit": "dcc6128eca09e01e3585d9cbcb9a21b5cf621c22",
+    "status": "supported"
+  },
+  {
+    "grammar": "pascal",
+    "url": "https://github.com/pyscripter/python4delphi",
+    "commit": "d02e0fbecc65c104837ae1f103148044ef6e6f61",
+    "status": "partial"
+  },
+  {
+    "grammar": "perl",
+    "url": "https://github.com/mojolicious/mojo",
+    "commit": "da40b9c04e31a530b05ce285fca322e135b3b780",
+    "status": "supported"
+  },
+  {
+    "grammar": "php",
+    "url": "https://github.com/slimphp/Slim",
+    "commit": "3675bf6baac66b07032575b7bef4200b60b7974b",
+    "status": "supported"
+  },
+  {
+    "grammar": "powershell",
+    "url": "https://github.com/dahlbyk/posh-git",
+    "commit": "bbc5ac380018239e0ac70411a59f4e367ca87f2d",
+    "status": "supported"
+  },
+  {
+    "grammar": "r",
+    "url": "https://github.com/tidyverse/stringr",
+    "commit": "ae054b1d28f630fee22ddb3cb7525396e62af4fe",
+    "status": "supported"
+  },
+  {
+    "grammar": "racket",
+    "url": "https://github.com/greghendershott/markdown",
+    "commit": "1083700a81c0bdb38f62f31fd711686007fe33e8",
+    "status": "supported"
+  },
+  {
+    "grammar": "ruby",
+    "url": "https://github.com/sinatra/sinatra",
+    "commit": "cb22afd7902b566b6eaba6c4ea89739494a65d12",
+    "status": "supported"
+  },
+  {
+    "grammar": "scala",
+    "url": "https://github.com/com-lihaoyi/os-lib",
+    "commit": "86e5ddb65fe62305afb5885fcc0f8da50aba4b48",
+    "status": "supported"
+  },
+  {
+    "grammar": "scheme",
+    "url": "https://github.com/ashinn/chibi-scheme",
+    "commit": "c4e7367e867428889d8fe898a0b39f42e418b3f1",
+    "status": "supported"
+  },
+  {
+    "grammar": "solidity",
+    "url": "https://github.com/transmissions11/solmate",
+    "commit": "89365b880c4f3c786bdd453d4b8e8fe410344a69",
+    "status": "supported"
+  },
+  {
+    "grammar": "sql",
+    "url": "https://github.com/lerocha/chinook-database",
+    "commit": "7f67772503d71ba90f19283c38e93923addb43fa",
+    "status": "supported"
+  },
+  {
+    "grammar": "starlark",
+    "url": "https://github.com/bazelbuild/bazel-skylib",
+    "commit": "b34514a91ae798406b6806ddab330dc18f63bfd4",
+    "status": "supported"
+  },
+  {
+    "grammar": "swift",
+    "url": "https://github.com/Alamofire/Alamofire",
+    "commit": "bda9ed57d72988a3a2ada33d824583541f86eac6",
+    "status": "supported"
+  },
+  {
+    "grammar": "tcl",
+    "url": "https://github.com/tcltk/tcllib",
+    "commit": "8636ecc94b0baa4622036f24160ea86d4e72b19e",
+    "status": "supported"
+  },
+  {
+    "grammar": "vim",
+    "url": "https://github.com/tpope/vim-fugitive",
+    "commit": "3b753cf8c6a4dcde6edee8827d464ba9b8c4a6f0",
+    "status": "supported"
+  },
+  {
+    "grammar": "zig",
+    "url": "https://github.com/zigtools/zls",
+    "commit": "0ea69abdd8f50d81989c00b6a3b9cf8ced7f9522",
+    "status": "supported"
+  },
+  {
+    "grammar": "zsh",
+    "url": "https://github.com/ohmyzsh/ohmyzsh",
+    "commit": "4d4cfc287e9d887b81242c0e431b5f49f9cec5c1",
+    "status": "partial"
+  }
+]

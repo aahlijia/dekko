@@ -380,6 +380,47 @@ def test_discover_minified_check_ignores_unreadable_file(
 # symlinked files (phantom duplicate symbols)
 
 
+def test_discover_skips_tree_sitter_query_files_with_their_reason(
+    tmp_path: Path,
+) -> None:
+    # tree-sitter names its query files ``.scm``. Read as Scheme, every
+    # pattern in one is a call to ``identifier`` or ``comment``.
+    _touch(
+        tmp_path / "queries" / "highlights.scm",
+        '(identifier) @variable\n(comment)+ @comment\n["if" "else"] @kw\n',
+    )
+    _touch(
+        tmp_path / "queries" / "injections.scm",
+        '((comment) @injection.content\n (#set! injection.language "x"))\n',
+    )
+    _touch(tmp_path / "lib" / "shapes.scm", "(define (area r) (* r r))\n")
+
+    files, skipped = discover(tmp_path)
+    assert files == ["lib/shapes.scm"]
+    assert dict(skipped) == {
+        "queries/highlights.scm": "tree-sitter query",
+        "queries/injections.scm": "tree-sitter query",
+    }
+
+
+def test_discover_keeps_scheme_that_only_looks_like_a_query(
+    tmp_path: Path,
+) -> None:
+    # A capture-shaped string inside real Scheme: the ``define`` wins.
+    _touch(
+        tmp_path / "gen.scm",
+        '(define (emit)\n  (display "(identifier) @name"))\n',
+    )
+    # No capture at all: a script of top-level calls is still Scheme.
+    _touch(tmp_path / "run.scm", '(display "hello")\n(newline)\n')
+    # Only ``.scm`` is ever a query file.
+    _touch(tmp_path / "notes.rkt", '(list "a") @b\n')
+
+    files, skipped = discover(tmp_path)
+    assert files == ["gen.scm", "notes.rkt", "run.scm"]
+    assert skipped == []
+
+
 def test_discover_skips_symlinked_file_by_default(tmp_path: Path) -> None:
     _touch(tmp_path / "src" / "real.py")
     (tmp_path / "src" / "alias.py").symlink_to(tmp_path / "src" / "real.py")

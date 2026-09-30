@@ -9,6 +9,120 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.5.13] — 2026-09-30
+
+### Changed
+- **Tier-2 languages are read through one rule set per grammar, and
+  the list of them is measured instead of assumed.** The generic
+  extractor decided what a definition was by matching words in
+  tree-sitter node type names (`function`, `method`, `class`,
+  `struct`, ...) and then asking the node for a `name` field. Run over
+  one real repository per grammar, that found no function at all in 21
+  of the 47 Tier-2 grammars (Clojure, CMake, Common Lisp, D, Dart,
+  Elixir, Elm, Julia, Nim, Nix, OCaml, Odin, Pascal, PowerShell, R,
+  Racket, Scheme, Zig among them) and no call in 17, and it invented
+  symbols in languages that looked fine. `dekko stats` on a 90-file
+  Zig project read `0 symbols, 0 edges`, and nothing said the language
+  went unread. Each grammar now has a row in `src/dekko/core/tier2.py`
+  naming the node types that define a function or a type, the path to
+  the name, and the node types that are calls. Nothing is inferred
+  from how a node type is spelled: a grammar without a row is not a
+  Tier-2 language. A row ships only if it passes a bar on its
+  repository (`benchmarks/tier2_corpus.py`, 43 repositories pinned by
+  commit): **supported** is 90% of functions and 80% of types found,
+  with calls extracted; **partial** is 75% and 50%. 39 languages are
+  supported (10 passed before, and five of those were right) and 4 are
+  partial, limited by grammars that fail to parse parts of real files:
+  Pascal 89%, Zsh 89%, Crystal 86%, Haxe 82%. `docs/cli.md` "Language
+  support" has the list and what Tier 2 does not do.
+- **Four extensions are no longer Tier-2.** `.vue`, `.svelte` and
+  `.mojo` are now unparsed languages, like `.astro` and `.groovy`:
+  skipped as `no parser (vue)` and counted in the coverage note every
+  empty answer carries (`76 files unparsed — no parser for: vue (76)`).
+  The Vue and Svelte grammars return a component's `<script>` block as
+  one piece of raw text, and the Mojo grammar fails on 92% of the files
+  of a real Mojo repository. All three yielded 0 symbols before, with
+  no caveat. One thing is lost: a TypeScript file's import of a `.vue`
+  file is no longer a `dekko deps` module edge (6 of 205 on
+  vitepress). `.mli` is no longer a source file: an OCaml interface
+  restates the signatures of its `.ml`, so indexing it would give every
+  function a twin.
+- **Symbol ids change in some Tier-2 languages.** Erlang, Haskell and
+  Elixir functions written as several clauses are one symbol (`f`, not
+  `f`, `f#2`, `f#3`); Solidity functions are qualified by their
+  contract, Ada subprograms by their package, Fortran procedures by
+  their module and Tcl procs by their `namespace eval`; SQL table names
+  lose their quotes. Notes anchored to the old ids are orphaned;
+  `dekko note list --orphaned` finds them.
+- **`dekko[all]` needs `tree-sitter-language-pack` 1.20 or newer.** A
+  row names its grammar's node types, and an older pack ships older
+  grammars: the same Haxe row yields no calls on pack 1.8.
+- **A `.scm` file of tree-sitter queries is not mapped as Scheme.** A
+  `.scm` file with a capture (`(identifier) @name`) and no `define` is
+  skipped as `tree-sitter query`. zed has 149 of them and no Scheme;
+  its `stats` line loses `scheme 149f/0s` and `dekko map` prints
+  `skipped: ... tree-sitter query 149`.
+- One CI leg (ubuntu, Python 3.13) now installs the extras. Every
+  Tier-2 test skips without the grammar pack and no leg installed it,
+  which is how 21 grammars sat at zero with CI green.
+
+### Fixed
+- **Parameters, variables and table mentions were symbols.** On
+  slimphp/Slim every PHP parameter was a class (`class
+  $responseFactory`), 1,077 types against 748 functions; the file's
+  namespace was a class too. Haxe parameters were functions (5,834 on
+  HaxeFlixel/flixel, against 4,364 real ones), Gleam parameters were
+  functions, Ada variables and Scala constructor parameters were
+  classes, C# and Dart constructors had kind `struct` (the word is
+  inside "con**struct**or"), an Erlang `mod:fun()` made `mod` a class,
+  and every SQL statement that mentioned a table (`INSERT`, `ALTER`,
+  `CREATE INDEX`) defined it again: zed's two SQL files held 401
+  "classes", now 58 tables.
+- **Functions defined by assignment or by a head word were missed or
+  misnamed.** All 200 R functions in tidyverse/stringr were named
+  `function`; the name is on the assignment around it. Lua's
+  `M.f = function`, Nix's `f = x: ...`, Zig's `const T = struct`,
+  Elixir's `def`/`defp`/`defmodule`, every Lisp's `defun`/`defn`/
+  `(define (f x) ...)`, CMake's `function()` and TclOO's `method` are
+  now definitions.
+- **A Vim script or Fortran function owned none of its calls.** The
+  symbol spanned the header line, so every call in the body had no
+  caller: 0 of 4,791 attributed on tpope/vim-fugitive, 0 of 4,326 on
+  json-fortran. A symbol now spans its body (97% and 96%), including
+  in Dart and Zig, where the grammar puts the body next to the
+  signature.
+- **Definitions were recorded as calls.** Elixir's `def`, `defp` and
+  `defmodule` were the top three "callees" of any Elixir repo, and a
+  Julia `function helper(a)` called `helper`.
+- **Member and qualified calls could never resolve.** Ada callees came
+  out as `TTY.URL` and Fortran ones as `json%get`; no symbol is named
+  that. They are now `URL` and `get`. A Perl `&f(...)` is a call to
+  `f`. Going the other way, a shell function named `_omz::log` and a
+  Scheme function named `list->set` keep their whole name at the call,
+  as they do at the definition.
+- **Expressions were recorded as callee names.** A callee holding
+  whitespace, a bracket or a quote (`(0..<rank).map`) is dropped
+  instead of becoming an `external` row nothing can match.
+- **No call was extracted from any Lisp, or from Dart, Zig, Nim,
+  Haskell, Elm, F#, Nix, Pascal or CMake.** Each spells a call its own
+  way (an `apply` node, an argument list after a name, a bare list),
+  and none matched the old call pattern. `query callers
+  magit-git-string` on magit said `(no callers)` for a function 37
+  others call. In a Lisp a list is a call when its head is a symbol
+  that is not a special form; binding lists, parameter lists, record
+  and class fields and quoted data are not calls. A curried
+  application (`lib.nameValuePair name value`) is one call.
+- **A Tcl command written from the root namespace was dropped.**
+  `::ns::proc arg` failed a filter written for shell commands.
+
+On the five evaluation repos with Tier-2 files every Tier-1 language,
+Bash, Starlark and Ruby are identical. zed gains 21 Nix, 23 PowerShell
+and 1 Julia symbols where it had none, and `dekko unused` there drops
+from 10,397 rows to 10,095 (330 bogus SQL rows leave, 18 tables and 10
+real functions enter). tensorflow gains its 11 CMake functions, all of
+them called (82 resolved call sites). spring-boot's SQL goes from 54
+symbols to 22.
+
 ## [1.5.12] — 2026-09-30
 
 ### Changed

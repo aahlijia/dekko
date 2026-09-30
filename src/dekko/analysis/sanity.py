@@ -1972,17 +1972,17 @@ _PYTHON_DOCSTRING = ('"""', "'''")
 
 # grammar name -> comment/docstring line-start prefixes. Covers every
 # Tier-1 grammar (languages.TIER1_SPECS, via each spec's .grammar) and
-# every Tier-2 grammar (languages.TIER2_GRAMMARS's values) *except*
-# Vue and Svelte, deliberately left unmapped: both are mixed-content
-# SFC formats (an HTML-ish template plus embedded script/style blocks,
-# each with its own comment convention), and a single-line-start
-# prefix check has no way to know which embedded language a hit's
-# line belongs to. ``_grammar_for_path`` still resolves "vue"/
-# "svelte" as a grammar name for these paths (``is_supported()``
-# stays True, so ``unsupported_language`` is computed correctly
-# elsewhere) -- ``_looks_like_comment_line`` just falls back to False
-# for them, a false negative (heuristic doesn't fire) never a false
-# positive.
+# every Tier-2 grammar (languages.TIER2_GRAMMARS's values), plus the
+# names ``_comment_style_for_path`` falls back to for a file dekko
+# does not parse.
+#
+# Vue and Svelte are deliberately left unmapped: both are
+# mixed-content SFC formats (an HTML-ish template plus embedded
+# script/style blocks, each with its own comment convention), and a
+# single-line-start prefix check has no way to know which embedded
+# language a hit's line belongs to. ``_looks_like_comment_line`` falls
+# back to False for them, a false negative (heuristic doesn't fire)
+# never a false positive.
 #
 # fsharp is intentionally SLASH_STYLE-only, not
 # SLASH_STYLE + _PAREN_STAR_STYLE like ocaml/pascal: real F# code can
@@ -2011,9 +2011,10 @@ _COMMENT_PREFIXES_BY_GRAMMAR: dict[str, tuple[str, ...]] = {
     "dart": _SLASH_STYLE,
     "zig": _SLASH_STYLE,
     "gleam": _SLASH_STYLE,
-    # Not grammars: the names ``_comment_style_for_path`` falls back to
-    # for a Groovy file or a Gradle build script, neither of which is
-    # parsed. A comment there is still a comment to ``sanity --unused``.
+    # Not grammars dekko parses: the names ``_comment_style_for_path``
+    # falls back to for a Groovy or Mojo file, a Gradle build script
+    # or an OCaml interface file. A comment there is still a comment
+    # to ``sanity --unused``.
     "groovy": _SLASH_STYLE,
     "gradle": _SLASH_STYLE,
     "solidity": _SLASH_STYLE,
@@ -2066,10 +2067,7 @@ def _grammar_for_path(path: str) -> str | None:
     check, returning the grammar name itself instead of a bool, so
     ``_looks_like_comment_line`` can look up a grammar-specific
     marker set rather than guessing from one global list. ``None``
-    for anything ``is_supported()`` also rejects, and for Vue/Svelte
-    -- ``is_supported() == True`` for both, but they're deliberately
-    left out of ``_COMMENT_PREFIXES_BY_GRAMMAR`` (see that table's
-    comment).
+    for anything ``is_supported()`` also rejects.
     """
     spec = languages.spec_for_path(path)
     if spec is not None:
@@ -2077,18 +2075,28 @@ def _grammar_for_path(path: str) -> str | None:
     return languages.tier2_grammar_for_path(path)
 
 
+# Extensions in no registry whose comment syntax is known anyway. An
+# OCaml interface file is not indexed, because it restates what its
+# ``.ml`` defines, but a comment line in one is still a comment.
+_UNREGISTERED_COMMENT_STYLES: dict[str, str] = {
+    ".mli": "ocaml_interface",
+}
+
+
 def _comment_style_for_path(path: str) -> str:
     """The ``_COMMENT_PREFIXES_BY_GRAMMAR`` key for ``path``, or ``""``.
 
     ``_grammar_for_path`` first. A file dekko recognizes and doesn't
     parse has no grammar, so it falls back to the language name its
-    registry gives it.
+    registry gives it, then to ``_UNREGISTERED_COMMENT_STYLES``.
     """
+    dot = path.rfind(".")
+    unregistered = _UNREGISTERED_COMMENT_STYLES.get(path[dot:].lower(), "")
     return (
         _grammar_for_path(path)
         or languages.build_script_language(path)
         or languages.known_unsupported_language(path)
-        or ""
+        or unregistered
     )
 
 
@@ -2123,7 +2131,7 @@ def _looks_like_comment_line(snippet: str, path: str) -> bool:
     resolve a grammar name (``_grammar_for_path``), never opened or
     read. Returns ``False`` for a path whose grammar isn't in
     ``_COMMENT_PREFIXES_BY_GRAMMAR`` (unsupported entirely, or one of
-    the deliberately-unmapped Vue/Svelte SFC grammars).
+    the deliberately-unmapped Vue/Svelte SFC formats).
 
     This is the *only* gate on a comment cause (the
     near-definition/header zone now picks the wording, not the verdict),
