@@ -1064,7 +1064,13 @@ only reaches `Type`'s own members, so its row lists only those (the
 same call written `x.name(..)` is not narrowed), and a Rust call
 through a `use` rooted at `std`, `core` or `alloc` (`use std::path::
 Path; Path::new(..)`) is counted external even when the repo defines a
-type of that name. A low ambiguous rate
+type of that name. A Rust call never resolves to a function its shape
+or argument count rules out (Rust has no overloads or default
+arguments): `x.name(..)` needs a method taking `self` and the written
+count, a bare `name(..)` never reaches a method, and
+`Type::name(obj, ..)` counts `self` as an argument. The call goes to the
+next candidate that fits, or stays ambiguous or external. Its ambiguous
+row can still list the candidate that was ruled out. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output

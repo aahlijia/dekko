@@ -972,6 +972,60 @@ def test_extends_clause_edit_keeps_incremental_equal_to_full(
     }
 
 
+RUST_ARITY_SRC = {
+    "src/inner.rs": (
+        "pub struct Inner;\n"
+        "impl Inner {\n"
+        "    pub fn set(&mut self, a: u8, b: u8) {}\n"
+        "}\n"
+    ),
+    "src/user.rs": (
+        "pub fn use_it(x: crate::inner::Inner) {\n    x.set(1);\n}\n"
+    ),
+    "src/other.rs": "pub fn other() {}\n",
+}
+_FITS = RUST_ARITY_SRC["src/inner.rs"].replace(", b: u8", "")
+
+
+def test_gate_widens_to_dot_calls_when_a_rust_method_comes_to_fit(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The call was external because the method wanted two arguments;
+    its cached entry still names ``set`` by the text it wrote."""
+    root = make_mapped_repo(RUST_ARITY_SRC)
+    (root / "src/inner.rs").write_text(_FITS)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"src/inner.rs", "src/user.rs"}
+
+
+@pytest.mark.parametrize("before", ["wants_two", "fits"])
+def test_rust_method_arity_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    source = dict(RUST_ARITY_SRC)
+    after = RUST_ARITY_SRC["src/inner.rs"]
+    if before == "wants_two":
+        after = _FITS
+    else:
+        source["src/inner.rs"] = _FITS
+    root = make_mapped_repo(source)
+    (root / "src/inner.rs").write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    pair = ("src/user.rs::use_it", "src/inner.rs::Inner.set")
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    assert (pair in edges) == (before == "wants_two")
+
+
 def test_a_tsconfig_paths_edit_invalidates_the_cache(
     make_mapped_repo: RepoFactory,
 ) -> None:

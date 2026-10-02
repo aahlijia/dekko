@@ -3488,6 +3488,124 @@ def _pick_candidate(
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
 ) -> Symbol | _Noise | None:
+    """Pick a candidate, skipping a Rust pick the call can't mean.
+
+    See ``_pick_candidate_vetoed`` for the ladder's own vetoes and
+    every parameter. A pick ``_rust_call_excludes`` rules out (a
+    shape or an argument count Rust has no syntax for) is taken out of
+    ``candidates`` and ``same_file`` and the ladder runs again, so a
+    wrapper's ``self.inner.set(a)`` reaches the wrapped type's
+    one-argument ``set`` instead of stopping at the wrapper's own
+    two-argument one. Only a candidate the ladder actually picked is
+    removed: a call that is ambiguous among possible candidates stays
+    ambiguous, and each new pick is held to the same rule. A call with
+    nothing left is noise.
+    """
+    excluded: set[str] = set()
+    while True:
+        picked = _pick_candidate_vetoed(
+            call,
+            candidates,
+            same_file,
+            file_imports,
+            caller,
+            index,
+            repo_stems,
+            raw_imports,
+            crate_roots,
+            tiebreak_hits,
+        )
+        if not isinstance(picked, Symbol) or not _rust_call_excludes(
+            call, picked
+        ):
+            return picked
+        if picked.id in excluded:
+            # The ladder can answer with a symbol from outside both
+            # lists; dropping it again would never end.
+            return _NOISE if repo_stems is not None else None
+        excluded.add(picked.id)
+        candidates = [c for c in candidates if c.id != picked.id]
+        same_file = [c for c in same_file if c.id != picked.id]
+        if not candidates:
+            return _NOISE if repo_stems is not None else None
+
+
+def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
+    """Whether a Rust call's shape or argument count rules out
+    ``candidate``.
+
+    Rust has no overloads, default arguments or optional parameters,
+    and writes ``self`` exactly when a method is called as a path
+    (``Type::method(obj, x)``), so a count that doesn't fit is code
+    that doesn't compile, not a guess. On zed, 6,039 sites picked such
+    a target: zero-argument ``x.clone()`` on ``Editor.clone(&self,
+    window, cx)``, ``a.min(b)`` on an associated ``fn min(a, b)``,
+    ``drop(x)`` on ``Terminal.drop(&mut self)``, ``zlog::init_test()``
+    on the same file's ``init_test(cx)``.
+
+    - A dot-call ``recv.name(..)`` needs a ``self`` parameter, and
+      writes every other parameter.
+    - A bare call ``name(..)`` can't reach a ``method`` (anything in an
+      ``impl`` or trait, with or without ``self``) or anything taking
+      ``self``, and writes every parameter.
+    - A path call ``a::name(..)`` writes every parameter, ``self``
+      included.
+
+    ``_candidate_arity`` strips ``self`` for any receiver, which is
+    wrong for a path call, but it is left alone: counting ``self``
+    there let the sole-candidate rung's trait-default allowance take
+    ``AppContext.new(&mut self, build)`` for an outside type's
+    ``Foo::new(a, b)``. The path count is read here only.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidate: The symbol the ladder picked.
+
+    Returns:
+        True for a ``RawCall`` in a ``.rs`` file and a Rust function or
+        method it can't mean. A call whose arguments the extractor
+        couldn't count (``arg_count is None``) is judged by shape only.
+    """
+    if (
+        not isinstance(call, RawCall)
+        or not call.path.endswith(".rs")
+        or candidate.language != "rust"
+        or candidate.kind not in ("function", "method")
+    ):
+        return False
+    params = candidate.params
+    has_self = bool(params) and _is_receiver_param(params[0], "rust")
+    if _rust_is_dot_call(call):
+        if not has_self:
+            return True
+        params = params[1:]
+    elif not call.receiver and (candidate.kind == "method" or has_self):
+        # ``has_self`` too: an ``impl`` inside a function body is
+        # extracted as plain functions.
+        return True
+
+    if call.arg_count is None:
+        return False
+
+    min_count, max_count = _param_arity(params)
+    if call.arg_count < min_count:
+        return True
+
+    return max_count is not None and call.arg_count > max_count
+
+
+def _pick_candidate_vetoed(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    file_imports: dict[str, Import],
+    caller: Symbol | None,
+    index: dict[str, list[Symbol]],
+    repo_stems: set[str] | None = None,
+    raw_imports: list[Import] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
+) -> Symbol | _Noise | None:
     """Run the candidate ladder, then veto a structurally impossible pick.
 
     See ``_pick_candidate_ladder`` for the ladder itself and every

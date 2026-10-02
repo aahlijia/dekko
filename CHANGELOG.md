@@ -9,6 +9,41 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.4] — 2026-10-02
+
+### Fixed
+- **A Rust call no longer resolves to a function its shape or argument
+  count rules out.** Rust has no overloads, default arguments or
+  optional parameters, so a mismatched count is code that doesn't
+  compile. But only the sole-candidate rung read the count: the
+  same-file, typed-parameter, container and import rungs took whatever
+  matched the name. On zed, 6,039 call sites picked such a target:
+  every zero-argument `x.clone()` in the editor crate landed on
+  `Editor.clone(&self, window, cx)`, 1,002 `cx.simulate_keystrokes(..)`
+  calls landed on `TestAppContext`'s two-argument version, `a.min(b)` on an
+  associated `fn min(a, b)`, `drop(x)` on some type's `Drop::drop`, and
+  `zlog::init_test()` on the same file's `init_test(cx)`. Now a
+  dot-call needs a method with `self` that takes the written count, a
+  bare call can't reach a method (or anything taking `self`), and a
+  path call writes every parameter, `self` included
+  (`Type::method(obj, x)`). A call whose arguments couldn't be counted
+  (inside a macro) is judged by shape only. When a pick is ruled out,
+  the ladder runs again without it, so a wrapper's
+  `self.inner.set(a)` reaches the wrapped type's one-argument `set`
+  instead of the wrapper's own two-argument one. Only a candidate that
+  was actually picked is dropped, and a call that was ambiguous stays
+  ambiguous. Measured against 1.6.3 on zed: 3,151 wrong pairs removed
+  (a random 50 read, all wrong) and 320 gained, all 320 read against the source:
+  9 wrong (2.8%), mostly a std method (`Cell::update`, `SocketAddr::port`)
+  or an outside crate's type. 1,272 calls go external
+  and the ambiguous count grows from 85,406 to 87,934 rows, because a
+  wrong pick now becomes ambiguous among the candidates that remain.
+  `dekko unused` on zed gains 117 rows and loses 41. Of the new rows,
+  111 are trait impl methods (flagged as dispatch candidates) and 6
+  are structs built only by struct literals. Wrong edges used to hide
+  them. cline has one Rust call go external. The other five eval repos
+  (no Rust) are unchanged.
+
 ## [1.6.3] — 2026-10-02
 
 ### Fixed
