@@ -63,7 +63,7 @@ from dekko.core.resolver import (
     workspace_fingerprint,
 )
 from dekko.core.languages import spec_fingerprint
-from dekko.core.model import FileMap
+from dekko.core.model import FileMap, RawHeritage
 from dekko.render.mapfile import (
     _callee_base,
     _json_dumps,
@@ -384,6 +384,28 @@ def _cpp_decl_names(entries: set[str]) -> set[str]:
     return names
 
 
+def _extended_names(clauses: list[RawHeritage] | list[dict]) -> set[str]:
+    """Bare names of the types that carry an ``extends`` clause.
+
+    Whether a class extends anything decides how a construction of it
+    is read (``resolver._constructed_by_count``), and the clause is not
+    part of the class's own symbol.
+
+    Args:
+        clauses: One file's heritage clauses, as ``RawHeritage``
+            objects or the plain dicts the extraction cache stores.
+
+    Returns:
+        The subtype names, empty for a file with no such clause.
+    """
+    names: set[str] = set()
+    for clause in clauses:
+        d = clause if isinstance(clause, dict) else vars(clause)
+        if d.get("subtype_id") and d.get("relation") == "extends":
+            names.add(resolved_id_name(d["subtype_id"]))
+    return names
+
+
 def _name_delta_dirty(
     files: list[FileMap],
     cached: dict[str, dict],
@@ -424,6 +446,11 @@ def _name_delta_dirty(
         changed |= _cpp_decl_names(
             set(cache.old_cpp_decls(fm.path) or []) ^ set(fm.cpp_decls)
         )
+        # So does an ``extends`` clause gained or lost: it changes how
+        # a construction of that class resolves from any file.
+        changed |= _extended_names(
+            cache.old_heritage(fm.path) or []
+        ) ^ _extended_names(fm.heritage)
         # Whole-file compare first: cheaper than the grouped analysis
         # below, and this is the dominant agent-loop edit (a body edit,
         # a new call, a literal fix -- none of which touch any symbol's

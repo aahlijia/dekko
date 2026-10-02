@@ -3363,7 +3363,7 @@ def _pick_candidate_ladder(
 
     if len(candidates) == 1:
         return _sole_candidate_match(
-            call, candidates[0], repo_stems is not None, index
+            call, candidates[0], repo_stems is not None, index, file_imports
         )
 
     return _last_resort_match(call, candidates)
@@ -3786,6 +3786,7 @@ def _sole_candidate_match(
     only: Symbol,
     noise_aware: bool,
     index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
 ) -> "Symbol | _Noise | None":
     """Resolve, or reject, the single remaining candidate for a call.
 
@@ -3810,6 +3811,11 @@ def _sole_candidate_match(
     1.0 candidates". Same defect class and same remedy as the ``_NOISE``
     split: no plausible repo target means external.
 
+    A class is not judged by its own symbol's parameters, which are
+    empty: it stands for its constructors. Java and C++ name them
+    after the class (``_class_named_constructors``); JS/TS and Python
+    don't, and are read by ``_constructed_by_count``.
+
     Args:
         call: The raw call/reference/heritage clause being resolved.
         only: The single language-filtered candidate.
@@ -3817,12 +3823,17 @@ def _sole_candidate_match(
             a non-``None`` ``repo_stems`` to ``_pick_candidate``).
             ``_resolve_ref`` doesn't, and has no external bucket to
             feed, so it keeps the plain ``None``.
+        index: The bare-name index, with its reserved entries.
+        file_imports: Local name to import record for the calling
+            file.
     """
     if (
-        only.kind in TYPE_KINDS and _class_named_constructors(only, index)
-    ) or (
-        _arity_plausible(only, call, index)
-        and not _rust_name_is_also_a_variant(call, only, index)
+        (only.kind in TYPE_KINDS and _class_named_constructors(only, index))
+        or _constructed_by_count(only, call, index, file_imports or {})
+        or (
+            _arity_plausible(only, call, index)
+            and not _rust_name_is_also_a_variant(call, only, index)
+        )
     ):
         # A class with named constructors stands for them after
         # ``_without_own_constructors``; its own symbol has no
@@ -3831,6 +3842,98 @@ def _sole_candidate_match(
     if noise_aware:
         return _NOISE
     return _last_resort_match(call, [])
+
+
+def _constructed_by_count(
+    only: Symbol,
+    call: _Referable,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+) -> bool:
+    """Whether ``call``'s argument count can construct the class ``only``.
+
+    For JS/TS and Python, where a class's parameters are on a method
+    not named after it. ``new AgentRuntime(config)`` read against the
+    class symbol is one argument for zero parameters, and the sole-
+    candidate rung threw out every construction with an argument that
+    no import tied to the class's file: an import through a barrel
+    (``./index``, a package ``__init__.py``), through an alias, a
+    receiver-qualified one, or none at all. cline kept 2 of 46
+    ``new AgentRuntime(..)`` sites; tensorflow lost 1,174 Python
+    construction sites.
+
+    Three cases:
+
+    - The class has constructors of its own: the count must fit one.
+    - It has none and its arity is knowable (a JS/TS class with no
+      ``extends`` clause takes no arguments): not decided here, the
+      class symbol's own empty parameter list is the right reading.
+    - It has none and its arity is unknowable (any Python class:
+      dataclass, ``NamedTuple``, metaclass, inherited ``__init__``; a
+      JS/TS class with an ``extends`` clause): there is no count to
+      check, so the call needs other evidence. Its receiver's head
+      is an import of the class's own file, or it is bare and a bare
+      name can mean this class (``_bare_name_reaches``). Without the
+      receiver test tensorflow gained 648 such sites and about half
+      were wrong: ``config_pb2.RunOptions(..)``, a generated protobuf
+      class, landed on the repo's one hand-written ``RunOptions``.
+
+    Args:
+        only: The sole remaining candidate.
+        call: The raw call being resolved. A reference or heritage
+            clause has no argument count and is never decided here.
+        index: The bare-name index, with the ``_OWN_CTOR_KEY`` and
+            ``_EXTENDS_KEY`` entries.
+        file_imports: Local name to import record for the calling
+            file.
+
+    Returns:
+        True when the construction is plausible by its constructor.
+        False leaves the decision to the class symbol's own arity.
+    """
+    arg_count = getattr(call, "arg_count", None)
+    if (
+        arg_count is None
+        or only.kind != "class"
+        or only.language not in _UNNAMED_CTOR_LANGUAGES
+    ):
+        return False
+    ctors = index.get(f"{_OWN_CTOR_KEY}{only.path}::{only.qualname}")
+    if ctors:
+        return any(_arity_fits(only, c, arg_count, index) for c in ctors)
+    if only.language != "python" and _EXTENDS_KEY + only.id not in index:
+        return False
+
+    receiver = getattr(call, "receiver", None)
+    if not receiver:
+        return _bare_name_reaches(only, call)
+
+    imp = file_imports.get(_PATH_SPLIT.split(receiver)[0])
+    return imp is not None and _module_matches(imp.source, only.path)
+
+
+def _bare_name_reaches(only: Symbol, call: _Referable) -> bool:
+    """Whether a bare ``Name(..)`` in another file can mean ``only``.
+
+    The call's own file binds the name to something the map has no
+    symbol for, or the same-file rung would have answered. That is an
+    alias of the class (``DoNotConvert = config_lib.DoNotConvert``) or
+    an unrelated local (``Car = collections.namedtuple("Car", ..)``),
+    and two things rule the class out: a class nested in another scope
+    has no bare name outside it, and code outside the tests does not
+    construct a class that lives in them.
+
+    Args:
+        only: The sole candidate, a class in another file.
+        call: The bare call being resolved.
+
+    Returns:
+        False when the bare name cannot be this class.
+    """
+    if "." in only.qualname:
+        return False
+
+    return not only.test or is_test_path(call.path)
 
 
 def _last_resort_match(
@@ -6275,11 +6378,28 @@ _CPP_USING_KEY = "::cpp-using::"
 # from a ``.cc`` definition that can't repeat its header's defaults.
 _CPP_DECLARED_KEY = "::cpp-declared::"
 
+# Reserved ``index`` namespaces for a JS/TS or Python construction
+# (``_constructed_by_count``). ``_OWN_CTOR_KEY + "path::Qualname"``
+# holds the ``constructor`` / ``__init__`` methods of the class with
+# that qualname in that file. ``_EXTENDS_KEY + class id`` is present
+# when the class has an ``extends`` clause, so it may inherit a
+# constructor the map can't read off the class itself.
+_OWN_CTOR_KEY = "::own-ctor::"
+_EXTENDS_KEY = "::extends::"
+_UNNAMED_CTOR_NAMES = {
+    "python": "__init__",
+    "javascript": "constructor",
+    "typescript": "constructor",
+    "tsx": "constructor",
+}
+_UNNAMED_CTOR_LANGUAGES = frozenset(_UNNAMED_CTOR_NAMES)
+
 
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
-    ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY`` and
-    ``_CPP_DECLARED_KEY`` entries."""
+    ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY``,
+    ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY`` and ``_EXTENDS_KEY``
+    entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
@@ -6297,7 +6417,29 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
         for entry in fm.cpp_using:
             _index_cpp_using(entry, index)
     _index_cpp_declared(files, index)
+    _index_constructions(files, index)
     return index
+
+
+def _index_constructions(
+    files: list[FileMap], index: dict[str, list[Symbol]]
+) -> None:
+    """Record what a JS/TS or Python construction is checked against:
+    each class's own constructors and whether it extends anything (see
+    ``_OWN_CTOR_KEY`` and ``_EXTENDS_KEY``)."""
+    for fm in files:
+        if fm.language not in _UNNAMED_CTOR_LANGUAGES:
+            continue
+        ctor_name = _UNNAMED_CTOR_NAMES[fm.language]
+        for sym in fm.symbols:
+            if sym.kind == "method" and sym.name == ctor_name:
+                owner = sym.qualname.rpartition(".")[0]
+                index.setdefault(
+                    f"{_OWN_CTOR_KEY}{sym.path}::{owner}", []
+                ).append(sym)
+        for clause in fm.heritage:
+            if clause.subtype_id and clause.relation == "extends":
+                index.setdefault(_EXTENDS_KEY + clause.subtype_id, [])
 
 
 def _index_cpp_declared(
@@ -6728,6 +6870,33 @@ def _rust_std_import(imp: Import) -> bool:
     return imp.source.split("::", 1)[0] in _RUST_STD_NAMESPACE_ROOTS
 
 
+def _bare_package_import(imp: Import) -> bool:
+    """Whether ``imp`` is a JS/TS import of a one-segment bare specifier.
+
+    ``"vscode"``, ``"react"``, ``"zod"``, ``"node:fs"``: a specifier
+    with no slash that is not relative is a package name, the same
+    line ``_resolve_import_js`` draws for the module graph. Not
+    covered: ``@scope/name`` and anything with a slash, which can be
+    a tsconfig path alias (``@core/controller``, ``src/state``) that
+    this test has no table for, and ``#name``, a package's own
+    ``imports`` map.
+
+    Args:
+        imp: An import record; the file's language comes from its path.
+
+    Returns:
+        True for such an import in a JS/TS file.
+    """
+    if not imp.path.endswith(_JS_TS_EXTENSIONS):
+        return False
+    # Every binding's source carries its imported name as a last
+    # segment (``vscode/Uri``); a side-effect import has no name.
+    module = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
+    return bool(module) and not (
+        "/" in module or module.startswith((".", "@", "#"))
+    )
+
+
 def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     """Whether an import binding plausibly points into this repo.
 
@@ -6737,10 +6906,22 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     pass by coincidence. A dotted filename's stem is never a single
     segment, hence the second, component-wise check (see
     ``_dotted_components``). A Java/Kotlin import is tested by its
-    qualified path instead (see ``_jvm_import_keys``).
+    qualified path instead (see ``_jvm_import_keys``), and a one-
+    segment bare JS/TS specifier is a package, never a repo file (see
+    ``_bare_package_import``).
     """
     if isinstance(imp, _WorkspaceImport):
         return True
+    if _bare_package_import(imp):
+        # ``import * as vscode from "vscode"`` names an npm package,
+        # whatever the repo's files are called. The stem test passed
+        # it on cline because of ``webview/src/vscode.ts``, so
+        # ``vscode.Uri.file(..)`` reached the sole-candidate rung and
+        # landed on a test stub of the VS Code API: 79 wrong caller/
+        # callee pairs there, and ``cwd()`` from ``"process"`` bound to
+        # a repo method on claude-code. A workspace package is told
+        # apart above.
+        return False
     if imp.path.endswith(_JVM_EXTENSIONS):
         # A qualified JVM name is a path, not a bag of words: the
         # import is in-repo iff it names a repo file, package or

@@ -9,6 +9,54 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-10-02
+
+### Fixed
+- **A construction with arguments is checked against the class's
+  constructor, not against the class.** `new AgentRuntime(config)`
+  names the class, and a JS/TS or Python class symbol has no
+  parameters: they are on `constructor` / `__init__`. When the class
+  was the only candidate and no import named its file, the resolver
+  read the call as one argument for zero parameters and filed it as
+  external. That is every construction with an argument whose import
+  goes through a barrel (`./index`, a package `__init__.py`) or a path
+  alias, is written on a receiver (`linalg.LinearOperatorDiag(..)`),
+  or has no import at all. A zero-argument `new Plain()` passed, which
+  made it look like barrels sometimes worked. On cline `query callers
+  AgentRuntime` listed 2 of the 46 construction sites, and nothing
+  said 44 were missing. Now the argument count is read against the
+  class's own constructors, and a count none of them takes is still
+  external. A class with no constructor of its own whose argument
+  count can't be known (any Python class; a JS/TS class with an
+  `extends` clause) needs other evidence: the call's receiver is an
+  import of the class's own file, or the call is bare and the class is
+  a top-level one that the calling code could mean (a class in test
+  code is not what code outside the tests constructs). A JS/TS class
+  with no constructor and no `extends` clause still takes no
+  arguments. Measured against 1.6.0: cline 57 construction sites
+  gained (`AgentRuntime` 2 -> 46, `AgentTeamsRuntime` 26 -> 29),
+  tensorflow 1,170 sites and 1,779 caller/callee pairs gained, none
+  lost on any of seven repositories. Java, C++, Rust and Go maps are
+  unchanged. Not a regression: 1.0.0 gives the same wrong answer.
+- **An import of a bare npm package name is external, whatever the
+  repo's files are called.** `import * as vscode from "vscode"`
+  counted as an import of the repo on cline because a file there is
+  named `vscode.ts`, so `vscode.Uri.file(..)` was matched against repo
+  symbols and landed on a test stub of the VS Code API. The same test
+  bound `z.unknown()` (zod) to a local `unknown` helper,
+  `http.createServer(..)` to a repo method, and on claude-code `cwd()`
+  from `"process"` to a repo function. A JS/TS specifier with one
+  segment (`"vscode"`, `"react"`, `"node:fs"`) is now a package. A
+  workspace package is still recognized first, and `@scope/name`,
+  `#name` and anything with a slash are tested as before, since they
+  can be path aliases. cline loses 79 wrong caller/callee pairs (118
+  call sites) and 47 wrong reference pairs; claude-code loses 11
+  pairs.
+- **An `extends` clause added to or removed from a class re-resolves
+  the files that construct it.** The incremental map compared symbols
+  only, and the clause is not part of one.
+
+
 ## [1.6.0] — 2026-10-02
 
 Closes round 1.6's fix cycle. The code is 1.5.13; this release is the

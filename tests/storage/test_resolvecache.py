@@ -738,3 +738,45 @@ def test_prototype_default_edit_keeps_incremental_equal_to_full(
     assert ("user.cc::app.Use", "shape.cc::tf.GetType") in {
         (ids[e["caller"]], ids[e["callee"]]) for e in incremental["edges"]
     }
+
+
+# An ``extends`` clause is not part of the class's symbol, and it
+# decides whether ``new Sub(1)`` in another file can construct it.
+EXTENDS_SRC = {
+    "base.ts": (
+        "export class Base {\n  constructor(a: number) {}\n}\n"
+        "export class Sub {}\n"
+    ),
+    "user.ts": "export function use() {\n  return new Sub(1);\n}\n",
+    "other.ts": "export function other() {\n  return 1;\n}\n",
+}
+_EXTENDED = EXTENDS_SRC["base.ts"].replace("Sub {}", "Sub extends Base {}")
+
+
+def test_gate_widens_to_constructions_when_an_extends_clause_appears(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(EXTENDS_SRC)
+    (root / "base.ts").write_text(_EXTENDED)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"base.ts", "user.ts"}
+
+
+def test_extends_clause_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(EXTENDS_SRC)
+    (root / "base.ts").write_text(_EXTENDED)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    assert ("user.ts::use", "base.ts::Sub") in {
+        (ids[e["caller"]], ids[e["callee"]]) for e in incremental["edges"]
+    }
