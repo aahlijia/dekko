@@ -376,6 +376,20 @@ def test_looks_like_comment_line_vue_deliberately_unmapped() -> None:
     )
 
 
+def test_looks_like_comment_line_in_files_dekko_does_not_parse() -> None:
+    # Mojo is a disclosed gap and an OCaml interface file is not
+    # indexed at all. A comment in either is still only a comment.
+    assert sanity._looks_like_comment_line(
+        "# Helper does X", "src/helper.mojo"
+    )
+    assert sanity._looks_like_comment_line(
+        "(* Helper does X *)", "src/helper.mli"
+    )
+    assert not sanity._looks_like_comment_line(
+        "val helper : int -> int", "src/helper.mli"
+    )
+
+
 def test_looks_like_comment_line_unsupported_language() -> None:
     assert not sanity._looks_like_comment_line(
         "// Helper does X", "src/Helper.astro"
@@ -2515,9 +2529,9 @@ def test_sanity_cross_file_collision_flags_call_shaped_reference(
     grep_only_by_loc = {
         (row["file"], row["line"]): row["cause"] for row in doc["grep_only"]
     }
-    assert (
-        grep_only_by_loc.get(("b.py", 6)) == sanity.CAUSE_CROSS_FILE_COLLISION
-    )
+    # File B's call is a site the map attributes to B's own ``icon``,
+    # so the exact, index-backed cause wins over the file-shape one.
+    assert grep_only_by_loc.get(("b.py", 6)) == sanity.CAUSE_RESOLVED_ELSEWHERE
 
 
 def test_sanity_cross_file_collision_absent_with_single_candidate(
@@ -2625,7 +2639,13 @@ def test_sanity_all_cross_file_collision_two_candidates_flagged(
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["aggregate_causes"].get(sanity.CAUSE_UNEXPLAINED) is None
-    assert doc["aggregate_causes"].get(sanity.CAUSE_CROSS_FILE_COLLISION) == 2
+    # Each file's call is a site the map attributes to that file's own
+    # ``icon``, so for the other one it is the exact resolved-elsewhere
+    # cause, not the file-shape collision cause.
+    assert doc["aggregate_causes"].get(sanity.CAUSE_RESOLVED_ELSEWHERE) == 2
+    assert (
+        doc["aggregate_causes"].get(sanity.CAUSE_CROSS_FILE_COLLISION) is None
+    )
 
 
 # --- ``sanity --unused``: classify_unused_reference (pure) -------------
@@ -4621,7 +4641,9 @@ def test_miss_rust_end_to_end_struct_target(
         }
     )
     rows = _grep_only_causes(root, "AbortLoc", capsys)
-    assert rows.get(3) == sanity.CAUSE_TYPE_ANNOTATION
+    # The payload sits inside ``enum Abort``'s body: the index-backed
+    # type-context cause outranks the payload shape.
+    assert rows.get(3) == sanity.CAUSE_TYPE_CONTEXT
     assert rows.get(6) == sanity.CAUSE_TYPE_ANNOTATION
 
 

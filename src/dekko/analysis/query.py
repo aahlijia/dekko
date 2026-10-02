@@ -25,6 +25,7 @@ from dekko.classify import is_test_path, relevance_key
 from dekko.render.mapfile import (
     MapIndex,
     callee_segments,
+    format_build_scripts,
     format_unsupported,
 )
 from dekko.core import languages
@@ -740,6 +741,52 @@ def _coverage_note(index: MapIndex) -> str | None:
     return f"{note} — this answer may be incomplete" if note else None
 
 
+# The one directory name Gradle itself fixes for a build's own logic.
+# Code under it is on every build script's classpath, so it is the code
+# a skipped build script can call.
+_BUILD_LOGIC_DIR = "buildSrc"
+
+
+def _build_logic_note(index: MapIndex, sym: Symbol, action: str) -> str | None:
+    """Caveat for an empty callers answer on a build's own logic.
+
+    Build scripts are skipped, and they are left out of the general
+    coverage note because almost no symbol is reachable from one. A
+    symbol under ``buildSrc/`` is the exception: a build script may be
+    its only caller, so "no callers" there needs the caveat.
+
+    Args:
+        index: Loaded map index.
+        sym: The symbol whose callers came back empty.
+        action: ``"callers"`` or ``"callees"``; only the callers
+            direction can be missing a build script's call.
+
+    Returns:
+        A one-line caveat, or ``None`` when the map skipped no build
+        script, the symbol is not build logic, or the question was
+        about callees.
+    """
+    if action != "callers":
+        return None
+
+    scripts = format_build_scripts(index.provenance)
+    if scripts is None or _BUILD_LOGIC_DIR not in sym.path.split("/"):
+        return None
+
+    return (
+        f"build scripts: {scripts}, and this symbol is under "
+        f"{_BUILD_LOGIC_DIR}/; a build script may call it. Check with: "
+        f"dekko sanity {sym.id}"
+    )
+
+
+def _print_notes(*notes: str | None) -> None:
+    """Print each note that is set, as a ``note:`` line on stderr."""
+    for note in notes:
+        if note:
+            print(f"  note: {note}", file=sys.stderr)
+
+
 def _referenced_entries(
     index: MapIndex, sym: Symbol, sites: bool = False
 ) -> list[dict]:
@@ -820,6 +867,7 @@ def _print_relation_json(
     coverage: str | None,
     ambig_in: int,
     ambig_out: int,
+    build_logic: str | None = None,
 ) -> None:
     """JSON rendering for ``_run_relation`` (callers/callees)."""
     entries = []
@@ -872,6 +920,8 @@ def _print_relation_json(
         referenced = _referenced_entries(index, sym, sites)
         if referenced:
             doc["referenced_not_called"] = referenced
+        elif build_logic:
+            doc["build_script_warning"] = build_logic
     print(json.dumps(doc, indent=2))
 
 
@@ -895,6 +945,7 @@ def _run_relation(
     # rows already equal this count 1:1.
     caller_total = len(symbols) + len(modules)
     coverage = _coverage_note(index)
+    build_logic = _build_logic_note(index, sym, action)
     # Ambiguous calls never become a resolved edge (see resolver.py's
     # module docstring), so a symbol's calls_in/calls_out can look
     # exhaustive when name-collision candidates were actually dropped.
@@ -919,6 +970,7 @@ def _run_relation(
             coverage,
             ambig_in,
             ambig_out,
+            build_logic,
         )
         return EXIT_OK, None
     lines: list[str] = []
@@ -952,8 +1004,7 @@ def _run_relation(
                 print(f"  {row}")
             return EXIT_OK, None
         print(f"(no {action} of {sym.id})")
-        if coverage:
-            print(f"  note: {coverage}", file=sys.stderr)
+        _print_notes(coverage, build_logic)
         return EXIT_OK, None
     related_total = caller_total if sites else 0
     related_label = (
@@ -1122,6 +1173,13 @@ def _run_peers(
 # Python/Java/C++/JS/TS only, Rust/Go/C permanently
 # out of scope; see ``languages.LanguageSpec.throw_query``'s
 # docstring).
+
+
+# Languages whose errors aren't exception syntax at all (``Result``/
+# ``?``, returned ``error`` values, no exceptions), so throws/catches
+# can never cover them. Any other uncovered language just has no
+# query yet.
+_NO_EXCEPTION_SYNTAX = frozenset({"rust", "go", "c"})
 
 
 def _caller_label(index: MapIndex, caller_id: str) -> str:
@@ -1561,10 +1619,14 @@ def _run_throws(
     )
     if not rows:
         if not language_supported:
+            scope = (
+                "permanently excluded from"
+                if sym.language in _NO_EXCEPTION_SYNTAX
+                else "not covered by"
+            )
             print(
                 f"(throws not tracked for {sym.id} — {sym.language} is "
-                "permanently excluded from this query; see `dekko "
-                "query throws --help`)"
+                f"{scope} this query; see `dekko query throws --help`)"
             )
         else:
             print(f"(no throws found for {sym.id})")
@@ -3571,7 +3633,11 @@ def _locate_file(index: MapIndex, target: str) -> tuple[str | None, int]:
         wider = index.languages_by_path.keys() | index.hidden_test_symbols
         matches = paths_matching(index, target, wider)
     if not matches:
-        print(f"dekko: no mapped file matches '{target}'", file=sys.stderr)
+        reason = languages.unindexed_reason(target)
+        why = f" ({reason})" if reason else ""
+        print(
+            f"dekko: no mapped file matches '{target}'{why}", file=sys.stderr
+        )
         coverage = _coverage_note(index)
         if coverage:
             print(f"  note: {coverage}", file=sys.stderr)

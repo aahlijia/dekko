@@ -437,22 +437,176 @@ count: `matches`, `dekko-only` and `grep-only` are untouched, only the
 cause on a grep-only row changes. `--fail-on-unexplained` will fail
 less often as a result.
 
-**Same-named locals (JS/TS only), since 0.43.76.** A second pass over
-whatever is still `unexplained` after every shape above: a value-
-position use of a local (a `const`/`let`/`var`, a destructured
-binding, a `catch (e)` parameter, or a function parameter) declared
-earlier in the enclosing function reads as `use of a same-named local
-declared earlier in the enclosing function — not a reference to the
-target; scope heuristic, not a parse`, with the declaration's own line
-riding on the row (`decl_line` in `--json`, `(declared at line N)` in
-text) — never a per-hit line in the cause string itself, so `--all`
-keeps this in one bucket instead of fragmenting by line number. Four
-guards keep it from ever overriding a real miss: never a call-shaped
-line (a genuinely missed call stays a miss), never the target's own
-definition, never a declaration indented deeper than the use (out of
-scope), and the check only ever *upgrades* an `unexplained` row, never
-a row a more specific cause already claimed. On claude-code's own
-worst-case sample this closed 759 of 4,104 unexplained rows (18.5%).
+**A site the map attributed to a same-named sibling, since 1.5.9.**
+When two unrelated symbols share a bare name (a 1-arg `errorMessage(e)`
+helper and a 2-arg one elsewhere), a grep-only row for one of them
+whose `(path, line)` the map records as a call site or a value
+reference of the *other* reads `dekko attributes this line to a
+different, same-named declaration (see resolved_to) — a miss only if
+that attribution is wrong`, with the sibling's id on the row
+(`resolved_to` in `--json`, `(resolved to <id>)` in text). It is an
+index fact, exact to the line, so it takes precedence over every shape
+rule above, in single-target and `--all` mode alike; it never applies
+to a line the map also attributes to the target itself (that keeps
+`dekko has this as a reference`), nor to a test-file line under the
+default `--no-tests`. A row under it that does not in fact call or
+reference the named symbol is a resolver error worth reporting. The
+older `call-shaped reference to a different, same-named declaration
+elsewhere in the repo` cause remains for a call-shaped hit inside a
+sibling's own file that the map attributed to nobody, which is what an
+ambiguous site among several same-named candidates looks like.
+
+**Four more index facts, since 1.5.10.** Each is read off the map, not
+the line, and named as such:
+
+- *A type-declaration body.* A hit whose innermost enclosing symbol is
+  an interface, type alias or enum (an interface member signature,
+  `readonly count?: number`, a generic parameter default, an enum
+  member, any comment or string in there) reads `inside an interface,
+  type-alias or enum body — a type context, never a call site`. Not
+  `class`/`struct`/`trait` bodies, which hold code. It sits below the
+  comment rungs and below a recorded reference of the target (a fact
+  about the target beats one about the line), above every other shape.
+- *A recursive self-call.* A bare `name(` inside the target's own span
+  reads `recursive call inside the symbol's own body — dekko records
+  no self edges by design`. Decided per target: the same line is a
+  plain call for a same-named sibling.
+- *A name bound to a different import in this file.* When the hit's
+  file imports the bare name from a source the map could not place in
+  the repo (`import { appendFileSync } from 'fs'`) or from a repo file
+  other than the target's, the row reads `this file imports a
+  different declaration of the name (see bound_to) — the resolver
+  bound the name to that import, not the target`, with the module
+  string or repo path on the row (`bound_to` in `--json`, `(bound to
+  fs)` in text). Applied only to rows the ladder left `unexplained` or
+  under one of its trailing causes (generic name, test filter, ...): a
+  comment line that names `appendFileSync` is still best described as
+  a comment.
+- *A heritage clause the map recorded.* `export class FocusEvent
+  extends TerminalEvent {` on a type target whose subtype the map
+  resolved reads `heritage clause (extends/implements) the map records
+  — not a call site; see: dekko query subtypes <target>`, over any
+  shape cause. A clause the map resolved to a same-named *sibling*
+  reads as resolved elsewhere; a clause the map did not resolve keeps
+  the `extends`/`implements` shape under `type position`.
+
+**Files dekko does not index, since 1.5.12.** A hit in a Gradle build
+script reads `build script: dekko does not index build scripts, so a
+call here never becomes an edge`, and a hit in a file of an unparsed
+language (`.groovy`, `.astro`) reads `unparsed-language file`. Both are
+decided before any rung that reads the line's shape, the same way a
+file the map skipped is: those rungs guess why the resolver missed a
+call, and the resolver never saw the file. A bare `normalizeLiveReloadPort()`
+inside a `tasks.register(...) { ... }` closure used to read
+`unexplained miss`, and `version.forAntora()` a `qualified call`. Hits
+in files dekko does not recognize at all (`README.md`, `package.json`)
+keep the labels they had.
+
+**Two file-state shapes and the leftover line shapes (JS/TS), since
+1.5.10.** A one-line rule cannot see that a line sits inside a template
+literal or a `/* */` block opened above it, which is what a prompt's
+continuation line or a JSDoc body without `*` prefixes is. A small
+three-state lexer over the file (quoted strings end at their line,
+template literals with brace-aware `${}` bodies and block comments
+carry across lines, `//` ends the line) now gives every JS/TS line its
+starting state: a line that starts inside a template and loses the
+name once the template text is blanked reads `mention inside a string
+or template text` outright (the `eval("name()")` exception is for a
+one-line string that *is* code, not for prompt prose and generated-
+code templates that hold `name(` all the time), and a line that starts
+inside a block comment reads as a comment line. A file the lexer does
+not leave in code state (a backtick in JSX text, a regex literal: 11
+of claude-code's 1,902 JS/TS files) gets no state-based cause at all.
+The line shapes that rode in with this:
+
+- A trailing comment after code (`since: number; // timestamp of last
+  mood change`) reads `comment mention — not a call site (a trailing
+  comment after code on the line)`: the name is in the comment part
+  and absent from the code part, strings blanked first. JS/TS, the `#`
+  grammars (Python, Bash, Ruby) and the C family.
+- Type positions the anchored templates missed read `type position`:
+  a union or generic member (`Promise<Svc | undefined>`, `x: A | Svc`),
+  `typeof Name`, an `extends`/`implements` clause, and for a type
+  target only `as`/`satisfies Name`, a namespace-qualified `x: ns.Name`,
+  a function-type return `) => Name`, a return type `): ...Name... {`
+  (no space before the colon, which a ternary `) : x` has), a type-alias
+  body and an indexed-access type `Name["key"]`.
+- A method call on an expression result (`foo().name(`, `items[0].
+  name(`, `x!.name(`, `x?.name(`) or a line-start `.name(` chain
+  continuation reads as the qualified-call blind spot, in any grammar.
+- A JSX attribute `name="..."`/`name={...}` (`.tsx`/`.jsx`) reads as an
+  object key does; `action={action}` keeps a bare `action` and falls
+  through to the shadow pass. JSX text between `>` and `<`
+  (`<span>debug this</span>`) reads `JSX text content — literal text,
+  not a call site`; a text line with no tag on it is left alone.
+- An `abstract`/`declare` method, an interface member `name(params):
+  Type;` or a `function name(params): Type;` overload with no body reads
+  `a method or function signature with this name (abstract, interface
+  member or overload) — a declaration, not a call site`.
+- `x.name` with no `(` after it, on a line the map records no read for,
+  reads `a property access of a same-named member (`x.name`), not a
+  call — line-shape match; the map records no read at this line`, the
+  shape twin of the tier-1 property read.
+- An alias-only re-export `export { a as b };` and a member line of a
+  multi-line `export {` list read as import statements; a
+  destructuring declaration (`const [state, name] =`, `const { name }
+  =`, a member line of a multi-line one), a bare `let name`, a `for`-of
+  binding, an arrow or `function` parameter list and `readonly name: T`
+  read as declarations; Rust `let mut name =` joins the declaration
+  shape.
+- A shell line whose only mention is inside quotes (a jq filter, a
+  `POOLS=("...")` literal) reads `mention inside a string or template
+  text`: Bash is Tier 2 but does yield call links, so "unparsed
+  language" would be false.
+- Two older rules were fixed alongside: a quoted string *inside* a
+  `${...}` body is blanked too (`${isLoading ? "animate-pulse" : ""}`
+  used to keep `animate` visible), and the `eval("name()")` exception
+  now requires some string on the line to be *nothing but* a call
+  expression; a string that merely contains `name(` among other text is
+  string text.
+
+Every one of these refuses a line that also calls the name bare, so a
+real missed call never hides behind it. Still left unexplained on
+purpose: regex literals naming the target, JSX text lines with no tag
+on them, multi-line Bash strings and heredocs, Python and Rust twins of
+the JS/TS-only rules (attribute reads, f-strings, docstring prose, bare
+uses of a `let` local), files the lexer desyncs on, and ambiguous
+sites, which have no line in the map. Measured with `sanity --all`
+(unexplained rows): claude-buddy 30 → 1, claude-code 957 → 51, cline
+1,439 → 218; the grep-only totals are unchanged, since only causes on
+grep-only rows move.
+
+**Same-named locals (JS/TS only), since 0.43.76; widened in 1.5.10.**
+A second pass over whatever is still `unexplained` after every shape
+above: a use of a local declared earlier in an enclosing scope reads
+as `use of a same-named local declared earlier in an enclosing scope —
+not a reference to the target; scope heuristic, not a parse`, with the
+declaration's own line riding on the row (`decl_line` in `--json`,
+`(declared at line N)` in text) — never a per-hit line in the cause
+string itself, so `--all` keeps this in one bucket instead of
+fragmenting by line number. A binding is a `const`/`let`/`var` (plain
+or destructured, including a member line of a multi-line `const {`),
+a `catch (e)` parameter, an arrow or `function` parameter on a line
+above (`xs.map(count => ...)`, `({ action }) =>`), a `for`-of binding,
+or a parameter of any enclosing symbol, read off the map (a
+destructured parameter `{ slots, activeSlot }` and an optional one
+`count?` count). Scope is every enclosing symbol, then the file's top
+level: an inner arrow sees the outer function's locals, and a hit with
+no indexed enclosing symbol at all (an inline `server.tool(...)`
+callback, module-level code inside an `if` block) is scanned up to the
+first indent-0 line above it. A bare call of the name with such a
+binding in scope (`const [state, dispatch] = useReducer(..)` then
+`dispatch({...})`) is explained too: it calls the local by the
+language's own rule, and the resolver vetoes exactly that edge on the
+same evidence. The guards that keep it from hiding a real miss: never
+a `x.name(` method call, never a call-shaped line with no binding in
+scope, never a declaration found by the scan that is the target's own
+definition line (the nearest binding is then the target itself), never
+a declaration indented deeper than the use, and the check only ever
+*upgrades* an `unexplained` row, never a row a more specific cause
+already claimed. On claude-code's own worst-case sample the first
+version closed 759 of 4,104 unexplained rows (18.5%); the widening
+closed 194 more of the 957 that were left after 1.5.9.
 
 Also since 0.43.76: the `x: Name` colon-annotation shape (an object
 literal's `error: errorMessage,`, a variable's `let x: Name`) counts
@@ -874,7 +1028,40 @@ carries the true totals as `suspects_meta`/`dispatch_meta`
 ## Interpreting `dekko ambiguous`
 
 `ambiguous` aggregates every call site where a bare name matched 2+
-repo-wide candidates and couldn't be resolved — a low ambiguous rate
+repo-wide candidates the call could actually reach, and couldn't be
+resolved. "Reach" means the call site's own language, or failing that
+its language family (C/C++; Java/Kotlin; JS/TS/TSX; Swift calling C
+functions): a Python `print(...)` is never listed against a C++
+`print`, and a call whose only namesakes live in other languages is
+counted external instead. Tier-2 files (shell, Starlark, Ruby, ...)
+follow the same rule, keyed on their grammar. A C/C++ call written
+with its full path (`a::b::Name(..)`, or from the root, `::ns::Name(..)`)
+only reaches symbols whose qualified name ends with that path (from the
+root, whose qualified name *is* that path). So its row lists only the
+overloads on that path, and a path that names no repo symbol, or any
+`std::` path, is counted external. A call written through one
+namespace (`absl::OkStatus()`, `ops::Add(..)`) only reaches symbols
+directly inside a namespace of that name, plus the ones a
+namespace-scope `using`-declaration there re-exports (`namespace
+tensorflow { using tsl::F; }` makes `tensorflow::F()` the `tsl`
+function). A call nothing qualifies for is counted external rather
+than listed, and several that qualify are the only ones its row lists.
+A C/C++ definition's argument count is read with the defaults its
+header prototype declares (same qualified name and parameter count),
+since a `.cc` definition can't repeat them. When exactly one symbol
+qualifies but its parameters don't fit the call's argument count even
+with those defaults, the call is counted external. When no prototype
+of it was found, so dekko can't know its defaults, the call resolves
+the way it did before this rule, except that a target outside the
+written namespace is counted external. A one-scope call through a
+class (`TensorShape::IsValid()`, which may reach a base class, or
+`View<T>::Next()`) or through a name dekko never saw as a namespace (a
+namespace alias) resolves as before. A Rust `Type::name(..)` call
+only reaches `Type`'s own members, so its row lists only those (the
+same call written `x.name(..)` is not narrowed), and a Rust call
+through a `use` rooted at `std`, `core` or `alloc` (`use std::path::
+Path; Path::new(..)`) is counted external even when the repo defines a
+type of that name. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output
@@ -898,6 +1085,39 @@ very-high-cardinality collision (a bare `main`/`New`/`Generate`
 matched against dozens of same-named repo-wide candidates) truncates
 the same way an unresolved-target error does, rather than dumping every
 candidate unconditionally.
+
+**External JVM imports.** A Java or Kotlin file's `import` names a
+class by qualified path, and dekko trusts it: a call, `new`, `extends`
+or `throws` on a name imported from a package that is not in the repo
+(`import java.util.jar.Manifest;` next to a repo `Manifest.java`) is
+counted external, not listed as ambiguous among the repo's namesakes
+and never resolved to one of them. The other way round, an import of
+one of several same-named repo classes resolves to the one it spells
+instead of going ambiguous, so `ambiguous --name JSONObject` on a repo
+with three shaded copies lists only a copy's own constructor overloads.
+
+**Constructor overloads.** `new X(...)` always resolves to the class
+`X`. When `X` declares several constructors, the call's argument count
+picks one: an exact declared-count match first, then a unique varargs
+or default-argument fit. Overloads with the same count (Java's
+`ErrorPage(HttpStatus, String)` and `ErrorPage(Class, String)`) can
+only be told apart by argument types, which dekko doesn't have, so the
+call shows under `ambiguous --name X` and as "resolved ambiguously" on
+each of those constructors rather than being credited to one.
+
+In C++, `new X(...)`, `std::make_unique<X>(...)`/`make_shared` (and
+the `absl::` spellings) and a temporary `X(...)` all count as
+constructing `X`, and `query callers` on the class lists them. The
+constructors are found wherever they're defined, so out-of-line
+`X::X(...)` definitions in a `.cc` are credited too. A definition
+outside the class body doesn't show the default arguments its header
+declaration gives, so any argument count up to its parameter count fits
+it. A stack declaration `X x(args);` isn't counted yet: without type
+information it reads the same as a function declaration. A
+namespace-qualified construction (`absl::Status()`) never reaches an
+in-repo type outside that namespace. One reached through a `using`
+alias (`ops::NodeOut` for `NodeBuilder::NodeOut`) is left unresolved
+too. `= delete` functions aren't symbols, since nothing can call them.
 
 **Standing high-ambiguous-rate flag.** A repo whose repo-wide
 ambiguous rate is **30% or higher** doesn't stay silent until you think
@@ -1027,11 +1247,22 @@ file could plausibly be meant:
   best-effort crate-root/module-tree walk (the nearest ancestor
   directory with `lib.rs`/`main.rs`, absent any `Cargo.toml` parsing).
   A bare crate name (`use serde::Deserialize`) is external.
-- **Java**: `import com.foo.Bar;` maps mechanically to `.../com/foo/
-  Bar.java`, searched against the repo regardless of whether sources
-  sit at the repo root or nested under a Maven/Gradle `src/main/java`
-  (or `src/test/java`) module directory — confirmed against
-  `spring-boot`'s real multi-module layout.
+- **Java/Kotlin**: `import com.foo.Bar;` maps mechanically to
+  `.../com/foo/Bar.java`, searched against the repo regardless of
+  whether sources sit at the repo root or nested under a Maven/Gradle
+  module directory — confirmed against `spring-boot`'s real
+  multi-module layout. Any `src/<sourceSet>/java*` or
+  `src/<sourceSet>/kotlin*` directory is a source root (`main`, `test`,
+  Gradle's `intTest`, `dockerTest`, `testFixtures`, a `json-shade` or
+  `javaTemplates` set alike), and a file under no such root is matched
+  by the trailing segments of its path. A qualified import is matched
+  as a path, never by simple name: `import java.util.jar.Manifest;`
+  stays external even when the repo has a `Manifest.java` of its own,
+  and an import of one of several same-named repo classes names
+  exactly the one whose package it spells. A static import
+  (`import static a.b.Checks.check;`) and a nested-class import
+  (`import a.b.Outer.Inner;`) reach the declaring file; a Kotlin
+  top-level function or property is reached through its package.
 - **C/C++**: `#include` resolves by filename search (no
   package-qualified path the way Java's `import` has); two headers
   sharing a basename in different directories are left external rather
@@ -1075,6 +1306,7 @@ every other `query` action:
   typed match. `dekko query catches` always prints this caveat in its
   own output (not just here), so a near-empty result on a JS/TS-heavy
   repo isn't mistaken for "nothing catches this."
+- **Kotlin: not covered yet.** `throws` says so in its output.
 - **Rust, Go, C: not supported, permanently** — not a coverage gap
   waiting on a future pass. Rust's `Result<T, E>`/`?` propagation and
   Go's returned-`error`-value convention are type-inference questions,
@@ -1228,7 +1460,8 @@ allowlist of known `getenv`-shaped call idioms per language: Python's
 `os.getenv(...)`/`os.environ.get(...)`/`os.environ[...]`, JS/TS's
 `process.env.X`/`process.env["X"]`, Java's `System.getenv(...)`,
 Rust's `std::env::var(...)`/`env::var(...)`/their `_os` variants, Go's
-`os.Getenv(...)`/`os.LookupEnv(...)`, and C/C++'s bare `getenv(...)`.
+`os.Getenv(...)`/`os.LookupEnv(...)`, C/C++'s bare `getenv(...)`, and
+Kotlin's `System.getenv(...)`.
 All Tier-1 languages are covered (unlike `throws`/`catches`, there's
 no Rust/Go/C exclusion here — an env-var read is just a call/member
 expression, not a language feature some languages structurally lack).
@@ -1432,6 +1665,92 @@ calls.
 ## Language support
 
 Tier 1 (full fidelity, offline): Python, Rust, C, C++, JavaScript,
-TypeScript/TSX, Go, Java. Tier 2 (generic fallback — names and calls,
-no types): everything else `tree-sitter-language-pack` supports (Ruby,
-PHP, C#, Kotlin, Swift, Lua, and more), via `pip install dekko[all]`.
+TypeScript/TSX, Go, Java, Kotlin.
+
+Tier 2 (names and calls, no types, no imports), via `pip install
+dekko[all]`: 43 languages. Each one is read through its own set of
+rules for its grammar, and each was measured on a real open-source
+repository before it was listed
+([`benchmarks/tier2_corpus.py`](../benchmarks/README.md#tier-2-languages-one-real-repository-per-grammar)).
+A language dekko cannot read well is not on this list, and dekko says
+so when it meets one.
+
+- **Supported (39):** Ada, Bash, C#, Clojure, CMake, Common Lisp, D,
+  Dart, Elixir, Elm, Emacs Lisp, Erlang, F#, Fortran, GDScript, Gleam,
+  Hare, Haskell, Julia, Lua, Nim, Nix, OCaml, Odin, Perl, PHP,
+  PowerShell, R, Racket, Ruby, Scala, Scheme, Solidity, SQL, Starlark,
+  Swift, Tcl, Vim script, Zig. On its repository dekko finds at least
+  90% of the functions and 80% of the types a line regex finds, and
+  attributes calls to the function they sit in.
+- **Partial (4):** Pascal (89% of functions), Zsh (89%), Crystal
+  (86%), Haxe (82% of functions, 77% of types). The grammar fails to
+  parse parts of real files in these languages, and a definition in
+  such a part is missed. What dekko does report is right; "no symbol"
+  and "no callers" are weaker evidence here than elsewhere.
+
+What Tier 2 does not do, in any of them:
+
+- **Imports.** A call resolves by name among the symbols of its own
+  language, so two functions with one name make a call ambiguous
+  where an import would have settled it.
+- **Types.** Parameters are raw text; there is no heritage
+  (`supertypes`/`subtypes`), `throws` or type-use data.
+- **Constructor calls** (`new X()` in C#, PHP, Dart, Haxe) are not
+  recorded as calls.
+- **Case-insensitive matching.** Pascal, Fortran, PowerShell, SQL and
+  CMake ignore case; dekko matches a call to a definition by exact
+  spelling.
+- **Calls with no call syntax:** a Pascal procedure called without
+  parentheses, Haskell's `f $ x` and `f . g`, a function passed by
+  name.
+- **Project-defined definition macros.** A Lisp or Elixir macro that
+  defines functions is a call; what it defines is not a symbol.
+
+In SQL the symbols are tables (`CREATE TABLE`), functions and
+procedures. A table is never called, so expect tables in `dekko
+unused`.
+
+Recognized and not indexed, on either install:
+
+- **Vue and Svelte components (`.vue`, `.svelte`)** and **Mojo
+  (`.mojo`)** have no usable parser. The Vue and Svelte grammars return
+  a component's `<script>` block as one piece of raw text, and the Mojo
+  grammar predates the language's current syntax. The files are
+  skipped as `no parser (vue)` and counted in the same coverage note
+  as Groovy below: `76 files unparsed — no parser for: vue (76)`. A
+  TypeScript file's import of a `.vue` file is not a module edge in
+  `dekko deps`.
+- **tree-sitter query files.** `.scm` is Scheme, and it is also what
+  tree-sitter names its query files (`highlights.scm`). A `.scm` file
+  with a capture (`(identifier) @name`) and no `define` is skipped as
+  `tree-sitter query`, shown on `dekko map`'s `skipped:` line.
+- **OCaml interface files (`.mli`)** are not read. Each restates the
+  signatures of its `.ml`, so indexing it would give every function a
+  twin and make every call to one ambiguous.
+- **Groovy (`.groovy`)** has no usable parser. The files are skipped
+  as `no parser (groovy)` and counted in the coverage note that
+  `stats`, `status`, `summary`, `search`, `affected` and every empty
+  `query` answer carry: `24 files unparsed — no parser for: groovy
+  (24)`. If a repo's tests are Spock specs, read "no callers" and "no
+  impacted tests" with that note in mind.
+- **Gradle build scripts (`.gradle`)** are skipped as `build script
+  (gradle)` and reported on their own line by `stats`, `status`,
+  `summary` and `map_status`: `build scripts: 736 not indexed: gradle
+  (736)` (`build_scripts` in their JSON). They are left out of the
+  per-query coverage note, because a build script calls the Gradle API
+  and the build's own logic rather than product code. The exception is
+  a symbol under `buildSrc/`: an empty `query callers` there adds a
+  note that a build script may be the caller, with the `dekko sanity`
+  command to check. `build.gradle.kts` is Kotlin and is indexed.
+
+`query file` and `outline` on an unparsed-language file or a build
+script say which of the two it is instead of a bare "no mapped file".
+
+Java and Kotlin resolve against each other: a Kotlin file's imports
+reach Java classes and Kotlin ones alike, and each language still
+prefers its own symbols first. A Kotlin constructor is `Foo.Foo` like
+a Java one, so `Foo(1)` credits the class and the constructor the
+argument count picks. Companion-object members read as `Foo.create`,
+the way callers write them. Not tracked yet for Kotlin: `throws`/
+`catches`, callable references (`::fn`) and type-only uses, and calls
+to extension functions through their receiver.

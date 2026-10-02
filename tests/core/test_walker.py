@@ -45,6 +45,35 @@ def test_discover_reports_known_unsupported_language(tmp_path: Path) -> None:
     assert "notes.txt" not in reasons
 
 
+def test_discover_reports_build_scripts_and_groovy_apart(
+    tmp_path: Path,
+) -> None:
+    # A Gradle script and a Groovy source file are both recognized and
+    # both skipped, under different reasons: one is configuration dekko
+    # leaves out by design, the other a language with no usable parser.
+    _touch(tmp_path / "src" / "App.java", "class App {}\n")
+    _touch(tmp_path / "build.gradle", 'plugins { id "java" }\n')
+    _touch(tmp_path / "sub" / "settings.gradle", "include 'a'\n")
+    _touch(tmp_path / "src" / "AppSpec.groovy", "class AppSpec {}\n")
+    _touch(tmp_path / "build.gradle.kts", "val x = 1\n")
+
+    files, skipped = discover(tmp_path)
+    assert files == ["build.gradle.kts", "src/App.java"]
+    assert dict(skipped) == {
+        "build.gradle": "build script (gradle)",
+        "sub/settings.gradle": "build script (gradle)",
+        "src/AppSpec.groovy": "no parser (groovy)",
+    }
+
+
+def test_discover_build_script_respects_excludes(tmp_path: Path) -> None:
+    _touch(tmp_path / "src" / "app.py")
+    _touch(tmp_path / "build.gradle", 'plugins { id "java" }\n')
+
+    _, skipped = discover(tmp_path, excludes=("*.gradle",))
+    assert dict(skipped)["build.gradle"] == "excluded"
+
+
 def test_discover_unsupported_language_respects_subpath(
     tmp_path: Path,
 ) -> None:
@@ -349,6 +378,47 @@ def test_discover_minified_check_ignores_unreadable_file(
 
 # ---------------------------------------------------------------------
 # symlinked files (phantom duplicate symbols)
+
+
+def test_discover_skips_tree_sitter_query_files_with_their_reason(
+    tmp_path: Path,
+) -> None:
+    # tree-sitter names its query files ``.scm``. Read as Scheme, every
+    # pattern in one is a call to ``identifier`` or ``comment``.
+    _touch(
+        tmp_path / "queries" / "highlights.scm",
+        '(identifier) @variable\n(comment)+ @comment\n["if" "else"] @kw\n',
+    )
+    _touch(
+        tmp_path / "queries" / "injections.scm",
+        '((comment) @injection.content\n (#set! injection.language "x"))\n',
+    )
+    _touch(tmp_path / "lib" / "shapes.scm", "(define (area r) (* r r))\n")
+
+    files, skipped = discover(tmp_path)
+    assert files == ["lib/shapes.scm"]
+    assert dict(skipped) == {
+        "queries/highlights.scm": "tree-sitter query",
+        "queries/injections.scm": "tree-sitter query",
+    }
+
+
+def test_discover_keeps_scheme_that_only_looks_like_a_query(
+    tmp_path: Path,
+) -> None:
+    # A capture-shaped string inside real Scheme: the ``define`` wins.
+    _touch(
+        tmp_path / "gen.scm",
+        '(define (emit)\n  (display "(identifier) @name"))\n',
+    )
+    # No capture at all: a script of top-level calls is still Scheme.
+    _touch(tmp_path / "run.scm", '(display "hello")\n(newline)\n')
+    # Only ``.scm`` is ever a query file.
+    _touch(tmp_path / "notes.rkt", '(list "a") @b\n')
+
+    files, skipped = discover(tmp_path)
+    assert files == ["gen.scm", "notes.rkt", "run.scm"]
+    assert skipped == []
 
 
 def test_discover_skips_symlinked_file_by_default(tmp_path: Path) -> None:

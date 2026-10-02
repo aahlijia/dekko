@@ -34,16 +34,22 @@ declared type before falling back to the (purely coincidental)
 same-file step — see ``_typed_param_match``. A call/construction that
 resolves to a class-shaped symbol also credits that class's own
 explicit constructor method (JS/TS ``constructor``, Python
-``__init__``, Java's same-named ``constructor_declaration``) when one
-was extracted, via ``_constructor_of`` — without this, ``new
-ClassName(...)`` construction was invisible to the constructor
-method's fan-in even though it resolved fine to the class itself (or,
-for Java specifically, fell into ``ambiguous`` entirely, since a Java
-constructor's own bare name is the class name — see
-``_construction_pick``). These three gaps undercounted callers
+``__init__``, Java's and C++'s same-named constructors, which for C++
+may be defined out of line in another file) when one was extracted,
+via ``_constructors_of`` — without this, ``new ClassName(...)``
+construction was invisible to the constructor method's fan-in even
+though it resolved fine to the class itself (or, for Java and C++,
+fell into ``ambiguous`` entirely, since such a constructor's own bare
+name is the class name — see ``_without_own_constructors``). These
+three gaps undercounted callers
 (cline's ``get_callers("Controller.initTask")`` finding 2 of 9 real
 callers; cline/spring-boot's ``Controller.constructor``/
 ``AutoConfigurations.of`` reading fan-in 0 despite real call sites).
+When the class declares several constructors, the construction's
+argument count picks one (``_pick_constructor``); overloads it can't
+separate are recorded as ambiguous under the class's name, and credit
+no constructor, while the class edge itself is still recorded, since
+the class was resolved.
 
 Bare-identifier *references* (a callback passed by value rather than
 invoked — see ``model.RawRef``) go through the same candidate ladder
@@ -96,6 +102,7 @@ tests for a change a same-package unit test directly covered.
 """
 
 import fnmatch
+import functools
 import gc
 import hashlib
 import json
@@ -154,16 +161,35 @@ _WHOLE_FILE_IMPORT_LANGUAGES = frozenset({"c", "cpp"})
 # same pairing/triple ``_WHOLE_FILE_IMPORT_LANGUAGES`` and
 # ``_IMPORT_RESOLVERS`` (below) already encode for import resolution --
 # see ``_language_filtered``'s docstring for why this is the boundary
-# a same-bare-name candidate is allowed to cross. Every language with
-# no declared family here (python, rust, go, java, ...) has no such
-# precedent anywhere in the resolver and defaults to a same-language-
-# only singleton family in ``_language_filtered``.
+# a same-bare-name candidate is allowed to cross. Java and Kotlin
+# share one JVM: a Kotlin file imports and calls Java classes directly
+# (most of spring-boot's in-repo Kotlin imports name a ``.java`` file),
+# and Java can call Kotlin. Swift (Tier-2) calls C functions directly
+# (tensorflow's Swift API is written over the TfLite C API); C and C++
+# can't call Swift back, so the pairing is one-way. Every language
+# with no declared family here (python, rust, go, bash, ruby, ...)
+# has no such precedent anywhere in the resolver and defaults to a
+# same-language-only singleton family in ``_language_filtered``.
 _LANGUAGE_FAMILIES: dict[str, frozenset[str]] = {
     "c": frozenset({"c", "cpp"}),
     "cpp": frozenset({"c", "cpp"}),
+    "java": frozenset({"java", "kotlin"}),
+    "kotlin": frozenset({"java", "kotlin"}),
     "javascript": frozenset({"javascript", "typescript", "tsx"}),
     "typescript": frozenset({"javascript", "typescript", "tsx"}),
     "tsx": frozenset({"javascript", "typescript", "tsx"}),
+    "swift": frozenset({"swift", "c", "cpp"}),
+}
+# The symbol kinds a family's *other* languages can supply, where that
+# is narrower than everything, and then only to a bare call. Swift
+# imports C functions as globals, not C++ classes or methods:
+# tensorflow's Swift API reaches 63 TfLite C API functions with bare
+# calls, and every other Swift edge that crossed into C/C++ was a
+# namesake (``Bundle.path(..)`` landing on a C++ test fixture's
+# ``path``, ``Int(..)`` on a header's ``Type.Int``, a pointer's
+# ``buffer.deallocate()`` on a C++ ``deallocate`` function).
+_FAMILY_FOREIGN_KINDS: dict[str, frozenset[str]] = {
+    "swift": frozenset({"function"}),
 }
 # The JS family's dialects are one language for candidate narrowing,
 # not just one family: a ``.tsx`` file calls into ``.ts`` files as
@@ -342,6 +368,33 @@ def _projected_symbol_fields() -> tuple[str, ...]:
     return _PROJECTED_SYMBOL_FIELDS
 
 
+def cpp_scope_names(symbols: list[Symbol] | list[dict]) -> frozenset[str]:
+    """Every scope name the C/C++ qualnames in ``symbols`` carry.
+
+    ``_namespace_head_match`` reads this repo-wide set (through
+    ``_CPP_SCOPE_KEY``) to decide whether ``ns::Name`` names a
+    namespace, so a file that adds or drops one changes how calls in
+    *other* files resolve, even calls to names it never defines.
+
+    Args:
+        symbols: One file's symbols, as ``Symbol`` objects or the plain
+            dicts the extraction cache stores.
+
+    Returns:
+        The scope names, empty for a file with no C/C++ symbols.
+    """
+    out: set[str] = set()
+    for sym in symbols:
+        if isinstance(sym, dict):
+            language, qualname = sym["language"], sym["qualname"]
+        else:
+            language, qualname = sym.language, sym.qualname
+        if language in _CPP_FAMILY:
+            scopes = _PATH_SPLIT.split(qualname)[:-1]
+            out.update(s for s in scopes if s)
+    return frozenset(out)
+
+
 def symbol_projection(symbols: list[Symbol] | list[dict]) -> str:
     """Canonical form of the parts of ``symbols`` resolution can read.
 
@@ -515,7 +568,7 @@ class NameDelta:
             or JS/TS's ``constructor``), its enclosing type's own bare
             name is added too. Without this, adding an ``__init__`` to
             an existing class would go undetected by any cached
-            caller's *own* name-scan: ``_constructor_of`` looks up the
+            caller's *own* name-scan: ``_constructors_of`` looks up the
             new method by a name (``__init__``) that never appears in
             an already-cached ``MyClass()`` edge, whose callee id ends
             in ``MyClass``, not ``__init__``. Adding the class's own
@@ -1141,7 +1194,7 @@ def resolve(
     workspace_pkgs = {n: m.package_dir for n, m in manifests.items()}
     imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
-    repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+    repo_stems = _repo_stems(files)
 
     # Under fork-context pools, CPython refcounting
     # dirties copy-on-write pages on mere *reads*, so each worker
@@ -1550,7 +1603,7 @@ def resolve_refs(
     by_name_path = _build_name_path_index(files)
     imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
-    repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+    repo_stems = _repo_stems(files)
 
     total_refs = sum(len(fm.refs) for fm in files)
     pool_workers = _pool_workers(workers, total_refs)
@@ -1633,7 +1686,7 @@ def _resolve_ref(
     falls through to ``external`` with nothing further tracked.
     """
     caller_id = ref.caller_id or f"{ref.path}{MODULE_CALLER_SUFFIX}"
-    candidates = index.get(ref.name, [])
+    candidates = _language_filtered(ref, index.get(ref.name, []))
     if ref.bound is not None:
         # The identifier names a parameter or a local. Not the candidate
         # pre-filter ``_pick_candidate`` warns about: nothing is being
@@ -1644,7 +1697,9 @@ def _resolve_ref(
             edges.setdefault((caller_id, fixture.id), set()).add(ref.line)
         return
     if not candidates:
-        alias = _alias_candidates(ref, file_imports, index)
+        alias = _language_filtered(
+            ref, _alias_candidates(ref, file_imports, index)
+        )
         if len(alias) == 1 and alias[0].id != caller_id:
             edges.setdefault((caller_id, alias[0].id), set()).add(ref.line)
         return
@@ -1655,7 +1710,6 @@ def _resolve_ref(
         same_file,
         file_imports,
         symbols_by_id.get(ref.caller_id or ""),
-        by_name_path,
         index,
     )
     if (
@@ -1720,6 +1774,7 @@ _REF_VISIBILITY_LANGUAGES = frozenset(
     {"python", "javascript", "typescript", "tsx"}
 )
 _JS_FAMILY = _LANGUAGE_FAMILIES["javascript"]
+_CPP_FAMILY = _LANGUAGE_FAMILIES["cpp"]
 
 
 def _ref_target_visible(
@@ -1885,7 +1940,7 @@ def resolve_heritage(
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
     imports_by_file = _imports_by_file(files, workspace_pkgs)
-    repo_stems = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+    repo_stems = _repo_stems(files)
     crate_roots = _rust_crate_roots_index_all(
         frozenset(fm.path for fm in files)
     )
@@ -2137,13 +2192,13 @@ def _resolve_one_heritage(
         _record_external_heritage(h, external, relations)
         return
 
-    candidates = [c for c in index.get(h.name, []) if c.kind in TYPE_KINDS]
-    if h.relation == "impl":
-        candidates = _narrow_impl_candidates_to_traits(candidates)
+    candidates = _heritage_candidates(h, index)
     if not candidates:
         alias = [
             c
-            for c in _alias_candidates(h, file_imports, index)
+            for c in _language_filtered(
+                h, _alias_candidates(h, file_imports, index)
+            )
             if c.kind in TYPE_KINDS
         ]
         if len(alias) == 1:
@@ -2155,10 +2210,17 @@ def _resolve_one_heritage(
         _record_external_heritage(h, external, relations)
         return
 
+    # Same-file types only count when the repo-wide list kept them. For
+    # ``impl ws::Provider for Provider`` the repo-wide list narrows to
+    # the trait, but a same-file list with no trait in it keeps its
+    # struct (see _narrow_impl_candidates_to_traits), and the same-file
+    # rung used to pick it. A fully written C++ path narrows the same
+    # way (_heritage_candidates).
+    candidate_ids = {c.id for c in candidates}
     same_file = [
         c
         for c in by_name_path.get((h.name, h.path), [])
-        if c.kind in TYPE_KINDS
+        if c.kind in TYPE_KINDS and c.id in candidate_ids
     ]
     if h.relation == "impl":
         same_file = _narrow_impl_candidates_to_traits(same_file)
@@ -2168,7 +2230,6 @@ def _resolve_one_heritage(
         same_file,
         file_imports,
         None,
-        by_name_path,
         index,
         repo_stems,
         raw_imports,
@@ -2185,7 +2246,24 @@ def _resolve_one_heritage(
     if decoy_free is not None:
         _add_heritage_edge(h, decoy_free.id, edges, relations)
         return
+    if len(candidates) < 2:
+        _record_external_heritage(h, external, relations)
+        return
+
     _record_ambiguous(h.subtype_id, h.name, candidates, ambiguous)
+
+
+def _heritage_candidates(
+    h: RawHeritage, index: dict[str, list[Symbol]]
+) -> list[Symbol]:
+    """The types a heritage clause's name can reach from its language."""
+    candidates = [c for c in index.get(h.name, []) if c.kind in TYPE_KINDS]
+    if h.relation == "impl":
+        candidates = _narrow_impl_candidates_to_traits(candidates)
+    candidates = _language_filtered(h, candidates)
+    on_path = _qualified_path_match(h, candidates)
+
+    return candidates if on_path is None else on_path
 
 
 def _hintless_decoy_tiebreak(
@@ -2340,7 +2418,9 @@ def _resolve_type_name(
         genuinely ambiguous (``candidates`` has 2+ entries, a real
         same-name-in-two-files collision).
     """
-    candidates = [c for c in index.get(name, []) if c.kind in TYPE_KINDS]
+    candidates = _language_filtered_at(
+        path, [c for c in index.get(name, []) if c.kind in TYPE_KINDS]
+    )
     if not candidates:
         return None, []
     if len(candidates) == 1:
@@ -2661,12 +2741,20 @@ def _resolve_call(
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
 
-    candidates = index.get(call.name, [])
+    candidates = _language_filtered(call, index.get(call.name, []))
     if not candidates:
-        alias = _alias_candidates(call, file_imports, index)
+        alias = _language_filtered(
+            call, _alias_candidates(call, file_imports, index)
+        )
         if len(alias) == 1:
             _add_call_and_constructor(
-                caller_id, alias[0], call.line, by_name_path, edges
+                caller_id,
+                alias[0],
+                call,
+                by_name_path,
+                index,
+                edges,
+                ambiguous,
             )
             return
         if len(alias) > 1:
@@ -2676,26 +2764,96 @@ def _resolve_call(
         return
 
     same_file = by_name_path.get((call.name, call.path), [])
-    target = _pick_candidate(
-        call,
-        candidates,
-        same_file,
-        file_imports,
-        symbols_by_id.get(call.caller_id or ""),
-        by_name_path,
-        index,
-        repo_stems,
-        raw_imports,
+    scoped = _written_scope_match(call, candidates, index)
+    if scoped is not None:
+        if scoped.trusted and len(scoped.candidates) == 1:
+            # The written path names the target's scopes outright; see
+            # _qualified_path_match. No denylist second-guesses it.
+            _add_call_and_constructor(
+                caller_id,
+                scoped.candidates[0],
+                call,
+                by_name_path,
+                index,
+                edges,
+                ambiguous,
+            )
+            return
+        candidates = scoped.candidates
+        same_file = [s for s in same_file if s in candidates]
+    target = _within_scope(
+        scoped,
+        _pick_candidate(
+            call,
+            candidates,
+            same_file,
+            file_imports,
+            symbols_by_id.get(call.caller_id or ""),
+            index,
+            repo_stems,
+            raw_imports,
+        ),
     )
     if target is _NOISE:
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
     if target is not None:
         _add_call_and_constructor(
-            caller_id, target, call.line, by_name_path, edges
+            caller_id, target, call, by_name_path, index, edges, ambiguous
         )
         return
-    _record_ambiguous(caller_id, call.name, candidates, ambiguous)
+    if len(candidates) < 2:
+        # Nothing live to be ambiguous among; see _sole_candidate_match.
+        external.setdefault((caller_id, call.text), set()).add(call.line)
+        return
+
+    disclosed = _ambiguous_candidates(
+        call, candidates, index, file_imports, repo_stems
+    )
+    _record_ambiguous(caller_id, call.name, disclosed, ambiguous)
+
+
+def _ambiguous_candidates(
+    call: RawCall,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+) -> list[Symbol]:
+    """The candidates an ambiguous call is disclosed among.
+
+    The ladder narrows a Rust ``Type::name(..)`` path to ``Type``'s own
+    members before it picks (``_rust_shape_narrowed_candidates``), but
+    when the pick fails, ``_resolve_call`` only has the list it passed
+    in: every same-named symbol in the language. Recording that list
+    named all 1,386 ``new`` functions in zed on every one of its 1,520
+    ambiguous ``new`` rows, when ``Editor::new(..)`` could only mean
+    the two ``Editor`` types' constructors. So the shape narrowing is
+    run again here, on the ambiguous path only, and its result is what
+    the row records whenever it applied and left two or more. A
+    dot-call is not narrowed (the dot-call rule is a veto on the pick,
+    see ``_pick_candidate``), and nothing else about the ladder's
+    verdict changes: the call is ambiguous either way.
+
+    Args:
+        call: The raw call the ladder could not resolve.
+        candidates: The 2+ language-filtered candidates it ran over.
+        index: Bare symbol name to every symbol sharing it.
+        file_imports: The calling file's import bindings by local name.
+        repo_stems: Every repo file's matching stem.
+
+    Returns:
+        The narrowed list when the Rust type-path shape applied and
+        left at least two candidates, else ``candidates`` unchanged.
+    """
+    live = _without_own_constructors(_language_filtered(call, candidates))
+    narrowed, _, applied = _rust_shape_narrowed_candidates(
+        call, live, [], index, file_imports, repo_stems
+    )
+    if applied and len(narrowed) >= 2:
+        return narrowed
+
+    return candidates
 
 
 def _add_edge(
@@ -2712,21 +2870,45 @@ def _add_edge(
 def _add_call_and_constructor(
     caller_id: str,
     target: Symbol,
-    line: int,
+    call: RawCall,
     by_name_path: dict[tuple[str, str], list[Symbol]],
+    index: dict[str, list[Symbol]],
     edges: dict[tuple[str, str], set[int]],
+    ambiguous: dict[tuple[str, str], list[str]],
 ) -> None:
     """Record the resolved call edge, plus a constructor edge if any.
 
-    See ``_constructor_of`` (module docstring): a call or
+    See ``_constructors_of`` (module docstring): a call or
     construction that resolves to a class-shaped symbol also counts
     toward that class's own explicit constructor method's fan-in, when
-    the language extracted one as its own symbol.
+    the language extracted one as its own symbol. The class edge is
+    recorded whatever happens next, so "who constructs this class"
+    never depends on the overload pick. When the class has several
+    constructors, ``_pick_constructor`` chooses by argument count; a
+    call it can't narrow to one is recorded as ambiguous among the
+    overloads it couldn't tell apart, under the class's name.
+
+    Args:
+        caller_id: Id of the calling symbol (or a module pseudo-id).
+        target: The symbol the call resolved to.
+        call: The raw call, for its line and written argument count.
+        by_name_path: ``(bare name, file path)`` → same-file symbols.
+        index: Bare name → every symbol with it, for C++ constructors
+            defined outside the class's own file.
+        edges: The graph's edge accumulator, mutated in place.
+        ambiguous: The graph's ambiguous-call accumulator, mutated in
+            place.
     """
-    _add_edge(caller_id, target.id, line, edges)
-    ctor = _constructor_of(target, by_name_path)
+    _add_edge(caller_id, target.id, call.line, edges)
+    ctors = _constructors_of(target, by_name_path, index)
+    if not ctors:
+        return
+
+    ctor, overloads = _pick_constructor(target, ctors, call, index)
     if ctor is not None:
-        _add_edge(caller_id, ctor.id, line, edges)
+        _add_edge(caller_id, ctor.id, call.line, edges)
+    elif overloads:
+        _record_ambiguous(caller_id, call.name, overloads, ambiguous)
 
 
 def _record_ambiguous(
@@ -2737,6 +2919,12 @@ def _record_ambiguous(
 ) -> None:
     """Record a call/alias name with 2+ same-name candidates.
 
+    A second record for the same ``(caller_id, name)`` merges into the
+    first rather than being dropped: one caller can construct a class
+    through two different sets of undecidable overloads (a 2-arg and
+    a 3-arg ``new Foo(...)``), and both sets belong in the disclosure.
+    A repeated identical record leaves the list unchanged.
+
     Args:
         caller_id: Id of the calling symbol (or a module pseudo-id).
         name: The bare callee name (as written at the call site).
@@ -2746,9 +2934,14 @@ def _record_ambiguous(
             ``(caller_id, name)``, mutated in place.
     """
     # Candidate lists are presentation data: production code first,
-    # test/fixture symbols last.
-    ranked = sorted(candidates, key=lambda c: (is_test_path(c.path), c.id))
-    ambiguous.setdefault((caller_id, name), [c.id for c in ranked])
+    # test/fixture symbols last. A symbol id is ``<path>::<qualname>``,
+    # so ids already on record rank by their own path prefix.
+    ids = set(ambiguous.get((caller_id, name), []))
+    ids.update(c.id for c in candidates)
+    ambiguous[(caller_id, name)] = sorted(
+        ids,
+        key=lambda i: (is_test_path(i.partition("::")[0]), i),
+    )
 
 
 def _resolution_language(language: str) -> str:
@@ -2769,10 +2962,12 @@ def _language_filtered(
     ``errors::InvalidArgumentError`` calls resolving to a same-
     named, unrelated Python class purely because it was the sole
     non-method candidate left once ``_bare_call_non_method_match``
-    ran). ``call.path``'s registry language (Tier-1 only — every
-    symbol candidate comes from Tier-1 extraction, so a Tier-2/
-    unrecognized call-site path has nothing meaningful to compare
-    against) is the source of truth for the call site's own language.
+    ran). ``call.path``'s registry language is the source of truth for
+    the call site's own language: the Tier-1 spec name, or for a Tier-2
+    file its grammar name, which is also the ``language`` its symbols
+    carry. A shell script's ``exit`` is not a Python ``exit``, and a
+    Ruby script's ``puts`` is not a Java ``puts()`` method.
+    Only a path no registry recognizes keeps every candidate.
 
     Two-stage narrowing, not a single same-language check: same-
     language candidates win outright when any exist. Otherwise, the
@@ -2794,12 +2989,14 @@ def _language_filtered(
     Removing candidates that can never legitimately be the right
     answer must never turn a resolvable call into an unresolvable one
     *when a same-family candidate exists*; a call that can only
-    "resolve" via a definitively unrelated language family is
-    intentionally downgraded to unresolved/ambiguous (via
-    ``_pick_candidate``'s caller falling through to
-    ``_record_ambiguous`` with the original, unfiltered candidate
-    list) rather than answered wrong. A language with no declared
-    family (python, rust, go, java, ...) behaves exactly as before:
+    "resolve" via a definitively unrelated language family is counted
+    external rather than answered wrong. It is not ambiguous either:
+    ``_resolve_call`` and its heritage/throws siblings filter at entry
+    and record an ambiguous row only among the 2+ candidates that
+    survive here, so a disclosure never names a symbol the call could
+    not have reached (a C++ ``errors::InvalidArgumentError(..)`` once
+    showed as an ambiguous call to tensorflow's Python class). A
+    language with no declared family (python, rust, go, ...) is
     same-language-or-nothing, since its family is itself alone.
 
     "Same language" means same *resolution* language
@@ -2810,19 +3007,63 @@ def _language_filtered(
     function the caller imports from ``lib/errors.ts`` lost to an
     unrelated ``errorMessage`` in some other ``.tsx`` file.
     """
-    spec = languages.spec_for_path(call.path)
-    if spec is None:
+    return _language_filtered_at(
+        call.path, candidates, bare=_written_bare(call)
+    )
+
+
+def _written_bare(call: _Referable) -> bool:
+    """Whether a usage is written with no receiver at all.
+
+    Checks the text too: the Tier-2 extractor leaves ``receiver`` unset
+    for a receiver it can't name, so Swift's
+    ``UnsafeMutablePointer<CChar>.allocate(..)`` arrives as text
+    ``.allocate`` with no receiver.
+    """
+    if getattr(call, "receiver", None):
+        return False
+
+    return "." not in (getattr(call, "text", None) or "")
+
+
+def _site_language(path: str) -> str | None:
+    """A usage site's language: its Tier-1 spec, else its Tier-2 grammar."""
+    spec = languages.spec_for_path(path)
+    if spec is not None:
+        return spec.name
+
+    return languages.tier2_grammar_for_path(path)
+
+
+def _language_filtered_at(
+    path: str, candidates: list[Symbol], bare: bool = True
+) -> list[Symbol]:
+    """``_language_filtered`` for a usage site known by its path.
+
+    ``bare`` is whether the site is written without a receiver; see
+    ``_FAMILY_FOREIGN_KINDS``.
+    """
+    language = _site_language(path)
+    if language is None:
         return candidates
 
-    own = _resolution_language(spec.name)
+    own = _resolution_language(language)
     same_language = [
         c for c in candidates if _resolution_language(c.language) == own
     ]
     if same_language:
         return same_language
 
-    family = _LANGUAGE_FAMILIES.get(spec.name, frozenset({spec.name}))
-    return [c for c in candidates if c.language in family]
+    family = _LANGUAGE_FAMILIES.get(language, frozenset({language}))
+    kinds = _FAMILY_FOREIGN_KINDS.get(language)
+    if kinds is not None and not bare:
+        return []
+
+    return [
+        c
+        for c in candidates
+        if c.language in family and (kinds is None or c.kind in kinds)
+    ]
 
 
 # Structural layer 2: the single-candidate
@@ -2943,7 +3184,11 @@ def _candidate_arity(
     return _param_arity(params)
 
 
-def _arity_plausible(candidate: Symbol, call: _Referable) -> bool:
+def _arity_plausible(
+    candidate: Symbol,
+    call: _Referable,
+    index: dict[str, list[Symbol]],
+) -> bool:
     """Whether ``call``'s written argument count fits ``candidate``.
 
     The safe default is ``True`` (never suppress) whenever
@@ -2956,9 +3201,14 @@ def _arity_plausible(candidate: Symbol, call: _Referable) -> bool:
     missing arity signal must never itself become a new false-positive
     suppression.
 
+    A C/C++ definition is read with the defaults its prototypes
+    declare (``_declared``).
+
     Args:
         candidate: The sole remaining candidate symbol.
         call: The raw call/reference/heritage clause being resolved.
+        index: The bare-name index, with the ``_CPP_DECLARED_KEY``
+            entries.
 
     Returns:
         True when ``call.arg_count`` is unavailable, or falls within
@@ -2968,7 +3218,7 @@ def _arity_plausible(candidate: Symbol, call: _Referable) -> bool:
     arg_count = getattr(call, "arg_count", None)
     if arg_count is None:
         return True
-    min_count, max_count = _candidate_arity(candidate, call)
+    min_count, max_count = _candidate_arity(_declared(candidate, index), call)
     if arg_count < min_count:
         return False
     return max_count is None or arg_count <= max_count
@@ -2993,7 +3243,6 @@ def _pick_candidate_ladder(
     same_file: list[Symbol],
     file_imports: dict[str, Import],
     caller: Symbol | None,
-    by_name_path: dict[tuple[str, str], list[Symbol]],
     index: dict[str, list[Symbol]],
     repo_stems: set[str] | None = None,
     raw_imports: list[Import] | None = None,
@@ -3062,20 +3311,19 @@ def _pick_candidate_ladder(
     language *family* (see ``_language_filtered`` and
     ``_LANGUAGE_FAMILIES``) — a same-bare-name candidate in a language
     that can never legitimately be the target is removed before it
-    gets a chance to win one of the later, weaker heuristics. This
-    narrowing can leave ``candidates`` empty
-    (no same-language *or* same-family candidate exists), in which
-    case every remaining ladder step below is a no-op over an empty
-    list and this function returns ``None`` — the caller
-    (``_resolve_call``/``_resolve_ref``/``_resolve_one_heritage``)
-    then records the call as ambiguous against the original,
-    unfiltered candidate list, rather than silently resolving through
-    a candidate in a definitively unrelated language family.
+    gets a chance to win one of the later, weaker heuristics. The
+    callers (``_resolve_call``/``_resolve_ref``/
+    ``_resolve_one_heritage``) already pass a filtered list and count
+    an empty one external before getting here; filtering again is a
+    no-op for them and keeps the ladder safe for any other caller.
     ``same_file`` needs no equivalent filtering: every symbol in it is
     already, by construction, in the same file (and therefore the
     same language) as the call site.
     """
-    candidates = _language_filtered(call, candidates)
+    candidates = _without_own_constructors(
+        _language_filtered(call, candidates)
+    )
+    same_file = _without_own_constructors(same_file)
     candidates, same_file, shape_narrowed = _rust_shape_narrowed_candidates(
         call, candidates, same_file, index, file_imports, repo_stems
     )
@@ -3115,10 +3363,10 @@ def _pick_candidate_ladder(
 
     if len(candidates) == 1:
         return _sole_candidate_match(
-            call, candidates[0], by_name_path, repo_stems is not None, index
+            call, candidates[0], repo_stems is not None, index
         )
 
-    return _last_resort_match(call, candidates, by_name_path)
+    return _last_resort_match(call, candidates)
 
 
 def _pick_candidate(
@@ -3127,7 +3375,6 @@ def _pick_candidate(
     same_file: list[Symbol],
     file_imports: dict[str, Import],
     caller: Symbol | None,
-    by_name_path: dict[tuple[str, str], list[Symbol]],
     index: dict[str, list[Symbol]],
     repo_stems: set[str] | None = None,
     raw_imports: list[Import] | None = None,
@@ -3159,7 +3406,6 @@ def _pick_candidate(
         same_file,
         file_imports,
         caller,
-        by_name_path,
         index,
         repo_stems,
         raw_imports,
@@ -3177,14 +3423,367 @@ def _pick_candidate(
         # (``handler.Update()``, Windows COM, landing on
         # ``struct Update``).
         return _NOISE if repo_stems is not None else None
+    if isinstance(picked, Symbol) and _cpp_qualifier_contradicts(call, picked):
+        return _NOISE if repo_stems is not None else None
 
     return picked
+
+
+# A template argument list on one qualifier (``Foo<int>::Bar``).
+_TEMPLATE_ARGS = re.compile(r"<.*>")
+
+
+def _cpp_qualifier_contradicts(call: _Referable, target: Symbol) -> bool:
+    """Whether a C++ ``ns::Name`` usage names a scope ``target`` lacks.
+
+    ``absl::Status()`` can't construct ``tensorflow::experimental::cc
+    ::Status``, and ``xla::Parameter(..)`` can't reach
+    ``tensorflow::data::model::Parameter``: the written qualifier is
+    no enclosing namespace or class of the target. Neither is in the
+    repo, so without this their one same-named in-repo type won the
+    ``#include`` stem match or the sole-candidate rung. Only types are
+    checked, the targets constructions reach. A scope reached through
+    a ``using``/``typedef`` alias (``ops::NodeOut`` for
+    ``NodeBuilder::NodeOut``) is invisible here and is vetoed too; a
+    veto only removes an edge.
+
+    Args:
+        call: The raw call or heritage clause being resolved.
+        target: The symbol the ladder picked.
+
+    Returns:
+        True when ``call`` is written ``q::Name`` and ``q`` is not one
+        of ``target``'s enclosing scopes.
+    """
+    receiver = getattr(call, "receiver", None)
+    if (
+        not receiver
+        or target.kind not in TYPE_KINDS
+        or target.language not in _CPP_FAMILY
+        or not getattr(call, "text", "").endswith(f"::{call.name}")
+    ):
+        return False
+    scopes = set(_PATH_SPLIT.split(target.qualname)[:-1])
+    written = (_TEMPLATE_ARGS.sub("", q) for q in receiver.split("::"))
+    return any(q and q not in scopes for q in written)
+
+
+def _strip_template_args(text: str) -> str:
+    """``A<x<y>>::B<z>`` → ``A::B``: every balanced ``<…>`` removed."""
+    out: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch == "<":
+            depth += 1
+        elif ch == ">" and depth:
+            depth -= 1
+        elif not depth:
+            out.append(ch)
+    return "".join(out)
+
+
+# Characters a canonical receiver only has when it isn't bare scopes:
+# a call ``f()``, a subscript ``x[]``, member access ``.``/``->``, a
+# literal or an opaque ``(…)``.
+_NOT_A_SCOPE = frozenset('()[].->"{}…')
+
+
+def _cpp_scope_parts(call: _Referable) -> tuple[list[str], bool] | None:
+    """The scopes a C/C++ usage is written through, and whether the
+    path starts at the root.
+
+    ``a::b::Name`` gives ``(["a", "b"], False)``, ``::ns::Name`` gives
+    ``(["ns"], True)``, ``ns::Name`` gives ``(["ns"], False)``. An
+    unqualified name gives ``None``, and so does a member call on a
+    chain that merely contains a path
+    (``ns::Registry::Global()->LookUp``, ``std::move(x).status``): the
+    name has to follow a ``::``, and the receiver has to be scopes
+    only, with no call, subscript or member access in it. Template
+    arguments come off every scope, since qualnames carry none.
+
+    Args:
+        call: The raw call or heritage clause being resolved.
+
+    Returns:
+        ``(scopes, anchored)``, or ``None`` when the usage isn't
+        written through bare scopes from a C/C++ file.
+    """
+    receiver = _strip_template_args(getattr(call, "receiver", None) or "")
+    text = _strip_template_args(getattr(call, "text", "")).strip()
+    name = _strip_template_args(call.name).strip()
+    if (
+        not receiver
+        or not text.endswith(name)
+        or not text[: len(text) - len(name)].rstrip().endswith("::")
+        or any(ch in _NOT_A_SCOPE for ch in receiver)
+        or _site_language(call.path) not in _CPP_FAMILY
+    ):
+        return None
+    scopes = [q.strip() for q in receiver.split("::") if q.strip()]
+
+    return scopes, text.startswith("::")
+
+
+def _cpp_written_path(call: _Referable) -> tuple[list[str], bool] | None:
+    """The whole path of a C/C++ usage written with 2+ scopes or a
+    leading ``::``, and whether it's anchored at the root.
+
+    ``a::b::Name`` gives ``(["a", "b", "Name"], False)``, ``::ns::Name``
+    gives ``(["ns", "Name"], True)``. A one-scope ``a::Name`` (see
+    ``_namespace_head_match``), a root-only ``::Name`` and an
+    unqualified name give ``None``, as does anything
+    ``_cpp_scope_parts`` rejects. The name is kept as written, the way
+    the index keys it.
+
+    Args:
+        call: The raw call or heritage clause being resolved.
+
+    Returns:
+        ``(path, anchored)``, or ``None`` when the rule doesn't apply.
+    """
+    parts = _cpp_scope_parts(call)
+    if parts is None:
+        return None
+    scopes, anchored = parts
+    if not scopes or (not anchored and len(scopes) < 2):
+        return None
+
+    return [*scopes, call.name], anchored
+
+
+def _on_written_path(qualname: str, path: list[str], anchored: bool) -> bool:
+    """Whether ``qualname`` ends with ``path``, segment by segment.
+
+    Anchored, it has to be all of it. Qualnames join with ``.`` but an
+    out-of-class definition can carry ``::`` too
+    (``tensorflow.data.DatasetOp::Dataset.Iterator``), so both split.
+    """
+    segs = [s for s in _PATH_SPLIT.split(qualname) if s]
+    n = len(path)
+    if segs[-n:] != path:
+        return False
+
+    return not anchored or len(segs) == n
+
+
+def _qualified_path_match(
+    call: _Referable, candidates: list[Symbol]
+) -> list[Symbol] | None:
+    """Narrow a fully written C/C++ path's candidates to that path.
+
+    ``test::function::GDef()`` and ``::tensorflow::OpRegistry::Global()``
+    name their target's scopes outright, and C++ qualnames spell them
+    (``tensorflow.test.function.GDef``), so a candidate counts only
+    when its qualname ends with the written path. A path written
+    relative to the enclosing namespace (``grappler::X`` inside
+    ``tensorflow``) is still a suffix. A path from the root has to be
+    the whole qualname: ``::absl::OkStatus()`` is not the repo's
+    ``tensorflow.OkStatus`` wrapper. A ``std``-rooted path matches
+    nothing: the standard reserves ``std``, and the only repo symbols
+    that can live there are template specializations whose qualnames
+    lost their arguments (``std.numeric_limits.max``), which every
+    ``std::numeric_limits<int>::max()`` would otherwise reach. A path
+    no candidate is on reaches something dekko can't see (a
+    ``using``-declaration, a namespace alias, another library) and is
+    never guessed at. A class's constructors (``a.b.Graph.Graph``) are
+    off the path ``a::b::Graph``, so a construction narrows to the
+    class, and its constructor is picked from there; only a
+    constructor whose class isn't a symbol here matches by its own
+    name.
+
+    Args:
+        call: The raw call or heritage clause being resolved.
+        candidates: Its language-filtered same-name candidates.
+
+    Returns:
+        ``None`` when the call isn't a fully written C/C++ path (the
+        ordinary ladder applies). Otherwise the candidates on the
+        path, possibly empty.
+    """
+    written = _cpp_written_path(call)
+    if written is None:
+        return None
+    path, anchored = written
+    if path[0] == "std":
+        return []
+    hits = [
+        c for c in candidates if _on_written_path(c.qualname, path, anchored)
+    ]
+    if hits:
+        return hits
+    ctor_path = [*path, path[-1]]
+
+    return [
+        c
+        for c in candidates
+        if _on_written_path(c.qualname, ctor_path, anchored)
+    ]
+
+
+@dataclass(frozen=True)
+class _Scoped:
+    """What the scopes a C/C++ call is written through leave it.
+
+    Attributes:
+        candidates: What the ladder picks among.
+        allowed: The only symbols the pick may be, or ``None`` when any
+            pick stands.
+        trusted: Whether a lone candidate is the target outright.
+    """
+
+    candidates: list[Symbol]
+    allowed: list[Symbol] | None
+    trusted: bool
+
+
+def _written_scope_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> _Scoped | None:
+    """Narrow a C/C++ call by the scopes it's written through.
+
+    A full path (``_qualified_path_match``) is trusted: a unique match
+    is the target. One namespace scope (``_namespace_head_match``)
+    narrows, the ladder still picks, and the pick has to be one the
+    namespace allows.
+
+    Returns:
+        ``None`` when neither rule applies.
+    """
+    on_path = _qualified_path_match(call, candidates)
+    if on_path is not None:
+        return _Scoped(on_path, None, True)
+    in_namespace = _namespace_head_match(call, candidates, index)
+    if in_namespace is None:
+        return None
+    allowed, confident = in_namespace
+
+    return _Scoped(allowed if confident else candidates, allowed, False)
+
+
+def _within_scope(
+    scoped: _Scoped | None, target: Symbol | _Noise | None
+) -> Symbol | _Noise | None:
+    """``target``, unless the ladder picked a symbol the call's written
+    namespace rules out (a rung that reads the index itself can, and
+    so can one run over the unnarrowed list); then noise, so the call
+    goes external. See ``_namespace_head_match``."""
+    if (
+        scoped is None
+        or scoped.allowed is None
+        or not isinstance(target, Symbol)
+    ):
+        return target
+
+    return target if target in scoped.allowed else _NOISE
+
+
+def _namespace_head_match(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> tuple[list[Symbol], bool] | None:
+    """What a C/C++ ``ns::Name`` call can reach in the namespace it names.
+
+    ``absl::OkStatus()`` can't reach ``tensorflow::OkStatus``, and
+    ``reference_ops::F(..)`` means the ``reference_ops`` one even when
+    the ladder would favor ``optimized_ops::F``. When the one written
+    scope is a namespace, a candidate counts only when its qualname
+    ends with ``ns.Name`` or ``ns.Name.Name`` (a constructor: the
+    ladder has always been free to pick a same-file out-of-line one),
+    or when a namespace-scope
+    ``using``-declaration in a namespace named ``ns`` re-exports it
+    (``namespace tensorflow { using tsl::StatusFromTF_Status; }``).
+    ``std`` is always a namespace, and nothing in the repo answers it:
+    the standard reserves it, and the only repo symbols there are
+    specializations whose qualnames lost their template arguments
+    (``std.numeric_limits.max`` for every ``std::max``).
+
+    Any other scope name that some C/C++ qualname carries, and that no
+    C/C++ type is named, counts as a namespace, which also covers a
+    class whose own declaration wasn't extracted but whose out-of-line
+    methods carry its name. A type head (``TensorShape::IsValid``,
+    reachable through a base class), a head written with template
+    arguments, which no namespace takes, and a head the map never saw
+    (a namespace alias, an external class) are left to the ladder.
+
+    One written scope is weaker evidence than a full path, so the
+    ladder still picks. A lone survivor whose parameters don't fit the
+    call's argument count may be an unrelated namesake on the same
+    path: the four-parameter ``tensorflow::ops::Identity`` in
+    ``c/experimental`` for the generated two-argument
+    ``ops::Identity`` that isn't in the repo. When a prototype
+    declares its arity (``_arity_known``), the mismatch is real and
+    nothing on the path is the target. When none does, it may also be
+    the real target with defaults dekko never saw, and narrowing to it
+    would hand it to the ``#include`` rung, which runs before any
+    arity check, and turn ambiguous rows into guesses. So that case
+    doesn't narrow: the ladder runs over every candidate, as it would
+    without this rule, and only its pick is held to the namespace.
+
+    Args:
+        call: The raw call being resolved.
+        candidates: Its language-filtered same-name candidates.
+        index: The bare-name index, with the ``_CPP_SCOPE_KEY``,
+            ``_CPP_USING_KEY`` and ``_CPP_DECLARED_KEY`` entries.
+
+    Returns:
+        ``None`` when the call isn't a one-scope namespace-head call
+        (the ordinary ladder applies). Otherwise the candidates it can
+        reach, possibly empty, and whether the ladder may be narrowed
+        to them.
+    """
+    parts = _cpp_scope_parts(call)
+    if parts is None or parts[1] or len(parts[0]) != 1:
+        return None
+    head = parts[0][0]
+    if head == "std":
+        return [], True
+    if "<" in (getattr(call, "receiver", None) or "") or not (
+        _names_a_namespace(head, index)
+    ):
+        # Template arguments (``View<Attr>::Next``) make the head a
+        # class even when, as a specialization, it isn't a symbol.
+        return None
+    reexported = {
+        s.id for s in index.get(f"{_CPP_USING_KEY}{head}::{call.name}", [])
+    }
+    ctor_path = [head, call.name, call.name]
+    hits = [
+        c
+        for c in candidates
+        if c.id in reexported
+        or _on_written_path(c.qualname, [head, call.name], False)
+        or _on_written_path(c.qualname, ctor_path, False)
+    ]
+    confident = (
+        len(hits) != 1
+        or hits[0].kind in TYPE_KINDS
+        or _arity_plausible(hits[0], call, index)
+    )
+    if not confident and _arity_known(hits[0], index):
+        # Its declared arity doesn't fit either: nothing on the path
+        # is the target.
+        return [], True
+
+    return hits, confident
+
+
+def _names_a_namespace(head: str, index: dict[str, list[Symbol]]) -> bool:
+    """Whether ``head`` is a C/C++ qualname scope that no type is named."""
+    if not index.get(_CPP_SCOPE_KEY + head):
+        return False
+
+    return not any(
+        s.kind in TYPE_KINDS and s.language in _CPP_FAMILY
+        for s in index.get(head, [])
+    )
 
 
 def _sole_candidate_match(
     call: _Referable,
     only: Symbol,
-    by_name_path: dict[tuple[str, str], list[Symbol]],
     noise_aware: bool,
     index: dict[str, list[Symbol]],
 ) -> "Symbol | _Noise | None":
@@ -3214,42 +3813,36 @@ def _sole_candidate_match(
     Args:
         call: The raw call/reference/heritage clause being resolved.
         only: The single language-filtered candidate.
-        by_name_path: ``(name, path)`` → same-file symbols.
         noise_aware: Whether the caller handles ``_NOISE`` (it passed
             a non-``None`` ``repo_stems`` to ``_pick_candidate``).
             ``_resolve_ref`` doesn't, and has no external bucket to
             feed, so it keeps the plain ``None``.
     """
-    if _arity_plausible(only, call) and not _rust_name_is_also_a_variant(
-        call, only, index
+    if (
+        only.kind in TYPE_KINDS and _class_named_constructors(only, index)
+    ) or (
+        _arity_plausible(only, call, index)
+        and not _rust_name_is_also_a_variant(call, only, index)
     ):
+        # A class with named constructors stands for them after
+        # ``_without_own_constructors``; its own symbol has no
+        # parameters, and ``_pick_constructor`` checks the overloads.
         return only
     if noise_aware:
         return _NOISE
-    return _last_resort_match(call, [], by_name_path)
+    return _last_resort_match(call, [])
 
 
 def _last_resort_match(
-    call: _Referable,
-    candidates: list[Symbol],
-    by_name_path: dict[tuple[str, str], list[Symbol]],
+    call: _Referable, candidates: list[Symbol]
 ) -> Symbol | None:
-    """The final two ``_pick_candidate`` ladder steps for 2+ candidates.
+    """The final ``_pick_candidate`` ladder step for 2+ candidates.
 
-    Split out from ``_pick_candidate`` itself purely to keep that
-    function's cyclomatic complexity under the project's Ruff limit —
-    behaviorally this is still just the next two rungs of the same
-    ladder, tried in order: the class/own-constructor pair collapse
-    (``_construction_pick``, only ever applicable to exactly 2
-    candidates), then the bare-call/non-method fallback
-    (``_bare_call_non_method_match``, which works for any candidate
-    count).
+    The bare-call/non-method fallback
+    (``_bare_call_non_method_match``). A class and its own
+    constructors never reach here as rivals: the ladder collapses them
+    first (``_without_own_constructors``).
     """
-    if len(candidates) == 2:
-        pair = _construction_pick(candidates, by_name_path)
-        if pair is not None:
-            return pair
-
     return _bare_call_non_method_match(call, candidates)
 
 
@@ -4217,7 +4810,7 @@ def _owned_by_receiver_type(
     # without an arity check (live-testing on zed: 7 ``Point::zero()``
     # calls moved from ``point.rs``'s inherent fn to the ``Dimension``
     # impl sitting in the caller's own file).
-    plausible = [c for c in kept if _arity_plausible(c, call)]
+    plausible = [c for c in kept if _arity_plausible(c, call, index)]
     return plausible or kept
 
 
@@ -4428,10 +5021,12 @@ _CONSTRUCTOR_NAMES = ("constructor", "__init__")
 _CONSTRUCTOR_NAME_SET = frozenset(_CONSTRUCTOR_NAMES)
 
 
-def _constructor_of(
-    cls: Symbol, by_name_path: dict[tuple[str, str], list[Symbol]]
-) -> Symbol | None:
-    """The class's own explicit constructor method, if extracted.
+def _constructors_of(
+    cls: Symbol,
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+    index: dict[str, list[Symbol]],
+) -> list[Symbol]:
+    """The class's own explicit constructor methods, if extracted.
 
     ``new ClassName(...)``/bare ``ClassName(...)`` construction always
     resolves to the class symbol itself, which under-counts a class's
@@ -4443,58 +5038,245 @@ def _constructor_of(
     the class-level edge, so both "who constructs this class" and
     "who calls the constructor body" are counted.
 
+    Every overload is returned, not the first: Java ctor ids are
+    ``X.X``, ``X.X#2``, ... with one shared qualname, and crediting
+    the first match put every construction site of an overloaded
+    class on its first-declared constructor.
+
+    A C++ class is looked up repo-wide: its header declares the
+    constructors and a ``.cc`` defines them out of line
+    (``Graph::Graph(...)``), and only definitions are extracted. The
+    extractor builds an out-of-line definition's qualname from its
+    ``Graph::`` scope, so it matches the class's own.
+
     Args:
         cls: A resolved symbol, checked only when it is class-shaped
             (``model.TYPE_KINDS``) — a plain function/method target
-            returns ``None`` immediately.
+            returns an empty list immediately.
         by_name_path: ``(bare name, file path)`` → same-file symbols.
+        index: Bare name → every symbol with it.
 
     Returns:
-        The constructor method symbol, or ``None`` when ``cls`` isn't
-        a type-kind symbol or has no matching constructor definition.
+        The constructor method symbols in declaration order, or an
+        empty list when ``cls`` isn't a type-kind symbol or has no
+        matching constructor definition.
     """
     if cls.kind not in TYPE_KINDS:
-        return None
-    for name in (*_CONSTRUCTOR_NAMES, cls.name):
-        for sym in by_name_path.get((name, cls.path), []):
-            qual = f"{cls.qualname}.{name}"
-            if sym.kind == "method" and sym.qualname == qual:
-                return sym
-    return None
+        return []
+    named = _class_named_constructors(cls, index)
+    if named:
+        return named
+    for name in _CONSTRUCTOR_NAMES:
+        qual = f"{cls.qualname}.{name}"
+        found = [
+            sym
+            for sym in by_name_path.get((name, cls.path), [])
+            if sym.kind == "method" and sym.qualname == qual
+        ]
+        if found:
+            return sorted(found, key=lambda sym: sym.start_line)
+    return []
 
 
-def _construction_pick(
-    candidates: list[Symbol],
-    by_name_path: dict[tuple[str, str], list[Symbol]],
-) -> Symbol | None:
-    """Collapse a same-name {class, own-constructor} pair to the class.
+def _class_named_constructors(
+    cls: Symbol, index: dict[str, list[Symbol]]
+) -> list[Symbol]:
+    """A type's constructors that carry its own name (Java, C++).
 
-    Java's ``constructor_declaration`` shares its bare name with its
-    own class (no distinct keyword the way JS/TS's ``constructor`` or
-    Python's ``__init__`` is), so ``new Foo(...)`` finds two same-
-    named candidates — the class ``Foo`` and its constructor method
-    ``Foo.Foo`` — and used to be recorded as unresolvably ambiguous,
-    undercounting fan-in for *both*. This isn't a real
-    ambiguity: the two symbols are one class and its own constructor,
-    so the class wins as the primary target (matching JS/TS/Python's
-    convention elsewhere in this ladder) — ``_add_call_and_constructor``
-    then finds and adds the constructor edge alongside it automatically.
+    Looked up in ``index[cls.name]``, the same small list the
+    construction's own candidates came from. Java constructors live
+    in the class's file; C++ ones anywhere in the family (see
+    ``_constructors_of``).
 
     Args:
-        candidates: Exactly two same-named symbols (the caller only
-            invokes this when ``len(candidates) == 2``).
-        by_name_path: ``(bare name, file path)`` → same-file symbols.
+        cls: A type-kind symbol.
+        index: Bare name → every symbol with it.
 
     Returns:
-        The class symbol when ``candidates`` is one class and its own
-        constructor method, else ``None`` (a real ambiguity).
+        The constructors, by file then line.
     """
-    a, b = candidates
-    for cls, ctor in ((a, b), (b, a)):
-        found = _constructor_of(cls, by_name_path)
-        if found is not None and found.id == ctor.id:
-            return cls
-    return None
+    qual = f"{cls.qualname}.{cls.name}"
+    repo_wide = cls.language in _CPP_FAMILY
+    found = [
+        sym
+        for sym in index.get(cls.name, [])
+        if sym.kind == "method"
+        and sym.qualname == qual
+        and (
+            sym.language in _CPP_FAMILY if repo_wide else sym.path == cls.path
+        )
+    ]
+    return sorted(found, key=lambda sym: (sym.path, sym.start_line))
+
+
+def _constructor_params(ctor: Symbol) -> list[Param]:
+    """A constructor's parameters as a construction site supplies them.
+
+    A construction never writes the receiver, so Python's first
+    ``__init__`` parameter comes off whatever it's named (``self``,
+    ``inner_self``) and whether or not the call has a receiver:
+    ``Foo(1)`` against ``__init__(self, x)`` is one argument, not a
+    mismatch. A leading ``*args`` absorbs the receiver and stays.
+
+    Args:
+        ctor: A constructor method symbol.
+
+    Returns:
+        The parameters a construction's arguments bind to.
+    """
+    params = ctor.params
+    if (
+        ctor.language == "python"
+        and params
+        and not params[0].variadic
+        and params[0].name not in _ARITY_SYNTAX_MARKER_NAMES
+    ):
+        return params[1:]
+
+    return params
+
+
+def _declared_param_count(ctor: Symbol) -> int:
+    """How many parameters ``ctor`` declares, receiver excluded.
+
+    Args:
+        ctor: A constructor method symbol.
+
+    Returns:
+        The declared count: every parameter, defaulted or variadic
+        included, less the receiver and syntax markers.
+    """
+    return sum(
+        1
+        for p in _constructor_params(ctor)
+        if p.name not in _ARITY_SYNTAX_MARKER_NAMES
+    )
+
+
+def _arity_fits(
+    cls: Symbol,
+    ctor: Symbol,
+    arg_count: int,
+    index: dict[str, list[Symbol]],
+) -> bool:
+    """Whether ``arg_count`` written arguments fit ``cls``'s ``ctor``.
+
+    A C++ constructor defined outside its class body shows no default
+    arguments: they belong to the in-class declaration.
+    ``InterpreterBuilder(model, resolver)`` calls a ctor whose ``.cc``
+    definition lists three parameters, the third defaulted in the
+    header. When that declaration matched (``_declared``), its
+    defaults set the minimum. Otherwise any count up to the declared
+    one fits such a constructor; ``_pick_constructor``'s exact tier
+    still prefers the overload that declares exactly the written
+    count.
+    """
+    declared = _declared(ctor, index)
+    min_count, max_count = _param_arity(_constructor_params(declared))
+    if not _arity_known(ctor, index) and _out_of_class_cpp_constructor(
+        cls, ctor
+    ):
+        min_count = 0
+    if arg_count < min_count:
+        return False
+    return max_count is None or arg_count <= max_count
+
+
+def _out_of_class_cpp_constructor(cls: Symbol, ctor: Symbol) -> bool:
+    """Whether ``ctor`` is a C++ definition outside ``cls``'s body."""
+    return ctor.language in _CPP_FAMILY and not (
+        ctor.path == cls.path
+        and cls.start_line <= ctor.start_line <= cls.end_line
+    )
+
+
+def _pick_constructor(
+    cls: Symbol,
+    ctors: list[Symbol],
+    call: RawCall,
+    index: dict[str, list[Symbol]],
+) -> tuple[Symbol | None, list[Symbol]]:
+    """The constructor overload a construction's argument count selects.
+
+    Exact declared-count matches win over range fits, the way Java
+    tries fixed-arity applicability before variable-arity: for
+    ``SpringApplication(Class<?>...)`` and ``(ResourceLoader,
+    Class<?>...)``, one argument picks the first and two the second,
+    though both fit either count. Overloads the count can't separate
+    (``ErrorPage(HttpStatus, String)`` vs ``(Class, String)``) are
+    returned undecided, never guessed: only argument types tell them
+    apart, and dekko has none.
+
+    Args:
+        cls: The constructed class.
+        ctors: The class's constructors, from ``_constructors_of``.
+        call: The construction call.
+        index: The bare-name index, for each constructor's declared
+            arity (``_arity_fits``).
+
+    Returns:
+        ``(ctor, [])`` when one constructor is selected;
+        ``(None, overloads)`` when 2+ remain undecided; ``(None, [])``
+        when none fits the written argument count, which points at a
+        wrong class match rather than at a constructor.
+    """
+    n = call.arg_count
+    if n is None:
+        if len(ctors) == 1:
+            return ctors[0], []
+        return None, ctors
+    fitting = [c for c in ctors if _arity_fits(cls, c, n, index)]
+    exact = [c for c in fitting if _declared_param_count(c) == n]
+    for tier in (exact, fitting):
+        if len(tier) == 1:
+            return tier[0], []
+        if tier:
+            return None, tier
+
+    return None, []
+
+
+def _without_own_constructors(candidates: list[Symbol]) -> list[Symbol]:
+    """Drop constructors whose own class is also a candidate.
+
+    Java and C++ name a constructor after its class, so ``new
+    Graph(reg)`` finds the class ``Graph`` and every ``Graph.Graph``
+    overload (C++ out-of-line ones in the ``.cc``, the class in the
+    ``.h``) under one bare name. They are one class, not rivals: the
+    class stays, and ``_add_call_and_constructor`` credits the
+    overload afterwards. Collapsing before the ladder lets every rung
+    (the ``#include`` tiebreak above all) compare classes with
+    classes. JS/TS ``constructor`` and Python ``__init__`` never share
+    a candidate list with their class, so this never fires for them.
+
+    Args:
+        candidates: Same-bare-name symbols.
+
+    Returns:
+        ``candidates`` less every method whose qualname is
+        ``<C.qualname>.<C.name>`` for a type-kind candidate ``C`` in
+        the same language family.
+    """
+    classes = {
+        (c.qualname, _constructor_family(c.language))
+        for c in candidates
+        if c.kind in TYPE_KINDS
+    }
+    if not classes:
+        return candidates
+
+    return [
+        c
+        for c in candidates
+        if c.kind != "method"
+        or (c.qualname.rpartition(".")[0], _constructor_family(c.language))
+        not in classes
+    ]
+
+
+def _constructor_family(language: str) -> str:
+    """One key per language family, for matching a class to its ctors."""
+    return min(_LANGUAGE_FAMILIES.get(language, frozenset({language})))
 
 
 def _self_container(call: _Referable, caller: Symbol | None) -> str | None:
@@ -4661,7 +5443,11 @@ def _hint_match(
     against the caller's directory.
     """
     for hint in hints:
-        matched = [c for c in candidates if _module_matches(hint, c.path)]
+        matched = [
+            c
+            for c in candidates
+            if _module_matches(hint, c.path) or _kotlin_member_matches(hint, c)
+        ]
         if len(matched) == 1:
             return matched[0]
         if len(matched) > 1:
@@ -4682,6 +5468,27 @@ def _hint_match(
             if tiebroken is not None:
                 return tiebroken
     return None
+
+
+def _kotlin_member_matches(source: str, candidate: Symbol) -> bool:
+    """Whether a Kotlin import names this top-level Kotlin symbol.
+
+    A Kotlin file can define functions and properties outside any
+    class, and they are imported as package members:
+    ``import org.springframework.boot.runApplication`` names
+    ``runApplication`` in whichever file of that package defines it
+    (``SpringApplicationExtensions.kt``). The file's stem never appears
+    in the import, so ``_module_matches`` can't see it. The package is
+    read off the file's directory under its source root, which is
+    where Kotlin, like Java, keeps it by convention.
+    """
+    if candidate.language != "kotlin" or "." in candidate.qualname:
+        return False
+    package, _, name = source.rpartition(".")
+    if name != candidate.name or not package:
+        return False
+
+    return _jvm_package_dir(candidate.path) == package.replace(".", "/")
 
 
 def _relative_js_tiebreak(
@@ -4991,6 +5798,109 @@ def _repo_stem(path: PurePosixPath) -> str:
     return stem
 
 
+_JVM_EXTENSIONS = (".java", ".kt")
+
+
+@functools.lru_cache(maxsize=None)
+def _jvm_file_keys(path: str) -> frozenset[str]:
+    """Every path-shaped key a Java/Kotlin file answers an import by.
+
+    A qualified JVM name is a path: ``org.acme.json.JsonContent`` names
+    the one file ``org/acme/json/JsonContent.java`` under a source
+    root. A file under a root contributes that root-stripped path
+    without its extension and its package directory with a trailing
+    slash (what a wildcard or package import names). A file under no
+    root (a Bazel-style ``.../java/org/x/Y.java``) can only be matched
+    as a path suffix, so it contributes every directory-boundary
+    suffix of two or more segments, marked with a leading ``/`` so a
+    rooted path can never collide with it. A single segment is never a
+    key: that would be the file-stem test again, which bound every
+    external class to whichever repo class shared its simple name.
+
+    Args:
+        path: Repo-relative file path.
+
+    Returns:
+        The keys, empty for a non-JVM path.
+    """
+    if not path.endswith(_JVM_EXTENSIONS):
+        return frozenset()
+    stripped = _strip_java_root(path.split("/"))
+    if stripped is not None:
+        noext = stripped.rsplit(".", 1)[0]
+        keys = {noext}
+        package, sep, _ = noext.rpartition("/")
+        if sep:
+            keys.add(package + "/")
+        return frozenset(keys)
+    segs = path.rsplit(".", 1)[0].split("/")
+    return frozenset("/" + "/".join(segs[i:]) for i in range(len(segs) - 1))
+
+
+@functools.lru_cache(maxsize=None)
+def _jvm_import_keys(source: str) -> frozenset[str]:
+    """Every path-shaped key a Java/Kotlin import source could name.
+
+    ``a.b.C.m`` yields each dotted prefix of two or more segments
+    (``a/b/C/m``, ``a/b/C``, ``a/b``): a class import names its file
+    outright, and a static or nested-class import reaches the
+    declaring file through a shorter prefix. The whole name as a
+    package (``a/b/C/m/``) lets a wildcard import, recorded with the
+    package as its source, match the package directory. The
+    ``/``-marked dotted suffixes of two or more segments (``/a/b/C/m``
+    down to ``/C/m``) are for files under no source root (see
+    ``_jvm_file_keys``). A one-segment source (Kotlin's ``import Foo``
+    of a default-package class) keeps its own name as the key.
+
+    Args:
+        source: The import's qualified name.
+
+    Returns:
+        The keys, compared against ``_repo_stems`` or a candidate
+        file's ``_jvm_file_keys``.
+    """
+    segs = source.split(".")
+    keys = {"/".join(segs[:k]) for k in range(2, len(segs) + 1)}
+    keys.add("/".join(segs) + "/")
+    keys.update("/" + "/".join(segs[i:]) for i in range(len(segs) - 1))
+    if len(segs) == 1:
+        keys.add(source)
+    return frozenset(keys)
+
+
+def _repo_stems(files: list[FileMap]) -> set[str]:
+    """Every key an import is tested against to count as in-repo.
+
+    The file stems every language's ``_import_is_in_repo`` test uses,
+    plus, for Java/Kotlin files, the path-shaped keys of
+    ``_jvm_file_keys`` and each Kotlin top-level function or property
+    as ``package/dir/name`` (it is imported as a package member, so no
+    file stem ever spells it). A stem never contains ``/`` and every
+    JVM key of a packaged file does, so neither test can see the
+    other's keys and one set travels through every resolve pass and
+    pool initializer unchanged.
+
+    Args:
+        files: Every mapped file.
+
+    Returns:
+        The combined key set.
+    """
+    keys = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+    for fm in files:
+        file_keys = _jvm_file_keys(fm.path)
+        keys.update(file_keys)
+        if fm.language != "kotlin" or not file_keys:
+            continue
+        package = _jvm_package_dir(fm.path)
+        if package is None:
+            continue
+        for sym in fm.symbols:
+            if "." not in sym.qualname:
+                keys.add(f"{package}/{sym.name}" if package else sym.name)
+    return keys
+
+
 def _module_matches(source: str, candidate_path: str) -> bool:
     """Check whether an import source plausibly names a file.
 
@@ -5021,6 +5931,14 @@ def _module_matches(source: str, candidate_path: str) -> bool:
     on the stem actually containing a dot, so every undotted file
     matches exactly as before.
 
+    A Java/Kotlin candidate is matched by qualified path only (see
+    ``_jvm_file_keys``), never by stem: the stem test resolved an
+    external ``org.springframework.test.json.JsonContent`` import to
+    spring-boot's own ``JsonContent`` before the external-import veto
+    could run, and matched an in-repo import of one of three shaded
+    ``JSONObject`` classes to all three, so the hint gave up and the
+    call went ambiguous.
+
     Checked against ``source.split("/", 1)[0]``, not the whole
     ``source`` string -- ``extractor._imports_js`` encodes every
     *named* import's ``source`` as ``f"{module}/{name}"`` (e.g.
@@ -5038,6 +5956,8 @@ def _module_matches(source: str, candidate_path: str) -> bool:
         and candidate_path.endswith(_JS_TS_EXTENSIONS)
     ):
         return False
+    if candidate_path.endswith(_JVM_EXTENSIONS):
+        return bool(_jvm_file_keys(candidate_path) & _jvm_import_keys(source))
     stem = _repo_stem(PurePosixPath(candidate_path))
     if stem in _import_segments(source):
         return True
@@ -5338,19 +6258,150 @@ def _rust_crate_hint_matches(
 _RUST_VARIANT_KEY = "::variant::"
 
 
+# Reserved ``index`` namespaces for C/C++ one-scope calls
+# (``_namespace_head_match``), riding in the index for the same reason
+# as ``_RUST_VARIANT_KEY``. ``_CPP_SCOPE_KEY + H`` is present when ``H``
+# is a scope of some C/C++ symbol's qualname; its one symbol is just
+# the witness. ``_CPP_USING_KEY + "H::Name"`` holds the symbols a
+# namespace-scope ``using``-declaration in a namespace named ``H``
+# re-exports as ``H::Name``.
+_CPP_SCOPE_KEY = "::cpp-scope::"
+_CPP_USING_KEY = "::cpp-using::"
+
+# Reserved ``index`` namespace for C/C++ definitions whose arity a
+# prototype declares: ``_CPP_DECLARED_KEY + sym.id`` holds one copy of
+# ``sym`` with the prototype's trailing defaults applied. The key's
+# presence means the definition's arity is known, not just guessed
+# from a ``.cc`` definition that can't repeat its header's defaults.
+_CPP_DECLARED_KEY = "::cpp-declared::"
+
+
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
-    ``_RUST_VARIANT_KEY`` entries for tuple enum variants."""
+    ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY`` and
+    ``_CPP_DECLARED_KEY`` entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
             index.setdefault(sym.name, []).append(sym)
+            if sym.language in _CPP_FAMILY:
+                for scope in _PATH_SPLIT.split(sym.qualname)[:-1]:
+                    if scope:
+                        index.setdefault(_CPP_SCOPE_KEY + scope, [sym])
         for entry in fm.enum_variants:
             owner, _, variant = entry.partition("::")
             index.setdefault(_RUST_VARIANT_KEY + variant, []).extend(
                 s for s in fm.symbols if s.kind == "enum" and s.name == owner
             )
+    for fm in files:
+        for entry in fm.cpp_using:
+            _index_cpp_using(entry, index)
+    _index_cpp_declared(files, index)
     return index
+
+
+def _index_cpp_declared(
+    files: list[FileMap], index: dict[str, list[Symbol]]
+) -> None:
+    """Record each C/C++ definition's arity as its prototypes declare it.
+
+    A default argument belongs to the first declaration, almost always
+    the header prototype, and the ``.cc`` definition may not repeat
+    it: ``ToGraph(Graph* g, Options opts = {})`` in ``scope.h`` is
+    ``ToGraph(Graph* g, Options opts)`` in ``scope.cc``. A definition
+    matches every prototype with the same qualname (``::`` inside a
+    segment read as ``.``, since ``namespace a::b {`` is one segment)
+    and the same parameter count, and takes the most defaults any of
+    them declares: later declarations may add defaults, and one class
+    declared twice under two build configurations can disagree.
+
+    The symbol itself is never changed, so ``map.json``'s params and
+    the extraction cache keep what the definition says.
+    """
+    declared: dict[tuple[str, int], int] = {}
+    for fm in files:
+        for entry in fm.cpp_decls:
+            qualname, _, arity = entry.rpartition("/")
+            count, _, defaults = arity.partition("=")
+            key = (_dotted_qualname(qualname), int(count))
+            declared[key] = max(declared.get(key, 0), int(defaults))
+    if not declared:
+        return
+
+    for fm in files:
+        for sym in fm.symbols:
+            if sym.language not in _CPP_FAMILY or sym.kind not in (
+                "function",
+                "method",
+            ):
+                continue
+            plain = [p for p in sym.params if not p.variadic]
+            defaults = declared.get(
+                (_dotted_qualname(sym.qualname), len(plain))
+            )
+            if defaults is not None:
+                index[_CPP_DECLARED_KEY + sym.id] = [
+                    _with_trailing_defaults(sym, defaults)
+                ]
+
+
+def _dotted_qualname(qualname: str) -> str:
+    """``qualname`` with every ``::`` read as ``.``."""
+    return ".".join(
+        seg for seg in qualname.replace("::", ".").split(".") if seg
+    )
+
+
+def _with_trailing_defaults(sym: Symbol, defaults: int) -> Symbol:
+    """``sym``, or a copy whose last ``defaults`` params are defaulted."""
+    plain = [i for i, p in enumerate(sym.params) if not p.variadic]
+    lowered = plain[len(plain) - defaults :] if defaults else []
+    if all(sym.params[i].has_default for i in lowered):
+        return sym
+
+    params = list(sym.params)
+    for i in lowered:
+        params[i] = replace(params[i], has_default=True)
+    return replace(sym, params=params)
+
+
+def _declared(sym: Symbol, index: dict[str, list[Symbol]]) -> Symbol:
+    """``sym`` with its prototypes' defaults, when a prototype matched."""
+    shadow = index.get(_CPP_DECLARED_KEY + sym.id)
+    return shadow[0] if shadow else sym
+
+
+def _arity_known(sym: Symbol, index: dict[str, list[Symbol]]) -> bool:
+    """Whether a prototype declares ``sym``'s arity (see ``_declared``)."""
+    return _CPP_DECLARED_KEY + sym.id in index
+
+
+def _index_cpp_using(entry: str, index: dict[str, list[Symbol]]) -> None:
+    """Record what one ``FileMap.cpp_using`` entry re-exports.
+
+    ``tensorflow=tsl::StatusFromTF_Status`` makes every C/C++
+    ``StatusFromTF_Status`` on the path ``tsl::StatusFromTF_Status``
+    reachable as ``tensorflow::StatusFromTF_Status``. A declaration in
+    the global namespace re-exports nothing a one-scope call can name.
+    """
+    namespace, _, written = entry.partition("=")
+    if not namespace:
+        return
+    head = namespace.rsplit(".", 1)[-1]
+    anchored = written.startswith("::")
+    path = [seg for seg in written.split("::") if seg]
+    if len(path) < 2:
+        return
+    name = path[-1]
+    hits = [
+        s
+        for s in index.get(name, [])
+        if s.language in _CPP_FAMILY
+        and _on_written_path(s.qualname, path, anchored)
+    ]
+    if hits:
+        bucket = index.setdefault(f"{_CPP_USING_KEY}{head}::{name}", [])
+        bucket.extend(s for s in hits if s not in bucket)
 
 
 def _rust_name_is_also_a_variant(
@@ -5661,6 +6712,22 @@ _RUST_IN_CRATE_PREFIXES = ("crate::", "super::", "self::")
 _RELATIVE_SOURCE_PREFIXES = ("./", "../")
 
 
+def _rust_std_import(imp: Import) -> bool:
+    """Whether ``imp`` is a Rust ``use`` rooted at ``std``/``core``/``alloc``.
+
+    Args:
+        imp: An import record; the file's language comes from its path.
+
+    Returns:
+        True for a ``use`` in a ``.rs`` file whose source's first ``::``
+        segment is one of ``_RUST_STD_NAMESPACE_ROOTS``.
+    """
+    if not imp.path.endswith(".rs"):
+        return False
+
+    return imp.source.split("::", 1)[0] in _RUST_STD_NAMESPACE_ROOTS
+
+
 def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     """Whether an import binding plausibly points into this repo.
 
@@ -5669,10 +6736,31 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     file-shaped test, which a package-shaped specifier can only ever
     pass by coincidence. A dotted filename's stem is never a single
     segment, hence the second, component-wise check (see
-    ``_dotted_components``).
+    ``_dotted_components``). A Java/Kotlin import is tested by its
+    qualified path instead (see ``_jvm_import_keys``).
     """
     if isinstance(imp, _WorkspaceImport):
         return True
+    if imp.path.endswith(_JVM_EXTENSIONS):
+        # A qualified JVM name is a path, not a bag of words: the
+        # import is in-repo iff it names a repo file, package or
+        # Kotlin top-level member (``_repo_stems``). The stem test
+        # called ``import java.util.jar.Manifest`` in-repo because
+        # spring-boot has a ``Manifest.java`` of its own, and bound 40
+        # ``Manifest`` call sites to the buildpack's class; 4,564 of
+        # the repo's 23,528 "in-repo" imports named no repo file.
+        return bool(_jvm_import_keys(imp.source) & repo_stems)
+    if _rust_std_import(imp):
+        # ``use std::path::Path;`` is external by definition, whatever
+        # file stems its later segments match. The stem test passed it
+        # whenever the repo had a file named like a std module (zed's
+        # ``crates/path`` and ``crates/collections``), so ``Path::new``
+        # reached gpui's own ``Path.new`` at 1,377 sites and
+        # ``HashMap::new()`` was disclosed as ambiguous among every
+        # ``new`` in the repo. The full-path form (``std::path::Path::
+        # new``) was already external (``_rust_std_namespace_root_
+        # path``); this is the same call through a ``use``.
+        return False
     if imp.source.startswith(_RUST_IN_CRATE_PREFIXES):
         # ``use crate::{AgentTool};`` is in-repo by definition, whatever
         # the file stems say. The stem test fails it whenever the crate
@@ -5853,10 +6941,13 @@ class _ImportResolveContext:
             packages sit directly at the repo root.
         java_suffix_index: Path suffix (with any of the well-known
             Maven/Gradle source-root prefixes stripped, plus the raw
-            path itself) → matching real ``.java`` file path(s). Lets
-            ``import com.foo.Bar;`` resolve against ``src/main/java/
-            com/foo/Bar.java``-style layouts without hardcoding one
-            specific root.
+            path itself) → matching real ``.java``/``.kt`` file
+            path(s). Lets ``import com.foo.Bar;`` resolve against
+            ``src/main/java/com/foo/Bar.java``-style layouts without
+            hardcoding one specific root.
+        kotlin_package_members: ``(package directory, name)`` → the
+            Kotlin file(s) defining that top-level function or
+            property (see ``_kotlin_package_members``).
         cpp_basename_index: C/C++ header/source basename → matching
             real path(s), scoped to C/C++-shaped extensions only (a
             same-named Python/JS file must never satisfy a ``#include``
@@ -5895,6 +6986,9 @@ class _ImportResolveContext:
     paths: frozenset[str]
     py_package_roots: dict[str, list[str]] = field(default_factory=dict)
     java_suffix_index: dict[str, list[str]] = field(default_factory=dict)
+    kotlin_package_members: dict[tuple[str, str], list[str]] = field(
+        default_factory=dict
+    )
     cpp_basename_index: dict[str, list[str]] = field(default_factory=dict)
     crate_roots: dict[str, list[str]] = field(default_factory=dict)
     workspace_manifests: dict[str, "_WorkspaceManifest"] = field(
@@ -7252,12 +8346,58 @@ def _resolve_import_java(
     java`` rather than the repo root. ``ctx.java_suffix_index`` (built
     once, see ``_java_suffix_index``) already indexes every file under
     both its raw path and its root-stripped suffix, so this is a
-    single dict lookup, not a per-import scan.
+    single dict lookup, not a per-import scan. A class written in
+    Kotlin is imported the same way, so ``C.kt`` is the fallback.
     """
     del importer_path
-    target = imp.source.replace(".", "/") + ".java"
-    matches = sorted(set(ctx.java_suffix_index.get(target, [])))
-    return matches[0] if len(matches) == 1 else None
+    return _jvm_type_file(imp.source, (".java", ".kt"), ctx)
+
+
+def _resolve_import_kotlin(
+    imp: Import, importer_path: str, ctx: _ImportResolveContext
+) -> str | None:
+    """Resolve a Kotlin ``import`` to a repo file.
+
+    Kotlin keeps Java's package-equals-directory convention, and
+    imports Java classes as freely as Kotlin ones. In order:
+
+    1. ``a.b.C`` as ``a/b/C.kt``, then ``a/b/C.java``. Kotlin first, so
+       a Kotlin importer of a type that exists in both languages (docs
+       samples ship as Java/Kotlin twins) gets the Kotlin one.
+    2. A package member: a top-level function or property defined in
+       exactly one Kotlin file of package ``a.b``.
+    3. A nested type or a static member (``a.b.Outer.Inner``): the
+       enclosing ``a.b.Outer`` once more, by step 1.
+    """
+    del importer_path
+    found = _jvm_type_file(imp.source, (".kt", ".java"), ctx)
+    if found is not None:
+        return found
+    package, _, name = imp.source.rpartition(".")
+    members = ctx.kotlin_package_members.get((package.replace(".", "/"), name))
+    if members is not None and len(members) == 1:
+        return members[0]
+    if package:
+        return _jvm_type_file(package, (".kt", ".java"), ctx)
+
+    return None
+
+
+def _jvm_type_file(
+    source: str, extensions: tuple[str, ...], ctx: _ImportResolveContext
+) -> str | None:
+    """The one file declaring JVM type ``source``, trying each extension.
+
+    Only a unique match counts; the first extension that has one wins.
+    """
+    stem = source.replace(".", "/")
+    for ext in extensions:
+        matches = sorted(set(ctx.java_suffix_index.get(stem + ext, [])))
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            return None
+    return None
 
 
 _CPP_EXTENSIONS = (
@@ -7316,6 +8456,7 @@ _IMPORT_RESOLVERS: dict[
     "tsx": _resolve_import_js,
     "rust": _resolve_import_rust,
     "java": _resolve_import_java,
+    "kotlin": _resolve_import_kotlin,
     "c": _resolve_import_cpp,
     "cpp": _resolve_import_cpp,
 }
@@ -7427,24 +8568,21 @@ def _py_package_roots(paths: frozenset[str]) -> dict[str, list[str]]:
     return roots
 
 
-# Segment sequences tried in order — a directory-boundary subsequence
-# match anywhere in the path, not just a literal prefix at position 0,
-# since a real multi-module Maven/Gradle repo nests each module's own
-# "src/main/java" under a module directory (``spring-core/src/main/
-# java/...``, confirmed live against spring-boot), not
-# at the repo root.
-_JAVA_ROOT_SEGMENTS = (
-    ("src", "main", "java"),
-    ("src", "test", "java"),
-    ("src",),
-)
+# Segment sequences tried, after the source-set scan in
+# ``_strip_java_root``, as a directory-boundary subsequence match
+# anywhere in the path, not just a literal prefix at position 0, since
+# a real multi-module Maven/Gradle repo nests each module's own
+# ``src`` under a module directory (``spring-core/src/main/java/...``,
+# confirmed live against spring-boot), not at the repo root. The bare
+# ``src`` catches layouts with no language directory at all.
+_JAVA_ROOT_SEGMENTS = (("src",),)
 
 
 def _java_suffix_index(paths: frozenset[str]) -> dict[str, list[str]]:
-    """Java file path/root-stripped-suffix → matching real path(s).
+    """JVM file path/root-stripped-suffix → matching real path(s).
 
-    Every ``.java`` file is indexed under its own full path *and*
-    (when one of the well-known Maven/Gradle source-root segment
+    Every ``.java`` and ``.kt`` file is indexed under its own full
+    path *and* (when one of the well-known Maven/Gradle source-root segment
     sequences appears anywhere in its path, at a directory boundary)
     the path with everything up to and including that root stripped —
     so ``_resolve_import_java``'s single dict lookup works whether the
@@ -7460,7 +8598,7 @@ def _java_suffix_index(paths: frozenset[str]) -> dict[str, list[str]]:
     """
     index: dict[str, list[str]] = {}
     for p in paths:
-        if not p.endswith(".java"):
+        if not p.endswith((".java", ".kt")):
             continue
         index.setdefault(p, []).append(p)
         segs = p.split("/")
@@ -7470,10 +8608,53 @@ def _java_suffix_index(paths: frozenset[str]) -> dict[str, list[str]]:
     return index
 
 
-def _strip_java_root(segs: list[str]) -> str | None:
-    """First matching source-root segment sequence stripped from
-    ``segs``, or ``None`` when none of ``_JAVA_ROOT_SEGMENTS`` appears.
+def _kotlin_package_members(
+    files: list[FileMap],
+) -> dict[tuple[str, str], list[str]]:
+    """``(package directory, top-level name)`` → Kotlin file(s).
+
+    The package directory is the file's directory under its source
+    root (``_strip_java_root``), so ``import a.b.fn`` looks up
+    ``("a/b", "fn")``. Only top-level symbols count: a member of a
+    class is imported through the class.
     """
+    index: dict[tuple[str, str], list[str]] = {}
+    for fm in files:
+        if fm.language != "kotlin":
+            continue
+        package = _jvm_package_dir(fm.path)
+        if package is None:
+            continue
+        for name in {s.name for s in fm.symbols if "." not in s.qualname}:
+            index.setdefault((package, name), []).append(fm.path)
+    return index
+
+
+def _jvm_package_dir(path: str) -> str | None:
+    """A JVM file's directory under its source root: its package path.
+
+    ``core/x/src/main/kotlin/org/a/F.kt`` → ``org/a``; ``""`` for the
+    default package; ``None`` when no source root is in the path.
+    """
+    directory = _strip_java_root([*path.split("/")[:-1], ""])
+    return directory.rstrip("/") if directory is not None else None
+
+
+def _strip_java_root(segs: list[str]) -> str | None:
+    """The path under the JVM source root stripped from ``segs``, or
+    ``None`` when no root appears.
+
+    Any ``src/<sourceSet>/java*`` or ``src/<sourceSet>/kotlin*``
+    directory is a source root first: Gradle names source sets freely
+    (``intTest``, ``dockerTest``, ``testFixtures``, ``json-shade``) and
+    the language directory may be ``javaTemplates`` or a multi-release
+    ``java9``; spring-boot keeps 348 JVM files under such roots, whose
+    imports went unresolved when only ``main`` and ``test`` counted.
+    Then ``_JAVA_ROOT_SEGMENTS``, whose bare ``src`` catches the rest.
+    """
+    for i in range(len(segs) - 3):
+        if segs[i] == "src" and segs[i + 2].startswith(("java", "kotlin")):
+            return "/".join(segs[i + 3 :])
     for root_segs in _JAVA_ROOT_SEGMENTS:
         n = len(root_segs)
         for i in range(len(segs) - n):
@@ -7555,6 +8736,7 @@ def resolve_imports(
         paths=paths,
         py_package_roots=_py_package_roots(paths),
         java_suffix_index=_java_suffix_index(paths),
+        kotlin_package_members=_kotlin_package_members(files),
         cpp_basename_index=_cpp_basename_index(paths),
         crate_roots=_rust_crate_roots_index_all(paths),
         ts_path_aliases=(

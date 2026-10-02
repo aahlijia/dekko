@@ -73,6 +73,10 @@ _DYNAMIC_IMPORT_SIGNATURES: dict[str, tuple[tuple[str, str], ...]] = {
         (r"\bClass\.forName\s*\(", "Class.forName()"),
         (r"\bServiceLoader\.load\s*\(", "ServiceLoader.load()"),
     ),
+    "kotlin": (
+        (r"\bClass\.forName\s*\(", "Class.forName()"),
+        (r"\bServiceLoader\.load\s*\(", "ServiceLoader.load()"),
+    ),
 }
 
 # Scanning cost guard: these are cheap line regexes, but ``--file`` is

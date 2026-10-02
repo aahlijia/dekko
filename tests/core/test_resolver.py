@@ -481,10 +481,10 @@ def test_aliased_import_reference_resolves_to_real_target() -> None:
     # local import alias must resolve into referenced/_in/_out, not
     # be silently dropped just because the alias misses the by-name
     # index.
-    real = _fn("target.py", "resolveBug")
+    real = _fn("target.ts", "resolveBug", language="typescript")
     wire_up = _fn("caller.ts", "wireUp")
     files = [
-        FileMap("target.py", "python", symbols=[real]),
+        FileMap("target.ts", "typescript", symbols=[real]),
         FileMap(
             "caller.ts",
             "typescript",
@@ -783,7 +783,7 @@ def test_typed_parameter_match_strips_generic_wrapper() -> None:
 def test_untyped_parameter_falls_back_to_existing_ladder() -> None:
     # No declared type on the parameter: unchanged behavior — falls
     # through to the same-file step, exactly like before this fix.
-    same_file_fn = _fn("caller.ts", "initTask", line=1)
+    same_file_fn = _fn("caller.ts", "initTask", line=1, language="typescript")
     caller = Symbol(
         id="caller.ts::setup",
         name="setup",
@@ -976,6 +976,533 @@ def test_java_constructor_same_name_pair_not_ambiguous() -> None:
     assert graph.ambiguous == []
 
 
+_ERROR_PAGE = """package web;
+public class ErrorPage {
+    public ErrorPage(String path) { }
+    public ErrorPage(HttpStatus status, String path) { }
+    public ErrorPage(Class<? extends Throwable> exception, String path) { }
+}
+"""
+
+_SPRING_APPLICATION = """package app;
+public class SpringApplication {
+    public SpringApplication(Class<?>... sources) { }
+    public SpringApplication(ResourceLoader loader, Class<?>... sources) { }
+}
+"""
+
+_EP = "web/ErrorPage.java::ErrorPage"
+_SA = "app/SpringApplication.java::SpringApplication"
+
+
+def _graph(root: Path, sources: dict[str, str]) -> CallGraph:
+    for rel, text in sources.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    files, _ = map_repository(
+        root,
+        subpath=None,
+        excludes=(),
+        max_file_size=1_000_000,
+    )
+    return resolve(files)
+
+
+def _pairs(graph: CallGraph, caller: str) -> set[str]:
+    return {e.callee for e in graph.edges if e.caller == caller}
+
+
+def _ambiguous_for(graph: CallGraph, caller: str) -> dict[str, list[str]]:
+    return {name: ids for c, name, ids in graph.ambiguous if c == caller}
+
+
+def _java_caller(body: str) -> str:
+    return (
+        "package app;\n"
+        "import web.ErrorPage;\n"
+        "public class Builder {\n"
+        f"    Object build(Object a, Object b, Object c) {{ {body} }}\n"
+        "}\n"
+    )
+
+
+_BUILD = "app/Builder.java::Builder.build"
+
+
+def test_overloaded_constructor_credited_by_exact_arg_count(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "web/ErrorPage.java": _ERROR_PAGE,
+            "app/Builder.java": _java_caller('return new ErrorPage("/x");'),
+        },
+    )
+    assert _pairs(graph, _BUILD) == {_EP, f"{_EP}.ErrorPage"}
+    assert _ambiguous_for(graph, _BUILD) == {}
+
+
+def test_same_arity_constructor_overloads_are_disclosed_not_guessed(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "web/ErrorPage.java": _ERROR_PAGE,
+            "app/Builder.java": _java_caller(
+                'new ErrorPage(HttpStatus.NOT_FOUND, "/404");'
+                ' return new ErrorPage(Oops.class, "/500");'
+            ),
+        },
+    )
+    assert _pairs(graph, _BUILD) == {_EP}
+    assert _ambiguous_for(graph, _BUILD) == {
+        "ErrorPage": [f"{_EP}.ErrorPage#2", f"{_EP}.ErrorPage#3"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("args", "ctor"),
+    [
+        ("A.class", f"{_SA}.SpringApplication"),
+        ("a, b", f"{_SA}.SpringApplication#2"),
+        ("", f"{_SA}.SpringApplication"),
+    ],
+)
+def test_varargs_constructor_exact_count_beats_range_fit(
+    tmp_path: Path,
+    args: str,
+    ctor: str,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "app/SpringApplication.java": _SPRING_APPLICATION,
+            "app/Builder.java": _java_caller(
+                f"return new SpringApplication({args});"
+            ),
+        },
+    )
+    assert _pairs(graph, _BUILD) == {_SA, ctor}
+    assert _ambiguous_for(graph, _BUILD) == {}
+
+
+def test_varargs_constructors_both_fitting_stay_ambiguous(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "app/SpringApplication.java": _SPRING_APPLICATION,
+            "app/Builder.java": _java_caller(
+                "return new SpringApplication(a, b, c);"
+            ),
+        },
+    )
+    assert _pairs(graph, _BUILD) == {_SA}
+    assert _ambiguous_for(graph, _BUILD) == {
+        "SpringApplication": [
+            f"{_SA}.SpringApplication",
+            f"{_SA}.SpringApplication#2",
+        ],
+    }
+
+
+def test_construction_fitting_no_constructor_keeps_only_the_class_edge(
+    tmp_path: Path,
+) -> None:
+    pair = (
+        "package app;\n"
+        "public class Pair {\n"
+        "    public Pair() { }\n"
+        "    public Pair(Object a) { }\n"
+        "}\n"
+    )
+    graph = _graph(
+        tmp_path,
+        {
+            "app/Pair.java": pair,
+            "app/Builder.java": _java_caller("return new Pair(a, b);"),
+        },
+    )
+    assert _pairs(graph, _BUILD) == {"app/Pair.java::Pair"}
+    assert _ambiguous_for(graph, _BUILD) == {}
+
+
+@pytest.mark.parametrize("receiver", ["self", "inner_self"])
+def test_python_init_arity_ignores_the_receiver(
+    tmp_path: Path,
+    receiver: str,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "util.py": (
+                "class Config:\n"
+                f"    def __init__({receiver}, path, strict=False):\n"
+                f"        {receiver}.path = path\n"
+            ),
+            "main.py": (
+                "from util import Config\n\n\n"
+                "def run():\n"
+                "    return Config('x')\n"
+            ),
+        },
+    )
+    assert _pairs(graph, "main.py::run") == {
+        "util.py::Config",
+        "util.py::Config.__init__",
+    }
+
+
+def _two_ctors(arg_count: int | None) -> tuple[list[FileMap], str]:
+    cls = Symbol(
+        id="Foo.java::Foo",
+        name="Foo",
+        qualname="Foo",
+        kind="class",
+        path="Foo.java",
+        language="java",
+    )
+    ctors = [
+        Symbol(
+            id=f"Foo.java::Foo.Foo{suffix}",
+            name="Foo",
+            qualname="Foo.Foo",
+            kind="method",
+            path="Foo.java",
+            language="java",
+            params=[Param(name=f"p{i}") for i in range(count)],
+            start_line=line,
+        )
+        for suffix, count, line in (("", 0, 2), ("#2", 1, 3))
+    ]
+    caller = _fn("Foo.java", "make", "Foo.make", language="java")
+    call = RawCall(
+        caller_id=caller.id,
+        path="Foo.java",
+        text="new Foo",
+        name="Foo",
+        line=9,
+        arg_count=arg_count,
+    )
+    files = [
+        FileMap(
+            "Foo.java",
+            "java",
+            symbols=[cls, *ctors, caller],
+            calls=[call],
+        ),
+    ]
+    return files, caller.id
+
+
+def test_overloaded_constructors_without_arg_count_are_ambiguous() -> None:
+    files, caller = _two_ctors(None)
+    graph = resolve(files)
+    assert _pairs(graph, caller) == {"Foo.java::Foo"}
+    assert _ambiguous_for(graph, caller) == {
+        "Foo": ["Foo.java::Foo.Foo", "Foo.java::Foo.Foo#2"],
+    }
+
+
+def test_cpp_inline_constructors_credited_by_arg_count(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "foo.h": (
+                "class Foo {\n"
+                " public:\n"
+                "  Foo(int a) {}\n"
+                "  Foo(int a, int b) {}\n"
+                "};\n"
+                "inline void one() { Foo(1); }\n"
+                "inline void two() { Foo(1, 2); }\n"
+            ),
+        },
+    )
+    assert "foo.h::Foo.Foo" in _pairs(graph, "foo.h::one")
+    assert "foo.h::Foo.Foo#2" not in _pairs(graph, "foo.h::one")
+    assert "foo.h::Foo.Foo#2" in _pairs(graph, "foo.h::two")
+    assert "foo.h::Foo.Foo" not in _pairs(graph, "foo.h::two")
+
+
+# A class declared in a header with its constructors defined out of
+# line in a ``.cc``, a same-named class in another namespace and two
+# same-named Python classes: the shape of tensorflow's ``Graph``.
+_CPP_GRAPH_FILES = {
+    "core/graph.h": (
+        "namespace tensorflow {\n"
+        "class Registry;\n"
+        "class Library;\n"
+        "class Graph {\n"
+        " public:\n"
+        "  explicit Graph(const Registry* ops);\n"
+        "  explicit Graph(const Library& lib);\n"
+        "  int num_nodes() const { return 0; }\n"
+        " private:\n"
+        "  Graph(const Graph&) = delete;\n"
+        "};\n"
+        "class Sized {\n"
+        " public:\n"
+        "  Sized(int a);\n"
+        "  Sized(int a, int b);\n"
+        "};\n"
+        "class Solo {\n"
+        " public:\n"
+        "  Solo(int a, int b) {}\n"
+        "};\n"
+        "}\n"
+    ),
+    "core/graph.cc": (
+        '#include "core/graph.h"\n'
+        "namespace tensorflow {\n"
+        "Graph::Graph(const Registry* ops) {}\n"
+        "Graph::Graph(const Library& lib) {}\n"
+        "Sized::Sized(int a) {}\n"
+        "Sized::Sized(int a, int b) {}\n"
+        "}\n"
+    ),
+    "lite/model.h": (
+        "namespace tflite { class Graph { public: Graph() {} }; }\n"
+    ),
+    "py/ops.py": "class Graph:\n    def __init__(self):\n        pass\n",
+    "py/cfg.py": "class Graph:\n    pass\n",
+}
+_GRAPH = "core/graph.h::tensorflow.Graph"
+
+
+def _cpp_user(body: str) -> str:
+    return (
+        '#include "core/graph.h"\n'
+        "namespace tensorflow {\n"
+        f"void Build(const Registry* reg) {{\n{body}\n}}\n"
+        "}\n"
+    )
+
+
+_CPP_BUILD = "core/user.cc::tensorflow.Build"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "  new Graph(reg);",
+        "  new tensorflow::Graph(reg);",
+        "  auto g = std::make_unique<Graph>(reg);",
+    ],
+)
+def test_cpp_construction_resolves_to_the_included_class(
+    tmp_path: Path, body: str
+) -> None:
+    graph = _graph(
+        tmp_path, {**_CPP_GRAPH_FILES, "core/user.cc": _cpp_user(body)}
+    )
+    pairs = _pairs(graph, _CPP_BUILD)
+    assert _GRAPH in pairs
+    assert not any("lite/" in p or "py/" in p for p in pairs)
+    # The two real constructors take one argument each: only their
+    # types tell them apart, so the call is disclosed against both.
+    assert _ambiguous_for(graph, _CPP_BUILD) == {
+        "Graph": [
+            "core/graph.cc::tensorflow.Graph.Graph",
+            "core/graph.cc::tensorflow.Graph.Graph#2",
+        ],
+    }
+
+
+def test_cpp_out_of_line_constructor_credited_by_arg_count(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            **_CPP_GRAPH_FILES,
+            "core/user.cc": _cpp_user("  new Sized(1);\n  new Sized(1, 2);"),
+        },
+    )
+    pairs = _pairs(graph, _CPP_BUILD)
+    assert {
+        "core/graph.h::tensorflow.Sized",
+        "core/graph.cc::tensorflow.Sized.Sized",
+        "core/graph.cc::tensorflow.Sized.Sized#2",
+    } <= pairs
+    lines = {e.callee: e.lines for e in graph.edges if e.caller == _CPP_BUILD}
+    assert lines["core/graph.cc::tensorflow.Sized.Sized"] == [4]
+    assert lines["core/graph.cc::tensorflow.Sized.Sized#2"] == [5]
+    assert _ambiguous_for(graph, _CPP_BUILD) == {}
+
+
+def test_cpp_out_of_line_constructor_fits_calls_using_header_defaults(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "b/builder.h": (
+                "class Builder {\n"
+                " public:\n"
+                "  Builder(int model, int resolver, int* options = nullptr);\n"
+                "};\n"
+                "class Two {\n"
+                " public:\n"
+                "  Two(int a, int b = 0);\n"
+                "  Two(int* a, int b = 0, int c = 0);\n"
+                "};\n"
+            ),
+            "b/builder.cc": (
+                '#include "b/builder.h"\n'
+                "Builder::Builder(int model, int resolver, int* options) {}\n"
+                "Two::Two(int a, int b) {}\n"
+                "Two::Two(int* a, int b, int c) {}\n"
+            ),
+            "b/user.cc": (
+                '#include "b/builder.h"\n'
+                "void Use() { new Builder(1, 2); new Two(nullptr); }\n"
+            ),
+        },
+    )
+    assert "b/builder.cc::Builder.Builder" in _pairs(graph, "b/user.cc::Use")
+    assert _ambiguous_for(graph, "b/user.cc::Use") == {
+        "Two": ["b/builder.cc::Two.Two", "b/builder.cc::Two.Two#2"],
+    }
+
+
+def test_cpp_construction_through_a_foreign_namespace_stays_external(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "tf/status.h": (
+                "namespace tensorflow { namespace cc {\n"
+                "class Status {\n"
+                " public:\n"
+                "  Status() {}\n"
+                "  Status(int code) {}\n"
+                "};\n"
+                "} }\n"
+            ),
+            "tf/user.cc": (
+                '#include "absl/status/status.h"\n'
+                "namespace tensorflow {\n"
+                "void Use() { absl::Status(); new absl::Status(3); }\n"
+                "}\n"
+            ),
+        },
+    )
+    assert _pairs(graph, "tf/user.cc::tensorflow.Use") == set()
+    externals = {
+        e.callee
+        for e in graph.external
+        if e.caller == "tf/user.cc::tensorflow.Use"
+    }
+    assert externals == {"absl::Status"}
+
+
+def test_cpp_class_qualified_construction_resolves(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "b/builder.h": (
+                "namespace tf {\n"
+                "class Builder {\n"
+                " public:\n"
+                "  struct Out { Out(int a) {} };\n"
+                "};\n"
+                "}\n"
+            ),
+            "b/user.cc": (
+                '#include "b/builder.h"\n'
+                "namespace tf {\n"
+                "void Use() { Builder::Out(1); }\n"
+                "}\n"
+            ),
+        },
+    )
+    assert "b/builder.h::tf.Builder.Out" in _pairs(graph, "b/user.cc::tf.Use")
+
+
+def test_cpp_inline_single_constructor_still_credited(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {**_CPP_GRAPH_FILES, "core/user.cc": _cpp_user("  new Solo(1, 2);")},
+    )
+    assert {
+        "core/graph.h::tensorflow.Solo",
+        "core/graph.h::tensorflow.Solo.Solo",
+    } <= _pairs(graph, _CPP_BUILD)
+
+
+def test_cpp_heritage_through_include_reaches_the_class(
+    tmp_path: Path,
+) -> None:
+    sources = {
+        **_CPP_GRAPH_FILES,
+        "core/sub.h": (
+            '#include "core/graph.h"\n'
+            "namespace tensorflow {\n"
+            "class Sub : public Graph {\n"
+            " public:\n"
+            "  int x() { return 0; }\n"
+            "};\n"
+            "}\n"
+        ),
+    }
+    for rel, text in sources.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    heritage = resolve_heritage(files)[0]
+    parents = {
+        h.supertype
+        for h in heritage
+        if h.subtype == "core/sub.h::tensorflow.Sub"
+    }
+    assert parents == {_GRAPH}
+
+
+def test_java_class_and_all_its_constructors_collapse_to_the_class(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "web/ErrorPage.java": _ERROR_PAGE,
+            "app/Builder.java": _java_caller("return new ErrorPage();"),
+        },
+    )
+    assert _EP in _pairs(graph, _BUILD)
+    assert "ErrorPage" not in _ambiguous_for(graph, _BUILD)
+
+
+def test_record_ambiguous_merges_candidate_lists() -> None:
+    def sym(path: str) -> Symbol:
+        return _fn(path, "Foo", "Foo.Foo")
+
+    acc: dict[tuple[str, str], list[str]] = {}
+    resolver_mod._record_ambiguous(
+        "c", "Foo", [sym("tests/b.py"), sym("src/a.py")], acc
+    )
+    resolver_mod._record_ambiguous(
+        "c", "Foo", [sym("src/z.py"), sym("src/a.py")], acc
+    )
+    assert acc == {
+        ("c", "Foo"): [
+            "src/a.py::Foo.Foo",
+            "src/z.py::Foo.Foo",
+            "tests/b.py::Foo.Foo",
+        ],
+    }
+    resolver_mod._record_ambiguous("c", "Foo", [sym("src/a.py")], acc)
+    assert len(acc[("c", "Foo")]) == 3
+
+
 def test_real_ambiguity_between_two_unrelated_classes_still_ambiguous() -> (
     None
 ):
@@ -1083,8 +1610,8 @@ def test_bare_call_to_same_file_builtin_named_function_still_resolves() -> (
     # genuinely local bare call to a same-file function sharing a
     # built-in method name (dekko's real cline callers: bare
     # ``trim(value)``, no receiver) must still resolve normally.
-    trim_fn = _fn("util.ts", "trim")
-    caller = _fn("util.ts", "run", line=5)
+    trim_fn = _fn("util.ts", "trim", language="typescript")
+    caller = _fn("util.ts", "run", line=5, language="typescript")
     files = [
         FileMap(
             "util.ts",
@@ -1118,7 +1645,7 @@ def test_exact_self_receiver_builtin_named_method_still_resolves() -> None:
         language="typescript",
         symbols=[
             _fn("c.ts", "C", "C"),
-            _fn("c.ts", "trim", "C.trim", line=2),
+            _fn("c.ts", "trim", "C.trim", line=2, language="typescript"),
             _fn("c.ts", "m", "C.m", line=4),
         ],
         calls=[
@@ -1872,7 +2399,7 @@ def test_arity_plausible_python_strips_self_for_receiver_qualified_call() -> (
         receiver="task",
         arg_count=1,
     )
-    assert resolver_mod._arity_plausible(method, call) is True
+    assert resolver_mod._arity_plausible(method, call, {}) is True
 
     bare_call = RawCall(
         caller_id=None,
@@ -1883,7 +2410,7 @@ def test_arity_plausible_python_strips_self_for_receiver_qualified_call() -> (
     )
     # Bare call: `self` is not stripped (no receiver expression could
     # have supplied it), so the effective minimum is 2, not 1.
-    assert resolver_mod._arity_plausible(method, bare_call) is False
+    assert resolver_mod._arity_plausible(method, bare_call, {}) is False
 
 
 def test_arity_plausible_rust_strips_self_parameter_variants() -> None:
@@ -1898,7 +2425,7 @@ def test_arity_plausible_rust_strips_self_parameter_variants() -> None:
             receiver="p",
             arg_count=1,
         )
-        assert resolver_mod._arity_plausible(method, call) is True
+        assert resolver_mod._arity_plausible(method, call, {}) is True
 
 
 def test_param_arity_excludes_python_syntax_marker_params() -> None:
@@ -4404,22 +4931,20 @@ def test_pick_candidate_returns_none_when_language_filtered_empty() -> None:
         same_file=[],
         file_imports={},
         caller=None,
-        by_name_path={},
         index={},
         repo_stems=set(),
     )
     assert result is None
 
 
-def test_resolve_call_records_cross_family_miss_as_ambiguous() -> None:
-    """Full ``_resolve_call``/``resolve()`` integration test for the
-    residual tensorflow gap: the real C++ target lives outside the
-    map entirely (simulating a vendored/excluded directory), leaving
-    only a same-bare-name, unrelated-language Python class as the sole
-    candidate. This must land in ``graph.ambiguous`` -- not silently
-    resolve to the Python symbol as an edge -- so
-    ``query.py``'s existing ambiguous-call disclosure surfaces it
-    instead of reporting a confidently wrong fan-in."""
+def test_resolve_call_counts_cross_family_miss_as_external() -> None:
+    """The real C++ target lives outside the map (a vendored or
+    excluded directory), leaving only a same-bare-name Python class.
+    The call must not resolve to it, and it must not be recorded as
+    ambiguous either: a C++ call can never reach a Python class, so
+    listing it would say "+N resolved ambiguously" on a symbol no C++
+    code calls (2,882 such rows on tensorflow's ``InvalidArgumentError``
+    alone). With no live candidate the call is external."""
     python_class = Symbol(
         id="tensorflow/python/framework/errors_impl.py::InvalidArgumentError",
         name="InvalidArgumentError",
@@ -4461,11 +4986,10 @@ def test_resolve_call_records_cross_family_miss_as_ambiguous() -> None:
     edges = {(e.caller, e.callee) for e in graph.edges}
     assert (caller.id, python_class.id) not in edges
     assert edges == set()
-    assert len(graph.ambiguous) == 1
-    ambiguous_caller, ambiguous_name, ambiguous_cands = graph.ambiguous[0]
-    assert ambiguous_caller == caller.id
-    assert ambiguous_name == "InvalidArgumentError"
-    assert ambiguous_cands == [python_class.id]
+    assert graph.ambiguous == []
+    assert [ext.callee for ext in graph.external] == [
+        "errors::InvalidArgumentError"
+    ]
 
 
 def test_cross_language_bare_call_no_longer_resolves_to_wrong_symbol() -> None:

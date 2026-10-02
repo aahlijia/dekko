@@ -82,6 +82,7 @@ import re
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from dataclasses import dataclass
@@ -187,6 +188,15 @@ CAUSE_QUALIFIED_CALL = (
 CAUSE_UNSUPPORTED_LANGUAGE = (
     "unparsed-language file — dekko can't parse this file at all"
 )
+# A build script is skipped by design, so a call written in one is real
+# and still never in the map. Reading that line's shape instead gave a
+# different wrong answer per shape: a bare call was "unexplained", a
+# receiver call a "resolver blind spot", a common name "an unrelated
+# external-library method".
+CAUSE_BUILD_SCRIPT = (
+    "build script: dekko does not index build scripts, so a call here "
+    "never becomes an edge"
+)
 # A file in a language dekko parses that the map still doesn't hold:
 # skipped as too large or generated, or excluded. Dekko has no call
 # sites there because it never read the file, so "unexplained" was the
@@ -265,6 +275,18 @@ CAUSE_CROSS_FILE_COLLISION = (
     "call-shaped reference to a different, same-named declaration "
     "elsewhere in the repo — not a miss on the target"
 )
+# Tier 1: the map records this exact (path, line) as a call site or a
+# value reference of a *different* symbol with the target's bare name
+# (``_attributed_sites``). The shape rule above only sees a hit inside
+# a sibling's own file, so a call from any third file to a reused
+# helper name (claude-code's ``errorMessage``: 367 rows on one target)
+# fell through to "unexplained". The map's attribution is exact to
+# the line, and the row names it (``resolved_to``), so the label says
+# what dekko decided rather than that it decided right.
+CAUSE_RESOLVED_ELSEWHERE = (
+    "dekko attributes this line to a different, same-named declaration "
+    "(see resolved_to) — a miss only if that attribution is wrong"
+)
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
 # Tier 2: a value-position use of a same-named local declared earlier
 # in the enclosing function (``const errorMessage = ...`` four lines
@@ -279,9 +301,79 @@ CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
 # instead (``decl_line`` in JSON, appended in text) via
 # ``_shadow_decl_lines``.
 CAUSE_SHADOWING_LOCAL = (
-    "use of a same-named local declared earlier in the enclosing "
-    "function — not a reference to the target; scope heuristic, not "
-    "a parse"
+    "use of a same-named local declared earlier in an enclosing scope "
+    "— not a reference to the target; scope heuristic, not a parse"
+)
+# Tier 1: the hit's innermost enclosing symbol is an interface, type
+# alias or enum. Nothing inside one is a call: member signatures,
+# ``readonly count?: number``, generic parameter defaults, and any
+# comment or string in there. Not class/struct/trait bodies, which
+# hold code. The largest leftover bucket on the TS repos measured
+# (570 rows on claude-code, 1,911 on cline).
+CAUSE_TYPE_CONTEXT = (
+    "inside an interface, type-alias or enum body — a type context, "
+    "never a call site"
+)
+# Tier 1, per target: a call-shaped line inside the target's own
+# span. ``resolver._record_edge`` drops ``caller_id == target_id`` on
+# purpose, so the missing edge is the resolver's design, not a miss.
+CAUSE_SELF_RECURSION = (
+    "recursive call inside the symbol's own body — dekko records no "
+    "self edges by design"
+)
+# Tier 1, per target: the hit's file imports the bare name from a
+# source the map could not place in the repo (``module_external``) or
+# from a repo file other than the target's (``module_edge_names``).
+# The resolver bound the name to that import; the line cannot reach
+# the target. The import's module or path rides on the row as
+# ``bound_to``, like ``resolved_to``.
+CAUSE_IMPORT_BOUND_ELSEWHERE = (
+    "this file imports a different declaration of the name (see "
+    "bound_to) — the resolver bound the name to that import, not the "
+    "target"
+)
+# Tier 1, per target: ``heritage_lines`` holds this exact line as an
+# ``extends``/``implements`` clause naming the target. A clause the
+# map resolved to a same-named sibling reads as resolved elsewhere
+# instead (``_attributed_sites`` carries heritage sites too).
+CAUSE_HERITAGE = (
+    "heritage clause (extends/implements) the map records — not a call "
+    "site; see: dekko query subtypes <target>"
+)
+# The remaining shape causes name a line whose only mention of the
+# target is in a place code never calls from. Each refuses a line
+# that also calls the name bare, so a real missed call never hides
+# behind one.
+CAUSE_TRAILING_COMMENT = (
+    "comment mention — not a call site (a trailing comment after code "
+    "on the line)"
+)
+CAUSE_JSX_TEXT = "JSX text content — literal text, not a call site"
+CAUSE_SIGNATURE = (
+    "a method or function signature with this name (abstract, interface "
+    "member or overload) — a declaration, not a call site"
+)
+# Tier 2 sibling of ``CAUSE_PROPERTY_READ``: the ``x.name`` shape with
+# no ``(`` after it, on a line the map records no read for.
+CAUSE_PROPERTY_ACCESS_SHAPE = (
+    "a property access of a same-named member (`x.name`), not a call — "
+    "line-shape match; the map records no read at this line"
+)
+# Every cause at or below ``_classify_miss_remaining``: the rungs the
+# per-target tier-1 facts (self-recursion, import bound elsewhere) sit
+# above. A row under one of these is re-decided by them; a row with a
+# more specific cause (a comment line that names ``appendFileSync``)
+# keeps it.
+_REMAINING_CAUSES = frozenset(
+    {
+        CAUSE_UNSUPPORTED_LANGUAGE,
+        CAUSE_VALUE_REFERENCE_UNRESOLVED,
+        CAUSE_CROSS_FILE_COLLISION,
+        CAUSE_LIKELY_EXTERNAL_COLLISION,
+        CAUSE_TEST_FILTER,
+        CAUSE_GENERIC_NAME,
+        CAUSE_UNEXPLAINED,
+    }
 )
 
 # Generous top-of-file import/using-block scan window for
@@ -526,8 +618,11 @@ _JAVA_IMPORT_TEMPLATE = r"^import\s+(?:static\s+)?[\w.]*\.{name}\s*;"
 _KOTLIN_IMPORT_TEMPLATE = r"^import\s+[\w.]*\.{name}(?:\s+as\s+\w+)?\s*$"
 # ``export { X } from './x.js'`` / ``export type { X } from`` re-exports
 # a name without calling it: the same binding shape as a named import.
+# The ``from`` clause is optional: an alias-only re-export of a local
+# (``export { a as b };``) binds a name the same way.
 _ESM_REEXPORT_TEMPLATE = (
-    r"^export\s+(?:type\s+)?\{{[^}}]*\b{name}\b[^}}]*\}}\s*from\s+['\"]"
+    r"^export\s+(?:type\s+)?\{{[^}}]*\b{name}\b[^}}]*\}}\s*"
+    r"(?:from\s+['\"]|;?\s*$)"
 )
 _IMPORT_LINE_TEMPLATES = (
     _ESM_NAMED_IMPORT_TEMPLATE,
@@ -764,7 +859,8 @@ def _looks_like_type_annotation(
 # "unrelated local binding" shape (a JSX prop, a destructured parameter,
 # an object-literal key -- extend reactively if one of those surfaces as
 # a concrete new bucket).
-_LOCAL_DECL_TEMPLATE = r"^(?:const|let|var)\s+{name}\s*[:=]"
+# ``(?:mut\s+)?`` admits Rust's ``let mut name =``; JS has no ``mut``.
+_LOCAL_DECL_TEMPLATE = r"^(?:const|let|var)\s+(?:mut\s+)?{name}\s*[:=]"
 _STRING_LITERAL_TEMPLATE = r'["\']{name}["\']'
 # A `catch (error) { ... }` parameter binding -- the caught exception
 # name shares the target's bare name but is a fresh local binding, not a
@@ -852,8 +948,20 @@ def _skip_quoted(line: str, i: int) -> int:
     return j + 1
 
 
+def _skip_braces(line: str, j: int) -> int:
+    """Index just past the ``}`` closing the ``${`` body that starts at
+    ``j`` (brace-depth aware, one line only), or the line's end."""
+    depth = 1
+    while j < len(line) and depth:
+        depth += {"{": 1, "}": -1}.get(line[j], 0)
+        j += 1
+    return j
+
+
 def _template_code(line: str, i: int) -> tuple[str, int]:
-    """The ``${...}`` bodies of the template literal opening at ``i``.
+    """The ``${...}`` bodies of the template literal opening at ``i``,
+    each with its own strings blanked (``${x ? "a-b" : ""}`` used to
+    keep the quoted text and let ``a`` match).
 
     Returns:
         The kept code (bodies, space-separated) and the index just past
@@ -865,36 +973,119 @@ def _template_code(line: str, i: int) -> tuple[str, int]:
         if line[j] == "\\":
             j += 2
         elif line.startswith("${", j):
-            depth, k = 1, j + 2
-            while k < len(line) and depth:
-                depth += {"{": 1, "}": -1}.get(line[k], 0)
-                k += 1
-            kept.append(line[j + 2 : k - 1])
+            k = _skip_braces(line, j + 2)
+            kept.append(_js_code_only(line[j + 2 : k - 1]))
             j = k
         else:
             j += 1
     return " " + " ".join(kept) + " ", j + 1
 
 
-def _js_code_only(line: str) -> str:
-    """``line`` with JS string and template text blanked.
+def _js_code_only(line: str, *, keep_comments: bool = False) -> str:
+    """``line`` with JS string, template and comment text blanked.
 
     Quoted strings become ``""``; a template literal keeps only its
-    ``${...}`` bodies (brace-depth aware), so a template holding
-    ``${warn()}`` still shows the call. One line at a time: the
+    ``${...}`` bodies (brace-depth aware, strings inside them blanked
+    too), so a template holding ``${warn()}`` still shows the call. A
+    ``/* ... */`` becomes a space and a ``//`` ends the line, unless
+    ``keep_comments`` (the trailing-comment check wants the comment
+    text intact and the rest blanked). One line at a time: the
     continuation line of a multi-line template has no backtick and
-    reads as code.
+    reads as code; ``_js_line_state`` is what knows better.
     """
     out: list[str] = []
     i = 0
     while i < len(line):
         c = line[i]
-        if c in "'\"":
+        if line.startswith("//", i):
+            if keep_comments:
+                out.append(line[i:])
+            break
+        if line.startswith("/*", i) and not keep_comments:
+            end = line.find("*/", i + 2)
+            out.append(" ")
+            i = len(line) if end < 0 else end + 2
+        elif c in "'\"":
             out.append('""')
             i = _skip_quoted(line, i)
         elif c == "`":
             code, i = _template_code(line, i)
             out.append(f'"{code}"')
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+# A string that is nothing but a call expression: ``eval("warn()")``,
+# ``setTimeout("tick()", 1)``, ``new Function("return f()")``. No space
+# before ``(``: prose like ``"Project (.claude/agents/)"`` has one, and
+# code in a string doesn't.
+_CALL_ONLY_TEXT = re.compile(r"^\s*(?:new\s+)?[\w.$]+\(.*\)\s*;?\s*$")
+
+
+def _string_contents(line: str) -> list[str]:
+    """The text of every quoted string and template literal on
+    ``line``, template ``${...}`` bodies left out."""
+    out: list[str] = []
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c in "'\"":
+            j = _skip_quoted(line, i)
+            out.append(line[i + 1 : j - 1])
+            i = j
+        elif c == "`":
+            buf: list[str] = []
+            j = i + 1
+            while j < len(line) and line[j] != "`":
+                if line[j] == "\\":
+                    j += 2
+                elif line.startswith("${", j):
+                    j = _skip_braces(line, j + 2)
+                else:
+                    buf.append(line[j])
+                    j += 1
+            out.append("".join(buf))
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+def _call_written_in_text(line: str, name: str) -> bool:
+    """Whether some string on ``line`` is *nothing but* a call naming
+    ``name`` (already ``re.escape``d): the ``eval("name()")`` shape, a
+    real reference the resolver can't see. A string that merely
+    contains ``name(`` among other text (a template of generated code,
+    a log line) is string text; the old any-``name(``-in-the-line test
+    kept every such row visible.
+    """
+    return any(
+        _CALL_ONLY_TEXT.match(text) is not None
+        and re.search(rf"\b{name}\(", text) is not None
+        for text in _string_contents(line)
+    )
+
+
+def _bash_code_only(line: str) -> str:
+    """``line`` with shell-quoted text blanked: ``'...'`` verbatim,
+    ``"..."`` with backslash escapes. jq filters and ``POOLS=("...")``
+    literals read as string text."""
+    out: list[str] = []
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == "'":
+            j = line.find("'", i + 1)
+            out.append("''")
+            i = len(line) if j < 0 else j + 1
+        elif c == '"':
+            j = i + 1
+            while j < len(line) and line[j] != '"':
+                j += 2 if line[j] == "\\" else 1
+            out.append('""')
+            i = j + 1
         else:
             out.append(c)
             i += 1
@@ -909,10 +1100,15 @@ def _js_shapes(
 ) -> _JsShapes:
     """Classify ``snippet`` against the three JS/TS non-call shapes.
 
+    Bash gets the string shape alone: it is Tier-2 but yields call
+    links (claude-buddy has four ``.sh`` callers), so "declarations-only
+    language" would be false, and a name that survives only inside
+    shell quotes (a jq filter) is string text.
+
     Args:
         snippet: The grep-matched line.
         bare_name: The bare identifier being searched for.
-        path: The hit's file; any non-JS/TS file gets no shape.
+        path: The hit's file; any other file gets no shape.
         is_read_site: Whether the map records a property read of
             ``bare_name`` at this line (``_read_sites``).
 
@@ -920,18 +1116,21 @@ def _js_shapes(
         The shapes that hold. At most one matters: ``classify_miss``
         checks them in field order.
     """
-    if _grammar_for_path(path) not in _JS_SHAPE_GRAMMARS:
-        return _JsShapes()
+    grammar = _grammar_for_path(path)
     name = re.escape(bare_name)
-    code = _js_code_only(snippet.strip())
     word = re.compile(rf"\b{name}\b")
+    stripped = snippet.strip()
+    if grammar == "bash":
+        return _JsShapes(
+            string_mention=word.search(_bash_code_only(stripped)) is None
+        )
+    if grammar not in _JS_SHAPE_GRAMMARS:
+        return _JsShapes()
+    code = _js_code_only(stripped)
     if not word.search(code):
-        # ``eval("warn()")``, ``setTimeout("warn()")``: a call written
-        # as string text is a real reference the resolver can't see.
-        # No space before ``(``: prose like ``"border color (blue)"``
-        # has one, and code in a string doesn't.
-        called_in_text = re.search(rf"\b{name}\(", snippet)
-        return _JsShapes(string_mention=called_in_text is None)
+        return _JsShapes(
+            string_mention=not _call_written_in_text(stripped, name)
+        )
     bare_call = re.search(_JS_BARE_CALL_TEMPLATE.format(name=name), code)
     if bare_call:
         return _JsShapes()
@@ -939,6 +1138,554 @@ def _js_shapes(
     return _JsShapes(
         property_read=is_read_site,
         key_or_field=rest != code and not word.search(rest),
+    )
+
+
+# --- file state and the leftover line shapes ------------------------------
+
+# Per-run caches for the checks that read a hit's file: the lines
+# themselves and, per JS/TS file, the lexer state at the start of each
+# line. Keyed by ``(root, path)`` (a long-lived process can serve more
+# than one root); cleared at the start of ``run()`` and ``run_all()``
+# so an edited file is re-read on the next run. Filled from worker
+# threads under ``--all``: a dict write of one immutable value is
+# atomic in CPython, and two threads that compute the same file agree.
+_file_lines: dict[tuple[str, str], list[str]] = {}
+_file_states: dict[tuple[str, str], list[str]] = {}
+
+
+def _reset_file_caches() -> None:
+    _file_lines.clear()
+    _file_states.clear()
+    _shadow_decl_lines.clear()
+
+
+def _cached_lines(root: Path, path: str) -> list[str]:
+    key = (str(root), path)
+    lines = _file_lines.get(key)
+    if lines is None:
+        lines = read_lines(root, path)
+        _file_lines[key] = lines
+
+    return lines
+
+
+_STATE_CODE = "code"
+_STATE_TEMPLATE = "template"
+_STATE_BLOCK = "block"
+
+
+def _lex_block(text: str, i: int) -> tuple[str, int]:
+    if text.startswith("*/", i):
+        return _STATE_CODE, i + 2
+
+    return _STATE_BLOCK, i + 1
+
+
+def _lex_template(text: str, i: int) -> tuple[str, int]:
+    c = text[i]
+    if c == "\\":
+        return _STATE_TEMPLATE, i + 2
+    if c == "`":
+        return _STATE_CODE, i + 1
+    if text.startswith("${", i):
+        return _STATE_TEMPLATE, _skip_braces(text, i + 2)
+
+    return _STATE_TEMPLATE, i + 1
+
+
+def _lex_code(text: str, i: int) -> tuple[str, int]:
+    c = text[i]
+    if c in "'\"":
+        return _STATE_CODE, _skip_quoted(text, i)
+    if c == "`":
+        return _STATE_TEMPLATE, i + 1
+    if text.startswith("//", i):
+        return _STATE_CODE, len(text)
+    if text.startswith("/*", i):
+        return _STATE_BLOCK, i + 2
+
+    return _STATE_CODE, i + 1
+
+
+_LEX_STEP = {
+    _STATE_CODE: _lex_code,
+    _STATE_TEMPLATE: _lex_template,
+    _STATE_BLOCK: _lex_block,
+}
+
+
+def _js_line_states(lines: list[str]) -> list[str]:
+    """The lexer state at the *start* of each line of a JS/TS file:
+    ``code``, ``template`` (inside a backtick literal) or ``block``
+    (inside ``/* */``).
+
+    Three states and one pass over the file. Quoted strings end at
+    their line; template literals (with brace-aware ``${}`` bodies,
+    skipped unlexed on their own line) and block comments carry
+    across lines; ``//`` ends the line in code state. No JSX awareness:
+    see ``_js_line_state`` for the desync guard.
+    """
+    states: list[str] = []
+    state = _STATE_CODE
+    for text in lines:
+        states.append(state)
+        i = 0
+        while i < len(text):
+            state, i = _LEX_STEP[state](text, i)
+    return states
+
+
+def _js_line_state(root: Path, path: str, line: int) -> str:
+    """``code``/``template``/``block`` at the start of ``path:line``.
+
+    A line-at-a-time rule cannot see that a line sits inside a template
+    literal or a ``/* */`` block opened above, which is what a prompt's
+    continuation line or a JSDoc body without ``*`` prefixes is. Cached
+    per file for the run.
+
+    **Desync guard.** A backtick or an unbalanced quote inside JSX
+    text, or a regex literal, can leave the lexer in the wrong state
+    for the rest of the file. A file that does not end in ``code``
+    state is treated as all-``code``: no state-based cause anywhere in
+    it (11 of 1,902 JS/TS files on claude-code, files *about* shells).
+    A desync that closes again before the file ends is the remaining
+    risk; the value-position rule and the map's tier-1 references
+    bound what it can hide.
+    """
+    key = (str(root), path)
+    states = _file_states.get(key)
+    if states is None:
+        states = _js_line_states([*_cached_lines(root, path), ""])
+        if states[-1] != _STATE_CODE:
+            states = [_STATE_CODE] * len(states)
+        _file_states[key] = states
+
+    return states[line - 1] if line <= len(states) else _STATE_CODE
+
+
+# ``.tsx``/``.jsx`` carry JSX; ``.ts`` cannot.
+_JSX_GRAMMARS = frozenset({"tsx", "javascript"})
+# Grammars whose ``#`` opens a comment outside quotes, for the
+# trailing-comment shape; the C family is the ``//`` set.
+_HASH_COMMENT_GRAMMARS = frozenset({"python", "bash", "ruby", "zsh"})
+_SLASH_COMMENT_GRAMMARS = frozenset(
+    {"rust", "c", "cpp", "go", "java", "kotlin", "swift", "scala", "csharp"}
+)
+# Symbol kinds whose body is a type context: nothing inside one is a
+# call. Not ``class``/``struct``/``trait``, which hold code.
+_TYPE_CONTEXT_KINDS = frozenset({"interface", "type_alias", "enum"})
+# A method call on an expression result (``foo().name(``, ``a[0].name(``,
+# ``x!.name(``, ``x?.name(``) or a line-start ``.name(`` continuation of
+# a chain: the same blind spot as the identifier-receiver form
+# (``_QUALIFIED_CALL_TEMPLATE``), a receiver whose type the resolver
+# does not know. Any grammar.
+_EXPRESSION_CALL_TEMPLATE = r"[)\]!?]\s*\.\s*{name}\s*\(|^\.\s*{name}\s*\("
+# ``x.name`` / ``x?.name`` / ``x!.name`` / ``foo().name`` with no ``(``
+# after the name.
+_PROPERTY_ACCESS_TEMPLATE = r"[\w)\]]\s*[?!]?\.\s*{name}\b(?!\s*\()"
+# TS modifiers that may precede a method signature.
+_TS_MEMBER_MODIFIERS = (
+    r"(?:(?:public|protected|private|static|abstract|readonly|async|"
+    r"override|declare|export|get|set)\s+)*"
+)
+# A bare member line of a multi-line ``export {`` list, one specifier.
+_EXPORT_LIST_MEMBER_TEMPLATE = (
+    r"^\s*(?:type\s+)?(?:\w+\s+as\s+)?{name}(?:\s+as\s+\w+)?\s*,?\s*$"
+)
+_EXPORT_LIST_OPENER = re.compile(r"^export\s+(?:type\s+)?\{\s*$")
+_EXPORT_LIST_ANY_MEMBER = re.compile(
+    r"^(?:type\s+)?(?:\w+\s+as\s+)?\w+(?:\s+as\s+\w+)?\s*,?$"
+)
+# How far up a member line of an ``export {`` list may sit from its
+# opener (cline's ``sdk/packages/core/src/index.ts`` is a 300-line
+# export list).
+_EXPORT_LIST_SCAN_LINES = 600
+# A multi-line destructuring's opener (``const {`` / ``const [`` at the
+# end of a line) and one member line of it (``name,`` / ``key: name,``
+# / ``name = default,``), bounded to 40 member lines.
+_DESTRUCTURE_OPENER = re.compile(r"\b(?:const|let|var)\s*[{\[]\s*$")
+_DESTRUCTURE_NESTED_OPENER = re.compile(r"^\s*\w+\s*:\s*[{\[]\s*$")
+_DESTRUCTURE_MEMBER = re.compile(
+    r"^\s*(?:\.\.\.)?\w+(?:\s*:\s*[\w{}\[\]\s,]+)?(?:\s*=\s*[^,]+)?\s*,?\s*$"
+)
+_DESTRUCTURE_MEMBER_TEMPLATE = (
+    r"^\s*(?:\.\.\.)?(?:\w+\s*:\s*)?{name}\s*(?:=\s*[^,]+)?,?\s*$"
+)
+_DESTRUCTURE_SCAN_LINES = 40
+
+
+@dataclass(frozen=True)
+class _LineShapes:
+    """The leftover non-call shapes of one grep hit's line, each a
+    rung of ``classify_miss``. JS/TS only except where noted.
+
+    Attributes:
+        template_text: The line starts inside a template literal and
+            the name is gone once the template text is blanked.
+        block_comment: The line starts inside a ``/* */`` block and
+            the name is gone once the comment text is blanked.
+        expression_call: A method call on an expression result or a
+            chain continuation (``_EXPRESSION_CALL_TEMPLATE``); any
+            grammar.
+        type_shape: A type position the anchored templates miss
+            (``_looks_like_js_type_shape``).
+        trailing_comment: The name appears only after a ``//``, inside
+            a ``/* */`` or after a ``#`` following code
+            (``_looks_like_trailing_comment``); JS/TS, the ``#``
+            grammars and the C family.
+        jsx_text: JSX text content between ``>`` and ``<``.
+        property_access: ``x.name`` with no call, the shape twin of
+            a recorded property read.
+        signature: An abstract/overload/interface-member signature.
+        declaration: A declaration line binding the name
+            (destructuring, arrow/function parameter, ``for``-of,
+            ``readonly name: T``, a multi-line destructuring member,
+            a JSX attribute ``name=``).
+        export_member: A member line of a multi-line ``export {``
+            list (an import-statement shape, like the single-line
+            re-export).
+    """
+
+    template_text: bool = False
+    block_comment: bool = False
+    expression_call: bool = False
+    type_shape: bool = False
+    trailing_comment: bool = False
+    jsx_text: bool = False
+    property_access: bool = False
+    signature: bool = False
+    declaration: bool = False
+    export_member: bool = False
+
+
+def _word(bare_name: str) -> re.Pattern:
+    return re.compile(rf"\b{re.escape(bare_name)}\b")
+
+
+def _split_trailing_comment(code: str) -> tuple[str, str]:
+    """``(body, comment)`` for a JS/TS line with strings blanked and
+    comment text kept (``_js_code_only(..., keep_comments=True)``)."""
+    body, comment = code, ""
+    cut = body.find("//")
+    if cut >= 0:
+        body, comment = body[:cut], body[cut:]
+    parts: list[str] = []
+
+    def keep(m: re.Match) -> str:
+        parts.append(m.group(0))
+        return " "
+
+    body = re.sub(r"/\*.*?\*/", keep, body)
+    if "/*" in body:
+        cut = body.index("/*")
+        parts.append(body[cut:])
+        body = body[:cut]
+
+    return body, " ".join([comment, *parts])
+
+
+def _looks_like_trailing_comment(
+    snippet: str, bare_name: str, path: str
+) -> bool:
+    """Whether the name appears only in a comment that follows code
+    on the line (``since: number; // timestamp of last mood change``).
+
+    With strings blanked first, so a ``//`` inside a URL string does
+    not split the line and a name inside a string does not count as
+    the comment's. JS/TS, the ``#`` grammars and the C family; the
+    name must be in the comment part and absent from the code part.
+    """
+    grammar = _grammar_for_path(path)
+    word = _word(bare_name)
+    stripped = snippet.strip()
+    if grammar in _JS_SHAPE_GRAMMARS:
+        body, comment = _split_trailing_comment(
+            _js_code_only(stripped, keep_comments=True)
+        )
+    elif grammar in _HASH_COMMENT_GRAMMARS:
+        body, _, comment = _bash_code_only(stripped).partition("#")
+    elif grammar in _SLASH_COMMENT_GRAMMARS:
+        body, _, comment = _DOUBLE_QUOTED.sub('""', stripped).partition("//")
+    else:
+        return False
+
+    return word.search(comment) is not None and word.search(body) is None
+
+
+def _looks_like_js_type_shape(
+    code: str, bare_name: str, *, target_is_type: bool
+) -> bool:
+    """The JS/TS type positions ``_looks_like_type_annotation``'s
+    anchored templates miss, over the string-blanked line.
+
+    For any target: a heritage clause (``extends``/``implements``, the
+    shape fallback for a clause the map did not resolve), a union or
+    generic member (``<Name |``, ``| Name``, ``, Name>``), and
+    ``typeof Name`` (a type query names the value, never calls it).
+    For a type target only: a return type ``): ...Name...`` (no space
+    before the colon, which a ternary ``) : x`` has), ``as``/
+    ``satisfies Name``, a namespace-qualified ``x: ns.Name``, a
+    function-type return ``) => Name``, a type-alias body ``type X =
+    ... Name ...`` and an indexed-access type ``Name["key"]``.
+    """
+    name = re.escape(bare_name)
+    if re.search(rf"\b(?:extends|implements)\b[^{{=;]*\b{name}\b", code):
+        return True
+    if (
+        re.search(rf"<\s*{name}\s*[|&>,\[]", code)
+        or re.search(rf"(?<![|&])[|&](?![|&])\s*{name}\b(?!\s*\()", code)
+        or re.search(rf",\s*{name}\s*>", code)
+    ):
+        return True
+    if re.search(rf"\btypeof\s+{name}\b", code):
+        return True
+    if not target_is_type:
+        return False
+
+    return any(
+        re.search(template, code)
+        for template in (
+            rf"\):\s*[^={{;]*\b{name}\b[^={{;]*(?:=>|\{{|;|,)?\s*$",
+            rf"\b(?:as|satisfies)\s+{name}\b",
+            rf"[:<|&,(]\s*(?:[\w$]+\.)+{name}\b(?!\s*\()",
+            rf"\)\s*=>\s*{name}\b\s*(?:[,;)\]}}|]|$)",
+            rf"^(?:export\s+)?type\s+\w+(?:<[^>]*>)?\s*=\s*[^;]*\b{name}\b",
+            rf"(?<![.\w]){name}\s*\[\s*[\"']",
+        )
+    )
+
+
+def _looks_like_signature(code: str, bare_name: str) -> bool:
+    """An ``abstract``/``declare`` method signature, or an anchored
+    ``name(params): Type`` / ``function name(params): Type`` line with
+    no body after the return type (an overload or interface member)."""
+    name = re.escape(bare_name)
+    if re.search(rf"\b(?:abstract|declare)\b[^(]*\b{name}\s*\(", code):
+        return True
+    if re.search(
+        rf"^{_TS_MEMBER_MODIFIERS}{name}\s*(?:<[^>]*>)?\([^)]*\)\s*:\s*"
+        rf"[^={{;]+[;{{]?\s*$",
+        code,
+    ):
+        return True
+
+    return (
+        re.search(
+            rf"^(?:export\s+)?(?:async\s+)?function\s+{name}\s*(?:<[^>]*>)?"
+            rf"\([^)]*\)\s*:\s*[^={{;]+;?\s*$",
+            code,
+        )
+        is not None
+    )
+
+
+def _blank_braces(line: str) -> str:
+    """``line`` with every ``{...}`` body blanked (depth aware)."""
+    out: list[str] = []
+    depth = 0
+    for c in line:
+        if c == "{":
+            depth += 1
+            out.append(" ")
+        elif c == "}":
+            depth = max(0, depth - 1)
+            out.append(" ")
+        else:
+            out.append(c if depth == 0 else " ")
+    return "".join(out)
+
+
+def _looks_like_jsx_text(code: str, word: re.Pattern) -> bool:
+    """The name sits only in JSX text content: between ``>`` and ``<``
+    (or the line's end) once ``{...}`` bodies are blanked, and nowhere
+    outside those segments. A text line with no tag on it is not
+    claimed (that needs JSX-children state across lines)."""
+    blanked = _blank_braces(code)
+    segments = re.findall(r">([^<>]*)(?=<|$)", blanked)
+    if not any(word.search(s) for s in segments):
+        return False
+    outside = re.sub(r">[^<>]*(?=<|$)", ">", blanked)
+
+    return word.search(outside) is None
+
+
+def _looks_like_jsx_attribute(
+    code: str, bare_name: str, word: re.Pattern
+) -> bool:
+    """A JSX attribute ``name="..."``/``name={...}`` with no other
+    mention on the line: an object key, the way ``{ name: ... }`` is.
+    ``action={action}`` keeps a bare ``action`` and falls through to
+    the shadow pass."""
+    attribute = rf"(?:^|\s){re.escape(bare_name)}=(?:\"\"|\{{)"
+    if not re.search(attribute, code):
+        return False
+
+    return word.search(re.sub(attribute, " ", code)) is None
+
+
+def _destructuring_opener(
+    lines: list[str], line: int, bare_name: str
+) -> int | None:
+    """Line of the ``const {``/``const [`` opener when ``line`` is a
+    bare member line of a multi-line destructuring declaration naming
+    ``bare_name``, else ``None``.
+
+    Walks up through member lines and nested pattern openers only,
+    bounded to ``_DESTRUCTURE_SCAN_LINES``. claude-code's ``src/`` is
+    React-Compiler output (``const { action } = t0`` over several
+    lines), which is why "props" are destructuring members there.
+    """
+    if not lines or line > len(lines):
+        return None
+    member = _DESTRUCTURE_MEMBER_TEMPLATE.format(name=re.escape(bare_name))
+    if not re.match(member, lines[line - 1]):
+        return None
+    for ln in range(line - 1, max(0, line - _DESTRUCTURE_SCAN_LINES), -1):
+        text = lines[ln - 1]
+        if not text.strip():
+            continue
+        if _DESTRUCTURE_OPENER.search(text):
+            return ln
+        if _DESTRUCTURE_NESTED_OPENER.match(text):
+            continue
+        if not _DESTRUCTURE_MEMBER.match(text):
+            return None
+
+    return None
+
+
+def _export_list_member(lines: list[str], line: int, bare_name: str) -> bool:
+    """Whether ``line`` is a one-specifier member line of a multi-line
+    ``export {``/``export type {`` list, walking up through member
+    and comment lines only, bounded to ``_EXPORT_LIST_SCAN_LINES``."""
+    if not lines or line > len(lines):
+        return False
+    member = _EXPORT_LIST_MEMBER_TEMPLATE.format(name=re.escape(bare_name))
+    if not re.match(member, lines[line - 1]):
+        return False
+    for ln in range(line - 1, max(0, line - _EXPORT_LIST_SCAN_LINES), -1):
+        text = lines[ln - 1].strip()
+        if not text or text.startswith(("//", "/*", "*")):
+            continue
+        if _EXPORT_LIST_OPENER.match(text):
+            return True
+        if not _EXPORT_LIST_ANY_MEMBER.match(text):
+            return False
+
+    return False
+
+
+def _looks_like_js_declaration(
+    code: str, bare_name: str, lines: list[str], line: int
+) -> bool:
+    """A JS/TS declaration line that binds ``bare_name`` itself: a
+    destructuring declaration, a bare ``let name``, a ``for``-of
+    binding, an arrow or ``function`` parameter list, ``readonly
+    name: T``, or a member line of a multi-line destructuring."""
+    name = re.escape(bare_name)
+    templates = (
+        rf"^(?:export\s+)?(?:const|let|var)\s+[\[{{][^=]*\b{name}\b[^=]*[\]}}]\s*=",
+        rf"^(?:const|let|var)\s+{name}\s*(?:;|$)",
+        rf"^for\s*\(\s*(?:const|let|var)\s+(?:[{{\[][^=]*)?\b{name}\b",
+        rf"(?<![\w.]){name}\s*=>",
+        rf"[(,]\s*(?:\.\.\.)?(?:\{{[^}}]*)?\b{name}\b[^)]*\)\s*(?::\s*[^=]+)?=>",
+        rf"\bfunction\b[^(]*\([^)]*\b{name}\b",
+        rf"^(?:readonly\s+)?{name}\??\s*:\s*\S",
+    )
+    if any(re.search(t, code) for t in templates):
+        return True
+
+    return _destructuring_opener(lines, line, bare_name) is not None
+
+
+def _js_line_shapes(
+    root: Path,
+    hit: "GrepHit",
+    bare_name: str,
+    grammar: str,
+    *,
+    target_is_type: bool,
+) -> _LineShapes:
+    """``_line_shapes`` for a JS/TS hit."""
+    name = re.escape(bare_name)
+    word = _word(bare_name)
+    stripped = hit.snippet.strip()
+    state = _js_line_state(root, hit.path, hit.line)
+    if state == _STATE_TEMPLATE and not word.search(
+        _js_code_only("`" + stripped)
+    ):
+        return _LineShapes(template_text=True)
+    if state == _STATE_BLOCK and not word.search(
+        _js_code_only("/*" + stripped)
+    ):
+        return _LineShapes(block_comment=True)
+    code = _js_code_only(stripped)
+    lines = _cached_lines(root, hit.path)
+    jsx = grammar in _JSX_GRAMMARS
+    bare_call = re.search(_JS_BARE_CALL_TEMPLATE.format(name=name), code)
+
+    return _LineShapes(
+        expression_call=(
+            re.search(_EXPRESSION_CALL_TEMPLATE.format(name=name), code)
+            is not None
+        ),
+        type_shape=_looks_like_js_type_shape(
+            code, bare_name, target_is_type=target_is_type
+        ),
+        trailing_comment=_looks_like_trailing_comment(
+            stripped, bare_name, hit.path
+        ),
+        jsx_text=jsx and _looks_like_jsx_text(code, word),
+        property_access=(
+            bare_call is None
+            and re.search(_PROPERTY_ACCESS_TEMPLATE.format(name=name), code)
+            is not None
+        ),
+        signature=_looks_like_signature(code, bare_name),
+        declaration=(
+            _looks_like_js_declaration(code, bare_name, lines, hit.line)
+            or (jsx and _looks_like_jsx_attribute(code, bare_name, word))
+        ),
+        export_member=_export_list_member(lines, hit.line, bare_name),
+    )
+
+
+def _line_shapes(
+    root: Path,
+    hit: "GrepHit",
+    bare_name: str,
+    *,
+    target_is_type: bool,
+) -> _LineShapes:
+    """The ``_LineShapes`` of one hit, by its file's grammar.
+
+    JS/TS gets every shape (``_js_line_shapes``). Every other grammar
+    gets the two whose meaning is the same everywhere: a method call
+    on an expression result and a trailing comment (bash with its
+    quotes blanked first, the C family with double-quoted text
+    blanked). The rest of the module's shape rules stay JS/TS-only on
+    purpose: strings and a bare name mean other things elsewhere.
+    """
+    grammar = _grammar_for_path(hit.path)
+    if grammar in _JS_SHAPE_GRAMMARS:
+        return _js_line_shapes(
+            root, hit, bare_name, grammar, target_is_type=target_is_type
+        )
+    stripped = hit.snippet.strip()
+    code = _bash_code_only(stripped) if grammar == "bash" else stripped
+
+    return _LineShapes(
+        expression_call=(
+            re.search(
+                _EXPRESSION_CALL_TEMPLATE.format(name=re.escape(bare_name)),
+                code,
+            )
+            is not None
+        ),
+        trailing_comment=_looks_like_trailing_comment(
+            stripped, bare_name, hit.path
+        ),
     )
 
 
@@ -1225,17 +1972,17 @@ _PYTHON_DOCSTRING = ('"""', "'''")
 
 # grammar name -> comment/docstring line-start prefixes. Covers every
 # Tier-1 grammar (languages.TIER1_SPECS, via each spec's .grammar) and
-# every Tier-2 grammar (languages.TIER2_GRAMMARS's values) *except*
-# Vue and Svelte, deliberately left unmapped: both are mixed-content
-# SFC formats (an HTML-ish template plus embedded script/style blocks,
-# each with its own comment convention), and a single-line-start
-# prefix check has no way to know which embedded language a hit's
-# line belongs to. ``_grammar_for_path`` still resolves "vue"/
-# "svelte" as a grammar name for these paths (``is_supported()``
-# stays True, so ``unsupported_language`` is computed correctly
-# elsewhere) -- ``_looks_like_comment_line`` just falls back to False
-# for them, a false negative (heuristic doesn't fire) never a false
-# positive.
+# every Tier-2 grammar (languages.TIER2_GRAMMARS's values), plus the
+# names ``_comment_style_for_path`` falls back to for a file dekko
+# does not parse.
+#
+# Vue and Svelte are deliberately left unmapped: both are
+# mixed-content SFC formats (an HTML-ish template plus embedded
+# script/style blocks, each with its own comment convention), and a
+# single-line-start prefix check has no way to know which embedded
+# language a hit's line belongs to. ``_looks_like_comment_line`` falls
+# back to False for them, a false negative (heuristic doesn't fire)
+# never a false positive.
 #
 # fsharp is intentionally SLASH_STYLE-only, not
 # SLASH_STYLE + _PAREN_STAR_STYLE like ocaml/pascal: real F# code can
@@ -1264,7 +2011,12 @@ _COMMENT_PREFIXES_BY_GRAMMAR: dict[str, tuple[str, ...]] = {
     "dart": _SLASH_STYLE,
     "zig": _SLASH_STYLE,
     "gleam": _SLASH_STYLE,
+    # Not grammars dekko parses: the names ``_comment_style_for_path``
+    # falls back to for a Groovy or Mojo file, a Gradle build script
+    # or an OCaml interface file. A comment there is still a comment
+    # to ``sanity --unused``.
     "groovy": _SLASH_STYLE,
+    "gradle": _SLASH_STYLE,
     "solidity": _SLASH_STYLE,
     "d": _SLASH_STYLE,
     "hare": _SLASH_STYLE,
@@ -1315,15 +2067,60 @@ def _grammar_for_path(path: str) -> str | None:
     check, returning the grammar name itself instead of a bool, so
     ``_looks_like_comment_line`` can look up a grammar-specific
     marker set rather than guessing from one global list. ``None``
-    for anything ``is_supported()`` also rejects, and for Vue/Svelte
-    -- ``is_supported() == True`` for both, but they're deliberately
-    left out of ``_COMMENT_PREFIXES_BY_GRAMMAR`` (see that table's
-    comment).
+    for anything ``is_supported()`` also rejects.
     """
     spec = languages.spec_for_path(path)
     if spec is not None:
         return spec.grammar
     return languages.tier2_grammar_for_path(path)
+
+
+# Extensions in no registry whose comment syntax is known anyway. An
+# OCaml interface file is not indexed, because it restates what its
+# ``.ml`` defines, but a comment line in one is still a comment.
+_UNREGISTERED_COMMENT_STYLES: dict[str, str] = {
+    ".mli": "ocaml_interface",
+}
+
+
+def _comment_style_for_path(path: str) -> str:
+    """The ``_COMMENT_PREFIXES_BY_GRAMMAR`` key for ``path``, or ``""``.
+
+    ``_grammar_for_path`` first. A file dekko recognizes and doesn't
+    parse has no grammar, so it falls back to the language name its
+    registry gives it, then to ``_UNREGISTERED_COMMENT_STYLES``.
+    """
+    dot = path.rfind(".")
+    unregistered = _UNREGISTERED_COMMENT_STYLES.get(path[dot:].lower(), "")
+    return (
+        _grammar_for_path(path)
+        or languages.build_script_language(path)
+        or languages.known_unsupported_language(path)
+        or unregistered
+    )
+
+
+def _unindexed_cause(path: str) -> str | None:
+    """The cause for a hit in a file dekko recognizes and never parses.
+
+    A file fact, decided before any rung that reads the line's shape:
+    those rungs guess why the resolver missed a call, and the resolver
+    never saw this file. Limited to the two registries of recognized
+    files, so a hit in a README keeps the ladder it had.
+
+    Args:
+        path: The hit's repo-relative path.
+
+    Returns:
+        ``CAUSE_BUILD_SCRIPT``, ``CAUSE_UNSUPPORTED_LANGUAGE``, or
+        ``None`` for every other file.
+    """
+    if languages.build_script_language(path) is not None:
+        return CAUSE_BUILD_SCRIPT
+    if languages.known_unsupported_language(path) is not None:
+        return CAUSE_UNSUPPORTED_LANGUAGE
+
+    return None
 
 
 def _looks_like_comment_line(snippet: str, path: str) -> bool:
@@ -1334,7 +2131,7 @@ def _looks_like_comment_line(snippet: str, path: str) -> bool:
     resolve a grammar name (``_grammar_for_path``), never opened or
     read. Returns ``False`` for a path whose grammar isn't in
     ``_COMMENT_PREFIXES_BY_GRAMMAR`` (unsupported entirely, or one of
-    the deliberately-unmapped Vue/Svelte SFC grammars).
+    the deliberately-unmapped Vue/Svelte SFC formats).
 
     This is the *only* gate on a comment cause (the
     near-definition/header zone now picks the wording, not the verdict),
@@ -1343,7 +2140,7 @@ def _looks_like_comment_line(snippet: str, path: str) -> bool:
     attribute, and an attribute can name a class), and a line whose
     leading ``/* ... */`` closes with real code after it.
     """
-    grammar = _grammar_for_path(path) or ""
+    grammar = _comment_style_for_path(path)
     prefixes = _COMMENT_PREFIXES_BY_GRAMMAR.get(grammar)
     if not prefixes:
         return False
@@ -1405,7 +2202,7 @@ def _looks_like_block_comment_continuation(root: Path, hit: "GrepHit") -> bool:
         guess.
     """
     prefixes = _COMMENT_PREFIXES_BY_GRAMMAR.get(
-        _grammar_for_path(hit.path) or ""
+        _comment_style_for_path(hit.path)
     )
     if not prefixes or "/*" not in prefixes:
         return False
@@ -1452,6 +2249,14 @@ def classify_miss(
     not_mapped: bool = False,
     looks_like_string_mention: bool = False,
     is_recorded_read: bool = False,
+    in_template_text: bool = False,
+    in_block_comment: bool = False,
+    looks_like_expression_call: bool = False,
+    in_type_context: bool = False,
+    looks_like_trailing_comment: bool = False,
+    looks_like_jsx_text: bool = False,
+    looks_like_property_access: bool = False,
+    looks_like_signature: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
@@ -1590,6 +2395,41 @@ def classify_miss(
         is_recorded_read: Whether the map records a property read of
             the name at this JS/TS line and the line has no bare call
             of it (``_js_shapes``). Checked after the string rung.
+        in_template_text: Whether the JS/TS line starts inside a
+            template literal opened above and the name is gone once
+            that text is blanked (``_js_line_state``). Checked right
+            after ``not_mapped``: the line is string text whatever
+            its own shape says, and prompt prose and generated-code
+            templates hold ``name(`` all the time, so the
+            ``eval("name()")`` exception does not apply.
+        in_block_comment: Whether the JS/TS line starts inside a
+            ``/* */`` block opened above and the name is gone once the
+            comment text is blanked. Checked with ``in_template_text``.
+        looks_like_expression_call: Whether the line calls the name
+            on an expression result or as a chain continuation
+            (``_EXPRESSION_CALL_TEMPLATE``). Same cause and blind spot
+            as the identifier-receiver form; checked after the import
+            rungs.
+        in_type_context: Whether the hit's innermost enclosing symbol
+            is an interface, type alias or enum (``_enclosing_chain``).
+            An index fact; checked after the recorded-reference rung
+            (a fact about the *target* beats one about the line) and
+            below the comment rungs (a comment inside an interface body
+            still reads as a comment).
+        looks_like_trailing_comment: Whether the name appears only in
+            a comment that follows code on the line
+            (``_looks_like_trailing_comment``). Checked after the type
+            rung, before the string rung.
+        looks_like_jsx_text: Whether the name sits only in JSX text
+            content (``_looks_like_jsx_text``). Checked after the
+            string rung.
+        looks_like_property_access: Whether the line has the ``x.name``
+            shape with no call and the map records no read there
+            (``_PROPERTY_ACCESS_TEMPLATE``). Checked after the recorded
+            read.
+        looks_like_signature: Whether the line is an abstract, overload
+            or interface-member signature (``_looks_like_signature``).
+            Checked before the local-binding rung.
 
     Returns:
         One of the ``CAUSE_*`` constants.
@@ -1600,12 +2440,20 @@ def classify_miss(
     # would be false there.
     if not_mapped:
         return CAUSE_NOT_MAPPED
-    if _looks_qualified_call(snippet, bare_name):
-        return CAUSE_QUALIFIED_CALL
-    if _looks_like_import_statement(snippet, bare_name):
-        return CAUSE_IMPORT_STATEMENT
-    if looks_like_import_member:
-        return CAUSE_IMPORT_STATEMENT
+    # Second: a line that starts inside a template literal or a block
+    # comment opened above has no shape of its own to read.
+    if in_template_text:
+        return CAUSE_STRING_MENTION
+    if in_block_comment:
+        return CAUSE_COMMENT_ELSEWHERE
+    binding = _binding_cause(
+        snippet,
+        bare_name,
+        looks_like_import_member=looks_like_import_member,
+        looks_like_expression_call=looks_like_expression_call,
+    )
+    if binding is not None:
+        return binding
     # The comment test sits above the type and
     # string-literal checks. A comment is a comment whatever it quotes
     # (``# ... "tfrun" commands ...`` used to get the literal label).
@@ -1617,9 +2465,14 @@ def classify_miss(
         return CAUSE_COMMENT_ELSEWHERE
     non_call = _non_call_cause(
         is_recorded_reference=is_recorded_reference,
+        in_type_context=in_type_context,
         looks_like_type_annotation=looks_like_type_annotation,
+        looks_like_trailing_comment=looks_like_trailing_comment,
         looks_like_string_mention=looks_like_string_mention,
+        looks_like_jsx_text=looks_like_jsx_text,
         is_recorded_read=is_recorded_read,
+        looks_like_property_access=looks_like_property_access,
+        looks_like_signature=looks_like_signature,
         looks_like_local_binding_or_literal=(
             looks_like_local_binding_or_literal
         ),
@@ -1638,12 +2491,40 @@ def classify_miss(
     )
 
 
+def _binding_cause(
+    snippet: str,
+    bare_name: str,
+    *,
+    looks_like_import_member: bool,
+    looks_like_expression_call: bool,
+) -> str | None:
+    """``classify_miss``'s call-and-import rungs: a qualified call, an
+    import/require or re-export statement, a member line of a
+    multi-line import or export list, a call on an expression result.
+    Split out to keep ``classify_miss`` under the complexity ceiling.
+    """
+    if _looks_qualified_call(snippet, bare_name):
+        return CAUSE_QUALIFIED_CALL
+    if _looks_like_import_statement(snippet, bare_name):
+        return CAUSE_IMPORT_STATEMENT
+    if looks_like_import_member:
+        return CAUSE_IMPORT_STATEMENT
+    if looks_like_expression_call:
+        return CAUSE_QUALIFIED_CALL
+    return None
+
+
 def _non_call_cause(
     *,
     is_recorded_reference: bool,
+    in_type_context: bool,
     looks_like_type_annotation: bool,
+    looks_like_trailing_comment: bool,
     looks_like_string_mention: bool,
+    looks_like_jsx_text: bool,
     is_recorded_read: bool,
+    looks_like_property_access: bool,
+    looks_like_signature: bool,
     looks_like_local_binding_or_literal: bool,
 ) -> str | None:
     """``classify_miss``'s middle rungs: the line names the target
@@ -1653,12 +2534,41 @@ def _non_call_cause(
     """
     if is_recorded_reference:
         return CAUSE_VALUE_REFERENCE
+    if in_type_context:
+        return CAUSE_TYPE_CONTEXT
     if looks_like_type_annotation:
         return CAUSE_TYPE_ANNOTATION
+    if looks_like_trailing_comment:
+        return CAUSE_TRAILING_COMMENT
     if looks_like_string_mention:
         return CAUSE_STRING_MENTION
+    if looks_like_jsx_text:
+        return CAUSE_JSX_TEXT
+    return _member_shape_cause(
+        is_recorded_read=is_recorded_read,
+        looks_like_property_access=looks_like_property_access,
+        looks_like_signature=looks_like_signature,
+        looks_like_local_binding_or_literal=(
+            looks_like_local_binding_or_literal
+        ),
+    )
+
+
+def _member_shape_cause(
+    *,
+    is_recorded_read: bool,
+    looks_like_property_access: bool,
+    looks_like_signature: bool,
+    looks_like_local_binding_or_literal: bool,
+) -> str | None:
+    """The tail of ``_non_call_cause``: a recorded property read, its
+    shape twin, a signature line, a declaration or literal."""
     if is_recorded_read:
         return CAUSE_PROPERTY_READ
+    if looks_like_property_access:
+        return CAUSE_PROPERTY_ACCESS_SHAPE
+    if looks_like_signature:
+        return CAUSE_SIGNATURE
     if looks_like_local_binding_or_literal:
         return CAUSE_LOCAL_BINDING_OR_LITERAL
     return None
@@ -1919,6 +2829,242 @@ def _reference_sites(
     return frozenset(sites)
 
 
+def _caller_path(index: MapIndex, caller: str) -> str:
+    """The file a caller id lives in; a ``path::<module>`` pseudo-id
+    never enters ``symbols_by_id``, so the path comes off the id."""
+    caller_sym = index.symbols_by_id.get(caller)
+    if caller_sym is not None:
+        return caller_sym.path
+
+    return caller.split("::", 1)[0]
+
+
+def _attributed_sites(
+    index: MapIndex, bare_name: str
+) -> dict[tuple[str, int], set[str]]:
+    """Every ``(path, line)`` the map attributes a use of ``bare_name``
+    to, and to which symbol(s).
+
+    A call site of any symbol sharing the name (``calls_in`` +
+    ``edge_lines``, the tables ``query callers`` answers from) or a
+    visible value reference of one (``referenced_in`` + ``ref_lines``,
+    gated by ``_can_see`` like ``_reference_sites``). Read off the
+    same, tests-filtered index the dekko-side callers set is built
+    from, so under the default ``--no-tests`` a test-file site is not
+    a site here and keeps its test-filter cause.
+
+    Args:
+        index: The query index.
+        bare_name: The bare name being cross-checked.
+
+    Returns:
+        ``(path, line)`` → the ids of the same-named symbols the map
+        attributes that line to. Usually one; two when one line calls
+        the name twice or a class and its constructor share it.
+    """
+    sites: dict[tuple[str, int], set[str]] = {}
+    for sym in index.symbols_by_name.get(bare_name, []):
+        for caller in index.calls_in.get(sym.id, []):
+            path = _caller_path(index, caller)
+            for ln in index.edge_lines.get((caller, sym.id), []):
+                sites.setdefault((path, ln), set()).add(sym.id)
+        for caller in index.referenced_in.get(sym.id, []):
+            path = _caller_path(index, caller)
+            if not _can_see(index, path, sym):
+                continue
+            for ln in index.ref_lines.get((caller, sym.id), []):
+                sites.setdefault((path, ln), set()).add(sym.id)
+        # A heritage clause the map resolved to a same-named sibling
+        # is attributed to it the same way, so ``extends Name`` on the
+        # wrong ``Name`` reads as resolved elsewhere, not as a shape.
+        for loc in _heritage_sites(index, sym):
+            sites.setdefault(loc, set()).add(sym.id)
+
+    return sites
+
+
+def _heritage_sites(index: MapIndex, sym: Symbol) -> set[tuple[str, int]]:
+    """Every ``(path, line)`` the map records as an ``extends``/
+    ``implements`` clause naming ``sym`` (``heritage_in`` +
+    ``heritage_lines``, the tables ``query subtypes`` answers from)."""
+    sites: set[tuple[str, int]] = set()
+    for sub in index.heritage_in.get(sym.id, []):
+        path = _caller_path(index, sub)
+        sites.update(
+            (path, ln) for ln in index.heritage_lines.get((sub, sym.id), [])
+        )
+
+    return sites
+
+
+def _import_bound_to(
+    index: MapIndex, path: str, bare_name: str, target_path: str
+) -> str | None:
+    """Where ``path`` binds ``bare_name`` by import, when that is not
+    the target's own file: the module string of an import the map
+    could not place in the repo (``module_external``), or the repo
+    path a module edge carrying the name leads to
+    (``module_edge_names``). ``None`` when the file imports no such
+    binding, or only from the target's file.
+    """
+    external = set(index.module_external.get(path, []))
+    suffix = "/" + bare_name
+    for imp in index.imports_by_path.get(path, []):
+        if imp.name != bare_name:
+            continue
+        module = (
+            imp.source[: -len(suffix)]
+            if imp.source.endswith(suffix)
+            else imp.source
+        )
+        if module in external:
+            return module
+    for (importer, imported), names in index.module_edge_names.items():
+        if importer == path and imported != target_path and bare_name in names:
+            return imported
+
+    return None
+
+
+# A bare call of the name: at the line start, after a non-identifier
+# character, or after a spread. Not ``x.name(``.
+_SELF_CALL_TEMPLATE = r"(?:^|[^.\w]|\.\.\.){name}\s*\("
+
+
+def _is_self_recursion(
+    symbols_by_path: dict[str, list[Symbol]],
+    sym: Symbol,
+    loc: tuple[str, int],
+    snippet: str,
+) -> bool:
+    """Whether ``loc`` is a bare call of ``sym``'s name inside
+    ``sym``'s own span. The resolver records no self edges by design
+    (``resolver._record_edge``), so the missing edge is not a miss."""
+    path, line = loc
+    chain = _enclosing_chain(symbols_by_path.get(path, []), line)
+    if not any(s.id == sym.id for s in chain):
+        return False
+    code = (
+        _js_code_only(snippet.strip())
+        if _grammar_for_path(path) in _JS_SHAPE_GRAMMARS
+        else snippet
+    )
+
+    return (
+        re.search(_SELF_CALL_TEMPLATE.format(name=re.escape(sym.name)), code)
+        is not None
+    )
+
+
+def _apply_target_facts(
+    causes: dict[tuple[str, int], str],
+    index: MapIndex,
+    sym: Symbol | None,
+    locs: Iterable[tuple[str, int]],
+    snippets: dict[tuple[str, int], str],
+) -> dict[tuple[str, int], str]:
+    """The per-target tier-1 facts, applied after the resolved-elsewhere
+    relabel: a heritage clause naming the target (overrides any shape
+    cause), then, on rows the ladder left in ``_REMAINING_CAUSES``, a
+    recursive self-call and an import binding the name elsewhere.
+
+    Per target because the same line is a plain call for a same-named
+    sibling; decided here, beside ``_apply_resolved_elsewhere``, never
+    in the shared classification. ``sym`` is ``None`` in ``--usages``
+    mode, which has no target symbol and gets nothing.
+
+    Args:
+        causes: The classified rows, relabelled in place.
+        index: The query index.
+        sym: The target symbol, or ``None``.
+        locs: The grep-only ``(path, line)`` locations.
+        snippets: ``loc`` → the grep line's text, for the self-call
+            shape check.
+
+    Returns:
+        ``loc`` → the import source a row was bound to, for every row
+        given ``CAUSE_IMPORT_BOUND_ELSEWHERE`` (``_grep_row``'s
+        ``bound_to``).
+    """
+    bound: dict[tuple[str, int], str] = {}
+    if sym is None:
+        return bound
+    locs = list(locs)
+    for loc in _heritage_sites(index, sym):
+        if loc in causes and causes[loc] != CAUSE_NOT_MAPPED:
+            causes[loc] = CAUSE_HERITAGE
+    for loc in locs:
+        if causes.get(loc) not in _REMAINING_CAUSES:
+            continue
+        if _is_self_recursion(
+            index.symbols_by_path, sym, loc, snippets.get(loc, "")
+        ):
+            causes[loc] = CAUSE_SELF_RECURSION
+            continue
+        where = _import_bound_to(index, loc[0], sym.name, sym.path)
+        if where is not None:
+            causes[loc] = CAUSE_IMPORT_BOUND_ELSEWHERE
+            bound[loc] = where
+
+    return bound
+
+
+def _resolved_elsewhere(
+    sites: dict[tuple[str, int], set[str]],
+    own_id: str,
+    locs: Iterable[tuple[str, int]],
+) -> dict[tuple[str, int], list[str]]:
+    """The grep-only ``locs`` the map attributes to a symbol other than
+    ``own_id``, each with the sibling ids it names.
+
+    The target's own call sites are matches and never grep-only, but
+    its own *reference* sites are grep-only rows with the tier-1
+    value-reference cause, and ``--all`` classifies one shared row
+    set per bare name for every symbol sharing it, so this is decided
+    per target, after the shared classification, never inside it.
+
+    Args:
+        sites: ``_attributed_sites`` for the bare name.
+        own_id: The target symbol's id.
+        locs: The grep-only ``(path, line)`` locations to check.
+
+    Returns:
+        ``loc`` → sorted sibling ids, for every loc that qualifies. A
+        row in it takes ``CAUSE_RESOLVED_ELSEWHERE`` over whatever the
+        shape ladder said: the ladder's rungs guess why the resolver
+        missed the line, and the map says it didn't.
+    """
+    out: dict[tuple[str, int], list[str]] = {}
+    for loc in locs:
+        ids = sites.get(loc)
+        # A line the map also attributes to the target itself (a value
+        # reference of it beside a call of a sibling) keeps the
+        # target's own tier-1 reference cause: that is the answer to
+        # "why is this not a call of the target", not the sibling.
+        if ids and own_id not in ids:
+            out[loc] = sorted(ids)
+
+    return out
+
+
+def _apply_resolved_elsewhere(
+    causes: dict[tuple[str, int], str],
+    attributed: dict[tuple[str, int], set[str]],
+    own_id: str,
+    grep_only_hits: "list[GrepHit]",
+) -> dict[tuple[str, int], list[str]]:
+    """``run()``'s form of ``_resolved_elsewhere``: relabel the
+    qualifying grep-only rows in ``causes`` in place and return the
+    sibling ids per row for ``_grep_row``'s ``resolved_to``."""
+    resolved = _resolved_elsewhere(
+        attributed, own_id, [(h.path, h.line) for h in grep_only_hits]
+    )
+    for loc in resolved:
+        causes[loc] = CAUSE_RESOLVED_ELSEWHERE
+
+    return resolved
+
+
 def _read_sites(index: MapIndex, bare_name: str) -> frozenset[tuple[str, int]]:
     """Every ``(path, line)`` where the map records a property read of
     ``bare_name`` (``MapIndex.reads_by_name``; JS/TS only).
@@ -1941,7 +3087,7 @@ def _read_sites(index: MapIndex, bare_name: str) -> frozenset[tuple[str, int]]:
 
 # Languages where a sibling file in the same directory shares a
 # package/namespace and needs no import to name the target.
-_SAME_DIR_PACKAGE_GRAMMARS = frozenset({"go", "java"})
+_SAME_DIR_PACKAGE_GRAMMARS = frozenset({"go", "java", "kotlin"})
 
 
 def _can_see(index: MapIndex, path: str, sym: Symbol) -> bool:
@@ -2116,6 +3262,10 @@ def _classify_grep_hits(
         loc = (h.path, h.line)
         if loc in own_def_locs:
             continue
+        unindexed = _unindexed_cause(h.path)
+        if unindexed is not None:
+            causes[loc] = unindexed
+            continue
         looks_like_value = allow_value_shape and _looks_like_value_reference(
             h.snippet, bare_name, h.path
         )
@@ -2127,6 +3277,12 @@ def _classify_grep_hits(
         # the map (and passed ``_can_see``) is one to trust.
         is_recorded_reference = loc in ref_sites
         js = _js_shapes(h.snippet, bare_name, h.path, loc in read_sites)
+        shapes = _line_shapes(
+            root, h, bare_name, target_is_type=target_is_type
+        )
+        chain = _enclosing_chain(
+            symbols_by_path.get(h.path, []) if symbols_by_path else [], h.line
+        )
         causes[loc] = classify_miss(
             h.snippet,
             bare_name,
@@ -2148,6 +3304,7 @@ def _classify_grep_hits(
             looks_like_import_member=(
                 _looks_like_multiline_import_member(root, h, bare_name)
                 or _looks_like_rust_use_line(root, h, bare_name)
+                or shapes.export_member
             ),
             # ``.map(Prompt::as_str)`` also matches the TS-shaped
             # ``: name`` type template (on the second colon of ``::``)
@@ -2155,19 +3312,32 @@ def _classify_grep_hits(
             # target. The path-value reading wins.
             looks_like_type_annotation=(
                 not looks_like_value
-                and _looks_like_type_annotation(
-                    h.snippet,
-                    bare_name,
-                    h.path,
-                    target_is_type=target_is_type,
+                and (
+                    _looks_like_type_annotation(
+                        h.snippet,
+                        bare_name,
+                        h.path,
+                        target_is_type=target_is_type,
+                    )
+                    or shapes.type_shape
                 )
             ),
             looks_like_local_binding_or_literal=(
                 js.key_or_field
                 or _looks_like_local_binding_or_literal(h.snippet, bare_name)
+                or shapes.declaration
             ),
             looks_like_string_mention=js.string_mention,
             is_recorded_read=js.property_read,
+            in_template_text=shapes.template_text,
+            in_block_comment=shapes.block_comment,
+            looks_like_expression_call=shapes.expression_call,
+            in_type_context=bool(chain)
+            and chain[0].kind in _TYPE_CONTEXT_KINDS,
+            looks_like_trailing_comment=shapes.trailing_comment,
+            looks_like_jsx_text=shapes.jsx_text,
+            looks_like_property_access=shapes.property_access,
+            looks_like_signature=shapes.signature,
             in_leading_header_comment=(
                 _looks_like_comment_line(h.snippet, h.path)
                 and _in_leading_header_comment(root, h)
@@ -2212,64 +3382,114 @@ _shadow_decl_lines: dict[tuple[str, int], int] = {}
 # JS/TS only, like every other shape rule in this module: Python's
 # scoping would mostly work too, but the evidence was TS.
 _SHADOW_GRAMMARS = frozenset({"typescript", "tsx", "javascript"})
+# The shapes that bind a name in JS/TS: a ``const``/``let``/``var``
+# (plain or destructured), a ``catch`` parameter, an arrow parameter
+# (``name =>``, ``(x, name) =>``, ``({ name }) =>``, ``([a, name]) =>``),
+# a ``function`` parameter, a ``for``-of/in binding.
 _SHADOW_DECL_TEMPLATE = (
     r"\b(?:const|let|var)\s+(?:{name}\b|[{{\[][^=]*\b{name}\b[^=]*[}}\]]\s*=)"
     r"|\bcatch\s*\(\s*{name}\b"
+    r"|(?<![\w.]){name}\s*=>"
+    r"|[(,]\s*(?:\.\.\.)?(?:\{{[^}}]*)?\b{name}\b[^)]*\)\s*(?::\s*[^=]+)?=>"
+    r"|\bfunction\b[^(]*\([^)]*\b{name}\b"
+    r"|\bfor\s*\(\s*(?:const|let|var)\s+(?:[{{\[][^=]*)?\b{name}\b"
 )
+# How far above a hit with no enclosing symbol the scan may go before
+# the first indent-0 line stops it.
+_SHADOW_SCAN_LINES = 400
+# ``x.name(``: a method call on something else is never a local.
+_METHOD_CALL_TEMPLATE = r"[\w)\]]\s*[?!]?\.\s*{name}\s*\("
 
 
-def _enclosing_symbol(symbols: list[Symbol], line: int) -> Symbol | None:
-    """Innermost symbol whose line range contains ``line``."""
-    best: Symbol | None = None
-    for s in symbols:
-        if s.start_line <= line <= s.end_line and (
-            best is None
-            or (s.end_line - s.start_line) < (best.end_line - best.start_line)
-        ):
-            best = s
-    return best
+def _enclosing_chain(symbols: list[Symbol], line: int) -> list[Symbol]:
+    """Every symbol whose line range contains ``line``, innermost
+    first (by span length; a tie keeps definition order)."""
+    return sorted(
+        (s for s in symbols if s.start_line <= line <= s.end_line),
+        key=lambda s: s.end_line - s.start_line,
+    )
 
 
 def _indent(line: str) -> int:
     return len(line) - len(line.lstrip())
 
 
+def _binds_as_parameter(chain: list[Symbol], bare_name: str) -> Symbol | None:
+    """The enclosing symbol whose parameter list binds ``bare_name``:
+    a plain parameter, an optional one (``name?``), or a name inside a
+    destructured pattern (the extractor stores ``{ slots, cursor }``
+    as one parameter whose name is the pattern text)."""
+    word = _word(bare_name)
+    for s in chain:
+        for p in s.params:
+            pname = p.name.rstrip("?")
+            if pname == bare_name or (
+                pname[:1] in ("{", "[") and word.search(pname)
+            ):
+                return s
+
+    return None
+
+
 def _shadowing_decl_line(
     root: Path,
     hit: GrepHit,
     bare_name: str,
-    sym: Symbol,
+    chain: list[Symbol],
     own_def_locs: frozenset[tuple[str, int]],
 ) -> int | None:
-    """Line of a same-named local in scope for ``hit``, or ``None``.
+    """Line of the same-named binding in scope for ``hit``, or
+    ``None``.
 
-    Four guards, each closing a specific way this could lie:
+    Scope is every enclosing symbol, then the file's top level: the
+    scan walks up from the hit to the *outermost* enclosing symbol's
+    start (an inner arrow sees the outer function's locals). With no
+    enclosing symbol at all (an inline callback that is not an indexed
+    symbol, or module-level code inside a block) it stops at the first
+    indent-0 line above, after checking it: the enclosing top-level
+    statement. Guards, each closing a specific way this could lie:
 
-    1. Never on a call-shaped line -- a call dekko has no edge for is
-       exactly what ``sanity`` exists to surface (checked by the
-       caller, which only feeds value-position rows).
-    2. The declaration must not be the target's own definition (a
-       nested recursive function matched itself in the first probe).
-    3. The declaration's indent must be ``<=`` the hit's: a ``const``
-       nested deeper than the use can't be in scope for it.
-    4. A parameter of the enclosing symbol is index-backed and in
-       scope for the whole body: no regex, no indent rule.
+    - A parameter of an enclosing symbol is index-backed and in scope
+      for the whole body: no regex, no indent rule.
+    - A declaration's indent must be ``<=`` the hit's: a ``const``
+      nested deeper than the use can't be in scope for it. A member
+      line of a multi-line destructuring is compared on its opener,
+      since members sit deeper than the use.
+    - A declaration found by the scan must not be the target's own
+      definition line (a nested recursive ``const visit = ...`` matched
+      itself in the first probe): the nearest binding is the target,
+      so the hit refers to it. A *parameter* declared on that line is
+      a fresh binding all the same (``command(command: string)`` and
+      ``${command}`` in its body), so the parameter check is not
+      guarded. The caller refuses a ``x.name(`` method-call line.
     """
-    if any(p.name == bare_name for p in sym.params):
-        return sym.start_line
-    lines = read_lines(root, hit.path)
-    if not lines:
+    param_owner = _binds_as_parameter(chain, bare_name)
+    if param_owner is not None:
+        return param_owner.start_line
+    lines = _cached_lines(root, hit.path)
+    if not lines or hit.line > len(lines):
         return None
     decl = re.compile(_SHADOW_DECL_TEMPLATE.format(name=re.escape(bare_name)))
-    hit_indent = _indent(lines[hit.line - 1]) if hit.line <= len(lines) else 0
-    for ln in range(sym.start_line, hit.line):
-        if ln > len(lines):
-            break
+    hit_indent = _indent(lines[hit.line - 1])
+    lowest = (
+        chain[-1].start_line
+        if chain
+        else max(1, hit.line - _SHADOW_SCAN_LINES)
+    )
+    for ln in range(hit.line - 1, lowest - 1, -1):
         text = lines[ln - 1]
-        if (hit.path, ln) in own_def_locs:
+        if not text.strip():
             continue
-        if decl.search(text) and _indent(text) <= hit_indent:
-            return ln
+        found = _destructuring_opener(lines, ln, bare_name)
+        if found is not None and _indent(lines[found - 1]) > hit_indent:
+            found = None
+        if found is None and _indent(text) <= hit_indent:
+            found = ln if decl.search(_js_code_only(text)) else None
+        if found is not None:
+            return None if (hit.path, found) in own_def_locs else found
+        if not chain and _indent(text) == 0:
+            return None
+
     return None
 
 
@@ -2283,23 +3503,30 @@ def _explain_shadowing_locals(
 ) -> None:
     """Upgrade ``CAUSE_UNEXPLAINED`` rows that use a same-named local.
 
-    Only value-position hits in JS/TS files whose enclosing symbol
-    binds ``bare_name`` above the hit. Never rewrites a row that
-    already carries a specific cause.
+    JS/TS hits whose enclosing scope binds ``bare_name`` above the
+    hit (``_shadowing_decl_line``). Never rewrites a row that already
+    carries a specific cause. A bare call ``name(`` with a declaration
+    of ``name`` in scope calls that binding by the language's own
+    rule, and the resolver vetoes exactly this edge on the same
+    evidence (the shadowed-local veto), so it is explained too; a
+    call-shaped line with no declaration in scope stays a miss, and a
+    ``x.name(`` method call is never a local.
     """
-    call = re.compile(_BARE_CALL_TEMPLATE.format(name=re.escape(bare_name)))
+    method_call = re.compile(
+        _METHOD_CALL_TEMPLATE.format(name=re.escape(bare_name))
+    )
     for h in hits:
         loc = (h.path, h.line)
         if causes.get(loc) != CAUSE_UNEXPLAINED:
             continue
         if _grammar_for_path(h.path) not in _SHADOW_GRAMMARS:
             continue
-        if call.search(h.snippet):
+        if method_call.search(h.snippet):
             continue
-        sym = _enclosing_symbol(symbols_by_path.get(h.path, []), h.line)
-        if sym is None:
-            continue
-        decl_line = _shadowing_decl_line(root, h, bare_name, sym, own_def_locs)
+        chain = _enclosing_chain(symbols_by_path.get(h.path, []), h.line)
+        decl_line = _shadowing_decl_line(
+            root, h, bare_name, chain, own_def_locs
+        )
         if decl_line is not None:
             causes[loc] = CAUSE_SHADOWING_LOCAL
             _shadow_decl_lines[loc] = decl_line
@@ -2422,7 +3649,12 @@ def _cap_snippet(snippet: str) -> str:
     return snippet[:_SNIPPET_MAX_CHARS] + "...(truncated)"
 
 
-def _grep_row(hit: GrepHit, cause: str | None = None) -> dict:
+def _grep_row(
+    hit: GrepHit,
+    cause: str | None = None,
+    resolved_to: list[str] | None = None,
+    bound_to: str | None = None,
+) -> dict:
     row = {
         "file": hit.path,
         "line": hit.line,
@@ -2433,6 +3665,11 @@ def _grep_row(hit: GrepHit, cause: str | None = None) -> dict:
     decl = _shadow_decl_lines.get((hit.path, hit.line))
     if decl is not None and cause == CAUSE_SHADOWING_LOCAL:
         row["decl_line"] = decl
+    if resolved_to:
+        row["resolved_to"] = resolved_to
+    if bound_to is not None and cause == CAUSE_IMPORT_BOUND_ELSEWHERE:
+        row["bound_to"] = bound_to
+
     return row
 
 
@@ -2647,6 +3884,11 @@ def _print_bucket_text(title: str, rows: list[dict], meter: Meter) -> None:
             cause = row["cause"]
             if "decl_line" in row:
                 cause = f"{cause} (declared at line {row['decl_line']})"
+            if "resolved_to" in row:
+                targets = ", ".join(row["resolved_to"])
+                cause = f"{cause} (resolved to {targets})"
+            if "bound_to" in row:
+                cause = f"{cause} (bound to {row['bound_to']})"
             print(f"    {loc}  [{cause}]")
             print(f"      {row['snippet']}")
         else:
@@ -3366,7 +4608,11 @@ def run(
             index, target, root, limit, budget, as_json, root_globs
         )
 
+    _reset_file_caches()
     query_index = index if include_tests else index.without_tests()
+    # The target symbol, for the per-target tier-1 facts
+    # (``_apply_target_facts``); ``None`` in ``--usages`` mode.
+    target_sym: Symbol | None = None
     own_def_locs: frozenset[tuple[str, int]] = frozenset()
     # Every file (besides the target's own) holding a declaration of a
     # different symbol sharing the target's bare name -- the
@@ -3388,6 +4634,11 @@ def run(
     ref_sites: frozenset[tuple[str, int]] = frozenset()
     read_sites: frozenset[tuple[str, int]] = frozenset()
     target_kinds: frozenset[str] = frozenset()
+    # The map's own attribution of every use of the bare name, for the
+    # tier-1 resolved-elsewhere cause (``_resolved_elsewhere``). Callers
+    # mode only, like everything above; ``own_id`` is the target.
+    attributed: dict[tuple[str, int], set[str]] = {}
+    own_id = ""
 
     if usages:
         bare_name = target
@@ -3430,6 +4681,9 @@ def run(
         ref_sites = _reference_sites(query_index, [sym])
         read_sites = _read_sites(query_index, sym.name)
         target_kinds = frozenset({sym.kind})
+        attributed = _attributed_sites(query_index, sym.name)
+        own_id = sym.id
+        target_sym = sym
         sym_target = f"{sym.path}:{sym.qualname}:{sym.start_line}"
         try:
             dekko_hits, module_level = _dekko_hits_callers(
@@ -3493,8 +4747,24 @@ def run(
         scope=_map_scope(index),
         read_sites=read_sites,
     )
+    resolved = _apply_resolved_elsewhere(
+        causes, attributed, own_id, grep_only_hits
+    )
+    bound = _apply_target_facts(
+        causes,
+        query_index,
+        target_sym,
+        [(h.path, h.line) for h in grep_only_hits],
+        {loc: h.snippet for loc, h in grep_by_loc.items()},
+    )
     grep_only_rows = [
-        _grep_row(h, causes[(h.path, h.line)]) for h in grep_only_hits
+        _grep_row(
+            h,
+            causes[(h.path, h.line)],
+            resolved.get((h.path, h.line)),
+            bound.get((h.path, h.line)),
+        )
+        for h in grep_only_hits
     ]
     match_rows = [_grep_row(grep_by_loc[loc]) for loc in matched_locs]
     dekko_only_rows = [_hit_row(*loc) for loc in dekko_only_locs]
@@ -3695,13 +4965,21 @@ def _diff_symbol(
     query_index: MapIndex,
     sym: Symbol,
     causes: dict[tuple[str, int], str],
+    attributed: dict[tuple[str, int], set[str]] | None = None,
+    snippets: dict[tuple[str, int], str] | None = None,
 ) -> "_SymbolSweepResult | None":
     """Diff one symbol's own dekko-side callers hits against its bare
     name's shared classified grep hit set (``causes``).
 
     Mirrors ``run()``'s own matches/dekko-only/grep-only split, just
     keyed off ``causes`` (already computed once per bare name) instead
-    of re-running ``_classify_grep_hits`` per symbol.
+    of re-running ``_classify_grep_hits`` per symbol. ``attributed``
+    (``_attributed_sites`` for the name, computed once per name by the
+    caller) and ``snippets`` (the sweep's hit lines) are what let this
+    one place, which knows which symbol the shared sweep is being
+    diffed for, apply the resolved-elsewhere cause and the other
+    per-target facts (``_apply_target_facts``) per symbol; the shared
+    ``causes`` is never mutated.
 
     Returns:
         ``None`` if the symbol's own internal query unexpectedly fails
@@ -3721,7 +4999,13 @@ def _diff_symbol(
     grep_locs = set(causes)
     matches = len(dekko_set & grep_locs)
     dekko_only = len(dekko_set - grep_locs)
-    grep_only_causes = [causes[loc] for loc in grep_locs - dekko_set]
+    grep_only = grep_locs - dekko_set
+    own = dict(causes)
+    for loc in _resolved_elsewhere(attributed or {}, sym.id, grep_only):
+        own[loc] = CAUSE_RESOLVED_ELSEWHERE
+    _apply_target_facts(own, query_index, sym, grep_only, snippets or {})
+    grep_only_causes = [own[loc] for loc in grep_only]
+
     return _SymbolSweepResult(
         target=f"{sym.path}:{sym.qualname}",
         bare_name=sym.name,
@@ -3964,11 +5248,16 @@ def _diff_all_symbols(
     name's already-classified, shared grep sweep (see ``_diff_symbol``)."""
     results: list[_SymbolSweepResult] = []
     for name in names:
-        _sweep, causes = sweeps[name]
+        sweep, causes = sweeps[name]
+        attributed = _attributed_sites(query_index, name)
+        snippets = {(h.path, h.line): h.snippet for h in sweep.hits}
         for sym in groups[name]:
-            diffed = _diff_symbol(query_index, sym, causes)
+            diffed = _diff_symbol(
+                query_index, sym, causes, attributed, snippets
+            )
             if diffed is not None:
                 results.append(diffed)
+
     return results
 
 
@@ -4034,6 +5323,7 @@ def run_all(
         unexplained count is nonzero, ``EXIT_GREP_FAILED`` when any
         name's grep sweep itself couldn't run.
     """
+    _reset_file_caches()
     query_index = index if include_tests else index.without_tests()
     groups = _group_fan_in_symbols(query_index)
     all_names = sorted(groups)

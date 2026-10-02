@@ -2539,6 +2539,7 @@ def run_status(args: argparse.Namespace) -> int:
         prov = index.provenance
 
     unsupported = (prov or {}).get("unsupported")
+    build_scripts = (prov or {}).get("build_scripts")
     too_large = (prov or {}).get("too_large")
     if args.as_json:
         doc = {
@@ -2548,6 +2549,7 @@ def run_status(args: argparse.Namespace) -> int:
             "removed": fresh.removed,
             "changed": fresh.changed,
             "unsupported": unsupported,
+            "build_scripts": build_scripts,
             "too_large": too_large,
         }
         if fresh.reason == "version":
@@ -2580,9 +2582,18 @@ def _print_fresh_status(provenance: dict | None) -> None:
     commit = (prov.get("git_commit") or "no git")[:12]
     n = len(prov.get("files", {}))
     print(f"dekko: map fresh ({n} files, commit {commit})")
-    note = mapfile.format_unsupported(prov)
+    _print_skip_notes(prov)
+
+
+def _print_skip_notes(provenance: dict | None) -> None:
+    """Print what the map left out: coverage gaps, then build scripts."""
+    note = mapfile.format_unsupported(provenance)
     if note:
         print(f"  {note}")
+
+    scripts = mapfile.format_build_scripts(provenance)
+    if scripts:
+        print(f"  build scripts: {scripts}")
 
 
 def _print_stale_status(
@@ -2599,9 +2610,7 @@ def _print_stale_status(
     if fresh.reason == "version":
         print(f"  {_version_stale_note(fresh)}")
         return
-    note = mapfile.format_unsupported(provenance)
-    if note:
-        print(f"  {note}")
+    _print_skip_notes(provenance)
     for title, items in (
         ("added", fresh.added),
         ("changed", fresh.changed),

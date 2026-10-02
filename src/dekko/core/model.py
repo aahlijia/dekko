@@ -30,9 +30,10 @@ class Param:
     Attributes:
         name: Parameter name as written (display-oriented — carries a
             ``*``/``**``/``...`` prefix for a splat/rest/variadic
-            parameter, a trailing ``?`` for a TS optional parameter,
-            and the raw ``self``/``&self``/``&mut self`` text for a
-            Rust ``self_parameter``; not a normalized identifier).
+            parameter (Kotlin: ``vararg``), a trailing ``?`` for a TS
+            optional parameter, and the raw ``self``/``&self``/``&mut
+            self`` text for a Rust ``self_parameter``; not a
+            normalized identifier).
         type: Declared type, or ``None``.
         has_default: Whether the parameter carries a default value
             (Python ``default_parameter``/``typed_default_parameter``,
@@ -585,6 +586,25 @@ class FileMap:
             written to ``map.json``: a name registry the resolver
             reads so ``Left(x)`` is not taken for ``struct Left`` when
             some enum also has a ``Left(..)`` variant.
+        cpp_using: ``"<namespace>=<path>"`` for every namespace-scope
+            C++ ``using``-declaration in this file
+            (``"tensorflow=tsl::StatusFromTF_Status"`` for
+            ``namespace tensorflow { using tsl::StatusFromTF_Status; }``;
+            the global namespace is empty). The namespace chain is
+            dot-joined like a qualname, the path keeps its ``::`` and
+            a leading ``::``, template arguments dropped. Not symbols
+            and not written to ``map.json``: a registry the resolver
+            reads so ``tensorflow::StatusFromTF_Status(..)`` reaches
+            the ``tsl`` function it re-exports.
+        cpp_decls: ``"<qualname>/<count>=<defaults>"`` for every C++
+            function prototype in this file (C++ only):
+            ``"tf.Scope.ToGraph/2=1"`` for ``Status ToGraph(Graph* g,
+            Options opts = {});`` in ``class Scope`` in ``namespace
+            tf``. The count is the non-variadic parameters, the
+            defaults the trailing defaulted ones. Not symbols and not
+            written to ``map.json``: a registry the resolver reads so
+            a ``.cc`` definition's arity takes the defaults its header
+            declares.
         type_aliases: Bare names of type-alias declarations in this
             file (TS/TSX only — see ``languages.LanguageSpec.
             type_alias_query``). Not full symbols, just names: a
@@ -614,6 +634,8 @@ class FileMap:
     imports: list[Import] = field(default_factory=list)
     type_aliases: list[str] = field(default_factory=list)
     enum_variants: list[str] = field(default_factory=list)
+    cpp_using: list[str] = field(default_factory=list)
+    cpp_decls: list[str] = field(default_factory=list)
     type_uses: list[TypeUse] = field(default_factory=list)
     submodules: list[Submodule] = field(default_factory=list)
     error: str | None = None

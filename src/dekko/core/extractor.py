@@ -116,6 +116,12 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
     imports = _collect_imports(spec, rel, import_matches)
     type_aliases = _collect_type_aliases(spec, tree.root_node)
     enum_variants = _collect_enum_variants(spec, tree.root_node)
+    cpp_using = (
+        _collect_cpp_using(tree.root_node) if spec.name in ("c", "cpp") else []
+    )
+    cpp_decls = (
+        _collect_cpp_decls(tree.root_node) if spec.name == "cpp" else []
+    )
     type_uses = _collect_type_uses(spec, tree.root_node, rel, defs)
     submodules = (
         rust_cfg.collect_submodules(tree.root_node, rel)
@@ -136,6 +142,8 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         imports=imports,
         type_aliases=type_aliases,
         enum_variants=enum_variants,
+        cpp_using=cpp_using,
+        cpp_decls=cpp_decls,
         type_uses=type_uses,
         submodules=submodules,
         doc=_module_doc(spec.name, tree.root_node),
@@ -206,12 +214,17 @@ def _collect_definitions(
             kind_type = (
                 kind_node.type if kind_node is not None else def_node.type
             )
+            kind = (
+                _kotlin_class_kind(def_node)
+                if spec.name == "kotlin"
+                else _CLASSDEF_KIND.get(kind_type, "class")
+            )
             sym = _make_symbol(
                 spec,
                 rel,
                 def_node,
                 _text(class_name),
-                _CLASSDEF_KIND.get(kind_type, "class"),
+                kind,
                 params=_tuple_struct_fields(def_node),
                 returns=None,
                 seen=seen,
@@ -258,7 +271,7 @@ def _collect_definitions(
 
         if _looks_like_c_macro_invocation(
             spec.name, _text(name_node), params_node
-        ):
+        ) or _is_deleted_function(def_node):
             continue
 
         ret_node = _one(caps, "ret")
@@ -277,7 +290,7 @@ def _collect_definitions(
             spec,
             rel,
             def_node,
-            _text(name_node),
+            _definition_name(spec.name, name_node),
             "function",
             params=params,
             returns=returns,
@@ -287,6 +300,51 @@ def _collect_definitions(
         defs.append((def_node, sym))
 
     return defs
+
+
+def _definition_name(language: str, name_node: Node) -> str:
+    """A definition's name as callers write it.
+
+    Kotlin allows any text in backticks (``fun `does a thing`()``,
+    the usual shape of a test name). The backticks only quote it, the
+    way a string's quotes do, so they are not part of the name.
+    """
+    text = _text(name_node)
+    if language == "kotlin":
+        return text.strip("`")
+
+    return text
+
+
+def _kotlin_class_kind(def_node: Node) -> str:
+    """``Symbol.kind`` of a Kotlin ``class_declaration``.
+
+    One node type covers classes, interfaces and enums. An interface
+    has an ``interface`` keyword child (``fun interface`` and
+    ``sealed interface`` too), an enum an ``enum`` class modifier.
+    """
+    if any(child.type == "interface" for child in def_node.children):
+        return "interface"
+    modifiers = _modifiers_node(def_node)
+    if modifiers is not None and any(
+        child.type == "class_modifier" and _text(child) == "enum"
+        for child in modifiers.named_children
+    ):
+        return "enum"
+
+    return "class"
+
+
+def _is_deleted_function(def_node: Node) -> bool:
+    """Whether a C++ definition is ``= delete``.
+
+    A deleted function declares that it can't be called, so as a
+    symbol it can only mislead: a deleted copy constructor has the
+    same bare name and often the same arity as the real constructors,
+    so it blocks their overload pick and lands in ``unused``. ``=
+    default`` is callable and stays.
+    """
+    return any(c.type == "delete_method_clause" for c in def_node.children)
 
 
 # ALL-CAPS-with-underscores is the near-universal C/C++ convention for
@@ -507,6 +565,8 @@ def _is_decorated(language: str, def_node: Node) -> bool:
         return _has_prev_sibling(def_node, "attribute_item")
     if language == "java":
         return _modifiers_have(def_node, ("annotation", "marker_annotation"))
+    if language == "kotlin":
+        return _modifiers_have(def_node, ("annotation",))
     if language in ("javascript", "typescript", "tsx"):
         return _has_child(def_node, "decorator") or _has_prev_sibling(
             def_node, "decorator"
@@ -520,9 +580,27 @@ def _is_exported(language: str, def_node: Node) -> bool:
         return _has_child(def_node, "visibility_modifier")
     if language == "java":
         return _modifiers_keyword(def_node, "public")
+    if language == "kotlin":
+        return not _kotlin_restricted(def_node)
     if language in ("javascript", "typescript", "tsx"):
         return _ancestor_is(def_node, "export_statement", depth=4)
     return False
+
+
+# Kotlin declarations are public unless one of these says otherwise.
+_KOTLIN_RESTRICTED_VISIBILITY = frozenset({"private", "internal", "protected"})
+
+
+def _kotlin_restricted(def_node: Node) -> bool:
+    """Whether a Kotlin declaration has a non-public visibility."""
+    modifiers = _modifiers_node(def_node)
+    if modifiers is None:
+        return False
+    return any(
+        child.type == "visibility_modifier"
+        and _text(child) in _KOTLIN_RESTRICTED_VISIBILITY
+        for child in modifiers.named_children
+    )
 
 
 def _has_child(node: Node, child_type: str) -> bool:
@@ -918,11 +996,15 @@ def _params_python(params_node: Node) -> list[Param]:
             name_node = child.child_by_field_name("name")
             if name_node is None:
                 name_node = child.named_children[0]
+            # ``*args: T`` / ``**kwargs: T`` wrap the splat pattern in a
+            # typed_parameter; they're still variadic.
             out.append(
                 Param(
                     name=_text(name_node),
                     type=_text(type_node) if type_node else None,
                     has_default=kind == "typed_default_parameter",
+                    variadic=name_node.type
+                    in ("list_splat_pattern", "dictionary_splat_pattern"),
                 )
             )
         elif kind == "default_parameter":
@@ -983,6 +1065,15 @@ def _params_generic(params_node: Node) -> list[Param]:
             continue
         if child.type == "spread_parameter":
             out.append(Param(name=_text(child), variadic=True))
+            continue
+        if child.type == "ERROR" and "..." in _text(child):
+            # tree-sitter-java can't parse a type annotation before
+            # the ellipsis (``Resolver @Nullable ... resolvers``), so
+            # that varargs parameter arrives as an ERROR node. It is
+            # still varargs: capping it would reject a correct
+            # constructor that a call with fewer arguments selects.
+            text = _text(child).lstrip(", ").strip()
+            out.append(Param(name=text, variadic=True))
             continue
         name_node = child.child_by_field_name(
             "name"
@@ -1137,6 +1228,67 @@ def _params_go(params_node: Node) -> list[Param]:
     return out
 
 
+# Children of a Kotlin parameter that are neither its name, its type
+# nor its default value.
+_KOTLIN_PARAM_SKIP = frozenset(
+    {"modifiers", "parameter_modifiers", "binding_pattern_kind"}
+)
+
+
+def _params_kotlin(params_node: Node) -> list[Param]:
+    """Parse ``function_value_parameters`` or ``class_parameters``.
+
+    The two place a default differently. A function parameter's
+    default is the next sibling in the list (``x: Int = 1`` is
+    ``parameter`` then an expression), a class parameter's is its own
+    third child after the name and type. ``vararg`` is a
+    ``parameter_modifiers`` sibling just before a function parameter,
+    and a ``modifiers`` child inside a class parameter. Defaults are
+    everywhere in Kotlin, so without them every call that leaves one
+    out would fail the resolver's arity check.
+    """
+    out: list[Param] = []
+    vararg_next = False
+    for child in params_node.named_children:
+        if child.is_extra:
+            continue
+        if child.type == "parameter_modifiers":
+            vararg_next = _has_vararg(child)
+            continue
+        if child.type not in ("parameter", "class_parameter"):
+            if out:
+                out[-1].has_default = True
+            continue
+        variadic = vararg_next or any(
+            _has_vararg(c)
+            for c in child.named_children
+            if c.type == "modifiers"
+        )
+        vararg_next = False
+        parts = [
+            c
+            for c in child.named_children
+            if c.type not in _KOTLIN_PARAM_SKIP and not c.is_extra
+        ]
+        if not parts:
+            continue
+        name = _text(parts[0])
+        out.append(
+            Param(
+                name=f"vararg {name}" if variadic else name,
+                type=_text(parts[1]) if len(parts) > 1 else None,
+                has_default=len(parts) > 2,
+                variadic=variadic,
+            )
+        )
+    return out
+
+
+def _has_vararg(modifiers: Node) -> bool:
+    """Whether a Kotlin modifier list includes ``vararg``."""
+    return any(_text(m) == "vararg" for m in modifiers.named_children)
+
+
 _PARAM_PARSERS: dict[str, Callable[[Node], list[Param]]] = {
     "python": _params_python,
     "rust": _params_rust,
@@ -1144,6 +1296,7 @@ _PARAM_PARSERS: dict[str, Callable[[Node], list[Param]]] = {
     "js": _params_js,
     "ts": _params_ts,
     "go": _params_go,
+    "kotlin": _params_kotlin,
     "generic": _params_generic,
 }
 
@@ -1162,6 +1315,8 @@ def _collect_calls(
     spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
 ) -> list[RawCall]:
     """Find call expressions and attribute them to enclosing defs."""
+    if spec.name == "kotlin":
+        return _collect_kotlin_calls(spec, root, rel, defs)
     spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
     attrs = (
         _rust_error_attribute_spans(root)
@@ -1175,15 +1330,58 @@ def _collect_calls(
             continue
         if any(a <= callee.start_byte < b for a, b in attrs):
             continue
-        text, name, receiver = _callee_parts(callee)
-        if not name:
-            continue
-        text, receiver = _cap_callee(text, name, receiver)
-        caller = _enclosing(spans, callee.start_byte)
-        args_node = _one(caps, "args")
-        arg_count = (
-            len(args_node.named_children) if args_node is not None else None
+        call_node = _one(caps, "call")
+        cpp_new = (
+            spec.name == "cpp"
+            and call_node is not None
+            and call_node.type == "new_expression"
         )
+        args_node = _one(caps, "args")
+        # C++ ``new T`` with no argument list is a default
+        # construction: zero arguments, not "no signal".
+        arg_count = (
+            0 if cpp_new and args_node is None else _call_arg_count(args_node)
+        )
+        call = _raw_call(callee, rel, spans, arg_count, constructs=cpp_new)
+        if call is None:
+            continue
+        calls.append(call)
+        made = _cpp_factory_type(callee) if spec.name == "cpp" else None
+        if made is not None:
+            built = _raw_call(made, rel, spans, arg_count, constructs=True)
+            if built is not None:
+                calls.append(built)
+    return calls
+
+
+def _collect_kotlin_calls(
+    spec: LanguageSpec, root: Node, rel: str, defs: list[tuple[Node, Symbol]]
+) -> list[RawCall]:
+    """Kotlin calls, attributed to their enclosing definitions.
+
+    A call with a trailing lambda and parentheses
+    (``run(x) { ... }``) parses as a ``call_expression`` wrapping
+    another one. The inner call is the real one, and the lambda is
+    its last argument; the wrapper is skipped so the call isn't
+    recorded twice.
+    """
+    spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
+    calls: list[RawCall] = []
+    for _, caps in _run_query(spec.grammar, spec.call_query, root):
+        ctor = _one(caps, "ctor")
+        call_node = ctor or _one(caps, "call")
+        if call_node is None:
+            continue
+        parts = (
+            _kotlin_constructed_type(ctor)
+            if ctor is not None
+            else _kotlin_callee_parts(call_node)
+        )
+        if parts is None:
+            continue
+        text, name, receiver = parts
+        text, receiver = _cap_callee(text, name, receiver)
+        caller = _enclosing(spans, call_node.start_byte)
         calls.append(
             RawCall(
                 caller_id=caller.id if caller else None,
@@ -1191,11 +1389,224 @@ def _collect_calls(
                 text=text,
                 name=name,
                 receiver=receiver,
-                line=callee.start_point[0] + 1,
-                arg_count=arg_count,
+                line=call_node.start_point[0] + 1,
+                arg_count=_kotlin_arg_count(call_node),
             )
         )
     return calls
+
+
+def _kotlin_callee_parts(call: Node) -> tuple[str, str, str | None] | None:
+    """``(text, name, receiver)`` of a Kotlin ``call_expression``.
+
+    ``None`` for the trailing-lambda wrapper (see
+    ``_collect_kotlin_calls``) and for callees with no name to resolve:
+    an invoked call result (``f()()``), a parenthesized lambda.
+    """
+    head = call.named_children[0] if call.named_children else None
+    if head is None:
+        return None
+    if head.type == "identifier":
+        name = _text(head)
+        return name, name, None
+    if head.type != "navigation_expression":
+        return None
+    member = head.named_children[-1]
+    if member.type != "identifier" or head.named_child_count < 2:
+        return None
+    name = _text(member)
+    receiver = _kotlin_canonical(head.named_children[0])
+    return f"{receiver}.{name}", name, receiver
+
+
+def _kotlin_constructed_type(
+    ctor: Node,
+) -> tuple[str, str, str | None] | None:
+    """``(text, name, receiver)`` of an object expression's superclass.
+
+    ``object : a.Base<T>(x) { ... }``: the ``constructor_invocation``'s
+    ``user_type``, generic arguments dropped, split at its last dot.
+    """
+    user_type = _first_child_of_type(ctor, "user_type")
+    if user_type is None:
+        return None
+    text = _strip_generics(_text(user_type))
+    receiver, _, name = text.rpartition(".")
+    if not name:
+        return None
+
+    return text, name, receiver or None
+
+
+def _kotlin_canonical(node: Node) -> str:
+    """Argument-free text of a Kotlin receiver: ``a.b.C``, ``f().g``.
+
+    Kotlin's ``navigation_expression`` has no fields, so the shared
+    ``_canonical_expr`` can't find the member name and would reduce
+    ``a.b.Util`` to ``a.(…)``. Walked iteratively, like that one:
+    builder chains can be long.
+    """
+    suffixes: list[str] = []
+    current = node
+    while True:
+        kids = current.named_children
+        if (
+            current.type == "navigation_expression"
+            and len(kids) >= 2
+            and kids[-1].type == "identifier"
+        ):
+            suffixes.append("." + _text(kids[-1]))
+            current = kids[0]
+        elif current.type == "call_expression" and kids:
+            suffixes.append("()")
+            current = kids[0]
+        else:
+            break
+    if current.type == "this_expression":
+        head = "this"
+    elif current.type == "super_expression":
+        head = "super"
+    else:
+        head = _canonical_expr(current)
+
+    return head + "".join(reversed(suffixes))
+
+
+def _kotlin_arg_count(call: Node) -> int | None:
+    """Arguments a Kotlin call writes, or ``None`` when unknowable.
+
+    Each ``value_argument`` counts once (a named argument too), and a
+    trailing lambda counts as the last argument, whether it sits on
+    this node or on the wrapper around it. A spread (``*args``) makes
+    the count unknowable, the same as an unpacking argument elsewhere.
+    """
+    count = 0
+    for child in call.named_children:
+        if child.type == "annotated_lambda":
+            count += 1
+        elif child.type == "value_arguments":
+            args = [a for a in child.named_children if not a.is_extra]
+            if any(
+                c.type == "spread_expression"
+                for a in args
+                for c in a.named_children
+            ):
+                return None
+            count += len(args)
+    parent = call.parent
+    if (
+        parent is not None
+        and parent.type == "call_expression"
+        and parent.named_children[0] == call
+    ):
+        count += sum(
+            1 for c in parent.named_children if c.type == "annotated_lambda"
+        )
+
+    return count
+
+
+def _raw_call(
+    callee: Node,
+    rel: str,
+    spans: list[tuple[int, int, Symbol]],
+    arg_count: int | None,
+    *,
+    constructs: bool,
+) -> RawCall | None:
+    """Build the ``RawCall`` for one callee node.
+
+    Args:
+        callee: The callee node, or for a construction the type node.
+        rel: Repo-relative POSIX path of the file.
+        spans: ``(start_byte, end_byte, symbol)`` of every definition,
+            to attribute the call to its enclosing one.
+        arg_count: The written argument count, or ``None``.
+        constructs: Whether ``callee`` names a type being constructed.
+            Its trailing template arguments are then dropped, so
+            ``new ns::Box<int>(3)`` matches the class ``Box``.
+
+    Returns:
+        The call, or ``None`` when the callee has no usable name.
+    """
+    text, name, receiver = _callee_parts(callee)
+    if constructs:
+        name, text = _strip_trailing_template_args(name, text)
+    if not name:
+        return None
+    text, receiver = _cap_callee(text, name, receiver)
+    caller = _enclosing(spans, callee.start_byte)
+    return RawCall(
+        caller_id=caller.id if caller else None,
+        path=rel,
+        text=text,
+        name=name,
+        receiver=receiver,
+        line=callee.start_point[0] + 1,
+        arg_count=arg_count,
+    )
+
+
+def _strip_trailing_template_args(name: str, text: str) -> tuple[str, str]:
+    """``(Box<int>, ns::Box<int>)`` → ``(Box, ns::Box)``.
+
+    Only the name's own template arguments come off the text, so an
+    enclosing template (``Outer<int>::Inner``) is left as written.
+    """
+    bare = _strip_generics(name)
+    if bare != name and text.endswith(name):
+        text = text[: len(text) - len(name)] + bare
+    return bare, text
+
+
+# Standard factories that construct their one template type argument
+# (``std::make_unique<Graph>(reg)`` builds a ``Graph``). A same-named
+# function in any other namespace is ordinary code, so both parts of
+# the name must match.
+_CPP_FACTORY_NAMESPACES = frozenset({"std", "absl"})
+_CPP_FACTORY_NAMES = frozenset({"make_unique", "make_shared"})
+_CPP_CONSTRUCTIBLE_TYPES = frozenset(
+    {"type_identifier", "qualified_identifier", "template_type"}
+)
+
+
+def _cpp_factory_type(callee: Node) -> Node | None:
+    """The type a ``std::make_unique<T>``-shaped callee constructs.
+
+    Args:
+        callee: A C++ call's ``function`` node.
+
+    Returns:
+        The node naming ``T``, or ``None`` when the callee isn't a
+        ``std``/``absl`` ``make_unique``/``make_shared`` with exactly
+        one class-shaped type argument (``make_unique<int>`` and the
+        array form ``make_unique<T[]>`` construct no class).
+    """
+    if callee.type != "qualified_identifier":
+        return None
+    scope = callee.child_by_field_name("scope")
+    func = callee.child_by_field_name("name")
+    if (
+        scope is None
+        or func is None
+        or func.type != "template_function"
+        or _text(scope) not in _CPP_FACTORY_NAMESPACES
+        or _text(func.child_by_field_name("name")) not in _CPP_FACTORY_NAMES
+    ):
+        return None
+    targs = func.child_by_field_name("arguments")
+    named = [a for a in targs.named_children if not a.is_extra]
+    if (
+        len(named) != 1
+        or named[0].type != "type_descriptor"
+        or named[0].child_by_field_name("declarator") is not None
+    ):
+        return None
+    made = named[0].child_by_field_name("type")
+    if made is None or made.type not in _CPP_CONSTRUCTIBLE_TYPES:
+        return None
+
+    return made
 
 
 def _rust_error_attribute_spans(root: Node) -> list[tuple[int, int]]:
@@ -1563,6 +1974,44 @@ def _rust_skip_generic_args(children: list[Node], j: int) -> int:
 # parameters (``|a, b| ..``) and generic arguments (``Map::<K, V>``)
 # both put their commas at the argument list's own depth.
 _RUST_UNCOUNTABLE_ARG_TOKENS = frozenset({"|", "||", "<", ">", "<<", ">>"})
+
+
+# Argument shapes that unpack a sequence or mapping at the call site
+# (``f(*xs)``, ``f(**kw)``, ``f(...xs)``, ``f(xs...)``, ``f(args...)``):
+# how many arguments they supply is only known at run time.
+_UNPACKING_ARGUMENT_TYPES = frozenset(
+    {
+        "list_splat",
+        "dictionary_splat",
+        "spread_element",
+        "variadic_argument",
+        "parameter_pack_expansion",
+    }
+)
+
+
+def _call_arg_count(args_node: Node | None) -> int | None:
+    """How many arguments a call writes, or ``None`` when unknowable.
+
+    Comments are named "extra" nodes that can sit between arguments
+    (``undefined, // modelId``), so they don't count. An unpacking
+    argument makes the count unknowable, and ``None`` is the value the
+    resolver's arity checks read as "no signal" rather than as a
+    mismatch.
+
+    Args:
+        args_node: The call's captured argument list, if any.
+
+    Returns:
+        The written argument count, or ``None``.
+    """
+    if args_node is None:
+        return None
+    args = [a for a in args_node.named_children if not a.is_extra]
+    if any(a.type in _UNPACKING_ARGUMENT_TYPES for a in args):
+        return None
+
+    return len(args)
 
 
 def _rust_token_arg_count(args: Node) -> int | None:
@@ -2436,18 +2885,67 @@ def _callee_parts(node: Node) -> tuple[str, str, str | None]:
             return _callee_parts(inner)
     name_node = _callee_name_node(node)
     if name_node is not None:
-        name = _canonical_member_name(name_node)
-        for field_name in _RECEIVER_FIELDS:
-            recv_node = node.child_by_field_name(field_name)
-            if recv_node is not None:
-                receiver = _canonical_expr(recv_node)
-                joiner = _joiner_text(node, recv_node, name_node)
-                return receiver + joiner + name, name, receiver
-        return _text(node), name, None
+        text, name, receiver = _access_parts(node, name_node)
+        flat = _cpp_flat_qualifier(node)
+        if flat is not None:
+            name, receiver = flat
+        return text, name, receiver
     text = _text(node)
     if node.named_child_count == 0:
         return text, text, None
     return text, *_split_callee_text(text)
+
+
+def _access_parts(node: Node, name_node: Node) -> tuple[str, str, str | None]:
+    """(text, name, receiver) of an access-shaped callee."""
+    name = _canonical_member_name(name_node)
+    for field_name in _RECEIVER_FIELDS:
+        recv_node = node.child_by_field_name(field_name)
+        if recv_node is not None:
+            receiver = _canonical_expr(recv_node)
+            joiner = _joiner_text(node, recv_node, name_node)
+            return receiver + joiner + name, name, receiver
+    return _text(node), name, None
+
+
+def _cpp_flat_qualifier(node: Node) -> tuple[str, str | None] | None:
+    """(name, receiver) of a C++ path with 2+ scopes or a leading ``::``.
+
+    tree-sitter-cpp nests ``qualified_identifier`` to the right:
+    ``a::b::Name`` is scope ``a`` with name ``b::Name``, and ``::t::G``
+    has no scope at all, just name ``t::G``. Read field by field, that
+    named the call ``b::Name`` (no symbol has that name, so it never
+    resolved) and kept one scope out of two. Rust's paths nest to the
+    left and never had the problem. This walks the nested names down
+    to the last one and returns every scope as the receiver
+    (``a::b``), the shape a one-scope ``a::Name`` already has.
+
+    Args:
+        node: A callee or type node.
+
+    Returns:
+        ``None`` unless ``node`` is a C++ ``qualified_identifier`` with
+        a nested qualifier or no scope; the one-scope shape is already
+        split right.
+    """
+    if node.type != "qualified_identifier":
+        return None
+    scope = node.child_by_field_name("scope")
+    inner = node.child_by_field_name("name")
+    if inner is None or (
+        scope is not None and inner.type != "qualified_identifier"
+    ):
+        return None
+    scopes = [] if scope is None else [_canonical_expr(scope)]
+    while inner.type == "qualified_identifier":
+        nested_scope = inner.child_by_field_name("scope")
+        nested_name = inner.child_by_field_name("name")
+        if nested_name is None:
+            return None
+        if nested_scope is not None:
+            scopes.append(_canonical_expr(nested_scope))
+        inner = nested_name
+    return _canonical_member_name(inner), "::".join(scopes) or None
 
 
 _TEMPLATE_NAME_TYPES = frozenset({"template_method", "template_function"})
@@ -2639,6 +3137,39 @@ def _heritage_java(caps: dict[str, list[Node]]) -> list[tuple[Node, str]]:
     return out
 
 
+def _heritage_kotlin(specifiers: Node) -> list[tuple[Node, str]]:
+    """Walk Kotlin ``delegation_specifiers`` into ``(type, relation)``.
+
+    A superclass is written as a constructor call (``: Base(p)``,
+    a ``constructor_invocation``) and an interface bare (``: Iface``)
+    or delegated (``: Iface by impl``). A class has at most one
+    superclass, so the shape alone gives the relation. An interface's
+    supertypes are interfaces it extends, never implements.
+    """
+    owner = specifiers.parent
+    is_interface = owner is not None and any(
+        child.type == "interface" for child in owner.children
+    )
+    out: list[tuple[Node, str]] = []
+    for spec_node in specifiers.named_children:
+        if spec_node.type != "delegation_specifier":
+            continue
+        inner = (
+            spec_node.named_children[0] if spec_node.named_children else None
+        )
+        if inner is None:
+            continue
+        relation = "implements"
+        if inner.type == "constructor_invocation":
+            relation = "extends"
+        if inner.type in ("constructor_invocation", "explicit_delegation"):
+            inner = _first_child_of_type(inner, "user_type")
+        if inner is None or inner.type != "user_type":
+            continue
+        out.append((inner, "extends" if is_interface else relation))
+    return out
+
+
 def _heritage_cpp(clause_node: Node) -> list[tuple[Node, str]]:
     """Walk a C++ ``base_class_clause`` into ``(type_node, "extends")``.
 
@@ -2779,6 +3310,9 @@ def _heritage_entries(
         return _heritage_ts(heritage) if heritage is not None else []
     if language == "java":
         return _heritage_java(caps)
+    if language == "kotlin":
+        heritage = _one(caps, "heritage")
+        return _heritage_kotlin(heritage) if heritage is not None else []
     if language == "cpp":
         heritage = _one(caps, "heritage")
         return _heritage_cpp(heritage) if heritage is not None else []
@@ -2798,6 +3332,10 @@ def _heritage_name_parts(node: Node) -> tuple[str, str, str | None]:
     argument list already is).
     """
     text = _text(node)
+    flat = _cpp_flat_qualifier(node)
+    if flat is not None:
+        name, receiver = flat
+        return text, _strip_generics(name), receiver
     name, receiver = _split_callee_text(text)
     return text, name, receiver
 
@@ -3516,6 +4054,7 @@ _ENV_READ_DISPATCH: dict[
     "typescript": _env_read_js,
     "tsx": _env_read_js,
     "java": _env_read_java,
+    "kotlin": _env_read_java,
     "rust": _env_read_rust,
     "go": _env_read_go,
     "c": _env_read_c_cpp,
@@ -3647,6 +4186,222 @@ def _collect_enum_variants(spec: LanguageSpec, root: Node) -> list[str]:
         if owner is not None and variant is not None:
             out.append(f"{_text(owner)}::{_text(variant)}")
     return out
+
+
+# Nodes a namespace-scope declaration can sit in: the file, a
+# namespace body, an ``extern "C++" { }`` block, or a preprocessor
+# conditional. A class body (``field_declaration_list``) is not one:
+# ``using Base::f;`` there is about members, not namespaces.
+_CPP_NAMESPACE_SCOPE_NODES = frozenset(
+    {
+        "translation_unit",
+        "namespace_definition",
+        "declaration_list",
+        "linkage_specification",
+        "preproc_if",
+        "preproc_ifdef",
+        "preproc_else",
+        "preproc_elif",
+        "preproc_elifdef",
+    }
+)
+
+
+def _collect_cpp_using(root: Node) -> list[str]:
+    """``"<namespace>=<path>"`` for every namespace-scope C++
+    ``using``-declaration (see ``FileMap.cpp_using``).
+
+    ``using namespace x;`` shares the node type but names no single
+    symbol, so it's skipped, as is anything inside a class body.
+    """
+    out: list[str] = []
+    _walk_cpp_using(root, (), out)
+    return out
+
+
+def _walk_cpp_using(
+    node: Node, chain: tuple[str, ...], out: list[str]
+) -> None:
+    """Append ``node``'s using-declarations, in source order."""
+    for child in node.named_children:
+        if child.type == "using_declaration":
+            path = _cpp_using_path(child)
+            if path is not None:
+                out.append(f"{'.'.join(chain)}={path}")
+        elif child.type == "namespace_definition":
+            name = child.child_by_field_name("name")
+            inner = chain
+            if name is not None:
+                inner = chain + tuple(
+                    seg.strip()
+                    for seg in _text(name).split("::")
+                    if seg.strip()
+                )
+            _walk_cpp_using(child, inner, out)
+        elif child.type in _CPP_NAMESPACE_SCOPE_NODES:
+            _walk_cpp_using(child, chain, out)
+
+
+def _cpp_using_path(node: Node) -> str | None:
+    """``a::b::Name`` (or ``::a::Name``) of a ``using a::b::Name;``.
+
+    ``None`` for ``using namespace x;`` and for a bare ``using x;``.
+    Template arguments come off each scope, since qualnames carry none.
+    """
+    target = next(
+        (c for c in node.named_children if c.type == "qualified_identifier"),
+        None,
+    )
+    if target is None or any(c.type == "namespace" for c in node.children):
+        return None
+    segments: list[str] = []
+    rooted = target.child_by_field_name("scope") is None
+    current: Node | None = target
+    while current is not None and current.type == "qualified_identifier":
+        scope = current.child_by_field_name("scope")
+        if scope is not None:
+            segments.append(_cpp_scope_text(scope))
+        current = current.child_by_field_name("name")
+    if current is None or not all(segments):
+        return None
+    segments.append(_canonical_member_name(current))
+    path = "::".join(segments)
+
+    return f"::{path}" if rooted else path
+
+
+def _cpp_scope_text(scope: Node) -> str:
+    """One scope of a C++ path, without template arguments."""
+    if scope.type == "template_type":
+        name = scope.child_by_field_name("name")
+        return _text(name) if name is not None else ""
+
+    return _text(scope).strip()
+
+
+# Where a C++ prototype can sit: namespace, class, template, linkage
+# and preprocessor scope. A function body is never walked, since a
+# local ``Graph g(ops);`` parses as a function declaration.
+_CPP_DECL_SCOPE_NODES = frozenset(
+    {
+        "translation_unit",
+        "declaration_list",
+        "field_declaration_list",
+        "linkage_specification",
+        "template_declaration",
+        "preproc_if",
+        "preproc_ifdef",
+        "preproc_else",
+        "preproc_elif",
+        "preproc_elifdef",
+    }
+)
+_CPP_DECLARATOR_WRAPPERS = frozenset(
+    {"pointer_declarator", "reference_declarator", "attributed_declarator"}
+)
+_CPP_TEMPLATE_ARGS = re.compile(r"<[^<>]*(?:<[^<>]*>[^<>]*)*>")
+
+
+def _collect_cpp_decls(root: Node) -> list[str]:
+    """``"<qualname>/<count>=<defaults>"`` for every C++ function
+    prototype (see ``FileMap.cpp_decls``), in source order."""
+    out: list[str] = []
+    _walk_cpp_decls(root, (), out)
+    return out
+
+
+def _walk_cpp_decls(
+    node: Node, chain: tuple[str, ...], out: list[str]
+) -> None:
+    """Append the prototypes under ``node``, whose scope is ``chain``."""
+    for child in node.named_children:
+        kind = child.type
+        if kind == "namespace_definition":
+            name = child.child_by_field_name("name")
+            body = child.child_by_field_name("body")
+            if body is not None:
+                inner = chain + (_cpp_decl_path(name) if name else ())
+                _walk_cpp_decls(body, inner, out)
+        elif kind in ("class_specifier", "struct_specifier"):
+            name = child.child_by_field_name("name")
+            body = child.child_by_field_name("body")
+            if name is not None and body is not None:
+                _walk_cpp_decls(body, chain + _cpp_decl_path(name), out)
+        elif kind in ("declaration", "field_declaration"):
+            out.extend(_cpp_prototypes(child, chain))
+        elif kind in _CPP_DECL_SCOPE_NODES:
+            _walk_cpp_decls(child, chain, out)
+
+
+def _cpp_prototypes(decl: Node, chain: tuple[str, ...]) -> list[str]:
+    """One entry per function declarator of a (field) declaration.
+
+    The count is what ``_params_c`` counts for a definition of the
+    same function, so the two join on equal terms; the defaults are
+    its trailing defaulted parameters.
+    """
+    found: list[str] = []
+    for declarator in decl.children_by_field_name("declarator"):
+        func = _cpp_function_declarator(declarator)
+        if func is None:
+            continue
+        name = func.child_by_field_name("declarator")
+        params_node = func.child_by_field_name("parameters")
+        if (
+            name is None
+            or params_node is None
+            or name.type == "parenthesized_declarator"
+        ):
+            # ``int (*fp)(int);`` declares a pointer, not a function.
+            continue
+        path = _cpp_decl_path(name)
+        if not path:
+            continue
+        params = [p for p in _params_c(params_node) if not p.variadic]
+        defaults = 0
+        for param in reversed(params):
+            if not param.has_default:
+                break
+            defaults += 1
+        qualname = ".".join(chain + path)
+        found.append(f"{qualname}/{len(params)}={defaults}")
+    return found
+
+
+def _cpp_function_declarator(node: Node) -> Node | None:
+    """The ``function_declarator`` a declaration's declarator wraps.
+
+    ``None`` for a declarator that isn't a function's.
+    """
+    current: Node | None = node
+    while current is not None and current.type in _CPP_DECLARATOR_WRAPPERS:
+        inner = current.child_by_field_name("declarator")
+        if inner is None:
+            inner = next(
+                (c for c in current.named_children if "declarator" in c.type),
+                None,
+            )
+        current = inner
+    if current is not None and current.type == "function_declarator":
+        return current
+
+    return None
+
+
+def _cpp_decl_path(name: Node) -> tuple[str, ...]:
+    """A written C++ name as qualname segments, template arguments off.
+
+    ``a::b`` (a nested namespace, or an out-of-line ``Outer::Inner``)
+    becomes two segments, as the resolver reads a qualname.
+    """
+    text = _text(name)
+    previous = None
+    while previous != text:
+        previous, text = text, _CPP_TEMPLATE_ARGS.sub("", text)
+
+    return tuple(
+        seg.strip() for seg in text.lstrip(":").split("::") if seg.strip()
+    )
 
 
 def _collect_type_aliases(spec: LanguageSpec, root: Node) -> list[str]:

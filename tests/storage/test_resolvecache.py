@@ -410,7 +410,7 @@ def test_gate_widens_for_a_new_constructor_on_an_existing_class(
     """Constructor-collapse gap (dependency audit): adding
     ``__init__`` to a class never changes the class's own bare name, so
     a caller's already-cached ``Widget()`` edge doesn't literally
-    mention ``__init__`` anywhere. ``_constructor_of`` would now find
+    mention ``__init__`` anywhere. ``_constructors_of`` would now find
     the new ``__init__`` and add a second edge to it, so the caller must
     be marked dirty even though nothing about its own call site's name
     changed -- ``name_delta`` folds the class's own name into
@@ -619,3 +619,122 @@ def test_gate_refuses_a_torn_pair_of_cache_files(
     (root / "b.py").write_text(SRC["b.py"] + "# just a comment\n")
 
     assert _build(root) is None
+
+
+# A one-scope C++ call whose result depends on repo-wide inputs no
+# name delta sees: which names are namespaces, and what a namespace's
+# ``using``-declarations re-export.
+CPP_SRC = {
+    "tsl.cc": "namespace tsl { int Status(int s) { return s; } }\n",
+    "other.cc": "namespace other { int Status(int s) { return s; } }\n",
+    "user.cc": (
+        "namespace tensorflow {\n"
+        "int Use() { return tensorflow::Status(1); }\n"
+        "}\n"
+    ),
+}
+_REEXPORT = "namespace tensorflow {\nusing tsl::Status;\n}\n"
+
+
+def test_gate_fires_on_a_cpp_body_only_edit(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CPP_SRC)
+    (root / "user.cc").write_text(CPP_SRC["user.cc"] + "// a comment\n")
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"user.cc"}
+
+
+def test_gate_refuses_when_a_cpp_using_declaration_changes(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo({**CPP_SRC, "helper.h": "// empty\n"})
+    (root / "helper.h").write_text(_REEXPORT)
+    assert _build(root) is None
+
+
+def test_gate_refuses_when_a_cpp_namespace_appears(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CPP_SRC)
+    (root / "other.cc").write_text(
+        CPP_SRC["other.cc"] + "namespace brandnew { int G() { return 0; } }\n"
+    )
+    assert _build(root) is None
+
+
+@pytest.mark.parametrize(
+    ("target", "text"),
+    [
+        ("helper.h", _REEXPORT),
+        (
+            "tsl.cc",
+            CPP_SRC["tsl.cc"]
+            + "namespace tensorflow { int Other() { return 0; } }\n",
+        ),
+    ],
+)
+def test_cpp_namespace_inputs_keep_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory, target: str, text: str
+) -> None:
+    root = make_mapped_repo({**CPP_SRC, "helper.h": "// empty\n"})
+    (root / target).write_text(text)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+
+
+# A prototype's defaults change what calls named like it resolve to,
+# though no symbol changes: the header holds only the declaration.
+DECL_SRC = {
+    "shape.h": "namespace tf {\nint GetType(int a, int b);\n}\n",
+    "shape.cc": "namespace tf {\nint GetType(int a, int b) { return a; }\n}\n",
+    "user.cc": "namespace app {\nint Use() { return GetType(1); }\n}\n",
+    "other.cc": "namespace app {\nint Other() { return Use(); }\n}\n",
+}
+_DEFAULTED = "namespace tf {\nint GetType(int a, int b = 0);\n}\n"
+
+
+def test_gate_widens_to_callers_when_a_prototype_default_changes(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(DECL_SRC)
+    (root / "shape.h").write_text(_DEFAULTED)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"shape.h", "user.cc"}
+
+
+def test_gate_fires_on_a_header_body_only_edit(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(DECL_SRC)
+    (root / "shape.h").write_text(DECL_SRC["shape.h"] + "// a comment\n")
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"shape.h"}
+
+
+def test_prototype_default_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(DECL_SRC)
+    (root / "shape.h").write_text(_DEFAULTED)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    assert ("user.cc::app.Use", "shape.cc::tf.GetType") in {
+        (ids[e["caller"]], ids[e["callee"]]) for e in incremental["edges"]
+    }

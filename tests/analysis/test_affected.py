@@ -172,6 +172,41 @@ def test_tiers_direct_transitive_import(
     assert "test_unrelated.py" not in out
 
 
+def _kotlin_extensions(value: int) -> str:
+    return (
+        "package boot\n\nfun runApplication(vararg args: String): Int {\n"
+        f"    return {value}\n}}\n"
+    )
+
+
+def test_kotlin_change_impacts_the_kotlin_test_calling_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    ext = "core/src/main/kotlin/boot/SpringApplicationExtensions.kt"
+    root = _repo(
+        tmp_path,
+        {
+            ext: _kotlin_extensions(1),
+            "core/src/test/kotlin/boot/ExtensionsTests.kt": (
+                "package boot\n\nclass ExtensionsTests {\n"
+                "    @Test\n"
+                "    fun `runs the application`() {\n"
+                "        runApplication()\n    }\n}\n"
+            ),
+            "core/src/test/kotlin/boot/OtherTests.kt": (
+                "package boot\n\nclass OtherTests {\n"
+                "    @Test\n    fun other() {}\n}\n"
+            ),
+        },
+    )
+    (root / ext).write_text(_kotlin_extensions(2))
+
+    assert cli.main(["affected", "--root", str(root)]) == 1
+    out = capsys.readouterr().out
+    assert "[direct] core/src/test/kotlin/boot/ExtensionsTests.kt" in out
+    assert "OtherTests.kt" not in out
+
+
 def test_node_builtin_module_name_collision_not_falsely_impacted(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:

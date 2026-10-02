@@ -4,10 +4,11 @@
 uv tool install dekko     # or: pip install dekko / pipx install dekko
 ```
 
-The default install bundles nine Tier-1 languages (Python, Rust, C, C++,
-JavaScript, TypeScript/TSX, Go, Java) as offline grammar packages — no
-network call at parse time. For ~55 additional languages (parsed
-generically), add the extra:
+The default install bundles ten Tier-1 languages (Python, Rust, C, C++,
+JavaScript, TypeScript/TSX, Go, Java, Kotlin) as offline grammar packages — no
+network call at parse time. For 43 additional languages (names and
+calls, read through one measured rule set per language; the
+[list](cli.md#language-support) has each one's status), add the extra:
 
 ```sh
 pip install dekko[all]

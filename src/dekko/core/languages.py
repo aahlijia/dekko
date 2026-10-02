@@ -1,12 +1,15 @@
 """Language registry: extensions, grammars, and tree-sitter queries.
 
 Tier-1 languages get dedicated queries with full parameter/return-type
-fidelity. Tier-2 languages (everything else in the language pack) are
-handled by the generic fallback extractor and only need a grammar name.
+fidelity. Tier-2 languages are read by the generic extractor, each
+through its own row in ``tier2.TIER2_SPECS``; here they need only an
+extension and a grammar name.
 """
 
 import hashlib
 from dataclasses import dataclass, field, fields
+
+from dekko.core.tier2 import TIER2_SPECS, canonical
 
 
 @dataclass(frozen=True)
@@ -552,8 +555,14 @@ CPP = LanguageSpec(
   name: (type_identifier) @classname
   body: (field_declaration_list)) @classdef
 """,
+    # ``new_expression``'s type alternation leaves out primitive and
+    # sized types (``new int[5]``): they construct no class.
     call_query="""
 (call_expression function: (_) @callee arguments: (_)? @args) @call
+
+(new_expression
+  type: [(type_identifier) (qualified_identifier) (template_type)] @callee
+  arguments: (_)? @args) @call
 """,
     import_query="""
 (preproc_include path: (_) @module)
@@ -1359,6 +1368,99 @@ JAVA = LanguageSpec(
 """,
 )
 
+# Kotlin runs on the tree-sitter-grammars ``tree-sitter-kotlin`` wheel,
+# not the language pack's Kotlin grammar: the pack's declarations have
+# no field names at all, so nothing can key on a ``name``. This one
+# fields ``name`` on every class, object and function declaration.
+#
+# Constructors borrow the enclosing class's own ``name`` as ``@name``,
+# so a primary or secondary constructor of ``Foo`` becomes the method
+# ``Foo.Foo``, the same shape as a Java constructor. That is what the
+# resolver's class-named constructor pick keys on: ``Foo(1)`` resolves
+# to the class, then its argument count picks the overload. Both kinds
+# are symbols or neither would be: with only secondary ones, a call to
+# the primary constructor would be credited to a secondary one.
+#
+# ``companion_object`` is deliberately not a container: callers write
+# ``Foo.create()``, never ``Foo.Companion.create()``, so a companion's
+# members qualify as ``Foo.create``.
+#
+# Calls are walked by ``extractor._collect_kotlin_calls``, not through
+# the shared ``@callee`` path: Kotlin's ``navigation_expression`` has
+# no fields, and a trailing lambda wraps its call in a second
+# ``call_expression`` that must not count as another call. An object
+# expression with a superclass (``object : Base(x) { ... }``) constructs
+# ``Base``, the way Java's ``new Base(x) { ... }`` does.
+KOTLIN = LanguageSpec(
+    name="kotlin",
+    grammar="kotlin",
+    extensions=(".kt", ".kts"),
+    definition_query="""
+(function_declaration
+  name: (identifier) @name
+  (function_value_parameters) @params
+  .
+  [(user_type) (nullable_type) (function_type)]? @ret) @def
+
+(class_declaration
+  name: (identifier) @name
+  (primary_constructor (class_parameters) @params) @def)
+
+(class_declaration
+  name: (identifier) @name
+  (class_body
+    (secondary_constructor (function_value_parameters) @params) @def))
+
+(class_declaration
+  name: (identifier) @name
+  (enum_class_body
+    (secondary_constructor (function_value_parameters) @params) @def))
+
+(class_declaration name: (identifier) @classname) @classdef
+(object_declaration name: (identifier) @classname) @classdef
+""",
+    call_query="""
+(call_expression) @call
+(object_literal
+  (delegation_specifiers
+    (delegation_specifier (constructor_invocation) @ctor)))
+""",
+    import_query="""
+(import (qualified_identifier) @module (identifier)? @alias)
+""",
+    container_types={
+        "class_declaration": "name",
+        "object_declaration": "name",
+    },
+    method_containers=("class_declaration", "object_declaration"),
+    param_style="kotlin",
+    function_boundary_types=(
+        "function_declaration",
+        "secondary_constructor",
+        "lambda_literal",
+        "anonymous_function",
+    ),
+    # Kotlin writes a superclass as a constructor call (``: Base(p)``)
+    # and an interface bare (``: Iface``), and a class has at most one
+    # superclass, so the clause says which relation each entry is.
+    heritage_query="""
+(class_declaration
+  name: (identifier) @classname
+  (delegation_specifiers) @heritage) @classdef
+
+(object_declaration
+  name: (identifier) @classname
+  (delegation_specifiers) @heritage) @classdef
+""",
+    # ``System.getenv("X")``: Kotlin reads the environment through the
+    # same Java API, so ``extractor._env_read_java`` checks the names.
+    env_read_query="""
+(call_expression
+  (navigation_expression (identifier) @sys (identifier) @fn)
+  (value_arguments . (value_argument . (string_literal) @key))) @call
+""",
+)
+
 # ``RUST``, ``GO``, and ``C`` above deliberately leave ``throw_query``/
 # ``catch_query`` at their default ``None`` — a **permanent** exclusion,
 # not a placeholder awaiting a future pass (contrast with
@@ -1378,6 +1480,7 @@ TIER1_SPECS: tuple[LanguageSpec, ...] = (
     TSX,
     GO,
     JAVA,
+    KOTLIN,
 )
 
 EXTENSION_MAP: dict[str, LanguageSpec] = {
@@ -1469,9 +1572,37 @@ _CALLEE_TEXT_CANONICAL_VERSION = 1
 # ``.dekko`` cache built before the change keeps serving them.
 _RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION = 1
 
+# Bumped whenever the extractor changes how it reads a C++
+# construction outside ``call_query``: ``std::make_unique<T>(..)`` /
+# ``make_shared`` emit a second call naming ``T``, ``new T`` with no
+# argument list counts zero arguments, a constructed type's template
+# arguments come off its name, and ``= delete`` functions are no
+# longer symbols. Same blind spot as the constants above.
+_CPP_CONSTRUCTION_VERSION = 1
+
+# Bumped whenever the extractor changes how it splits a C++ path with
+# more than one scope, or one written from the root (``a::b::Name``,
+# ``::ns::Name``), into a name and a receiver. That walk lives in the
+# extractor, outside any query. Same blind spot as the constants above.
+_CPP_QUALIFIED_PATH_VERSION = 1
+
+# Bump when the extractor changes how it records C++ namespace-scope
+# ``using``-declarations (``FileMap.cpp_using``). Another tree walk
+# outside any query, so the spec loop below can't see it.
+_CPP_USING_VERSION = 1
+
+# Bump when the extractor changes how it records C++ function
+# prototypes (``FileMap.cpp_decls``). The same kind of tree walk.
+_CPP_DECLS_VERSION = 1
+
+# Bump when the Tier-2 engine (``extractor_generic.py``) changes what
+# it yields for an unchanged row. The rows themselves are hashed below,
+# so editing one needs no bump.
+_TIER2_ENGINE_VERSION = 1
+
 
 def spec_fingerprint() -> str:
-    """Hash every Tier-1 extraction spec into one invalidation key.
+    """Hash every extraction spec, both tiers, into one invalidation key.
 
     Captures everything that changes what ``extractor.py`` pulls out
     of a file — queries, container/method-container types, parameter
@@ -1481,10 +1612,16 @@ def spec_fingerprint() -> str:
     ``_HEADER_DISPATCH_HEURISTIC_VERSION``,
     ``_RUST_HERITAGE_IMPL_SUBTYPE_RECOVERY_VERSION``,
     ``_RUST_MACRO_CALL_RECOVERY_VERSION``,
-    ``_CALLEE_TEXT_CANONICAL_VERSION`` and
-    ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION``, which each cover
+    ``_CALLEE_TEXT_CANONICAL_VERSION``,
+    ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION``,
+    ``_CPP_CONSTRUCTION_VERSION``, ``_CPP_QUALIFIED_PATH_VERSION``,
+    ``_CPP_USING_VERSION``, ``_CPP_DECLS_VERSION`` and
+    ``_TIER2_ENGINE_VERSION``,
+    which each cover
     one piece of dispatch/recovery logic that lives outside any
-    ``LanguageSpec`` (see those constants' own comments). Used to
+    ``LanguageSpec`` (see those constants' own comments), plus every
+    Tier-2 row (``tier2.TIER2_SPECS``), so editing a row re-extracts
+    that language's files the same way editing a query does. Used to
     invalidate a stale ``.dekko`` cache entry or flag a stale
     ``map.json`` even when the released package version string hasn't
     changed — a dev iteration or hotfix that reuses the same version,
@@ -1502,6 +1639,11 @@ def spec_fingerprint() -> str:
         f"callee_text_canonical={_CALLEE_TEXT_CANONICAL_VERSION}",
         "rust_error_attribute_recovery="
         f"{_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION}",
+        f"cpp_construction={_CPP_CONSTRUCTION_VERSION}",
+        f"cpp_qualified_path={_CPP_QUALIFIED_PATH_VERSION}",
+        f"cpp_using={_CPP_USING_VERSION}",
+        f"cpp_decls={_CPP_DECLS_VERSION}",
+        f"tier2_engine={_TIER2_ENGINE_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):
@@ -1509,20 +1651,30 @@ def spec_fingerprint() -> str:
             if isinstance(value, dict):
                 value = tuple(sorted(value.items()))
             parts.append(f"{f.name}={value!r}")
-    canonical = "\x1f".join(parts)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    parts.extend(
+        f"tier2:{grammar}={canonical(TIER2_SPECS[grammar])!r}"
+        for grammar in sorted(TIER2_SPECS)
+    )
+    joined = "\x1f".join(parts)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 # Tier-2: extension → tree-sitter-language-pack grammar name. These are
-# handled by the generic extractor (names + calls, raw parameter text).
-# Grammars are downloaded on demand by the language pack on first use.
+# handled by the generic extractor (names + calls, raw parameter text),
+# each through its own row in ``tier2.TIER2_SPECS``. An extension
+# belongs here only if its grammar has a row, and a grammar gets a row
+# only after the row is measured on a real repository
+# (``benchmarks/tier2_corpus.py``). Grammars are downloaded on demand
+# by the language pack on first use.
+#
+# Not here: ``.mli``. An OCaml interface file restates the signatures
+# its ``.ml`` defines, so indexing it would give every function a twin
+# and make every call to one ambiguous.
 TIER2_GRAMMARS: dict[str, str] = {
     ".rb": "ruby",
     ".rake": "ruby",
     ".php": "php",
     ".cs": "csharp",
-    ".kt": "kotlin",
-    ".kts": "kotlin",
     ".swift": "swift",
     ".scala": "scala",
     ".sc": "scala",
@@ -1539,12 +1691,9 @@ TIER2_GRAMMARS: dict[str, str] = {
     ".erl": "erlang",
     ".hrl": "erlang",
     ".ml": "ocaml",
-    ".mli": "ocaml_interface",
     ".clj": "clojure",
     ".gleam": "gleam",
     ".nim": "nim",
-    ".groovy": "groovy",
-    ".gradle": "groovy",
     ".sol": "solidity",
     ".sh": "bash",
     ".bash": "bash",
@@ -1570,12 +1719,9 @@ TIER2_GRAMMARS: dict[str, str] = {
     ".cr": "crystal",
     ".hx": "haxe",
     ".gd": "gdscript",
-    ".mojo": "mojo",
     ".nix": "nix",
     ".bzl": "starlark",
     ".cmake": "cmake",
-    ".vue": "vue",
-    ".svelte": "svelte",
 }
 
 # Extensions dekko recognizes as source code but has no grammar for at
@@ -1590,8 +1736,44 @@ TIER2_GRAMMARS: dict[str, str] = {
 # are confirmed; it intentionally does not attempt to enumerate every non-code
 # extension (``.md``, ``.json``, images, ...), which stay silently ignored as
 # before.
+#
+# A language also belongs here when a grammar exists and yields nothing
+# usable. Groovy is the case: the language pack's grammar is a token
+# tree with no declaration nodes, so it produced no symbols and recorded
+# whole statements as callee names; the only Groovy wheel on PyPI is a
+# fork of the Java grammar that reads a Spock feature method
+# (``def "does a thing"() { ... }``) as a constructor named ``def``. A
+# language that looks supported carries no caveat, so a disclosed gap is
+# the more accurate answer until a grammar reads idiomatic Groovy.
+#
+# Vue and Svelte: the grammar returns a component's ``<script>`` block
+# as one raw-text node, so nothing in it is parsed. Mojo: the grammar
+# predates the language's current syntax and fails on most files of a
+# real Mojo repository.
 KNOWN_UNSUPPORTED: dict[str, str] = {
     ".astro": "astro",
+    ".groovy": "groovy",
+    ".mojo": "mojo",
+    ".svelte": "svelte",
+    ".vue": "vue",
+}
+
+# Build scripts: recognized, skipped, and counted apart from
+# ``KNOWN_UNSUPPORTED``. A Gradle script written in Groovy is
+# configuration. It calls the Gradle API and, now and then, the repo's
+# own build logic, never the product code a map is asked about, so
+# filing it as an unparsed language would append "this answer may be
+# incomplete" to every empty result in every Gradle-built repo. It gets
+# its own skip reason and its own line on the whole-repo reports
+# instead. ``.gradle.kts`` is not listed: its extension is ``.kts``, it
+# is Kotlin, and it is indexed as Kotlin.
+BUILD_SCRIPTS: dict[str, str] = {
+    ".gradle": "gradle",
+}
+
+# How each build-script language reads in a sentence.
+_BUILD_SCRIPT_LABELS: dict[str, str] = {
+    "gradle": "Gradle",
 }
 
 
@@ -1651,3 +1833,49 @@ def known_unsupported_language(filename: str) -> str | None:
         return None
 
     return KNOWN_UNSUPPORTED.get(filename[dot:].lower())
+
+
+def build_script_language(filename: str) -> str | None:
+    """Return the build-script language of a filename, or ``None``.
+
+    The twin of ``known_unsupported_language`` for ``BUILD_SCRIPTS``:
+    files dekko recognizes as build configuration and does not index.
+
+    Args:
+        filename: Any path or basename; only the extension is used.
+
+    Returns:
+        The build-script language's name (``"gradle"``), or ``None``.
+    """
+    dot = filename.rfind(".")
+    if dot == -1:
+        return None
+
+    return BUILD_SCRIPTS.get(filename[dot:].lower())
+
+
+def unindexed_reason(filename: str) -> str | None:
+    """Say why dekko recognizes a file and still does not index it.
+
+    For the messages that answer "why isn't this path in the map":
+    a lookup that misses on a build script or on a file in a
+    confirmed-unsupported language can name the cause instead of
+    reporting a bare miss.
+
+    Args:
+        filename: Any path or basename; only the extension is used.
+
+    Returns:
+        A clause that completes "``<path>`` is ...", or ``None`` when
+        the extension is in neither registry.
+    """
+    script = build_script_language(filename)
+    if script is not None:
+        label = _BUILD_SCRIPT_LABELS.get(script, script)
+        return f"a {label} build script; dekko does not index build scripts"
+
+    unsupported = known_unsupported_language(filename)
+    if unsupported is not None:
+        return f"{unsupported}; dekko has no parser for it"
+
+    return None

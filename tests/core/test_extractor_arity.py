@@ -7,6 +7,7 @@
 
 from pathlib import Path
 
+import pytest
 from tree_sitter import Node, Parser
 
 from dekko.core import languages
@@ -68,6 +69,20 @@ def test_python_typed_default_param_flagged() -> None:
     assert [(p.name, p.type, p.has_default) for p in params] == [
         ("a", "int", False),
         ("b", "int", True),
+    ]
+
+
+def test_python_typed_splat_params_flagged_variadic() -> None:
+    node = _params_node(
+        "python",
+        "def f(a: int, *parts: str, **kw: object): pass\n",
+        "parameters",
+    )
+    params = _params_python(node)
+    assert [(p.name, p.variadic) for p in params] == [
+        ("a", False),
+        ("*parts", True),
+        ("**kw", True),
     ]
 
 
@@ -171,6 +186,21 @@ def test_java_varargs_parameter_flagged_via_generic_parser() -> None:
     assert params[1].variadic is True
 
 
+def test_java_annotated_varargs_parameter_stays_variadic() -> None:
+    # The grammar can't parse an annotation before the ellipsis, so the
+    # parameter arrives as an ERROR node; it must still count as
+    # varargs, or a 2-argument call can't fit this 3-parameter method.
+    node = _params_node(
+        "java",
+        "class C { C(Ctx c, Map<String, Object> m,"
+        " Resolver @Nullable ... rs) {} }\n",
+        "formal_parameters",
+    )
+    params = _params_generic(node)
+    assert [p.variadic for p in params] == [False, False, True]
+    assert params[2].name == "Resolver @Nullable ... rs"
+
+
 # ---------------------------------------------------------------------
 # RawCall.arg_count per language.
 
@@ -267,3 +297,64 @@ def test_java_call_and_constructor_arg_count(tmp_path: Path) -> None:
     assert counts["foo"] == 3
     assert counts["bar"] == 0
     assert counts["Baz"] == 1
+
+
+@pytest.mark.parametrize(
+    ("rel", "code"),
+    [
+        (
+            "m.ts",
+            "function run(): void {\n"
+            "  new Err(\n    raw,\n    undefined, // modelId\n"
+            "    'cline',\n  );\n}\n",
+        ),
+        (
+            "M.java",
+            "class M {\n  void run() {\n"
+            '    new Err(raw, /* modelId */ null, "cline");\n  }\n}\n',
+        ),
+        (
+            "m.py",
+            "def run():\n    Err(\n        raw,  # the error\n"
+            "        None,\n        'cline',\n    )\n",
+        ),
+    ],
+)
+def test_comments_between_arguments_are_not_counted(
+    tmp_path: Path,
+    rel: str,
+    code: str,
+) -> None:
+    spec = languages.spec_for_path(rel)
+    assert spec is not None
+    (tmp_path / rel).write_text(code)
+    fm = extract_file(tmp_path, rel, spec)
+    counts = {c.name: c.arg_count for c in fm.calls}
+    assert counts["Err"] == 3
+
+
+@pytest.mark.parametrize(
+    ("rel", "code"),
+    [
+        ("m.py", "def run():\n    Err(*parts)\n    Err(a, **kw)\n"),
+        ("m.ts", "function run(): void {\n  new Err(...parts);\n}\n"),
+        ("m.js", "function run() {\n  Err(a, ...rest);\n}\n"),
+        ("m.go", "package m\n\nfunc run() {\n\tErr(parts...)\n}\n"),
+        (
+            "m.cpp",
+            "template <class... T> void run(T... a) { Err(a...); }\n",
+        ),
+    ],
+)
+def test_unpacking_argument_makes_the_count_unknown(
+    tmp_path: Path,
+    rel: str,
+    code: str,
+) -> None:
+    spec = languages.spec_for_path(rel)
+    assert spec is not None
+    (tmp_path / rel).write_text(code)
+    fm = extract_file(tmp_path, rel, spec)
+    counts = [c.arg_count for c in fm.calls if c.name == "Err"]
+    assert counts
+    assert all(n is None for n in counts)

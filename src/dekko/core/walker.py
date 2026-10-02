@@ -3,6 +3,7 @@
 import fnmatch
 import itertools
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -72,6 +73,17 @@ DEFAULT_MAX_FILE_SIZE = 1_000_000
 # derived from it.
 _MINIFIED_SAMPLE_LINES = 50
 _MINIFIED_AVG_LINE_LEN = 300
+
+# ``.scm`` is Scheme, and it is also what tree-sitter names its query
+# files (``highlights.scm``, ``injections.scm``). A query is a list of
+# patterns, so read as Scheme each pattern is a call to ``identifier``,
+# ``comment`` or ``string``. An editor's repo can hold over a hundred
+# of them. A capture (a closing bracket or quote, an optional
+# quantifier, then ``@name``) marks a query; a ``(define`` anywhere
+# marks real Scheme, which wins.
+_QUERY_EXTENSION = ".scm"
+_QUERY_CAPTURE = re.compile(r"[)\]\"][+*?]?\s*@[A-Za-z_]")
+_SCHEME_DEFINE = re.compile(r"^\s*\(define", re.MULTILINE)
 
 
 def _git_files(root: Path) -> list[str] | None:
@@ -308,6 +320,30 @@ def _looks_minified(path: Path) -> bool:
     return avg_len > _MINIFIED_AVG_LINE_LEN
 
 
+def _looks_like_tree_sitter_query(path: Path) -> bool:
+    """Whether a ``.scm`` file holds tree-sitter queries, not Scheme.
+
+    Returns ``False`` (never skip) on a read error, like
+    ``_looks_minified``.
+
+    Args:
+        path: Absolute path to a ``.scm`` file that has already passed
+            the size gate, so reading it whole is bounded.
+
+    Returns:
+        ``True`` when the file has a query capture and no ``define``.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    if _QUERY_CAPTURE.search(text) is None:
+        return False
+
+    return _SCHEME_DEFINE.search(text) is None
+
+
 def discover(
     root: Path,
     subpath: str | None = None,
@@ -346,6 +382,10 @@ def discover(
         map, and ``(path, reason)`` pairs for files that were skipped
         — including files in a confirmed-unsupported language (reason
         ``"no parser (<language>)"``, see ``languages.KNOWN_UNSUPPORTED``),
+        build scripts (reason ``"build script (<language>)"``, see
+        ``languages.BUILD_SCRIPTS``), ``.scm`` files that hold
+        tree-sitter queries rather than Scheme (reason
+        ``"tree-sitter query"``),
         files under a default-excluded directory that sometimes holds
         first-party code (reason ``"vendored (<dirname>)"``, see
         ``_VENDORED_DIRS`` — distinct from the purely-silent VCS/cache
@@ -446,20 +486,39 @@ def _classify(
         # a user debugging a vanished file knows where to look.
         return "ignored"
     if not languages.is_supported(rel):
-        unsupported = languages.known_unsupported_language(rel)
-        return f"no parser ({unsupported})" if unsupported else None
+        return _unindexed_verdict(rel)
     return _size_and_content_gate(root, rel, max_file_size)
+
+
+def _unindexed_verdict(rel: str) -> str | None:
+    """The skip reason for a file no registered language handles.
+
+    Args:
+        rel: Repo-relative candidate path.
+
+    Returns:
+        ``"build script (<language>)"`` for a build script,
+        ``"no parser (<language>)"`` for a confirmed-unsupported
+        language, or ``None`` for an extension dekko doesn't recognize
+        at all (non-code files, ignored without an entry).
+    """
+    script = languages.build_script_language(rel)
+    if script is not None:
+        return f"build script ({script})"
+
+    unsupported = languages.known_unsupported_language(rel)
+    return f"no parser ({unsupported})" if unsupported else None
 
 
 def _size_and_content_gate(
     root: Path, rel: str, max_file_size: int
 ) -> str | None:
-    """Final classification gate: file size, then minified-content check.
+    """Final classification gate: file size, then what the file holds.
 
     Only reached for a candidate that already passed every path-based
     gate (noise/vendored dirs, generated-name patterns, excludes,
     dekkoignore, and language support) — i.e. it's about to be marked
-    ``"ok"`` unless it trips one of these two checks. Split out of
+    ``"ok"`` unless it trips one of these checks. Split out of
     ``_classify`` to keep that function's branch count under the
     project's complexity cap.
 
@@ -470,6 +529,7 @@ def _size_and_content_gate(
 
     Returns:
         ``"too large"``, ``"generated"`` (minified-content heuristic),
+        ``"tree-sitter query"`` (a ``.scm`` file that is not Scheme),
         ``"ok"``, or ``None`` when the file can't be stat'd.
     """
     try:
@@ -480,4 +540,8 @@ def _size_and_content_gate(
         return "too large"
     if _looks_minified(root / rel):
         return "generated"
+    if rel.lower().endswith(_QUERY_EXTENSION):
+        if _looks_like_tree_sitter_query(root / rel):
+            return "tree-sitter query"
+
     return "ok"

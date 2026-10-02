@@ -75,7 +75,7 @@ def test_is_grammar_unavailable_message_matches_both_raise_sites() -> None:
     "missing grammar" its own summary/heuristic bucket, separate from
     a genuine parse failure."""
     assert is_grammar_unavailable_message(
-        "grammar 'kotlin' is not in the offline Tier-1 set; install "
+        "grammar 'scala' is not in the offline Tier-1 set; install "
         "the extras with `pip install dekko[all]`"
     )
     assert is_grammar_unavailable_message(

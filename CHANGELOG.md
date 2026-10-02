@@ -9,6 +9,660 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-10-02
+
+Closes round 1.6's fix cycle. The code is 1.5.13; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.6 evaluated 1.5.0 on
+seven real repositories and found three High issues (C++ constructors
+with no callers, Java constructor overloads bound to the first one
+declared, Kotlin mapped with no symbols) and three Medium ones.
+Fixing them surfaced seven more. All thirteen are fixed:
+
+- **1.5.1**: a constructor call picks its overload by argument count
+  instead of binding to the first one declared.
+- **1.5.2**: C++ constructions count in the call graph (tensorflow
+  `Graph`: 0 -> 399 callers).
+- **1.5.3**: Kotlin is a Tier-1 language (spring-boot: 0 -> 1,165
+  Kotlin symbols).
+- **1.5.4**: ambiguous rows and Tier-2 calls stay inside the caller's
+  language (tensorflow ambiguous rows 260,507 -> 238,166).
+- **1.5.5**: C++ calls resolve through their full written path
+  (tensorflow +3,510 edges, none lost).
+- **1.5.6**: a one-scope C++ call binds to the namespace it names
+  (tensorflow: 11,312 wrong call sites gone, mostly `absl::` and
+  `std::`).
+- **1.5.7**: C++ default arguments declared in a header count toward
+  the arity of the definition in the `.cc` file.
+- **1.5.8**: Rust `use std::` imports stay out of the repo, and an
+  ambiguous `Type::name` row keeps only the candidates on that type
+  (zed: 2,087 wrong edges gone, none added).
+- **1.5.9**: a `sanity` grep-only row on a site the map resolved to a
+  different same-named symbol names that symbol.
+- **1.5.10**: `sanity` names the leftover non-call shapes (type
+  bodies, self-recursion, imports bound elsewhere, heritage).
+  `sanity --all` unexplained rows dropped 30 -> 1 (claude-buddy),
+  957 -> 51 (claude-code) and 1,439 -> 218 (cline).
+- **1.5.11**: a Java/Kotlin import matches by qualified path, so an
+  external class no longer resolves to a same-named class in the
+  repo, and any Gradle source set is a source root.
+- **1.5.12**: Groovy files and Gradle build scripts are skipped with
+  a stated reason instead of being mapped empty (spring-boot: 9,376
+  garbage external rows gone).
+- **1.5.13**: each Tier-2 language is read through its own measured
+  row instead of a guess at node types: 43 languages, 39 supported
+  and 4 partial against a pinned corpus. Vue, Svelte and Mojo are
+  disclosed as unsupported rather than mapped wrong.
+
+## [1.5.13] — 2026-09-30
+
+### Changed
+- **Tier-2 languages are read through one rule set per grammar, and
+  the list of them is measured instead of assumed.** The generic
+  extractor decided what a definition was by matching words in
+  tree-sitter node type names (`function`, `method`, `class`,
+  `struct`, ...) and then asking the node for a `name` field. Run over
+  one real repository per grammar, that found no function at all in 21
+  of the 47 Tier-2 grammars (Clojure, CMake, Common Lisp, D, Dart,
+  Elixir, Elm, Julia, Nim, Nix, OCaml, Odin, Pascal, PowerShell, R,
+  Racket, Scheme, Zig among them) and no call in 17, and it invented
+  symbols in languages that looked fine. `dekko stats` on a 90-file
+  Zig project read `0 symbols, 0 edges`, and nothing said the language
+  went unread. Each grammar now has a row in `src/dekko/core/tier2.py`
+  naming the node types that define a function or a type, the path to
+  the name, and the node types that are calls. Nothing is inferred
+  from how a node type is spelled: a grammar without a row is not a
+  Tier-2 language. A row ships only if it passes a bar on its
+  repository (`benchmarks/tier2_corpus.py`, 43 repositories pinned by
+  commit): **supported** is 90% of functions and 80% of types found,
+  with calls extracted; **partial** is 75% and 50%. 39 languages are
+  supported (10 passed before, and five of those were right) and 4 are
+  partial, limited by grammars that fail to parse parts of real files:
+  Pascal 89%, Zsh 89%, Crystal 86%, Haxe 82%. `docs/cli.md` "Language
+  support" has the list and what Tier 2 does not do.
+- **Four extensions are no longer Tier-2.** `.vue`, `.svelte` and
+  `.mojo` are now unparsed languages, like `.astro` and `.groovy`:
+  skipped as `no parser (vue)` and counted in the coverage note every
+  empty answer carries (`76 files unparsed — no parser for: vue (76)`).
+  The Vue and Svelte grammars return a component's `<script>` block as
+  one piece of raw text, and the Mojo grammar fails on 92% of the files
+  of a real Mojo repository. All three yielded 0 symbols before, with
+  no caveat. One thing is lost: a TypeScript file's import of a `.vue`
+  file is no longer a `dekko deps` module edge (6 of 205 on
+  vitepress). `.mli` is no longer a source file: an OCaml interface
+  restates the signatures of its `.ml`, so indexing it would give every
+  function a twin.
+- **Symbol ids change in some Tier-2 languages.** Erlang, Haskell and
+  Elixir functions written as several clauses are one symbol (`f`, not
+  `f`, `f#2`, `f#3`); Solidity functions are qualified by their
+  contract, Ada subprograms by their package, Fortran procedures by
+  their module and Tcl procs by their `namespace eval`; SQL table names
+  lose their quotes. Notes anchored to the old ids are orphaned;
+  `dekko note list --orphaned` finds them.
+- **`dekko[all]` needs `tree-sitter-language-pack` 1.20 or newer.** A
+  row names its grammar's node types, and an older pack ships older
+  grammars: the same Haxe row yields no calls on pack 1.8.
+- **A `.scm` file of tree-sitter queries is not mapped as Scheme.** A
+  `.scm` file with a capture (`(identifier) @name`) and no `define` is
+  skipped as `tree-sitter query`. zed has 149 of them and no Scheme;
+  its `stats` line loses `scheme 149f/0s` and `dekko map` prints
+  `skipped: ... tree-sitter query 149`.
+- One CI leg (ubuntu, Python 3.13) now installs the extras. Every
+  Tier-2 test skips without the grammar pack and no leg installed it,
+  which is how 21 grammars sat at zero with CI green.
+
+### Fixed
+- **Parameters, variables and table mentions were symbols.** On
+  slimphp/Slim every PHP parameter was a class (`class
+  $responseFactory`), 1,077 types against 748 functions; the file's
+  namespace was a class too. Haxe parameters were functions (5,834 on
+  HaxeFlixel/flixel, against 4,364 real ones), Gleam parameters were
+  functions, Ada variables and Scala constructor parameters were
+  classes, C# and Dart constructors had kind `struct` (the word is
+  inside "con**struct**or"), an Erlang `mod:fun()` made `mod` a class,
+  and every SQL statement that mentioned a table (`INSERT`, `ALTER`,
+  `CREATE INDEX`) defined it again: zed's two SQL files held 401
+  "classes", now 58 tables.
+- **Functions defined by assignment or by a head word were missed or
+  misnamed.** All 200 R functions in tidyverse/stringr were named
+  `function`; the name is on the assignment around it. Lua's
+  `M.f = function`, Nix's `f = x: ...`, Zig's `const T = struct`,
+  Elixir's `def`/`defp`/`defmodule`, every Lisp's `defun`/`defn`/
+  `(define (f x) ...)`, CMake's `function()` and TclOO's `method` are
+  now definitions.
+- **A Vim script or Fortran function owned none of its calls.** The
+  symbol spanned the header line, so every call in the body had no
+  caller: 0 of 4,791 attributed on tpope/vim-fugitive, 0 of 4,326 on
+  json-fortran. A symbol now spans its body (97% and 96%), including
+  in Dart and Zig, where the grammar puts the body next to the
+  signature.
+- **Definitions were recorded as calls.** Elixir's `def`, `defp` and
+  `defmodule` were the top three "callees" of any Elixir repo, and a
+  Julia `function helper(a)` called `helper`.
+- **Member and qualified calls could never resolve.** Ada callees came
+  out as `TTY.URL` and Fortran ones as `json%get`; no symbol is named
+  that. They are now `URL` and `get`. A Perl `&f(...)` is a call to
+  `f`. Going the other way, a shell function named `_omz::log` and a
+  Scheme function named `list->set` keep their whole name at the call,
+  as they do at the definition.
+- **Expressions were recorded as callee names.** A callee holding
+  whitespace, a bracket or a quote (`(0..<rank).map`) is dropped
+  instead of becoming an `external` row nothing can match.
+- **No call was extracted from any Lisp, or from Dart, Zig, Nim,
+  Haskell, Elm, F#, Nix, Pascal or CMake.** Each spells a call its own
+  way (an `apply` node, an argument list after a name, a bare list),
+  and none matched the old call pattern. `query callers
+  magit-git-string` on magit said `(no callers)` for a function 37
+  others call. In a Lisp a list is a call when its head is a symbol
+  that is not a special form; binding lists, parameter lists, record
+  and class fields and quoted data are not calls. A curried
+  application (`lib.nameValuePair name value`) is one call.
+- **A Tcl command written from the root namespace was dropped.**
+  `::ns::proc arg` failed a filter written for shell commands.
+
+On the five evaluation repos with Tier-2 files every Tier-1 language,
+Bash, Starlark and Ruby are identical. zed gains 21 Nix, 23 PowerShell
+and 1 Julia symbols where it had none, and `dekko unused` there drops
+from 10,397 rows to 10,095 (330 bogus SQL rows leave, 18 tables and 10
+real functions enter). tensorflow gains its 11 CMake functions, all of
+them called (82 resolved call sites). spring-boot's SQL goes from 54
+symbols to 22.
+
+## [1.5.12] — 2026-09-30
+
+### Changed
+- **Groovy files and Gradle build scripts are no longer mapped as
+  empty files.** Both used to go through the generic extractor on the
+  language pack's Groovy grammar, which has no declaration nodes: on
+  spring-boot 760 files (736 `.gradle`, 24 `.groovy`) produced 0
+  symbols, 0 edges, and 9,376 `external` rows whose "callee" was often
+  a whole statement (`tasks.named("compileTestJava") { ... }`, 240
+  times). `dekko stats` read `groovy 760f/0s`, `query file` said
+  `mapped, no symbols`, and nothing said a class of files went unread.
+  No installable Groovy grammar is good enough to fix that the way
+  Kotlin was fixed: the one on PyPI is a fork of the Java grammar that
+  reads a Spock feature method (`def "does a thing"() { ... }`) as a
+  constructor named `def`, and fails on 93% of Spock's own files. So
+  dekko now says what it does instead:
+  - **`.groovy` is an unparsed language**, like `.astro`. The files
+    are skipped with `no parser (groovy)` and counted in the coverage
+    note that `stats`, `status`, `summary`, `search`, `affected` and
+    every empty `query` answer already carry (`24 files unparsed — no
+    parser for: groovy (24)`). A repo whose tests are Spock specs now
+    gets that caveat on "no callers" and "no impacted tests".
+  - **`.gradle` is a build script**, skipped with `build script
+    (gradle)` and counted on its own line: `build scripts: 736 not
+    indexed: gradle (736)` in `stats`, `status`, `summary` and the MCP
+    `map_status` tool, and a `build_scripts` key in their JSON. It
+    stays out of the per-query coverage note on purpose. A build
+    script calls the Gradle API and the build's own logic, not the code
+    most questions are about, and a caveat on every empty answer in
+    every Gradle-built repo would be noise.
+  - **The one place a build script does matter gets its own note.**
+    Empty `query callers` on a symbol under `buildSrc/` now adds
+    `build scripts: ... and this symbol is under buildSrc/; a build
+    script may call it`, with the `dekko sanity` command to check
+    (`build_script_warning` in JSON).
+  - `.gradle.kts` is Kotlin and is indexed as before. Editing a
+    `.gradle` file no longer makes the map stale.
+
+  spring-boot: 760 fewer files, 9,376 fewer external rows, and every
+  symbol, edge, ambiguous row, supertype and module edge identical.
+  Repos with no Groovy or Gradle files are unchanged.
+
+### Fixed
+- **A default install told every Gradle repo to install `dekko[all]`
+  for files the extra cannot map.** `dekko map` printed `NOT parsed (no
+  symbols, no edges): groovy N -- grammar not installed; install the
+  extras to map them`, and installing them gave 0 symbols. The files
+  are now skipped with their real reason on both install types.
+- **`dekko sanity` guessed at calls written in a build script.** A
+  real call from `build.gradle` into build logic was labeled by the
+  shape of its line: `unexplained miss` for a bare call in a closure,
+  `cross-package/qualified call — known resolver blind spot` for
+  `version.forAntora()`, `likely an unrelated external-library method`
+  for a common name. All three describe a resolver that never saw the
+  file. A hit in a build script now reads `build script: dekko does
+  not index build scripts, so a call here never becomes an edge`, and
+  a hit in a Groovy or Astro file reads `unparsed-language file`
+  whatever the line looks like. Hits in other unrecognized files
+  (`README.md`, `package.json`) are labeled as before.
+- **`query file` and `outline` on a skipped path said only "no mapped
+  file".** They now say why: `(a Gradle build script; dekko does not
+  index build scripts)` or `(groovy; dekko has no parser for it)`.
+
+## [1.5.11] — 2026-09-30
+
+### Fixed
+- **A Java/Kotlin import of an external class bound calls, `new`,
+  `extends` and `throws` to a same-named class elsewhere in the repo.**
+  `import java.util.jar.Manifest;` counted as in-repo because
+  spring-boot has a `Manifest.java` of its own (the in-repo test asked
+  whether any segment of the qualified name was a repo file's stem),
+  so `Manifest.read(..)` edged to the buildpack's `Manifest` at 40
+  sites, `jakarta.servlet.http.Cookie` to the web server's `Cookie`,
+  Thymeleaf's `Context` to the jarmode `Context`, and Spring Data's
+  `Repository` became the supertype of 29 classes that extend nothing
+  in the repo. On spring-boot 4,564 of 23,528 "in-repo" imports named
+  no repo file. A qualified JVM name is now matched as a path: the
+  import is in-repo only when it names a repo file, a repo package (a
+  wildcard import) or a Kotlin top-level function or property, and the
+  import hint that picks among same-named candidates matches a
+  Java/Kotlin file by that path alone, never by simple name. The same
+  hint used to match an in-repo import of one of several namesakes
+  (three shaded `JSONObject`s, two `Library`s, `TextResourceOrigin.
+  Location`) to all of them and give up, so those calls went
+  ambiguous; they now resolve to the file the import names. A file
+  under no source root (a Bazel-style `java/org/x/Y.java`) is matched
+  by path suffix of two or more segments. spring-boot: 139 wrong call
+  edges gone (every one checked), 336 gained, heritage +10 / −51,
+  throws resolved 204 → 219, 828 ambiguous rows gone (634 now
+  external, 200 now edges); tensorflow 15 wrong edges gone (twelve
+  `android.util.Size`), 90 ambiguous rows gone. Repos with no Java or
+  Kotlin are unchanged.
+- **Only `src/main` and `src/test` counted as JVM source roots.**
+  Gradle names source sets freely, and spring-boot keeps 348 Java files
+  under `src/intTest/java`, `src/dockerTest/java`,
+  `src/testFixtures/java`, `src/systemTest/java`, `src/json-shade/java`
+  and `src/main/javaTemplates`; imports of those files never resolved
+  in `dekko deps` (210 missing module edges), and with the path match
+  above they would have gone external. Any `src/<sourceSet>/java*` or
+  `src/<sourceSet>/kotlin*` directory is now a source root. spring-boot
+  `deps`: +213 module edges; tensorflow +2 (`src/gen/java`,
+  `src/testhelper/java`).
+
+## [1.5.10] — 2026-09-29
+
+### Fixed
+- **`dekko sanity` left whole families of non-call lines "unexplained".**
+  On the TypeScript repos measured, most of what survived 1.5.9's
+  ladder was a line the map rightly has no edge for and the ladder had
+  no name for: a JSX attribute (`<KeyboardShortcutHint action="copy" />`,
+  175 rows on one claude-code target), a continuation line of a
+  multi-line template literal (prompt text, generated-code templates),
+  an interface or enum member, a trailing `// comment` after code, a
+  method call on an expression result (`foo().name(`), a union or
+  generic type member (`Promise<Svc | undefined>`), a recursive
+  self-call, a call of `appendFileSync` in a file that imports it from
+  `fs`, an `extends X` clause, an abstract or overload signature, a
+  destructuring member line, an alias-only `export { a as b };`, a jq
+  filter in a shell script. Each now gets a cause. Four are read off
+  the map: `inside an interface, type-alias or enum body — a type
+  context, never a call site`, `recursive call inside the symbol's own
+  body — dekko records no self edges by design`, `this file imports a
+  different declaration of the name (see bound_to) — the resolver
+  bound the name to that import, not the target` (with the module or
+  repo path on the row: `bound_to` in JSON, `(bound to fs)` in text),
+  and `heritage clause (extends/implements) the map records — not a
+  call site` (a clause the map resolved to a same-named sibling reads
+  as resolved elsewhere). A small three-state lexer over each JS/TS
+  file gives a line its starting state, so a line inside a template
+  literal or a `/* */` block opened above reads as string text or as a
+  comment (a file the lexer cannot follow gets no state-based cause).
+  The rest are line shapes, JS/TS unless noted: a trailing comment
+  (also the `#` grammars and the C family), the missed type positions,
+  chained calls in any grammar, JSX attribute and text, signatures, a
+  `x.name` property access the map has no read for, declaration lines,
+  multi-line `export {` members, Rust `let mut`, and quoted shell text.
+  Every one refuses a line that also calls the name bare. Two older
+  rules were fixed on the way: a string nested in a `${...}` body is
+  blanked (`${isLoading ? "animate-pulse" : ""}` kept `animate`
+  visible), and the `eval("name()")` exception now needs a string that
+  is *only* a call expression. `sanity --all` unexplained rows:
+  claude-buddy 30 → 1, claude-code 957 → 51 (flagged targets 109 →
+  28), cline 1,439 → 218 (200 → 20); grep-only totals unchanged, since
+  only causes on grep-only rows move; every report target from the
+  round reaches zero unexplained.
+- **The same-named-local pass only looked inside the innermost
+  function.** claude-buddy's `activeSlot` at `server/index.ts:1113`
+  sits in an inline `server.tool(..., async () => {...})` callback that
+  is not an indexed symbol, so the pass never ran; a local declared in
+  an outer function was invisible from an inner arrow; a destructured
+  parameter (`{ slots, cursor, activeSlot }`) never matched; and a
+  bare call of a local (`const [state, dispatch] = useReducer(..)` then
+  `dispatch({...})`) was refused as "call-shaped" although the resolver
+  vetoes exactly that edge on the same evidence. The pass now scans
+  every enclosing symbol and then the file's top level (up to the first
+  indent-0 line when there is no enclosing symbol), matches parameters
+  inside destructuring patterns and optional `name?` parameters, knows
+  arrow and `function` parameters, `for`-of bindings and multi-line
+  destructuring members, and explains a call of a bound local. The
+  cause reads `... declared earlier in an enclosing scope ...` (was
+  "in the enclosing function"). The guards stand: never a `x.name(`
+  method call, never a call with no binding in scope, never a scanned
+  declaration that is the target's own definition line, never a
+  declaration indented deeper than the use.
+
+## [1.5.9] — 2026-09-28
+
+### Fixed
+- **`dekko sanity` called a call to a same-named sibling an
+  "unexplained miss".** When two unrelated symbols share a bare name
+  (claude-code has a 1-arg `errorMessage(e)` in `utils/errors.ts` and
+  a 2-arg one in `remote-setup.tsx`), a grep hit that is really a call
+  to the other one was explained only when it sat inside that other
+  symbol's own file; a call from any third file, the normal case for a
+  reused helper name, fell through to "unexplained miss — inspect
+  manually". The map already records which sites it attributed to
+  each symbol, so such a row now gets an exact cause, `dekko attributes
+  this line to a different, same-named declaration (see resolved_to) —
+  a miss only if that attribution is wrong`, with the sibling's id in
+  the row (`resolved_to` in JSON, `(resolved to <id>)` in text). It
+  applies in single-target and `--all` mode, to recorded calls and
+  recorded value references alike, and never to a line the map also
+  attributes to the target itself. On claude-code, `sanity --all`'s
+  unexplained count drops 1,383 → 957 and `remote-setup.tsx:
+  errorMessage`'s 367 → 6; on cline 2,394 → 1,439, and single-target
+  `sanity` on one of its three `ClineAccountService` classes no longer
+  reports the other two classes' `getInstance()` bodies as misses (8
+  → 1). The older file-shape cause ("call-shaped reference to a
+  different, same-named declaration elsewhere in the repo") remains
+  for a hit in a sibling's file that the map attributed to nobody.
+
+### Known limitations
+- A site the resolver left **ambiguous** among several same-named
+  candidates is attributed to none of them and has no line in the map,
+  so it still reads as unexplained or as the generic-name caution
+  (claude-code's three one-arg `debug(msg)` helpers, 34 rows each).
+
+## [1.5.8] — 2026-09-28
+
+### Fixed
+- **A Rust call through a `use std::` binding could reach a repo type of
+  the same name.** dekko decides whether a `use` points into the repo by
+  asking whether any segment of its path is a file's stem, so in a repo
+  with a `path.rs` or a `collections.rs` (zed has `crates/path` and
+  `crates/collections`), `use std::path::Path;` looked in-repo and
+  `Path::new(..)` resolved to gpui's own `Path.new` at 1,377 call sites.
+  `Command::new`, `Stdio::piped`, `PathBuf::from` and `HashMap::new`
+  went wrong the same way. A Rust `use` rooted at `std`, `core` or
+  `alloc` is now never in-repo, the same rule the full-path form
+  (`std::path::Path::new(..)`) has always had. On zed: 2,087 wrong call
+  sites removed, 0 added, 1,313 ambiguous rows counted external
+  instead. On cline: 5 wrong `Command::new` sites removed.
+- **An ambiguous Rust `Type::name(..)` call disclosed every namesake in
+  the repo.** The resolver narrows such a call to `Type`'s own members
+  before it picks, but when the pick failed, the ambiguous row recorded
+  the list from before the narrowing: all 1,520 ambiguous `new` rows on
+  zed named all 1,386 `new` functions, and every `new`'s callers note
+  said "+1,520 ambiguous sites". The row now lists what the type path
+  left (the `Editor::new(..)` row in `thread_view.rs`: 1,386 → 2
+  candidates; `Editor.new`'s note: 1,520 → 243 sites). On zed, 2,053
+  rows narrowed, none widened; edges are unchanged by this rule. A
+  dot-call (`x.new(..)`) is not narrowed, as before.
+
+### Known limitations
+- A `Type::f(..)` call on a std type that reaches an in-repo extension
+  trait's function (`PathBuf::try_from_bytes(..)` through zed's
+  `PathExt`, 2 sites) now counts as external, like the full-path form
+  always has. Telling that case from `Path::new` needs to know whether
+  the std type implements the trait, which a blanket
+  `impl<T: AsRef<Path>> PathExt for T` doesn't say.
+
+## [1.5.7] — 2026-09-28
+
+### Fixed
+- **C++ argument counts ignored the defaults a header declares.** A
+  default argument lives on the header prototype, and the `.cc`
+  definition can't repeat it, so dekko read `Status ToGraph(Graph* g,
+  GraphConstructorOptions opts = {})` as needing two arguments and
+  counted every `scope.ToGraph(&g)` as external. dekko now reads C++
+  prototypes (in headers, classes, namespaces and templates) and gives
+  each definition with the same qualified name and parameter count the
+  defaults they declare. Three things change. Calls that leave out a
+  declared default resolve (`Scope::ToGraph` gains 88 call sites on
+  tensorflow, `GetTypeFromTFTensorShape` 35). A call through one
+  namespace that can't fit the one function on that path even with its
+  defaults is counted external instead of reaching it through an
+  `#include`: 542 generated `ops::Identity(scope, x)`-style calls no
+  longer land on the unrelated `c/experimental/ops` functions. And an
+  out-of-line constructor with a known declaration keeps its real
+  minimum, so the kernel-builder call `Name("X").Device(DEVICE_CPU)` no
+  longer credits `Device::Device` (117 sites). On tensorflow: 663 wrong
+  call sites removed, 266 added, 518 ambiguous rows resolved, none new.
+  A definition with no matching prototype resolves as before, and
+  `map.json`'s parameter lists still show what the definition says.
+  Editing a header prototype re-resolves only the files that call that
+  name. Other languages are unaffected.
+
+### Known limitations
+- A generated `ops::X(scope, ..)` call whose argument count happens to
+  fit the `c/experimental/ops` function of the same name still reaches
+  it (19 sites on tensorflow). Only argument types could tell them
+  apart, and the generated headers aren't in the repo.
+- `Device::Device` now shows up in `unused`: its real callers are
+  subclass constructors' initializer lists, which dekko doesn't read.
+
+## [1.5.6] — 2026-09-28
+
+### Fixed
+- **A C++ call written through one namespace ignored that namespace.**
+  `absl::OkStatus()` resolved to tensorflow's own `tensorflow::OkStatus`
+  wrapper because it was the only in-repo `OkStatus`, `std::max(a, b)`
+  landed on a repo `std::numeric_limits` specialization's `max`, and
+  `gtl::MakeCleanup`, `xla::ConvertElementType` and the generated
+  `ops::Add` all reached unrelated namesakes. Now, when the written
+  scope is a namespace, the call only reaches symbols directly inside a
+  namespace of that name, plus what a namespace-scope
+  `using`-declaration there re-exports (`namespace tensorflow { using
+  tsl::StatusFromTF_Status; }`). The ordinary resolver still picks among
+  those, so `reference_ops::ResizeNearestNeighbor` now reaches the
+  `reference_ops` one instead of `optimized_ops`. `std::` never resolves
+  into the repo. A call through a class (`TensorShape::IsValid()`,
+  `View<T>::Next()`) or a namespace alias resolves as before. On
+  tensorflow this removes 11,312 wrong call sites (9,504 `absl::`,
+  1,113 `std::`; `OkStatus` drops from 10,031 callers' sites to its
+  real 806), adds 473 right ones, mostly from ambiguous rows that now
+  have exactly one candidate in the right namespace (`mlrt::Execute`,
+  `DeviceFactory::GetFactory`, `flags::Global`), and turns 5,698
+  ambiguous rows with no candidate in the written namespace into
+  external calls. `unused` loses 87 entries that did have callers. Of
+  its 25 new entries, 16 had only wrong callers before. The other 9 are
+  real functions whose namespace dekko misreads (below). Other
+  languages are unaffected.
+
+### Known limitations
+- Functions after an unterminated macro line (`PYBIND11_MAKE_OPAQUE(T)`
+  with no `;`) can lose their enclosing namespace in dekko's map, so a
+  correctly qualified call to them (`tensorflow::InputTFE_Context(..)`)
+  now counts as external. tensorflow has 79 such call sites.
+
+## [1.5.5] — 2026-09-28
+
+### Fixed
+- **C++ calls written with a full path never resolved.**
+  `tensorflow::Scope::NewRootScope()`, `test::function::GDef()`,
+  `::tflite::ops::builtin::Register_ADD()`: any call with two or more
+  scopes, or written from the root, came out named `Scope::NewRootScope`
+  (or `tensorflow::Foo`) instead of `NewRootScope`, so it never matched a
+  symbol and was counted external. Now the name is the last segment and
+  the whole path must match the target's qualified name: `a::b::F()`
+  only reaches a `F` whose scopes end in `a::b`, a path from the root
+  (`::a::F()`) only reaches `a::F` itself, and a path that names no repo
+  symbol stays external instead of being guessed. `std::` paths never
+  resolve into the repo, so tensorflow's `std::numeric_limits`
+  specialization isn't credited with every `numeric_limits<int>::max()`.
+  On tensorflow this adds 3,510 caller → callee edges (4,067 call sites;
+  `Scope::NewRootScope` alone gains 560) and drops 583 symbols from
+  `unused` that were never dead, with no edge lost. Calls whose path
+  names several overloads become ambiguous rows listing only those
+  (+553). The same rule applies to base classes: 444 gtest fixtures
+  written `: public ::testing::Test` no longer inherit from TFLite's own
+  `tflite::testing::Test` wrapper.
+- **A Rust `impl other::Trait for Name` could resolve to a same-file
+  struct.** When the file also defined a struct named like the trait
+  (or the implementing type shared the trait's name), the struct won,
+  which is impossible, since only a trait can be implemented. The
+  clause then either vanished as a self-reference or pointed at the
+  wrong type. It now resolves to the trait: zed gains 12 impl edges
+  (`impl workspace::DebuggerProvider for DebuggerProvider`, `impl
+  sum_tree::Summary for Summary`, ...) and corrects one.
+
+## [1.5.4] — 2026-09-28
+
+### Fixed
+- **Ambiguous-call disclosures named candidates the call could never
+  reach.** The resolver already ignored other-language namesakes when
+  picking a target, but it wrote the ambiguous row from the full
+  same-name list. So a Python `print(...)` was "ambiguous" among 33 C++
+  `print`s, and tensorflow's C++ `errors::InvalidArgumentError(...)`
+  calls showed as 2,882 ambiguous calls to a Python class. Now a row
+  lists only the 2+ candidates in the caller's language (or language
+  family), and a call whose only namesakes are in other languages is
+  counted external. Every ambiguous row now has at least two
+  candidates. tensorflow goes from 260,507 ambiguous rows to 238,166
+  (101k more got shorter), spring-boot from 70,727 to 69,970, zed from
+  87,315 to 86,742, cline from 5,628 to 5,564. `query symbol Graph` on
+  tensorflow no longer counts Python `tf.Graph()` calls against the C++
+  class. The same rule now covers supertypes (`heritage_ambiguous`),
+  thrown and caught types, and import aliases: cline's
+  `import { main as generateHostBridgeClient } from "./….mjs"` used to
+  be ambiguous with two Rust `main`s and now resolves.
+- **Shell, Starlark, Gradle and other Tier-2 files resolved calls into
+  any language.** A shell script's `exit` edged to a Python
+  `control_flow_ops.exit`, `command -v` to a TypeScript variable, and
+  a `.gradle` file's `id "java"` and `description = ...` to Java
+  methods. Tier-2 calls now resolve only within their own grammar.
+  Swift is the one cross-language exception: a bare Swift call can
+  still reach a C function, since Swift imports C APIs directly, so
+  tensorflow's 62 Swift → TfLite C API edges stay. This removes 1,331
+  false edges on spring-boot, 208 on tensorflow, 29 on zed, 7 on
+  claude-buddy and 1 on cline. It also drops 13 existing Swift edges
+  into C++ methods and classes, which were all namesakes (Foundation's
+  `URL(...)` landing on `tensorflow::data::URL`). Swift constructions
+  of Swift types that used to be ambiguous next to C++ namesakes now
+  resolve (19 on tensorflow).
+
+## [1.5.3] — 2026-09-28
+
+### Added
+- **Kotlin is a Tier-1 language.** `.kt` and `.kts` files parse
+  offline with the `tree-sitter-kotlin` grammar, now a core dependency,
+  so a default install needs no `dekko[all]` for them. Classes,
+  interfaces, enums, objects, functions and both kinds of constructor
+  are symbols with typed parameters (defaults and `vararg` included,
+  so argument counts check out), plus calls with receivers and
+  argument counts, imports with aliases, supertypes and
+  `System.getenv` reads. Java and Kotlin resolve against each other,
+  each preferring its own language first: a Kotlin import of a Java
+  class reaches the `.java` file, and a type that exists in both (the
+  Java/Kotlin twins in docs samples) resolves to the importer's own
+  language. A top-level function imported by package
+  (`import org.springframework.boot.runApplication`) resolves to the
+  file that defines it. `object : Base(x) { ... }` constructs `Base`,
+  like Java's `new Base(x) { ... }`. Not yet for Kotlin:
+  `throws`/`catches`, `::fn` references, type-only uses, and calls to
+  extension functions through their receiver.
+
+### Fixed
+- **Kotlin files extracted no symbols.** The language pack's Kotlin
+  grammar has no field names on declarations, and the generic
+  extractor only accepts a named definition, so all 492 of
+  spring-boot's `.kt` files mapped as "no symbols". A test-covered
+  change to `runApplication` got "no symbol changes" from `diff` and
+  "no impacted tests" from `affected`. Now spring-boot has 1,165 Kotlin
+  symbols, `diff` reports the change, and `affected` names
+  `SpringApplicationExtensionsTests.kt` as possibly impacted (its calls
+  can't be pinned to one of `runApplication`'s two overloads). The
+  Kotlin files gained 273 call edges (166 into Java) and 31 supertypes.
+  309 wrong edges from the old path went away: `.gradle.kts` scripts
+  "calling" unrelated Java methods, annotations counted as calls, and
+  Kotlin docs samples resolving to their Java twin.
+
+### Changed
+- `query throws` on a language it doesn't cover says "not covered by
+  this query" unless the language has no exception syntax at all
+  (Rust, Go, C), which stay "permanently excluded". It used to call
+  every uncovered language permanent.
+
+## [1.5.2] — 2026-09-28
+
+### Fixed
+- **No C++ construction site reached the call graph.** `new
+  Graph(reg)`, `new tensorflow::Graph(reg)` and
+  `std::make_unique<Graph>(reg)` weren't extracted as calls at all,
+  so `query callers` on tensorflow's `Graph` said "no callers" against
+  hundreds of construction sites, and `affected` stopped at its
+  constructors. `new T(...)` (brace, placement and argument-less forms
+  too) and `std::`/`absl::` `make_unique`/`make_shared<T>(...)` now
+  construct `T`. The class gets the edge, and so does the constructor
+  the argument count picks, including constructors defined out of line
+  in a `.cc`, with header default arguments allowed for. Overloads the
+  count can't separate are disclosed as "resolved ambiguously" (both
+  of `Graph`'s one-argument constructors). On tensorflow, `Graph` went
+  from 0 callers to 399, `EagerContext` from 0 to 36, C++ constructors
+  listed by `unused --kinds all` from 6,225 to 4,312, and C++ classes
+  from 3,890 to 3,461. Stack declarations `T x(args);` are still not
+  counted: without types they parse as function declarations.
+- **A class and its own constructors counted as rivals.** Java and C++
+  constructors share their class's name, so a construction whose class
+  had two or more constructors went ambiguous whenever no other rung
+  settled it. Now they collapse to the class before resolution. On
+  spring-boot, 1,094 construction edges were added and 548 ambiguous
+  records went away. A Java class with a builder method named
+  `constructor(...)` no longer gets that method credited as its
+  constructor.
+- **`= delete` functions were symbols.** A deleted copy constructor
+  was credited with real construction sites (93 edges on tensorflow),
+  showed in `outline` and filled `unused`: copy/move-shaped constructor
+  rows went from 716 to 85. Deleted functions are no longer extracted.
+  `= default` ones still are.
+- **A namespace-qualified C++ name could resolve to a same-named type
+  in another namespace.** `absl::Status()` credited
+  `tensorflow::experimental::cc::Status`, `xla::Parameter(...)` a
+  `tensorflow::data::model::Parameter`, and `class X : public
+  ::testing::Environment` a `tflite::gpu::cl::Environment`. A `q::Name`
+  usage now resolves to a type only when `q` is one of its enclosing
+  namespaces or classes. On tensorflow that removed 602 call edges and
+  11 heritage edges, all wrong except about 100 `ops::NodeOut` sites.
+  A qualifier that works through a `using`/`typedef` alias is left
+  unresolved too, which is what happens to those (`ops::NodeOut` is
+  `NodeBuilder::NodeOut`).
+
+## [1.5.1] — 2026-09-28
+
+### Fixed
+- **`new X(...)` always credited the class's first-declared
+  constructor, whatever the arguments.** On spring-boot, 481 classes
+  declare two or more constructors; every construction site sat on
+  the first one and all 637 later constructors read zero callers, with
+  nothing disclosed. `query callers` on `ErrorPage(HttpStatus, String)`
+  said "no callers" while the 1-arg `ErrorPage(String)` listed its
+  2-arg call sites. The written argument count now picks the overload:
+  an exact declared-count match first, then a unique varargs or
+  default-argument fit, so `new SpringApplication(loader, sources)`
+  reaches the 2-arg constructor. Overloads that only argument types
+  could separate, like `ErrorPage(HttpStatus, String)` and
+  `(Class, String)`, are disclosed as "resolved ambiguously" on each
+  of them instead of guessed. The same applies to a C++ class with
+  several constructors defined in its header. Class-level callers are
+  unchanged. On
+  spring-boot, 1,032 caller edges moved to a later constructor and 954
+  construction sites are now disclosed as ambiguous. Because `unused`
+  lists ambiguous candidates tagged `[dispatch?]`, constructors whose
+  only construction sites are ambiguous now show up there with that
+  tag (47 on spring-boot), where the first constructor's false credit
+  used to hide the whole overload set.
+- **A Java varargs parameter with a type annotation before the
+  ellipsis (`Resolver @Nullable ... resolvers`) lost its varargs
+  flag.** tree-sitter-java parses that shape as an error node, so the
+  parameter counted as one fixed argument. It is varargs again, which
+  keeps calls with fewer arguments on that constructor or method.
+- **A comment between call arguments counted as an argument.**
+  A multi-line `new ClineError(raw, undefined, // modelId` ...
+  `"cline")` read as four arguments, and a call with four commented
+  lines as nine instead of five, in every language. The count feeds the arity checks that keep
+  a call off a target it can't be calling, so a commented call could
+  be kept off the right one. Comments no longer count.
+- **A typed Python `*args: T` / `**kwargs: T` parameter wasn't marked
+  variadic** (the untyped forms were), so `List(a, b, c)` against
+  `__init__(self, *components: TraceType)` read as a mismatch.
+- **An unpacking argument counted as one argument.**
+  `SparseTensor(*iterator.get_next())`, `f(**kw)`, `f(...rest)`,
+  `f(xs...)` and C++ `f(args...)` supply a number of arguments only
+  known at run time. Their count is now "unknown", which the arity
+  checks never treat as a mismatch.
+
 ## [1.5.0] — 2026-09-26
 
 Closes round 1.5's fix cycle. The code is 1.4.4; this release is the

@@ -199,16 +199,14 @@ def test_cross_language_name_collision_no_longer_ambiguous() -> None:
     assert graph.heritage_ambiguous == []
 
 
-def test_cross_family_heritage_miss_lands_in_ambiguous() -> None:
-    """Heritage-path counterpart to ``test_resolve_call_records_cross_
-    family_miss_as_ambiguous``: a C++ base-class name with only a
-    same-bare-name, unrelated-language Python candidate (no C/C++
-    family candidate at all -- simulating the real C++ base living
+def test_cross_family_heritage_miss_is_external() -> None:
+    """Heritage-path counterpart to ``test_resolve_call_counts_cross_
+    family_miss_as_external``: a C++ base-class name whose only
+    same-bare-name candidate is a Python class (the real C++ base lives
     outside the map, e.g. under an excluded vendored directory) must
-    land in ``heritage_ambiguous``, not silently resolve to the Python
-    class. ``resolve_heritage`` shares ``_pick_candidate`` with
-    ``resolve()``, so it must get the identical fail-safe guarantee
-    the call-resolution test above pins down."""
+    neither resolve to the Python class nor list it as ambiguous. A
+    C++ class can't derive from a Python one, so the base is
+    external."""
     base_py = Symbol(
         id="unrelated/base.py::Base",
         name="Base",
@@ -238,9 +236,8 @@ def test_cross_family_heritage_miss_lands_in_ambiguous() -> None:
     ]
     graph = resolve(files)
     assert graph.heritage_out == {}
-    assert graph.heritage_ambiguous == [
-        ("kernels/foo.cc::Foo", "Base", ["unrelated/base.py::Base"])
-    ]
+    assert graph.heritage_ambiguous == []
+    assert [ext.callee for ext in graph.heritage_external] == ["Base"]
 
 
 def test_bare_name_with_no_in_repo_candidate_is_external() -> None:
@@ -551,6 +548,41 @@ def test_rust_impl_trait_resolves_cross_file_via_import(
     ]
     graph = resolve(files)
     assert graph.heritage_out["circle.rs::Circle"] == ["shapes.rs::Shape"]
+
+
+def test_rust_impl_of_a_foreign_trait_skips_same_file_structs(
+    tmp_path: Path,
+) -> None:
+    # `impl workspace::Provider for Provider` names a trait; the
+    # same-named struct beside it can't be the target, and neither can
+    # an unrelated same-file struct named like the trait.
+    from dekko.core import languages
+    from dekko.core.extractor import extract_file
+
+    (tmp_path / "workspace.rs").write_text(
+        "pub trait Provider {}\npub trait Delegate {}\n"
+    )
+    (tmp_path / "panel.rs").write_text(
+        "struct Provider;\n"
+        "impl workspace::Provider for Provider {}\n"
+        "pub struct Delegate;\n"
+        "struct Background;\n"
+        "impl workspace::Delegate for Background {}\n"
+    )
+    spec = languages.spec_for_path("a.rs")
+    assert spec is not None
+    graph = resolve(
+        [
+            extract_file(tmp_path, "workspace.rs", spec),
+            extract_file(tmp_path, "panel.rs", spec),
+        ]
+    )
+    assert graph.heritage_out["panel.rs::Provider"] == [
+        "workspace.rs::Provider"
+    ]
+    assert graph.heritage_out["panel.rs::Background"] == [
+        "workspace.rs::Delegate"
+    ]
 
 
 def test_rust_impl_unknown_trait_is_external(tmp_path: Path) -> None:

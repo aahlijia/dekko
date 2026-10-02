@@ -101,7 +101,7 @@ uv tool install dekko      # or: pip install dekko / pipx install dekko
 dekko --claude-install     # add the /map command + MCP server to Claude Code, then restart
 ```
 
-Extras (`dekko[all]` for ~55 more languages, `dekko[search]` for
+Extras (`dekko[all]` for 43 more languages, `dekko[search]` for
 embedding search), installing from a local clone, and uninstalling are
 in [docs/install.md](docs/install.md).
 
@@ -116,8 +116,9 @@ dekko summary               # ~40-line digest: dirs, hotspots, entry points
 `.dekko/` is git-ignored by default; the map regenerates on demand, so
 you rarely need to run `dekko map` again by hand. If your repo has
 languages outside the default Tier-1 set (Python, C, C++, JS/TS, Go,
-Java, Rust), `dekko map` will say so per file; install `dekko[all]` for
-~55 more languages (see [Install](#install)) and re-run.
+Java, Kotlin, Rust), `dekko map` will say so per file; install `dekko[all]` for
+43 more languages (see [Install](#install)) and re-run. The
+[list](docs/cli.md#language-support) says how well each one is read.
 
 ## Documentation
 

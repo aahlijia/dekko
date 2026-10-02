@@ -317,7 +317,7 @@ def test_normal_small_file_has_no_sparse_caveat(
 def test_sparse_note_suppressed_when_file_failed_to_parse() -> None:
     """A file that failed to parse
     entirely (most often an unsupported/uninstalled Tier-2 grammar --
-    Kotlin/Groovy without ``pip install dekko[all]``) always has 0
+    Scala/Groovy without ``pip install dekko[all]``) always has 0
     symbols, which used to trip the "few named symbols" heuristic en
     masse -- misleadingly implying a callback-heavy file the outline
     is silently missing content from, when the real (and already
@@ -334,7 +334,7 @@ def test_sparse_note_suppressed_when_file_failed_to_parse() -> None:
             full=1000,
             outline_tokens=20,
             symbol_count=0,
-            error="grammar 'kotlin' is not in the offline Tier-1 set",
+            error="grammar 'scala' is not in the offline Tier-1 set",
         )
         is None
     )

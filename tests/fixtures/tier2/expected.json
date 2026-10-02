@@ -1,0 +1,735 @@
+{
+  "ada": {
+    "file": "ada.adb",
+    "symbols": [
+      ["class", "Shapes", 3, 20],
+      ["method", "Shapes.Square", 5, 8],
+      ["method", "Shapes.Area", 10, 13],
+      ["method", "Shapes.Describe", 15, 18]
+    ],
+    "calls": [
+      ["Square", "Shapes.Area", 12],
+      ["Put_Line", "Shapes.Describe", 17],
+      ["Format", "Shapes.Describe", 17],
+      ["Area", "Shapes.Describe", 17]
+    ]
+  },
+  "bash": {
+    "file": "bash.sh",
+    "symbols": [
+      ["function", "square", 3, 5],
+      ["function", "area", 7, 10]
+    ],
+    "calls": [
+      ["echo", "square", 4],
+      ["echo", "area", 9],
+      ["square", "area", 9],
+      ["area", null, 12]
+    ]
+  },
+  "clojure": {
+    "file": "clojure.clj",
+    "symbols": [
+      ["interface", "Shape", 4, 5],
+      ["method", "Shape.area", 5, 5],
+      ["function", "square", 7, 8],
+      ["class", "Circle", 10, 12],
+      ["method", "Circle.area", 12, 12],
+      ["function", "describe", 14, 18]
+    ],
+    "calls": [
+      ["*", "square", 8],
+      ["*", "Circle.area", 12],
+      ["square", "Circle.area", 12],
+      ["area", "describe", 17],
+      ["join", "describe", 18],
+      ["println", null, 20],
+      ["describe", null, 20],
+      ["->Circle", null, 20]
+    ]
+  },
+  "cmake": {
+    "file": "cmake.cmake",
+    "symbols": [
+      ["function", "shapes_square", 1, 4],
+      ["function", "shapes_area", 6, 9]
+    ],
+    "calls": [
+      ["math", "shapes_square", 2],
+      ["set", "shapes_square", 3],
+      ["shapes_square", "shapes_area", 7],
+      ["math", "shapes_area", 8],
+      ["shapes_area", null, 11],
+      ["message", null, 12]
+    ]
+  },
+  "commonlisp": {
+    "file": "commonlisp.lisp",
+    "symbols": [
+      ["class", "circle", 1, 2],
+      ["struct", "point", 4, 4],
+      ["function", "square", 6, 7],
+      ["function", "area", 9, 10],
+      ["function", "twice", 12, 13],
+      ["function", "describe-shape", 15, 17]
+    ],
+    "calls": [
+      ["*", "square", 7],
+      ["*", "area", 10],
+      ["square", "area", 10],
+      ["radius", "area", 10],
+      ["*", "twice", 13],
+      ["area", "describe-shape", 16],
+      ["format", "describe-shape", 17],
+      ["describe-shape", null, 19],
+      ["make-instance", null, 19]
+    ]
+  },
+  "crystal": {
+    "file": "crystal.cr",
+    "symbols": [
+      ["class", "Shapes", 1, 22],
+      ["class", "Shapes.Shape", 2, 4],
+      ["method", "Shapes.Shape.area", 3, 3],
+      ["struct", "Shapes.Point", 6, 8],
+      ["class", "Shapes.Circle", 10, 17],
+      ["method", "Shapes.Circle.initialize", 11, 12],
+      ["method", "Shapes.Circle.area", 14, 16],
+      ["method", "Shapes.square", 19, 21]
+    ],
+    "calls": [
+      ["getter", "Shapes.Point", 7],
+      ["square", "Shapes.Circle.area", 15],
+      ["puts", null, 24],
+      ["area", null, 24],
+      ["new", null, 24]
+    ]
+  },
+  "csharp": {
+    "file": "csharp.cs",
+    "symbols": [
+      ["class", "Shapes", 1, 31],
+      ["interface", "Shapes.IShape", 3, 6],
+      ["method", "Shapes.IShape.Area", 5, 5],
+      ["struct", "Shapes.Point", 8, 11],
+      ["class", "Shapes.Circle", 13, 30],
+      ["method", "Shapes.Circle.Circle", 17, 20],
+      ["method", "Shapes.Circle.Area", 22, 25],
+      ["method", "Shapes.Circle.Square", 27, 27],
+      ["method", "Shapes.Circle.Guard", 29, 29]
+    ],
+    "calls": [
+      ["Guard", "Shapes.Circle.Circle", 19],
+      ["Square", "Shapes.Circle.Area", 24]
+    ]
+  },
+  "d": {
+    "file": "d.d",
+    "symbols": [
+      ["interface", "Shape", 5, 8],
+      ["method", "Shape.area", 7, 7],
+      ["struct", "Point", 10, 13],
+      ["class", "Circle", 15, 23],
+      ["method", "Circle.area", 19, 22],
+      ["function", "square", 25, 28],
+      ["function", "main", 30, 34]
+    ],
+    "calls": [
+      ["square", "Circle.area", 21],
+      ["writeln", "main", 33],
+      ["area", "main", 33]
+    ]
+  },
+  "dart": {
+    "file": "dart.dart",
+    "symbols": [
+      ["class", "Shape", 1, 3],
+      ["method", "Shape.area", 2, 2],
+      ["class", "Circle", 5, 16],
+      ["method", "Circle.Circle", 6, 6],
+      ["method", "Circle.diameter", 10, 10],
+      ["method", "Circle.area", 13, 15],
+      ["function", "square", 18, 18],
+      ["function", "main", 20, 22]
+    ],
+    "calls": [
+      ["square", "Circle.area", 14],
+      ["print", "main", 21],
+      ["Circle", "main", 21],
+      ["area", "main", 21]
+    ]
+  },
+  "elisp": {
+    "file": "elisp.el",
+    "symbols": [
+      ["struct", "shapes-circle", 3, 3],
+      ["function", "shapes-square", 5, 7],
+      ["function", "shapes-area", 9, 11],
+      ["function", "shapes-twice", 13, 14],
+      ["function", "shapes-describe", 16, 18]
+    ],
+    "calls": [
+      ["*", "shapes-square", 7],
+      ["*", "shapes-area", 11],
+      ["shapes-square", "shapes-area", 11],
+      ["shapes-circle-radius", "shapes-area", 11],
+      ["shapes-area", "shapes-describe", 17],
+      ["format", "shapes-describe", 18],
+      ["message", null, 20],
+      ["shapes-describe", null, 20],
+      ["make-shapes-circle", null, 20]
+    ]
+  },
+  "elixir": {
+    "file": "elixir.ex",
+    "symbols": [
+      ["class", "Shapes.Circle", 1, 12],
+      ["method", "Shapes.Circle.area", 4, 5],
+      ["method", "Shapes.Circle.square", 7, 9],
+      ["method", "Shapes.Circle.twice", 11, 11],
+      ["interface", "Shapes.Shape", 14, 16],
+      ["method", "Shapes.Shape.describe", 15, 15]
+    ],
+    "calls": [
+      ["defstruct", "Shapes.Circle", 2],
+      ["pi", "Shapes.Circle.area", 4],
+      ["square", "Shapes.Circle.area", 4],
+      ["quote", "Shapes.Circle.twice", 11],
+      ["unquote", "Shapes.Circle.twice", 11],
+      ["puts", null, 18],
+      ["area", null, 18]
+    ]
+  },
+  "elm": {
+    "file": "elm.elm",
+    "symbols": [
+      ["class", "Shape", 4, 6],
+      ["class", "Model", 9, 10],
+      ["function", "square", 14, 15],
+      ["function", "area", 19, 25],
+      ["function", "describe", 29, 34]
+    ],
+    "calls": [
+      ["square", "area", 22],
+      ["square", "area", 25],
+      ["area", "describe", 32],
+      ["fromFloat", "describe", 34]
+    ]
+  },
+  "erlang": {
+    "file": "erlang.erl",
+    "symbols": [
+      ["class", "shapes", 1, 1],
+      ["function", "area", 4, 9],
+      ["function", "square", 11, 12],
+      ["function", "describe", 14, 15]
+    ],
+    "calls": [
+      ["pi", "area", 5],
+      ["square", "area", 5],
+      ["square", "area", 7],
+      ["format", "describe", 15],
+      ["area", "describe", 15]
+    ]
+  },
+  "fortran": {
+    "file": "fortran.f90",
+    "symbols": [
+      ["class", "shapes", 1, 21],
+      ["struct", "shapes.circle", 4, 6],
+      ["method", "shapes.square", 10, 13],
+      ["method", "shapes.describe", 15, 19]
+    ],
+    "calls": [
+      ["show", "shapes.describe", 17],
+      ["square", "shapes.describe", 17],
+      ["render", "shapes.describe", 18]
+    ]
+  },
+  "fsharp": {
+    "file": "fsharp.fs",
+    "symbols": [
+      ["class", "Shapes.Core", 1, 20],
+      ["class", "Shapes.Core.Shape", 3, 5],
+      ["class", "Shapes.Core.Printer", 7, 9],
+      ["method", "Shapes.Core.Printer.Print", 8, 8],
+      ["method", "Shapes.Core.Printer.Default", 9, 9],
+      ["method", "Shapes.Core.square", 11, 11],
+      ["method", "Shapes.Core.area", 13, 16],
+      ["method", "Shapes.Core.describe", 18, 18]
+    ],
+    "calls": [
+      ["describe", "Shapes.Core.Printer.Print", 8],
+      ["Printer", "Shapes.Core.Printer.Default", 9],
+      ["square", "Shapes.Core.area", 16],
+      ["sprintf", "Shapes.Core.describe", 18],
+      ["area", "Shapes.Core.describe", 18],
+      ["printfn", "Shapes.Core", 20],
+      ["describe", "Shapes.Core", 20],
+      ["Circle", "Shapes.Core", 20]
+    ]
+  },
+  "gdscript": {
+    "file": "gdscript.gd",
+    "symbols": [
+      ["class", "Shapes", 1, 1],
+      ["class", "Circle", 4, 11],
+      ["method", "Circle._init", 7, 8],
+      ["method", "Circle.area", 10, 11],
+      ["function", "square", 13, 14],
+      ["function", "_ready", 16, 17]
+    ],
+    "calls": [
+      ["square", "Circle.area", 11],
+      ["print", "_ready", 17],
+      ["new", "_ready", 17],
+      ["area", "_ready", 17]
+    ]
+  },
+  "gleam": {
+    "file": "gleam.gleam",
+    "symbols": [
+      ["class", "Shape", 4, 7],
+      ["function", "square", 9, 11],
+      ["function", "area", 13, 18],
+      ["function", "main", 20, 22]
+    ],
+    "calls": [
+      ["square", "area", 15],
+      ["square", "area", 16],
+      ["println", "main", 21],
+      ["to_string", "main", 21],
+      ["area", "main", 21]
+    ]
+  },
+  "hare": {
+    "file": "hare.ha",
+    "symbols": [
+      ["struct", "circle", 3, 5],
+      ["function", "square", 7, 9],
+      ["function", "area", 11, 13],
+      ["function", "main", 15, 18]
+    ],
+    "calls": [
+      ["square", "area", 12],
+      ["println", "main", 17],
+      ["area", "main", 17]
+    ]
+  },
+  "haskell": {
+    "file": "haskell.hs",
+    "symbols": [
+      ["class", "Circle", 3, 3],
+      ["class", "Label", 5, 5],
+      ["class", "Shape", 7, 8],
+      ["method", "Shape.area", 11, 11],
+      ["function", "square", 14, 14],
+      ["function", "describe", 17, 20],
+      ["function", "render", 20, 20],
+      ["function", "main", 23, 23]
+    ],
+    "calls": [
+      ["square", "Shape.area", 11],
+      ["radius", "Shape.area", 11],
+      ["render", "describe", 18],
+      ["square", "describe", 18],
+      ["fromIntegral", "describe", 18],
+      ["show", "render", 20],
+      ["putStrLn", "main", 23],
+      ["describe", "main", 23]
+    ]
+  },
+  "haxe": {
+    "file": "haxe.hx",
+    "symbols": [
+      ["interface", "Shape", 3, 5],
+      ["method", "Shape.area", 4, 4],
+      ["class", "Point", 7, 9],
+      ["class", "Circle", 11, 25],
+      ["method", "Circle.new", 14, 16],
+      ["method", "Circle.area", 18, 20],
+      ["method", "Circle.square", 22, 24]
+    ],
+    "calls": [
+      ["square", "Circle.area", 19]
+    ]
+  },
+  "julia": {
+    "file": "julia.jl",
+    "symbols": [
+      ["class", "Shapes", 1, 17],
+      ["class", "Shapes.Shape", 3, 3],
+      ["struct", "Shapes.Circle", 5, 7],
+      ["method", "Shapes.square", 9, 9],
+      ["method", "Shapes.area", 11, 13],
+      ["method", "Shapes.show", 15, 15]
+    ],
+    "calls": [
+      ["square", "Shapes.area", 12],
+      ["print", "Shapes.show", 15],
+      ["area", "Shapes.show", 15],
+      ["println", null, 19],
+      ["area", null, 19],
+      ["Circle", null, 19]
+    ]
+  },
+  "lua": {
+    "file": "lua.lua",
+    "symbols": [
+      ["function", "clamp", 3, 5],
+      ["method", "M.area", 7, 9],
+      ["method", "M.describe", 11, 13],
+      ["method", "M.scale", 15, 17],
+      ["function", "on_draw", 20, 22]
+    ],
+    "calls": [
+      ["max", "clamp", 4],
+      ["clamp", "M.area", 8],
+      ["tostring", "M.describe", 12],
+      ["clamp", "M.scale", 16],
+      ["area", "on_draw", 21],
+      ["print", null, 25],
+      ["area", null, 25]
+    ]
+  },
+  "nim": {
+    "file": "nim.nim",
+    "symbols": [
+      ["class", "Shape", 2, 2],
+      ["class", "Circle", 3, 3],
+      ["function", "square", 6, 7],
+      ["function", "area", 9, 10],
+      ["function", "describe", 12, 13]
+    ],
+    "calls": [
+      ["square", "area", 10],
+      ["area", "describe", 13],
+      ["echo", null, 15],
+      ["describe", null, 15]
+    ]
+  },
+  "nix": {
+    "file": "nix.nix",
+    "symbols": [
+      ["function", "square", 3, 3],
+      ["function", "area", 4, 4]
+    ],
+    "calls": [
+      ["square", "area", 4],
+      ["mkOption", null, 8],
+      ["area", null, 10],
+      ["nameValuePair", null, 12],
+      ["area", null, 12]
+    ]
+  },
+  "ocaml": {
+    "file": "ocaml.ml",
+    "symbols": [
+      ["class", "Circle", 1, 4],
+      ["method", "Circle.square", 2, 2],
+      ["method", "Circle.area", 3, 3],
+      ["interface", "SHAPE", 6, 8],
+      ["function", "describe", 10, 10]
+    ],
+    "calls": [
+      ["square", "Circle.area", 3],
+      ["string_of_float", "describe", 10],
+      ["area", "describe", 10],
+      ["print_endline", null, 12],
+      ["describe", null, 12]
+    ]
+  },
+  "odin": {
+    "file": "odin.odin",
+    "symbols": [
+      ["struct", "Circle", 5, 7],
+      ["class", "Kind", 9, 12],
+      ["function", "square", 14, 16],
+      ["function", "area", 18, 20],
+      ["function", "main", 22, 24]
+    ],
+    "calls": [
+      ["square", "area", 19],
+      ["println", "main", 23],
+      ["area", "main", 23]
+    ]
+  },
+  "pascal": {
+    "file": "pascal.pas",
+    "symbols": [
+      ["class", "TCircle", 6, 10],
+      ["function", "Square", 14, 17],
+      ["method", "TCircle.Area", 19, 22],
+      ["method", "TCircle.Describe", 24, 27]
+    ],
+    "calls": [
+      ["Square", "TCircle.Area", 21],
+      ["WriteLn", "TCircle.Describe", 26],
+      ["Square", "TCircle.Describe", 26]
+    ]
+  },
+  "perl": {
+    "file": "perl.pl",
+    "symbols": [
+      ["class", "Shape.Circle", 1, 1],
+      ["function", "new", 4, 7],
+      ["function", "area", 9, 12],
+      ["function", "square", 14, 17],
+      ["class", "main", 19, 19]
+    ],
+    "calls": [
+      ["bless", "new", 6],
+      ["square", "area", 11],
+      ["new", null, 21],
+      ["print", null, 22],
+      ["area", null, 22],
+      ["print", null, 23],
+      ["square", null, 23]
+    ]
+  },
+  "php": {
+    "file": "php.php",
+    "symbols": [
+      ["interface", "Shape", 4, 7],
+      ["method", "Shape.area", 6, 6],
+      ["trait", "Named", 9, 15],
+      ["method", "Named.label", 11, 14],
+      ["class", "Circle", 17, 27],
+      ["method", "Circle.__construct", 21, 21],
+      ["method", "Circle.area", 23, 26],
+      ["function", "square", 29, 32]
+    ],
+    "calls": [
+      ["format_name", "Named.label", 13],
+      ["pi", "Circle.area", 25],
+      ["square", "Circle.area", 25],
+      ["area", null, 34]
+    ]
+  },
+  "powershell": {
+    "file": "powershell.ps1",
+    "symbols": [
+      ["function", "Get-Square", 1, 4],
+      ["function", "Get-Area", 6, 9],
+      ["class", "Circle", 11, 17],
+      ["method", "Circle.Area", 14, 16]
+    ],
+    "calls": [
+      ["Get-Square", "Get-Area", 8],
+      ["Get-Area", "Circle.Area", 15],
+      ["Write-Host", null, 19],
+      ["Get-Area", null, 19]
+    ]
+  },
+  "r": {
+    "file": "r.r",
+    "symbols": [
+      ["function", "square", 1, 3],
+      ["function", "circle_area", 5, 7],
+      ["function", "describe", 9, 12],
+      ["function", "inner", 10, 10]
+    ],
+    "calls": [
+      ["square", "circle_area", 6],
+      ["format", "inner", 10],
+      ["paste", "describe", 11],
+      ["inner", "describe", 11],
+      ["circle_area", "describe", 11],
+      ["print", null, 14],
+      ["describe", null, 14]
+    ]
+  },
+  "racket": {
+    "file": "racket.rkt",
+    "symbols": [
+      ["struct", "circle", 3, 3],
+      ["function", "square", 5, 6],
+      ["function", "area", 8, 9],
+      ["function", "describe", 11, 14]
+    ],
+    "calls": [
+      ["*", "square", 6],
+      ["*", "area", 9],
+      ["square", "area", 9],
+      ["circle-radius", "area", 9],
+      ["area", "describe", 13],
+      ["number->string", "describe", 14],
+      ["displayln", null, 16],
+      ["describe", null, 16],
+      ["circle", null, 16]
+    ]
+  },
+  "ruby": {
+    "file": "ruby.rb",
+    "symbols": [
+      ["function", "normalize", 2, 4],
+      ["class", "Storage", 6, 20],
+      ["class", "Storage.Store", 7, 19],
+      ["method", "Storage.Store.initialize", 8, 10],
+      ["method", "Storage.Store.put", 12, 14],
+      ["method", "Storage.Store.build", 16, 18]
+    ],
+    "calls": [
+      ["strip", "normalize", 3],
+      ["to_s", "normalize", 3],
+      ["normalize", "Storage.Store.put", 13],
+      ["put", null, 22],
+      ["build", null, 22]
+    ]
+  },
+  "scala": {
+    "file": "scala.scala",
+    "symbols": [
+      ["trait", "Shape", 3, 5],
+      ["method", "Shape.area", 4, 4],
+      ["class", "Circle", 7, 9],
+      ["method", "Circle.area", 8, 8],
+      ["class", "Circle", 11, 13],
+      ["method", "Circle.square", 12, 12],
+      ["class", "Main", 15, 17],
+      ["method", "Main.main", 16, 16]
+    ],
+    "calls": [
+      ["square", "Circle.area", 8],
+      ["println", "Main.main", 16]
+    ]
+  },
+  "scheme": {
+    "file": "scheme.scm",
+    "symbols": [
+      ["struct", "circle", 1, 4],
+      ["function", "square", 6, 7],
+      ["function", "area", 9, 10],
+      ["function", "describe", 12, 15],
+      ["function", "twice", 17, 19]
+    ],
+    "calls": [
+      ["*", "square", 7],
+      ["*", "area", 10],
+      ["square", "area", 10],
+      ["circle-radius", "area", 10],
+      ["area", "describe", 14],
+      ["number->string", "describe", 15],
+      ["display", null, 21],
+      ["describe", null, 21],
+      ["make-circle", null, 21]
+    ]
+  },
+  "solidity": {
+    "file": "solidity.sol",
+    "symbols": [
+      ["interface", "IShape", 4, 6],
+      ["method", "IShape.area", 5, 5],
+      ["class", "Math2", 8, 12],
+      ["method", "Math2.square", 9, 11],
+      ["class", "Circle", 14, 29],
+      ["method", "Circle.positive", 17, 20],
+      ["method", "Circle.setRadius", 22, 24],
+      ["method", "Circle.area", 26, 28]
+    ],
+    "calls": [
+      ["require", "Circle.positive", 18],
+      ["positive", "Circle.setRadius", 22],
+      ["square", "Circle.area", 27]
+    ]
+  },
+  "sql": {
+    "file": "sql.sql",
+    "symbols": [
+      ["class", "shapes", 1, 4],
+      ["function", "square", 8, 10]
+    ],
+    "calls": [
+      ["square", null, 14]
+    ]
+  },
+  "starlark": {
+    "file": "starlark.bzl",
+    "symbols": [
+      ["function", "_square", 3, 4],
+      ["function", "area", 6, 7],
+      ["function", "shape_library", 9, 14]
+    ],
+    "calls": [
+      ["_square", "area", 7],
+      ["genrule", "shape_library", 10],
+      ["area", "shape_library", 13],
+      ["area", null, 16]
+    ]
+  },
+  "swift": {
+    "file": "swift.swift",
+    "symbols": [
+      ["interface", "Shape", 1, 3],
+      ["method", "Shape.area", 2, 2],
+      ["class", "Circle", 5, 11],
+      ["method", "Circle.area", 8, 10],
+      ["function", "square", 13, 15]
+    ],
+    "calls": [
+      ["Circle", null, 17],
+      ["print", null, 18],
+      ["area", null, 18]
+    ]
+  },
+  "tcl": {
+    "file": "tcl.tcl",
+    "symbols": [
+      ["method", "shapes.square", 2, 4],
+      ["method", "shapes.area", 6, 8],
+      ["class", "Circle", 11, 15],
+      ["method", "Circle.describe", 12, 14],
+      ["method", "shapes.report", 17, 19]
+    ],
+    "calls": [
+      ["return", "shapes.square", 3],
+      ["return", "shapes.area", 7],
+      ["square", "shapes.area", 7],
+      ["return", "Circle.describe", 13],
+      ["area", "Circle.describe", 13],
+      ["puts", "shapes.report", 18],
+      ["area", "shapes.report", 18],
+      ["report", null, 21]
+    ]
+  },
+  "vim": {
+    "file": "vim.vim",
+    "symbols": [
+      ["function", "shapes#Square", 1, 3],
+      ["method", "s.Area", 5, 7],
+      ["function", "shapes#Describe", 9, 11]
+    ],
+    "calls": [
+      ["shapes#Square", "s.Area", 6],
+      ["Area", "shapes#Describe", 10],
+      ["shapes#Describe", null, 13]
+    ]
+  },
+  "zig": {
+    "file": "zig.zig",
+    "symbols": [
+      ["struct", "Circle", 3, 9],
+      ["method", "Circle.area", 6, 8],
+      ["function", "square", 11, 13],
+      ["function", "main", 15, 18]
+    ],
+    "calls": [
+      ["square", "Circle.area", 7],
+      ["print", "main", 17],
+      ["area", "main", 17]
+    ]
+  },
+  "zsh": {
+    "file": "zsh.zsh",
+    "symbols": [
+      ["function", "square", 3, 5],
+      ["function", "area", 7, 10]
+    ],
+    "calls": [
+      ["print", "square", 4],
+      ["print", "area", 9],
+      ["square", "area", 9],
+      ["area", null, 12]
+    ]
+  }
+}
