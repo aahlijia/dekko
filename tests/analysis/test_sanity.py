@@ -5145,3 +5145,35 @@ def test_sanity_all_explains_ts_non_call_shapes(
     assert causes.get(sanity.CAUSE_PROPERTY_READ) == 1
     assert causes.get(sanity.CAUSE_LOCAL_BINDING_OR_LITERAL) == 1
     assert causes.get(sanity.CAUSE_IMPORT_STATEMENT) == 2
+
+
+def test_sanity_all_sweeps_a_class_sharing_its_line_with_a_constructor(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A Kotlin primary constructor sits on its class's own line, so a
+    # rebuilt `path:qualname:LINE` target matched both and the sweep
+    # dropped the class as ambiguous. The sweep passes ids now.
+    root = make_mapped_repo(
+        {
+            "CustomData.kt": (
+                "package demo\n"
+                "\n"
+                "class CustomData(val name: String) {\n"
+                "    fun greet(): String = name\n"
+                "}\n"
+            ),
+            "Use.kt": (
+                "package demo\n"
+                "\n"
+                "fun make(): Any {\n"
+                '    return CustomData("x")\n'
+                "}\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    out, err = capsys.readouterr()
+    assert "is ambiguous" not in err
+    doc = json.loads(out)
+    assert doc["symbols_swept"] == 2

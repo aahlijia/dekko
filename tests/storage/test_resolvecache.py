@@ -410,7 +410,7 @@ def test_gate_widens_for_a_new_constructor_on_an_existing_class(
     """Constructor-collapse gap (dependency audit): adding
     ``__init__`` to a class never changes the class's own bare name, so
     a caller's already-cached ``Widget()`` edge doesn't literally
-    mention ``__init__`` anywhere. ``_constructors_of`` would now find
+    mention ``__init__`` anywhere. ``constructors_of`` would now find
     the new ``__init__`` and add a second edge to it, so the caller must
     be marked dirty even though nothing about its own call site's name
     changed -- ``name_delta`` folds the class's own name into

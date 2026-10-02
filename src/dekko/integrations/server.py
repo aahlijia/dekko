@@ -1132,7 +1132,8 @@ _ROOT_PROP = {
 }
 _SYMBOL_PROP = {
     "type": "string",
-    "description": "Symbol: name, Class.method, or file.py:name. If the "
+    "description": "Symbol: name, Class.method, file.py:name, or a "
+    "symbol id a reply printed (Foo.java::Foo.run#2). If the "
     "reply says the target is ambiguous, append ':LINE' from a printed "
     "candidate row (file.py:Class.method:42) to pick one. 'name', "
     "'target' and 'type' are also accepted as aliases for this argument; "

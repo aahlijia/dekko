@@ -817,15 +817,13 @@ _DISPATCH_LIMIT = 20
 def _dispatch_check_command(sym: Symbol) -> str:
     """The ``dekko sanity --unused`` hint for one dispatch candidate.
 
-    Uses the full ``path:qualname:line`` target form, not the bare
-    ``qualname`` — an overloaded target (2+ symbols sharing the same
-    ``(path, qualname)``) needs the trailing ``:line`` to disambiguate,
-    matching the exact hint ``resolve_target``'s own ambiguous-target
-    error message already tells the user to append (the row already
-    carries ``sym.start_line``, so there's no reason to make the
-    copy-pasted command hit that error at all).
+    Uses the symbol's id, not a ``path:qualname:line`` string rebuilt
+    from it: an id always resolves to its own symbol, where a rebuilt
+    string can still be ambiguous (a Kotlin class and its primary
+    constructor share a line) or unparseable (a C++ qualname holding
+    ``::``).
     """
-    return f"dekko sanity --unused {sym.path}:{sym.qualname}:{sym.start_line}"
+    return f"dekko sanity --unused {sym.id}"
 
 
 def _dispatch_json(sym: Symbol, evidence: str | None) -> dict:

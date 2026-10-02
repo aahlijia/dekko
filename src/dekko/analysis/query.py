@@ -44,7 +44,11 @@ from dekko.textutil import (
     signature,
     token_footer,
 )
-from dekko.core.resolver import MODULE_CALLER_SUFFIX, bare_import_source
+from dekko.core.resolver import (
+    MODULE_CALLER_SUFFIX,
+    bare_import_source,
+)
+from dekko.core.resolver import constructors_of as _resolver_constructors_of
 
 EXIT_OK = 0
 EXIT_NOT_FOUND = 3
@@ -188,9 +192,20 @@ def resolve_target(
     ``Class.method`` reading before giving up — a dead-end here ejects
     an agent into grep/Read, the exact cost the map exists to avoid.
 
+    A symbol id (``path::qualname`` or ``path::qualname#N``, the form
+    every command prints) is looked up first, so an id always names
+    its own symbol, whatever the other readings of the string would
+    match.
+
+    A bare name shared only by one type and that type's own
+    constructors (Java's ``ErrorPage`` class and its three
+    ``ErrorPage`` constructors) resolves to the type, with a note on
+    stderr: the class's callers are every construction, whichever
+    overload each one picked.
+
     Args:
         index: Loaded map index.
-        target: Bare name, qualname, ``path:qualname``, or
+        target: Symbol id, bare name, qualname, ``path:qualname``, or
             ``path:qualname:line`` form — the trailing ``:line`` picks
             one candidate out of an overload set that shares the same
             ``(path, qualname)`` (see ``_resolve_exact``).
@@ -200,6 +215,10 @@ def resolve_target(
         candidates considered. No candidates means not found; several
         with no match means ambiguous.
     """
+    by_id = index.symbols_by_id.get(target)
+    if by_id is not None:
+        return by_id, [by_id]
+
     match, candidates = _resolve_exact(index, target)
     if not candidates and "::" in target:
         for variant in (
@@ -209,7 +228,64 @@ def resolve_target(
             match, candidates = _resolve_exact(index, variant)
             if candidates:
                 break
+
+    if match is None:
+        match = _type_over_own_constructors(index, target, candidates)
     return match, candidates
+
+
+def constructors_of(index: MapIndex, cls: Symbol) -> list[Symbol]:
+    """A type's own constructors, as the resolver pairs them.
+
+    The same relation the resolver credits constructions by, read off
+    the loaded map, so the read side can't drift from the edges it
+    is reading.
+
+    Args:
+        index: Loaded map index.
+        cls: Any symbol; only a type-kind one has constructors.
+
+    Returns:
+        The constructor symbols, or an empty list.
+    """
+    return _resolver_constructors_of(cls, index.symbols_by_name)
+
+
+def _type_over_own_constructors(
+    index: MapIndex, target: str, candidates: list[Symbol]
+) -> Symbol | None:
+    """The type among candidates that are one type plus its constructors.
+
+    Two types, or a type plus anything that isn't one of its own
+    constructors, stay ambiguous. The choice is disclosed on stderr,
+    never silent.
+
+    Args:
+        index: Loaded map index.
+        target: The target string, for the note.
+        candidates: An ambiguous target's candidates.
+
+    Returns:
+        The type, or ``None`` when the candidates aren't that shape.
+    """
+    types = [c for c in candidates if c.kind in TYPE_KINDS]
+    if len(types) != 1 or len(candidates) < 2:
+        return None
+
+    cls = types[0]
+    ctor_ids = {c.id for c in constructors_of(index, cls)}
+    others = [c for c in candidates if c is not cls]
+    if not all(c.id in ctor_ids for c in others):
+        return None
+
+    print(
+        f"dekko: note: '{target}' also names its {len(others)} "
+        f"constructor(s); using the {cls.kind} at {cls.path}:"
+        f"{cls.start_line}. For one constructor, pass its id or "
+        f"{others[0].path}:{others[0].qualname}:LINE",
+        file=sys.stderr,
+    )
+    return cls
 
 
 def _resolve_exact(
@@ -239,11 +315,17 @@ def _resolve_exact(
             body, line = head, int(tail)
     if ":" in body:
         path_part, _, qual = body.rpartition(":")
-        pool = [
+        in_files = [
             s
             for p in paths_matching(index, path_part)
             for s in index.symbols_by_path[p]
-            if s.qualname == qual or s.name == qual
+        ]
+        # An exact qualname outranks a bare-name match: ``File.java:
+        # ErrorPage`` is the class, not the class plus its same-named
+        # constructors. The bare name is the fallback when nothing in
+        # the file has that qualname.
+        pool = [s for s in in_files if s.qualname == qual] or [
+            s for s in in_files if s.name == qual
         ]
         candidates = pool
         if line is not None:
@@ -588,11 +670,23 @@ def render_candidates(candidates: list[Symbol]) -> list[str]:
         # only escape hatch; point at it directly with a real
         # candidate's own line as an example.
         sample = ranked[0]
-        rows.append(
-            "  … path+qualname alone can't disambiguate these (same "
-            "file, same name) — append `:LINE` from a row above, e.g. "
-            f"`{sample.path}:{sample.qualname}:{sample.start_line}`"
-        )
+        if len({s.start_line for s in candidates}) == len(candidates):
+            rows.append(
+                "  … path+qualname alone can't disambiguate these (same "
+                "file, same name) — append `:LINE` from a row above, "
+                f"e.g. `{sample.path}:{sample.qualname}:"
+                f"{sample.start_line}`"
+            )
+        else:
+            # Two of them share a line too, so ``:LINE`` can't pick
+            # one either; an id always can.
+            rows.append(
+                "  … these share file, name and line — pass a symbol "
+                "id instead: "
+                + ", ".join(
+                    f"`{s.id}`" for s in ranked[:_MAX_AMBIGUOUS_CANDIDATES]
+                )
+            )
     return rows
 
 
@@ -3114,9 +3208,10 @@ def _sole_type_candidate(
     """The one type-kind symbol among an ambiguous target's candidates.
 
     A heritage query can only ever be about a type, so a bare name
-    shared by a class and its own constructors/methods (Java's
-    ``ConfigDataEnvironmentPostProcessor``: one class, three ctors) is
-    not genuinely ambiguous *for this action* -- every non-type
+    shared by one class and unrelated same-named methods (a class
+    plus only its own constructors already resolves in
+    ``resolve_target``) is not genuinely ambiguous *for this action*
+    -- every non-type
     candidate would just hit ``_run_heritage_wrong_kind``. The generic
     candidate list used to send an agent off to
     copy a ``:LINE`` qualifier to say something the action already

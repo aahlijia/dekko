@@ -36,7 +36,7 @@ resolves to a class-shaped symbol also credits that class's own
 explicit constructor method (JS/TS ``constructor``, Python
 ``__init__``, Java's and C++'s same-named constructors, which for C++
 may be defined out of line in another file) when one was extracted,
-via ``_constructors_of`` — without this, ``new ClassName(...)``
+via ``constructors_of`` — without this, ``new ClassName(...)``
 construction was invisible to the constructor method's fan-in even
 though it resolved fine to the class itself (or, for Java and C++,
 fell into ``ambiguous`` entirely, since such a constructor's own bare
@@ -570,7 +570,7 @@ class NameDelta:
             or JS/TS's ``constructor``), its enclosing type's own bare
             name is added too. Without this, adding an ``__init__`` to
             an existing class would go undetected by any cached
-            caller's *own* name-scan: ``_constructors_of`` looks up the
+            caller's *own* name-scan: ``constructors_of`` looks up the
             new method by a name (``__init__``) that never appears in
             an already-cached ``MyClass()`` edge, whose callee id ends
             in ``MyClass``, not ``__init__``. Adding the class's own
@@ -3044,7 +3044,7 @@ def _add_call_and_constructor(
 ) -> None:
     """Record the resolved call edge, plus a constructor edge if any.
 
-    See ``_constructors_of`` (module docstring): a call or
+    See ``constructors_of`` (module docstring): a call or
     construction that resolves to a class-shaped symbol also counts
     toward that class's own explicit constructor method's fan-in, when
     the language extracted one as its own symbol. The class edge is
@@ -3066,7 +3066,7 @@ def _add_call_and_constructor(
             place.
     """
     _add_edge(caller_id, target.id, call.line, edges)
-    ctors = _constructors_of(target, by_name_path, index)
+    ctors = constructors_of(target, index, by_name_path)
     if not ctors:
         return
 
@@ -5631,10 +5631,10 @@ _CONSTRUCTOR_NAMES = ("constructor", "__init__")
 _CONSTRUCTOR_NAME_SET = frozenset(_CONSTRUCTOR_NAMES)
 
 
-def _constructors_of(
+def constructors_of(
     cls: Symbol,
-    by_name_path: dict[tuple[str, str], list[Symbol]],
     index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]] | None = None,
 ) -> list[Symbol]:
     """The class's own explicit constructor methods, if extracted.
 
@@ -5659,12 +5659,19 @@ def _constructors_of(
     extractor builds an out-of-line definition's qualname from its
     ``Graph::`` scope, so it matches the class's own.
 
+    The read side asks the same question of a loaded map (a class and
+    its constructors are one thing to a caller), so it calls this with
+    ``MapIndex.symbols_by_name`` and gets exactly the relation the
+    resolver recorded edges by.
+
     Args:
         cls: A resolved symbol, checked only when it is class-shaped
             (``model.TYPE_KINDS``) — a plain function/method target
             returns an empty list immediately.
-        by_name_path: ``(bare name, file path)`` → same-file symbols.
         index: Bare name → every symbol with it.
+        by_name_path: ``(bare name, file path)`` → same-file symbols,
+            a faster lookup the resolver already holds. Without it the
+            same-file symbols are filtered out of ``index``.
 
     Returns:
         The constructor method symbols in declaration order, or an
@@ -5678,9 +5685,13 @@ def _constructors_of(
         return named
     for name in _CONSTRUCTOR_NAMES:
         qual = f"{cls.qualname}.{name}"
+        if by_name_path is None:
+            same_file = [s for s in index.get(name, []) if s.path == cls.path]
+        else:
+            same_file = by_name_path.get((name, cls.path), [])
         found = [
             sym
-            for sym in by_name_path.get((name, cls.path), [])
+            for sym in same_file
             if sym.kind == "method" and sym.qualname == qual
         ]
         if found:
@@ -5696,7 +5707,7 @@ def _class_named_constructors(
     Looked up in ``index[cls.name]``, the same small list the
     construction's own candidates came from. Java constructors live
     in the class's file; C++ ones anywhere in the family (see
-    ``_constructors_of``).
+    ``constructors_of``).
 
     Args:
         cls: A type-kind symbol.
@@ -5824,7 +5835,7 @@ def _pick_constructor(
 
     Args:
         cls: The constructed class.
-        ctors: The class's constructors, from ``_constructors_of``.
+        ctors: The class's constructors, from ``constructors_of``.
         call: The construction call.
         index: The bare-name index, for each constructor's declared
             arity (``_arity_fits``).

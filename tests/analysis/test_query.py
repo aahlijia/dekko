@@ -1276,6 +1276,233 @@ def test_overload_ambiguous_report_hints_line_qualifier(
     assert "Foo.java:Foo.run:2" in err
 
 
+# A class and its same-named constructors: Java overloads on their own
+# lines, a Kotlin primary constructor on the class's own line, and a
+# C++ class whose qualname holds `::` (defined out of its outer class).
+CLASS_AND_CONSTRUCTORS = {
+    "ErrorPage.java": (
+        "package demo;\n"
+        "\n"
+        "public class ErrorPage {\n"
+        "    private final String path;\n"
+        "\n"
+        "    public ErrorPage(String path) {\n"
+        "        this.path = path;\n"
+        "    }\n"
+        "\n"
+        "    public ErrorPage(int status) {\n"
+        '        this.path = "x";\n'
+        "    }\n"
+        "\n"
+        "    public ErrorPage(int status, String path) {\n"
+        "        this.path = path;\n"
+        "    }\n"
+        "}\n"
+    ),
+    "CustomData.kt": (
+        "package demo\n"
+        "\n"
+        "class CustomData(val name: String) {\n"
+        "    fun greet(): String = name\n"
+        "}\n"
+    ),
+    "session.h": (
+        "namespace ns {\nclass Outer {\n public:\n  class Impl;\n};\n}\n"
+    ),
+    "session.cc": (
+        '#include "session.h"\n'
+        "namespace ns {\n"
+        "class Outer::Impl {\n"
+        " public:\n"
+        "  Impl() {}\n"
+        "  int Run() { return 1; }\n"
+        "};\n"
+        "}\n"
+    ),
+}
+
+
+@pytest.fixture
+def class_ctor_index(make_mapped_repo: RepoFactory) -> mapfile.MapIndex:
+    index = mapfile.load_map(make_mapped_repo(CLASS_AND_CONSTRUCTORS))
+    assert index is not None
+    return index
+
+
+def test_every_symbol_id_resolves_to_its_own_symbol(
+    class_ctor_index: mapfile.MapIndex,
+) -> None:
+    """Every command prints ids, so every id must work as a target,
+    including an overload's `#N` id and a qualname holding `::`."""
+    ids = list(class_ctor_index.symbols_by_id)
+    assert "ErrorPage.java::ErrorPage.ErrorPage#2" in ids
+    assert any("::" in sid.partition("::")[2] for sid in ids)
+    for sid in ids:
+        match, candidates = query.resolve_target(class_ctor_index, sid)
+        assert match is not None
+        assert match.id == sid
+        assert candidates == [match]
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("ErrorPage.java:ErrorPage", "ErrorPage.java::ErrorPage"),
+        (
+            "ErrorPage.java:ErrorPage.ErrorPage:10",
+            "ErrorPage.java::ErrorPage.ErrorPage#2",
+        ),
+        ("CustomData.kt:CustomData:3", "CustomData.kt::CustomData"),
+        ("CustomData.kt:CustomData", "CustomData.kt::CustomData"),
+        (
+            "CustomData.kt:CustomData.CustomData",
+            "CustomData.kt::CustomData.CustomData",
+        ),
+    ],
+)
+def test_path_target_prefers_an_exact_qualname(
+    class_ctor_index: mapfile.MapIndex, target: str, expected: str
+) -> None:
+    """`path:Name` is the class: the class's qualname is `Name`, its
+    constructors only share the bare name."""
+    match, _ = query.resolve_target(class_ctor_index, target)
+    assert match is not None
+    assert match.id == expected
+
+
+def test_path_target_to_constructor_overloads_stays_ambiguous(
+    class_ctor_index: mapfile.MapIndex,
+) -> None:
+    match, candidates = query.resolve_target(
+        class_ctor_index, "ErrorPage.java:ErrorPage.ErrorPage"
+    )
+    assert match is None
+    assert len(candidates) == 3
+
+
+def test_path_target_falls_back_to_bare_name(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """With no qualname match in the file, the bare name still works."""
+    index = mapfile.load_map(
+        make_mapped_repo(
+            {"a.py": "class A:\n    def run(self):\n        return 1\n"}
+        )
+    )
+    assert index is not None
+    match, _ = query.resolve_target(index, "a.py:run")
+    assert match is not None
+    assert match.id == "a.py::A.run"
+
+
+@pytest.mark.parametrize(
+    ("target", "expected", "count"),
+    [
+        ("ErrorPage", "ErrorPage.java::ErrorPage", 3),
+        ("CustomData", "CustomData.kt::CustomData", 1),
+    ],
+)
+def test_bare_name_of_type_and_its_constructors_is_the_type(
+    class_ctor_index: mapfile.MapIndex,
+    capsys: pytest.CaptureFixture,
+    target: str,
+    expected: str,
+    count: int,
+) -> None:
+    match, _ = query.resolve_target(class_ctor_index, target)
+    assert match is not None
+    assert match.id == expected
+    err = capsys.readouterr().err
+    assert f"also names its {count} constructor(s)" in err
+    assert "pass its id" in err
+
+
+def test_bare_class_name_query_exits_ok(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(CLASS_AND_CONSTRUCTORS)
+    code = cli.main(["query", "symbol", "ErrorPage", "--root", str(root)])
+    assert code == query.EXIT_OK
+    out, err = capsys.readouterr()
+    assert "ErrorPage.java:3" in out
+    assert "is ambiguous" not in err
+
+
+def test_type_plus_unrelated_method_stays_ambiguous(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    index = mapfile.load_map(
+        make_mapped_repo(
+            {
+                "Status.java": "class Status {\n}\n",
+                "Util.java": (
+                    "class Util {\n"
+                    "    int Status() {\n"
+                    "        return 1;\n"
+                    "    }\n"
+                    "}\n"
+                ),
+            }
+        )
+    )
+    assert index is not None
+    match, candidates = query.resolve_target(index, "Status")
+    assert match is None
+    assert len(candidates) == 2
+
+
+def test_two_same_named_types_stay_ambiguous(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    index = mapfile.load_map(
+        make_mapped_repo(
+            {
+                "a/Graph.java": ("class Graph {\n    Graph() {\n    }\n}\n"),
+                "b/Graph.java": "class Graph {\n}\n",
+            }
+        )
+    )
+    assert index is not None
+    match, candidates = query.resolve_target(index, "Graph")
+    assert match is None
+    assert len(candidates) == 3
+
+
+def test_constructors_of_reads_the_resolver_relation(
+    class_ctor_index: mapfile.MapIndex,
+) -> None:
+    cls = class_ctor_index.symbols_by_id["ErrorPage.java::ErrorPage"]
+    assert [
+        s.start_line for s in query.constructors_of(class_ctor_index, cls)
+    ] == [6, 10, 14]
+    method = class_ctor_index.symbols_by_id["CustomData.kt::CustomData.greet"]
+    assert query.constructors_of(class_ctor_index, method) == []
+
+
+def test_render_candidates_offers_ids_when_lines_collide() -> None:
+    """Two candidates sharing path, qualname and line can't be told
+    apart by `:LINE`; the hint names their ids instead."""
+    rows = query.render_candidates(
+        [
+            Symbol(
+                id=f"Foo.java::Foo.run{suffix}",
+                name="run",
+                qualname="Foo.run",
+                kind="method",
+                path="Foo.java",
+                language="java",
+                start_line=2,
+                end_line=3,
+            )
+            for suffix in ("", "#2")
+        ]
+    )
+    hint = rows[-1]
+    assert "`Foo.java::Foo.run`" in hint
+    assert "`Foo.java::Foo.run#2`" in hint
+    assert ":LINE" not in hint
+
+
 def test_render_candidates_no_hint_for_single_candidate() -> None:
     """``render_candidates``'s overload-set check
     (``len({(path, qualname) for s in candidates}) == 1``) is trivially

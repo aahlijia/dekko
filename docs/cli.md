@@ -52,9 +52,17 @@ dekko sanity --all                   # repo-wide sweep: every fan-in symbol, not
 dekko daemon start                   # warm-cache background process (see below)
 ```
 
-Symbol targets accept a bare `name`, `Class.method`, or a qualified
-`file.py:name` — ambiguous names list their candidates instead of
-guessing. Every read command takes `--json` for structured output.
+Symbol targets accept a bare `name`, `Class.method`, a qualified
+`file.py:name` or `file.py:Class.method`, a trailing `:LINE` to pick
+one overload (`Foo.java:Foo.run:12`), or a symbol id exactly as any
+command prints it (`Foo.java::Foo.run#2`). An id always names its own
+symbol. In `file:name`, a symbol whose full qualname is `name` wins
+over ones that only share the bare name, so `ErrorPage.java:ErrorPage`
+is the class, not the class plus its constructors. A bare name shared
+only by one class and that class's own constructors resolves to the
+class, with a note on stderr (its callers are every construction).
+Other ambiguous names list their candidates instead of guessing.
+Every read command takes `--json` for structured output.
 Most also regenerate a stale map automatically (`--no-regen` to fail
 instead) — `diff`, `affected`, `status`, and `ledger` don't accept
 `--no-regen` at all: `status`/`ledger` never regenerate regardless,

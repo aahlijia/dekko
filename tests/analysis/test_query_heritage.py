@@ -588,16 +588,34 @@ def test_heritage_query_prefers_sole_type_candidate(
     assert code == 0
     assert "interface Base" in captured.out
     # Disclosed, never silent.
-    assert "also names 2 non-type symbol(s)" in captured.err
+    assert "also names its 2 constructor(s)" in captured.err
 
 
-def test_non_heritage_query_still_reports_the_collision(
+def test_non_heritage_query_takes_the_class_over_its_constructors(
     make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
 ) -> None:
+    # A class's callers are every construction, so a name shared only
+    # by the class and its own constructors is the class for any action.
     root = make_mapped_repo(JAVA_CTOR_COLLISION)
     code = cli.main(["query", "callers", "Proc", "--root", str(root)])
-    assert code != 0
-    assert "also names" not in capsys.readouterr().err
+    assert code == 0
+    assert "also names its 2 constructor(s)" in capsys.readouterr().err
+
+
+def test_heritage_query_prefers_type_over_an_unrelated_method(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            **JAVA_CTOR_COLLISION,
+            "Util.java": "class Util {\n    int Proc() { return 1; }\n}\n",
+        }
+    )
+    code = cli.main(["query", "supertypes", "Proc", "--root", str(root)])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "interface Base" in captured.out
+    assert "also names 3 non-type symbol(s)" in captured.err
 
 
 def test_sole_type_candidate_needs_exactly_one_type() -> None:

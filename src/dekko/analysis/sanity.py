@@ -3629,10 +3629,9 @@ def _dekko_hits_callers(
 ) -> tuple[list[tuple[str, int]], list[str]]:
     """``(site_hits, module_level_paths)`` for a resolved callers target.
 
-    ``sym_target`` is a ``path:qualname:LINE`` string built from an
-    already-resolved ``Symbol`` (see ``run()``) so this re-resolves to
-    exactly the same candidate — the same disambiguation escape hatch
-    ``note add``/``note rm`` already use for an overload set.
+    ``sym_target`` is an already-resolved ``Symbol``'s id (see
+    ``run()``), which ``query.resolve_target`` looks up before any
+    other reading, so it re-resolves to exactly that symbol.
 
     ``module_level`` entries carry per-site lines when the map
     recorded them; those fold straight into
@@ -4735,11 +4734,8 @@ def run(
         attributed = _attributed_sites(query_index, sym.name)
         own_id = sym.id
         target_sym = sym
-        sym_target = f"{sym.path}:{sym.qualname}:{sym.start_line}"
         try:
-            dekko_hits, module_level = _dekko_hits_callers(
-                query_index, sym_target
-            )
+            dekko_hits, module_level = _dekko_hits_callers(query_index, sym.id)
         except _QueryFailedError as exc:
             return exc.code
 
@@ -5039,11 +5035,8 @@ def _diff_symbol(
         ``_QueryFailedError``'s own docstring — but this keeps one
         anomalous symbol from crashing the whole sweep).
     """
-    sym_target = f"{sym.path}:{sym.qualname}:{sym.start_line}"
     try:
-        dekko_hits, _module_level = _dekko_hits_callers(
-            query_index, sym_target
-        )
+        dekko_hits, _module_level = _dekko_hits_callers(query_index, sym.id)
     except _QueryFailedError:
         return None
     dekko_set = set(dekko_hits)

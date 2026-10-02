@@ -9,6 +9,38 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.8] — 2026-10-02
+
+### Fixed
+- **Every symbol id a command prints now works as a target, and a
+  class can be named apart from its constructors.** Ids were only
+  reachable by reading `::` as a separator, so an overload's `#N` id,
+  or any id whose plain reading was ambiguous, said "no symbol
+  matches": 272 of 3,000 sampled ids on spring-boot, 630 on
+  tensorflow, 49 on claude-code, 35 on cline. tensorflow's 3,575
+  symbols whose qualname holds `::` (`tensorflow.ClientSession::
+  Impl.Impl`) couldn't be named by any target string. Now an id is
+  looked up first and always names its own symbol; 0 failures across
+  every id on all seven eval repos. In `file:name`, a symbol whose
+  qualname is exactly `name` now wins over ones that only share the
+  bare name, so `ErrorPage.java:ErrorPage` is the class instead of
+  "ambiguous" between the class and its three constructors (2,218 of
+  2,219 such types on spring-boot, 245 of 676 on tensorflow; the rest
+  are true same-qualname duplicates). That includes Kotlin classes
+  with a primary constructor, which share the class's line, so even
+  `:LINE` couldn't pick them. `sanity --all` dropped those classes
+  from its sweep as ambiguous. A bare name shared only by one class
+  and that class's own constructors now resolves to the class, with a
+  note on stderr saying so and how to name one constructor: the
+  class's callers are every construction (2,950 names on spring-boot,
+  4,683 on tensorflow stop exiting 4). A class name that also names a
+  second class or an unrelated method stays ambiguous. `sanity`,
+  `sanity --all` and `unused`'s `sanity --unused` hint now pass the
+  symbol's id rather than a rebuilt `path:qualname:LINE` string, and
+  an ambiguous list whose candidates share file, name and line names
+  their ids, since `:LINE` can't help there. Targets that resolved
+  before resolve to the same symbol; no call graph changes.
+
 ## [1.6.7] — 2026-10-02
 
 ### Fixed

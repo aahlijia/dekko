@@ -55,9 +55,10 @@ don't fall back to grep because "the map might be stale now."
 not substring matching, so phrase it as behavior ("where do we retry
 failed requests?"). Zero hits is not an error: broaden and retry.
 
-**Targets** accept a bare name, `Class.method`, `file.py:name`, or
-`file.py::name`. If a reply says the target is ambiguous, append the
-`:LINE` from one of the candidate rows it prints
+**Targets** accept a bare name, `Class.method`, `file.py:name`,
+`file.py::name`, or any symbol id a reply printed (`Foo.java::Foo.run#2`
+always names exactly that symbol). If a reply says the target is
+ambiguous, append the `:LINE` from one of the candidate rows it prints
 (`file.py:Class.method:42`) instead of reading the file. MCP tools
 take the target as `symbol`, `name`, `target` or `type`; pass one.
 
