@@ -9,6 +9,33 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.9] — 2026-10-02
+
+### Fixed
+- **A constructor whose callers tied between two overloads no longer
+  reads "no callers".** When a construction's arguments fit two
+  overloads equally, the class gets the edge and no constructor does.
+  `query callers` on either constructor printed "(no callers of ..)",
+  the same line dead code gets, plus "N additional call site(s)
+  resolved ambiguously", which never said the class holds the
+  answer. `Graph::Graph` on tensorflow read zero while the class has
+  399 callers. Now it prints `(no caller resolved to this constructor
+  of Graph: <id>)` and a note: how many callers construct the class
+  with arguments that fit this constructor and another, which other
+  overloads, and `dekko query callers <class id>` with the class's
+  caller count. A call whose name could also mean an unrelated symbol
+  is not a tie and keeps its own count and the old "resolved
+  ambiguously" note. `--json` adds `overload_ties` (`callers`,
+  `class`, `class_callers`, `siblings`); `ambiguous_in` is still the
+  total. The `query symbol` fan-in line, `context` and MCP
+  `get_callers` split them the same way. These counts were always
+  distinct callers, not call sites, so the notes now say "caller(s)".
+  Applies to 197 constructors on spring-boot (152 that read zero on
+  ties alone) and 486 on tensorflow (365; 347 C++, 18 Java). Where
+  several C++ classes share a qualname (a `DummyDevice` in each of a
+  dozen test files), the note names the class in the constructor's
+  own file, or the header beside it. No call graph changes.
+
 ## [1.6.8] — 2026-10-02
 
 ### Fixed

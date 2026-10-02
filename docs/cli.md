@@ -1114,9 +1114,9 @@ Counts here are **distinct `(caller, name)` collisions, not physical
 call-site counts**: the resolver keys its ambiguous-call accumulator on
 `(caller, name)`, not `(caller, name, line)`, so a caller that
 references the same colliding name at 3 different lines counts once in
-this report — the same granularity limit `query symbol`'s
-"N additional call site(s) resolved ambiguously" disclosure already
-has. `--name` reuses `query`'s own ambiguous-candidate rendering, so a
+this report — the same granularity `query symbol`'s "+N caller(s)
+named 'X' resolved ambiguously" disclosure has, which is why it says
+callers, not call sites. `--name` reuses `query`'s own ambiguous-candidate rendering, so a
 very-high-cardinality collision (a bare `main`/`New`/`Generate`
 matched against dozens of same-named repo-wide candidates) truncates
 the same way an unresolved-target error does, rather than dumping every
@@ -1145,8 +1145,19 @@ Overloads nothing visible tells apart (`new
 ErrorPage(HttpStatus.NOT_FOUND, "/404")` against
 `ErrorPage(HttpStatus, String)` and `ErrorPage(Class, String)`) need
 argument types, which dekko doesn't have, so the call shows under
-`ambiguous --name X` and as "resolved ambiguously" on each of those
-constructors rather than being credited to one.
+`ambiguous --name X` rather than being credited to one constructor.
+The class still gets the edge. `query callers` on one of those
+constructors says so: with no caller resolved to it, it prints `(no
+caller resolved to this constructor of ErrorPage: <id>)` instead of
+"no callers", and a note on stderr counts the callers whose
+arguments fit it and another overload, names the other overload, and
+gives the command that lists them all (`dekko query callers <class
+id>`, with the class's caller count). `--json` adds `overload_ties`
+(`callers`, `class`, `class_callers`, `siblings`) next to
+`ambiguous_in`, which stays the total. A call whose name could also
+mean an unrelated symbol is not a tie; it keeps the plain "resolved
+ambiguously — not counted here" note, counted separately. `query
+symbol` and `context` split the two the same way.
 
 In C++, `new X(...)`, `std::make_unique<X>(...)`/`make_shared` (and
 the `absl::` spellings) and a temporary `X(...)` all count as

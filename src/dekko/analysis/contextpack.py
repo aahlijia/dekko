@@ -22,6 +22,8 @@ from dekko.analysis.query import (
     EXIT_AMBIGUOUS,
     EXIT_OK,
     ambiguous_counts,
+    ambiguous_in_notes,
+    overload_ties_json,
     paths_matching,
     report_unresolved,
     resolve_target,
@@ -89,6 +91,11 @@ class Pack:
         ambig_out: Names the target itself called that resolved
             ambiguously and so never became a ``calls_out`` edge
             (symbol mode only; always 0 in file mode).
+        ambig_in_notes: How ``ambig_in`` is disclosed, worded as
+            ``query callers`` words it (a constructor's overload ties
+            point at its class).
+        overload_ties: The ``overload_ties`` JSON object when the
+            target is a constructor with tied callers.
     """
 
     label: str
@@ -106,6 +113,8 @@ class Pack:
     notes: list[str] = field(default_factory=list)
     ambig_in: int = 0
     ambig_out: int = 0
+    ambig_in_notes: list[str] = field(default_factory=list)
+    overload_ties: dict | None = None
 
 
 def _neighbors(index: MapIndex, sym_id: str) -> list[tuple[str, str]]:
@@ -244,6 +253,9 @@ def build_pack(
         notes=list(index.notes.get(target.id, [])),
     )
     pack.ambig_in, pack.ambig_out = ambiguous_counts(index, target)
+    if pack.ambig_in:
+        pack.ambig_in_notes = ambiguous_in_notes(index, target)
+        pack.overload_ties = overload_ties_json(index, target)
     seen = {target.id}
     # (sym_id, direction) — direction is a placeholder ("") on the
     # target itself, since hop 1 legitimately wants both directions
@@ -434,12 +446,7 @@ def render_text(pack: Pack) -> str:
     """Render a pack as compact text."""
     lines = [f"context: {pack.label}"]
     lines += _target_lines(pack)
-    if pack.ambig_in:
-        lines.append(
-            f"  note: {pack.ambig_in} additional call site(s) named "
-            f"'{pack.target.name}' resolved ambiguously — not "
-            "counted here"
-        )
+    lines += [f"  note: {note}" for note in pack.ambig_in_notes]
     if pack.ambig_out:
         lines.append(
             f"  note: {pack.ambig_out} outgoing call(s) from this "
@@ -626,6 +633,8 @@ def _render_json(pack: Pack, meter: Meter) -> str:
         doc["notes"] = pack.notes
     if pack.ambig_in:
         doc["ambiguous_in"] = pack.ambig_in
+    if pack.overload_ties is not None:
+        doc["overload_ties"] = pack.overload_ties
     if pack.ambig_out:
         doc["ambiguous_out"] = pack.ambig_out
     if pack.source_lines is not None:

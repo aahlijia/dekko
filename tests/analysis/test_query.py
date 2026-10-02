@@ -280,7 +280,7 @@ def test_symbol_card_shows_ambiguous_in_count(
     assert code == 0
     out = capsys.readouterr().out
     assert (
-        "fan-in: 0 (+1 additional call site(s) named 'target' "
+        "fan-in: 0 (+1 caller(s) named 'target' "
         "resolved ambiguously — not counted), fan-out: 0" in out
     )
 
@@ -323,7 +323,7 @@ def test_symbol_card_labels_ambig_in_and_ambig_out_correctly(
     assert code == 0
     out = capsys.readouterr().out
     assert (
-        "fan-in: 0 (+2 additional call site(s) named 'mid' resolved "
+        "fan-in: 0 (+2 caller(s) named 'mid' resolved "
         "ambiguously — not counted), fan-out: 0 (+1 outgoing "
         "call(s) resolved ambiguously — not counted)" in out
     )
@@ -1938,10 +1938,15 @@ def test_later_constructor_with_ambiguous_sites_says_so(
         ]
     )
     assert code == 0
-    err = capsys.readouterr().err
+    out, err = capsys.readouterr()
+    assert "(no caller resolved to this constructor of ErrorPage" in out
     assert (
-        "1 additional call site(s) named 'ErrorPage' resolved ambiguously"
-        in err
+        "1 caller(s) construct ErrorPage with arguments that fit this "
+        "constructor and 1 other(s) (web/ErrorPage.java:5)" in err
+    )
+    assert (
+        "dekko query callers web/ErrorPage.java::ErrorPage  (1 callers)"
+        in (err)
     )
     index = mapfile.load_map(root)
     first = next(
@@ -1950,3 +1955,151 @@ def test_later_constructor_with_ambiguous_sites_says_so(
         if s.start_line == 3
     )
     assert index.calls_in.get(first.id, []) == []
+
+
+TWO_ARG_CTOR = "web/ErrorPage.java:ErrorPage.ErrorPage:4"
+
+
+def test_constructor_tie_json_names_the_class(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SAME_ARITY_CONSTRUCTORS)
+    code = cli.main(
+        [
+            "query",
+            "callers",
+            TWO_ARG_CTOR,
+            "--root",
+            str(root),
+            "--json",
+        ]
+    )
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["ambiguous_in"] == 1
+    assert doc["overload_ties"] == {
+        "callers": 1,
+        "class": "web/ErrorPage.java::ErrorPage",
+        "class_callers": 1,
+        "siblings": ["web/ErrorPage.java::ErrorPage.ErrorPage#3"],
+    }
+
+
+def test_constructor_tie_on_the_symbol_card(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(SAME_ARITY_CONSTRUCTORS)
+    code = cli.main(["query", "symbol", TWO_ARG_CTOR, "--root", str(root)])
+    assert code == 0
+    assert (
+        "fan-in: 0 (+1 caller(s) tied with another constructor, counted "
+        "on web/ErrorPage.java::ErrorPage), fan-out: 0"
+    ) in capsys.readouterr().out
+
+
+def test_constructor_tie_with_resolved_callers_keeps_rows(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A class literal can only go to the (Class<?>, String) overload,
+    # so that constructor has one resolved caller and still shares the
+    # HttpStatus construction's tie.
+    files = dict(SAME_ARITY_CONSTRUCTORS)
+    files["app/Direct.java"] = (
+        "package app;\n"
+        "import web.ErrorPage;\n"
+        "public class Direct {\n"
+        "    Object make() {\n"
+        '        return new ErrorPage(Direct.class, "/x");\n'
+        "    }\n"
+        "}\n"
+    )
+    root = make_mapped_repo(files)
+    target = "web/ErrorPage.java:ErrorPage.ErrorPage:5"
+    code = cli.main(["query", "callers", target, "--root", str(root)])
+    assert code == 0
+    out, err = capsys.readouterr()
+    assert "Direct.make" in out
+    assert "no caller resolved" not in out
+    assert (
+        "1 caller(s) construct ErrorPage with arguments that fit this "
+        "constructor and 1 other(s) (web/ErrorPage.java:4)" in err
+    )
+
+
+def test_name_collision_is_not_an_overload_tie(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # Two unrelated classes named Graph, each with one constructor; a
+    # bare `new Graph()` neither import settles could mean either, so
+    # no class answers it.
+    root = make_mapped_repo(
+        {
+            "a/Graph.java": (
+                "package a;\npublic class Graph {\n    public Graph() { }\n}\n"
+            ),
+            "b/Graph.java": (
+                "package b;\npublic class Graph {\n    public Graph() { }\n}\n"
+            ),
+            "c/Use.java": (
+                "package c;\n"
+                "public class Use {\n"
+                "    Object make() {\n"
+                "        return new Graph();\n"
+                "    }\n"
+                "}\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    assert index is not None
+    ctor = index.symbols_by_id["a/Graph.java::Graph.Graph"]
+    if not index.ambiguous_in.get(ctor.id):
+        pytest.skip("the construction was not recorded as ambiguous")
+    assert query.overload_ties(index, ctor) is None
+    code = cli.main(
+        ["query", "callers", ctor.id, "--root", str(root), "--json"]
+    )
+    assert code == 0
+    assert "overload_ties" not in json.loads(capsys.readouterr().out)
+
+
+def test_plain_function_ambiguity_note_counts_callers(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(AMBIGUOUS_CALL)
+    code = cli.main(["query", "callers", "a.py:target", "--root", str(root)])
+    assert code == 0
+    out, err = capsys.readouterr()
+    assert "(no callers of a.py::target)" in out
+    assert (
+        "1 more caller(s) call something named 'target' that resolved "
+        "ambiguously — not counted here"
+    ) in err
+
+
+def test_constructed_class_pairs_with_constructors_of(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SAME_ARITY_CONSTRUCTORS)
+    index = mapfile.load_map(root)
+    assert index is not None
+    cls = index.symbols_by_id["web/ErrorPage.java::ErrorPage"]
+    for ctor in query.constructors_of(index, cls):
+        assert query.constructed_class(index, ctor) is cls
+    assert query.constructed_class(index, cls) is None
+
+
+def test_constructed_class_prefers_the_constructors_own_file(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # C++ pairs a class with constructors by qualname repo-wide, so two
+    # test files each defining `Dummy` both claim both constructors.
+    body = "class Dummy {\n public:\n  Dummy() {}\n};\n"
+    root = make_mapped_repo({"a_test.cc": body, "b_test.cc": body})
+    index = mapfile.load_map(root)
+    assert index is not None
+    for path in ("a_test.cc", "b_test.cc"):
+        ctor = index.symbols_by_id[f"{path}::Dummy.Dummy"]
+        cls = query.constructed_class(index, ctor)
+        assert cls is not None
+        assert cls.path == path

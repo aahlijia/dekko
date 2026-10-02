@@ -397,6 +397,190 @@ def ambiguous_counts(index: MapIndex, sym: Symbol) -> tuple[int, int]:
     )
 
 
+def constructed_class(index: MapIndex, sym: Symbol) -> Symbol | None:
+    """The type ``sym`` is a constructor of, if it is one.
+
+    The inverse of ``constructors_of``, looked up through the
+    constructor's container qualname, so it pairs exactly the symbols
+    the resolver pairs. C++ pairs by qualname repo-wide, so several
+    same-named classes (a ``DummyDevice`` in each of a dozen test
+    files) all claim the same constructors; the class in the
+    constructor's own file wins, then the header beside it
+    (``graph.cc`` → ``graph.h``).
+
+    Args:
+        index: Loaded map index.
+        sym: Any symbol.
+
+    Returns:
+        The type, or ``None`` when ``sym`` isn't a constructor.
+    """
+    container = sym.qualname.rpartition(".")[0]
+    if sym.kind != "method" or not container:
+        return None
+
+    owners = [
+        cls
+        for cls in index.symbols_by_qualname.get(container, [])
+        if cls.kind in TYPE_KINDS
+        and any(c.id == sym.id for c in constructors_of(index, cls))
+    ]
+    if not owners:
+        return None
+
+    stem = sym.path.rpartition(".")[0]
+    return min(
+        owners,
+        key=lambda c: (
+            c.path != sym.path,
+            c.path.rpartition(".")[0] != stem,
+            c.path,
+            c.start_line,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class OverloadTies:
+    """How a constructor's ambiguous callers split.
+
+    Attributes:
+        cls: The class the constructor belongs to.
+        siblings: The other overloads the tied calls could also mean.
+        callers: Callers whose call fits this constructor and a
+            sibling equally, so neither got the edge. The class did.
+        collisions: Every other ambiguous caller: the name could mean
+            something besides this class's constructors.
+    """
+
+    cls: Symbol
+    siblings: list[Symbol]
+    callers: int
+    collisions: int
+
+
+def overload_ties(index: MapIndex, sym: Symbol) -> OverloadTies | None:
+    """Split a constructor's ambiguous callers into ties and collisions.
+
+    A construction the resolver could place on the class but not on
+    one overload is recorded as ambiguous among those overloads, with
+    the class edge kept. That caller is answered by the class, unlike
+    a call whose name could mean an unrelated symbol. ``ambiguous_in``
+    keeps ``(caller, name)`` pairs per candidate, so a pair's full
+    candidate set is every same-named symbol (plus the class's own
+    constructors) holding that pair.
+
+    Args:
+        index: Loaded map index.
+        sym: Any symbol.
+
+    Returns:
+        The split, or ``None`` when ``sym`` isn't a constructor or no
+        ambiguous caller of it is an overload tie.
+    """
+    pairs = index.ambiguous_in.get(sym.id, [])
+    cls = constructed_class(index, sym) if pairs else None
+    if cls is None:
+        return None
+
+    ctors = {c.id: c for c in constructors_of(index, cls)}
+    pair_sets: dict[str, set[tuple[str, str]]] = {}
+    sibling_ids: set[str] = set()
+    ties = 0
+    for caller, name in pairs:
+        pool = {s.id for s in index.symbols_by_name.get(name, [])}
+        candidates = set()
+        for sid in pool | ctors.keys():
+            if sid not in pair_sets:
+                pair_sets[sid] = _pair_set(index, sid)
+            if (caller, name) in pair_sets[sid]:
+                candidates.add(sid)
+        if candidates <= ctors.keys():
+            ties += 1
+            sibling_ids |= candidates - {sym.id}
+    if not ties:
+        return None
+
+    siblings = sorted(
+        (ctors[sid] for sid in sibling_ids),
+        key=lambda s: (s.path, s.start_line),
+    )
+    return OverloadTies(cls, siblings, ties, len(pairs) - ties)
+
+
+def _pair_set(index: MapIndex, sid: str) -> set[tuple[str, str]]:
+    """A candidate's ambiguous ``(caller, name)`` pairs, as a set."""
+    return {tuple(p) for p in index.ambiguous_in.get(sid, [])}
+
+
+def ambiguous_in_notes(index: MapIndex, sym: Symbol) -> list[str]:
+    """The sentences that disclose ``sym``'s ambiguous callers.
+
+    A constructor's overload ties name the class that holds those
+    callers and the command that lists them; every other ambiguous
+    caller keeps the plain "not counted" disclosure. Shared by
+    ``query callers`` and the context pack, so both word it the same.
+
+    Args:
+        index: Loaded map index.
+        sym: Resolved symbol.
+
+    Returns:
+        Zero, one or two sentences, without a ``note:`` prefix.
+    """
+    total = len(index.ambiguous_in.get(sym.id, []))
+    if not total:
+        return []
+
+    ties = overload_ties(index, sym)
+    if ties is None:
+        return [
+            f"{total} more caller(s) call something named "
+            f"'{sym.name}' that resolved ambiguously — not counted here"
+        ]
+
+    cls = ties.cls
+    where = ", ".join(f"{s.path}:{s.start_line}" for s in ties.siblings[:3])
+    if len(ties.siblings) > 3:
+        where += ", …"
+    class_callers = len(index.calls_in.get(cls.id, []))
+    notes = [
+        f"{ties.callers} caller(s) construct {cls.name} with arguments "
+        f"that fit this constructor and {len(ties.siblings)} other(s) "
+        f"({where}); dekko can't tell which. Each is a caller of the "
+        f"class: dekko query callers {cls.id}  ({class_callers} callers)"
+    ]
+    if ties.collisions:
+        notes.append(
+            f"{ties.collisions} more caller(s) call something named "
+            f"'{sym.name}' that resolved ambiguously — not counted here"
+        )
+    return notes
+
+
+def overload_ties_json(index: MapIndex, sym: Symbol) -> dict | None:
+    """The ``overload_ties`` JSON object for ``sym``, if it has ties.
+
+    Args:
+        index: Loaded map index.
+        sym: Resolved symbol.
+
+    Returns:
+        ``callers``, ``class``, ``class_callers`` and ``siblings``, or
+        ``None``.
+    """
+    ties = overload_ties(index, sym)
+    if ties is None:
+        return None
+
+    return {
+        "callers": ties.callers,
+        "class": ties.cls.id,
+        "class_callers": len(index.calls_in.get(ties.cls.id, [])),
+        "siblings": [s.id for s in ties.siblings],
+    }
+
+
 def _sym_line(sym: Symbol) -> str:
     """One-line text rendering of a symbol."""
     return f"{sym.path}:{sym.start_line}  {signature(sym)}"
@@ -1006,10 +1190,7 @@ def _print_relation_json(
     }
     if coverage:
         doc["coverage_warning"] = coverage
-    if ambig_in:
-        doc["ambiguous_in"] = ambig_in
-    if ambig_out:
-        doc["ambiguous_out"] = ambig_out
+    doc.update(_ambiguous_json(index, sym, ambig_in, ambig_out))
     if action == "callers" and not entries and not modules:
         referenced = _referenced_entries(index, sym, sites)
         if referenced:
@@ -1017,6 +1198,59 @@ def _print_relation_json(
         elif build_logic:
             doc["build_script_warning"] = build_logic
     print(json.dumps(doc, indent=2))
+
+
+def _ambiguous_json(
+    index: MapIndex, sym: Symbol, ambig_in: int, ambig_out: int
+) -> dict:
+    """The ambiguity keys of a callers/callees JSON doc.
+
+    ``ambiguous_in`` stays the total; ``overload_ties`` says how much
+    of it the constructor's class answers.
+    """
+    doc: dict = {}
+    if ambig_in:
+        doc["ambiguous_in"] = ambig_in
+        ties = overload_ties_json(index, sym)
+        if ties is not None:
+            doc["overload_ties"] = ties
+    if ambig_out:
+        doc["ambiguous_out"] = ambig_out
+    return doc
+
+
+def _print_ambiguous_notes(
+    index: MapIndex, sym: Symbol, ambig_in: int, ambig_out: int
+) -> None:
+    """Print the ambiguous-caller and -callee notes on stderr."""
+    if ambig_in:
+        for note in ambiguous_in_notes(index, sym):
+            print(f"  note: {note}", file=sys.stderr)
+    if ambig_out:
+        print(
+            f"  note: {ambig_out} outgoing call(s) from this symbol "
+            "resolved ambiguously (name matched 2+ candidates) — not "
+            "counted here",
+            file=sys.stderr,
+        )
+
+
+def _empty_relation_line(
+    index: MapIndex, sym: Symbol, action: str, ambig_in: int
+) -> str:
+    """The line for a callers/callees answer with no rows.
+
+    A constructor whose callers all tied between overloads isn't
+    uncalled: the class holds them, and the note says where.
+    """
+    ties = overload_ties(index, sym) if ambig_in else None
+    if ties is None:
+        return f"(no {action} of {sym.id})"
+
+    return (
+        f"(no caller resolved to this constructor of {ties.cls.name}: "
+        f"{sym.id})"
+    )
 
 
 def _run_relation(
@@ -1072,19 +1306,7 @@ def _run_relation(
         lines += _site_rows(index, action, sym, s) if sites else [_sym_line(s)]
     for path in modules:
         lines += _module_rows(index, action, sym, path, sites)
-    if ambig_in:
-        print(
-            f"  note: {ambig_in} additional call site(s) named "
-            f"'{sym.name}' resolved ambiguously — not counted here",
-            file=sys.stderr,
-        )
-    if ambig_out:
-        print(
-            f"  note: {ambig_out} outgoing call(s) from this symbol "
-            "resolved ambiguously (name matched 2+ candidates) — not "
-            "counted here",
-            file=sys.stderr,
-        )
+    _print_ambiguous_notes(index, sym, ambig_in, ambig_out)
     if not lines:
         referenced = (
             _referenced_rows(index, sym, sites) if action == "callers" else []
@@ -1097,7 +1319,7 @@ def _run_relation(
             for row in referenced:
                 print(f"  {row}")
             return EXIT_OK, None
-        print(f"(no {action} of {sym.id})")
+        print(_empty_relation_line(index, sym, action, ambig_in))
         _print_notes(coverage, build_logic)
         return EXIT_OK, None
     related_total = caller_total if sites else 0
@@ -3511,7 +3733,12 @@ _TYPE_ZERO_FAN_NOTE = (
 
 
 def _fan_line(
-    sym: Symbol, fan_in: int, fan_out: int, ambig_in: int, ambig_out: int
+    sym: Symbol,
+    fan_in: int,
+    fan_out: int,
+    ambig_in: int,
+    ambig_out: int,
+    ties: OverloadTies | None = None,
 ) -> str:
     """Build the ``fan-in: N, fan-out: M`` line with ambiguity notes.
 
@@ -3527,16 +3754,15 @@ def _fan_line(
         fan_out: Resolved outgoing call count.
         ambig_in: Additional ambiguous incoming call sites.
         ambig_out: Additional ambiguous outgoing calls.
+        ties: A constructor's overload ties, split out of ``ambig_in``
+            because its class counts them.
 
     Returns:
         The formatted fan-in/fan-out line, without a trailing newline.
     """
     line = f"  fan-in: {fan_in}"
     if ambig_in:
-        line += (
-            f" (+{ambig_in} additional call site(s) named "
-            f"'{sym.name}' resolved ambiguously — not counted)"
-        )
+        line += f" ({_fan_in_ambiguity(sym, ambig_in, ties)})"
     line += f", fan-out: {fan_out}"
     if ambig_out:
         line += (
@@ -3544,6 +3770,25 @@ def _fan_line(
             "— not counted)"
         )
     return line
+
+
+def _fan_in_ambiguity(
+    sym: Symbol, ambig_in: int, ties: OverloadTies | None
+) -> str:
+    """The parenthetical after ``fan-in: N`` for ambiguous callers."""
+    rest = ambig_in if ties is None else ties.collisions
+    parts = []
+    if ties is not None:
+        parts.append(
+            f"+{ties.callers} caller(s) tied with another constructor, "
+            f"counted on {ties.cls.id}"
+        )
+    if rest:
+        parts.append(
+            f"+{rest} caller(s) named '{sym.name}' resolved ambiguously "
+            "— not counted"
+        )
+    return "; ".join(parts)
 
 
 def _fan_in_note(sym_id: str) -> str:
@@ -3607,10 +3852,7 @@ def _sym_card_json(
             "fan_out": fan_out,
         }
     )
-    if ambig_in:
-        doc["ambiguous_in"] = ambig_in
-    if ambig_out:
-        doc["ambiguous_out"] = ambig_out
+    doc.update(_ambiguous_json(index, sym, ambig_in, ambig_out))
     if referenced_by:
         doc["referenced_by"] = referenced_by
     if type_zero_fan:
@@ -3629,6 +3871,7 @@ def _print_sym_card_text(
     referenced_by: int,
     type_zero_fan: bool,
     sym_notes: list[str],
+    ties: OverloadTies | None = None,
 ) -> None:
     """Print the ``query symbol`` text-mode card.
 
@@ -3641,11 +3884,12 @@ def _print_sym_card_text(
         referenced_by: Non-call reference count.
         type_zero_fan: Whether the zero-fan type caveat applies.
         sym_notes: Anchored notes to print, if any.
+        ties: A constructor's overload ties, if any.
     """
     print(signature(sym))
     print(f"  kind: {sym.kind} ({sym.language})")
     print(f"  at: {sym.path}:{sym.start_line}-{sym.end_line}")
-    print(_fan_line(sym, fan_in, fan_out, ambig_in, ambig_out))
+    print(_fan_line(sym, fan_in, fan_out, ambig_in, ambig_out, ties))
     if fan_in:
         print(_fan_in_note(sym.id))
     if referenced_by:
@@ -3701,6 +3945,7 @@ def _run_symbol(
         referenced_by,
         type_zero_fan,
         sym_notes,
+        overload_ties(index, sym) if ambig_in else None,
     )
     return EXIT_OK, None
 

@@ -41,7 +41,10 @@ Spot-check, don't re-verify everything, when any of these apply:
 - **A low count with no ambiguity disclosure.** A real ambiguous call
   says so (`N call(s) resolved ambiguously`). A widely used symbol
   with a low count and *no* disclosure is more suspicious than one
-  with it.
+  with it. A Java or C++ constructor reading "no caller resolved to
+  this constructor" isn't uncalled: its callers fit two overloads
+  equally, and the note names the class whose `query callers` lists
+  them.
 - **Unsupported or partially parsed files, and build scripts.** `dekko
   stats` or the map summary notes them (`coverage:` for unparsed
   languages such as Groovy, `build scripts:` for Gradle scripts). A

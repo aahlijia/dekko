@@ -2038,8 +2038,8 @@ def test_get_callers_discloses_ambiguous_call_sites_over_mcp(
     make_mapped_repo: RepoFactory,
 ) -> None:
     """``query.run`` prints its
-    "N additional call site(s) ... resolved ambiguously — not counted
-    here" disclosure to stderr on an otherwise-successful (exit 0)
+    "N more caller(s) ... resolved ambiguously — not counted here"
+    disclosure to stderr on an otherwise-successful (exit 0)
     run. The CLI shows both streams to a human, but every
     ``_capture()``-based MCP tool handler used to return only
     ``out.strip()``, silently discarding that note — an MCP-only
@@ -2300,3 +2300,37 @@ def test_trace_path_needs_at_least_one_path(
     ctx = _ctx(make_mapped_repo(SRC))
     with pytest.raises(server.ToolError, match="'max_paths' must be 1"):
         server.tool_trace_path(ctx, {"from": "g", "to": "f", "max_paths": bad})
+
+
+def test_get_callers_on_a_tied_constructor_points_at_the_class_over_mcp(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(
+        make_mapped_repo(
+            {
+                "web/ErrorPage.java": (
+                    "package web;\n"
+                    "public class ErrorPage {\n"
+                    "    public ErrorPage(HttpStatus status, String p) { }\n"
+                    "    public ErrorPage(Class<?> exception, String p) { }\n"
+                    "}\n"
+                ),
+                "app/Pages.java": (
+                    "package app;\n"
+                    "import web.ErrorPage;\n"
+                    "public class Pages {\n"
+                    "    Object make() {\n"
+                    "        return new ErrorPage(HttpStatus.A, null);\n"
+                    "    }\n"
+                    "}\n"
+                ),
+            }
+        )
+    )
+    text = _call(
+        ctx,
+        "get_callers",
+        {"symbol": "web/ErrorPage.java::ErrorPage.ErrorPage"},
+    )["content"][0]["text"]
+    assert "(no caller resolved to this constructor of ErrorPage" in text
+    assert "dekko query callers web/ErrorPage.java::ErrorPage" in text
