@@ -9,6 +9,42 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.5] — 2026-10-02
+
+### Fixed
+- **A Rust `use` of a crate the repo doesn't have no longer counts as
+  in-repo because a file shares a segment's name.** Only `std`, `core`
+  and `alloc` were recognized as outside crates. Every other `use`
+  fell to the file-name test, and zed has `windows.rs`, `image.rs`,
+  `http.rs` and `process.rs`, so `windows::core::HSTRING`,
+  `image::Frame` and `smol::process::Command` all looked in-repo and
+  their calls ran the ladder over every same-named function in the
+  repo. Now a `use` whose first segment names no crate in the repo's
+  `Cargo.toml` files (package and `[lib]` names, directory names and
+  `path =` dependencies, `-` read as `_`) and no module of a repo crate
+  is external. A repo with no `Cargo.toml` keeps the old test. Editing
+  a `Cargo.toml` now invalidates the resolve cache.
+- **A type imported from a workspace crate that only re-exports it is
+  treated as an outside type.** `use collections::BTreeMap;` (where
+  `collections` is `pub use std::collections::*`) was kept in-repo so
+  that a rename like `pub use text::Buffer as TextBuffer` could still
+  resolve, and so `BTreeMap::new()` ran the ladder too. Now an in-repo
+  `use` of a name no repo symbol carries counts as a rename only when
+  some `use .. as` in the repo binds that name; otherwise the call is
+  external. Measured against 1.6.4 on zed: 141 caller/callee pairs
+  removed, all read against the source. 128 were wrong (65
+  `acp::SessionId::new` calls on `scheduler`'s `SessionId`, 22
+  macro-made `RoomId::from_proto` calls on another type's
+  `from_proto`, `oneshot::channel()` on a repo `channel` method, and
+  so on). 13 were right: a local variable or parameter named like an
+  imported outside module (`let fs = FakeFs::new(..)` after `use
+  smol::fs`, a `stream` parameter after `use futures::stream`) is read
+  as the import, so its calls now count external. No pair is gained.
+  928 calls go external, ambiguous rows fall from 87,934 to 87,252,
+  and `new` rows over 1,000 candidates from 324 to 225. `dekko unused`
+  on zed gains 2 rows (one through the shadowing gap above). The other
+  six eval repos are unchanged.
+
 ## [1.6.4] — 2026-10-02
 
 ### Fixed

@@ -55,18 +55,20 @@ from pathlib import Path
 from dekko.core.resolver import (
     ResolveReuse,
     alias_original_name,
+    cargo_fingerprint,
     cpp_scope_names,
     name_delta,
     reexport_closure,
     reexport_delta_names,
     resolve_fingerprint,
     resolved_id_name,
+    rust_renamed_names,
     symbol_projection,
     tsconfig_fingerprint,
     workspace_fingerprint,
 )
 from dekko.core.languages import spec_fingerprint
-from dekko.core.model import FileMap, RawHeritage
+from dekko.core.model import FileMap, Import, RawHeritage
 from dekko.render.mapfile import (
     _callee_base,
     _json_dumps,
@@ -190,8 +192,10 @@ def load(root: Path) -> dict[str, dict] | None:
     ``package.json`` or edited ``workspaces`` glob changes which imports
     count as in-repo without touching a single source file, so neither
     ``build_reuse``'s path-set check nor its symbol check would see it),
-    or the tsconfig path-alias tables (``tsconfig_fingerprint`` -- an
-    edited ``paths`` entry changes which file an aliased import names).
+    the tsconfig path-alias tables (``tsconfig_fingerprint`` -- an
+    edited ``paths`` entry changes which file an aliased import names),
+    or the Rust crate list (``cargo_fingerprint`` -- a crate added to a
+    ``Cargo.toml`` turns its ``use``s from external to in-repo).
 
     Args:
         root: Repository root.
@@ -213,9 +217,7 @@ def load(root: Path) -> dict[str, dict] | None:
         return None
     if doc.get("resolve_hash") != resolve_fingerprint():
         return None
-    if doc.get("workspace_hash", "") != workspace_fingerprint(root):
-        return None
-    if doc.get("tsconfig_hash", "") != tsconfig_fingerprint(root):
+    if not _config_inputs_match(doc, root):
         return None
     files = doc.get("files")
     table = doc.get("ids")
@@ -226,6 +228,23 @@ def load(root: Path) -> dict[str, dict] | None:
     except (IndexError, KeyError, TypeError, ValueError):
         # A truncated or hand-edited cache is a cache miss, not a crash.
         return None
+
+
+def _config_inputs_match(doc: dict, root: Path) -> bool:
+    """Whether the cache's repo config digests match the repo's now.
+
+    Args:
+        doc: The loaded cache document.
+        root: Repository root.
+
+    Returns:
+        True when the workspace, tsconfig and Cargo digests all agree.
+    """
+    return (
+        doc.get("workspace_hash", "") == workspace_fingerprint(root)
+        and doc.get("tsconfig_hash", "") == tsconfig_fingerprint(root)
+        and doc.get("cargo_hash", "") == cargo_fingerprint(root)
+    )
 
 
 def save(
@@ -252,6 +271,7 @@ def save(
         "resolve_hash": resolve_fingerprint(),
         "workspace_hash": workspace_fingerprint(root),
         "tsconfig_hash": tsconfig_fingerprint(root),
+        "cargo_hash": cargo_fingerprint(root),
         "ids": table,
         "files": files,
     }
@@ -428,6 +448,89 @@ def _files_using(
     return found
 
 
+def _rust_files_using(
+    files: list[FileMap], dirty: set[str], names: set[str]
+) -> set[str]:
+    """Clean Rust files that write one of ``names`` as a type or import.
+
+    Whether ``Name::new(..)`` can reach a repo symbol depends on
+    whether some ``use .. as Name`` exists anywhere in the repo
+    (``resolver._rust_unknown_type_path``), and the call names ``new``,
+    not ``Name``. So the files are found by the receiver they wrote.
+
+    Args:
+        files: Every mapped file.
+        dirty: Paths already known dirty -- skipped.
+        names: The names whose renaming ``use`` was gained or lost.
+
+    Returns:
+        Additional paths (disjoint from ``dirty``) whose cached entry
+        must be discarded.
+    """
+    found: set[str] = set()
+    for fm in files:
+        if fm.path in dirty or not fm.path.endswith(".rs"):
+            continue
+        receivers = {
+            segment
+            for call in fm.calls
+            for segment in (call.receiver or "").split("::")
+        }
+        if receivers & names or any(imp.name in names for imp in fm.imports):
+            found.add(fm.path)
+    return found
+
+
+def _rust_renamed_delta(
+    fm: FileMap, old_imports: list[dict] | None
+) -> set[str]:
+    """Names one edited Rust file's renaming ``use``s gained or lost.
+
+    Args:
+        fm: The file as extracted now.
+        old_imports: Its cached import bindings, as dicts.
+
+    Returns:
+        The local names some ``use .. as Name`` bound before or binds
+        now, but not both. Empty for a non-Rust file.
+    """
+    if not fm.path.endswith(".rs"):
+        return set()
+    before = FileMap(
+        path=fm.path,
+        language=fm.language,
+        imports=[
+            Import(path=fm.path, name=d["name"], source=d["source"])
+            for d in old_imports or ()
+        ],
+    )
+    return rust_renamed_names([before]) ^ rust_renamed_names([fm])
+
+
+def _rust_rename_dirty(
+    files: list[FileMap], cache: IncrementalCache, dirty: set[str]
+) -> set[str]:
+    """Clean Rust files a dirty file's renaming ``use`` edit invalidates.
+
+    Args:
+        files: Every mapped file.
+        cache: This run's extraction cache.
+        dirty: Paths already known dirty.
+
+    Returns:
+        Additional paths (disjoint from ``dirty``), see
+        ``_rust_files_using``.
+    """
+    renamed: set[str] = set()
+    for fm in files:
+        if fm.path in dirty:
+            renamed |= _rust_renamed_delta(fm, cache.old_imports(fm.path))
+    if not renamed:
+        return set()
+
+    return _rust_files_using(files, dirty, renamed)
+
+
 def _cpp_decl_names(entries: set[str]) -> set[str]:
     """Bare names of ``FileMap.cpp_decls`` entries.
 
@@ -540,6 +643,10 @@ def _name_delta_dirty(
         extra |= _files_using(files, dirty, reach)
     if changed or newly_defined:
         extra |= _files_importing(files, dirty, newly_defined, changed)
+    # A Rust ``use .. as Name`` gained or lost decides whether
+    # ``Name::f(..)`` can reach a repo symbol from any file.
+    extra |= _rust_rename_dirty(files, cache, dirty)
+
     return extra
 
 

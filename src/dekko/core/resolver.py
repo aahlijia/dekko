@@ -105,6 +105,7 @@ import fnmatch
 import functools
 import gc
 import hashlib
+import itertools
 import json
 import multiprocessing
 import os
@@ -1289,7 +1290,10 @@ def resolve(
     # import names) and the module graph alike.
     import_ctx = _import_resolve_context(files, root, manifests)
     imports_by_file = _imports_by_file(
-        files, workspace_pkgs, _OriginLookup(import_ctx, by_name_path, files)
+        files,
+        workspace_pkgs,
+        _OriginLookup(import_ctx, by_name_path, files),
+        _rust_crates(files, root),
     )
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
@@ -5012,12 +5016,14 @@ def _rust_unknown_type_path(
     - no candidate is a member of it. A macro-generated struct with a
       handwritten ``impl Foo { fn new() }`` has no ``Foo`` symbol but
       does have ``Foo.new``.
-    - the calling file doesn't ``use`` it from inside the repo. A
-      rename matches no symbol by design, and it needn't be written
-      in this file: ``pub use text::Buffer as TextBuffer;`` in one
-      crate, then ``use language::TextBuffer;`` here (live-testing on
-      zed: a same-file-only ``as`` check lost 2 real
-      ``TextBuffer::new_normalized`` edges).
+    - the calling file doesn't ``use`` it from inside the repo under a
+      name some ``use .. as`` in the repo binds. A rename matches no
+      symbol by design, and it needn't be written in this file: ``pub
+      use text::Buffer as TextBuffer;`` in one crate, then ``use
+      language::TextBuffer;`` here (live-testing on zed: a
+      same-file-only ``as`` check lost 2 real
+      ``TextBuffer::new_normalized`` edges). An in-repo ``use`` of a
+      name nothing renames is a re-exported outside type.
     - it isn't an associated-type path. ``T::ProtoRequest::stop()``
       and ``Self::Output::new()`` name a type only the trait solver
       knows; the ladder's trait-method guess was right on zed (3 of
@@ -5052,10 +5058,15 @@ def _rust_unknown_type_path(
     binding = (file_imports or {}).get(last)
     if binding is None:
         return True
+    if repo_stems is not None and not _import_is_in_repo(binding, repo_stems):
+        return True
 
-    return repo_stems is not None and not _import_is_in_repo(
-        binding, repo_stems
-    )
+    # Imported from inside the repo, yet no repo symbol carries the
+    # name: only a rename explains that. Anything else is an outside
+    # type a workspace crate re-exports (``collections::BTreeMap`` is
+    # ``pub use std::collections::*``) or a macro-made one with no
+    # handwritten members.
+    return _RUST_RENAMED_KEY + last not in index
 
 
 def _rust_is_associated_type_path(call: _Referable) -> bool:
@@ -6702,6 +6713,11 @@ _CPP_DECLARED_KEY = "::cpp-declared::"
 # constructor the map can't read off the class itself.
 _OWN_CTOR_KEY = "::own-ctor::"
 _EXTENDS_KEY = "::extends::"
+
+# Reserved ``index`` namespace for the names some Rust ``use .. as
+# Name`` binds anywhere in the repo: ``_RUST_RENAMED_KEY + name`` is
+# present (with no symbols) when one does (``_rust_unknown_type_path``).
+_RUST_RENAMED_KEY = "::rust-renamed::"
 _UNNAMED_CTOR_NAMES = {
     "python": "__init__",
     "javascript": "constructor",
@@ -6714,8 +6730,8 @@ _UNNAMED_CTOR_LANGUAGES = frozenset(_UNNAMED_CTOR_NAMES)
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
     ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY``,
-    ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY`` and ``_EXTENDS_KEY``
-    entries."""
+    ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY`` and
+    ``_RUST_RENAMED_KEY`` entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
@@ -6734,7 +6750,30 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
             _index_cpp_using(entry, index)
     _index_cpp_declared(files, index)
     _index_constructions(files, index)
+    for name in rust_renamed_names(files):
+        index.setdefault(_RUST_RENAMED_KEY + name, [])
+
     return index
+
+
+def rust_renamed_names(files: list[FileMap]) -> set[str]:
+    """Every name a Rust ``use .. as Name`` binds, across ``files``.
+
+    ``pub use text::Buffer as TextBuffer;`` gives ``TextBuffer``.
+
+    Args:
+        files: The extracted files to read imports from.
+
+    Returns:
+        The local names whose ``use`` source ends in another name.
+    """
+    return {
+        imp.name
+        for fm in files
+        if fm.path.endswith(".rs")
+        for imp in fm.imports
+        if imp.name and imp.source.rsplit("::", 1)[-1] != imp.name
+    }
 
 
 def _index_constructions(
@@ -7096,6 +7135,161 @@ def tsconfig_fingerprint(root: Path) -> str:
         [[scope, t.base_dir, t.paths] for scope, t in sorted(tables.items())]
     ).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+_CARGO_MANIFESTS = frozenset({"Cargo.toml"})
+_CARGO_SECTION = re.compile(r"^\[([^\]]+)\]\s*$", re.M)
+_CARGO_NAME = re.compile(r'^name\s*=\s*"([^"]+)"', re.M)
+_CARGO_PATH_DEP = re.compile(r"^([\w-]+)\s*=\s*\{[^}\n]*\bpath\s*=", re.M)
+
+
+def load_cargo_crates(root: Path) -> frozenset[str]:
+    """Every crate name the repo's ``Cargo.toml`` files declare.
+
+    Each manifest's ``[package]`` name and directory name, its
+    ``[lib]`` name, and the local name of every ``path =`` dependency,
+    with ``-`` read as ``_`` the way a ``use`` spells it. The
+    directory-convention index (``_rust_crate_roots_index_all``)
+    misses crates whose directory differs from their name or whose
+    ``[lib] path`` isn't ``src/lib.rs`` (14 of zed's 261), and a
+    missed crate here would turn its imports external. Read with line
+    regexes: Python 3.10 has no TOML parser and dekko takes no
+    dependencies.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        The crate names, empty for a repo with no ``Cargo.toml``.
+    """
+    names: set[str] = set()
+    for rel in walker.find_config_files(root, _CARGO_MANIFESTS):
+        try:
+            text = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        marks = [
+            (m.start(), m.group(1)) for m in _CARGO_SECTION.finditer(text)
+        ]
+        marks.append((len(text), ""))
+        for (start, section), (end, _) in itertools.pairwise(marks):
+            body = text[start:end]
+            if section in ("package", "lib"):
+                found = _CARGO_NAME.search(body)
+                if found:
+                    names.add(found.group(1).replace("-", "_"))
+                if section == "package":
+                    crate_dir = _dirname(rel).rsplit("/", 1)[-1]
+                    if crate_dir:
+                        names.add(crate_dir.replace("-", "_"))
+            elif section.endswith("dependencies"):
+                names.update(
+                    m.group(1).replace("-", "_")
+                    for m in _CARGO_PATH_DEP.finditer(body)
+                )
+
+    return frozenset(names)
+
+
+def cargo_fingerprint(root: Path) -> str:
+    """Digest of the repo's Rust crate names, for cache invalidation.
+
+    The cached call pass reads them to tell a ``use`` of a workspace
+    crate from one of an outside crate. Adding a crate or a path
+    dependency moves no source file and no symbol.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        A stable hex digest, or ``""`` for a repo with no crates.
+    """
+    names = load_cargo_crates(root)
+    if not names:
+        return ""
+    return hashlib.sha256("\n".join(sorted(names)).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class _RustCrates:
+    """What a Rust ``use`` path may start with and still be in-repo.
+
+    Attributes:
+        names: Every crate name from the repo's ``Cargo.toml`` files
+            (see ``load_cargo_crates``).
+        top_modules: Every crate's top-level modules: a file or
+            directory directly under some crate's ``src/``.
+        own_modules: Crate directory → every file stem and directory
+            name inside that crate.
+    """
+
+    names: frozenset[str]
+    top_modules: frozenset[str]
+    own_modules: dict[str, frozenset[str]]
+
+    def outside(self, imp: Import) -> bool:
+        """Whether a Rust ``use`` is rooted at a crate the repo lacks.
+
+        A lowercase first segment that names no crate and no module
+        is an outside crate (``windows::core::HSTRING``,
+        ``smol::process::Command``), whatever file stems its segments
+        happen to match. A module counts when it is the importer's own
+        crate's, for 2018 uniform paths (``mod util; use
+        util::helper;``), or a top-level module of *any* crate: a
+        fixture copied out of its crate (``agent``'s copy of
+        ``editor.rs``) still ``use``s its old siblings.
+        """
+        first = imp.source.split("::", 1)[0]
+        if not first[:1].islower() or first in self.names:
+            return False
+        if first in self.top_modules:
+            return False
+
+        own = self.own_modules.get(_rust_crate_dir(imp.path), frozenset())
+        return first not in own
+
+
+def _rust_crates(
+    files: list[FileMap], root: Path | None
+) -> _RustCrates | None:
+    """The repo's ``_RustCrates``, or ``None`` with no crate list.
+
+    ``None`` when there is no root to read manifests from or no
+    ``Cargo.toml`` declares a crate: without the list nothing can tell
+    an outside crate from an unconventional workspace one, so every
+    ``use`` keeps the stem test.
+    """
+    if root is None:
+        return None
+    names = load_cargo_crates(root)
+    if not names:
+        return None
+
+    own: dict[str, set[str]] = {}
+    top: set[str] = set()
+    for fm in files:
+        if not fm.path.endswith(".rs"):
+            continue
+        crate = _rust_crate_dir(fm.path)
+        path = PurePosixPath(fm.path)
+        modules = own.setdefault(crate, set())
+        modules.add(path.stem)
+        modules.update(path.parts[:-1])
+        rel = fm.path[len(crate) :].strip("/").split("/")
+        if len(rel) >= 2 and rel[0] == "src":
+            top.add(rel[1].removesuffix(".rs"))
+
+    return _RustCrates(
+        names=names,
+        top_modules=frozenset(top),
+        own_modules={k: frozenset(v) for k, v in own.items()},
+    )
+
+
+@dataclass
+class _RustOutsideImport(Import):
+    """A Rust ``use`` rooted at a crate the repo doesn't have (see
+    ``_RustCrates.outside``): external, whatever its segments match."""
 
 
 def _package_json_workspace_globs(data: dict) -> list[str]:
@@ -7512,6 +7706,11 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     """
     if isinstance(imp, _WorkspaceImport):
         return True
+    if isinstance(imp, _RustOutsideImport):
+        # ``use windows::core::HSTRING;`` passed the stem test because
+        # zed has a ``windows.rs``, and ``HSTRING::new(..)`` ran the
+        # ladder over every ``new`` in the repo.
+        return False
     if _bare_package_import(imp):
         # ``import * as vscode from "vscode"`` names an npm package,
         # whatever the repo's files are called. The stem test passed
@@ -7660,6 +7859,7 @@ def _imports_by_file(
     files: list[FileMap],
     workspace_pkgs: dict[str, str] | None = None,
     lookup: _OriginLookup | None = None,
+    rust_crates: _RustCrates | None = None,
 ) -> dict[str, dict[str, Import]]:
     """Map file path → local name → import record.
 
@@ -7667,7 +7867,9 @@ def _imports_by_file(
     upgrades every JS/TS binding that names a workspace package to a
     ``_WorkspaceImport``. ``lookup``, when given, attaches to every
     JS/TS binding the symbols its specifier resolves to (see
-    ``_OriginLookup``). With neither, every record is left as-is.
+    ``_OriginLookup``). ``rust_crates``, when given, turns every Rust
+    ``use`` of an outside crate into a ``_RustOutsideImport``. With
+    none of them, every record is left as-is.
     """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
@@ -7684,9 +7886,20 @@ def _imports_by_file(
                     found = lookup.members(imp, name)
                     if found:
                         members[name] = found
+            if (
+                rust_crates is not None
+                and imp.path.endswith(".rs")
+                and not imp.source.startswith(_RUST_IN_CRATE_PREFIXES)
+                and rust_crates.outside(imp)
+            ):
+                table[imp.name] = _RustOutsideImport(
+                    path=imp.path, name=imp.name, source=imp.source
+                )
+                continue
             table[imp.name] = _workspace_tagged(
                 imp, workspace_pkgs, origins, members
             )
+
     return out
 
 

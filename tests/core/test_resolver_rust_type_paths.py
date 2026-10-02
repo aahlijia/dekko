@@ -10,7 +10,11 @@ the path narrowed to, not every same-named symbol in the language.
 from pathlib import Path
 
 from dekko.core.model import CallGraph
-from dekko.core.resolver import resolve
+from dekko.core.resolver import (
+    cargo_fingerprint,
+    load_cargo_crates,
+    resolve,
+)
 from dekko.repo_ops import map_repository
 
 
@@ -232,3 +236,213 @@ def test_bare_ambiguous_call_keeps_its_full_list(tmp_path: Path) -> None:
     assert _ambiguous_for(graph, _BUILD) == {
         "new": ["crates/a/src/lib.rs::new", "crates/b/src/lib.rs::new"]
     }
+
+
+# A ``use`` rooted at a crate the repo doesn't have is external, even
+# when a repo file shares a segment's name (zed's ``windows.rs`` made
+# ``use windows::core::HSTRING`` look in-repo). The crate list comes
+# from the ``Cargo.toml`` files, so these resolve with a root.
+
+
+def _rooted(root: Path, sources: dict[str, str]) -> CallGraph:
+    for rel, text in sources.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    files, _ = map_repository(
+        root,
+        subpath=None,
+        excludes=(),
+        max_file_size=1_000_000,
+    )
+    return resolve(files, root=root)
+
+
+_APP_TOML = '[package]\nname = "app"\n'
+_RUN = "src/main.rs::run"
+_SOURCE_RS = "pub fn play() {}\n"
+_OUTSIDE_USER = (
+    "mod source;\n"
+    "use rodio::source as sound;\n"
+    "pub fn run() {\n"
+    "    sound::play();\n"
+    "}\n"
+)
+
+
+def test_use_of_an_outside_crate_is_external(tmp_path: Path) -> None:
+    graph = _rooted(
+        tmp_path,
+        {
+            "Cargo.toml": _APP_TOML,
+            "src/source.rs": _SOURCE_RS,
+            "src/main.rs": _OUTSIDE_USER,
+        },
+    )
+    assert _pairs(graph, _RUN) == set()
+    assert _externals(graph, _RUN) == {"sound::play"}
+
+
+def test_path_dependency_counts_as_a_repo_crate(tmp_path: Path) -> None:
+    graph = _rooted(
+        tmp_path,
+        {
+            "Cargo.toml": _APP_TOML
+            + '\n[dependencies]\nrodio = { path = "../rodio" }\n',
+            "src/source.rs": _SOURCE_RS,
+            "src/main.rs": _OUTSIDE_USER,
+        },
+    )
+    assert _pairs(graph, _RUN) == {"src/source.rs::play"}
+
+
+def test_no_cargo_toml_keeps_the_stem_test(tmp_path: Path) -> None:
+    graph = _rooted(
+        tmp_path,
+        {"src/source.rs": _SOURCE_RS, "src/main.rs": _OUTSIDE_USER},
+    )
+    assert _pairs(graph, _RUN) == {"src/source.rs::play"}
+
+
+def test_cargo_crate_names(tmp_path: Path) -> None:
+    files = {
+        "Cargo.toml": (
+            "[workspace]\n"
+            'members = ["crates/*"]\n'
+            "\n"
+            "[workspace.dependencies]\n"
+            'zed-extension-api = { path = "crates/extension_api" }\n'
+            'serde = { version = "1" }\n'
+            'gpui = { git = "https://example.com/gpui" }\n'
+        ),
+        "crates/extension_api/Cargo.toml": (
+            '[package]\nname = "zed_extension_api"\n'
+        ),
+        "crates/onboarding/Cargo.toml": (
+            "[package]\n"
+            'name = "language-onboarding"\n'
+            "\n"
+            "[lib]\n"
+            'name = "onboard"\n'
+            'path = "src/python.rs"\n'
+            "\n"
+            "[dev-dependencies]\n"
+            'test_util = { workspace = true, path = "../test_util" }\n'
+        ),
+    }
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+
+    assert load_cargo_crates(tmp_path) == {
+        "zed_extension_api",
+        "extension_api",
+        "language_onboarding",
+        "onboarding",
+        "onboard",
+        "test_util",
+    }
+    assert cargo_fingerprint(tmp_path) != ""
+    assert cargo_fingerprint(tmp_path / "crates/missing") == ""
+
+
+def test_own_crate_module_use_is_in_repo(tmp_path: Path) -> None:
+    # ``util`` is no crate and no crate's top-level module, but it is a
+    # module of the importing file's own crate (2018 uniform paths).
+    graph = _rooted(
+        tmp_path,
+        {
+            "Cargo.toml": _APP_TOML,
+            "src/net/util.rs": _SOURCE_RS,
+            "src/main.rs": (
+                "use util as u;\npub fn run() {\n    u::play();\n}\n"
+            ),
+        },
+    )
+    assert _pairs(graph, _RUN) == {"src/net/util.rs::play"}
+
+
+def test_another_crates_top_module_is_in_repo(tmp_path: Path) -> None:
+    # A fixture copied out of ``editor`` into ``agent`` still writes
+    # ``use scroll::..``, a module of the crate it came from.
+    graph = _rooted(
+        tmp_path,
+        {
+            "Cargo.toml": ('[workspace]\nmembers = ["crates/*"]\n'),
+            "crates/editor/Cargo.toml": '[package]\nname = "editor"\n',
+            "crates/editor/src/scroll.rs": "pub fn autoscroll() {}\n",
+            "crates/agent/Cargo.toml": '[package]\nname = "agent"\n',
+            "crates/agent/src/before.rs": (
+                "use scroll as s;\npub fn run() {\n    s::autoscroll();\n}\n"
+            ),
+        },
+    )
+    assert _pairs(graph, "crates/agent/src/before.rs::run") == {
+        "crates/editor/src/scroll.rs::autoscroll"
+    }
+
+
+# A type imported from inside the repo that no repo symbol carries is
+# a rename (``pub use text::Buffer as TextBuffer``) only when something
+# in the repo renames to it. Otherwise a workspace crate re-exports an
+# outside type (``collections`` is ``pub use std::collections::*``).
+
+_OTHER_NEW = (
+    "pub struct Other;\n"
+    "impl Other {\n"
+    "    pub fn new() -> Other {\n"
+    "        Other\n"
+    "    }\n"
+    "}\n"
+)
+_USE_MAP = "crates/app/src/view.rs::build"
+
+
+def test_reexported_outside_type_is_external(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "crates/collections/src/collections.rs": (
+                "pub use std::collections::*;\n"
+            ),
+            "crates/other/src/lib.rs": _OTHER_NEW,
+            "crates/app/src/view.rs": (
+                "use collections::BTreeMap;\n"
+                "pub fn build() {\n"
+                "    BTreeMap::new();\n"
+                "}\n"
+            ),
+        },
+    )
+    assert _pairs(graph, _USE_MAP) == set()
+    assert _ambiguous_for(graph, _USE_MAP) == {}
+    assert _externals(graph, _USE_MAP) == {"BTreeMap::new"}
+
+
+def test_renamed_type_from_another_crate_still_resolves(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "crates/text/src/text.rs": (
+                "pub struct Buffer;\n"
+                "impl Buffer {\n"
+                "    pub fn new(a: i32) -> Buffer {\n"
+                "        Buffer\n"
+                "    }\n"
+                "}\n"
+            ),
+            "crates/language/src/language.rs": (
+                "pub use text::Buffer as TextBuffer;\n"
+            ),
+            "crates/other/src/lib.rs": _OTHER_NEW,
+            "crates/app/src/view.rs": (
+                "use language::TextBuffer;\n"
+                "pub fn build() {\n"
+                "    TextBuffer::new(1);\n"
+                "}\n"
+            ),
+        },
+    )
+    assert "crates/other/src/lib.rs::Other.new" not in _pairs(graph, _USE_MAP)
+    assert _externals(graph, _USE_MAP) == set()

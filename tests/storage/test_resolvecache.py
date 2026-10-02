@@ -1038,3 +1038,92 @@ def test_a_tsconfig_paths_edit_invalidates_the_cache(
         '"paths": {"@lib/*": ["old/*"]}}}\n'
     )
     assert not _fired(root)
+
+
+RUST_CRATE_SRC = {
+    "Cargo.toml": '[package]\nname = "app"\n',
+    "src/source.rs": "pub fn play() {}\n",
+    "src/main.rs": (
+        "mod source;\n"
+        "use rodio::source as sound;\n"
+        "pub fn run() {\n"
+        "    sound::play();\n"
+        "}\n"
+    ),
+}
+
+
+def test_a_cargo_toml_edit_invalidates_the_cache(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The call pass reads the crate list to tell a workspace crate's
+    ``use`` from an outside one's, and editing it moves no source."""
+    root = make_mapped_repo(RUST_CRATE_SRC)
+    assert _fired(root)
+    (root / "Cargo.toml").write_text(
+        RUST_CRATE_SRC["Cargo.toml"]
+        + '\n[dependencies]\nrodio = { path = "../rodio" }\n'
+    )
+    assert not _fired(root)
+
+
+RUST_RENAME_SRC = {
+    "crates/text/src/text.rs": (
+        "pub struct Buffer;\n"
+        "impl Buffer {\n"
+        "    pub fn new(a: i32) -> Buffer {\n"
+        "        Buffer\n"
+        "    }\n"
+        "}\n"
+    ),
+    "crates/language/src/language.rs": "pub use text::Buffer;\n",
+    "crates/app/src/view.rs": (
+        "use language::TextBuffer;\n"
+        "pub fn build() {\n"
+        "    TextBuffer::new(1);\n"
+        "}\n"
+    ),
+}
+_RENAMED = "pub use text::Buffer as TextBuffer;\n"
+
+
+def test_gate_widens_to_files_writing_a_type_renamed_elsewhere(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``TextBuffer::new(..)`` was external because nothing renamed to
+    ``TextBuffer``. The call names ``new``, so the file is found by the
+    type it wrote."""
+    root = make_mapped_repo(RUST_RENAME_SRC)
+    (root / "crates/language/src/language.rs").write_text(_RENAMED)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {
+        "crates/language/src/language.rs",
+        "crates/app/src/view.rs",
+    }
+
+
+@pytest.mark.parametrize("before", ["plain", "renamed"])
+def test_rust_rename_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    source = dict(RUST_RENAME_SRC)
+    after = _RENAMED
+    if before == "renamed":
+        source["crates/language/src/language.rs"] = _RENAMED
+        after = RUST_RENAME_SRC["crates/language/src/language.rs"]
+    root = make_mapped_repo(source)
+    (root / "crates/language/src/language.rs").write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    external = {(ids[e["caller"]], ids[e["callee"]]) for e in full["external"]}
+    pair = ("crates/app/src/view.rs::build", "TextBuffer::new")
+    assert (pair in external) == (before == "renamed")

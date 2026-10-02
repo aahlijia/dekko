@@ -5847,7 +5847,9 @@ def test_rust_in_repo_use_is_not_an_unknown_type() -> None:
     # zed: `pub use text::Buffer as TextBuffer;` in `language`, then
     # `use language::TextBuffer;` elsewhere. The rename isn't written
     # in the calling file and matches no symbol, so only the in-repo
-    # `use` gives it away. Same binding from outside the repo: unknown.
+    # `use` plus some `use .. as TextBuffer` in the repo give it away.
+    # Same binding from outside the repo, or with nothing in the repo
+    # renamed to it (a re-exported outside type): unknown.
     call = RawCall(
         caller_id=None,
         path="crates/ui/src/ui.rs",
@@ -5859,14 +5861,17 @@ def test_rust_in_repo_use_is_not_an_unknown_type() -> None:
         "crates/text/src/text.rs", "build", "Buffer.build", language="rust"
     )
 
-    def unknown(source: str) -> bool:
+    renamed = {resolver_mod._RUST_RENAMED_KEY + "TextBuffer": []}
+
+    def unknown(source: str, index: dict) -> bool:
         binding = Import(path=call.path, name="TextBuffer", source=source)
         return resolver_mod._rust_unknown_type_path(
-            call, [build], {}, {"TextBuffer": binding}, {"text", "language"}
+            call, [build], index, {"TextBuffer": binding}, {"text", "language"}
         )
 
-    assert not unknown("language::TextBuffer")
-    assert unknown("ropey::TextBuffer")
+    assert not unknown("language::TextBuffer", renamed)
+    assert unknown("ropey::TextBuffer", renamed)
+    assert unknown("language::TextBuffer", {})
 
 
 def test_rust_associated_type_path_is_left_to_the_ladder(

@@ -1064,7 +1064,16 @@ only reaches `Type`'s own members, so its row lists only those (the
 same call written `x.name(..)` is not narrowed), and a Rust call
 through a `use` rooted at `std`, `core` or `alloc` (`use std::path::
 Path; Path::new(..)`) is counted external even when the repo defines a
-type of that name. A Rust call never resolves to a function its shape
+type of that name. The same goes for a `use` rooted at any crate the
+repo's `Cargo.toml` files don't declare (`use windows::core::HSTRING`),
+unless its first segment is a module of a repo crate, and for a type
+imported from a workspace crate that only re-exports it from outside
+(`use collections::BTreeMap`): no repo symbol carries the name and no
+`use .. as` in the repo renames anything to it. A repo with no
+`Cargo.toml` keeps the older file-name test. One blind spot: a local
+variable or parameter named like such an import (`let fs =
+FakeFs::new(..)` after `use smol::fs`) is read as the import, so its
+calls count external. A Rust call never resolves to a function its shape
 or argument count rules out (Rust has no overloads or default
 arguments): `x.name(..)` needs a method taking `self` and the written
 count, a bare `name(..)` never reaches a method, and
