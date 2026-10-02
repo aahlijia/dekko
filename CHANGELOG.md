@@ -9,6 +9,51 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-10-02
+
+Closes round 1.6's fix cycle. The code is 1.5.13; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.6 evaluated 1.5.0 on
+seven real repositories and found three High issues (C++ constructors
+with no callers, Java constructor overloads bound to the first one
+declared, Kotlin mapped with no symbols) and three Medium ones.
+Fixing them surfaced seven more. All thirteen are fixed:
+
+- **1.5.1**: a constructor call picks its overload by argument count
+  instead of binding to the first one declared.
+- **1.5.2**: C++ constructions count in the call graph (tensorflow
+  `Graph`: 0 -> 399 callers).
+- **1.5.3**: Kotlin is a Tier-1 language (spring-boot: 0 -> 1,165
+  Kotlin symbols).
+- **1.5.4**: ambiguous rows and Tier-2 calls stay inside the caller's
+  language (tensorflow ambiguous rows 260,507 -> 238,166).
+- **1.5.5**: C++ calls resolve through their full written path
+  (tensorflow +3,510 edges, none lost).
+- **1.5.6**: a one-scope C++ call binds to the namespace it names
+  (tensorflow: 11,312 wrong call sites gone, mostly `absl::` and
+  `std::`).
+- **1.5.7**: C++ default arguments declared in a header count toward
+  the arity of the definition in the `.cc` file.
+- **1.5.8**: Rust `use std::` imports stay out of the repo, and an
+  ambiguous `Type::name` row keeps only the candidates on that type
+  (zed: 2,087 wrong edges gone, none added).
+- **1.5.9**: a `sanity` grep-only row on a site the map resolved to a
+  different same-named symbol names that symbol.
+- **1.5.10**: `sanity` names the leftover non-call shapes (type
+  bodies, self-recursion, imports bound elsewhere, heritage).
+  `sanity --all` unexplained rows dropped 30 -> 1 (claude-buddy),
+  957 -> 51 (claude-code) and 1,439 -> 218 (cline).
+- **1.5.11**: a Java/Kotlin import matches by qualified path, so an
+  external class no longer resolves to a same-named class in the
+  repo, and any Gradle source set is a source root.
+- **1.5.12**: Groovy files and Gradle build scripts are skipped with
+  a stated reason instead of being mapped empty (spring-boot: 9,376
+  garbage external rows gone).
+- **1.5.13**: each Tier-2 language is read through its own measured
+  row instead of a guess at node types: 43 languages, 39 supported
+  and 4 partial against a pinned corpus. Vue, Svelte and Mojo are
+  disclosed as unsupported rather than mapped wrong.
+
 ## [1.5.13] — 2026-09-30
 
 ### Changed
