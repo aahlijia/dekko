@@ -1192,7 +1192,12 @@ def resolve(
     # directory) and the module graph (entry-point fields).
     manifests = _load_workspace_manifests(root) if root is not None else {}
     workspace_pkgs = {n: m.package_dir for n, m in manifests.items()}
-    imports_by_file = _imports_by_file(files, workspace_pkgs)
+    # One context serves the symbol-level passes (which file a JS/TS
+    # import names) and the module graph alike.
+    import_ctx = _import_resolve_context(files, root, manifests)
+    imports_by_file = _imports_by_file(
+        files, workspace_pkgs, _OriginLookup(import_ctx, by_name_path)
+    )
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
 
@@ -1251,7 +1256,7 @@ def resolve(
         )
         _build_adjacency(graph)
         graph.referenced, graph.referenced_in, graph.referenced_out = (
-            resolve_refs(files, workers, workspace_pkgs)
+            resolve_refs(files, workers, workspace_pkgs, imports_by_file)
         )
         (
             graph.heritage,
@@ -1261,9 +1266,9 @@ def resolve(
             graph.heritage_external,
             graph.heritage_synthetic_tiebreak_count,
             graph.heritage_unplaced_subtype_count,
-        ) = resolve_heritage(files, workspace_pkgs)
+        ) = resolve_heritage(files, workspace_pkgs, imports_by_file)
         graph.modules = resolve_imports(
-            files, root=root, workspace_manifests=manifests
+            files, root=root, workspace_manifests=manifests, ctx=import_ctx
         )
         (
             graph.throws,
@@ -1572,6 +1577,7 @@ def resolve_refs(
     files: list[FileMap],
     workers: int = 1,
     workspace_pkgs: dict[str, str] | None = None,
+    imports_by_file: dict[str, dict[str, Import]] | None = None,
 ) -> tuple[list[Edge], dict[str, list[str]], dict[str, list[str]]]:
     """Resolve every raw value reference across the repo.
 
@@ -1594,6 +1600,9 @@ def resolve_refs(
             ``load_workspace_packages``), or ``None``. Lets a
             workspace-package import narrow a colliding name to the
             package it was imported from.
+        imports_by_file: The per-file import table ``resolve()``
+            already built, so both passes read the same resolved
+            bindings. ``None`` builds one from ``workspace_pkgs``.
 
     Returns:
         ``(edges, referenced_in, referenced_out)``, the same shape
@@ -1601,7 +1610,8 @@ def resolve_refs(
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files, workspace_pkgs)
+    if imports_by_file is None:
+        imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
 
@@ -1848,6 +1858,7 @@ def _ref_target_visible(
 def resolve_heritage(
     files: list[FileMap],
     workspace_pkgs: dict[str, str] | None = None,
+    imports_by_file: dict[str, dict[str, Import]] | None = None,
 ) -> tuple[
     list[HeritageEdge],
     dict[str, list[str]],
@@ -1909,6 +1920,8 @@ def resolve_heritage(
             clause whose base is imported by package name (``import
             type { ApiHandler } from "@cline/llms"``) is misfiled as
             external.
+        imports_by_file: The per-file import table ``resolve()``
+            already built. ``None`` builds one from ``workspace_pkgs``.
 
     Returns:
         ``(heritage_edges, heritage_out, heritage_in,
@@ -1939,7 +1952,8 @@ def resolve_heritage(
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files, workspace_pkgs)
+    if imports_by_file is None:
+        imports_by_file = _imports_by_file(files, workspace_pkgs)
     repo_stems = _repo_stems(files)
     crate_roots = _rust_crate_roots_index_all(
         frozenset(fm.path for fm in files)
@@ -5477,7 +5491,18 @@ def _import_match(
     how many resolved edges rest on that convention-based tiebreak
     rather than a structural match.
     """
-    # Workspace narrowing runs first on purpose: for a package-shaped
+    # The file the import's specifier resolves to answers before any
+    # hint below does: each of them tests a file *stem*, and where the
+    # two disagreed on cline and claude-code the stem was the wrong one
+    # every time (an alias matching another app's same-named file, an
+    # import alias bound to an unrelated symbol of the local name). The
+    # answer need not be among ``candidates``: an import alias ends at
+    # a symbol the call's own name never finds.
+    origin = _origin_match(call, file_imports)
+    if origin is not None:
+        return origin
+
+    # Workspace narrowing runs next on purpose: for a package-shaped
     # specifier, ``_module_matches``'s stem test below can only ever
     # hit by coincidence (``@cline/shared/Logger`` "matching" an
     # unrelated ``Logger.ts`` in another package), so the package
@@ -5510,14 +5535,55 @@ def _import_match(
     )
     if receiver_hint is not None:
         return receiver_hint
-    if raw_imports:
-        matched = [
-            c
-            for c in candidates
-            if any(_module_matches(i.source, c.path) for i in raw_imports)
-        ]
-        if len(matched) == 1:
-            return matched[0]
+
+    return _whole_file_include_match(candidates, raw_imports)
+
+
+def _whole_file_include_match(
+    candidates: list[Symbol], raw_imports: list[Import] | None
+) -> Symbol | None:
+    """The one candidate whose file some ``#include`` here names.
+
+    Args:
+        candidates: The candidates the per-name hints could not settle.
+        raw_imports: The calling file's full import list, for a
+            whole-file-include language; ``None`` otherwise.
+
+    Returns:
+        The single candidate in an included file, or ``None``.
+    """
+    if not raw_imports:
+        return None
+    matched = [
+        c
+        for c in candidates
+        if any(_module_matches(i.source, c.path) for i in raw_imports)
+    ]
+    if len(matched) == 1:
+        return matched[0]
+
+    return None
+
+
+def _origin_match(
+    call: _Referable, file_imports: dict[str, Import]
+) -> Symbol | None:
+    """The one symbol the call's own import binding resolves to.
+
+    Args:
+        call: The raw call, reference or heritage clause.
+        file_imports: The calling file's import bindings by local name.
+
+    Returns:
+        The binding's origin when it has exactly one (see
+        ``_OriginLookup``). ``None`` with no binding, no origin, or
+        two or more (a type and a value declared under one name),
+        which leaves the verdict to the rest of the ladder.
+    """
+    imp = file_imports.get(call.name)
+    if isinstance(imp, _OriginImport) and len(imp.origins) == 1:
+        return imp.origins[0]
+
     return None
 
 
@@ -5712,12 +5778,20 @@ def _alias_candidates(
     imp = file_imports.get(call.name)
     if imp is None:
         return []
+    origins = imp.origins if isinstance(imp, _OriginImport) else ()
+    if len(origins) == 1:
+        # The file the specifier resolves to settles it, as in
+        # ``_import_match``: the stem test below would tie on every
+        # same-named file behind a tsconfig alias.
+        return list(origins)
     original = alias_original_name(imp.source)
-    return [
+    found = [
         c
         for c in index.get(original, [])
         if _module_matches(imp.source, c.path)
     ]
+
+    return found or list(origins)
 
 
 # Rust std/core/alloc namespace roots -- a fully-qualified inline path
@@ -6616,7 +6690,21 @@ _WORKSPACE_MANIFESTS = frozenset({"package.json", "pnpm-workspace.yaml"})
 
 
 @dataclass
-class _WorkspaceImport(Import):
+class _OriginImport(Import):
+    """A JS/TS import binding whose specifier was resolved to a file.
+
+    Attributes:
+        origins: The top-level symbols the resolved file declares
+            under the binding's original name (see
+            ``_import_origins``). Empty when the specifier names no
+            repo file or the file declares no such symbol.
+    """
+
+    origins: tuple[Symbol, ...] = ()
+
+
+@dataclass
+class _WorkspaceImport(_OriginImport):
     """An import binding whose source names an in-repo workspace package.
 
     Attributes:
@@ -6722,10 +6810,45 @@ def workspace_fingerprint(root: Path) -> str:
     Returns:
         A stable hex digest, or ``""`` for a repo with no workspaces.
     """
-    packages = load_workspace_packages(root)
-    if not packages:
+    manifests = _load_workspace_manifests(root)
+    if not manifests:
         return ""
-    payload = json.dumps(sorted(packages.items())).encode()
+    # The entry-point fields too: they decide which file a bare
+    # ``@scope/pkg`` import names, and so which symbol a call through
+    # that import resolves to.
+    table = [
+        [
+            name,
+            m.package_dir,
+            m.data.get("exports"),
+            [m.data.get(f) for f in _JS_ENTRY_FIELDS],
+        ]
+        for name, m in sorted(manifests.items())
+    ]
+    payload = json.dumps(table, sort_keys=True, default=str).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def tsconfig_fingerprint(root: Path) -> str:
+    """Digest of the tsconfig path-alias tables, for cache invalidation.
+
+    The cached call pass reads these to tell which file a JS/TS import
+    names. Editing ``compilerOptions.paths`` or ``baseUrl`` moves no
+    source file and no symbol, so nothing else in the reuse gate would
+    notice.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        A stable hex digest, or ``""`` for a repo with no path aliases.
+    """
+    tables = _load_tsconfig_alias_tables(root)
+    if not tables:
+        return ""
+    payload = json.dumps(
+        [[scope, t.base_dir, t.paths] for scope, t in sorted(tables.items())]
+    ).encode()
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -6831,21 +6954,100 @@ def _workspace_package_name(source: str) -> str | None:
 
 
 def _workspace_tagged(
-    imp: Import, workspace_pkgs: dict[str, str] | None
+    imp: Import,
+    workspace_pkgs: dict[str, str] | None,
+    origins: tuple[Symbol, ...] = (),
 ) -> Import:
-    """``imp``, upgraded to a ``_WorkspaceImport`` when it names one."""
-    if not workspace_pkgs or not imp.path.endswith(_JS_TS_EXTENSIONS):
-        return imp
-    name = _workspace_package_name(imp.source)
-    package_dir = workspace_pkgs.get(name) if name else None
-    if package_dir is None:
-        return imp
-    return _WorkspaceImport(
-        path=imp.path,
-        name=imp.name,
-        source=imp.source,
-        package_dir=package_dir,
-    )
+    """``imp``, upgraded to the subclass carrying what is known of it.
+
+    A ``_WorkspaceImport`` when its source names a workspace package,
+    else an ``_OriginImport`` when ``origins`` is non-empty, else
+    ``imp`` itself.
+    """
+    package_dir = None
+    if workspace_pkgs and imp.path.endswith(_JS_TS_EXTENSIONS):
+        name = _workspace_package_name(imp.source)
+        package_dir = workspace_pkgs.get(name) if name else None
+    if package_dir is not None:
+        return _WorkspaceImport(
+            path=imp.path,
+            name=imp.name,
+            source=imp.source,
+            origins=origins,
+            package_dir=package_dir,
+        )
+    if origins:
+        return _OriginImport(
+            path=imp.path, name=imp.name, source=imp.source, origins=origins
+        )
+
+    return imp
+
+
+class _OriginLookup:
+    """Resolves JS/TS import bindings to the symbols they name.
+
+    ``_module_matches`` asks whether some segment of a specifier is a
+    candidate's file stem. For ``./errors`` that is nearly exact; for
+    a tsconfig alias (``@/lib/utils``) it matches every ``utils.ts``
+    in the repo, and for an import alias (``import { a as b }``) it
+    tests the wrong name altogether. The module graph resolves the
+    same specifier to one file (``_resolve_import_js``), so that is
+    done here, once per binding in the parent process, and the answer
+    rides to every ladder step on the import record itself.
+
+    Attributes:
+        ctx: The import-resolution lookup structures.
+        by_name_path: ``(bare name, file path)`` → same-file symbols.
+    """
+
+    def __init__(
+        self,
+        ctx: "_ImportResolveContext",
+        by_name_path: dict[tuple[str, str], list[Symbol]],
+    ) -> None:
+        self.ctx = ctx
+        self.by_name_path = by_name_path
+        self._files: dict[tuple[str, str], str | None] = {}
+
+    def file_of(self, importer: str, module: str) -> str | None:
+        """The repo file ``module`` names when imported from ``importer``."""
+        key = (importer, module)
+        if key not in self._files:
+            probe = Import(path=importer, name="", source=module)
+            self._files[key] = _resolve_import_js(probe, importer, self.ctx)
+
+        return self._files[key]
+
+    def origins(self, imp: Import) -> tuple[Symbol, ...]:
+        """The top-level symbols ``imp`` binds, read off its own file.
+
+        Args:
+            imp: One import binding.
+
+        Returns:
+            Every top-level symbol the resolved file declares under
+            the binding's original name (so an import alias is
+            undone). Empty for a non-JS/TS file, a side-effect import,
+            a specifier that names no repo file, or a file declaring
+            no such symbol.
+        """
+        if (
+            not imp.name
+            or "/" not in imp.source
+            or not imp.path.endswith(_JS_TS_EXTENSIONS)
+        ):
+            return ()
+        module, original = imp.source.rsplit("/", 1)
+        target = self.file_of(imp.path, module)
+        if target is None:
+            return ()
+
+        return tuple(
+            sym
+            for sym in self.by_name_path.get((original, target), ())
+            if "." not in sym.qualname
+        )
 
 
 _RUST_IN_CRATE_PREFIXES = ("crate::", "super::", "self::")
@@ -7057,20 +7259,27 @@ def _rust_own_crate_narrowed(
 
 
 def _imports_by_file(
-    files: list[FileMap], workspace_pkgs: dict[str, str] | None = None
+    files: list[FileMap],
+    workspace_pkgs: dict[str, str] | None = None,
+    lookup: _OriginLookup | None = None,
 ) -> dict[str, dict[str, Import]]:
     """Map file path → local name → import record.
 
     ``workspace_pkgs`` (see ``load_workspace_packages``), when given,
     upgrades every JS/TS binding that names a workspace package to a
-    ``_WorkspaceImport``. ``None``/empty leaves every record as-is.
+    ``_WorkspaceImport``. ``lookup``, when given, attaches to every
+    JS/TS binding the symbols its specifier resolves to (see
+    ``_OriginLookup``). With neither, every record is left as-is.
     """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
         table = out.setdefault(fm.path, {})
         for imp in fm.imports:
             if imp.name not in table:
-                table[imp.name] = _workspace_tagged(imp, workspace_pkgs)
+                origins = lookup.origins(imp) if lookup is not None else ()
+                table[imp.name] = _workspace_tagged(
+                    imp, workspace_pkgs, origins
+                )
     return out
 
 
@@ -8857,10 +9066,48 @@ def _cpp_basename_index(paths: frozenset[str]) -> dict[str, list[str]]:
     return index
 
 
+def _import_resolve_context(
+    files: list[FileMap],
+    root: Path | None,
+    workspace_manifests: dict[str, _WorkspaceManifest] | None = None,
+) -> _ImportResolveContext:
+    """Build the import-resolution lookup structures for ``files``.
+
+    Args:
+        files: Per-file extraction results.
+        root: Repository root, for the tsconfig alias tables and the
+            workspace package table. ``None`` leaves both empty.
+        workspace_manifests: Already-loaded workspace manifests.
+            ``None`` loads them from ``root``.
+
+    Returns:
+        The context every ``_resolve_import_*`` function reads.
+    """
+    if workspace_manifests is None:
+        workspace_manifests = (
+            _load_workspace_manifests(root) if root is not None else {}
+        )
+    paths = frozenset(fm.path for fm in files)
+
+    return _ImportResolveContext(
+        paths=paths,
+        py_package_roots=_py_package_roots(paths),
+        java_suffix_index=_java_suffix_index(paths),
+        kotlin_package_members=_kotlin_package_members(files),
+        cpp_basename_index=_cpp_basename_index(paths),
+        crate_roots=_rust_crate_roots_index_all(paths),
+        ts_path_aliases=(
+            _load_tsconfig_alias_tables(root) if root is not None else {}
+        ),
+        workspace_manifests=workspace_manifests,
+    )
+
+
 def resolve_imports(
     files: list[FileMap],
     root: Path | None = None,
     workspace_manifests: dict[str, _WorkspaceManifest] | None = None,
+    ctx: _ImportResolveContext | None = None,
 ) -> ModuleGraph:
     """Resolve every file's raw imports into a file-to-file dependency
     graph.
@@ -8903,28 +9150,15 @@ def resolve_imports(
             ``_load_workspace_manifests``), so ``resolve()`` pays for
             one discovery pass rather than two. ``None`` loads them
             from ``root`` (or nothing, without a root).
+        ctx: The lookup structures ``resolve()`` already built for
+            these same files (see ``_import_resolve_context``).
+            ``None`` builds them here.
 
     Returns:
         The resolved ``ModuleGraph``.
     """
-    if workspace_manifests is None:
-        workspace_manifests = (
-            _load_workspace_manifests(root) if root is not None else {}
-        )
-
-    paths = frozenset(fm.path for fm in files)
-    ctx = _ImportResolveContext(
-        paths=paths,
-        py_package_roots=_py_package_roots(paths),
-        java_suffix_index=_java_suffix_index(paths),
-        kotlin_package_members=_kotlin_package_members(files),
-        cpp_basename_index=_cpp_basename_index(paths),
-        crate_roots=_rust_crate_roots_index_all(paths),
-        ts_path_aliases=(
-            _load_tsconfig_alias_tables(root) if root is not None else {}
-        ),
-        workspace_manifests=workspace_manifests,
-    )
+    if ctx is None:
+        ctx = _import_resolve_context(files, root, workspace_manifests)
 
     edge_names: dict[tuple[str, str], set[str]] = {}
     external: dict[str, set[str]] = {}

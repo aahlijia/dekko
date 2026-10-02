@@ -459,6 +459,45 @@ def test_gate_widens_for_an_import_alias_newly_resolving(
     assert reuse.dirty == {"mod.py", "caller.py"}
 
 
+ALIASED_TS_SRC = {
+    "tsconfig.json": (
+        '{"compilerOptions": {"baseUrl": ".", '
+        '"paths": {"@lib/*": ["lib/*"]}}}\n'
+    ),
+    "lib/base.ts": "export function other(): number {\n  return 0;\n}\n",
+    "old/base.ts": "export function helper(): number {\n  return 2;\n}\n",
+    "app.ts": (
+        'import { helper as h } from "@lib/base";\n'
+        "export function run(): number {\n  return h();\n}\n"
+    ),
+}
+
+
+def test_aliased_import_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``h()`` resolves through the file its import names. When that
+    file gains the imported name, the unchanged caller's cached entry
+    names only ``h`` and must be re-resolved anyway."""
+    root = make_mapped_repo(ALIASED_TS_SRC)
+    (root / "lib/base.ts").write_text(
+        ALIASED_TS_SRC["lib/base.ts"]
+        + "export function helper(): number {\n  return 1;\n}\n"
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert "app.ts" in reuse.dirty
+
+    _map(root)
+    incremental = _graph_json(root)
+    _map(root, "--full")
+    assert incremental == _graph_json(root)
+    doc = json.loads((root / ".dekko" / "map.json").read_text())
+    assert [doc["ids"][e["callee"]] for e in doc["edges"]] == [
+        "lib/base.ts::helper"
+    ]
+
+
 # --- invalidation keys ------------------------------------------------
 
 
@@ -780,3 +819,17 @@ def test_extends_clause_edit_keeps_incremental_equal_to_full(
     assert ("user.ts::use", "base.ts::Sub") in {
         (ids[e["caller"]], ids[e["callee"]]) for e in incremental["edges"]
     }
+
+
+def test_a_tsconfig_paths_edit_invalidates_the_cache(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The call pass reads the alias tables to tell which file an
+    aliased import names, and editing one moves no source file."""
+    root = make_mapped_repo(ALIASED_TS_SRC)
+    assert _fired(root)
+    (root / "tsconfig.json").write_text(
+        '{"compilerOptions": {"baseUrl": ".", '
+        '"paths": {"@lib/*": ["old/*"]}}}\n'
+    )
+    assert not _fired(root)

@@ -60,6 +60,7 @@ from dekko.core.resolver import (
     resolve_fingerprint,
     resolved_id_name,
     symbol_projection,
+    tsconfig_fingerprint,
     workspace_fingerprint,
 )
 from dekko.core.languages import spec_fingerprint
@@ -182,11 +183,13 @@ def load(root: Path) -> dict[str, dict] | None:
     resolution *produces* has moved: the cache format, the dekko version,
     the extraction spec (different symbols in, different edges out),
     the resolver's own source (``resolve_fingerprint`` -- the extraction
-    spec hash says nothing about the resolution ladder), or the JS/TS
+    spec hash says nothing about the resolution ladder), the JS/TS
     workspace package table (``workspace_fingerprint`` -- a renamed
     ``package.json`` or edited ``workspaces`` glob changes which imports
     count as in-repo without touching a single source file, so neither
-    ``build_reuse``'s path-set check nor its symbol check would see it).
+    ``build_reuse``'s path-set check nor its symbol check would see it),
+    or the tsconfig path-alias tables (``tsconfig_fingerprint`` -- an
+    edited ``paths`` entry changes which file an aliased import names).
 
     Args:
         root: Repository root.
@@ -209,6 +212,8 @@ def load(root: Path) -> dict[str, dict] | None:
     if doc.get("resolve_hash") != resolve_fingerprint():
         return None
     if doc.get("workspace_hash", "") != workspace_fingerprint(root):
+        return None
+    if doc.get("tsconfig_hash", "") != tsconfig_fingerprint(root):
         return None
     files = doc.get("files")
     table = doc.get("ids")
@@ -244,6 +249,7 @@ def save(
         "spec_hash": spec_fingerprint(),
         "resolve_hash": resolve_fingerprint(),
         "workspace_hash": workspace_fingerprint(root),
+        "tsconfig_hash": tsconfig_fingerprint(root),
         "ids": table,
         "files": files,
     }
@@ -330,7 +336,10 @@ def _files_naming(
 
 
 def _files_importing(
-    files: list[FileMap], dirty: set[str], added_names: set[str]
+    files: list[FileMap],
+    dirty: set[str],
+    added_names: set[str],
+    changed_names: set[str] | frozenset[str] = frozenset(),
 ) -> set[str]:
     """Clean files whose own import could newly resolve via an alias.
 
@@ -344,6 +353,13 @@ def _files_importing(
     one produced a miss, is the cheap side of "over-invalidate, never
     under."
 
+    An *aliased* binding (``import { real as alias }``) is also at
+    risk when ``real`` merely changed: its call sites are written
+    ``alias(..)``, and when they resolve through the file the import
+    names (``resolver._OriginLookup``), a ``real`` appearing in or
+    leaving that file flips them while the cached entry names only
+    ``alias`` or whatever it resolved to before.
+
     Args:
         files: Every mapped file (fresh, current ``fm.imports`` --
             unaffected by the reuse gate, since imports are always
@@ -352,6 +368,8 @@ def _files_importing(
         added_names: ``NameDelta.newly_defined`` names to test against
             -- only a name with *no* prior candidates can flip an
             alias miss to a hit.
+        changed_names: ``NameDelta.changed`` names, tested against
+            aliased bindings only.
 
     Returns:
         Additional paths (disjoint from ``dirty``) whose cached entry
@@ -362,7 +380,10 @@ def _files_importing(
         if fm.path in dirty:
             continue
         for imp in fm.imports:
-            if alias_original_name(imp.source) in added_names:
+            original = alias_original_name(imp.source)
+            if original in added_names or (
+                original != imp.name and original in changed_names
+            ):
                 found.add(fm.path)
                 break
     return found
@@ -466,8 +487,8 @@ def _name_delta_dirty(
     extra: set[str] = set()
     if changed:
         extra |= _files_naming(cached, dirty, changed)
-    if newly_defined:
-        extra |= _files_importing(files, dirty, newly_defined)
+    if changed or newly_defined:
+        extra |= _files_importing(files, dirty, newly_defined, changed)
     return extra
 
 

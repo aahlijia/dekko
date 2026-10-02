@@ -9,6 +9,40 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.2] — 2026-10-02
+
+### Fixed
+- **A JS/TS import is resolved to its file, and that file answers
+  before any filename test.** When two symbols shared a name, the
+  resolver asked whether some segment of the import's specifier was a
+  candidate's file stem. For `./errors` that is nearly exact. For a
+  tsconfig path alias it is a coincidence test: `@/lib/utils` matches
+  every `utils.ts` in the repo, so in a monorepo where three apps each
+  carry their own copy of a file, `cn(..)` was ambiguous among the
+  three though each app's own `tsconfig.json` says which one it means.
+  For an import alias it tested the wrong name altogether: after
+  `import { isInsideTmux as checkTmux }`, a call to `checkTmux()` went
+  to whatever the repo happened to call `checkTmux`, on claude-code a
+  method of an unrelated class. The module graph (`dekko deps`)
+  already resolved the same specifiers exactly: relative paths,
+  tsconfig `paths` aliases, workspace package entry files and
+  root-relative paths. The call, reference and heritage passes now use
+  that resolution first. When the resolved file declares exactly one
+  top-level symbol under the imported name, that symbol is the answer;
+  when it declares none, or a type and a value under one name, the
+  rest of the ladder decides as before. Measured against 1.6.1: cline
+  gains 1,333 caller/callee pairs (1,525 call sites) and 1,677
+  reference pairs (2,237 sites), and its ambiguous rows fall from
+  5,450 to 4,118; the 3 reference pairs it loses were an import alias
+  bound to the wrong symbol. claude-code gains 8 call pairs and 4
+  reference pairs and loses the one wrong `checkTmux` edge. Five
+  repositories with no JS/TS aliases are unchanged. A re-export
+  (`export { X } from "./x"`) is still not followed: an import that
+  goes through a barrel file resolves as it did before.
+- **Editing a tsconfig `paths` table or a workspace package's entry
+  fields re-resolves the repo.** The incremental map now reads both
+  to resolve calls, and neither edit touches a source file.
+
 ## [1.6.1] — 2026-10-02
 
 ### Fixed
