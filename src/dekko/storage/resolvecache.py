@@ -57,6 +57,8 @@ from dekko.core.resolver import (
     alias_original_name,
     cpp_scope_names,
     name_delta,
+    reexport_closure,
+    reexport_delta_names,
     resolve_fingerprint,
     resolved_id_name,
     symbol_projection,
@@ -389,6 +391,43 @@ def _files_importing(
     return found
 
 
+_JS_LANGUAGES = frozenset({"javascript", "typescript", "tsx"})
+
+
+def _files_using(
+    files: list[FileMap], dirty: set[str], names: set[str]
+) -> set[str]:
+    """Clean JS/TS files that call or import one of ``names``.
+
+    ``_files_naming`` reads what a cached call resolved *to*. A call
+    that goes through a re-export can resolve to a symbol with another
+    name entirely (``Text`` to ``ThemedText``), so when what a name
+    leads to may have changed, the files are found by the name as
+    they wrote it: at a call site, or in an import (whose members,
+    ``Ns.name(..)``, are written under yet other names).
+
+    Args:
+        files: Every mapped file.
+        dirty: Paths already known dirty -- skipped.
+        names: The changed names, closed under renames (see
+            ``resolver.reexport_closure``).
+
+    Returns:
+        Additional paths (disjoint from ``dirty``) whose cached entry
+        must be discarded.
+    """
+    found: set[str] = set()
+    for fm in files:
+        if fm.path in dirty or fm.language not in _JS_LANGUAGES:
+            continue
+        if any(call.name in names for call in fm.calls) or any(
+            imp.name in names or alias_original_name(imp.source) in names
+            for imp in fm.imports
+        ):
+            found.add(fm.path)
+    return found
+
+
 def _cpp_decl_names(entries: set[str]) -> set[str]:
     """Bare names of ``FileMap.cpp_decls`` entries.
 
@@ -445,8 +484,9 @@ def _name_delta_dirty(
         Additional paths to fold into ``dirty``, or ``None`` when any
         dirty file's delta includes a type-kind name -- see
         ``resolver.NameDelta.blocks_reuse`` -- or changes its C/C++
-        ``using``-declarations or qualname scope names, and the caller
-        must fall back to a full resolve instead.
+        ``using``-declarations or qualname scope names, or gains or
+        loses a JS/TS star re-export, and the caller must fall back to
+        a full resolve instead.
     """
     changed: set[str] = set()
     newly_defined: set[str] = set()
@@ -472,6 +512,15 @@ def _name_delta_dirty(
         changed |= _extended_names(
             cache.old_heritage(fm.path) or []
         ) ^ _extended_names(fm.heritage)
+        # And a JS/TS re-export or import binding gained, lost or
+        # re-pointed: it changes where a name leads from any file that
+        # imports it through this one.
+        passed_on = reexport_delta_names(
+            fm, cache.old_reexports(fm.path), cache.old_imports(fm.path)
+        )
+        if passed_on is None:
+            return None
+        changed |= passed_on
         # Whole-file compare first: cheaper than the grouped analysis
         # below, and this is the dominant agent-loop edit (a body edit,
         # a new call, a literal fix -- none of which touch any symbol's
@@ -486,7 +535,9 @@ def _name_delta_dirty(
 
     extra: set[str] = set()
     if changed:
-        extra |= _files_naming(cached, dirty, changed)
+        reach = reexport_closure(files, changed)
+        extra |= _files_naming(cached, dirty, reach)
+        extra |= _files_using(files, dirty, reach)
     if changed or newly_defined:
         extra |= _files_importing(files, dirty, newly_defined, changed)
     return extra

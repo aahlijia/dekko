@@ -18,6 +18,7 @@ from dekko.core.model import (
     RawRead,
     RawRef,
     RawThrow,
+    Reexport,
     Submodule,
     Symbol,
     TypeUse,
@@ -615,6 +616,7 @@ def _fully_populated_filemap() -> FileMap:
                 candidates=["a/x.rs", "a/x/mod.rs"], test_only=True, line=2
             ),
         ],
+        reexports=[Reexport(name="C", original="B", source="./a")],
         error="parse error",
         doc="module docstring",
     )

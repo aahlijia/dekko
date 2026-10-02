@@ -556,6 +556,31 @@ class Import:
 
 
 @dataclass
+class Reexport:
+    """One name a JS/TS file exports without declaring it there.
+
+    ``export { B as C } from "./a"`` is ``Reexport("C", "B", "./a")``.
+    A star is ``("*", "*", "./s")``, a namespace ``export * as ns from
+    "./n"`` is ``("ns", "*", "./n")``. A record with no ``source``
+    renames something the file itself holds: ``export { a as b }`` is
+    ``("b", "a", "")``, and a named default export (``export default
+    function Foo``, ``export default Foo;``) is ``("default", "Foo",
+    "")``.
+
+    Attributes:
+        name: The exported name, ``"*"`` for a star.
+        original: The name on the other side: in ``source`` when there
+            is one, else in this file. ``"*"`` or ``"default"`` as
+            written.
+        source: The module specifier, ``""`` for a local export.
+    """
+
+    name: str
+    original: str
+    source: str
+
+
+@dataclass
 class FileMap:
     """Everything extracted from a single source file.
 
@@ -619,6 +644,11 @@ class FileMap:
         submodules: Out-of-line ``mod x;`` declarations (Rust only,
             see ``model.Submodule``). Not written to ``map.json``:
             ``repo_ops`` reads them to flag test-only child files.
+        reexports: Re-exports and named default exports (JS/TS/TSX
+            only, see ``model.Reexport``). Not written to ``map.json``
+            as a list: the resolver follows them from an import to
+            the declaring file, and the module graph carries each one
+            with a source as an edge.
     """
 
     path: str
@@ -638,6 +668,7 @@ class FileMap:
     cpp_decls: list[str] = field(default_factory=list)
     type_uses: list[TypeUse] = field(default_factory=list)
     submodules: list[Submodule] = field(default_factory=list)
+    reexports: list[Reexport] = field(default_factory=list)
     error: str | None = None
     doc: str | None = None
 

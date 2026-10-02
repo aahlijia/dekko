@@ -19,6 +19,7 @@ from dekko.core.model import (
     RawRead,
     RawRef,
     RawThrow,
+    Reexport,
     Symbol,
     TypeUse,
 )
@@ -128,6 +129,11 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         if spec.name == "rust"
         else []
     )
+    reexports = (
+        _collect_reexports(tree.root_node)
+        if spec.name in _JS_FAMILY_SPECS
+        else []
+    )
     return FileMap(
         path=rel,
         language=spec.name,
@@ -146,6 +152,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         cpp_decls=cpp_decls,
         type_uses=type_uses,
         submodules=submodules,
+        reexports=reexports,
         doc=_module_doc(spec.name, tree.root_node),
     )
 
@@ -4737,6 +4744,85 @@ def _imports_generic(
         name = _text(alias) if alias else re.split(r"[./:]", source)[-1]
         out.append(Import(path=rel, name=name, source=source))
     return out
+
+
+_JS_FAMILY_SPECS = frozenset({"javascript", "typescript", "tsx"})
+
+
+def _collect_reexports(root: Node) -> list[Reexport]:
+    """Every re-export and named default export of a JS/TS file.
+
+    Only top-level ``export`` statements: one inside a ``declare
+    module`` or a namespace exports from that scope, not from the
+    file. See ``model.Reexport`` for the record each form becomes.
+    """
+    out: list[Reexport] = []
+    for node in root.children:
+        if node.type == "export_statement":
+            out.extend(_reexports_of(node))
+    return out
+
+
+def _reexports_of(node: Node) -> list[Reexport]:
+    """The records one top-level ``export`` statement contributes."""
+    source_node = node.child_by_field_name("source")
+    source = _strip_quotes(_text(source_node)) if source_node else ""
+    kinds = {child.type: child for child in node.children}
+    if "default" in kinds:
+        declared = _default_export_name(node)
+        return [Reexport("default", declared, "")] if declared else []
+    if "namespace_export" in kinds:
+        alias = kinds["namespace_export"].named_children[-1:]
+        if not alias or not source:
+            return []
+        return [Reexport(_strip_quotes(_text(alias[0])), "*", source)]
+    if "export_clause" in kinds:
+        return _clause_reexports(kinds["export_clause"], source)
+    if "*" in kinds and source:
+        return [Reexport("*", "*", source)]
+
+    return []
+
+
+def _clause_reexports(clause: Node, source: str) -> list[Reexport]:
+    """One record per item of an ``export { ... }`` clause.
+
+    A source-less item with no rename records nothing: the file's own
+    symbol, or its own import of the name, already says where the
+    name comes from.
+    """
+    out: list[Reexport] = []
+    for spec in clause.named_children:
+        if spec.type != "export_specifier":
+            continue
+        name = spec.child_by_field_name("name")
+        if name is None:
+            continue
+        alias = spec.child_by_field_name("alias")
+        original = _strip_quotes(_text(name))
+        exported = _strip_quotes(_text(alias)) if alias else original
+        if source or exported != original:
+            out.append(Reexport(exported, original, source))
+    return out
+
+
+def _default_export_name(node: Node) -> str | None:
+    """The name an ``export default`` statement's value is declared
+    under, or ``None`` for an anonymous or computed one.
+
+    ``export default function Foo``, ``export default class Foo`` and
+    ``export default Foo;`` name it; ``export default () => 1`` and
+    ``export default memo(Foo)`` do not.
+    """
+    declaration = node.child_by_field_name("declaration")
+    if declaration is not None:
+        name = declaration.child_by_field_name("name")
+        return _text(name) if name is not None else None
+    value = node.child_by_field_name("value")
+    if value is not None and value.type == "identifier":
+        return _text(value)
+
+    return None
 
 
 def _strip_quotes(text: str) -> str:

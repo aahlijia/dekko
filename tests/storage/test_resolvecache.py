@@ -498,6 +498,157 @@ def test_aliased_import_keeps_incremental_equal_to_full(
     ]
 
 
+BARREL_TS_SRC = {
+    "lib/a.ts": "export function make(): number {\n  return 1;\n}\n",
+    "lib/b.ts": "export function make(): number {\n  return 2;\n}\n",
+    "lib/index.ts": 'export { make as build } from "./a";\n',
+    "app.ts": (
+        'import { build } from "./lib/index";\n'
+        "export function run(): number {\n  return build();\n}\n"
+    ),
+    "ns.ts": (
+        'import * as lib from "./lib/index";\n'
+        "export function go(): number {\n  return lib.build();\n}\n"
+    ),
+    "bystander.ts": "export function idle(): number {\n  return 0;\n}\n",
+}
+
+
+def _callee_ids(root: Path) -> set[str]:
+    doc = json.loads((root / ".dekko" / "map.json").read_text())
+    return {doc["ids"][e["callee"]] for e in doc["edges"]}
+
+
+def test_gate_widens_to_importers_when_a_barrel_is_re_pointed(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The importers resolved ``build`` to ``a.ts::make``: their cached
+    entries name ``make``, the barrel's edit names only the source it
+    points at. They are found by the name they wrote."""
+    root = make_mapped_repo(BARREL_TS_SRC)
+    assert _callee_ids(root) == {"lib/a.ts::make"}
+    (root / "lib/index.ts").write_text(
+        'export { make as build } from "./b";\n'
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"lib/index.ts", "app.ts", "ns.ts"}
+
+    _map(root)
+    incremental = _graph_json(root)
+    assert _callee_ids(root) == {"lib/b.ts::make"}
+    _map(root, "--full")
+    assert incremental == _graph_json(root)
+
+
+def test_barrel_gaining_a_named_reexport_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    src = dict(BARREL_TS_SRC)
+    src["late.ts"] = (
+        'import { extra } from "./lib/index";\n'
+        "export function later(): number {\n  return extra();\n}\n"
+    )
+    src["lib/a.ts"] += "export function extra(): number {\n  return 3;\n}\n"
+    src["lib/b.ts"] += "export function extra(): number {\n  return 4;\n}\n"
+    root = make_mapped_repo(src)
+    (root / "lib/index.ts").write_text(
+        src["lib/index.ts"] + 'export { extra } from "./b";\n'
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert "late.ts" in reuse.dirty
+    assert "bystander.ts" not in reuse.dirty
+
+    _map(root)
+    incremental = _graph_json(root)
+    assert "lib/b.ts::extra" in _callee_ids(root)
+    _map(root, "--full")
+    assert incremental == _graph_json(root)
+
+
+def test_gate_finds_importers_by_the_name_they_wrote(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``Text()`` resolved to ``ThemedA``: the cached entry names
+    ``ThemedA``, the barrel's edit names ``Text`` and ``default``.
+    Nothing links the two but the call site's own spelling."""
+    src = {
+        "a.ts": (
+            "export default function ThemedA(): number {\n  return 1;\n}\n"
+        ),
+        "b.ts": (
+            "export default function ThemedB(): number {\n  return 2;\n}\n"
+        ),
+        "index.ts": 'export { default as Text } from "./a";\n',
+        "app.ts": (
+            'import { Text } from "./index";\n'
+            "export function run(): number {\n  return Text();\n}\n"
+        ),
+    }
+    root = make_mapped_repo(src)
+    assert _callee_ids(root) == {"a.ts::ThemedA"}
+    (root / "index.ts").write_text('export { default as Text } from "./b";\n')
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"index.ts", "app.ts"}
+
+    _map(root)
+    incremental = _graph_json(root)
+    assert _callee_ids(root) == {"b.ts::ThemedB"}
+    _map(root, "--full")
+    assert incremental == _graph_json(root)
+
+
+def test_gate_refuses_when_a_star_reexport_changes(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """What a star exposes is no bounded set of names."""
+    root = make_mapped_repo(BARREL_TS_SRC)
+    (root / "lib/index.ts").write_text(
+        BARREL_TS_SRC["lib/index.ts"] + 'export * from "./b";\n'
+    )
+    assert _build(root) is None
+
+
+def test_gate_widens_when_an_import_that_is_a_hop_is_re_pointed(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    src = dict(BARREL_TS_SRC)
+    src["lib/index.ts"] = 'import { make } from "./a";\nexport { make };\n'
+    src["app.ts"] = (
+        'import { make as build } from "./lib/index";\n'
+        "export function run(): number {\n  return build();\n}\n"
+    )
+    del src["ns.ts"]
+    root = make_mapped_repo(src)
+    assert _callee_ids(root) == {"lib/a.ts::make"}
+    (root / "lib/index.ts").write_text(
+        'import { make } from "./b";\nexport { make };\n'
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert "app.ts" in reuse.dirty
+
+    _map(root)
+    incremental = _graph_json(root)
+    assert _callee_ids(root) == {"lib/b.ts::make"}
+    _map(root, "--full")
+    assert incremental == _graph_json(root)
+
+
+def test_a_bare_package_import_edit_dirties_nothing_else(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(BARREL_TS_SRC)
+    (root / "bystander.ts").write_text(
+        'import { build } from "somepkg";\n' + BARREL_TS_SRC["bystander.ts"]
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"bystander.ts"}
+
+
 # --- invalidation keys ------------------------------------------------
 
 

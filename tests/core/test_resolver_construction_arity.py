@@ -114,9 +114,22 @@ def test_construction_no_constructor_fits_stays_external(
 ) -> None:
     # Three arguments against ``(a, b?)``: the name matched a class
     # this call cannot be constructing.
-    graph = _ts(tmp_path, 'return new Base(1, "x", 3);', _BARREL)
+    graph = _ts(tmp_path, 'return new Base(1, "x", 3);')
     assert _callees(graph, _RUN_TS) == set()
     assert _externals(graph, _RUN_TS) == {"Base"}
+
+
+def test_an_import_through_a_barrel_proves_the_class_like_a_direct_one(
+    tmp_path: Path,
+) -> None:
+    # With an import that leads to the class's file the count is not
+    # the evidence, the import is: a barrel reads as a direct import.
+    direct = 'import { Base } from "./lib/base";\n'
+    for label, imports in (("barrel", _BARREL), ("direct", direct)):
+        root = tmp_path / label
+        root.mkdir()
+        graph = _ts(root, 'return new Base(1, "x", 3);', imports)
+        assert _callees(graph, _RUN_TS) == {"lib/base.ts::Base"}, label
 
 
 def test_optional_constructor_parameter_takes_one_argument(
@@ -141,7 +154,7 @@ def test_subclass_without_a_constructor_takes_arguments(
 def test_class_without_constructor_or_base_takes_no_arguments(
     tmp_path: Path,
 ) -> None:
-    graph = _ts(tmp_path, "return new NoCtor(1);", _BARREL)
+    graph = _ts(tmp_path, "return new NoCtor(1);")
     assert _callees(graph, _RUN_TS) == set()
     assert _externals(graph, _RUN_TS) == {"NoCtor"}
 

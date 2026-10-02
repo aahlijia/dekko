@@ -113,7 +113,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
@@ -140,6 +140,7 @@ from dekko.core.model import (
     RawHeritage,
     RawRef,
     ReadSite,
+    Reexport,
     Symbol,
     ThrowEdge,
 )
@@ -588,6 +589,98 @@ class NameDelta:
     blocks_reuse: bool
     changed: frozenset[str]
     newly_defined: frozenset[str]
+
+
+def reexport_delta_names(
+    fm: FileMap,
+    old_reexports: list[dict] | None,
+    old_imports: list[dict] | None,
+) -> set[str] | None:
+    """Names one edited JS/TS file's exports and imports can re-point.
+
+    A name is followed from an import through every file that
+    re-exports it (``_OriginLookup``), and neither a re-export record
+    nor an import binding is part of any symbol. So an edit to either
+    changes what a call in an *unchanged* file resolves to, and the
+    symbol delta cannot see it.
+
+    Args:
+        fm: The file as extracted now.
+        old_reexports: Its cached re-export records, as dicts.
+        old_imports: Its cached import bindings, as dicts.
+
+    Returns:
+        Both names of every re-export record gained or lost, and the
+        local and original name of every import binding gained, lost
+        or re-pointed (a file's own import is a hop when it exports
+        the name again). An import of a bare package name leads
+        nowhere in the repo and is skipped. ``None`` when a star
+        re-export was gained or lost: what a star exposes is no
+        bounded set of names. Empty for a non-JS/TS file.
+    """
+    if not fm.path.endswith(_JS_TS_EXTENSIONS):
+        return set()
+    before = {
+        (d["name"], d["original"], d["source"]) for d in old_reexports or ()
+    }
+    now = {(r.name, r.original, r.source) for r in fm.reexports}
+    delta = before ^ now
+    if any(name == "*" for name, _, _ in delta):
+        return None
+    names = {n for name, original, _ in delta for n in (name, original)}
+    bound_before = {(d["name"], d["source"]) for d in old_imports or ()}
+    bound_now = {(i.name, i.source) for i in fm.imports}
+    for local, source in bound_before ^ bound_now:
+        probe = Import(path=fm.path, name=local, source=source)
+        if local and not _bare_package_import(probe):
+            names.update((local, alias_original_name(source)))
+    names.discard("*")
+
+    return names
+
+
+def reexport_closure(files: list[FileMap], names: set[str]) -> set[str]:
+    """``names``, plus every name a JS/TS file passes one of them on as.
+
+    ``export { helper as assist } from "./base"`` makes ``assist``
+    depend on ``helper``, and ``import { helper as h }`` does the same
+    for ``h``. A call resolved through such a hop is written under the
+    far name, so a change to ``helper`` has to reach the files that
+    say ``assist`` or ``h``. Which file each record sits in is
+    ignored: this over-approximates, and is only ever used to widen a
+    re-resolve.
+
+    Args:
+        files: Every mapped file.
+        names: The bare names that changed.
+
+    Returns:
+        The closure of ``names`` under renaming re-exports and import
+        aliases.
+    """
+    renames: list[tuple[str, str]] = []
+    for fm in files:
+        if not fm.path.endswith(_JS_TS_EXTENSIONS):
+            continue
+        renames.extend(
+            (rec.original, rec.name)
+            for rec in fm.reexports
+            if rec.name not in ("*", rec.original)
+        )
+        for imp in fm.imports:
+            original = alias_original_name(imp.source)
+            if imp.name and imp.name != original:
+                renames.append((original, imp.name))
+    out = set(names)
+    grew = bool(renames)
+    while grew:
+        grew = False
+        for original, name in renames:
+            if original in out and name not in out:
+                out.add(name)
+                grew = True
+
+    return out
 
 
 def name_delta(
@@ -1196,7 +1289,7 @@ def resolve(
     # import names) and the module graph alike.
     import_ctx = _import_resolve_context(files, root, manifests)
     imports_by_file = _imports_by_file(
-        files, workspace_pkgs, _OriginLookup(import_ctx, by_name_path)
+        files, workspace_pkgs, _OriginLookup(import_ctx, by_name_path, files)
     )
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
@@ -5575,16 +5668,47 @@ def _origin_match(
         file_imports: The calling file's import bindings by local name.
 
     Returns:
-        The binding's origin when it has exactly one (see
-        ``_OriginLookup``). ``None`` with no binding, no origin, or
+        The one symbol those bindings lead to (see
+        ``_origin_symbols``). ``None`` with no binding, no origin, or
         two or more (a type and a value declared under one name),
         which leaves the verdict to the rest of the ladder.
     """
-    imp = file_imports.get(call.name)
-    if isinstance(imp, _OriginImport) and len(imp.origins) == 1:
-        return imp.origins[0]
+    found = _origin_symbols(call, file_imports)
+    if len(found) == 1:
+        return found[0]
 
     return None
+
+
+def _origin_symbols(
+    call: _Referable, file_imports: dict[str, Import]
+) -> list[Symbol]:
+    """Every symbol the call's import bindings lead to.
+
+    The call's own name as a binding, and, for ``Head.name(..)``, the
+    name as a member of ``Head``'s binding (see
+    ``_OriginLookup.members``).
+
+    Args:
+        call: The raw call, reference or heritage clause.
+        file_imports: The calling file's import bindings by local name.
+
+    Returns:
+        The distinct symbols, empty when no binding leads anywhere.
+    """
+    found: dict[str, Symbol] = {}
+    imp = file_imports.get(call.name)
+    if isinstance(imp, _OriginImport):
+        for sym in imp.origins:
+            found.setdefault(sym.id, sym)
+    receiver = getattr(call, "receiver", None)
+    if receiver:
+        head = file_imports.get(_PATH_SPLIT.split(receiver)[0])
+        if isinstance(head, _OriginImport):
+            for sym in head.members.get(call.name, ()):
+                found.setdefault(sym.id, sym)
+
+    return list(found.values())
 
 
 def _hint_match(
@@ -5775,15 +5899,15 @@ def _alias_candidates(
         file matches — e.g. an alias for a genuinely external
         package, which must keep resolving to ``external``.
     """
-    imp = file_imports.get(call.name)
-    if imp is None:
-        return []
-    origins = imp.origins if isinstance(imp, _OriginImport) else ()
+    origins = _origin_symbols(call, file_imports)
     if len(origins) == 1:
         # The file the specifier resolves to settles it, as in
         # ``_import_match``: the stem test below would tie on every
         # same-named file behind a tsconfig alias.
-        return list(origins)
+        return origins
+    imp = file_imports.get(call.name)
+    if imp is None:
+        return origins
     original = alias_original_name(imp.source)
     found = [
         c
@@ -5791,7 +5915,7 @@ def _alias_candidates(
         if _module_matches(imp.source, c.path)
     ]
 
-    return found or list(origins)
+    return found or origins
 
 
 # Rust std/core/alloc namespace roots -- a fully-qualified inline path
@@ -6694,13 +6818,17 @@ class _OriginImport(Import):
     """A JS/TS import binding whose specifier was resolved to a file.
 
     Attributes:
-        origins: The top-level symbols the resolved file declares
-            under the binding's original name (see
-            ``_import_origins``). Empty when the specifier names no
-            repo file or the file declares no such symbol.
+        origins: The top-level symbols the binding's name leads to:
+            what the resolved file declares under the binding's
+            original name, and what any re-export it passes through
+            ends at (see ``_OriginLookup``). Empty when the specifier
+            names no repo file or nothing declares the name.
+        members: The same, for each name this file uses *on* the
+            binding (``Ns.name(..)``): name → symbols.
     """
 
     origins: tuple[Symbol, ...] = ()
+    members: dict[str, tuple[Symbol, ...]] = field(default_factory=dict)
 
 
 @dataclass
@@ -6957,13 +7085,15 @@ def _workspace_tagged(
     imp: Import,
     workspace_pkgs: dict[str, str] | None,
     origins: tuple[Symbol, ...] = (),
+    members: dict[str, tuple[Symbol, ...]] | None = None,
 ) -> Import:
     """``imp``, upgraded to the subclass carrying what is known of it.
 
     A ``_WorkspaceImport`` when its source names a workspace package,
-    else an ``_OriginImport`` when ``origins`` is non-empty, else
-    ``imp`` itself.
+    else an ``_OriginImport`` when ``origins`` or ``members`` is
+    non-empty, else ``imp`` itself.
     """
+    members = members or {}
     package_dir = None
     if workspace_pkgs and imp.path.endswith(_JS_TS_EXTENSIONS):
         name = _workspace_package_name(imp.source)
@@ -6974,14 +7104,25 @@ def _workspace_tagged(
             name=imp.name,
             source=imp.source,
             origins=origins,
+            members=members,
             package_dir=package_dir,
         )
-    if origins:
+    if origins or members:
         return _OriginImport(
-            path=imp.path, name=imp.name, source=imp.source, origins=origins
+            path=imp.path,
+            name=imp.name,
+            source=imp.source,
+            origins=origins,
+            members=members,
         )
 
     return imp
+
+
+# How many files a name is followed through before the walk gives up.
+# Real barrels nest two or three deep; the cap only bounds a
+# pathological chain.
+_REEXPORT_DEPTH = 8
 
 
 class _OriginLookup:
@@ -6996,6 +7137,16 @@ class _OriginLookup:
     done here, once per binding in the parent process, and the answer
     rides to every ladder step on the import record itself.
 
+    From that file the name is followed through whatever re-exports
+    it (``model.Reexport``): a named or renamed item, a star, a
+    source-less rename, the file's default export, and the file's own
+    import of the name (``import { X } from "./x"; export { X }``).
+    Each hop's specifier is resolved from the re-exporting file's own
+    path, so a barrel's alias uses the barrel's tsconfig. Without it a
+    barrel was a dead end, and behind a renaming one
+    (``export { default as Text } from "./ThemedText"``) the stem test
+    bound every use to an unrelated file named like the import.
+
     Attributes:
         ctx: The import-resolution lookup structures.
         by_name_path: ``(bare name, file path)`` → same-file symbols.
@@ -7005,10 +7156,20 @@ class _OriginLookup:
         self,
         ctx: "_ImportResolveContext",
         by_name_path: dict[tuple[str, str], list[Symbol]],
+        files: list[FileMap] | None = None,
     ) -> None:
         self.ctx = ctx
         self.by_name_path = by_name_path
         self._files: dict[tuple[str, str], str | None] = {}
+        self._reexports: dict[str, list[Reexport]] = {}
+        self._imports: dict[str, list[Import]] = {}
+        self._bindings: dict[str, dict[str, Import]] = {}
+        self._reached: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
+        for fm in files or ():
+            if fm.reexports:
+                self._reexports[fm.path] = fm.reexports
+            if fm.path.endswith(_JS_TS_EXTENSIONS):
+                self._imports[fm.path] = fm.imports
 
     def file_of(self, importer: str, module: str) -> str | None:
         """The repo file ``module`` names when imported from ``importer``."""
@@ -7020,34 +7181,153 @@ class _OriginLookup:
         return self._files[key]
 
     def origins(self, imp: Import) -> tuple[Symbol, ...]:
-        """The top-level symbols ``imp`` binds, read off its own file.
+        """The top-level symbols ``imp`` binds.
 
         Args:
             imp: One import binding.
 
         Returns:
-            Every top-level symbol the resolved file declares under
-            the binding's original name (so an import alias is
-            undone). Empty for a non-JS/TS file, a side-effect import,
-            a specifier that names no repo file, or a file declaring
-            no such symbol.
+            Every top-level symbol declared under the binding's
+            original name (so an import alias is undone) in the file
+            its specifier resolves to, or in a file that name is
+            re-exported from. Empty for a non-JS/TS file, a
+            side-effect import, a specifier that names no repo file,
+            or a name nothing declares.
         """
+        start = self._start(imp)
+        if start is None:
+            return ()
+
+        return self._symbols(self._reach(*start))
+
+    def members(self, imp: Import, name: str) -> tuple[Symbol, ...]:
+        """The top-level symbols ``Head.name`` can mean, ``imp`` being
+        the binding of ``Head``.
+
+        Two readings, both followed: ``name`` is exported by the
+        module ``Head`` was imported from (``import * as Head``, or
+        an object assembled from that module's own imports), and
+        ``Head`` is a namespace re-export (``export * as Head from
+        "./n"``), which makes ``name`` an export of ``./n``.
+
+        Args:
+            imp: The import binding of the receiver's leading segment.
+            name: The member name used on it.
+
+        Returns:
+            The symbols, as ``origins`` returns them.
+        """
+        start = self._start(imp)
+        if start is None:
+            return ()
+        first, original = start
+        pairs = list(self._reach(first, name))
+        for path, exported in self._reach(first, original):
+            for rec in self._reexports.get(path, ()):
+                if rec.name != exported or rec.original != "*":
+                    continue
+                target = self.file_of(path, rec.source)
+                if target is not None:
+                    pairs.extend(self._reach(target, name))
+
+        return self._symbols(pairs)
+
+    def _start(self, imp: Import) -> tuple[str, str] | None:
+        """``(resolved file, original name)`` for a JS/TS binding."""
         if (
             not imp.name
             or "/" not in imp.source
             or not imp.path.endswith(_JS_TS_EXTENSIONS)
         ):
-            return ()
+            return None
         module, original = imp.source.rsplit("/", 1)
         target = self.file_of(imp.path, module)
         if target is None:
-            return ()
+            return None
 
-        return tuple(
-            sym
-            for sym in self.by_name_path.get((original, target), ())
-            if "." not in sym.qualname
-        )
+        return target, original
+
+    def _symbols(self, pairs: Iterable[tuple[str, str]]) -> tuple[Symbol, ...]:
+        """The top-level symbols declared at ``(file, name)`` pairs."""
+        found: dict[str, Symbol] = {}
+        for path, name in pairs:
+            for sym in self.by_name_path.get((name, path), ()):
+                if "." not in sym.qualname:
+                    found.setdefault(sym.id, sym)
+
+        return tuple(found.values())
+
+    def _reach(self, path: str, name: str) -> tuple[tuple[str, str], ...]:
+        """Every ``(file, declared name)`` that ``name`` exported from
+        ``path`` can come from, ``path`` itself first."""
+        key = (path, name)
+        reached = self._reached.get(key)
+        if reached is None:
+            seen: dict[tuple[str, str], None] = {}
+            self._walk(path, name, seen, 0)
+            reached = self._reached[key] = tuple(seen)
+
+        return reached
+
+    def _walk(
+        self,
+        path: str,
+        name: str,
+        seen: dict[tuple[str, str], None],
+        depth: int,
+    ) -> None:
+        """Visit ``(path, name)`` and everything it is re-exported from."""
+        if (path, name) in seen or depth > _REEXPORT_DEPTH:
+            return
+        seen[(path, name)] = None
+        for rec in self._reexports.get(path, ()):
+            if rec.name == "*":
+                # A star never carries the default export.
+                if name != "default":
+                    self._hop(path, rec.source, name, seen, depth)
+            elif rec.name != name:
+                continue
+            elif not rec.source:
+                # ``export { a as b }`` / ``export default a``: the
+                # file's own ``a``, declared here or imported.
+                seen[(path, rec.original)] = None
+                self._follow_binding(path, rec.original, seen, depth)
+            elif rec.original != "*":
+                self._hop(path, rec.source, rec.original, seen, depth)
+        self._follow_binding(path, name, seen, depth)
+
+    def _hop(
+        self,
+        path: str,
+        module: str,
+        name: str,
+        seen: dict[tuple[str, str], None],
+        depth: int,
+    ) -> None:
+        """Continue the walk in the file ``module`` names from ``path``."""
+        target = self.file_of(path, module)
+        if target is not None:
+            self._walk(target, name, seen, depth + 1)
+
+    def _follow_binding(
+        self,
+        path: str,
+        name: str,
+        seen: dict[tuple[str, str], None],
+        depth: int,
+    ) -> None:
+        """Follow ``path``'s own import of ``name``, if it has one."""
+        bindings = self._bindings.get(path)
+        if bindings is None:
+            bindings = self._bindings[path] = {}
+            for imp in self._imports.get(path, ()):
+                if imp.name:
+                    bindings.setdefault(imp.name, imp)
+        imp = bindings.get(name)
+        if imp is None or "/" not in imp.source:
+            return
+        module, original = imp.source.rsplit("/", 1)
+        self._hop(path, module, original, seen, depth)
 
 
 _RUST_IN_CRATE_PREFIXES = ("crate::", "super::", "self::")
@@ -7274,13 +7554,46 @@ def _imports_by_file(
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
         table = out.setdefault(fm.path, {})
+        used = _member_names(fm) if lookup is not None else {}
         for imp in fm.imports:
-            if imp.name not in table:
-                origins = lookup.origins(imp) if lookup is not None else ()
-                table[imp.name] = _workspace_tagged(
-                    imp, workspace_pkgs, origins
-                )
+            if imp.name in table:
+                continue
+            origins: tuple[Symbol, ...] = ()
+            members: dict[str, tuple[Symbol, ...]] = {}
+            if lookup is not None:
+                origins = lookup.origins(imp)
+                for name in sorted(used.get(imp.name, ())):
+                    found = lookup.members(imp, name)
+                    if found:
+                        members[name] = found
+            table[imp.name] = _workspace_tagged(
+                imp, workspace_pkgs, origins, members
+            )
     return out
+
+
+def _member_names(fm: FileMap) -> dict[str, set[str]]:
+    """Receiver head → the names a JS/TS file uses on it.
+
+    ``LlmsModels.registerProvider(..)`` gives ``{"LlmsModels":
+    {"registerProvider"}}``. Read off the calls and heritage clauses,
+    the two usage kinds that carry a receiver.
+
+    Args:
+        fm: One extracted file.
+
+    Returns:
+        Empty for a non-JS/TS file.
+    """
+    used: dict[str, set[str]] = {}
+    if not fm.path.endswith(_JS_TS_EXTENSIONS):
+        return used
+    for site in (*fm.calls, *fm.heritage):
+        if site.receiver:
+            head = _PATH_SPLIT.split(site.receiver)[0]
+            used.setdefault(head, set()).add(site.name)
+
+    return used
 
 
 def _build_adjacency(graph: CallGraph) -> None:
@@ -9103,6 +9416,27 @@ def _import_resolve_context(
     )
 
 
+def _module_dependencies(fm: FileMap) -> Iterator[tuple[Import, str]]:
+    """Every module ``fm`` depends on, with the name each one carries.
+
+    Its imports, then its re-exports: ``export { X } from "./x"``
+    depends on ``./x`` exactly as an import of it does, and names no
+    local binding, so it is given here as a side-effect-shaped import
+    carrying the exported name (``*`` for a star).
+
+    Args:
+        fm: One extracted file.
+
+    Yields:
+        ``(import record, name on the module-graph edge)``.
+    """
+    for imp in fm.imports:
+        yield imp, imp.name
+    for rec in fm.reexports:
+        if rec.source:
+            yield Import(path=fm.path, name="", source=rec.source), rec.name
+
+
 def resolve_imports(
     files: list[FileMap],
     root: Path | None = None,
@@ -9164,14 +9498,14 @@ def resolve_imports(
     external: dict[str, set[str]] = {}
     for fm in files:
         resolver = _IMPORT_RESOLVERS.get(fm.language)
-        for imp in fm.imports:
+        for imp, name in _module_dependencies(fm):
             target = resolver(imp, fm.path, ctx) if resolver else None
             if target is None:
                 external.setdefault(fm.path, set()).add(
                     bare_import_source(imp, fm.language)
                 )
                 continue
-            edge_names.setdefault((fm.path, target), set()).add(imp.name)
+            edge_names.setdefault((fm.path, target), set()).add(name)
 
     edges = [
         ModuleEdge(importer=i, imported=j, names=sorted(names))

@@ -2905,7 +2905,9 @@ def _import_bound_to(
     could not place in the repo (``module_external``), or the repo
     path a module edge carrying the name leads to
     (``module_edge_names``). ``None`` when the file imports no such
-    binding, or only from the target's file.
+    binding, or only from the target's file or from a barrel that
+    re-exports the name out of it: that import is the target's own
+    declaration, so it explains nothing and the row stays a miss.
     """
     external = set(index.module_external.get(path, []))
     suffix = "/" + bare_name
@@ -2920,10 +2922,59 @@ def _import_bound_to(
         if module in external:
             return module
     for (importer, imported), names in index.module_edge_names.items():
-        if importer == path and imported != target_path and bare_name in names:
+        if (
+            importer == path
+            and imported != target_path
+            and bare_name in names
+            and not _reexported_from(index, imported, bare_name, target_path)
+        ):
             return imported
 
     return None
+
+
+# How many barrels deep a name is followed, like the resolver's own
+# re-export walk.
+_BARREL_DEPTH = 8
+
+
+def _reexported_from(
+    index: MapIndex, start: str, bare_name: str, target_path: str
+) -> bool:
+    """Whether ``start`` passes ``bare_name`` on from ``target_path``.
+
+    Follows module edges out of ``start`` that carry the name or a
+    star (``export { X } from``, ``export * from``, and a file's own
+    import of the name, which it may export again).
+
+    Args:
+        index: The query index.
+        start: The repo file an import of the name leads to.
+        bare_name: The imported name.
+        target_path: The file declaring the symbol being checked.
+
+    Returns:
+        True when ``target_path`` is reached within ``_BARREL_DEPTH``
+        hops.
+    """
+    seen = {start}
+    frontier = [start]
+    for _ in range(_BARREL_DEPTH):
+        reached: list[str] = []
+        for path in frontier:
+            for nxt in index.module_deps_out.get(path, []):
+                names = index.module_edge_names.get((path, nxt), [])
+                if nxt in seen or not (bare_name in names or "*" in names):
+                    continue
+                if nxt == target_path:
+                    return True
+                seen.add(nxt)
+                reached.append(nxt)
+        frontier = reached
+        if not frontier:
+            break
+
+    return False
 
 
 # A bare call of the name: at the line start, after a non-identifier

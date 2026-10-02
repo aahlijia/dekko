@@ -9,6 +9,60 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.3] — 2026-10-02
+
+### Fixed
+- **A JS/TS import that goes through a barrel file is followed to the
+  declaration.** `export { X } from "./x"`, `export * from "./x"`,
+  `export * as ns from "./x"` and a file's default export were not
+  extracted at all, so a barrel (`index.ts`, a package entry file)
+  was a dead end: the resolver knew the import named the barrel and
+  nothing about where the name came from. Three things followed. A
+  barrel that renames was bound to the wrong symbol: claude-code's
+  `ink.ts` has `export { default as Text } from
+  './components/design-system/ThemedText.js'`, and every `<Text>`
+  imported from it was attributed to an unrelated
+  `ink/components/Text.tsx`, because that file's name is the imported
+  name. That was 1,122 wrong reference pairs (4,160 sites): the base
+  component read as the most-used symbol in the repo and `ThemedText`
+  as nearly unused. A name with a namesake elsewhere was ambiguous or
+  bound to the namesake, and a renamed export with no namesake was
+  external. Now the name is followed from the import through named
+  and renamed re-exports, stars, namespace re-exports
+  (`Llms.getProvider(..)` after `export * as Llms from`), a file's
+  own `import { X }` that it exports again, source-less renames
+  (`export { a as b }`) and named default exports, up to eight files
+  deep, each hop resolved with the re-exporting file's own tsconfig.
+  As in 1.6.2, the walk answers only when it ends at exactly one
+  top-level symbol. Measured against 1.6.2: claude-code moves 1,122
+  reference pairs from `Text` / `Box` to `ThemedText` / `ThemedBox`,
+  gains 74 call pairs (134 sites) and loses none; cline gains 73 call
+  pairs (108 sites), 5 reference pairs and 3 heritage edges, 20 calls
+  leave `external`, and the 3 call pairs and 2 reference pairs it
+  loses were bound to a same-named file in another app. Five
+  repositories without JS/TS barrels are unchanged. Not followed: a
+  default import whose local name differs from the declared one
+  (`import Text from "./ThemedText"`), CommonJS `module.exports =
+  require(..)`, and Python `__init__.py` re-exports.
+- **`dekko deps` shows what a barrel re-exports.** Each re-export with
+  a source is a module-graph edge from the barrel to that file,
+  carrying the exported name (`*` for a star), and a re-exported
+  package is listed under the file's external modules. cline gains
+  508 edges (7,090 -> 7,598) and claude-code 65. These edges close
+  real import cycles (a package's `index.ts` re-exports a file that
+  imports from `index.ts`), so `deps --cycles` reports fewer, larger
+  clusters: cline goes from 27 clusters over 93 files (largest 14) to
+  15 clusters over 290 files (largest 138).
+- **`dekko sanity` no longer calls a barrel import "a different
+  declaration".** A grep hit in a file that imports the name through
+  a barrel was labelled as bound to another declaration, which is
+  false when the barrel re-exports the target itself. Such a row is
+  now left as a miss and counts toward `--fail-on-unexplained`.
+- **Editing a re-export or re-pointing an import re-resolves the
+  files that use the name.** Neither is part of a symbol, so the
+  incremental map did not see the edit. A star re-export gained or
+  lost re-resolves the whole repo.
+
 ## [1.6.2] — 2026-10-02
 
 ### Fixed

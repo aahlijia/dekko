@@ -38,6 +38,7 @@ from dekko.core.model import (
     RawRead,
     RawRef,
     RawThrow,
+    Reexport,
     Submodule,
     TypeUse,
 )
@@ -93,6 +94,7 @@ def _filemap_from_dict(d: dict) -> FileMap:
         cpp_decls=list(d.get("cpp_decls", [])),
         type_uses=[TypeUse(**t) for t in d.get("type_uses", [])],
         submodules=[Submodule(**m) for m in d.get("submodules", [])],
+        reexports=[Reexport(**r) for r in d.get("reexports", [])],
         error=d.get("error"),
         doc=d.get("doc"),
     )
@@ -177,6 +179,28 @@ class IncrementalCache:
         if entry is None:
             return None
         return entry.get("file", {}).get("heritage", [])
+
+    def old_reexports(self, rel: str) -> list[dict] | None:
+        """Previously cached re-export record dicts for ``rel``, if any.
+
+        ``None`` when this file had no prior cache entry at all, like
+        ``old_symbols``.
+        """
+        entry = self._old.get(rel)
+        if entry is None:
+            return None
+        return entry.get("file", {}).get("reexports", [])
+
+    def old_imports(self, rel: str) -> list[dict] | None:
+        """Previously cached import binding dicts for ``rel``, if any.
+
+        ``None`` when this file had no prior cache entry at all, like
+        ``old_symbols``.
+        """
+        entry = self._old.get(rel)
+        if entry is None:
+            return None
+        return entry.get("file", {}).get("imports", [])
 
     def old_hash(self, rel: str) -> str | None:
         """Content hash the prior cache recorded for ``rel``, if any."""

@@ -481,7 +481,10 @@ the line, and named as such:
   fs)` in text). Applied only to rows the ladder left `unexplained` or
   under one of its trailing causes (generic name, test filter, ...): a
   comment line that names `appendFileSync` is still best described as
-  a comment.
+  a comment. A repo file that re-exports the name out of the target's
+  own file (a barrel: `export { X } from`, `export * from`, up to
+  eight files deep) is not a different declaration, so an import
+  through it gets no such label and the row stays a miss.
 - *A heritage clause the map recorded.* `export class FocusEvent
   extends TerminalEvent {` on a type target whose subtype the map
   resolved reads `heritage clause (extends/implements) the map records
@@ -1199,6 +1202,17 @@ isn't import-resolved by design, so entries listed under `external`
 may in fact be this repo's own packages, and `imported by` is always
 empty for that language — not "nothing depends on this file," which
 isn't a claim dekko can make there.
+
+**A JS/TS re-export is a dependency.** `export { X } from "./x"`,
+`export * from "./x"` and `export * as ns from "./x"` make the file
+depend on `./x` exactly as an import does, so a barrel file has an
+edge to every file it re-exports (carrying the exported name, or `*`
+for a star), and a re-export of a package is listed under `external`.
+A barrel that re-exports a file which imports back from the barrel is
+a real import cycle and is reported as one: on a monorepo whose
+packages each have an `index.ts`, expect `--cycles` to show fewer,
+larger clusters than it did before 1.6.3, when barrels had no
+outgoing edges at all.
 
 Cycle detection groups files into strongly-connected components
 (Tarjan's SCC): a reported cycle is every file mutually reachable from

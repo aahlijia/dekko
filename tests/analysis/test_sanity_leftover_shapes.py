@@ -720,3 +720,50 @@ def test_all_mode_aggregates_the_new_causes(
     assert agg.get(sanity.CAUSE_TYPE_CONTEXT, 0) >= 2
     assert agg.get(sanity.CAUSE_UNEXPLAINED) is None
     assert doc["flagged"] == []
+
+
+_BARREL_REPO = {
+    "lib/base.ts": "export function helper(): number {\n  return 1\n}\n",
+    "lib/mid.ts": "export * from './base'\n",
+    "lib/index.ts": "export { helper } from './mid'\n",
+    "other/base.ts": "export function helper(): number {\n  return 2\n}\n",
+    "app.ts": (
+        "import { helper } from './lib/index'\nexport const r = helper()\n"
+    ),
+}
+
+
+def test_an_import_through_a_barrel_is_not_a_different_declaration(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_BARREL_REPO)
+    index, _ = repo_ops.load_or_regen(root, no_regen=True)
+    # Two barrels deep, the second a star: the import is the target's
+    # own declaration and explains no missing edge.
+    assert (
+        sanity._import_bound_to(index, "app.ts", "helper", "lib/base.ts")
+        is None
+    )
+    # For the namesake the barrel never reaches, it still does.
+    assert (
+        sanity._import_bound_to(index, "app.ts", "helper", "other/base.ts")
+        == "lib/index.ts"
+    )
+
+
+def test_a_barrel_cycle_ends_the_walk(make_mapped_repo: RepoFactory) -> None:
+    root = make_mapped_repo(
+        {
+            "a.ts": "export * from './b'\n",
+            "b.ts": "export * from './a'\n",
+            "target.ts": "export function ghost() {}\n",
+            "app.ts": (
+                "import { ghost } from './a'\nexport const r = ghost()\n"
+            ),
+        }
+    )
+    index, _ = repo_ops.load_or_regen(root, no_regen=True)
+    assert (
+        sanity._import_bound_to(index, "app.ts", "ghost", "target.ts")
+        == "a.ts"
+    )
