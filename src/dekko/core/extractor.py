@@ -233,7 +233,7 @@ def _collect_definitions(
                 _text(class_name),
                 kind,
                 params=_tuple_struct_fields(def_node),
-                returns=None,
+                returns=_rust_alias_target(def_node),
                 seen=seen,
             )
             defs.append((def_node, sym))
@@ -4180,6 +4180,20 @@ def _tuple_struct_fields(def_node: Node) -> list[Param]:
         Param(name=str(i), type=_text(field_type))
         for i, field_type in enumerate(body.children_by_field_name("type"))
     ]
+
+
+def _rust_alias_target(def_node: Node) -> str | None:
+    """What a Rust ``type`` alias names: ``FxHashMap<K, V>`` for
+    ``type HashMap<K, V> = FxHashMap<K, V>;``.
+
+    An alias has no members of its own, so ``HashMap::default()`` can
+    only reach what it names. Kept in ``returns``, the one free text
+    slot a type symbol has.
+    """
+    if def_node.type != "type_item":
+        return None
+    target = def_node.child_by_field_name("type")
+    return _text(target) if target is not None else None
 
 
 def _collect_enum_variants(spec: LanguageSpec, root: Node) -> list[str]:

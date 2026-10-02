@@ -183,3 +183,23 @@ def test_js_produces_no_type_alias_symbols(tmp_path: Path) -> None:
     # match either.
     syms = _type_alias_symbols(tmp_path, "plain.js", "export const x = 1;\n")
     assert syms == []
+
+
+def test_rust_type_alias_records_what_it_names(tmp_path: Path) -> None:
+    syms = _type_alias_symbols(
+        tmp_path,
+        "collections.rs",
+        "pub type HashMap<K, V> = FxHashMap<K, V>;\n"
+        "type P = gpui::Point<Pixels>;\n",
+    )
+    assert [(s.name, s.returns) for s in syms] == [
+        ("HashMap", "FxHashMap<K, V>"),
+        ("P", "gpui::Point<Pixels>"),
+    ]
+
+
+def test_ts_type_alias_keeps_no_returns(tmp_path: Path) -> None:
+    syms = _type_alias_symbols(
+        tmp_path, "shell.ts", "export type Id = string | number;\n"
+    )
+    assert [s.returns for s in syms] == [None]

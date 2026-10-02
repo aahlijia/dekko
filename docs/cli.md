@@ -1060,8 +1060,19 @@ written namespace is counted external. A one-scope call through a
 class (`TensorShape::IsValid()`, which may reach a base class, or
 `View<T>::Next()`) or through a name dekko never saw as a namespace (a
 namespace alias) resolves as before. A Rust `Type::name(..)` call
-only reaches `Type`'s own members, so its row lists only those (the
-same call written `x.name(..)` is not narrowed), and a Rust call
+only reaches `Type`'s own members, so its row lists only those. That
+holds through a turbofish (`Vec::<T>::new()`), a type alias (`type
+HashMap<K, V> = FxHashMap<K, V>` makes `HashMap::default()` a call on
+`FxHashMap`, external when the repo doesn't define it) and a renaming
+`use` (`use text::Buffer as TextBuffer` makes `TextBuffer::new(..)` a
+call on `Buffer`). A type with no symbol of its own but with members in
+the repo (`String` with the repo's `impl From<X> for String`) lists
+those members. A lowercase path through a workspace crate
+(`release_channel::init(cx)`, directly or through a `use` of the crate
+or one of its modules) keeps the candidates inside that crate's
+directory, functions before methods, when it has any. A Rust dot-call
+`x.name(..)` row lists only the methods that take `self` and the
+written count, when two or more do. A Rust call
 through a `use` rooted at `std`, `core` or `alloc` (`use std::path::
 Path; Path::new(..)`) is counted external even when the repo defines a
 type of that name. The same goes for a `use` rooted at any crate the
@@ -1078,8 +1089,7 @@ or argument count rules out (Rust has no overloads or default
 arguments): `x.name(..)` needs a method taking `self` and the written
 count, a bare `name(..)` never reaches a method, and
 `Type::name(obj, ..)` counts `self` as an argument. The call goes to the
-next candidate that fits, or stays ambiguous or external. Its ambiguous
-row can still list the candidate that was ruled out. A low ambiguous rate
+next candidate that fits, or stays ambiguous or external. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output

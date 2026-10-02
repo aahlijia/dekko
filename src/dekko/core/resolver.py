@@ -1289,11 +1289,13 @@ def resolve(
     # One context serves the symbol-level passes (which file a JS/TS
     # import names) and the module graph alike.
     import_ctx = _import_resolve_context(files, root, manifests)
+    crates = load_cargo_crates(root) if root is not None else {}
+    _index_rust_crates(crates, index)
     imports_by_file = _imports_by_file(
         files,
         workspace_pkgs,
         _OriginLookup(import_ctx, by_name_path, files),
-        _rust_crates(files, root),
+        _rust_crates(files, crates),
     )
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
@@ -1363,7 +1365,7 @@ def resolve(
             graph.heritage_external,
             graph.heritage_synthetic_tiebreak_count,
             graph.heritage_unplaced_subtype_count,
-        ) = resolve_heritage(files, workspace_pkgs, imports_by_file)
+        ) = resolve_heritage(files, workspace_pkgs, imports_by_file, crates)
         graph.modules = resolve_imports(
             files, root=root, workspace_manifests=manifests, ctx=import_ctx
         )
@@ -1956,6 +1958,7 @@ def resolve_heritage(
     files: list[FileMap],
     workspace_pkgs: dict[str, str] | None = None,
     imports_by_file: dict[str, dict[str, Import]] | None = None,
+    crates: dict[str, frozenset[str]] | None = None,
 ) -> tuple[
     list[HeritageEdge],
     dict[str, list[str]],
@@ -2019,6 +2022,9 @@ def resolve_heritage(
             external.
         imports_by_file: The per-file import table ``resolve()``
             already built. ``None`` builds one from ``workspace_pkgs``.
+        crates: ``load_cargo_crates``'s table, so ``impl
+            some_crate::Trait for X`` keeps that crate's ``Trait``
+            (``_rust_crate_path_narrowed``). ``None`` skips that.
 
     Returns:
         ``(heritage_edges, heritage_out, heritage_in,
@@ -2048,6 +2054,7 @@ def resolve_heritage(
         into "clause never happened."
     """
     index = _build_index(files)
+    _index_rust_crates(crates or {}, index)
     by_name_path = _build_name_path_index(files)
     if imports_by_file is None:
         imports_by_file = _imports_by_file(files, workspace_pkgs)
@@ -2941,10 +2948,10 @@ def _ambiguous_candidates(
     ambiguous ``new`` rows, when ``Editor::new(..)`` could only mean
     the two ``Editor`` types' constructors. So the shape narrowing is
     run again here, on the ambiguous path only, and its result is what
-    the row records whenever it applied and left two or more. A
-    dot-call is not narrowed (the dot-call rule is a veto on the pick,
-    see ``_pick_candidate``), and nothing else about the ladder's
-    verdict changes: the call is ambiguous either way.
+    the row records whenever it applied and left two or more
+    (``_rust_row_narrowed`` adds the two shapes the ladder doesn't
+    narrow). Nothing about the ladder's verdict changes: the call is
+    ambiguous either way.
 
     Args:
         call: The raw call the ladder could not resolve.
@@ -2954,17 +2961,65 @@ def _ambiguous_candidates(
         repo_stems: Every repo file's matching stem.
 
     Returns:
-        The narrowed list when the Rust type-path shape applied and
-        left at least two candidates, else ``candidates`` unchanged.
+        The narrowed list when a Rust shape applied and left at least
+        two candidates, else ``candidates`` unchanged.
     """
     live = _without_own_constructors(_language_filtered(call, candidates))
     narrowed, _, applied = _rust_shape_narrowed_candidates(
         call, live, [], index, file_imports, repo_stems
     )
-    if applied and len(narrowed) >= 2:
+    if not applied or len(narrowed) < 2:
+        narrowed = candidates
+
+    return _rust_row_narrowed(call, candidates, narrowed, index)
+
+
+def _rust_row_narrowed(
+    call: RawCall,
+    candidates: list[Symbol],
+    narrowed: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> list[Symbol]:
+    """An ambiguous Rust row's candidates, down to what the call could
+    mean.
+
+    - A dot-call: the functions it can call with the count it wrote
+      (``_rust_call_excludes``). ``cx.new(|cx| ..)`` listed every
+      ``new`` in zed, free functions and associated ones included.
+    - A ``Type::name`` path on a type with no symbol, unnarrowed so
+      far: ``Type``'s members (``String::from`` with the repo's ``impl
+      From<X> for String``: 664 candidates each, on 185 calls).
+
+    Either applies only when it leaves two or more: one candidate left
+    is not a pick, and the ladder already declined to make it.
+
+    Args:
+        call: The raw call the ladder could not resolve.
+        candidates: The candidates it ran over.
+        narrowed: ``candidates`` after the shape narrowing.
+        index: Bare symbol name to every symbol sharing it.
+
+    Returns:
+        The narrower list, else ``narrowed``.
+    """
+    if not call.path.endswith(".rs"):
+        return narrowed
+    last = _rust_type_path_last_segment(call)
+    if last is not None:
+        if len(narrowed) != len(candidates) or index.get(last):
+            return narrowed
+        kept = [c for c in candidates if _container_name(c) == last]
+    elif _rust_is_dot_call(call):
+        kept = [
+            c
+            for c in candidates
+            if c.kind in ("function", "method")
+            and not _rust_call_excludes(call, c)
+        ]
+    else:
         return narrowed
 
-    return candidates
+    return kept if len(kept) >= 2 else narrowed
 
 
 def _add_edge(
@@ -4827,8 +4882,12 @@ def _rust_shape_narrowed_candidates(
     """Narrow candidates by Rust call shape, before the rest of
     ``_pick_candidate``'s ladder runs.
 
-    Three shapes each rule out an entire class of candidate: a
-    ``Type::name`` path can only reach that type's own members
+    A path whose type is an alias or a renaming ``use`` is read as the
+    type it names (``_rust_alias_target``, ``_rust_rename_target``), and
+    a path through a workspace crate keeps that crate's candidates
+    (``_rust_crate_path_narrowed``). Then three shapes each rule out an
+    entire class of candidate: a ``Type::name`` path can only reach
+    that type's own members
     (``_owned_by_receiver_type``), the same path rooted at a type the
     repo doesn't define can reach nothing at all
     (``_rust_unknown_type_path``), and a ``recv.name`` dot-call can
@@ -4860,6 +4919,17 @@ def _rust_shape_narrowed_candidates(
         symbol" (worth a ``_NOISE``/external verdict) as opposed to
         merely having started out empty for an unrelated reason.
     """
+    owner = _rust_alias_target(call, index) or _rust_rename_target(
+        call, index, file_imports
+    )
+    if owner is not None:
+        return _rust_named_owner_narrowed(
+            call, candidates, same_file, index, owner
+        )
+    in_crate = _rust_crate_path_narrowed(call, candidates, index, file_imports)
+    if in_crate is not None:
+        keep = {c.id for c in in_crate}
+        return in_crate, [c for c in same_file if c.id in keep], True
     if _rust_type_path_receiver(call, index):
         return (
             _owned_by_receiver_type(call, candidates, index),
@@ -4878,6 +4948,189 @@ def _rust_shape_narrowed_candidates(
         # see ``_pick_candidate``'s veto.
         return [], [], True
     return candidates, same_file, False
+
+
+# The head type a Rust type's text names: ``FxHashMap`` for
+# ``FxHashMap<K, V>``, ``Point`` for ``&'a gpui::Point<Pixels>``.
+_RUST_TYPE_HEAD = re.compile(
+    r"^(?:&\s*(?:'\w+\s+)?(?:mut\s+)?)?((?:\w+::)*)(\w+)"
+)
+# How many aliases of aliases ``_rust_alias_target`` follows.
+_RUST_ALIAS_DEPTH = 4
+
+
+def _only_aliases(symbols: list[Symbol]) -> bool:
+    """Whether ``symbols`` is non-empty and every one is a type alias."""
+    return bool(symbols) and all(s.kind == "type_alias" for s in symbols)
+
+
+def _rust_alias_heads(name: str, index: dict[str, list[Symbol]]) -> set[str]:
+    """The head types the Rust aliases named ``name`` stand for."""
+    heads: set[str] = set()
+    for sym in index.get(name, []):
+        if sym.kind != "type_alias" or sym.language != "rust":
+            continue
+        found = _RUST_TYPE_HEAD.match((sym.returns or "").strip())
+        if found:
+            heads.add(found.group(2))
+    return heads
+
+
+def _rust_alias_target(
+    call: _Referable, index: dict[str, list[Symbol]]
+) -> str | None:
+    """The type a Rust ``Alias::name(..)`` path's alias stands for.
+
+    An alias has no members, so ``_rust_type_path_receiver`` skips it
+    and nothing followed it: ``collections::HashMap`` is ``type
+    HashMap<K, V> = FxHashMap<K, V>``, and 1,173 ``HashMap::..`` calls
+    on zed went to whichever ``default``/``new`` the ladder found.
+    Followed through aliases of aliases, when every symbol of each
+    name is an alias and they agree on what they name.
+
+    Returns:
+        The first name on the way that is not only an alias, or
+        ``None`` when the path's type isn't an alias, the aliases
+        disagree, or the chain loops or runs past
+        ``_RUST_ALIAS_DEPTH``.
+    """
+    last = _rust_type_path_last_segment(call)
+    if last is None or not _only_aliases(index.get(last, [])):
+        return None
+    seen = {last}
+    name = last
+    for _ in range(_RUST_ALIAS_DEPTH):
+        heads = _rust_alias_heads(name, index)
+        if len(heads) != 1:
+            return None
+        name = heads.pop()
+        if name in seen:
+            return None
+        seen.add(name)
+        if not _only_aliases(index.get(name, [])):
+            return name
+
+    return None
+
+
+def _rust_rename_target(
+    call: _Referable,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None,
+) -> str | None:
+    """The type a Rust ``Local::name(..)`` path's renaming ``use``
+    stands for.
+
+    ``use text::Buffer as TextBuffer`` here, or ``use
+    language::TextBuffer`` here where ``language`` did ``pub use
+    text::Buffer as TextBuffer``: either way ``TextBuffer::new(..)``
+    means ``Buffer.new``, which no lookup by ``TextBuffer`` finds.
+
+    Returns:
+        The original name, or ``None`` when the path's type has a
+        symbol of its own, isn't imported here, or the repo renames to
+        it from more than one name.
+    """
+    last = _rust_type_path_last_segment(call)
+    if last is None or index.get(last):
+        return None
+    binding = (file_imports or {}).get(last)
+    if binding is None:
+        return None
+    original = binding.source.rsplit("::", 1)[-1]
+    if original != last:
+        return original
+    originals = {s.name for s in index.get(_RUST_RENAMED_KEY + last, [])}
+
+    return originals.pop() if len(originals) == 1 else None
+
+
+def _rust_named_owner_narrowed(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    index: dict[str, list[Symbol]],
+    owner: str,
+) -> tuple[list[Symbol], list[Symbol], bool]:
+    """``_rust_shape_narrowed_candidates`` for a path whose type an
+    alias or a renaming ``use`` named: ``owner``'s own members, or
+    nothing at all when the repo has no ``owner`` type and no member of
+    one (``FxHashMap``: external)."""
+    in_repo = any(s.kind in TYPE_KINDS for s in index.get(owner, []))
+    if not in_repo and not any(
+        _container_name(c) == owner for c in candidates
+    ):
+        return [], [], True
+
+    return (
+        _owned_by_type(call, candidates, index, owner),
+        _owned_by_type(call, same_file, index, owner),
+        True,
+    )
+
+
+# A Rust path of lowercase module segments: ``release_channel``,
+# ``open_ai::batches``.
+_RUST_MODULE_PATH = re.compile(r"[a-z_][a-z0-9_]*(::[a-z_][a-z0-9_]*)*")
+_RUST_NOT_A_CRATE = frozenset(
+    {"crate", "self", "super", "std", "core", "alloc"}
+)
+
+
+def _rust_crate_path_dirs(
+    call: _Referable,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None,
+) -> set[str]:
+    """The directories of the workspace crate a ``some_crate::..::
+    name(..)`` call names, directly or through the file's ``use`` of
+    its first segment. Empty for any other call."""
+    receiver = getattr(call, "receiver", None)
+    if not receiver or not call.path.endswith(".rs"):
+        return set()
+    if getattr(call, "text", "") != f"{receiver}::{call.name}":
+        return set()
+    if not _RUST_MODULE_PATH.fullmatch(receiver):
+        return set()
+    first = receiver.split("::", 1)[0]
+    binding = (file_imports or {}).get(first)
+    if binding is not None:
+        first = binding.source.split("::", 1)[0]
+    if first in _RUST_NOT_A_CRATE:
+        return set()
+
+    return {s.path for s in index.get(_RUST_CRATE_KEY + first, [])}
+
+
+def _rust_crate_path_narrowed(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None,
+) -> list[Symbol] | None:
+    """The candidates inside the crate a ``some_crate::name(..)`` path
+    names, non-methods first.
+
+    ``release_channel::init(cx)`` from ``zed.rs`` went to ``zed.rs``'s
+    own ``init`` (the same-file rung) or stayed ambiguous among all 165
+    ``init`` functions: nothing narrowed a lowercase path. On zed this
+    rule gained 1,072 pairs, ``main`` and every ``init_test`` reaching
+    the crates they set up.
+
+    Returns:
+        The narrowed list, or ``None`` when the call isn't a crate
+        path, or no candidate is in the crate (it re-exports the
+        function from elsewhere: no evidence), or every candidate is.
+    """
+    dirs = _rust_crate_path_dirs(call, index, file_imports)
+    inside = [
+        c for c in candidates if any(c.path.startswith(d + "/") for d in dirs)
+    ]
+    free = [c for c in inside if c.kind != "method"] or inside
+    if free and len(free) < len(candidates):
+        return free
+
+    return None
 
 
 def _rust_is_dot_call(call: _Referable) -> bool:
@@ -4972,14 +5225,19 @@ def _rust_type_path_last_segment(call: _Referable) -> str | None:
 
     ``gpui::Point::<f32>::new`` gives ``Point``. Purely syntactic, no
     index lookup: ``None`` for a non-Rust call, a dot-call, ``Self``,
-    and a lowercase module path (``module::func``).
+    and a lowercase module path (``module::func``). Type arguments are
+    removed before the split: a turbofish receiver (``Vec::<T>``) ends
+    in ``::<T>``, and reading ``<T>`` as the last segment gave up on
+    the path (35 ambiguous ``new`` rows on zed over every ``new`` in
+    the repo).
     """
     receiver = getattr(call, "receiver", None)
     if not receiver or not call.path.endswith(".rs"):
         return None
     if f"{receiver}::" not in (getattr(call, "text", "") or ""):
         return None
-    last = receiver.rsplit("::", 1)[-1].split("<", 1)[0].strip()
+    bare = _strip_template_args(receiver).strip().rstrip(":")
+    last = bare.rsplit("::", 1)[-1].strip()
     if not last[:1].isupper() or last == "Self":
         return None
 
@@ -5075,7 +5333,8 @@ def _rust_is_associated_type_path(call: _Referable) -> bool:
     ``T::ProtoRequest::name`` and ``Self::Output::name``: a segment
     before the last one is itself type-shaped (capitalized, or
     ``Self``), where a plain module path (``std::collections::
-    HashMap::name``) is lowercase all the way to the type.
+    HashMap::name``) is lowercase all the way to the type. A turbofish
+    is not a segment: ``Vec::<T>::name`` is a ``Vec`` path.
     """
     receiver = (getattr(call, "receiver", None) or "").strip()
     if receiver.startswith("<"):
@@ -5083,8 +5342,8 @@ def _rust_is_associated_type_path(call: _Referable) -> bool:
         # form of the same thing (live-testing on zed, 1 real edge).
         return True
 
-    qualifiers = receiver.split("<", 1)[0].split("::")[:-1]
-    return any(seg.strip()[:1].isupper() for seg in qualifiers)
+    bare = _strip_template_args(receiver).strip().rstrip(":")
+    return any(seg.strip()[:1].isupper() for seg in bare.split("::")[:-1])
 
 
 def _container_name(sym: Symbol) -> str | None:
@@ -5124,12 +5383,24 @@ def _owned_by_receiver_type(
     owner = _rust_type_path_receiver(call, index)
     if owner is None:
         return candidates
+
+    return _owned_by_type(call, candidates, index, owner)
+
+
+def _owned_by_type(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+    owner: str,
+) -> list[Symbol]:
+    """The candidates a path rooted at type ``owner`` could mean: its
+    own members, else a trait's (see ``_owned_by_receiver_type``)."""
     own: list[Symbol] = []
     via_trait: list[Symbol] = []
     for cand in candidates:
-        if "." not in cand.qualname:
+        container_name = _container_name(cand)
+        if container_name is None:
             continue
-        container_name = cand.qualname.rsplit(".", 1)[0].rsplit(".", 1)[-1]
         if container_name == owner:
             own.append(cand)
         elif any(sym.kind == "trait" for sym in index.get(container_name, [])):
@@ -6714,10 +6985,15 @@ _CPP_DECLARED_KEY = "::cpp-declared::"
 _OWN_CTOR_KEY = "::own-ctor::"
 _EXTENDS_KEY = "::extends::"
 
-# Reserved ``index`` namespace for the names some Rust ``use .. as
-# Name`` binds anywhere in the repo: ``_RUST_RENAMED_KEY + name`` is
-# present (with no symbols) when one does (``_rust_unknown_type_path``).
+# Reserved ``index`` namespaces holding stand-ins (``_stand_in``), not
+# real symbols. ``_RUST_RENAMED_KEY + name`` is present when some Rust
+# ``use .. as Name`` in the repo binds ``name``, with one stand-in per
+# original name it renames (``_rust_unknown_type_path``,
+# ``_rust_rename_target``). ``_RUST_CRATE_KEY + crate`` holds one
+# stand-in per directory of that workspace crate, its ``path``
+# (``_rust_crate_path_dirs``).
 _RUST_RENAMED_KEY = "::rust-renamed::"
+_RUST_CRATE_KEY = "::rust-crate::"
 _UNNAMED_CTOR_NAMES = {
     "python": "__init__",
     "javascript": "constructor",
@@ -6750,25 +7026,54 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
             _index_cpp_using(entry, index)
     _index_cpp_declared(files, index)
     _index_constructions(files, index)
-    for name in rust_renamed_names(files):
-        index.setdefault(_RUST_RENAMED_KEY + name, [])
+    for name, original in sorted(rust_renames(files)):
+        index.setdefault(_RUST_RENAMED_KEY + name, []).append(
+            _stand_in(original)
+        )
 
     return index
 
 
-def rust_renamed_names(files: list[FileMap]) -> set[str]:
-    """Every name a Rust ``use .. as Name`` binds, across ``files``.
+def _stand_in(name: str, path: str = "") -> Symbol:
+    """A placeholder carrying a name or a directory through the index
+    to pool workers (see ``_RUST_RENAMED_KEY``); never a candidate."""
+    return Symbol(
+        id="",
+        name=name,
+        qualname=name,
+        kind="module",
+        path=path,
+        language="rust",
+    )
 
-    ``pub use text::Buffer as TextBuffer;`` gives ``TextBuffer``.
+
+def _index_rust_crates(
+    crates: dict[str, frozenset[str]], index: dict[str, list[Symbol]]
+) -> None:
+    """Record each workspace crate's directories (``_RUST_CRATE_KEY``).
+    The repo root is left out: a crate there contains every path."""
+    for name, dirs in crates.items():
+        stand_ins = [_stand_in(name, d) for d in sorted(dirs) if d]
+        if stand_ins:
+            index[_RUST_CRATE_KEY + name] = stand_ins
+
+
+def rust_renames(files: list[FileMap]) -> set[tuple[str, str]]:
+    """Every ``(Name, Original)`` a Rust ``use .. as Name`` binds,
+    across ``files``.
+
+    ``pub use text::Buffer as TextBuffer;`` gives ``("TextBuffer",
+    "Buffer")``.
 
     Args:
         files: The extracted files to read imports from.
 
     Returns:
-        The local names whose ``use`` source ends in another name.
+        The local names whose ``use`` source ends in another name,
+        each with that name.
     """
     return {
-        imp.name
+        (imp.name, imp.source.rsplit("::", 1)[-1])
         for fm in files
         if fm.path.endswith(".rs")
         for imp in fm.imports
@@ -7143,12 +7448,15 @@ _CARGO_NAME = re.compile(r'^name\s*=\s*"([^"]+)"', re.M)
 _CARGO_PATH_DEP = re.compile(r"^([\w-]+)\s*=\s*\{[^}\n]*\bpath\s*=", re.M)
 
 
-def load_cargo_crates(root: Path) -> frozenset[str]:
-    """Every crate name the repo's ``Cargo.toml`` files declare.
+def load_cargo_crates(root: Path) -> dict[str, frozenset[str]]:
+    """Every crate name the repo's ``Cargo.toml`` files declare, with
+    the directories of the manifests that declare it.
 
-    Each manifest's ``[package]`` name and directory name, its
-    ``[lib]`` name, and the local name of every ``path =`` dependency,
-    with ``-`` read as ``_`` the way a ``use`` spells it. The
+    Each manifest's ``[package]`` name and directory name and its
+    ``[lib]`` name, each with that manifest's directory, and the local
+    name of every ``path =`` dependency with none (the dependency's
+    own manifest gives it one), with ``-`` read as ``_`` the way a
+    ``use`` spells it. The
     directory-convention index (``_rust_crate_roots_index_all``)
     misses crates whose directory differs from their name or whose
     ``[lib] path`` isn't ``src/lib.rs`` (14 of zed's 261), and a
@@ -7160,14 +7468,16 @@ def load_cargo_crates(root: Path) -> frozenset[str]:
         root: Repository root.
 
     Returns:
-        The crate names, empty for a repo with no ``Cargo.toml``.
+        Crate name to directories (repo-relative, ``""`` for the
+        root), empty for a repo with no ``Cargo.toml``.
     """
-    names: set[str] = set()
+    crates: dict[str, set[str]] = {}
     for rel in walker.find_config_files(root, _CARGO_MANIFESTS):
         try:
             text = (root / rel).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        where = _dirname(rel)
         marks = [
             (m.start(), m.group(1)) for m in _CARGO_SECTION.finditer(text)
         ]
@@ -7177,26 +7487,29 @@ def load_cargo_crates(root: Path) -> frozenset[str]:
             if section in ("package", "lib"):
                 found = _CARGO_NAME.search(body)
                 if found:
-                    names.add(found.group(1).replace("-", "_"))
-                if section == "package":
-                    crate_dir = _dirname(rel).rsplit("/", 1)[-1]
-                    if crate_dir:
-                        names.add(crate_dir.replace("-", "_"))
+                    crates.setdefault(
+                        found.group(1).replace("-", "_"), set()
+                    ).add(where)
+                crate_dir = where.rsplit("/", 1)[-1]
+                if section == "package" and crate_dir:
+                    crates.setdefault(crate_dir.replace("-", "_"), set()).add(
+                        where
+                    )
             elif section.endswith("dependencies"):
-                names.update(
-                    m.group(1).replace("-", "_")
-                    for m in _CARGO_PATH_DEP.finditer(body)
-                )
+                for m in _CARGO_PATH_DEP.finditer(body):
+                    crates.setdefault(m.group(1).replace("-", "_"), set())
 
-    return frozenset(names)
+    return {name: frozenset(dirs) for name, dirs in crates.items()}
 
 
 def cargo_fingerprint(root: Path) -> str:
-    """Digest of the repo's Rust crate names, for cache invalidation.
+    """Digest of the repo's Rust crates, for cache invalidation.
 
     The cached call pass reads them to tell a ``use`` of a workspace
-    crate from one of an outside crate. Adding a crate or a path
-    dependency moves no source file and no symbol.
+    crate from one of an outside crate, and to narrow a
+    ``some_crate::name(..)`` path to that crate's directories. Adding
+    a crate or a path dependency, or renaming one, moves no source
+    file and no symbol.
 
     Args:
         root: Repository root.
@@ -7204,10 +7517,11 @@ def cargo_fingerprint(root: Path) -> str:
     Returns:
         A stable hex digest, or ``""`` for a repo with no crates.
     """
-    names = load_cargo_crates(root)
-    if not names:
+    crates = load_cargo_crates(root)
+    if not crates:
         return ""
-    return hashlib.sha256("\n".join(sorted(names)).encode()).hexdigest()
+    table = [[name, sorted(dirs)] for name, dirs in sorted(crates.items())]
+    return hashlib.sha256(json.dumps(table).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -7250,19 +7564,20 @@ class _RustCrates:
 
 
 def _rust_crates(
-    files: list[FileMap], root: Path | None
+    files: list[FileMap], crates: dict[str, frozenset[str]]
 ) -> _RustCrates | None:
     """The repo's ``_RustCrates``, or ``None`` with no crate list.
 
-    ``None`` when there is no root to read manifests from or no
-    ``Cargo.toml`` declares a crate: without the list nothing can tell
-    an outside crate from an unconventional workspace one, so every
+    ``None`` when no ``Cargo.toml`` declares a crate (or there was no
+    root to read manifests from): without the list nothing can tell an
+    outside crate from an unconventional workspace one, so every
     ``use`` keeps the stem test.
+
+    Args:
+        files: Every extracted file.
+        crates: ``load_cargo_crates``'s table.
     """
-    if root is None:
-        return None
-    names = load_cargo_crates(root)
-    if not names:
+    if not crates:
         return None
 
     own: dict[str, set[str]] = {}
@@ -7280,7 +7595,7 @@ def _rust_crates(
             top.add(rel[1].removesuffix(".rs"))
 
     return _RustCrates(
-        names=names,
+        names=frozenset(crates),
         top_modules=frozenset(top),
         own_modules={k: frozenset(v) for k, v in own.items()},
     )

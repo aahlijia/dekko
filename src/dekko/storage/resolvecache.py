@@ -62,7 +62,7 @@ from dekko.core.resolver import (
     reexport_delta_names,
     resolve_fingerprint,
     resolved_id_name,
-    rust_renamed_names,
+    rust_renames,
     symbol_projection,
     tsconfig_fingerprint,
     workspace_fingerprint,
@@ -455,7 +455,8 @@ def _rust_files_using(
 
     Whether ``Name::new(..)`` can reach a repo symbol depends on
     whether some ``use .. as Name`` exists anywhere in the repo
-    (``resolver._rust_unknown_type_path``), and the call names ``new``,
+    (``resolver._rust_unknown_type_path``) and what it renames
+    (``resolver._rust_rename_target``), and the call names ``new``,
     not ``Name``. So the files are found by the receiver they wrote.
 
     Args:
@@ -492,7 +493,8 @@ def _rust_renamed_delta(
 
     Returns:
         The local names some ``use .. as Name`` bound before or binds
-        now, but not both. Empty for a non-Rust file.
+        now, or binds to another original name now. Empty for a
+        non-Rust file.
     """
     if not fm.path.endswith(".rs"):
         return set()
@@ -504,7 +506,8 @@ def _rust_renamed_delta(
             for d in old_imports or ()
         ],
     )
-    return rust_renamed_names([before]) ^ rust_renamed_names([fm])
+    changed = rust_renames([before]) ^ rust_renames([fm])
+    return {name for name, _original in changed}
 
 
 def _rust_rename_dirty(

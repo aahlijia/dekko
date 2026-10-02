@@ -1127,3 +1127,66 @@ def test_rust_rename_edit_keeps_incremental_equal_to_full(
     external = {(ids[e["caller"]], ids[e["callee"]]) for e in full["external"]}
     pair = ("crates/app/src/view.rs::build", "TextBuffer::new")
     assert (pair in external) == (before == "renamed")
+
+
+def test_gate_widens_when_a_rename_points_at_another_type(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``TextBuffer::new(..)`` reaches what ``TextBuffer`` renames, so
+    re-pointing the rename moves it even though the renamed name stays
+    the same."""
+    source = dict(RUST_RENAME_SRC)
+    source["crates/language/src/language.rs"] = _RENAMED
+    root = make_mapped_repo(source)
+    (root / "crates/language/src/language.rs").write_text(
+        "pub use text::Rope as TextBuffer;\n"
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {
+        "crates/language/src/language.rs",
+        "crates/app/src/view.rs",
+    }
+
+
+RUST_ALIAS_SRC = {
+    "src/point.rs": (
+        "pub struct Point;\n"
+        "impl Point {\n"
+        "    pub fn new(a: i32) -> Point {\n"
+        "        Point\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/other.rs": (
+        "pub struct Other;\n"
+        "impl Other {\n"
+        "    pub fn new(a: i32) -> Other {\n"
+        "        Other\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/alias.rs": "pub type P = Point;\n",
+    "src/user.rs": "pub fn use_it() {\n    P::new(1);\n}\n",
+}
+
+
+@pytest.mark.parametrize("target", ["Other", "Missing"])
+def test_rust_alias_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    target: str,
+) -> None:
+    root = make_mapped_repo(RUST_ALIAS_SRC)
+    (root / "src/alias.rs").write_text(f"pub type P = {target};\n")
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    pair = ("src/user.rs::use_it", "src/other.rs::Other.new")
+    assert (pair in edges) == (target == "Other")

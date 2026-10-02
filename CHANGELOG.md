@@ -9,6 +9,53 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.6] — 2026-10-02
+
+### Fixed
+- **A Rust path through a type alias, a renaming `use`, a turbofish or
+  a workspace crate now reaches what it names.** Four shapes hid the
+  owner of a Rust call, so the ladder ran over every same-named
+  function in the repo. `HashMap::default()` through `collections`'
+  `type HashMap<K, V> = FxHashMap<K, V>` landed on whatever `default`
+  sat in the caller's file. `TextBuffer::new(..)` through `use
+  text::Buffer as TextBuffer` (here or re-exported from another crate)
+  never found `Buffer.new`. `Vec::<T>::new()` read `<T>` as the type
+  and gave up. And `release_channel::init(cx)` from `main.rs` went to
+  `main.rs`'s own `init`, or stayed ambiguous among all 165 `init`
+  functions: nothing narrowed a lowercase path to the crate it names.
+  Now an alias is followed (a Rust `type` alias records what it names
+  in its symbol's `returns`) and a rename read back to the original,
+  both landing on that type's members or going external when the repo
+  doesn't define it; a turbofish is skipped; and a `some_crate::..::
+  name(..)` path, written directly or through a `use` of the crate,
+  keeps the candidates in that crate's directories (from its
+  `Cargo.toml`), functions first, when it has any. The same crate rule
+  applies to `impl some_crate::Trait for X`.
+- **A Rust ambiguous row lists only what the call could mean.** A
+  dot-call row listed every same-named symbol, free functions and
+  associated functions included; it now lists the methods taking
+  `self` and the written count, when two or more do. A path on a type
+  with no symbol but with members (`String::from` with the repo's
+  `impl From<X> for String`) lists those members. Measured against
+  1.6.5 on zed: 1,046 caller/callee pairs gained and 167 removed. All
+  167 removed were read against the source and all were wrong (46
+  `HttpRequest::builder()` calls through `use http_client::Request as
+  HttpRequest` on `extension_api`'s `HttpRequest`, about 50
+  `HashMap`/`HashSet::default()` calls on a local type's `default`,
+  27 `agent_ui::test_support::init_test(cx)` calls on the caller's own
+  `init_test`, cross-crate `init`s). 120 of the gained were read, all
+  right: `release_channel::init` now has 55 callers (0 before) and
+  `text::Buffer.new` 73 (54). Ambiguous rows fall from 87,252 to
+  85,757 and the candidates they list from 2,560,667 to 1,425,651
+  (median 8 to 4); `new` rows over 1,000 candidates from 225 to 18.
+  1,039 calls go external. 5 `impl project::ProjectItem for X` clauses
+  move from `workspace`'s `ProjectItem` to `project`'s. `dekko unused`
+  on zed gains 3 rows (each kept alive only by a wrong edge) and loses
+  2. The other six eval repos are unchanged. Re-pointing a renaming
+  `use` (same name, another original) now invalidates the files that
+  write that name, and the resolve cache key reads each crate's
+  directories as well as its name.
+
 ## [1.6.5] — 2026-10-02
 
 ### Fixed
