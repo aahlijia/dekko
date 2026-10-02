@@ -80,7 +80,7 @@ def _filemap_from_dict(d: dict) -> FileMap:
         path=d["path"],
         language=d["language"],
         symbols=[_symbol_from_dict(s) for s in d.get("symbols", [])],
-        calls=[RawCall(**c) for c in d.get("calls", [])],
+        calls=[_rawcall_from_dict(c) for c in d.get("calls", [])],
         refs=[RawRef(**r) for r in d.get("refs", [])],
         reads=[RawRead(**r) for r in d.get("reads", [])],
         heritage=[RawHeritage(**h) for h in d.get("heritage", [])],
@@ -98,6 +98,15 @@ def _filemap_from_dict(d: dict) -> FileMap:
         error=d.get("error"),
         doc=d.get("doc"),
     )
+
+
+def _rawcall_from_dict(d: dict) -> RawCall:
+    """Rebuild a ``RawCall``; JSON stores ``arg_kinds`` as a list."""
+    call = RawCall(**d)
+    if call.arg_kinds is not None:
+        call.arg_kinds = tuple(call.arg_kinds)
+
+    return call
 
 
 class IncrementalCache:

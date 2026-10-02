@@ -186,6 +186,30 @@ def test_java_varargs_parameter_flagged_via_generic_parser() -> None:
     assert params[1].variadic is True
 
 
+@pytest.mark.parametrize(
+    ("decl", "name", "type_"),
+    [
+        ("Class<?>... sources", "sources", "Class<?>..."),
+        ("final @Nullable String... s", "s", "String..."),
+        ("java.util.List<T>[]... arr", "arr", "java.util.List<T>[]..."),
+    ],
+)
+def test_java_varargs_parameter_splits_name_and_type(
+    decl: str,
+    name: str,
+    type_: str,
+) -> None:
+    # The type keeps its ellipsis, the way an array keeps its ``[]``,
+    # so a literal argument can be checked against the element type.
+    node = _params_node(
+        "java",
+        f"class C {{ C({decl}) {{}} }}\n",
+        "formal_parameters",
+    )
+    (param,) = _params_generic(node)
+    assert (param.name, param.type, param.variadic) == (name, type_, True)
+
+
 def test_java_annotated_varargs_parameter_stays_variadic() -> None:
     # The grammar can't parse an annotation before the ellipsis, so the
     # parameter arrives as an ERROR node; it must still count as
@@ -358,3 +382,78 @@ def test_unpacking_argument_makes_the_count_unknown(
     counts = [c.arg_count for c in fm.calls if c.name == "Err"]
     assert counts
     assert all(n is None for n in counts)
+
+
+# ---------------------------------------------------------------------
+# RawCall.arg_kinds: what a Java construction's arguments visibly are.
+
+
+def _java_construction_kinds(
+    tmp_path: Path,
+    args: str,
+) -> tuple[str, ...] | None:
+    spec = languages.spec_for_path("M.java")
+    assert spec is not None
+    (tmp_path / "M.java").write_text(
+        f"class M {{\n  void run() {{\n    new Box({args});\n  }}\n}}\n"
+    )
+    fm = extract_file(tmp_path, "M.java", spec)
+    (call,) = [c for c in fm.calls if c.name == "Box"]
+    return call.arg_kinds
+
+
+@pytest.mark.parametrize(
+    ("arg", "kind"),
+    [
+        ('"a"', "string"),
+        ('"""\n      text"""', "string"),
+        ('"a" + x', "string"),
+        ('x + "a"', "string"),
+        ('a + b + "c"', "string"),
+        ("A.class", "class"),
+        ("int[].class", "class"),
+        ("true", "bool"),
+        ("false", "bool"),
+        ("3", "int"),
+        ("-4", "int"),
+        ("'c'", "char"),
+        ("null", "null"),
+        ("new Foo(1)", "new:Foo"),
+        ("new java.util.HashMap<String, String>()", "new:HashMap"),
+        ("x -> x", "lambda"),
+        ("Foo::new", "lambda"),
+    ],
+)
+def test_java_construction_arg_kind(
+    tmp_path: Path,
+    arg: str,
+    kind: str,
+) -> None:
+    assert _java_construction_kinds(tmp_path, f"{arg}, y") == (kind, "?")
+
+
+@pytest.mark.parametrize(
+    "arg",
+    ["5L", "0x10", "2.0", "x + 1", '("a")', "new int[3]", "f()", "-x"],
+)
+def test_java_construction_arg_kind_unknown(tmp_path: Path, arg: str) -> None:
+    # A suffixed or non-decimal number isn't an ``int``; anything else
+    # an expression's node can't tell is ``?``, and a construction with
+    # nothing but ``?`` records no kinds at all.
+    assert _java_construction_kinds(tmp_path, arg) is None
+
+
+def test_java_construction_without_arguments_has_no_kinds(
+    tmp_path: Path,
+) -> None:
+    assert _java_construction_kinds(tmp_path, "") is None
+
+
+def test_java_method_call_has_no_kinds(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("M.java")
+    assert spec is not None
+    (tmp_path / "M.java").write_text(
+        'class M {\n  void run() {\n    foo("a", A.class);\n  }\n}\n'
+    )
+    fm = extract_file(tmp_path, "M.java", spec)
+    assert [c.arg_kinds for c in fm.calls] == [None]

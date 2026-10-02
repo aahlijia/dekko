@@ -1051,6 +1051,38 @@ def _params_rust(params_node: Node) -> list[Param]:
     return out
 
 
+def _java_spread_param(node: Node) -> Param:
+    """A Java varargs parameter, split the way Java writes it.
+
+    ``Class<?>... sources`` is ``sources`` of type ``Class<?>...``:
+    the type keeps its ellipsis, the way an array parameter keeps its
+    ``[]``, so a construction's literal argument can be checked
+    against the element type. A shape missing either part keeps the
+    whole text as its name.
+    """
+    type_node = next(
+        (
+            c
+            for c in node.named_children
+            if c.type not in ("modifiers", "variable_declarator", "comment")
+        ),
+        None,
+    )
+    declarator = next(
+        (c for c in node.named_children if c.type == "variable_declarator"),
+        None,
+    )
+    if type_node is None or declarator is None:
+        return Param(name=_text(node), variadic=True)
+
+    name_node = declarator.child_by_field_name("name") or declarator
+    return Param(
+        name=_text(name_node),
+        type=_text(type_node) + "...",
+        variadic=True,
+    )
+
+
 def _params_generic(params_node: Node) -> list[Param]:
     """Best-effort parse: try name/type fields, else raw text.
 
@@ -1071,7 +1103,7 @@ def _params_generic(params_node: Node) -> list[Param]:
         if child.type == "comment":
             continue
         if child.type == "spread_parameter":
-            out.append(Param(name=_text(child), variadic=True))
+            out.append(_java_spread_param(child))
             continue
         if child.type == "ERROR" and "..." in _text(child):
             # tree-sitter-java can't parse a type annotation before
@@ -1352,6 +1384,12 @@ def _collect_calls(
         call = _raw_call(callee, rel, spans, arg_count, constructs=cpp_new)
         if call is None:
             continue
+        if (
+            spec.name == "java"
+            and call_node is not None
+            and call_node.type == "object_creation_expression"
+        ):
+            call.arg_kinds = _java_arg_kinds(args_node)
         calls.append(call)
         made = _cpp_factory_type(callee) if spec.name == "cpp" else None
         if made is not None:
@@ -2019,6 +2057,89 @@ def _call_arg_count(args_node: Node | None) -> int | None:
         return None
 
     return len(args)
+
+
+# What a Java argument visibly is, by node type, for the shapes whose
+# node alone says (see ``RawCall.arg_kinds``).
+_JAVA_ARG_KIND_BY_NODE = {
+    "string_literal": "string",
+    "class_literal": "class",
+    "true": "bool",
+    "false": "bool",
+    "character_literal": "char",
+    "null_literal": "null",
+    "lambda_expression": "lambda",
+    "method_reference": "lambda",
+}
+
+
+def _java_arg_kinds(args_node: Node | None) -> tuple[str, ...] | None:
+    """What each argument of a Java construction visibly is.
+
+    Args:
+        args_node: The construction's argument list, if any.
+
+    Returns:
+        One kind per argument (see ``RawCall.arg_kinds``), or ``None``
+        when there are no arguments or none is more than ``?``.
+    """
+    if args_node is None:
+        return None
+    kinds = tuple(
+        _java_arg_kind(a) for a in args_node.named_children if not a.is_extra
+    )
+    if all(k == "?" for k in kinds):
+        return None
+
+    return kinds
+
+
+def _java_arg_kind(arg: Node) -> str:
+    """One Java argument's kind: a literal's, or ``?``.
+
+    A plain decimal (``3``, ``-4``) is ``int``; a suffixed one
+    (``5L``) or any other radix is left ``?``, since its type is not
+    ``int``'s. A ``+`` with a string operand is a string, as Java
+    defines it.
+    """
+    kind = _JAVA_ARG_KIND_BY_NODE.get(arg.type)
+    if kind is not None:
+        return kind
+    if arg.type == "unary_expression" and _text(arg).startswith("-"):
+        operand = arg.child_by_field_name("operand")
+        if operand is not None and _java_arg_kind(operand) == "int":
+            return "int"
+    if arg.type == "decimal_integer_literal":
+        return "?" if _text(arg)[-1:] in "lL" else "int"
+    if arg.type == "binary_expression" and _java_is_string_concat(arg):
+        return "string"
+    if arg.type == "object_creation_expression":
+        type_node = arg.child_by_field_name("type")
+        if type_node is not None:
+            made = _strip_generics(_text(type_node)).rsplit(".", 1)[-1]
+            return "new:" + made.strip()
+
+    return "?"
+
+
+def _java_is_string_concat(node: Node) -> bool:
+    """Whether a ``+`` expression has a string operand somewhere."""
+    operator = node.child_by_field_name("operator")
+    if operator is None or _text(operator) != "+":
+        return False
+
+    for side in ("left", "right"):
+        operand = node.child_by_field_name(side)
+        if operand is None:
+            continue
+        if operand.type == "string_literal":
+            return True
+        if operand.type == "binary_expression" and _java_is_string_concat(
+            operand
+        ):
+            return True
+
+    return False
 
 
 def _rust_token_arg_count(args: Node) -> int | None:

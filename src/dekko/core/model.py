@@ -167,6 +167,14 @@ class RawCall:
             ``resolver._arity_plausible`` to gate the single-candidate
             resolution rung; ``None`` is the safe "no signal" value,
             never treated as "zero arguments written."
+        arg_kinds: What each written argument visibly is, one entry
+            per argument (``string``, ``class``, ``bool``, ``int``,
+            ``char``, ``null``, ``new:<Type>``, ``lambda``, or ``?``
+            for anything an expression's text can't tell). Set only
+            for a Java construction with at least one argument that
+            isn't ``?``; ``None`` otherwise. Read by
+            ``resolver._pick_constructor`` to rule out an overload
+            whose parameter a literal can't be.
     """
 
     caller_id: str | None
@@ -176,6 +184,7 @@ class RawCall:
     receiver: str | None = None
     line: int = 0
     arg_count: int | None = None
+    arg_kinds: tuple[str, ...] | None = None
 
 
 @dataclass

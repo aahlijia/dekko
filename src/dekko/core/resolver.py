@@ -5812,10 +5812,15 @@ def _pick_constructor(
     tries fixed-arity applicability before variable-arity: for
     ``SpringApplication(Class<?>...)`` and ``(ResourceLoader,
     Class<?>...)``, one argument picks the first and two the second,
-    though both fit either count. Overloads the count can't separate
-    (``ErrorPage(HttpStatus, String)`` vs ``(Class, String)``) are
-    returned undecided, never guessed: only argument types tell them
-    apart, and dekko has none.
+    though both fit either count. Before either tier, a literal
+    argument rules out every overload whose parameter it can't be
+    (``_literal_viable``): a class literal is never a
+    ``ResourceLoader``, so ``new SpringApplication(A.class, B.class)``
+    is the ``(Class<?>...)`` one, and ``new ErrorPage(X.class,
+    "/500")`` the ``(Class, String)`` one. Overloads nothing visible
+    separates (``new ErrorPage(HttpStatus.NOT_FOUND, "/404")``) are
+    returned undecided, never guessed: dekko has no types for other
+    expressions.
 
     Args:
         cls: The constructed class.
@@ -5836,6 +5841,7 @@ def _pick_constructor(
             return ctors[0], []
         return None, ctors
     fitting = [c for c in ctors if _arity_fits(cls, c, n, index)]
+    fitting = _literal_viable(fitting, call.arg_kinds)
     exact = [c for c in fitting if _declared_param_count(c) == n]
     for tier in (exact, fitting):
         if len(tier) == 1:
@@ -5844,6 +5850,157 @@ def _pick_constructor(
             return None, tier
 
     return None, []
+
+
+# Java parameter types each literal kind can be passed to (JLS 5.3: a
+# method invocation has no user-defined conversions, so the lists are
+# closed). Every kind also fits a type variable and ``_JAVA_ANY``.
+_JAVA_PRIMITIVES = frozenset(
+    {"int", "long", "short", "byte", "char", "float", "double", "boolean"}
+)
+_JAVA_ANY = frozenset(
+    {"Object", "Serializable", "Comparable", "Constable", "ConstantDesc"}
+)
+_JAVA_ACCEPTS = {
+    "string": frozenset({"String", "CharSequence"}) | _JAVA_ANY,
+    "class": frozenset(
+        {
+            "Class",
+            "Type",
+            "AnnotatedElement",
+            "GenericDeclaration",
+            "TypeDescriptor",
+            "OfField",
+        }
+    )
+    | _JAVA_ANY,
+    "bool": frozenset({"boolean", "Boolean"}) | _JAVA_ANY,
+    "int": frozenset({"int", "long", "float", "double", "Integer", "Number"})
+    | _JAVA_ANY,
+    "char": frozenset({"char", "int", "long", "float", "double", "Character"})
+    | _JAVA_ANY,
+}
+# Types a freshly constructed object or a lambda is never an instance
+# of (unless it constructs that very type).
+_JAVA_NOT_OBJECTS = _JAVA_PRIMITIVES | frozenset(
+    {
+        "String",
+        "Class",
+        "Boolean",
+        "Integer",
+        "Long",
+        "Character",
+        "Double",
+        "Float",
+        "Short",
+        "Byte",
+    }
+)
+_JAVA_ANNOTATION = re.compile(r"@[\w.]+(\([^)]*\))?\s*")
+
+
+def _literal_viable(
+    fitting: list[Symbol],
+    arg_kinds: tuple[str, ...] | None,
+) -> list[Symbol]:
+    """Drop the overloads a literal argument can't be passed to.
+
+    Only a choice between 2+ overloads is narrowed, and when every
+    one is ruled out the count's choice stands: the literal evidence
+    is not trusted over it.
+
+    Args:
+        fitting: The constructors the written count fits.
+        arg_kinds: The construction's ``RawCall.arg_kinds``.
+
+    Returns:
+        The overloads no argument rules out, or ``fitting`` unchanged.
+    """
+    if arg_kinds is None or len(fitting) < 2:
+        return fitting
+    viable = [
+        ctor
+        for ctor in fitting
+        if not any(
+            _java_literal_rules_out(kind, *slot)
+            for kind, slot in zip(arg_kinds, _java_arg_slots(ctor, arg_kinds))
+        )
+    ]
+
+    return viable or fitting
+
+
+def _java_arg_slots(
+    ctor: Symbol,
+    arg_kinds: tuple[str, ...],
+) -> list[tuple[str | None, bool, bool]]:
+    """What each written argument binds to in ``ctor``.
+
+    Args:
+        ctor: A Java constructor.
+        arg_kinds: One kind per written argument.
+
+    Returns:
+        ``(base type, is array, may be the varargs array itself)``
+        per argument, the base ``None`` when the parameter has no
+        declared type. An argument in the varargs slot is checked
+        against the element type; when it is the slot's only
+        argument it may instead be the whole array.
+    """
+    params = [
+        p
+        for p in _constructor_params(ctor)
+        if p.name not in _ARITY_SYNTAX_MARKER_NAMES
+    ]
+    if not params:
+        return [(None, False, False)] * len(arg_kinds)
+
+    slots: list[tuple[str | None, bool, bool]] = []
+    for i in range(len(arg_kinds)):
+        param = params[min(i, len(params) - 1)]
+        text = _JAVA_ANNOTATION.sub("", param.type or "").strip()
+        whole_array = False
+        if param.variadic:
+            text = text.removesuffix("...").strip()
+            whole_array = i == len(params) - 1 == len(arg_kinds) - 1
+        array = "[" in text
+        base = re.sub(r"<.*", "", text).replace("[]", "").strip()
+        slots.append((base.rsplit(".", 1)[-1] or None, array, whole_array))
+
+    return slots
+
+
+def _java_literal_rules_out(
+    kind: str,
+    base: str | None,
+    array: bool,
+    whole_array: bool,
+) -> bool:
+    """Whether an argument of ``kind`` can't be passed as ``base``.
+
+    Args:
+        kind: The argument's ``RawCall.arg_kinds`` entry.
+        base: The parameter's type, generics and qualifier dropped.
+        array: Whether the parameter is an array.
+        whole_array: Whether the argument may be the varargs array.
+
+    Returns:
+        ``True`` only when Java would reject the argument.
+    """
+    if kind == "?" or not base:
+        return False
+    if len(base) <= 2 and base.isupper():
+        return False
+    if kind == "null":
+        return base in _JAVA_PRIMITIVES and not array and not whole_array
+    if array:
+        return True
+    if kind.startswith("new:"):
+        return base in _JAVA_NOT_OBJECTS and base != kind[4:]
+    if kind == "lambda":
+        return base in _JAVA_NOT_OBJECTS
+
+    return base not in _JAVA_ACCEPTS[kind]
 
 
 def _without_own_constructors(candidates: list[Symbol]) -> list[Symbol]:

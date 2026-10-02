@@ -1051,8 +1051,7 @@ def test_same_arity_constructor_overloads_are_disclosed_not_guessed(
         {
             "web/ErrorPage.java": _ERROR_PAGE,
             "app/Builder.java": _java_caller(
-                'new ErrorPage(HttpStatus.NOT_FOUND, "/404");'
-                ' return new ErrorPage(Oops.class, "/500");'
+                'return new ErrorPage(HttpStatus.NOT_FOUND, "/404");'
             ),
         },
     )

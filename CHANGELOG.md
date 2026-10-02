@@ -9,6 +9,42 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.7] — 2026-10-02
+
+### Fixed
+- **A Java constructor overload a literal argument can't be passed to
+  is no longer picked.** Where a varargs overload also fit, the
+  argument count decided by "declares exactly this many", which says
+  nothing there: `new SpringApplication(A.class, B.class)` went to
+  `(ResourceLoader, Class<?>...)`, `new TestRestTemplate("user",
+  "password")` to `(RestTemplateBuilder, UriTemplateHandler)`, `new
+  ServletRegistrationBean<>(servlet, false)` to `(servlet,
+  String...)`. Now each construction records what its arguments
+  visibly are (a string, a class literal, a boolean, a plain int, a
+  char, `null`, a `new T(..)`, a lambda or method reference), and an
+  overload one of them can't be passed to is dropped before the count
+  decides. Java has no user-defined conversions, so a class literal is
+  never a `ResourceLoader`. When every overload is ruled out, the
+  count's choice stands. Measured against 1.6.6 on spring-boot: 318
+  caller/callee pairs gained and 27 removed. All 27 were read and all
+  were wrong. 26 of those sites move to the right overload, and one
+  (`new TestConfigurations(Sorter.instance, A.class, B.class)`, two
+  varargs overloads left) becomes ambiguous. 305 sites that were
+  ambiguous now resolve (`FilteredClassLoader` alone 197), including
+  `new ErrorPage(Oops.class, "/500")`. Ambiguous rows fall from
+  69,142 to 68,851, and 8 more list fewer overloads. `dekko unused`
+  loses 7 constructors that gained real callers. The other six eval
+  repos keep the same edges. Only Java constructions are read;
+  overloaded Java methods and other languages' constructors are
+  unchanged, and an argument that isn't a literal (`HttpStatus.
+  NOT_FOUND`, a local) tells nothing, so `new ErrorPage(HttpStatus.
+  NOT_FOUND, "/404")` stays ambiguous.
+- **A Java varargs parameter now has a type.** `Class<?>... sources`
+  was one parameter named `Class<?>... sources` with no type. It is
+  now `sources` of type `Class<?>...`. Signatures read `sources:
+  Class<?>...` like every other Java parameter, and `find_type_usages`
+  sees the type.
+
 ## [1.6.6] — 2026-10-02
 
 ### Fixed

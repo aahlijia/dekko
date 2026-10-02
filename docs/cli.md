@@ -1127,11 +1127,18 @@ with three shaded copies lists only a copy's own constructor overloads.
 **Constructor overloads.** `new X(...)` always resolves to the class
 `X`. When `X` declares several constructors, the call's argument count
 picks one: an exact declared-count match first, then a unique varargs
-or default-argument fit. Overloads with the same count (Java's
-`ErrorPage(HttpStatus, String)` and `ErrorPage(Class, String)`) can
-only be told apart by argument types, which dekko doesn't have, so the
-call shows under `ambiguous --name X` and as "resolved ambiguously" on
-each of those constructors rather than being credited to one.
+or default-argument fit. In Java, a literal argument comes first: an
+overload a string, class literal, boolean, plain int, char, `null`,
+`new T(..)` or lambda can't be passed to is dropped before the count
+decides, so `new SpringApplication(A.class, B.class)` is the
+`(Class<?>...)` constructor, not `(ResourceLoader, Class<?>...)`, and
+`new ErrorPage(Oops.class, "/500")` is `ErrorPage(Class, String)`.
+Overloads nothing visible tells apart (`new
+ErrorPage(HttpStatus.NOT_FOUND, "/404")` against
+`ErrorPage(HttpStatus, String)` and `ErrorPage(Class, String)`) need
+argument types, which dekko doesn't have, so the call shows under
+`ambiguous --name X` and as "resolved ambiguously" on each of those
+constructors rather than being credited to one.
 
 In C++, `new X(...)`, `std::make_unique<X>(...)`/`make_shared` (and
 the `absl::` spellings) and a temporary `X(...)` all count as
