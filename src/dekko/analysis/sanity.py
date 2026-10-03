@@ -252,7 +252,8 @@ CAUSE_LOCAL_BINDING_OR_LITERAL = (
     "object key/field, or a string literal value — not a reference to "
     "the target"
 )
-# JS/TS only (see ``_JS_SHAPE_GRAMMARS``): once string and template
+# JS/TS, Java and Kotlin (see ``_JS_SHAPE_GRAMMARS`` and
+# ``_looks_like_jvm_string_mention``): once string and template
 # text is blanked, the name is gone from the line. The biggest
 # unexplained shape on the TS repos measured (claude-code: 2,116 of
 # 4,319 rows), mostly log messages naming a class.
@@ -286,6 +287,20 @@ CAUSE_CROSS_FILE_COLLISION = (
 CAUSE_RESOLVED_ELSEWHERE = (
     "dekko attributes this line to a different, same-named declaration "
     "(see resolved_to) — a miss only if that attribution is wrong"
+)
+# Tier 1, per constructor target: the line constructs the target's
+# class, and the map put the construction on the class because its
+# arguments fit more than one constructor equally. The class is not a
+# rival declaration, so ``CAUSE_RESOLVED_ELSEWHERE`` misread it.
+CAUSE_CONSTRUCTOR_TIE = (
+    "a construction whose arguments fit 2+ constructors of the class — "
+    "recorded on the class, not on one overload (see: dekko query "
+    "callers <class>)"
+)
+# Tier 1, per constructor target: the map picked another overload of
+# the same class for this construction.
+CAUSE_SIBLING_CONSTRUCTOR = (
+    "resolved to another constructor of the same class (see resolved_to)"
 )
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
 # Tier 2: a value-position use of a same-named local declared earlier
@@ -358,6 +373,17 @@ CAUSE_SIGNATURE = (
 CAUSE_PROPERTY_ACCESS_SHAPE = (
     "a property access of a same-named member (`x.name`), not a call — "
     "line-shape match; the map records no read at this line"
+)
+# Java and Kotlin, type targets only: the line names the type and no
+# occurrence of the name could run a constructor
+# (``_JVM_CONSTRUCTION_TEMPLATES``).
+# A Java constructor can't run without ``Name(``, ``Name<..>(`` or
+# ``Name::new``, so a missed construction never lands here. spring-boot:
+# 17,589 of 18,349 unexplained rows were this shape.
+CAUSE_TYPE_MENTION = (
+    "names the type without constructing it (declaration, parameter "
+    "or return type, generic argument, static member access, cast or "
+    "class literal) — not a call site"
 )
 # Every cause at or below ``_classify_miss_remaining``: the rungs the
 # per-target tier-1 facts (self-recursion, import bound elsewhere) sit
@@ -845,6 +871,106 @@ def _looks_like_type_annotation(
         grammar == "rust"
         and target_is_type
         and _looks_like_rust_type_construction(stripped, name)
+    )
+
+
+_JVM_GRAMMARS = frozenset({"java", "kotlin"})
+# A string or char literal on one line. Kotlin's ``"""raw"""`` blanks
+# as three adjacent strings, which is the same result.
+_JVM_LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)\'')
+# Kotlin string templates hold code: ``"${Name(1)}"`` constructs.
+_KOTLIN_TEMPLATE_TEMPLATE = r"\$(?:\{{[^}}]*\b{name}\b|{name}\b)"
+# Up to three levels of ``<..>`` type arguments, no parentheses inside.
+_JVM_GENERICS = (
+    r"(?:<[^<>()]*(?:<[^<>()]*(?:<[^<>()]*>[^<>()]*)*>[^<>()]*)*>)?"
+)
+# Every shape that can run a constructor, or declare one dekko didn't
+# index: ``Name(``, ``Name<..>(``, ``Name::new``, ``Name<..>::new``. An
+# annotation (``@Name(..)``) only passes arguments and never constructs.
+_JVM_CONSTRUCTION_TEMPLATES = (
+    r"(?<!@)\b{name}\s*" + _JVM_GENERICS + r"\s*\(",
+    r"\b{name}\s*" + _JVM_GENERICS + r"\s*::\s*new\b",
+)
+# Kotlin adds a constructor reference (``::Name``) and a trailing-lambda
+# construction (``Name { .. }``). A ``:`` or ``>`` right before the name
+# is a return or super type ahead of a body (``): Name {``), not one.
+_KOTLIN_CONSTRUCTION_TEMPLATES = (
+    r"::\s*{name}\b",
+    r"(?<![:>])(?<![:>]\s)\b{name}\s*" + _JVM_GENERICS + r"\s*\{{",
+)
+
+
+def _jvm_code_only(snippet: str) -> str:
+    """A Java/Kotlin line with string and char literals blanked and a
+    trailing ``//`` comment cut."""
+    code = _JVM_LITERAL.sub('""', snippet)
+    cut = code.find("//")
+
+    return code if cut < 0 else code[:cut]
+
+
+def _looks_like_jvm_construction(
+    code: str, bare_name: str, grammar: str
+) -> bool:
+    """Whether any occurrence of ``bare_name`` in ``code`` (literals
+    already blanked) could construct the type or declare a
+    constructor."""
+    name = re.escape(bare_name)
+    templates = _JVM_CONSTRUCTION_TEMPLATES
+    if grammar == "kotlin":
+        templates += _KOTLIN_CONSTRUCTION_TEMPLATES
+
+    return any(re.search(t.format(name=name), code) for t in templates)
+
+
+def _looks_like_jvm_type_mention(
+    snippet: str, bare_name: str, path: str, *, target_is_type: bool
+) -> bool:
+    """Whether a Java/Kotlin line names the type ``bare_name`` without
+    constructing it: a declaration, parameter or return type, a generic
+    argument, a static member, a cast, ``instanceof`` or a class
+    literal.
+
+    The safety property is the construction check: a Java constructor
+    can't run without one of ``_JVM_CONSTRUCTION_TEMPLATES``' shapes,
+    so a real missed construction is never explained away here. Only
+    for a type target (``target_is_type``, which counts the type's own
+    constructors as the type), never for a method sharing the name.
+    """
+    grammar = _grammar_for_path(path)
+    if not target_is_type or grammar not in _JVM_GRAMMARS:
+        return False
+    if grammar == "kotlin" and re.search(
+        _KOTLIN_TEMPLATE_TEMPLATE.format(name=re.escape(bare_name)), snippet
+    ):
+        return False
+    code = _jvm_code_only(snippet)
+
+    return _word(bare_name).search(code) is not None and not (
+        _looks_like_jvm_construction(code, bare_name, grammar)
+    )
+
+
+def _looks_like_jvm_string_mention(
+    snippet: str, bare_name: str, path: str
+) -> bool:
+    """Whether a Java/Kotlin line names ``bare_name`` only inside string
+    or char literals (``"org.example.JarLauncher"``). Neither language
+    runs code out of a string, except a Kotlin template, which is code
+    and refuses the match."""
+    grammar = _grammar_for_path(path)
+    if grammar not in _JVM_GRAMMARS:
+        return False
+    name = re.escape(bare_name)
+    if grammar == "kotlin" and re.search(
+        _KOTLIN_TEMPLATE_TEMPLATE.format(name=name), snippet
+    ):
+        return False
+    word = _word(bare_name)
+
+    return (
+        word.search(snippet) is not None
+        and word.search(_JVM_LITERAL.sub('""', snippet)) is None
     )
 
 
@@ -2257,6 +2383,7 @@ def classify_miss(
     looks_like_jsx_text: bool = False,
     looks_like_property_access: bool = False,
     looks_like_signature: bool = False,
+    looks_like_type_mention: bool = False,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
@@ -2389,9 +2516,10 @@ def classify_miss(
             fact computed by the caller, and checked before every
             other rung: the shape rungs explain a resolver miss, and
             the resolver never saw this file.
-        looks_like_string_mention: Whether a JS/TS line names the
-            target only inside string or template text
-            (``_js_shapes``). Checked after the type rung.
+        looks_like_string_mention: Whether a JS/TS, Java or Kotlin
+            line names the target only inside string or template text
+            (``_js_shapes``, ``_looks_like_jvm_string_mention``).
+            Checked after the type rung.
         is_recorded_read: Whether the map records a property read of
             the name at this JS/TS line and the line has no bare call
             of it (``_js_shapes``). Checked after the string rung.
@@ -2430,6 +2558,10 @@ def classify_miss(
         looks_like_signature: Whether the line is an abstract, overload
             or interface-member signature (``_looks_like_signature``).
             Checked before the local-binding rung.
+        looks_like_type_mention: Whether a Java/Kotlin line names a
+            type target with no construction-shaped occurrence of it
+            (``_looks_like_jvm_type_mention``). Checked with the type
+            annotation rung.
 
     Returns:
         One of the ``CAUSE_*`` constants.
@@ -2467,6 +2599,7 @@ def classify_miss(
         is_recorded_reference=is_recorded_reference,
         in_type_context=in_type_context,
         looks_like_type_annotation=looks_like_type_annotation,
+        looks_like_type_mention=looks_like_type_mention,
         looks_like_trailing_comment=looks_like_trailing_comment,
         looks_like_string_mention=looks_like_string_mention,
         looks_like_jsx_text=looks_like_jsx_text,
@@ -2519,6 +2652,7 @@ def _non_call_cause(
     is_recorded_reference: bool,
     in_type_context: bool,
     looks_like_type_annotation: bool,
+    looks_like_type_mention: bool,
     looks_like_trailing_comment: bool,
     looks_like_string_mention: bool,
     looks_like_jsx_text: bool,
@@ -2538,6 +2672,8 @@ def _non_call_cause(
         return CAUSE_TYPE_CONTEXT
     if looks_like_type_annotation:
         return CAUSE_TYPE_ANNOTATION
+    if looks_like_type_mention:
+        return CAUSE_TYPE_MENTION
     if looks_like_trailing_comment:
         return CAUSE_TRAILING_COMMENT
     if looks_like_string_mention:
@@ -3098,22 +3234,109 @@ def _resolved_elsewhere(
     return out
 
 
+def _caller_covers(
+    index: MapIndex, callers: set[str], loc: tuple[str, int]
+) -> bool:
+    """Whether one of ``callers`` holds ``loc``: a symbol whose span
+    contains the line, or the module pseudo-id of its file."""
+    path, line = loc
+    for caller in callers:
+        caller_sym = index.symbols_by_id.get(caller)
+        if caller_sym is None:
+            if _caller_path(index, caller) == path:
+                return True
+        elif (
+            caller_sym.path == path
+            and caller_sym.start_line <= line <= caller_sym.end_line
+        ):
+            return True
+
+    return False
+
+
+def _resolved_elsewhere_causes(
+    index: MapIndex,
+    sym: Symbol,
+    resolved: dict[tuple[str, int], list[str]],
+) -> dict[tuple[str, int], str]:
+    """The cause for each ``_resolved_elsewhere`` row of ``sym``.
+
+    A construction is recorded on the class and on the overload its
+    arguments pick, so for a constructor target the class is not a
+    rival declaration. A row the map gave only to the class, from a
+    caller holding one of ``sym``'s overload ties, is a tie; a row the
+    map gave to the class and another of its constructors went to that
+    sibling. Anything else keeps ``CAUSE_RESOLVED_ELSEWHERE``.
+
+    Args:
+        index: The query index.
+        sym: The target symbol.
+        resolved: ``_resolved_elsewhere``'s result for it.
+
+    Returns:
+        ``loc`` → cause, for every row in ``resolved``.
+    """
+    out = dict.fromkeys(resolved, CAUSE_RESOLVED_ELSEWHERE)
+    cls = query.constructed_class(index, sym) if resolved else None
+    if cls is None:
+        return out
+
+    siblings = {c.id for c in query.constructors_of(index, cls)} - {sym.id}
+    tie_callers = {caller for caller, _ in index.ambiguous_in.get(sym.id, [])}
+    for loc, ids in resolved.items():
+        others = set(ids) - {cls.id}
+        if cls.id not in ids:
+            continue
+        if others and others <= siblings:
+            out[loc] = CAUSE_SIBLING_CONSTRUCTOR
+        elif not others and _caller_covers(index, tie_callers, loc):
+            out[loc] = CAUSE_CONSTRUCTOR_TIE
+
+    return out
+
+
 def _apply_resolved_elsewhere(
     causes: dict[tuple[str, int], str],
+    index: MapIndex,
     attributed: dict[tuple[str, int], set[str]],
-    own_id: str,
-    grep_only_hits: "list[GrepHit]",
+    sym: Symbol | None,
+    locs: Iterable[tuple[str, int]],
 ) -> dict[tuple[str, int], list[str]]:
-    """``run()``'s form of ``_resolved_elsewhere``: relabel the
-    qualifying grep-only rows in ``causes`` in place and return the
-    sibling ids per row for ``_grep_row``'s ``resolved_to``."""
-    resolved = _resolved_elsewhere(
-        attributed, own_id, [(h.path, h.line) for h in grep_only_hits]
-    )
-    for loc in resolved:
-        causes[loc] = CAUSE_RESOLVED_ELSEWHERE
+    """Relabel the grep-only rows the map attributes elsewhere, in place,
+    and return the sibling ids per row for ``_grep_row``'s
+    ``resolved_to``. ``sym`` is ``None`` in ``--usages`` mode, which
+    has no target and gets nothing."""
+    if sym is None:
+        return {}
+    resolved = _resolved_elsewhere(attributed, sym.id, locs)
+    causes.update(_resolved_elsewhere_causes(index, sym, resolved))
 
     return resolved
+
+
+def _name_kinds(index: MapIndex, bare_name: str) -> frozenset[str]:
+    """The kinds of every symbol named ``bare_name``, a type's own
+    constructors counted as the type.
+
+    A Java, C++ or Kotlin class and its constructors share a name, so
+    without this every class with an explicit constructor was a mixed
+    ``{class, method}`` name and every type-shape rule stood down on it.
+
+    Args:
+        index: The query index.
+        bare_name: The bare name.
+
+    Returns:
+        The normalised kind set; empty when no symbol has the name.
+    """
+    symbols = index.symbols_by_name.get(bare_name, [])
+    owner_kind: dict[str, str] = {}
+    for sym in symbols:
+        if sym.kind in TYPE_KINDS:
+            for ctor in query.constructors_of(index, sym):
+                owner_kind[ctor.id] = sym.kind
+
+    return frozenset(owner_kind.get(s.id, s.kind) for s in symbols)
 
 
 def _read_sites(index: MapIndex, bare_name: str) -> frozenset[tuple[str, int]]:
@@ -3283,12 +3506,15 @@ def _classify_grep_hits(
             for every symbol sharing ``bare_name`` (``--all``). A hit
             at one of these locations is ``is_recorded_reference``.
             Empty by default, and always in ``--usages`` mode.
-        target_kinds: The ``Symbol.kind`` of the target (``run()``) or
-            of every symbol sharing ``bare_name`` (``--all``). Gates
-            the two shape heuristics in opposite directions,
+        target_kinds: ``_name_kinds`` for ``bare_name`` (``--all``,
+            and ``run()`` for a type target or when every kind in it is
+            a type), else the target's own ``Symbol.kind``. A type's
+            own constructors count as the type. Gates the shape
+            heuristics in opposite directions,
             both conservatively on a mixed group: Rust construction/
-            payload shapes need *every* kind in ``TYPE_KINDS``, the
-            value-reference shape needs *none* of them to be. Empty
+            payload shapes and the Java/Kotlin type mention need
+            *every* kind in ``TYPE_KINDS``, the value-reference shape
+            needs *none* of them to be. Empty
             (the default, and ``--usages`` mode) switches both off.
         scope: The unfiltered map's test spans and file set (see
             ``_MapScope``). ``None`` falls back to path-only test
@@ -3378,7 +3604,13 @@ def _classify_grep_hits(
                 or _looks_like_local_binding_or_literal(h.snippet, bare_name)
                 or shapes.declaration
             ),
-            looks_like_string_mention=js.string_mention,
+            looks_like_type_mention=_looks_like_jvm_type_mention(
+                h.snippet, bare_name, h.path, target_is_type=target_is_type
+            ),
+            looks_like_string_mention=(
+                js.string_mention
+                or _looks_like_jvm_string_mention(h.snippet, bare_name, h.path)
+            ),
             is_recorded_read=js.property_read,
             in_template_text=shapes.template_text,
             in_block_comment=shapes.block_comment,
@@ -4686,9 +4918,8 @@ def run(
     target_kinds: frozenset[str] = frozenset()
     # The map's own attribution of every use of the bare name, for the
     # tier-1 resolved-elsewhere cause (``_resolved_elsewhere``). Callers
-    # mode only, like everything above; ``own_id`` is the target.
+    # mode only, like everything above.
     attributed: dict[tuple[str, int], set[str]] = {}
-    own_id = ""
 
     if usages:
         bare_name = target
@@ -4730,9 +4961,18 @@ def run(
         declaring_type = _resolve_declaring_type(query_index, sym)
         ref_sites = _reference_sites(query_index, [sym])
         read_sites = _read_sites(query_index, sym.name)
-        target_kinds = frozenset({sym.kind})
+        # A type target, or a constructor of one, reads the type-shape
+        # rules off every symbol sharing the name, as ``--all`` does:
+        # a class's constructors count as the class, and a class whose
+        # name is also an unrelated method gets no type rule in either
+        # mode. Any other target keeps its own kind.
+        name_kinds = _name_kinds(query_index, sym.name)
+        target_kinds = (
+            name_kinds
+            if name_kinds <= TYPE_KINDS or sym.kind in TYPE_KINDS
+            else frozenset({sym.kind})
+        )
         attributed = _attributed_sites(query_index, sym.name)
-        own_id = sym.id
         target_sym = sym
         try:
             dekko_hits, module_level = _dekko_hits_callers(query_index, sym.id)
@@ -4795,7 +5035,11 @@ def run(
         read_sites=read_sites,
     )
     resolved = _apply_resolved_elsewhere(
-        causes, attributed, own_id, grep_only_hits
+        causes,
+        query_index,
+        attributed,
+        target_sym,
+        [(h.path, h.line) for h in grep_only_hits],
     )
     bound = _apply_target_facts(
         causes,
@@ -5045,8 +5289,9 @@ def _diff_symbol(
     dekko_only = len(dekko_set - grep_locs)
     grep_only = grep_locs - dekko_set
     own = dict(causes)
-    for loc in _resolved_elsewhere(attributed or {}, sym.id, grep_only):
-        own[loc] = CAUSE_RESOLVED_ELSEWHERE
+    _apply_resolved_elsewhere(
+        own, query_index, attributed or {}, sym, grep_only
+    )
     _apply_target_facts(own, query_index, sym, grep_only, snippets or {})
     grep_only_causes = [own[loc] for loc in grep_only]
 
@@ -5250,7 +5495,7 @@ def _run_all_sweeps(
             other_candidate_files=other_candidate_files,
             is_known_collision_name=name in collision,
             ref_sites=_reference_sites(query_index, symbols_for_name),
-            target_kinds=frozenset(s.kind for s in symbols_for_name),
+            target_kinds=_name_kinds(query_index, name),
             symbols_by_path=query_index.symbols_by_path,
             scope=scope,
             read_sites=_read_sites(query_index, name),

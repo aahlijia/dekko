@@ -435,15 +435,35 @@ of `unexplained miss`:
   string or key. `export { X } from './x'` re-exports read as import
   statements.
 
-Two shapes are left unexplained on purpose. Outside JS/TS, a name
-*inside* a longer string (`"settings.json cleanup complete."`) also
-matches `eval("cleanup()")` and dispatch by string, which are real
-references, and Python f-strings, Go map keys and Kotlin/Ruby
-interpolation make "inside a string" mean something else. And a name in the middle of a multi-line Python docstring
-can't be told from code one line at a time. None of this moves a
+Two shapes are left unexplained on purpose. Outside JS/TS, Java and
+Kotlin, a name *inside* a longer string (`"settings.json cleanup
+complete."`) also matches `eval("cleanup()")` and dispatch by string,
+which are real references, and Python f-strings, Go map keys and Ruby
+interpolation make "inside a string" mean something else. And a name in
+the middle of a multi-line Python docstring can't be told from code one
+line at a time. None of this moves a
 count: `matches`, `dekko-only` and `grep-only` are untouched, only the
 cause on a grep-only row changes. `--fail-on-unexplained` will fail
 less often as a result.
+
+**Java and Kotlin type mentions, since 1.6.10.** On a type target, or
+a constructor of one, a Java or Kotlin line that names the type without
+constructing it reads `names the type without constructing it
+(declaration, parameter or return type, generic argument, static member
+access, cast or class literal) — not a call site`: `ConfigurationPropertyName
+oldName = property.getName();`, `List<Name> all`, `Name.of("a")`,
+`Name.class`, `(Name) o`, `o instanceof Name`, `new Name[3]`. It holds
+only when no occurrence of the name on the line could construct it:
+`Name(`, `Name<..>(` and `Name::new` (plus `::Name` and a trailing-lambda
+`Name {` in Kotlin) keep the row a miss, since a Java constructor can't
+run without one of them. `Name::new` is a construction dekko records no
+edge for, so it stays unexplained on purpose. A class and its own
+constructors count as one type for this, in single-target and `--all`
+mode alike; a name that is also an unrelated method gets no such label
+in `--all`. On spring-boot this took 17,589 of 18,349 unexplained rows.
+A name only inside a Java or Kotlin string or char literal reads
+`mention inside a string or template text` (a Kotlin `${...}` template
+is code and never does).
 
 **A site the map attributed to a same-named sibling, since 1.5.9.**
 When two unrelated symbols share a bare name (a 1-arg `errorMessage(e)`
@@ -463,6 +483,15 @@ older `call-shaped reference to a different, same-named declaration
 elsewhere in the repo` cause remains for a call-shaped hit inside a
 sibling's own file that the map attributed to nobody, which is what an
 ambiguous site among several same-named candidates looks like.
+
+For a constructor target the class is not a rival: a construction is
+recorded on the class and on the overload its arguments pick. Since
+1.6.10 a row the map gave to another overload of the same class reads
+`resolved to another constructor of the same class (see resolved_to)`,
+and a row the map gave only to the class, from a caller whose
+arguments fit two or more overloads equally, reads `a construction
+whose arguments fit 2+ constructors of the class — recorded on the
+class, not on one overload (see: dekko query callers <class>)`.
 
 **Four more index facts, since 1.5.10.** Each is read off the map, not
 the line, and named as such:

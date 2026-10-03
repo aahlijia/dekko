@@ -9,6 +9,36 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.10] — 2026-10-03
+
+### Fixed
+- **`sanity` explains a Java or Kotlin line that names a type without
+  constructing it.** Java and Kotlin had no type-position rule, so
+  `ConfigurationPropertyName oldName = property.getName();` fell
+  through every rung and read "unexplained" on the class and on each
+  of its constructors. A class with an explicit constructor was also a
+  mixed `{class, method}` name, which switched off the type rules that
+  did exist. Now a class and its own constructors count as one type, in
+  single-target and `--all` mode alike, and a Java/Kotlin line that
+  names that type reads `names the type without constructing it
+  (declaration, parameter or return type, generic argument, static
+  member access, cast or class literal) — not a call site`. It never
+  fires while any occurrence of the name could construct it (`Name(`,
+  `Name<..>(`, `Name::new`; in Kotlin also `::Name` and `Name {`), so a
+  missed construction stays a miss. A name only inside a Java or
+  Kotlin string literal reads as a string mention (a Kotlin `${...}`
+  template is code and never does). On a constructor target, a
+  construction the map gave to a sibling overload reads `resolved to
+  another constructor of the same class`, and one it gave only to the
+  class because the arguments fit 2+ overloads reads as that tie,
+  instead of blaming "a different, same-named declaration". On
+  spring-boot (`sanity --all`, default 2,000 names) unexplained rows
+  go from 18,349 to 87 and flagged targets from 2,267 to 59; the
+  rows left are `Name::new` references dekko records no edge for, a
+  Java record constructed from another file, and text in JS and SQL
+  resources. `sanity ConfigurationPropertyName.ConfigurationPropertyName`:
+  311 unexplained to 0. No call graph change.
+
 ## [1.6.9] — 2026-10-02
 
 ### Fixed
