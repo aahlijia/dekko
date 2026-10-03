@@ -9,6 +9,45 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.11] — 2026-10-03
+
+### Fixed
+- **`query callers` lists value references next to callers, and
+  `sanity` points there.** The `referenced (not called):` section only
+  printed when a symbol had no callers at all, so a function with one
+  caller and one `setTimeout(fn)` reference had no command that showed
+  the reference; `sanity`'s value-reference cause pointed at `query
+  uses`, which refuses in-repo names. Now the section follows the
+  caller rows whenever the map holds references (JSON
+  `referenced_not_called` likewise, with its own `referenced_meta`),
+  and it obeys `--limit`/`--budget`, which it used to ignore on a
+  references-only answer. The `sanity` cause and the `uses` refusal
+  name `query callers`. A function's name mentioned without a call
+  inside its own body (`setTimeout(doRefresh, ..)` in `doRefresh`, a
+  same-named field in a Rust getter) reads `mention inside the
+  symbol's own body, not a call — never a missed caller` instead of
+  "unexplained" or "generic name".
+- **`sanity <target>` and `sanity --all` give a row the same cause.**
+  The two modes ran one classifier with four different inputs, so the
+  same line read differently: single-target called 416 rows on
+  claude-code and cline "likely an unrelated external-library method"
+  and was wrong on 415 (`entries.length`, a same-named local, a test
+  file's own helper), and `--all` blamed a call in the target's own
+  file on a "cross-file collision". Now both modes classify each grep
+  hit from facts about the bare name only, and run the
+  target-dependent rungs (the sibling-file collision, the receiver
+  check) per target afterwards. The receiver label needs a call of the
+  name on the line, a hit in the target's own language where imports
+  name types (Java/Kotlin/Scala, JS/TS, Python, C#; not C/C++, where
+  it called real `shape->AddDim(..)` misses library methods), and only
+  re-decides rows that were unexplained or "generic name". Single-target vs `--all` disagreement goes to 0 on
+  every repo measured (claude-code 197, cline 220, tensorflow 1,388,
+  zed 5,705 before). Every disagreeing row lands on `--all`'s cause,
+  except 43 tensorflow and 203 zed calls in the target's own file that
+  `--all` called a "cross-file collision". Unexplained rows go down
+  on every repo (spring-boot 87 to 79, tensorflow 10,109 to 10,060,
+  zed 11,889 to 11,812), as self-mentions are named.
+
 ## [1.6.10] — 2026-10-03
 
 ### Fixed

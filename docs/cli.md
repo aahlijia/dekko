@@ -6,7 +6,7 @@ dekko map src                        # ...restricted to a subtree
 dekko summary                        # repo digest: dirs, hotspots, entry points
 dekko outline src/server.py          # a file's signatures + docs, no bodies
 dekko query symbol run_map           # signature card: doc, location, fan-in/out
-dekko query callers resolve --sites  # who calls resolve, with call sites
+dekko query callers resolve --sites  # who calls resolve, with call sites, then who passes it as a value ('referenced (not called)')
 dekko query callers resolve --no-tests  # production callers only (the MCP get_callers default; the CLI includes tests)
 dekko query callees main             # what does main call?
 dekko query uses Path                # who references the external name Path?
@@ -396,7 +396,9 @@ of `unexplained miss`:
   `process.on("exit", cleanup)`, `.map(Src::getSource)`: the map
   already holds that line as a reference edge to the target (Python,
   JS/TS, Go, Java), and the row says `passed or stored as a value,
-  not called — dekko has this as a reference`. Only when the file
+  not called — dekko has this as a reference (see: dekko query callers
+  <target>, 'referenced (not called)')`. `query callers` lists those
+  references below the callers since 1.6.11. Only when the file
   could really have made that reference: it defines the target,
   imports its name or its declaring type, or is a same-package
   sibling (Go/Java), and it binds no local of the same name. A
@@ -507,7 +509,14 @@ the line, and named as such:
 - *A recursive self-call.* A bare `name(` inside the target's own span
   reads `recursive call inside the symbol's own body — dekko records
   no self edges by design`. Decided per target: the same line is a
-  plain call for a same-named sibling.
+  plain call for a same-named sibling. Since 1.6.11 a function or
+  method target's own name *mentioned* without a call inside its own
+  body (`setTimeout(doRefresh, 1000)` inside `doRefresh`, a same-named
+  field `self.blame` inside `fn blame`) reads `mention inside the
+  symbol's own body, not a call — never a missed caller (dekko records
+  no self edges by design)`. Only rows no more specific cause claimed;
+  a type's body holds methods that are callers of their own, so not
+  for types.
 - *A name bound to a different import in this file.* When the hit's
   file imports the bare name from a source the map could not place in
   the repo (`import { appendFileSync } from 'fs'`) or from a repo file
@@ -673,9 +682,35 @@ same-named method from a completely different library (e.g. AssertJ's
 grep-only miss when it isn't one. This is a cheap textual proxy, not
 real type inference (no alias tracking, no import resolution) — false
 positives (missing the real evidence) are the accepted failure mode,
-not false confidence. Gated to `sanity <target>`; `--all` does not
-apply this check (it has no single target to resolve a declaring type
-against).
+not false confidence. Since 1.6.11 it runs in `--all` too, per
+symbol, and only on a line that calls the name (`name(`): the label
+says "method", and a line with no call (`entries.length`, a regex,
+JSX text) is not one. It re-decides only rows the shared rules left
+unexplained or "generic name", so a same-named local stays a local
+and a test file's own helper stays with the test filter. And only for
+a hit in the target's own language family where an import names a
+type (Java/Kotlin/Scala, JS/TS, Python, C#): a C/C++ `#include` names
+a file, so on tensorflow a real `shape->AddDim(..)` miss read as a
+library method, as did a Python docstring naming a C++ method and a
+Rust closure sharing a method's name.
+
+**Both modes classify from the same facts, since 1.6.11.** `sanity
+<target>` and `sanity --all` share one classification of each grep
+hit, built from facts about the bare name only: every same-named
+symbol's definitions and recorded references, their kinds (a type's
+own constructors count as the type), and the name's recorded property
+reads. What depends on which same-named symbol is asked about runs
+afterwards, per target, in both modes: resolved elsewhere, a heritage
+clause, a self-call or self-mention, an import binding the name
+elsewhere, a call in a file declaring a same-named sibling (never the
+target's own file), and the receiver check. So a row reads the same
+in both. Before, `--all` blamed a call in the target's own file on a
+"cross-file collision", and single-target labelled 416 rows on
+claude-code and cline "external-library method" that `--all` (rightly)
+did not. One known cost: on a name that is both a type and a function
+(cline's `ClineFreeModelLimitError`, a class and a React component), a
+TypeScript type predicate `error is Name` is unexplained in both modes,
+where single-target used to call it a type position.
 
 The grep sweep itself has two safety caps: it stops reading raw grep
 output past 5,000 lines, and drops any single raw line over ~10,000

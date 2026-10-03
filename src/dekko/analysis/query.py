@@ -1191,12 +1191,15 @@ def _print_relation_json(
     if coverage:
         doc["coverage_warning"] = coverage
     doc.update(_ambiguous_json(index, sym, ambig_in, ambig_out))
-    if action == "callers" and not entries and not modules:
-        referenced = _referenced_entries(index, sym, sites)
-        if referenced:
-            doc["referenced_not_called"] = referenced
-        elif build_logic:
-            doc["build_script_warning"] = build_logic
+    referenced = (
+        _referenced_entries(index, sym, sites) if action == "callers" else []
+    )
+    if referenced:
+        kept_refs, ref_meter = _fit_entries(referenced, budget, limit)
+        doc["referenced_not_called"] = kept_refs
+        doc["referenced_meta"] = ref_meter.as_dict()
+    elif action == "callers" and not entries and not modules and build_logic:
+        doc["build_script_warning"] = build_logic
     print(json.dumps(doc, indent=2))
 
 
@@ -1307,18 +1310,20 @@ def _run_relation(
     for path in modules:
         lines += _module_rows(index, action, sym, path, sites)
     _print_ambiguous_notes(index, sym, ambig_in, ambig_out)
+    # A callback wired up by reference must not read as "nothing uses
+    # this" when calls_in is empty, and a reference beside real callers
+    # has no other command that lists it.
+    referenced = (
+        _referenced_rows(index, sym, sites) if action == "callers" else []
+    )
     if not lines:
-        referenced = (
-            _referenced_rows(index, sym, sites) if action == "callers" else []
-        )
         if referenced:
-            # A callback wired up by reference but never called (bug
-            # #2b) must not read as "nothing uses this" just because
-            # calls_in is empty.
-            print("referenced (not called):")
-            for row in referenced:
-                print(f"  {row}")
-            return EXIT_OK, None
+            return EXIT_OK, _emit_lines(
+                [f"  {row}" for row in referenced],
+                budget,
+                limit,
+                prefix=_REFERENCED_HEADER,
+            )
         print(_empty_relation_line(index, sym, action, ambig_in))
         _print_notes(coverage, build_logic)
         return EXIT_OK, None
@@ -1326,13 +1331,49 @@ def _run_relation(
     related_label = (
         ("callers" if action == "callers" else "callees") if sites else ""
     )
-    return EXIT_OK, _emit_lines(
+    meter = _emit_lines(
         lines,
         budget,
         limit,
         related_total=related_total,
         related_label=related_label,
     )
+    if referenced:
+        _print_referenced_after_callers(referenced, budget, limit)
+
+    return EXIT_OK, meter
+
+
+_REFERENCED_HEADER = "referenced (not called):"
+
+
+def _print_referenced_after_callers(
+    referenced: list[str], budget: int | None, limit: int
+) -> None:
+    """Print the value-reference section below the caller rows.
+
+    Capped like the callers; the footer that follows belongs to the
+    callers, so a cut here is disclosed on its own line.
+
+    Args:
+        referenced: ``_referenced_rows`` output.
+        budget: Token budget, or ``None``.
+        limit: Row cap.
+    """
+    kept, meter = fit_to_budget(
+        [f"  {row}" for row in referenced],
+        budget,
+        limit,
+        prefix=_REFERENCED_HEADER,
+    )
+    print(_REFERENCED_HEADER)
+    for row in kept:
+        print(row)
+    if meter.omitted:
+        print(
+            f"  ({meter.omitted} of {meter.total} references omitted · "
+            f"raise --{meter.truncated_by})"
+        )
 
 
 def _peer_relevance_key(
@@ -2665,7 +2706,8 @@ def _run_uses_not_found(index: MapIndex, target: str) -> int:
             f"dekko: '{target}' is an internal symbol, not an "
             "external reference — 'uses'/'find_usages' only "
             "covers out-of-repo names; try `query callers "
-            f"{target}` (or the `get_callers` tool) instead",
+            f"{target}` (or the `get_callers` tool), which lists its "
+            "callers and its value references",
             file=sys.stderr,
         )
         return EXIT_NOT_FOUND

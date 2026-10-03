@@ -28,18 +28,21 @@ A fourth mode, ``--all`` (``run_all()``), removes the human selection
 bias from the whole exercise: instead of one hand-picked ``target``,
 it runs the same callers/grep cross-check over *every* in-repo symbol
 with nonzero ``MapIndex.calls_in`` fan-in, deduping the expensive grep
-subprocess by bare name (classification depends only on
-``(root, bare_name)``, never on which symbol sharing that name is
-being checked — see ``_classify_grep_hits``, extracted so ``run()``
-and ``run_all()`` provably classify identically), and reports a triage
+subprocess by bare name (the shared classification depends only on
+facts about the bare name, ``_name_inputs``; what depends on which
+symbol sharing it is checked runs per symbol in
+``_apply_target_facts``, the same two functions ``run()`` calls, so
+the two modes classify identically), and reports a triage
 summary (an aggregate cause histogram plus the symbols with an
 unexplained miss) rather than a full per-symbol dump. Callers mode
 only — see ``run_all()``'s own docstring.
 
-In callers mode (single-target ``run()`` only, not ``--all``), a
-grep-only hit can also be classified ``CAUSE_LIKELY_EXTERNAL_COLLISION``
-when the target is a method, no other repo-defined symbol shares its
-bare name, and neither the hit's own line nor its file's top-of-file
+In callers mode, a grep-only hit that calls the name can also be
+classified ``CAUSE_LIKELY_EXTERNAL_COLLISION`` when the target is a
+method, no other repo-defined symbol shares its bare name, the shared
+ladder left the row unexplained or generic (a same-named local or a
+test file's own helper keeps its own cause), and neither the hit's
+own line nor its file's top-of-file
 imports mention the target's declaring type — the cheap, no-type-
 inference proxy for "this is almost certainly an unrelated external-
 library method sharing the name, not a real caller" (e.g. Java/AssertJ
@@ -236,7 +239,8 @@ CAUSE_TYPE_ANNOTATION = (
 # (path, line) as a value-reference edge to the target. Not a guess.
 CAUSE_VALUE_REFERENCE = (
     "passed or stored as a value, not called — dekko has this as a "
-    "reference (see: dekko query uses <target>)"
+    "reference (see: dekko query callers <target>, 'referenced (not "
+    "called)')"
 )
 # Tier 2: a line-shape match in a language whose spec has no
 # ``reference_query``. The label says it is a shape match and names
@@ -342,6 +346,16 @@ CAUSE_SELF_RECURSION = (
 # The resolver bound the name to that import; the line cannot reach
 # the target. The import's module or path rides on the row as
 # ``bound_to``, like ``resolved_to``.
+# Tier 1, per callable target: the name sits, without a call, inside
+# the target's own span: the function passing itself
+# (``setTimeout(doRefresh, ..)`` inside ``doRefresh``), a same-named
+# field (``self.blame`` inside ``fn blame``), its name in a message.
+# None of them can be a caller the map missed: even a real self
+# reference is never an edge.
+CAUSE_SELF_MENTION = (
+    "mention inside the symbol's own body, not a call — never a missed "
+    "caller (dekko records no self edges by design)"
+)
 CAUSE_IMPORT_BOUND_ELSEWHERE = (
     "this file imports a different declaration of the name (see "
     "bound_to) — the resolver bound the name to that import, not the "
@@ -2366,8 +2380,6 @@ def classify_miss(
     looks_like_import_member: bool = False,
     looks_like_type_annotation: bool = False,
     looks_like_local_binding_or_literal: bool = False,
-    likely_unrelated_external: bool = False,
-    looks_like_cross_file_collision: bool = False,
     in_leading_header_comment: bool = False,
     is_known_collision_name: bool = False,
     is_recorded_reference: bool = False,
@@ -2389,11 +2401,8 @@ def classify_miss(
 
     A pure function over one grep-matched line plus its context — no
     repo/grep I/O, so it's directly testable in isolation (the checks
-    that need file I/O or a repo-wide symbol-table lookup --
-    ``_looks_like_multiline_import_member``, the receiver-mismatch
-    heuristic behind ``likely_unrelated_external``, and the
-    ``symbols_by_name`` lookup behind
-    ``looks_like_cross_file_collision`` -- are computed by the caller
+    that need file I/O or a repo-wide symbol-table lookup, such as
+    ``_looks_like_multiline_import_member``, are computed by the caller
     and passed in rather than given to this function directly, to keep
     that contract). Checked in the order ``dekko-verify/SKILL.md`` lists
     its blind spots: a qualified-call syntax match is checked first
@@ -2417,18 +2426,9 @@ def classify_miss(
     block (a module-header comment naming several exports can sit far
     from any one of their definitions; not a call at all either way),
     then whether the file is in a language dekko can't parse at all,
-    then whether this hit is a call-shaped reference sitting in a file
-    that also holds a different, same-bare-named declaration (a
-    deterministic, repo-index-backed signal, stronger than the two
-    heuristics that follow; see ``looks_like_cross_file_collision``'s
-    own caller-side computation in ``run()``), then whether the caller's
-    own receiver-mismatch heuristic flagged this hit as likely an
-    unrelated external-library method sharing the target's bare name (a
-    same-named AssertJ/stdlib/third-party method colliding with the one
-    repo-defined candidate; see ``_receiver_mismatch``), then whether
-    it's a test file excluded by ``sanity``'s own default filtering,
-    then whether the target name is short/generic enough that dekko's
-    count should be read as directional rather than exact. A line
+    then whether it's a test file excluded by ``sanity``'s own default
+    filtering, then whether the target name is short/generic enough
+    that dekko's count should be read as directional rather than exact. A line
     matching none of these is reported as "unexplained" rather than
     forcing a guess that doesn't fit — avoiding false confidence from
     the classifier itself.
@@ -2440,8 +2440,11 @@ def classify_miss(
     between ``CAUSE_COMMENT_MENTION`` and ``CAUSE_COMMENT_ELSEWHERE``.
     ``is_recorded_reference`` comes next, exact and index-backed.
     ``looks_like_value_reference``, a shape heuristic, sits low: after
-    the unsupported-language check and before the cross-file-collision
-    one.
+    the unsupported-language check and before the test filter. The two
+    rungs that depend on which same-named symbol is the target (a call
+    in a file declaring a sibling, a receiver that shows no sign of the
+    target's type) left this ladder for ``_apply_target_facts``, so
+    both ``sanity`` modes classify a line from the same facts.
 
     Args:
         snippet: The grep-matched line's text.
@@ -2482,21 +2485,6 @@ def classify_miss(
             doesn't cover. Independent of, and OR'd with,
             ``near_own_definition`` in the ``CAUSE_COMMENT_MENTION``
             check below; never a guess made from inside this function.
-        looks_like_cross_file_collision: Whether this hit is call-shaped
-            (a qualified or bare call site) and sits in a file that
-            also holds a different symbol declaration sharing the
-            target's bare name -- a deterministic collision signal, not
-            a heuristic guess; computed by the caller from
-            ``MapIndex.symbols_by_name`` (see ``run()``'s
-            ``other_candidate_files``).
-        likely_unrelated_external: Whether the caller's own
-            receiver-mismatch gating (single-repo-candidate method
-            target, resolvable declaring type) held for this run *and*
-            ``_receiver_mismatch`` found no textual evidence of the
-            declaring type in this hit's line or file. Always ``False``
-            outside that gated scenario (see ``run()``'s own gating
-            computation) — never a guess made from inside this
-            function.
         is_known_collision_name: Whether ``bare_name`` has measurably
             collided 2+ ways somewhere in this repo's own call graph
             (``ambiguous.collision_names``) -- an additive signal to
@@ -2618,8 +2606,6 @@ def classify_miss(
         unsupported_language=unsupported_language,
         tests_excluded=tests_excluded,
         looks_like_value_reference=looks_like_value_reference,
-        looks_like_cross_file_collision=looks_like_cross_file_collision,
-        likely_unrelated_external=likely_unrelated_external,
         is_known_collision_name=is_known_collision_name,
     )
 
@@ -2717,8 +2703,6 @@ def _classify_miss_remaining(
     unsupported_language: bool,
     tests_excluded: bool,
     looks_like_value_reference: bool,
-    looks_like_cross_file_collision: bool,
-    likely_unrelated_external: bool,
     is_known_collision_name: bool = False,
 ) -> str:
     """The back half of ``classify_miss``'s ladder -- split out purely
@@ -2732,10 +2716,6 @@ def _classify_miss_remaining(
         return CAUSE_UNSUPPORTED_LANGUAGE
     if looks_like_value_reference:
         return CAUSE_VALUE_REFERENCE_UNRESOLVED
-    if looks_like_cross_file_collision:
-        return CAUSE_CROSS_FILE_COLLISION
-    if likely_unrelated_external:
-        return CAUSE_LIKELY_EXTERNAL_COLLISION
     if tests_excluded and is_test_file:
         return CAUSE_TEST_FILTER
     if _is_generic_name(bare_name, is_known_collision_name):
@@ -3143,30 +3123,174 @@ def _is_self_recursion(
     )
 
 
+# The trailing rungs the cross-file-collision fact used to outrank in
+# the shared ladder; it re-decides only these.
+_BELOW_COLLISION_CAUSES = frozenset(
+    {CAUSE_TEST_FILTER, CAUSE_GENERIC_NAME, CAUSE_UNEXPLAINED}
+)
+# The rows the receiver-mismatch fact may re-decide: never a test file's
+# own helper (the test filter's) or a same-named local.
+_RECEIVER_MISMATCH_CAUSES = frozenset({CAUSE_GENERIC_NAME, CAUSE_UNEXPLAINED})
+# The receiver check reads "the file never names the declaring type" as
+# "the receiver isn't that type", which holds only where an import
+# names a type. A C/C++ ``#include`` names a file, so a real
+# ``shape->AddDim(..)`` miss read as a library method; Rust hits were
+# closures and locals. Each grammar maps to its family: a hit in
+# another family (a Python docstring naming a C++ method) is never a
+# call of the target at all, whatever its receiver.
+_RECEIVER_FAMILIES = {
+    "java": "jvm",
+    "kotlin": "jvm",
+    "scala": "jvm",
+    "typescript": "js",
+    "tsx": "js",
+    "javascript": "js",
+    "python": "python",
+    "csharp": "csharp",
+}
+
+
+def _in_own_span(
+    symbols_by_path: dict[str, list[Symbol]],
+    sym: Symbol,
+    loc: tuple[str, int],
+) -> bool:
+    """Whether ``loc`` sits inside ``sym``'s own span."""
+    chain = _enclosing_chain(symbols_by_path.get(loc[0], []), loc[1])
+    return any(s.id == sym.id for s in chain)
+
+
+def _calls_name(snippet: str, bare_name: str) -> bool:
+    """Whether the line calls ``bare_name``, bare or on a receiver."""
+    return (
+        re.search(
+            _BARE_CALL_TEMPLATE.format(name=re.escape(bare_name)), snippet
+        )
+        is not None
+    )
+
+
+def _looks_call_shaped(snippet: str, bare_name: str) -> bool:
+    """A qualified or bare call of ``bare_name`` on the line."""
+    return (
+        _looks_qualified_call(snippet, bare_name)
+        or re.search(
+            _BARE_CALL_TEMPLATE.format(name=re.escape(bare_name)), snippet
+        )
+        is not None
+    )
+
+
+def _same_receiver_family(target_path: str, hit_path: str) -> bool:
+    """Whether a hit's file is in the target's language family and that
+    family's imports name types (``_RECEIVER_FAMILIES``)."""
+    family = _RECEIVER_FAMILIES.get(_grammar_for_path(target_path) or "")
+
+    return family is not None and family == _RECEIVER_FAMILIES.get(
+        _grammar_for_path(hit_path) or ""
+    )
+
+
+@dataclass(frozen=True)
+class _TargetFacts:
+    """What the per-target rungs need to know about the target."""
+
+    sym: Symbol
+    other_decl_files: frozenset[str]
+    declaring_type: str | None
+
+
+def _target_facts(index: MapIndex, sym: Symbol) -> _TargetFacts:
+    """The target-dependent inputs: the files of every *other*
+    same-named declaration, and the gated declaring type."""
+    return _TargetFacts(
+        sym=sym,
+        other_decl_files=frozenset(
+            s.path
+            for s in index.symbols_by_name.get(sym.name, [])
+            if s.path != sym.path or s.start_line != sym.start_line
+        ),
+        declaring_type=_resolve_declaring_type(index, sym),
+    )
+
+
+def _self_cause(
+    index: MapIndex, sym: Symbol, loc: tuple[str, int], snippet: str
+) -> str | None:
+    """A recursive call, or (callable targets) a mention, inside the
+    target's own span. A type's span holds methods that are callers of
+    their own, so a type gets only the call rung, as before."""
+    if _is_self_recursion(index.symbols_by_path, sym, loc, snippet):
+        return CAUSE_SELF_RECURSION
+    if sym.kind not in TYPE_KINDS and _in_own_span(
+        index.symbols_by_path, sym, loc
+    ):
+        return CAUSE_SELF_MENTION
+
+    return None
+
+
+def _shape_target_cause(
+    root: Path,
+    facts: _TargetFacts,
+    loc: tuple[str, int],
+    snippet: str,
+    cause: str,
+) -> str | None:
+    """The two line-shape rungs that depend on the target: a call in a
+    file declaring a same-named sibling, then a method call whose
+    receiver shows no sign of the target's declaring type."""
+    name = facts.sym.name
+    if (
+        cause in _BELOW_COLLISION_CAUSES
+        and loc[0] in facts.other_decl_files
+        and _looks_call_shaped(snippet, name)
+    ):
+        return CAUSE_CROSS_FILE_COLLISION
+    if (
+        facts.declaring_type is not None
+        and cause in _RECEIVER_MISMATCH_CAUSES
+        and _same_receiver_family(facts.sym.path, loc[0])
+        and _calls_name(snippet, name)
+        and _receiver_mismatch(
+            root,
+            GrepHit(path=loc[0], line=loc[1], snippet=snippet),
+            facts.declaring_type,
+            facts.sym.path,
+        )
+    ):
+        return CAUSE_LIKELY_EXTERNAL_COLLISION
+
+    return None
+
+
 def _apply_target_facts(
     causes: dict[tuple[str, int], str],
     index: MapIndex,
     sym: Symbol | None,
     locs: Iterable[tuple[str, int]],
     snippets: dict[tuple[str, int], str],
+    root: Path,
 ) -> dict[tuple[str, int], str]:
-    """The per-target tier-1 facts, applied after the resolved-elsewhere
+    """The per-target rungs, applied after the resolved-elsewhere
     relabel: a heritage clause naming the target (overrides any shape
-    cause), then, on rows the ladder left in ``_REMAINING_CAUSES``, a
-    recursive self-call and an import binding the name elsewhere.
+    cause), then, on rows the shared ladder left in
+    ``_REMAINING_CAUSES``, in order: a recursive call or mention inside
+    the target's own body, an import binding the name elsewhere, a
+    call in a file declaring a same-named sibling, and a method call
+    whose receiver shows no sign of the target's type.
 
     Per target because the same line is a plain call for a same-named
-    sibling; decided here, beside ``_apply_resolved_elsewhere``, never
-    in the shared classification. ``sym`` is ``None`` in ``--usages``
-    mode, which has no target symbol and gets nothing.
+    sibling; both modes run exactly this. ``sym`` is ``None`` in
+    ``--usages`` mode, which has no target symbol and gets nothing.
 
     Args:
         causes: The classified rows, relabelled in place.
         index: The query index.
         sym: The target symbol, or ``None``.
         locs: The grep-only ``(path, line)`` locations.
-        snippets: ``loc`` → the grep line's text, for the self-call
-            shape check.
+        snippets: ``loc`` → the grep line's text.
+        root: Repo root, for the receiver check's file read.
 
     Returns:
         ``loc`` → the import source a row was bound to, for every row
@@ -3180,18 +3304,24 @@ def _apply_target_facts(
     for loc in _heritage_sites(index, sym):
         if loc in causes and causes[loc] != CAUSE_NOT_MAPPED:
             causes[loc] = CAUSE_HERITAGE
+    facts = _target_facts(index, sym)
     for loc in locs:
-        if causes.get(loc) not in _REMAINING_CAUSES:
+        cause = causes.get(loc)
+        if cause not in _REMAINING_CAUSES:
             continue
-        if _is_self_recursion(
-            index.symbols_by_path, sym, loc, snippets.get(loc, "")
-        ):
-            causes[loc] = CAUSE_SELF_RECURSION
+        snippet = snippets.get(loc, "")
+        own = _self_cause(index, sym, loc, snippet)
+        if own is not None:
+            causes[loc] = own
             continue
         where = _import_bound_to(index, loc[0], sym.name, sym.path)
         if where is not None:
             causes[loc] = CAUSE_IMPORT_BOUND_ELSEWHERE
             bound[loc] = where
+            continue
+        shaped = _shape_target_cause(root, facts, loc, snippet, cause)
+        if shaped is not None:
+            causes[loc] = shaped
 
     return bound
 
@@ -3312,6 +3442,45 @@ def _apply_resolved_elsewhere(
     causes.update(_resolved_elsewhere_causes(index, sym, resolved))
 
     return resolved
+
+
+@dataclass(frozen=True)
+class _NameInputs:
+    """The facts about a bare name that both ``sanity`` modes classify
+    its grep hits from; see ``_classify_grep_hits`` for each field."""
+
+    own_def_locs: frozenset[tuple[str, int]]
+    ref_sites: frozenset[tuple[str, int]]
+    target_kinds: frozenset[str]
+    read_sites: frozenset[tuple[str, int]]
+    is_known_collision_name: bool
+
+
+def _name_inputs(
+    index: MapIndex, bare_name: str, collision_names: frozenset[str]
+) -> _NameInputs:
+    """Build the shared classification inputs for ``bare_name``.
+
+    One function for ``run()`` and the ``--all`` sweep, so the two
+    can't hand the classifier different facts.
+
+    Args:
+        index: The query index.
+        bare_name: The bare name.
+        collision_names: ``ambiguous.collision_names(index)``.
+
+    Returns:
+        The inputs.
+    """
+    symbols = index.symbols_by_name.get(bare_name, [])
+
+    return _NameInputs(
+        own_def_locs=frozenset((s.path, s.start_line) for s in symbols),
+        ref_sites=_reference_sites(index, symbols),
+        target_kinds=_name_kinds(index, bare_name),
+        read_sites=_read_sites(index, bare_name),
+        is_known_collision_name=bare_name in collision_names,
+    )
 
 
 def _name_kinds(index: MapIndex, bare_name: str) -> frozenset[str]:
@@ -3440,9 +3609,6 @@ def _classify_grep_hits(
     *,
     own_def_locs: frozenset[tuple[str, int]],
     tests_excluded: bool,
-    declaring_type: str | None = None,
-    declaring_path: str | None = None,
-    other_candidate_files: frozenset[str] = frozenset(),
     is_known_collision_name: bool = False,
     ref_sites: frozenset[tuple[str, int]] = frozenset(),
     target_kinds: frozenset[str] = frozenset(),
@@ -3453,69 +3619,42 @@ def _classify_grep_hits(
     """Classify every grep hit for ``bare_name`` outside
     ``own_def_locs``, once.
 
-    Extracted from ``run()``'s own per-hit classification block so
-    ``run()`` (single target) and ``run_all()`` (the ``--all`` sweep's
-    per-bare-name pass) provably run the *same* classification code,
-    not two implementations that can drift apart — see the module
-    docstring's ``--all`` paragraph. This is the whole point of the
-    ``--all`` feature: it exists to catch a classification-logic
-    regression like the old ``_looks_like_multiline_import_member`` bug,
-    and if this function's callers were allowed to diverge, a sweep
-    could pass cleanly on exactly that kind of bug.
+    The shared stage of both modes: every input is a fact about the
+    bare name (``_name_inputs``), never about which same-named symbol
+    is asked about, so ``run()`` and ``run_all()`` get the same causes
+    for the same hits. Whatever depends on the target is decided after
+    this, per target, in ``_apply_resolved_elsewhere`` and
+    ``_apply_target_facts``. This is the whole point of ``--all``: it
+    exists to catch a classification regression, and two diverging
+    paths could pass a sweep cleanly on exactly that kind of bug.
 
     Args:
         hits: Raw grep hits for ``bare_name`` (``sweep.hits``, before
             any dekko-side matching/diffing).
         bare_name: The bare identifier being searched for.
         root: Repo root, for ``_looks_like_multiline_import_member``'s
-            and ``_receiver_mismatch``'s one small file re-read.
+            one small file re-read.
         own_def_locs: Every same-bare-named symbol's own definition
-            line — excluded from classification entirely, matching
-            ``run()``'s existing "not a call site to explain either
-            way" treatment of a target's own definition.
+            line — excluded from classification entirely.
         tests_excluded: Whether the dekko-side query being compared
             against excluded test files by default.
-        declaring_type: The target's declaring type's own simple name,
-            when ``run()``'s receiver-mismatch gating held for this
-            run (single-repo-candidate method target with a resolvable
-            declaring type) — ``None`` otherwise (the default, and
-            always ``None`` from ``run_all()``'s sweep path, which
-            doesn't compute this gating).
-            When set, each hit is additionally checked with
-            ``_receiver_mismatch`` and the result threaded into
-            ``classify_miss`` as ``likely_unrelated_external``.
-        declaring_path: The declaring type's own file, when known —
-            forwarded to ``_receiver_mismatch`` so a hit inside that
-            same file (which never imports its own class) isn't
-            misflagged as a receiver mismatch.
-        other_candidate_files: Every file (besides the target's own)
-            holding a declaration of a different symbol sharing
-            ``bare_name`` — the deterministic cross-file-collision
-            signal (see ``run()``'s own computation). A hit whose file
-            is in this set *and* looks call-shaped
-            (``_looks_qualified_call`` or ``_BARE_CALL_TEMPLATE``) is
-            threaded into ``classify_miss`` as
-            ``looks_like_cross_file_collision``. Defaults to empty (the
-            existing, ungated behavior).
         is_known_collision_name: Whether ``bare_name`` is a member of
-            ``ambiguous.collision_names(query_index)`` -- a single
-            value per call (the same bare name for every hit in this
-            call), computed once by the caller and threaded into every
-            ``classify_miss`` call below.
-        ref_sites: ``_reference_sites`` for the target (``run()``) or
-            for every symbol sharing ``bare_name`` (``--all``). A hit
-            at one of these locations is ``is_recorded_reference``.
-            Empty by default, and always in ``--usages`` mode.
-        target_kinds: ``_name_kinds`` for ``bare_name`` (``--all``,
-            and ``run()`` for a type target or when every kind in it is
-            a type), else the target's own ``Symbol.kind``. A type's
-            own constructors count as the type. Gates the shape
-            heuristics in opposite directions,
-            both conservatively on a mixed group: Rust construction/
-            payload shapes and the Java/Kotlin type mention need
-            *every* kind in ``TYPE_KINDS``, the value-reference shape
-            needs *none* of them to be. Empty
-            (the default, and ``--usages`` mode) switches both off.
+            ``ambiguous.collision_names(query_index)``.
+        ref_sites: ``_reference_sites`` for every symbol sharing
+            ``bare_name``. A hit at one of these locations is
+            ``is_recorded_reference``; one that is a sibling's is
+            relabelled per target afterwards. Empty by default, and
+            always in ``--usages`` mode.
+        target_kinds: ``_name_kinds`` for ``bare_name``: a type's own
+            constructors count as the type. Gates the shape
+            heuristics in opposite directions, both conservatively on
+            a mixed group: Rust construction/payload shapes and the
+            Java/Kotlin type mention need *every* kind in
+            ``TYPE_KINDS``, the value-reference shape needs *none* of
+            them to be. Empty (the default, and ``--usages`` mode)
+            switches both off.
+        symbols_by_path: The query index's symbols per file, for the
+            enclosing-symbol and same-named-local checks.
         scope: The unfiltered map's test spans and file set (see
             ``_MapScope``). ``None`` falls back to path-only test
             classification and never reports a file as unmapped.
@@ -3624,21 +3763,6 @@ def _classify_grep_hits(
             in_leading_header_comment=(
                 _looks_like_comment_line(h.snippet, h.path)
                 and _in_leading_header_comment(root, h)
-            ),
-            looks_like_cross_file_collision=(
-                h.path in other_candidate_files
-                and (
-                    _looks_qualified_call(h.snippet, bare_name)
-                    or re.search(
-                        _BARE_CALL_TEMPLATE.format(name=re.escape(bare_name)),
-                        h.snippet,
-                    )
-                    is not None
-                )
-            ),
-            likely_unrelated_external=(
-                declaring_type is not None
-                and _receiver_mismatch(root, h, declaring_type, declaring_path)
             ),
             is_known_collision_name=is_known_collision_name,
             is_recorded_reference=is_recorded_reference,
@@ -4895,27 +5019,20 @@ def run(
     # The target symbol, for the per-target tier-1 facts
     # (``_apply_target_facts``); ``None`` in ``--usages`` mode.
     target_sym: Symbol | None = None
-    own_def_locs: frozenset[tuple[str, int]] = frozenset()
-    # Every file (besides the target's own) holding a declaration of a
-    # different symbol sharing the target's bare name -- the
-    # cross-file-collision signal. Callers mode only, same as
-    # ``own_def_locs`` (``--usages`` mode has no in-repo declaration to
-    # collide with).
-    other_candidate_files: frozenset[str] = frozenset()
-    # The receiver-mismatch heuristic's declaring-type name -- set only
-    # when every gating condition below holds (callers mode, a method
-    # target, exactly one repo-defined candidate for its bare name, and
-    # an unambiguous declaring-type lookup). ``None`` leaves
-    # ``_classify_grep_hits`` in its existing, ungated behavior.
+    # The bare name's shared classification inputs, the same ones the
+    # ``--all`` sweep builds. ``--usages`` mode has none: an external
+    # base identifier has no in-repo declaration, reference edge or
+    # kind.
+    inputs = _NameInputs(
+        own_def_locs=frozenset(),
+        ref_sites=frozenset(),
+        target_kinds=frozenset(),
+        read_sites=frozenset(),
+        is_known_collision_name=False,
+    )
+    # The receiver-mismatch gate's declaring type, for the one-per-run
+    # banner; the rung itself runs in ``_apply_target_facts``.
     declaring_type: str | None = None
-    # The target's recorded value-reference sites and its kind, for
-    # ``_classify_grep_hits``'s value-reference and type-construction
-    # checks.
-    # Callers mode only, like everything above: an external base
-    # identifier has neither a reference edge nor a kind.
-    ref_sites: frozenset[tuple[str, int]] = frozenset()
-    read_sites: frozenset[tuple[str, int]] = frozenset()
-    target_kinds: frozenset[str] = frozenset()
     # The map's own attribution of every use of the bare name, for the
     # tier-1 resolved-elsewhere cause (``_resolved_elsewhere``). Callers
     # mode only, like everything above.
@@ -4936,42 +5053,10 @@ def run(
         bare_name = sym.name
         query_action = "callers"
         label = sym.id
-        # Every symbol sharing the target's bare name, not just the
-        # target itself -- a same-bare-named symbol's own definition
-        # line (e.g. an unrelated MetalRenderer.new_internal, when the
-        # query target is Editor.new_internal) is just as much "not a
-        # call site" as the target's own, and MapIndex.symbols_by_name
-        # already indexes every symbol by bare name repo-wide.
-        own_def_locs = frozenset(
-            (s.path, s.start_line)
-            for s in query_index.symbols_by_name.get(sym.name, [])
-        )
-        # Dekko already computes every same-bare-named symbol above (for
-        # ``own_def_locs``) -- the files holding any *other* one of them
-        # is the deterministic "genuine collision" signal
-        # ``_is_generic_name``'s length/word-list heuristic was standing
-        # in for by accident. Excludes the target's own declaration by
-        # (path, line), not just by path, so a same-file overload
-        # sharing the bare name still counts as "another candidate."
-        other_candidate_files = frozenset(
-            s.path
-            for s in query_index.symbols_by_name.get(sym.name, [])
-            if s.path != sym.path or s.start_line != sym.start_line
+        inputs = _name_inputs(
+            query_index, sym.name, ambiguous.collision_names(query_index)
         )
         declaring_type = _resolve_declaring_type(query_index, sym)
-        ref_sites = _reference_sites(query_index, [sym])
-        read_sites = _read_sites(query_index, sym.name)
-        # A type target, or a constructor of one, reads the type-shape
-        # rules off every symbol sharing the name, as ``--all`` does:
-        # a class's constructors count as the class, and a class whose
-        # name is also an unrelated method gets no type rule in either
-        # mode. Any other target keeps its own kind.
-        name_kinds = _name_kinds(query_index, sym.name)
-        target_kinds = (
-            name_kinds
-            if name_kinds <= TYPE_KINDS or sym.kind in TYPE_KINDS
-            else frozenset({sym.kind})
-        )
         attributed = _attributed_sites(query_index, sym.name)
         target_sym = sym
         try:
@@ -4985,7 +5070,7 @@ def run(
         return EXIT_GREP_FAILED
     grep_command = sweep.command_text
     grep_hits = sweep.hits
-    if own_def_locs:
+    if inputs.own_def_locs:
         # The target's own definition line -- and every other
         # same-bare-named symbol's own definition line -- always
         # contains the bare name and would otherwise show up as a
@@ -4995,7 +5080,7 @@ def run(
         # to explain, it's out of scope for a caller/uses cross-check
         # entirely.
         grep_hits = [
-            h for h in grep_hits if (h.path, h.line) not in own_def_locs
+            h for h in grep_hits if (h.path, h.line) not in inputs.own_def_locs
         ]
     # Disclose how many raw hits that filter removed, so the
     # buckets below reconcile against the ``grep:`` command printed
@@ -5010,29 +5095,14 @@ def run(
     grep_only_hits = [
         h for h in grep_hits if (h.path, h.line) not in dekko_set
     ]
-    tests_excluded = not include_tests
-    # Consulted only in callers mode -- there is no "candidate" concept
-    # for an external base identifier the way there is for a
-    # repo-defined symbol's bare name, so ``--usages`` mode never has a
-    # collision to report here.
-    is_known_collision_name = (
-        not usages and bare_name in ambiguous.collision_names(query_index)
-    )
     causes = _classify_grep_hits(
         grep_hits,
         bare_name,
         root,
-        own_def_locs=own_def_locs,
-        tests_excluded=tests_excluded,
-        declaring_type=declaring_type,
-        declaring_path=sym.path if declaring_type is not None else None,
-        other_candidate_files=other_candidate_files,
-        is_known_collision_name=is_known_collision_name,
-        ref_sites=ref_sites,
-        target_kinds=target_kinds,
+        tests_excluded=not include_tests,
         symbols_by_path=query_index.symbols_by_path,
         scope=_map_scope(index),
-        read_sites=read_sites,
+        **vars(inputs),
     )
     resolved = _apply_resolved_elsewhere(
         causes,
@@ -5047,6 +5117,7 @@ def run(
         target_sym,
         [(h.path, h.line) for h in grep_only_hits],
         {loc: h.snippet for loc, h in grep_by_loc.items()},
+        root,
     )
     grep_only_rows = [
         _grep_row(
@@ -5159,48 +5230,30 @@ def _group_fan_in_symbols(query_index: MapIndex) -> dict[str, list[Symbol]]:
 def _sweep_bare_name(
     root: Path,
     bare_name: str,
+    inputs: _NameInputs,
     *,
-    own_def_locs: frozenset[tuple[str, int]],
     tests_excluded: bool,
-    other_candidate_files: frozenset[str] = frozenset(),
-    is_known_collision_name: bool = False,
-    ref_sites: frozenset[tuple[str, int]] = frozenset(),
-    target_kinds: frozenset[str] = frozenset(),
     symbols_by_path: dict[str, list[Symbol]] | None = None,
     scope: _MapScope | None = None,
-    read_sites: frozenset[tuple[str, int]] = frozenset(),
 ) -> tuple[GrepSweepResult, dict[tuple[str, int], str]]:
     """One grep + classify pass for ``bare_name``, shared across every
     symbol in its fan-in group — the sweep's whole cost-saving
     mechanism (see module docstring's ``--all`` paragraph): grep and
     classification cost drops from O(symbols with fan-in) to O(unique
-    bare names among them).
+    bare names among them). Sharing is sound because the shared stage
+    reads only facts about the name (``_name_inputs``), the same ones
+    ``run()`` reads; every target-dependent rung runs per symbol in
+    ``_diff_symbol``.
 
     Args:
         root: Repo root, for the grep sweep and classifier's file I/O.
         bare_name: The bare identifier being swept.
-        own_def_locs: Every symbol's own definition line sharing
-            ``bare_name`` — excluded from classification entirely.
+        inputs: ``_name_inputs`` for ``bare_name``.
         tests_excluded: Whether the dekko-side query being compared
             against excluded test files by default.
-        other_candidate_files: Files holding a declaration of
-            ``bare_name`` — see ``_run_all_sweeps``'s own computation
-            for why this is the full declaration-file set here (not
-            "every file but one symbol's own," the way ``run()``
-            computes it), a deliberate simplification safe under the
-            ``--all`` sweep's shared-causes-per-bare-name design.
-        is_known_collision_name: Whether ``bare_name`` is a member of
-            ``ambiguous.collision_names(query_index)`` -- computed once
-            by ``run_all()`` and threaded through unchanged.
-        ref_sites: Recorded value-reference sites for *every* symbol
-            sharing ``bare_name`` -- same shared-causes simplification
-            as ``other_candidate_files``.
-        target_kinds: Kinds of every symbol sharing ``bare_name``; see
-            ``_classify_grep_hits`` for how a mixed group is handled.
+        symbols_by_path: The query index's symbols per file.
         scope: The unfiltered map's test spans and file set, built once
             by ``run_all()``; see ``_MapScope``.
-        read_sites: Recorded property-read sites of ``bare_name``
-            (``_read_sites``).
 
     Returns:
         ``(sweep, causes)``. ``causes`` is empty when ``sweep.error``
@@ -5215,16 +5268,12 @@ def _sweep_bare_name(
         sweep.hits,
         bare_name,
         root,
-        own_def_locs=own_def_locs,
         tests_excluded=tests_excluded,
-        is_known_collision_name=is_known_collision_name,
-        other_candidate_files=other_candidate_files,
-        ref_sites=ref_sites,
-        target_kinds=target_kinds,
         symbols_by_path=symbols_by_path,
         scope=scope,
-        read_sites=read_sites,
+        **vars(inputs),
     )
+
     return sweep, causes
 
 
@@ -5258,6 +5307,8 @@ def _diff_symbol(
     causes: dict[tuple[str, int], str],
     attributed: dict[tuple[str, int], set[str]] | None = None,
     snippets: dict[tuple[str, int], str] | None = None,
+    *,
+    root: Path,
 ) -> "_SymbolSweepResult | None":
     """Diff one symbol's own dekko-side callers hits against its bare
     name's shared classified grep hit set (``causes``).
@@ -5292,7 +5343,7 @@ def _diff_symbol(
     _apply_resolved_elsewhere(
         own, query_index, attributed or {}, sym, grep_only
     )
-    _apply_target_facts(own, query_index, sym, grep_only, snippets or {})
+    _apply_target_facts(own, query_index, sym, grep_only, snippets or {}, root)
     grep_only_causes = [own[loc] for loc in grep_only]
 
     return _SymbolSweepResult(
@@ -5463,42 +5514,13 @@ def _run_all_sweeps(
     def _sweep_one(
         name: str,
     ) -> tuple[str, GrepSweepResult, dict[tuple[str, int], str]]:
-        symbols_for_name = query_index.symbols_by_name.get(name, [])
-        own_def_locs = frozenset(
-            (s.path, s.start_line) for s in symbols_for_name
-        )
-        # Unlike ``run()`` (one target symbol per call, so "other than
-        # the target's own file" is well-defined), one bare-name sweep
-        # here is shared across every fan-in symbol sharing ``name``
-        # (see ``_diff_symbol``), so there's no single "target" to
-        # exclude a file for -- using the full declaration-file set is
-        # the closest safe approximation. Only meaningful with >= 2
-        # distinct symbols: with exactly one declaration total, that
-        # lone file is by definition every diffed symbol's *own* file,
-        # not "a different, same-named declaration elsewhere" --
-        # flagging a genuine same-file resolver miss as a cross-file
-        # collision purely because its own declaration happens to live
-        # in a declaration file would be a real false positive (caught
-        # by this fix's own test coverage), not the narrow, accepted
-        # kind of over-classification the module's other heuristics
-        # allow.
-        other_candidate_files = (
-            frozenset(s.path for s in symbols_for_name)
-            if len(symbols_for_name) >= 2
-            else frozenset()
-        )
         sweep, causes = _sweep_bare_name(
             root,
             name,
-            own_def_locs=own_def_locs,
+            _name_inputs(query_index, name, collision),
             tests_excluded=tests_excluded,
-            other_candidate_files=other_candidate_files,
-            is_known_collision_name=name in collision,
-            ref_sites=_reference_sites(query_index, symbols_for_name),
-            target_kinds=_name_kinds(query_index, name),
             symbols_by_path=query_index.symbols_by_path,
             scope=scope,
-            read_sites=_read_sites(query_index, name),
         )
         return name, sweep, causes
 
@@ -5532,6 +5554,7 @@ def _diff_all_symbols(
     groups: dict[str, list[Symbol]],
     names: list[str],
     sweeps: dict[str, tuple[GrepSweepResult, dict[tuple[str, int], str]]],
+    root: Path,
 ) -> list[_SymbolSweepResult]:
     """Diff every fan-in symbol across ``names`` against its bare
     name's already-classified, shared grep sweep (see ``_diff_symbol``)."""
@@ -5542,7 +5565,7 @@ def _diff_all_symbols(
         snippets = {(h.path, h.line): h.snippet for h in sweep.hits}
         for sym in groups[name]:
             diffed = _diff_symbol(
-                query_index, sym, causes, attributed, snippets
+                query_index, sym, causes, attributed, snippets, root=root
             )
             if diffed is not None:
                 results.append(diffed)
@@ -5633,7 +5656,7 @@ def run_all(
         print(f"dekko: {sweep_error}", file=sys.stderr)
         return EXIT_GREP_FAILED
 
-    results = _diff_all_symbols(query_index, groups, names, sweeps)
+    results = _diff_all_symbols(query_index, groups, names, sweeps, root)
 
     aggregate_causes: Counter = Counter()
     for r in results:
