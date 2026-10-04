@@ -227,6 +227,139 @@ def test_prompt_submit_dedups_files_already_read(
     assert hooks._relevant_files(index, task, view) == []
 
 
+def _late_definition_repo() -> dict[str, str]:
+    """``engine.py`` defines ``generateBones`` after ten constants."""
+    consts = "".join(f"CONST_{i} = {i}\n" for i in range(10))
+    return {
+        "src/engine.py": (
+            '"""Companion generation."""\n'
+            f"{consts}"
+            "def generateBones() -> None:\n    pass\n"
+        ),
+        "src/verify.py": (
+            '"""Show the bones a user ID produces."""\n'
+            "def show() -> None:\n    pass\n"
+        ),
+        "src/other.py": (
+            '"""Unrelated helpers."""\n'
+            "def bones_count() -> None:\n    pass\n"
+            "def roll() -> None:\n    pass\n"
+        ),
+        "tests/test_engine.py": ("def generateBones() -> None:\n    pass\n"),
+    }
+
+
+def _prompt_lines(root: Path, prompt: str) -> list[str] | None:
+    out = hooks.prompt_submit({"cwd": str(root), "prompt": prompt})
+    if out is None:
+        return None
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    return [ln.strip() for ln in ctx.splitlines()[2:-1]]
+
+
+def test_prompt_submit_pins_file_defining_a_named_symbol(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # The name sits past the file's sampled names, so word overlap
+    # alone never reaches it; the exact name must pin the file first.
+    root = make_mapped_repo(_late_definition_repo())
+    lines = _prompt_lines(root, "who calls generateBones?")
+    assert lines is not None
+    assert lines[0] == "src/engine.py (defines generateBones)"
+    # Production definition before the test-file one.
+    assert lines[1] == "tests/test_engine.py (defines generateBones)"
+    assert lines.count("src/engine.py (defines generateBones)") == 1
+    assert "src/engine.py" not in lines  # not repeated by the fill
+
+
+def test_prompt_submit_plain_word_does_not_pin(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_late_definition_repo())
+    # Unquoted, the word only ranks lexically: listed, but not pinned.
+    assert _prompt_lines(root, "please roll it") == ["src/other.py"]
+    lines = _prompt_lines(root, "please `roll` it")
+    assert lines == ["src/other.py (defines roll)"]
+    assert _prompt_lines(root, "call roll() here") == [
+        "src/other.py (defines roll)"
+    ]
+
+
+def test_prompt_submit_qualified_name_pins_matching_qualname(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            "src/a.py": "class Alpha:\n    def run(self) -> None:\n"
+            "        pass\n",
+            "src/b.py": "class Beta:\n    def run(self) -> None:\n"
+            "        pass\n",
+        }
+    )
+    lines = _prompt_lines(root, "trace Beta.run please")
+    assert lines is not None
+    assert lines[0] == "src/b.py (defines Beta.run)"
+    assert "src/a.py (defines Beta.run)" not in lines
+
+
+def test_prompt_submit_dotted_filename_does_not_pin(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo({"src/ts.py": "def ts() -> None:\n    pass\n"})
+    lines = _prompt_lines(root, "look at server.ts e.g. now") or []
+    assert not any("defines" in ln for ln in lines)
+
+
+def test_prompt_submit_skips_pinned_file_already_read(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_late_definition_repo())
+    index = load_map(root)
+    assert index is not None
+    view = ledger.LedgerView()
+    view.files["src/engine.py"] = ledger.FileState(
+        "src/engine.py", fully_read=True
+    )
+    paths, lines = hooks._pinned_files(index, "generateBones", view, 5)
+    assert paths == ["tests/test_engine.py"]
+    assert lines == ["  tests/test_engine.py (defines generateBones)"]
+
+
+def test_prompt_submit_trailer_when_definitions_exceed_cap(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(
+        {
+            f"src/m{i}.py": "def load_all() -> None:\n    pass\n"
+            for i in range(4)
+        }
+    )
+    index = load_map(root)
+    assert index is not None
+    paths, lines = hooks._pinned_files(
+        index, "load_all", ledger.LedgerView(), 2
+    )
+    assert len(paths) == 2
+    assert lines[-1] == (
+        "  ... 2 more define load_all: `dekko query symbol load_all`"
+    )
+
+
+def test_code_tokens_shapes() -> None:
+    tokens = hooks._code_tokens(
+        "Fix parseInput and MAX_LEVEL, call run(), see `go`, "
+        "Foo::bar and Foo#baz. Then Companion and __init__."
+    )
+    assert tokens == [
+        "parseInput",
+        "MAX_LEVEL",
+        "run",
+        "go",
+        "Foo::bar",
+        "Foo#baz",
+    ]
+
+
 def test_adaptive_top_shrinks_as_budget_fills() -> None:
     fresh = ledger.LedgerView(consumed_tokens=0)
     full = ledger.LedgerView(consumed_tokens=hooks.SESSION_TOKEN_BUDGET)

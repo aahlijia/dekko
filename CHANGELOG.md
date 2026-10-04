@@ -9,6 +9,26 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.12] — 2026-10-04
+
+### Fixed
+- **The `prompt-submit` hook lists the file that defines a symbol the
+  prompt names.** A file was scored against its path, its doc line and
+  only its first 8 symbol names, so a function defined further down
+  was invisible: `who calls generateBones?` on a repo whose
+  `engine.ts` opens with constants listed three files that merely
+  mention "bones". Now a code-shaped identifier in the prompt
+  (camelCase, an inner underscore, `Foo.bar`/`Foo::bar`/`Foo#bar`,
+  `name(`, or anything in backticks) that exactly names a symbol puts
+  the defining file first, marked `(defines <name>)`, production files
+  before tests; word-relevant files fill the rest of the list. A plain
+  word never pins, a dotted filename like `server.ts` doesn't either,
+  and a name defined in more files than fit gets a `... N more define
+  <name>` line pointing at `dekko query symbol`. Asking `who calls
+  <name>?` for sampled names across seven real repos listed a defining
+  file 33-70% of the time before (33% on zed, 39% on tensorflow) and
+  100% after.
+
 ## [1.6.11] — 2026-10-03
 
 ### Fixed
