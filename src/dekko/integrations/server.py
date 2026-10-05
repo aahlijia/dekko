@@ -11,6 +11,7 @@ renderers under captured stdout/stderr so their output is returned in
 the tool result rather than leaking onto the protocol channel.
 """
 
+import difflib
 import io
 import json
 import sys
@@ -268,8 +269,25 @@ _TARGET_PARAM = {
     "find_type_usages": "type",
     "get_context_pack": "target",
     "outline": "target",
+    "workset": "symbol",
 }
 _TARGET_ALIASES = ("symbol", "name", "target", "type")
+
+# Arguments a handler honors that its input schema doesn't list. Each
+# schema property costs tokens in every session's tool list, so these
+# shared knobs stay off it, but calls that already pass them work and
+# must keep working when unknown arguments are rejected.
+_UNADVERTISED_ARGS: dict[str, tuple[str, ...]] = {
+    # ``query_symbol`` shares ``_relation_tool`` with the caller/callee
+    # tools, so it honors the same row and output knobs they do.
+    "query_symbol": ("include_tests", "limit", "sites", "budget"),
+    # Row cap shared by every ``_relation_tool`` tool.
+    "get_callers": ("limit",),
+    "get_callees": ("include_tests", "limit"),
+    # Row cap shared with the other relation tools.
+    "get_supertypes": ("limit",),
+    "get_subtypes": ("limit",),
+}
 
 
 def _as_int(key: str, raw: Any) -> int:
@@ -400,6 +418,70 @@ def _resolve_target_alias(tool_name: str, args: dict) -> dict:
     folded[primary] = next(iter(given.values()))
 
     return folded
+
+
+def _advertised_args(tool_name: str) -> list[str]:
+    """The argument names a tool's input schema lists, in schema order."""
+    schema = _TOOLS_BY_NAME[tool_name]["inputSchema"]
+    return list(schema.get("properties", {}))
+
+
+def _allowed_args(tool_name: str) -> set[str]:
+    """Every argument name a tool accepts.
+
+    That is its schema's properties, the target aliases when it takes a
+    target, and the honored-but-unadvertised knobs in
+    ``_UNADVERTISED_ARGS``.
+    """
+    allowed = set(_advertised_args(tool_name))
+    if tool_name in _TARGET_PARAM:
+        allowed.update(_TARGET_ALIASES)
+    allowed.update(_UNADVERTISED_ARGS.get(tool_name, ()))
+
+    return allowed
+
+
+def _reject_unknown_args(tool_name: str, args: dict) -> None:
+    """Raise ``ToolError`` for an argument the tool doesn't accept.
+
+    Handlers read only the keys they know, so a misnamed argument used
+    to be dropped silently and the call answered a different question
+    (``impacted_tests {"files": [..]}`` reported changes since the
+    default rev). A ``null`` value carries no intent and is ignored, the
+    same way it counts as absent for target aliases.
+
+    Raises:
+        ToolError: Naming every unknown argument and the tool's
+            advertised ones, with a "did you mean" for a near miss.
+    """
+    allowed = _allowed_args(tool_name)
+    unknown = [
+        k for k, v in args.items() if k not in allowed and v is not None
+    ]
+    if not unknown:
+        return
+    advertised = _advertised_args(tool_name)
+    names = ", ".join(f"'{k}'" for k in unknown)
+    noun = "argument" if len(unknown) == 1 else "arguments"
+    message = (
+        f"unknown {noun} {names} for {tool_name}; "
+        f"accepted: {', '.join(advertised) or '(none)'}"
+    )
+    hints = {
+        k: match[0]
+        for k in unknown
+        if (
+            match := difflib.get_close_matches(
+                k, sorted(allowed), n=1, cutoff=0.6
+            )
+        )
+    }
+    if len(unknown) == 1 and hints:
+        message += f"; did you mean '{hints[unknown[0]]}'?"
+    elif hints:
+        pairs = ", ".join(f"'{k}' -> '{v}'" for k, v in hints.items())
+        message += f"; did you mean {pairs}?"
+    raise ToolError(message)
 
 
 def _root_of(ctx: Context, args: dict) -> Path:
@@ -1669,6 +1751,7 @@ TOOLS: list[dict[str, Any]] = [
 _HANDLERS: dict[str, Callable[[Context, dict], str]] = {
     t["name"]: t["handler"] for t in TOOLS
 }
+_TOOLS_BY_NAME: dict[str, dict[str, Any]] = {t["name"]: t for t in TOOLS}
 
 _SUMMARY_URI = "dekko://summary"
 RESOURCES: list[dict[str, str]] = [
@@ -1769,6 +1852,7 @@ def _handle_tools_call(ctx: Context, req_id: Any, params: dict) -> dict:
     args = params.get("arguments") or {}
     try:
         args = _resolve_target_alias(name, args)
+        _reject_unknown_args(name, args)
         text = _with_default_root_note(ctx, args, handler(ctx, args))
         is_error = False
     except ToolError as exc:

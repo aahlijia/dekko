@@ -9,6 +9,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.19] — 2026-10-05
+
+### Fixed
+- **An MCP tool call with an argument the tool doesn't take is an
+  error, not a silent answer to a different question.** Handlers read
+  only the keys they know, so `impacted_tests {"files": [..]}` dropped
+  `files` and reported "no impacted tests" against the default rev,
+  and `get_callers {"symbol": .., "bogus": 1}` just succeeded. Now the
+  reply is `isError`, names every unknown argument, lists the ones the
+  tool advertises, and adds `did you mean 'symbol'?` for a near miss
+  like `symbl`. A `null` value is ignored, as it already is for target
+  aliases. Knobs some tools honor without listing them (`limit` on
+  `get_callers`, `include_tests` on `get_callees`, ...) stay accepted.
+  `workset` now takes `name`, `target` or `type` for its `symbol`,
+  like every other target tool.
+
 ## [1.6.18] — 2026-10-05
 
 ### Performance
