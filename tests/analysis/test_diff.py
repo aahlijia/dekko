@@ -422,13 +422,15 @@ def test_old_snapshot_disclosure_note_on_a_real_cache_miss(
 ) -> None:
     """End-to-end: a real ``dekko diff`` rev-cache miss at an explicit
     ``--jobs 1`` prints the note when the repo is (per a lowered
-    threshold) "large"; a rev-cache *hit* on a second identical call
-    prints nothing, since ``old_snapshot`` returns before
-    ``_maybe_warn_sequential`` is ever reached."""
+    threshold) "large" and the old side can't reuse the map's cached
+    resolution (the map has a file the rev doesn't); a rev-cache *hit*
+    on a second identical call prints nothing, since ``old_snapshot``
+    returns before ``_maybe_warn_sequential`` is ever reached."""
     monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
     root = _repo(tmp_path, BASE)
-    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
-    _commit_all(root, "change f")
+    (root / "c.py").write_text("def h() -> int:\n    return 2\n")
+    _commit_all(root, "add c")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
 
     sequential = ["diff", "HEAD~1", "--root", str(root), "--jobs", "1"]
     assert cli.main(sequential) == 1
@@ -438,6 +440,25 @@ def test_old_snapshot_disclosure_note_on_a_real_cache_miss(
 
     assert cli.main(["diff", "HEAD~1", "--root", str(root)]) == 1
     assert "single-threaded resolve" not in capsys.readouterr().err
+
+
+def test_old_side_reusing_cached_resolution_prints_no_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """When the old side reuses the map's cached resolution the wait is
+    short, so a "may take a while" note would be wrong."""
+    monkeypatch.setattr(diff, "_SEQUENTIAL_DISCLOSURE_THRESHOLD", 1)
+    root = _repo(tmp_path, BASE)
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+    _commit_all(root, "change f")
+    capsys.readouterr()
+
+    sequential = ["diff", "HEAD~1", "--root", str(root), "--jobs", "1"]
+    assert cli.main(sequential) == 1
+
+    assert "may take a while" not in capsys.readouterr().err
 
 
 def test_diff_rev_cache_hit_skips_reexport(
@@ -757,6 +778,59 @@ def test_stale_new_side_matches_a_cold_snapshot(
     _same_snapshot(reused, diff.snapshot(root, None, (), 1_000_000))
 
 
+def _scratch_old_snapshot(root: Path, rev: str) -> diff.Snapshot:
+    """The old side of ``rev`` built with no cache of any kind."""
+    old_root = root.parent / "scratch-export"
+    old_root.mkdir()
+    diff.export_rev(root, rev, old_root)
+    return diff.snapshot(
+        old_root,
+        None,
+        (),
+        1_000_000,
+        candidates=diff.tracked_at_rev(root, rev),
+    )
+
+
+@pytest.mark.parametrize("shape", ["unchanged", *sorted(EDITS)])
+def test_old_side_reusing_cached_resolution_matches_a_cold_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """The old side reuses the working tree's cached resolution for
+    an older rev, so the map is one commit ahead of the tree being
+    resolved. Whatever the plan decides, the old snapshot must equal
+    one resolved from scratch. An added file changes the path set,
+    which no plan can cover."""
+    (tmp_path / "repo").mkdir()
+    root = _repo(tmp_path / "repo", BASE)
+    for name, text in EDITS.get(shape, {}).items():
+        (root / name).write_text(text)
+    _git(root, "add", "-A")
+    _git(
+        root,
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "--allow-empty",
+        "-m",
+        shape,
+    )
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    plans = _spy_reuse(monkeypatch)
+
+    reused = diff.old_snapshot(
+        root, "HEAD~1", None, (), 1_000_000, lambda: cache_mod.load(root)
+    )
+
+    assert len(plans) == 1
+    assert (plans[0] is None) == (shape == "added_file")
+    if shape == "unchanged":
+        assert plans[0].dirty == frozenset()
+    _same_snapshot(reused, _scratch_old_snapshot(root, "HEAD~1"))
+
+
 def test_stale_new_side_writes_nothing(tmp_path: Path) -> None:
     """``diff``/``affected`` stay read-only: reusing the caches must
     not save them, or the map would stop matching its own caches."""
@@ -820,7 +894,9 @@ def test_both_sides_get_their_own_cache_over_one_load(
     assert new["cache"] is not None
     assert old["cache"] is not new["cache"]
     assert new["reuse_resolution"] is True
-    assert not old.get("reuse_resolution")
+    assert old["reuse_resolution"] is True
+    assert old["cache_root"] == root
+    assert new.get("cache_root") is None
     assert len(loads) == 1
 
 

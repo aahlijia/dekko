@@ -9,6 +9,26 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.13] — 2026-10-05
+
+### Fixed
+- **A cold `diff`, `affected` or `workset` no longer resolves the old
+  commit from scratch.** With no rev-cache entry, the old side exported
+  the rev and re-resolved every call in the repo, while the working
+  tree's `.dekko/` already held the resolution for a tree that was the
+  same commit or a few files off it. On tensorflow that was 186 s of a
+  239 s first `diff` on a dirty tree, and through the daemon it ran
+  past the client's 292 s wait, so the call failed with no output. The
+  old side now goes through the same reuse gate an incremental `map`
+  uses and re-resolves only what the difference can reach: 239 s to
+  69 s on tensorflow, 30 s to 13 s on zed. The gate still refuses a rev
+  that adds, removes or renames a file, changes a type, or has a
+  different `Cargo.toml`, tsconfig or workspace config, and those
+  resolve in full as before, with the same `no rev-cache` note. When
+  reuse engages the note no longer prints, since the wait is short.
+  The old side's symbols, callers, body hashes and imports are
+  identical either way.
+
 ## [1.6.12] — 2026-10-04
 
 ### Fixed

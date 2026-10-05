@@ -180,7 +180,9 @@ def _expand(table: list[str], files: dict[str, dict]) -> dict[str, dict]:
     return out
 
 
-def load(root: Path) -> dict[str, dict] | None:
+def load(
+    root: Path, config_root: Path | None = None
+) -> dict[str, dict] | None:
     """Load the prior run's per-file resolution, if it is still usable.
 
     Discards the cache outright when anything that could change what
@@ -198,7 +200,11 @@ def load(root: Path) -> dict[str, dict] | None:
     ``Cargo.toml`` turns its ``use``s from external to in-repo).
 
     Args:
-        root: Repository root.
+        root: Repository root whose ``.dekko/`` holds the cache.
+        config_root: The tree about to be resolved, whose config
+            digests must match the cached run's. Defaults to ``root``;
+            differs for a ``diff``'s old side, an exported rev that
+            reuses the working tree's cache.
 
     Returns:
         ``path -> {"hash", "edges", "ambiguous", "external"}``, or
@@ -217,7 +223,7 @@ def load(root: Path) -> dict[str, dict] | None:
         return None
     if doc.get("resolve_hash") != resolve_fingerprint():
         return None
-    if not _config_inputs_match(doc, root):
+    if not _config_inputs_match(doc, config_root or root):
         return None
     files = doc.get("files")
     table = doc.get("ids")
@@ -683,7 +689,10 @@ def _torn(
 
 
 def build_reuse(
-    root: Path, files: list[FileMap], cache: IncrementalCache
+    root: Path,
+    files: list[FileMap],
+    cache: IncrementalCache,
+    cache_root: Path | None = None,
 ) -> ResolveReuse | None:
     """Decide what cached resolution this run may reuse.
 
@@ -722,16 +731,25 @@ def build_reuse(
     repo. Otherwise every file not proven safe by the checks above is
     folded into ``dirty``.
 
+    None of these checks asks whether ``files`` is the tree the cache
+    was written for, only how it differs from it. So a different tree,
+    such as a ``diff``'s exported old rev, can reuse the working tree's
+    cache through ``cache_root``: near the map's own commit it differs
+    in a few files at most.
+
     Args:
-        root: Repository root.
+        root: Root of the tree being resolved. Its config digests are
+            the ones checked against the cached run.
         files: Every mapped file, freshly discovered this run.
         cache: This run's extraction cache, already populated by
             ``map_repository``.
+        cache_root: Repository root whose ``.dekko/`` holds the resolve
+            cache. Defaults to ``root``.
 
     Returns:
         A ``ResolveReuse``, or ``None`` to resolve everything.
     """
-    cached = load(root)
+    cached = load(cache_root or root, config_root=root)
     if cached is None:
         return None
 

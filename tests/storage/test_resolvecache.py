@@ -1190,3 +1190,56 @@ def test_rust_alias_edit_keeps_incremental_equal_to_full(
     edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
     pair = ("src/user.rs::use_it", "src/other.rs::Other.new")
     assert (pair in edges) == (target == "Other")
+
+
+# --- reusing another tree's cache --------------------------------------
+
+
+def _copy_sources(root: Path, dest: Path) -> Path:
+    """Copy ``root``'s files, minus ``.dekko/``, the way an export does."""
+    for path in root.rglob("*"):
+        rel = path.relative_to(root)
+        if rel.parts[0] == ".dekko" or not path.is_file():
+            continue
+        (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+        (dest / rel).write_bytes(path.read_bytes())
+    return dest
+
+
+def _build_from(
+    root: Path, cache_root: Path | None
+) -> resolver_mod.ResolveReuse | None:
+    """Plan for ``root`` over ``cache_root``'s two caches."""
+    cache = cache_mod.IncrementalCache(cache_mod.load(cache_root or root))
+    files, _ = repo_ops_map(root, cache)
+    return resolvecache.build_reuse(root, files, cache, cache_root=cache_root)
+
+
+def test_cache_root_supplies_the_cache_for_another_tree(
+    make_mapped_repo: RepoFactory, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """A diff's old side is an export with no ``.dekko/``; the cache
+    comes from the repo it was exported from."""
+    root = make_mapped_repo(RUST_CRATE_SRC)
+    other = _copy_sources(root, tmp_path_factory.mktemp("export"))
+
+    assert _build_from(other, None) is None
+    plan = _build_from(other, root)
+    assert plan is not None
+    assert plan.dirty == frozenset()
+
+
+def test_cache_root_checks_the_resolved_trees_config(
+    make_mapped_repo: RepoFactory, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """The config digests are the resolved tree's: a rev whose
+    ``Cargo.toml`` differs from the cached run's must miss."""
+    root = make_mapped_repo(RUST_CRATE_SRC)
+    other = _copy_sources(root, tmp_path_factory.mktemp("export"))
+    (other / "Cargo.toml").write_text(
+        RUST_CRATE_SRC["Cargo.toml"]
+        + '\n[dependencies]\nrodio = { path = "../rodio" }\n'
+    )
+
+    assert _build_from(other, root) is None
+    assert _build(root) is not None

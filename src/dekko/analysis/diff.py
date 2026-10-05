@@ -169,6 +169,7 @@ def snapshot(
     jobs: int = 1,
     reuse_resolution: bool = False,
     follow_symlinks: bool = False,
+    cache_root: Path | None = None,
 ) -> Snapshot:
     """Map a tree and capture its symbols, callers, and body hashes.
 
@@ -205,13 +206,18 @@ def snapshot(
             value (which allows ``0`` for "all cores").
         reuse_resolution: Also reuse ``root``'s cached call resolution
             for files the edit can't have affected, the way an
-            incremental ``dekko map`` does. Only valid for the working
-            tree whose ``.dekko/`` holds both caches, with ``cache``
-            loaded from it. Resolution is most of a snapshot's cost on
+            incremental ``dekko map`` does. ``cache`` must be loaded
+            from the ``.dekko/`` that holds the resolve cache (see
+            ``cache_root``). Resolution is most of a snapshot's cost on
             a large repo, so this is what makes a stale-map diff cheap.
             Nothing is saved.
         follow_symlinks: See ``walker.discover``; pass the map's own
             recorded setting so both sides discover what the map did.
+        cache_root: The repository whose resolve cache to reuse when
+            ``root`` is not that repository: a diff's old side, an
+            exported rev with no ``.dekko/`` of its own. Its slow-path
+            note is the rev-cache one, printed only when nothing can be
+            reused. ``None`` means ``root`` itself, the working tree.
     """
     files, _ = repo_ops.map_repository(
         root,
@@ -225,8 +231,13 @@ def snapshot(
     )
     reuse = None
     if reuse_resolution and cache is not None:
-        reuse = resolvecache.build_reuse(root, files, cache)
-        _maybe_warn_stale_new_side(len(files), reuse, jobs)
+        reuse = resolvecache.build_reuse(
+            root, files, cache, cache_root=cache_root
+        )
+        if cache_root is None:
+            _maybe_warn_stale_new_side(len(files), reuse, jobs)
+        elif reuse is None:
+            _maybe_warn_sequential(jobs, candidates)
     graph = resolve(files, workers=jobs, root=root, reuse=reuse)
     snap = Snapshot()
     all_syms: list[Symbol] = []
@@ -724,12 +735,17 @@ def _build_and_cache_old_snapshot(
     The old side gets its own ``IncrementalCache`` over the shared
     entries: its ``store()`` calls record old-rev content, which the
     new side's reuse plan would otherwise read as the current tree.
+
+    It also reuses the working tree's cached call resolution. The rev
+    is usually the commit the map was built at, so the old tree is the
+    cached tree or a few files off it, and the reuse gate only asks how
+    a file list differs from the cached one. Resolving it from scratch
+    was most of a cold ``diff`` on a large repo.
     """
     with tempfile.TemporaryDirectory(prefix="dekko-diff-") as tmp:
         old_root = Path(tmp)
         export_rev(root, target_rev, old_root)
         candidates = tracked_at_rev(root, target_rev)
-        _maybe_warn_sequential(jobs, candidates)
         old = snapshot(
             old_root,
             subpath,
@@ -738,7 +754,9 @@ def _build_and_cache_old_snapshot(
             cache=cache_mod.IncrementalCache(load_cache()),
             candidates=candidates,
             jobs=jobs,
+            reuse_resolution=True,
             follow_symlinks=follow_symlinks,
+            cache_root=root,
         )
     if sha is not None:
         revcache.save(root, sha, old)
@@ -854,6 +872,10 @@ def _maybe_warn_sequential(jobs: int, candidates: list[str] | None) -> None:
     ``render_lean.run`` already uses for its own budget-floor
     disclosure: a one-line ``note:`` to stderr, printed once, before
     the slow work starts -- no behavior change, purely additive.
+
+    Called only when the old side can't reuse the working tree's
+    cached call resolution. When it can, the wait is a few seconds
+    and a "may take a while" note would be wrong.
 
     Args:
         jobs: Resolved worker count about to be passed to

@@ -1737,6 +1737,14 @@ right after a commit or checkout: the old side would only rebuild
 what's already on disk, so both sides come from the current map, no
 old-side reparse runs, and no rev-cache entry is written.
 
+When the old side does have to be built, it reuses the working tree's
+cached call resolution for every file the difference between the rev
+and the last `dekko map` can't reach, the way an incremental `map`
+does. Against the map's own commit or a nearby one, that makes the
+first comparison cost about an incremental map instead of a full one.
+A rev that adds, removes or renames a file relative to the map, or
+changes a type, still resolves in full.
+
 On a stale map the current-tree side is the in-memory re-map described
 under the read commands above. The daemon keeps the last one it built
 and reuses it while the working tree holds the same content, so an
