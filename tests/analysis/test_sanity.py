@@ -3328,7 +3328,8 @@ def test_sanity_all_dedupes_grep_by_bare_name(
 
     def counting_run(*args: Any, **kwargs: Any) -> Any:
         nonlocal call_count
-        call_count += 1
+        if "helper" in args[0]:
+            call_count += 1
         return real_run(*args, **kwargs)
 
     monkeypatch.setattr(sanity.subprocess, "run", counting_run)

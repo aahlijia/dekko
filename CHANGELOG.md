@@ -9,6 +9,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.15] — 2026-10-05
+
+### Performance
+- **`sanity --all` walks the repo once instead of once per name.** It
+  ran a full `grep -rn` for every unique bare name, 2,000 by default,
+  so a sweep cost 2,000 walks: 879 s on spring-boot, and on zed it
+  never finished because an untracked 26 MB one-line cache file was
+  read and returned by nearly every grep. Now one `grep -rlI` lists
+  the text files in grep's walk order, one read of each file finds
+  which names it can hold, and each name's `grep -w -F` runs over only
+  those files, in that order. grep still decides every row, so the
+  rows, their order, the 5,000-line cap and `sanity <target>`'s output
+  are unchanged. A file with a line over 10,000 characters is matched
+  in-process once for all names, keeping its short rows and counting
+  the long ones as before. The prototype measured 10 s on spring-boot,
+  23 s on zed and 15 s on tensorflow for 2,000 names. If the one walk
+  fails, `--all` exits 2 as a failed per-name grep did.
+
 ## [1.6.14] — 2026-10-05
 
 ### Fixed

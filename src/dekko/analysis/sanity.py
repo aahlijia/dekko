@@ -32,7 +32,10 @@ subprocess by bare name (the shared classification depends only on
 facts about the bare name, ``_name_inputs``; what depends on which
 symbol sharing it is checked runs per symbol in
 ``_apply_target_facts``, the same two functions ``run()`` calls, so
-the two modes classify identically), and reports a triage
+the two modes classify identically). The repo is walked once for the
+whole sweep, and each name's grep runs over only the files that can
+hold it (``_plan_sweep``), with the same rows ``_run_grep`` returns.
+It reports a triage
 summary (an aggregate cause histogram plus the symbols with an
 unexplained miss) rather than a full per-symbol dump. Callers mode
 only — see ``run_all()``'s own docstring.
@@ -2790,11 +2793,30 @@ def _run_grep(root: Path, bare_name: str) -> GrepSweepResult:
         each field means, including the ``truncated``/
         ``skipped_pathological`` safety-cap disclosures.
     """
+    cmd = _grep_command(bare_name)
+    command_text = " ".join(cmd)
+    stdout, error = _run_grep_process(root, cmd)
+    if error is not None:
+        return GrepSweepResult([], command_text, error)
+
+    return _parse_grep_lines(stdout.splitlines(), command_text)
+
+
+def _grep_command(bare_name: str) -> list[str]:
+    """The single-target sweep's grep command for ``bare_name``."""
     cmd = ["grep", "-rn", "-I", "-w", "-F"]
     for d in _grep_exclude_dirs():
         cmd += ["--exclude-dir", d]
     cmd += ["--", bare_name, "."]
-    command_text = " ".join(cmd)
+    return cmd
+
+
+def _run_grep_process(root: Path, cmd: list[str]) -> tuple[str, str | None]:
+    """Run one grep under ``root``: ``(stdout, error)``.
+
+    ``error`` is ``None`` on exit 0 or 1 (grep's "no match") and a
+    message when grep is missing, times out, or exits with an error.
+    """
     try:
         result = subprocess.run(
             cmd,
@@ -2804,22 +2826,32 @@ def _run_grep(root: Path, bare_name: str) -> GrepSweepResult:
             timeout=_GREP_TIMEOUT,
         )
     except FileNotFoundError:
-        return GrepSweepResult(
-            [], command_text, "'grep' not found on this system"
-        )
+        return "", "'grep' not found on this system"
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return GrepSweepResult([], command_text, f"grep sweep failed: {exc}")
+        return "", f"grep sweep failed: {exc}"
     if result.returncode not in (0, 1):
         detail = result.stderr.strip() or f"exit {result.returncode}"
-        return GrepSweepResult(
-            [], command_text, f"grep sweep failed: {detail}"
-        )
-    raw_lines = result.stdout.splitlines()
+        return "", f"grep sweep failed: {detail}"
+
+    return result.stdout, None
+
+
+def _parse_grep_lines(
+    raw_lines: list[str | None],
+    command_text: str,
+) -> GrepSweepResult:
+    """Turn raw ``path:line:text`` grep lines into a sweep result.
+
+    Applies both safety caps: only the first ``_MAX_GREP_LINES`` raw
+    lines count, and a line longer than ``_PATHOLOGICAL_LINE_CHARS`` is
+    counted, not kept. ``None`` stands for a line already known to be
+    that long (the ``--all`` sweep's in-process rows).
+    """
     truncated = len(raw_lines) > _MAX_GREP_LINES
     hits: list[GrepHit] = []
     skipped_pathological = 0
     for raw in raw_lines[:_MAX_GREP_LINES]:
-        if len(raw) > _PATHOLOGICAL_LINE_CHARS:
+        if raw is None or len(raw) > _PATHOLOGICAL_LINE_CHARS:
             skipped_pathological += 1
             continue
         path, _, rest = raw.partition(":")
@@ -2829,6 +2861,7 @@ def _run_grep(root: Path, bare_name: str) -> GrepSweepResult:
         if path.startswith("./"):
             path = path[2:]
         hits.append(GrepHit(path=path, line=int(line_str), snippet=snippet))
+
     return GrepSweepResult(
         hits,
         command_text,
@@ -2836,6 +2869,191 @@ def _run_grep(root: Path, bare_name: str) -> GrepSweepResult:
         truncated=truncated,
         skipped_pathological=skipped_pathological,
     )
+
+
+# ``sanity --all`` once ran ``_run_grep`` per name: one full walk of the
+# repo per name, 2,000 walks by default, minutes on a large repo. The
+# sweep below walks once to learn which files can hold each name, then
+# runs the same whole-word grep over only those files. grep still
+# decides every row, and the files go in grep's own walk order, so the
+# rows, their order and where the line cap cuts all match ``_run_grep``.
+
+# Bytes of file paths per narrowed grep invocation, well under ARG_MAX.
+_GREP_ARG_BYTES = 200_000
+_TOKEN = re.compile(rb"[A-Za-z0-9_]+")
+_IDENTIFIER = re.compile(rb"[A-Za-z0-9_]+\Z")
+
+# A name's place in one file: ``None`` means hand the file to grep;
+# a list holds the rows already matched in-process (long-line files).
+_FileRows = list[str | None] | None
+
+
+@dataclass(frozen=True)
+class _SweepPlan:
+    """Which files each swept name can match, in grep's walk order.
+
+    Attributes:
+        files_by_name: Per name, ``(path, rows)`` in walk order; see
+            ``_FileRows``.
+        error: ``None``, or why the one walk could not run.
+    """
+
+    files_by_name: dict[str, list[tuple[str, _FileRows]]]
+    error: str | None = None
+
+
+def _grep_file_list(root: Path) -> tuple[list[str], str | None]:
+    """Every file a per-name grep could print from, in its walk order.
+
+    grep's own traversal with the same excludes and the same ``-I``
+    binary rule, listing each text file that has at least one line.
+    """
+    cmd = ["grep", "-rlI"]
+    for d in _grep_exclude_dirs():
+        cmd += ["--exclude-dir", d]
+    cmd += ["--", "", "."]
+    stdout, error = _run_grep_process(root, cmd)
+    if error is not None:
+        return [], error
+
+    return stdout.split("\n")[:-1], None
+
+
+def _has_long_line(data: bytes) -> bool:
+    # A byte count is never below the decoded character count, so this
+    # can only send an extra file in-process, never miss one grep would
+    # report as an over-long line.
+    if len(data) <= _PATHOLOGICAL_LINE_CHARS - 200:
+        return False
+    return max(map(len, data.split(b"\n"))) > _PATHOLOGICAL_LINE_CHARS - 200
+
+
+def _word_patterns(names: list[str]) -> dict[bytes, re.Pattern]:
+    """Whole-word patterns for names that are not plain identifiers."""
+    return {
+        b: re.compile(
+            rb"(?<![A-Za-z0-9_])" + re.escape(b) + rb"(?![A-Za-z0-9_])"
+        )
+        for b in (n.encode() for n in names)
+        if not _IDENTIFIER.match(b)
+    }
+
+
+def _names_in(
+    text: bytes,
+    plain: frozenset[bytes],
+    odd: dict[bytes, re.Pattern],
+    *,
+    whole_word: bool,
+) -> set[bytes]:
+    hit = set(_TOKEN.findall(text)) & plain
+    for b, rx in odd.items():
+        if rx.search(text) if whole_word else b in text:
+            hit.add(b)
+    return hit
+
+
+def _long_file_rows(
+    path: str,
+    data: bytes,
+    plain: frozenset[bytes],
+    odd: dict[bytes, re.Pattern],
+) -> dict[bytes, list[str | None]]:
+    """Match a file with an over-long line in-process, once for all names.
+
+    Each matched line becomes the raw line grep would print, split the
+    way ``_run_grep`` splits grep's output; a piece past the
+    pathological cap is kept as ``None`` so it is counted, not stored.
+    """
+    rows: dict[bytes, list[str | None]] = defaultdict(list)
+    for number, line in enumerate(data.split(b"\n"), 1):
+        hit = _names_in(line, plain, odd, whole_word=True)
+        if not hit:
+            continue
+        raw = f"{path}:{number}:" + line.decode("utf-8", "replace")
+        pieces = [
+            p if len(p) <= _PATHOLOGICAL_LINE_CHARS else None
+            for p in raw.splitlines()
+        ]
+        for b in hit:
+            rows[b].extend(pieces)
+    return rows
+
+
+def _plan_sweep(root: Path, names: list[str]) -> _SweepPlan:
+    """Walk once and read each file once to place every name's files.
+
+    The token test can only over-include a file (grep then finds
+    nothing in it), never leave out one grep would match.
+    """
+    files, error = _grep_file_list(root)
+    if error is not None:
+        return _SweepPlan({}, error)
+
+    plain = frozenset(
+        n.encode() for n in names if _IDENTIFIER.match(n.encode())
+    )
+    odd = _word_patterns(names)
+    by_name: dict[str, list[tuple[str, _FileRows]]] = defaultdict(list)
+    for path in files:
+        try:
+            data = (root / path).read_bytes()
+        except OSError:
+            continue
+        if _has_long_line(data):
+            for b, rows in _long_file_rows(path, data, plain, odd).items():
+                by_name[b.decode()].append((path, rows))
+            continue
+        for b in _names_in(data, plain, odd, whole_word=False):
+            by_name[b.decode()].append((path, None))
+
+    return _SweepPlan(dict(by_name))
+
+
+def _run_grep_planned(
+    root: Path,
+    bare_name: str,
+    files: list[tuple[str, _FileRows]],
+) -> GrepSweepResult:
+    """``_run_grep``'s result for ``bare_name``, grepping only ``files``.
+
+    ``command_text`` stays the single-target command, the one a reader
+    can rerun. Stops grepping once the line cap is past.
+    """
+    command_text = " ".join(_grep_command(bare_name))
+    raw_lines: list[str | None] = []
+    batch: list[str] = []
+    size = 0
+
+    def flush() -> str | None:
+        nonlocal size
+        if not batch:
+            return None
+        cmd = ["grep", "-nHI", "-w", "-F", "--", bare_name, *batch]
+        batch.clear()
+        size = 0
+        stdout, error = _run_grep_process(root, cmd)
+        raw_lines.extend(stdout.splitlines())
+        return error
+
+    for path, rows in files:
+        if len(raw_lines) > _MAX_GREP_LINES:
+            break
+        if rows is None:
+            batch.append(path)
+            size += len(path) + 1
+            if size < _GREP_ARG_BYTES:
+                continue
+        error = flush()
+        if error is not None:
+            return GrepSweepResult([], command_text, error)
+        if rows is not None:
+            raw_lines.extend(rows)
+    error = flush()
+    if error is not None:
+        return GrepSweepResult([], command_text, error)
+
+    return _parse_grep_lines(raw_lines, command_text)
 
 
 def _receiver_mismatch(
@@ -5235,6 +5453,7 @@ def _sweep_bare_name(
     tests_excluded: bool,
     symbols_by_path: dict[str, list[Symbol]] | None = None,
     scope: _MapScope | None = None,
+    sweep: GrepSweepResult | None = None,
 ) -> tuple[GrepSweepResult, dict[tuple[str, int], str]]:
     """One grep + classify pass for ``bare_name``, shared across every
     symbol in its fan-in group — the sweep's whole cost-saving
@@ -5254,6 +5473,8 @@ def _sweep_bare_name(
         symbols_by_path: The query index's symbols per file.
         scope: The unfiltered map's test spans and file set, built once
             by ``run_all()``; see ``_MapScope``.
+        sweep: The name's grep result when the caller already ran it
+            (``--all``'s planned sweep); ``None`` runs ``_run_grep``.
 
     Returns:
         ``(sweep, causes)``. ``causes`` is empty when ``sweep.error``
@@ -5261,7 +5482,8 @@ def _sweep_bare_name(
         empty ``causes`` as "no grep-only hits" rather than "the sweep
         itself failed."
     """
-    sweep = _run_grep(root, bare_name)
+    if sweep is None:
+        sweep = _run_grep(root, bare_name)
     if sweep.error is not None:
         return sweep, {}
     causes = _classify_grep_hits(
@@ -5497,10 +5719,17 @@ def _run_all_sweeps(
     tests_excluded: bool,
     workers: int,
     scope: _MapScope | None = None,
-) -> dict[str, tuple[GrepSweepResult, dict[tuple[str, int], str]]]:
+) -> tuple[
+    dict[str, tuple[GrepSweepResult, dict[tuple[str, int], str]]],
+    str | None,
+]:
     """Run one grep+classify sweep per unique bare name in ``names``,
     sequentially or via a thread pool sized by ``workers`` — see
     ``run_all``'s own docstring for why threads, not processes.
+
+    Each name greps only the files ``_plan_sweep`` placed it in. The
+    second item is the plan's own error (the one walk failed), in
+    which case no name is swept.
 
     ``ambiguous.collision_names(query_index)`` is computed exactly once
     here (not once per name in the loop below) and consulted per name
@@ -5509,6 +5738,10 @@ def _run_all_sweeps(
     ``collision_names`` itself is bounded by the map's own
     already-computed ambiguous-edge count, not by sweep size.
     """
+    plan = _plan_sweep(root, names)
+    if plan.error is not None:
+        return {}, plan.error
+
     collision = ambiguous.collision_names(query_index)
 
     def _sweep_one(
@@ -5521,6 +5754,9 @@ def _run_all_sweeps(
             tests_excluded=tests_excluded,
             symbols_by_path=query_index.symbols_by_path,
             scope=scope,
+            sweep=_run_grep_planned(
+                root, name, plan.files_by_name.get(name, [])
+            ),
         )
         return name, sweep, causes
 
@@ -5529,11 +5765,11 @@ def _run_all_sweeps(
         for name in names:
             _, sweep, causes = _sweep_one(name)
             sweeps[name] = (sweep, causes)
-        return sweeps
+        return sweeps, None
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for name, sweep, causes in pool.map(_sweep_one, names):
             sweeps[name] = (sweep, causes)
-    return sweeps
+    return sweeps, None
 
 
 def _first_sweep_error(
@@ -5643,7 +5879,7 @@ def run_all(
     names = all_names[:max_names] if names_truncated else all_names
 
     workers = repo_ops.resolve_workers(jobs)
-    sweeps = _run_all_sweeps(
+    sweeps, sweep_error = _run_all_sweeps(
         names,
         root,
         query_index,
@@ -5651,7 +5887,8 @@ def run_all(
         workers=workers,
         scope=_map_scope(index),
     )
-    sweep_error = _first_sweep_error(names, sweeps)
+    if sweep_error is None:
+        sweep_error = _first_sweep_error(names, sweeps)
     if sweep_error is not None:
         print(f"dekko: {sweep_error}", file=sys.stderr)
         return EXIT_GREP_FAILED

@@ -782,6 +782,18 @@ work `sanity <target>` already does, just amortized. `--jobs N`
 remaining per-name sweeps across a thread pool, since each is I/O-bound
 (waiting on a `grep` subprocess), not CPU-bound.
 
+The repo is walked only once per sweep. One `grep -rlI` lists every
+text file a per-name grep could print from, in grep's own walk order,
+and one read of each file finds which swept names it can contain.
+Each name's `grep -w -F` then runs over just those files, in that
+order, so its rows, their order and where the 5,000-line cap cuts are
+the same as `sanity <target>`'s. A file with a line over 10,000
+characters (a minified bundle, a one-line data file) is matched
+in-process instead, once for all names, keeping its short rows and
+counting the long ones the way the single-target sweep does. On
+spring-boot a 2,000-name sweep went from about 7 minutes of grep to
+about 10 seconds.
+
 Output is a triage summary, not a full per-symbol report: an aggregate
 histogram of grep-only causes across the whole sweep, then the symbols
 with a nonzero *unexplained* miss, sorted by count. Re-run `dekko
