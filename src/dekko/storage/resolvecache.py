@@ -55,15 +55,20 @@ from pathlib import Path
 from dekko.core.resolver import (
     ResolveReuse,
     alias_original_name,
+    cargo_fingerprint,
     cpp_scope_names,
     name_delta,
+    reexport_closure,
+    reexport_delta_names,
     resolve_fingerprint,
     resolved_id_name,
+    rust_renames,
     symbol_projection,
+    tsconfig_fingerprint,
     workspace_fingerprint,
 )
 from dekko.core.languages import spec_fingerprint
-from dekko.core.model import FileMap
+from dekko.core.model import FileMap, Import, RawHeritage
 from dekko.render.mapfile import (
     _callee_base,
     _json_dumps,
@@ -175,21 +180,31 @@ def _expand(table: list[str], files: dict[str, dict]) -> dict[str, dict]:
     return out
 
 
-def load(root: Path) -> dict[str, dict] | None:
+def load(
+    root: Path, config_root: Path | None = None
+) -> dict[str, dict] | None:
     """Load the prior run's per-file resolution, if it is still usable.
 
     Discards the cache outright when anything that could change what
     resolution *produces* has moved: the cache format, the dekko version,
     the extraction spec (different symbols in, different edges out),
     the resolver's own source (``resolve_fingerprint`` -- the extraction
-    spec hash says nothing about the resolution ladder), or the JS/TS
+    spec hash says nothing about the resolution ladder), the JS/TS
     workspace package table (``workspace_fingerprint`` -- a renamed
     ``package.json`` or edited ``workspaces`` glob changes which imports
     count as in-repo without touching a single source file, so neither
-    ``build_reuse``'s path-set check nor its symbol check would see it).
+    ``build_reuse``'s path-set check nor its symbol check would see it),
+    the tsconfig path-alias tables (``tsconfig_fingerprint`` -- an
+    edited ``paths`` entry changes which file an aliased import names),
+    or the Rust crate list (``cargo_fingerprint`` -- a crate added to a
+    ``Cargo.toml`` turns its ``use``s from external to in-repo).
 
     Args:
-        root: Repository root.
+        root: Repository root whose ``.dekko/`` holds the cache.
+        config_root: The tree about to be resolved, whose config
+            digests must match the cached run's. Defaults to ``root``;
+            differs for a ``diff``'s old side, an exported rev that
+            reuses the working tree's cache.
 
     Returns:
         ``path -> {"hash", "edges", "ambiguous", "external"}``, or
@@ -208,7 +223,7 @@ def load(root: Path) -> dict[str, dict] | None:
         return None
     if doc.get("resolve_hash") != resolve_fingerprint():
         return None
-    if doc.get("workspace_hash", "") != workspace_fingerprint(root):
+    if not _config_inputs_match(doc, config_root or root):
         return None
     files = doc.get("files")
     table = doc.get("ids")
@@ -219,6 +234,23 @@ def load(root: Path) -> dict[str, dict] | None:
     except (IndexError, KeyError, TypeError, ValueError):
         # A truncated or hand-edited cache is a cache miss, not a crash.
         return None
+
+
+def _config_inputs_match(doc: dict, root: Path) -> bool:
+    """Whether the cache's repo config digests match the repo's now.
+
+    Args:
+        doc: The loaded cache document.
+        root: Repository root.
+
+    Returns:
+        True when the workspace, tsconfig and Cargo digests all agree.
+    """
+    return (
+        doc.get("workspace_hash", "") == workspace_fingerprint(root)
+        and doc.get("tsconfig_hash", "") == tsconfig_fingerprint(root)
+        and doc.get("cargo_hash", "") == cargo_fingerprint(root)
+    )
 
 
 def save(
@@ -244,6 +276,8 @@ def save(
         "spec_hash": spec_fingerprint(),
         "resolve_hash": resolve_fingerprint(),
         "workspace_hash": workspace_fingerprint(root),
+        "tsconfig_hash": tsconfig_fingerprint(root),
+        "cargo_hash": cargo_fingerprint(root),
         "ids": table,
         "files": files,
     }
@@ -330,7 +364,10 @@ def _files_naming(
 
 
 def _files_importing(
-    files: list[FileMap], dirty: set[str], added_names: set[str]
+    files: list[FileMap],
+    dirty: set[str],
+    added_names: set[str],
+    changed_names: set[str] | frozenset[str] = frozenset(),
 ) -> set[str]:
     """Clean files whose own import could newly resolve via an alias.
 
@@ -344,6 +381,13 @@ def _files_importing(
     one produced a miss, is the cheap side of "over-invalidate, never
     under."
 
+    An *aliased* binding (``import { real as alias }``) is also at
+    risk when ``real`` merely changed: its call sites are written
+    ``alias(..)``, and when they resolve through the file the import
+    names (``resolver._OriginLookup``), a ``real`` appearing in or
+    leaving that file flips them while the cached entry names only
+    ``alias`` or whatever it resolved to before.
+
     Args:
         files: Every mapped file (fresh, current ``fm.imports`` --
             unaffected by the reuse gate, since imports are always
@@ -352,6 +396,8 @@ def _files_importing(
         added_names: ``NameDelta.newly_defined`` names to test against
             -- only a name with *no* prior candidates can flip an
             alias miss to a hit.
+        changed_names: ``NameDelta.changed`` names, tested against
+            aliased bindings only.
 
     Returns:
         Additional paths (disjoint from ``dirty``) whose cached entry
@@ -362,10 +408,136 @@ def _files_importing(
         if fm.path in dirty:
             continue
         for imp in fm.imports:
-            if alias_original_name(imp.source) in added_names:
+            original = alias_original_name(imp.source)
+            if original in added_names or (
+                original != imp.name and original in changed_names
+            ):
                 found.add(fm.path)
                 break
     return found
+
+
+_JS_LANGUAGES = frozenset({"javascript", "typescript", "tsx"})
+
+
+def _files_using(
+    files: list[FileMap], dirty: set[str], names: set[str]
+) -> set[str]:
+    """Clean JS/TS files that call or import one of ``names``.
+
+    ``_files_naming`` reads what a cached call resolved *to*. A call
+    that goes through a re-export can resolve to a symbol with another
+    name entirely (``Text`` to ``ThemedText``), so when what a name
+    leads to may have changed, the files are found by the name as
+    they wrote it: at a call site, or in an import (whose members,
+    ``Ns.name(..)``, are written under yet other names).
+
+    Args:
+        files: Every mapped file.
+        dirty: Paths already known dirty -- skipped.
+        names: The changed names, closed under renames (see
+            ``resolver.reexport_closure``).
+
+    Returns:
+        Additional paths (disjoint from ``dirty``) whose cached entry
+        must be discarded.
+    """
+    found: set[str] = set()
+    for fm in files:
+        if fm.path in dirty or fm.language not in _JS_LANGUAGES:
+            continue
+        if any(call.name in names for call in fm.calls) or any(
+            imp.name in names or alias_original_name(imp.source) in names
+            for imp in fm.imports
+        ):
+            found.add(fm.path)
+    return found
+
+
+def _rust_files_using(
+    files: list[FileMap], dirty: set[str], names: set[str]
+) -> set[str]:
+    """Clean Rust files that write one of ``names`` as a type or import.
+
+    Whether ``Name::new(..)`` can reach a repo symbol depends on
+    whether some ``use .. as Name`` exists anywhere in the repo
+    (``resolver._rust_unknown_type_path``) and what it renames
+    (``resolver._rust_rename_target``), and the call names ``new``,
+    not ``Name``. So the files are found by the receiver they wrote.
+
+    Args:
+        files: Every mapped file.
+        dirty: Paths already known dirty -- skipped.
+        names: The names whose renaming ``use`` was gained or lost.
+
+    Returns:
+        Additional paths (disjoint from ``dirty``) whose cached entry
+        must be discarded.
+    """
+    found: set[str] = set()
+    for fm in files:
+        if fm.path in dirty or not fm.path.endswith(".rs"):
+            continue
+        receivers = {
+            segment
+            for call in fm.calls
+            for segment in (call.receiver or "").split("::")
+        }
+        if receivers & names or any(imp.name in names for imp in fm.imports):
+            found.add(fm.path)
+    return found
+
+
+def _rust_renamed_delta(
+    fm: FileMap, old_imports: list[dict] | None
+) -> set[str]:
+    """Names one edited Rust file's renaming ``use``s gained or lost.
+
+    Args:
+        fm: The file as extracted now.
+        old_imports: Its cached import bindings, as dicts.
+
+    Returns:
+        The local names some ``use .. as Name`` bound before or binds
+        now, or binds to another original name now. Empty for a
+        non-Rust file.
+    """
+    if not fm.path.endswith(".rs"):
+        return set()
+    before = FileMap(
+        path=fm.path,
+        language=fm.language,
+        imports=[
+            Import(path=fm.path, name=d["name"], source=d["source"])
+            for d in old_imports or ()
+        ],
+    )
+    changed = rust_renames([before]) ^ rust_renames([fm])
+    return {name for name, _original in changed}
+
+
+def _rust_rename_dirty(
+    files: list[FileMap], cache: IncrementalCache, dirty: set[str]
+) -> set[str]:
+    """Clean Rust files a dirty file's renaming ``use`` edit invalidates.
+
+    Args:
+        files: Every mapped file.
+        cache: This run's extraction cache.
+        dirty: Paths already known dirty.
+
+    Returns:
+        Additional paths (disjoint from ``dirty``), see
+        ``_rust_files_using``.
+    """
+    renamed: set[str] = set()
+    for fm in files:
+        if fm.path in dirty:
+            renamed |= _rust_renamed_delta(fm, cache.old_imports(fm.path))
+    if not renamed:
+        return set()
+
+    return _rust_files_using(files, dirty, renamed)
 
 
 def _cpp_decl_names(entries: set[str]) -> set[str]:
@@ -381,6 +553,28 @@ def _cpp_decl_names(entries: set[str]) -> set[str]:
     for entry in entries:
         qualname = entry.rpartition("/")[0]
         names.add(qualname.replace("::", ".").rsplit(".", 1)[-1])
+    return names
+
+
+def _extended_names(clauses: list[RawHeritage] | list[dict]) -> set[str]:
+    """Bare names of the types that carry an ``extends`` clause.
+
+    Whether a class extends anything decides how a construction of it
+    is read (``resolver._constructed_by_count``), and the clause is not
+    part of the class's own symbol.
+
+    Args:
+        clauses: One file's heritage clauses, as ``RawHeritage``
+            objects or the plain dicts the extraction cache stores.
+
+    Returns:
+        The subtype names, empty for a file with no such clause.
+    """
+    names: set[str] = set()
+    for clause in clauses:
+        d = clause if isinstance(clause, dict) else vars(clause)
+        if d.get("subtype_id") and d.get("relation") == "extends":
+            names.add(resolved_id_name(d["subtype_id"]))
     return names
 
 
@@ -402,8 +596,9 @@ def _name_delta_dirty(
         Additional paths to fold into ``dirty``, or ``None`` when any
         dirty file's delta includes a type-kind name -- see
         ``resolver.NameDelta.blocks_reuse`` -- or changes its C/C++
-        ``using``-declarations or qualname scope names, and the caller
-        must fall back to a full resolve instead.
+        ``using``-declarations or qualname scope names, or gains or
+        loses a JS/TS star re-export, and the caller must fall back to
+        a full resolve instead.
     """
     changed: set[str] = set()
     newly_defined: set[str] = set()
@@ -424,6 +619,20 @@ def _name_delta_dirty(
         changed |= _cpp_decl_names(
             set(cache.old_cpp_decls(fm.path) or []) ^ set(fm.cpp_decls)
         )
+        # So does an ``extends`` clause gained or lost: it changes how
+        # a construction of that class resolves from any file.
+        changed |= _extended_names(
+            cache.old_heritage(fm.path) or []
+        ) ^ _extended_names(fm.heritage)
+        # And a JS/TS re-export or import binding gained, lost or
+        # re-pointed: it changes where a name leads from any file that
+        # imports it through this one.
+        passed_on = reexport_delta_names(
+            fm, cache.old_reexports(fm.path), cache.old_imports(fm.path)
+        )
+        if passed_on is None:
+            return None
+        changed |= passed_on
         # Whole-file compare first: cheaper than the grouped analysis
         # below, and this is the dominant agent-loop edit (a body edit,
         # a new call, a literal fix -- none of which touch any symbol's
@@ -438,9 +647,15 @@ def _name_delta_dirty(
 
     extra: set[str] = set()
     if changed:
-        extra |= _files_naming(cached, dirty, changed)
-    if newly_defined:
-        extra |= _files_importing(files, dirty, newly_defined)
+        reach = reexport_closure(files, changed)
+        extra |= _files_naming(cached, dirty, reach)
+        extra |= _files_using(files, dirty, reach)
+    if changed or newly_defined:
+        extra |= _files_importing(files, dirty, newly_defined, changed)
+    # A Rust ``use .. as Name`` gained or lost decides whether
+    # ``Name::f(..)`` can reach a repo symbol from any file.
+    extra |= _rust_rename_dirty(files, cache, dirty)
+
     return extra
 
 
@@ -474,7 +689,10 @@ def _torn(
 
 
 def build_reuse(
-    root: Path, files: list[FileMap], cache: IncrementalCache
+    root: Path,
+    files: list[FileMap],
+    cache: IncrementalCache,
+    cache_root: Path | None = None,
 ) -> ResolveReuse | None:
     """Decide what cached resolution this run may reuse.
 
@@ -513,16 +731,25 @@ def build_reuse(
     repo. Otherwise every file not proven safe by the checks above is
     folded into ``dirty``.
 
+    None of these checks asks whether ``files`` is the tree the cache
+    was written for, only how it differs from it. So a different tree,
+    such as a ``diff``'s exported old rev, can reuse the working tree's
+    cache through ``cache_root``: near the map's own commit it differs
+    in a few files at most.
+
     Args:
-        root: Repository root.
+        root: Root of the tree being resolved. Its config digests are
+            the ones checked against the cached run.
         files: Every mapped file, freshly discovered this run.
         cache: This run's extraction cache, already populated by
             ``map_repository``.
+        cache_root: Repository root whose ``.dekko/`` holds the resolve
+            cache. Defaults to ``root``.
 
     Returns:
         A ``ResolveReuse``, or ``None`` to resolve everything.
     """
-    cached = load(root)
+    cached = load(cache_root or root, config_root=root)
     if cached is None:
         return None
 

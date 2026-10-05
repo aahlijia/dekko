@@ -40,11 +40,14 @@ already maintains; dekko persists none of its own.
 """
 
 import json
+import re
 import shlex
 import sys
 from pathlib import Path
 
 from dekko import repo_ops
+from dekko.classify import is_test_path
+from dekko.core.model import Symbol
 from dekko.storage import ledger
 from dekko.analysis import ambiguous, outline, relevance, summary
 from dekko.render import mapfile, render_lean
@@ -76,6 +79,12 @@ PROMPT_TOP_FILES = 5
 READ_THRESHOLD = 1000
 # Symbol names sampled into a file's relevance text.
 _NAME_SAMPLE = 8
+# A prompt identifier, optionally qualified (``Foo.bar``, ``Foo::bar``,
+# ``Foo#bar``); a trailing sentence period is not a qualifier.
+_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*(?:(?:\.|::|#)[A-Za-z_$][\w$]*)*")
+_BACKTICK_RE = re.compile(r"`([^`\s]+)`")
+_CAMEL_RE = re.compile(r"[a-z0-9][A-Z]")
+_QUALIFIER_RE = re.compile(r"::|#|\.")
 
 # install-time map: our event name -> (Claude event, PreToolUse matcher).
 EVENTS: dict[str, tuple[str, str | None]] = {
@@ -196,14 +205,16 @@ def _adaptive_top(view: ledger.LedgerView) -> int:
 
 
 def _file_candidates(
-    index: MapIndex, view: ledger.LedgerView
+    index: MapIndex,
+    view: ledger.LedgerView,
+    skip: frozenset[str] = frozenset(),
 ) -> tuple[list[relevance.Candidate], dict[str, float]]:
     """Relevance candidates for files not already fully in context."""
     candidates: list[relevance.Candidate] = []
     centrality: dict[str, float] = {}
     for path in index.languages_by_path:
         state = view.files.get(path)
-        if state is not None and state.fully_read:
+        if path in skip or (state is not None and state.fully_read):
             continue  # dedup
         doc = index.docs_by_path.get(path) or ""
         names = " ".join(
@@ -217,14 +228,32 @@ def _file_candidates(
 
 
 def _relevant_files(
-    index: MapIndex, task: relevance.TaskContext, view: ledger.LedgerView
+    index: MapIndex,
+    task: relevance.TaskContext,
+    view: ledger.LedgerView,
+    *,
+    skip: frozenset[str] = frozenset(),
+    top: int | None = None,
 ) -> list[str]:
     """Top task-relevant, not-yet-read files, budget-scaled and gated.
 
     Only files the task actually matched (positive lexical relevance) are
     returned, so an unmatched prompt produces no nudge at all.
+
+    Args:
+        index: The loaded map.
+        task: The prompt's task context.
+        view: The session ledger, for dedup and budget scaling.
+        skip: Paths already listed some other way.
+        top: Most files to return; the budget-scaled default when
+            ``None``.
     """
-    candidates, centrality = _file_candidates(index, view)
+    if top is None:
+        top = _adaptive_top(view)
+    if top <= 0:
+        return []
+
+    candidates, centrality = _file_candidates(index, view, skip)
     if not candidates:
         return []
     rel = relevance.LexicalScorer().score(task, candidates)
@@ -235,11 +264,98 @@ def _relevant_files(
         task, matched, {c.id: centrality[c.id] for c in matched}
     )
     ranked = sorted(matched, key=lambda c: (-scores[c.id], c.id))
-    return [c.id for c in ranked[: _adaptive_top(view)]]
+    return [c.id for c in ranked[:top]]
+
+
+def _code_tokens(prompt: str) -> list[str]:
+    """Identifiers in a prompt that are written like code, in order.
+
+    A plain word (``parse``, ``Companion``) is left out so English never
+    pins a file: a token counts only when it is backticked, followed by
+    ``(``, has an inner lower-to-upper case change, an inner underscore,
+    or a ``.``/``::``/``#`` qualifier.
+    """
+    quoted = set(_BACKTICK_RE.findall(prompt))
+    tokens: dict[str, None] = {}
+    for match in _IDENT_RE.finditer(prompt):
+        token = match.group(0)
+        called = prompt[match.end() : match.end() + 1] == "("
+        if (
+            token in quoted
+            or called
+            or _CAMEL_RE.search(token)
+            or "_" in token.strip("_")
+            or _QUALIFIER_RE.search(token)
+        ):
+            tokens.setdefault(token, None)
+    return list(tokens)
+
+
+def _defining_symbols(index: MapIndex, token: str) -> list[Symbol]:
+    """Symbols a code token names exactly, production code first.
+
+    A qualified token keeps only symbols whose qualname ends with it, so
+    ``server.ts`` doesn't name every symbol called ``ts``.
+    """
+    dotted = _QUALIFIER_RE.sub(".", token)
+    name = dotted.rsplit(".", 1)[-1]
+    syms = index.symbols_by_name.get(name, [])
+    if dotted != name:
+        syms = [
+            s
+            for s in syms
+            if _QUALIFIER_RE.sub(".", s.qualname) == dotted
+            or _QUALIFIER_RE.sub(".", s.qualname).endswith("." + dotted)
+        ]
+
+    return sorted(
+        syms,
+        key=lambda s: (
+            is_test_path(s.path),
+            -len(index.calls_in.get(s.id, [])),
+            s.path,
+        ),
+    )
+
+
+def _pinned_files(
+    index: MapIndex, prompt: str, view: ledger.LedgerView, top: int
+) -> tuple[list[str], list[str]]:
+    """Files defining a symbol the prompt names, as listing lines.
+
+    Returns:
+        ``(paths, lines)``: at most ``top`` not-yet-read defining files
+        in prompt order, and their lines, plus one trailer line per name
+        whose defining files didn't all fit.
+    """
+    paths: list[str] = []
+    lines: list[str] = []
+    for token in _code_tokens(prompt):
+        left = 0
+        for sym in _defining_symbols(index, token):
+            state = view.files.get(sym.path)
+            if sym.path in paths or (state and state.fully_read):
+                continue
+            if len(paths) >= top:
+                left += 1
+                continue
+            paths.append(sym.path)
+            lines.append(f"  {sym.path} (defines {token})")
+        if left:
+            lines.append(
+                f"  ... {left} more define {token}: "
+                f"`dekko query symbol {token}`"
+            )
+
+    return paths, lines
 
 
 def prompt_submit(payload: dict) -> dict | None:
-    """Point at the files most relevant to the new prompt."""
+    """Point at the files most relevant to the new prompt.
+
+    A file defining a symbol the prompt names in code form comes first;
+    lexically relevant files fill the rest of the list.
+    """
     prompt = payload.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return None
@@ -249,10 +365,14 @@ def prompt_submit(payload: dict) -> dict | None:
         return None
     task = relevance.task_context(prompt, root)
     view = _view(payload, index, root)
-    files = _relevant_files(index, task, view)
-    if not files:
+    top = _adaptive_top(view)
+    pinned, pin_lines = _pinned_files(index, prompt, view, top)
+    files = _relevant_files(
+        index, task, view, skip=frozenset(pinned), top=top - len(pinned)
+    )
+    if not pinned and not files:
         return None
-    body = "\n".join(f"  {p}" for p in files)
+    body = "\n".join(pin_lines + [f"  {p}" for p in files])
     text = (
         "dekko — files most relevant to this task (not yet fully read).\n"
         "Outline or query these before Read/grep — do not read one of "

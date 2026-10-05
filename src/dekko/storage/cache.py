@@ -38,6 +38,7 @@ from dekko.core.model import (
     RawRead,
     RawRef,
     RawThrow,
+    Reexport,
     Submodule,
     TypeUse,
 )
@@ -79,7 +80,7 @@ def _filemap_from_dict(d: dict) -> FileMap:
         path=d["path"],
         language=d["language"],
         symbols=[_symbol_from_dict(s) for s in d.get("symbols", [])],
-        calls=[RawCall(**c) for c in d.get("calls", [])],
+        calls=[_rawcall_from_dict(c) for c in d.get("calls", [])],
         refs=[RawRef(**r) for r in d.get("refs", [])],
         reads=[RawRead(**r) for r in d.get("reads", [])],
         heritage=[RawHeritage(**h) for h in d.get("heritage", [])],
@@ -93,9 +94,19 @@ def _filemap_from_dict(d: dict) -> FileMap:
         cpp_decls=list(d.get("cpp_decls", [])),
         type_uses=[TypeUse(**t) for t in d.get("type_uses", [])],
         submodules=[Submodule(**m) for m in d.get("submodules", [])],
+        reexports=[Reexport(**r) for r in d.get("reexports", [])],
         error=d.get("error"),
         doc=d.get("doc"),
     )
+
+
+def _rawcall_from_dict(d: dict) -> RawCall:
+    """Rebuild a ``RawCall``; JSON stores ``arg_kinds`` as a list."""
+    call = RawCall(**d)
+    if call.arg_kinds is not None:
+        call.arg_kinds = tuple(call.arg_kinds)
+
+    return call
 
 
 class IncrementalCache:
@@ -166,6 +177,39 @@ class IncrementalCache:
         if entry is None:
             return None
         return entry.get("file", {}).get("cpp_decls", [])
+
+    def old_heritage(self, rel: str) -> list[dict] | None:
+        """Previously cached heritage clause dicts for ``rel``, if any.
+
+        ``None`` when this file had no prior cache entry at all, like
+        ``old_symbols``.
+        """
+        entry = self._old.get(rel)
+        if entry is None:
+            return None
+        return entry.get("file", {}).get("heritage", [])
+
+    def old_reexports(self, rel: str) -> list[dict] | None:
+        """Previously cached re-export record dicts for ``rel``, if any.
+
+        ``None`` when this file had no prior cache entry at all, like
+        ``old_symbols``.
+        """
+        entry = self._old.get(rel)
+        if entry is None:
+            return None
+        return entry.get("file", {}).get("reexports", [])
+
+    def old_imports(self, rel: str) -> list[dict] | None:
+        """Previously cached import binding dicts for ``rel``, if any.
+
+        ``None`` when this file had no prior cache entry at all, like
+        ``old_symbols``.
+        """
+        entry = self._old.get(rel)
+        if entry is None:
+            return None
+        return entry.get("file", {}).get("imports", [])
 
     def old_hash(self, rel: str) -> str | None:
         """Content hash the prior cache recorded for ``rel``, if any."""

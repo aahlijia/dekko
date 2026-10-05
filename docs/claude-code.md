@@ -147,6 +147,9 @@ dekko hooks uninstall                      # remove all dekko hooks
   independent of how big the repo is.
 - **`prompt-submit`** — for the new prompt, a short pointer to the most
   task-relevant files not already read, so the agent doesn't `grep` blind.
+  A symbol the prompt names in code form (`generateBones`, `load_map`,
+  `Foo.bar`, `run()`, or any name in backticks) lists the file defining
+  it first, marked `(defines <name>)`; a plain English word never does.
 - **`pre-read`** — a non-blocking advisory to `outline` a large file
   first, before a whole-file `Read`.
 - **`pre-bash`** — the enforcement tier, off by default even when other

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from dekko import repo_ops
+from dekko import repo_ops, selfcheck
 from dekko.core import languages
 from dekko.core import resolver
 from dekko.render import mapfile
@@ -480,3 +480,137 @@ def test_current_side_from_index_drops_a_stale_index(
     assert not side.fresh
     assert side.index is None
     assert side.provenance["files"]
+
+
+# --- a stale read parses map.json once --------------------------------
+#
+# A read on a stale map used to parse map.json three times: once to
+# learn it was stale, once in ``regen_map`` for four provenance fields,
+# once for the map it just wrote. The first two now read the sidecar.
+
+_STALE_SRC = {"a.py": "def f() -> int:\n    return 1\n"}
+
+
+def _count_loads(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    calls: list[Path] = []
+    real = mapfile.load_map
+
+    def counting(root: Path, *args: object, **kwargs: object) -> object:
+        calls.append(root)
+        return real(root, *args, **kwargs)
+
+    monkeypatch.setattr(mapfile, "load_map", counting)
+    return calls
+
+
+def _edit(root: Path) -> None:
+    (root / "a.py").write_text("def f() -> int:\n    return 2\n")
+
+
+def test_stale_map_with_a_sidecar_parses_map_json_once(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(_STALE_SRC)
+    _edit(root)
+    calls = _count_loads(monkeypatch)
+
+    index, code = repo_ops.load_or_regen(root, no_regen=False)
+
+    assert code == 0
+    assert index is not None
+    assert mapfile.check_freshness(root, index).fresh
+    assert len(calls) == 1
+
+
+def test_stale_map_without_a_sidecar_still_regenerates(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_STALE_SRC)
+    (root / ".dekko" / "provenance.json").unlink()
+    _edit(root)
+
+    index, code = repo_ops.load_or_regen(root, no_regen=False)
+
+    assert code == 0
+    assert index is not None
+    assert mapfile.check_freshness(root, index).fresh
+
+
+def test_a_desynced_sidecar_falls_back_to_parsing_the_map(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(_STALE_SRC)
+    sidecar = root / ".dekko" / "provenance.json"
+    doc = json.loads(sidecar.read_text())
+    doc["map_stat"] = [0, 0]
+    sidecar.write_text(json.dumps(doc))
+    assert mapfile.load_sidecar_provenance(root) is None
+
+    index, code = repo_ops.load_or_regen(root, no_regen=True)
+
+    assert code == 0
+    assert index is not None
+
+
+def test_a_fresh_map_is_served_without_a_regen(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(_STALE_SRC)
+    calls = _count_loads(monkeypatch)
+
+    index, code = repo_ops.load_or_regen(root, no_regen=True)
+
+    assert (code, len(calls)) == (0, 1)
+    assert index is not None
+
+
+def test_regen_map_keeps_the_recorded_subpath_and_excludes(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(_STALE_SRC)
+    sidecar = root / ".dekko" / "provenance.json"
+    doc = json.loads(sidecar.read_text())
+    doc["provenance"]["subpath"] = "pkg"
+    doc["provenance"]["excludes"] = ["*_gen.py"]
+    sidecar.write_text(json.dumps(doc))
+    seen: dict[str, object] = {}
+
+    def fake_run_map(args: object, **_kwargs: object) -> int:
+        seen["subpath"] = args.subpath
+        seen["exclude"] = args.exclude
+        return 0
+
+    monkeypatch.setattr(repo_ops, "run_map", fake_run_map)
+    calls = _count_loads(monkeypatch)
+
+    assert repo_ops.regen_map(root) == 0
+    assert seen == {"subpath": "pkg", "exclude": ["*_gen.py"]}
+    assert calls == []
+
+
+def test_outdated_process_still_serves_the_old_map_when_regen_fails(
+    make_mapped_repo: RepoFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    root = make_mapped_repo(_STALE_SRC)
+    map_path = root / ".dekko" / "map.json"
+    doc = json.loads(map_path.read_text())
+    doc["provenance"]["spec_hash"] = "deadbeef"
+    map_path.write_text(json.dumps(doc))
+    mapfile.write_provenance_sidecar(root, doc["provenance"])
+    assert mapfile.load_sidecar_provenance(root) is not None
+    selfcheck.mark_long_lived()
+    monkeypatch.setattr(
+        selfcheck,
+        "_ask_child",
+        lambda: (selfcheck.loaded_version(), "deadbeef"),
+    )
+    monkeypatch.setattr(repo_ops, "_locked_regen", lambda _root: (None, 9))
+    _edit(root)
+
+    index, code = repo_ops.load_or_regen(root, no_regen=False)
+
+    assert code == 0
+    assert index is not None
+    assert "serving the existing map" in capsys.readouterr().err

@@ -2419,73 +2419,100 @@ def test_sanity_near_own_definition_checks_every_same_named_symbol(
 # --- cross-file bare-name collision -------------------------------------
 
 
-def test_classify_miss_cross_file_collision() -> None:
-    # classify_miss stays pure/I/O-free -- the caller computes
-    # looks_like_cross_file_collision from MapIndex.symbols_by_name and
-    # passes it in, same contract as looks_like_import_member.
-    cause = sanity.classify_miss(
-        "return icon()",
-        "icon",
-        is_test_file=False,
-        unsupported_language=False,
-        tests_excluded=True,
-        looks_like_cross_file_collision=True,
+def _target_cause(
+    snippet: str,
+    name: str,
+    cause: str,
+    *,
+    root: Path | None = None,
+    other_file: bool = False,
+    declaring_type: str | None = None,
+) -> str | None:
+    """The per-target shape rungs on one ``b.py:3`` row whose shared
+    cause was ``cause``; the target is declared in ``a.py``."""
+    from dekko.core.model import Symbol
+
+    sym = Symbol(
+        id=f"a.py::Widget.{name}",
+        name=name,
+        qualname=f"Widget.{name}",
+        kind="method",
+        path="a.py",
+        language="python",
+        params=[],
+        start_line=2,
+        end_line=3,
     )
-    assert cause == sanity.CAUSE_CROSS_FILE_COLLISION
-
-
-def test_classify_miss_cross_file_collision_absent_without_flag() -> None:
-    cause = sanity.classify_miss(
-        "return icon()",
-        "icon",
-        is_test_file=False,
-        unsupported_language=False,
-        tests_excluded=True,
+    facts = sanity._TargetFacts(
+        sym=sym,
+        other_decl_files=frozenset({"b.py"} if other_file else ()),
+        declaring_type=declaring_type,
     )
-    assert cause != sanity.CAUSE_CROSS_FILE_COLLISION
-
-
-def test_classify_miss_cross_file_collision_wins_over_generic_name() -> None:
-    # Precedence lock-in: a name
-    # that's both short/generic *and* a genuine cross-file collision
-    # must resolve to the deterministic collision cause, not the
-    # accident-prone length/word-list heuristic.
-    cause = sanity.classify_miss(
-        "return fix()",
-        "fix",
-        is_test_file=False,
-        unsupported_language=False,
-        tests_excluded=True,
-        looks_like_cross_file_collision=True,
+    return sanity._shape_target_cause(
+        root or Path("/nonexistent"), facts, ("b.py", 3), snippet, cause
     )
-    assert cause == sanity.CAUSE_CROSS_FILE_COLLISION
 
 
-def test_classify_miss_cross_file_collision_wins_over_test_filter() -> None:
-    cause = sanity.classify_miss(
-        "return icon()",
-        "icon",
-        is_test_file=True,
-        unsupported_language=False,
-        tests_excluded=True,
-        looks_like_cross_file_collision=True,
+def test_cross_file_collision_is_a_per_target_fact() -> None:
+    # The shared ladder can't know which same-named symbol is asked
+    # about, so it never says "collision"; the per-target stage does.
+    assert (
+        sanity.classify_miss(
+            "return icon()",
+            "icon",
+            is_test_file=False,
+            unsupported_language=False,
+            tests_excluded=True,
+        )
+        != sanity.CAUSE_CROSS_FILE_COLLISION
     )
-    assert cause == sanity.CAUSE_CROSS_FILE_COLLISION
-
-
-def test_classify_miss_qualified_call_wins_over_cross_file_collision() -> None:
-    # Precedence: a genuine qualified call is still checked first
-    # inside classify_miss's own ladder, even if the caller
-    # (incorrectly) set the flag.
-    cause = sanity.classify_miss(
-        "pkg.icon(x)",
-        "icon",
-        is_test_file=False,
-        unsupported_language=False,
-        tests_excluded=True,
-        looks_like_cross_file_collision=True,
+    assert (
+        _target_cause(
+            "return icon()", "icon", sanity.CAUSE_UNEXPLAINED, other_file=True
+        )
+        == sanity.CAUSE_CROSS_FILE_COLLISION
     )
-    assert cause == sanity.CAUSE_QUALIFIED_CALL
+    assert (
+        _target_cause("return icon()", "icon", sanity.CAUSE_UNEXPLAINED)
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "cause", [sanity.CAUSE_GENERIC_NAME, sanity.CAUSE_TEST_FILTER]
+)
+def test_cross_file_collision_wins_over_trailing_rungs(cause: str) -> None:
+    # The deterministic collision fact beats the length/word-list
+    # heuristic and the test filter, as it did in the shared ladder.
+    assert (
+        _target_cause("return fix()", "fix", cause, other_file=True)
+        == sanity.CAUSE_CROSS_FILE_COLLISION
+    )
+
+
+def test_cross_file_collision_needs_a_call_shaped_line() -> None:
+    assert (
+        _target_cause(
+            "x = icon", "icon", sanity.CAUSE_UNEXPLAINED, other_file=True
+        )
+        is None
+    )
+
+
+def test_qualified_call_and_value_shape_outrank_per_target_rungs() -> None:
+    # A qualified call is decided in the shared ladder and never
+    # reaches the per-target stage; a Rust/C++ value shape outranked
+    # the collision rung and still does.
+    assert sanity.CAUSE_QUALIFIED_CALL not in sanity._REMAINING_CAUSES
+    assert (
+        _target_cause(
+            ".map(T::my_fn)",
+            "my_fn",
+            sanity.CAUSE_VALUE_REFERENCE_UNRESOLVED,
+            other_file=True,
+        )
+        is None
+    )
 
 
 def test_sanity_cross_file_collision_flags_call_shaped_reference(
@@ -2568,7 +2595,6 @@ def test_sanity_cross_file_collision_absent_with_single_candidate(
         root,
         own_def_locs=own_def_locs,
         tests_excluded=True,
-        other_candidate_files=frozenset(),
     )
     assert causes.get(("a.py", 6)) != sanity.CAUSE_CROSS_FILE_COLLISION
 
@@ -3302,7 +3328,8 @@ def test_sanity_all_dedupes_grep_by_bare_name(
 
     def counting_run(*args: Any, **kwargs: Any) -> Any:
         nonlocal call_count
-        call_count += 1
+        if "helper" in args[0]:
+            call_count += 1
         return real_run(*args, **kwargs)
 
     monkeypatch.setattr(sanity.subprocess, "run", counting_run)
@@ -3657,63 +3684,119 @@ def test_receiver_mismatch_same_declaring_file_is_false(
     assert sanity._receiver_mismatch(tmp_path, hit, "Widget") is True
 
 
-def test_classify_miss_likely_unrelated_external() -> None:
-    cause = sanity.classify_miss(
-        "    return isTrue()",
-        "isTrue",
-        is_test_file=False,
-        unsupported_language=False,
-        tests_excluded=True,
-        likely_unrelated_external=True,
+def _receiver_root(tmp_path: Path) -> Path:
+    (tmp_path / "b.py").write_text("import assertj\n\n", encoding="utf-8")
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "cause", [sanity.CAUSE_UNEXPLAINED, sanity.CAUSE_GENERIC_NAME]
+)
+def test_receiver_mismatch_relabels_unexplained_and_generic_rows(
+    tmp_path: Path, cause: str
+) -> None:
+    assert (
+        _target_cause(
+            "    return x.isTrue()",
+            "isTrue",
+            cause,
+            root=_receiver_root(tmp_path),
+            declaring_type="Widget",
+        )
+        == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
     )
-    assert cause == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
 
 
-def test_classify_miss_likely_unrelated_external_preempts_test_filter() -> (
-    None
-):
-    # Without the new flag this line would land on CAUSE_TEST_FILTER --
-    # the exact regression this design targets (spring-boot: a
-    # grep-only AssertJ-style hit in a test file
-    # read as "re-run with --include-tests" when it was never a real
-    # caller to begin with).
-    cause = sanity.classify_miss(
-        "    return isTrue()",
-        "isTrue",
-        is_test_file=True,
-        unsupported_language=False,
-        tests_excluded=True,
-        likely_unrelated_external=True,
+@pytest.mark.parametrize(
+    "cause",
+    [
+        sanity.CAUSE_TEST_FILTER,
+        sanity.CAUSE_UNSUPPORTED_LANGUAGE,
+        sanity.CAUSE_SHADOWING_LOCAL,
+    ],
+)
+def test_receiver_mismatch_leaves_more_specific_rows(
+    tmp_path: Path, cause: str
+) -> None:
+    # A test file's own helper is the test filter's, a same-named
+    # local is a local, and an unparsed file stays unparsed.
+    assert (
+        _target_cause(
+            "    return isTrue()",
+            "isTrue",
+            cause,
+            root=_receiver_root(tmp_path),
+            declaring_type="Widget",
+        )
+        is None
     )
-    assert cause == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
 
 
-def test_classify_miss_likely_unrelated_external_preempts_generic_name() -> (
-    None
-):
-    cause = sanity.classify_miss(
-        "    return map()",
-        "map",
-        is_test_file=False,
-        unsupported_language=False,
-        tests_excluded=True,
-        likely_unrelated_external=True,
+def test_receiver_mismatch_needs_a_call_of_the_name(tmp_path: Path) -> None:
+    # The label says "method": a line that never calls the name (a
+    # property read, a regex, JSX text) is not one.
+    assert (
+        _target_cause(
+            "    if (entries.isTrue) {",
+            "isTrue",
+            sanity.CAUSE_UNEXPLAINED,
+            root=_receiver_root(tmp_path),
+            declaring_type="Widget",
+        )
+        is None
     )
-    assert cause == sanity.CAUSE_LIKELY_EXTERNAL_COLLISION
 
 
-def test_classify_miss_unsupported_language_wins_over_receiver_cue() -> None:
-    # Precedence unchanged: a hard "dekko can't parse this file at
-    # all" fact still outranks a heuristic guess.
-    cause = sanity.classify_miss(
-        "    return isTrue()",
-        "isTrue",
-        is_test_file=False,
-        unsupported_language=True,
-        tests_excluded=True,
-        likely_unrelated_external=True,
+@pytest.mark.parametrize(
+    ("target_path", "hit_path"),
+    [
+        ("a.cc", "b.cc"),  # an #include names a file, not the type
+        ("a.rs", "b.rs"),
+        ("a.cc", "b.py"),  # another language can't call the target
+    ],
+)
+def test_receiver_mismatch_needs_a_type_importing_language(
+    tmp_path: Path, target_path: str, hit_path: str
+) -> None:
+    from dekko.core.model import Symbol
+
+    (tmp_path / hit_path).write_text("#include <x>\n", encoding="utf-8")
+    sym = Symbol(
+        id=f"{target_path}::Shape.AddDim",
+        name="AddDim",
+        qualname="Shape.AddDim",
+        kind="method",
+        path=target_path,
+        language="cpp",
+        params=[],
+        start_line=2,
+        end_line=3,
     )
-    assert cause == sanity.CAUSE_UNSUPPORTED_LANGUAGE
+    facts = sanity._TargetFacts(
+        sym=sym, other_decl_files=frozenset(), declaring_type="Shape"
+    )
+    assert (
+        sanity._shape_target_cause(
+            tmp_path,
+            facts,
+            (hit_path, 3),
+            "  shape->AddDim(1);",
+            sanity.CAUSE_UNEXPLAINED,
+        )
+        is None
+    )
+
+
+def test_receiver_mismatch_needs_the_gate(tmp_path: Path) -> None:
+    assert (
+        _target_cause(
+            "    return x.isTrue()",
+            "isTrue",
+            sanity.CAUSE_UNEXPLAINED,
+            root=_receiver_root(tmp_path),
+        )
+        is None
+    )
 
 
 def test_resolve_declaring_type_method_single_candidate(
@@ -4524,16 +4607,6 @@ def test_miss_tier2_cause_and_ladder_position() -> None:
         )
         == sanity.CAUSE_TYPE_ANNOTATION
     )
-    # ...above the cross-file-collision heuristic.
-    assert (
-        _cause(
-            ".map(T::my_fn)",
-            "my_fn",
-            looks_like_value_reference=True,
-            looks_like_cross_file_collision=True,
-        )
-        == sanity.CAUSE_VALUE_REFERENCE_UNRESOLVED
-    )
 
 
 def _grep_only_causes(
@@ -5145,3 +5218,35 @@ def test_sanity_all_explains_ts_non_call_shapes(
     assert causes.get(sanity.CAUSE_PROPERTY_READ) == 1
     assert causes.get(sanity.CAUSE_LOCAL_BINDING_OR_LITERAL) == 1
     assert causes.get(sanity.CAUSE_IMPORT_STATEMENT) == 2
+
+
+def test_sanity_all_sweeps_a_class_sharing_its_line_with_a_constructor(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A Kotlin primary constructor sits on its class's own line, so a
+    # rebuilt `path:qualname:LINE` target matched both and the sweep
+    # dropped the class as ambiguous. The sweep passes ids now.
+    root = make_mapped_repo(
+        {
+            "CustomData.kt": (
+                "package demo\n"
+                "\n"
+                "class CustomData(val name: String) {\n"
+                "    fun greet(): String = name\n"
+                "}\n"
+            ),
+            "Use.kt": (
+                "package demo\n"
+                "\n"
+                "fun make(): Any {\n"
+                '    return CustomData("x")\n'
+                "}\n"
+            ),
+        }
+    )
+    code = cli.main(["sanity", "--all", "--root", str(root), "--json"])
+    assert code == 0
+    out, err = capsys.readouterr()
+    assert "is ambiguous" not in err
+    doc = json.loads(out)
+    assert doc["symbols_swept"] == 2

@@ -1294,7 +1294,7 @@ def test_try_daemon_abandoned_error_carries_the_jobs_actually_sent(
         lambda candidates: 999.0,
     )
 
-    def _raise_abandoned(sock):  # noqa: ANN001, ANN202
+    def _raise_abandoned(sock, wait):  # noqa: ANN001, ANN202
         raise daemon.DaemonRequestAbandonedError("simulated timeout")
 
     monkeypatch.setattr(daemon, "_recv_daemon_response", _raise_abandoned)
@@ -1511,14 +1511,14 @@ def _route_cold_affected(
     )
     real_recv = daemon._recv_daemon_response
 
-    def canned(sock: object) -> tuple[int, str, str]:
+    def canned(sock: object, wait: object) -> tuple[int, str, str]:
         # Drain the daemon's real reply first. It's sent only after the
         # in-thread request leaves its stdout/stderr redirect, which
         # saved whatever stream was current (capsys's, for a test that
         # takes it). Returning early let capsys close that stream at
         # teardown and the redirect then restore it as sys.stdout,
         # breaking the fixture's ``daemon.stop`` print.
-        real_recv(sock)
+        real_recv(sock, wait)
         return 0, "out\n", daemon_stderr
 
     monkeypatch.setattr(daemon, "_recv_daemon_response", canned)
@@ -1589,7 +1589,7 @@ def test_try_daemon_keeps_stderr_when_nothing_was_disclosed(
     monkeypatch.setattr(
         daemon,
         "_recv_daemon_response",
-        lambda sock: (0, "", f"{note}\n"),
+        lambda sock, wait: (0, "", f"{note}\n"),
     )
     args = cli.build_subcommand_parser().parse_args(
         ["affected", "--root", str(daemon_thread_root)]
@@ -1837,9 +1837,10 @@ def test_try_daemon_raises_abandoned_error_on_client_timeout(
     the daemon (single-threaded, no cancellation, see
     ``_handle_connection``'s docstring) may still be computing the
     abandoned request in the background, so the caller must not treat
-    this the same as "no daemon reachable, a free fallback." Shortens
-    ``_CLIENT_TIMEOUT`` well below a deliberately slowed dispatched
-    command's duration to force exactly that race."""
+    this the same as "no daemon reachable, a free fallback." A busy
+    daemon is waited for past the first timeout, so this shortens both
+    ``_CLIENT_TIMEOUT`` and the whole-wait cap well below a
+    deliberately slowed dispatched command's duration."""
     started = threading.Event()
     finished = threading.Event()
     real_run_stats = cli.run_stats
@@ -1853,6 +1854,8 @@ def test_try_daemon_raises_abandoned_error_on_client_timeout(
     monkeypatch.setattr(cli, "run_stats", slow_run_stats)
     original_timeout = daemon._CLIENT_TIMEOUT
     monkeypatch.setattr(daemon, "_CLIENT_TIMEOUT", 0.3)
+    monkeypatch.setattr(daemon, "_REQUEST_WAIT_CAP", 0.6)
+    monkeypatch.setattr(daemon, "_BUSY_WAIT_SLICE", 0.1)
 
     root = short_root
     (root / "a.py").write_text("def f() -> int:\n    return 1\n")
@@ -2494,3 +2497,207 @@ def test_real_process_start_stop_status_roundtrip(
     finally:
         cli.main(["daemon", "stop", "--root", str(short_root)])
         assert _wait_until(lambda: not transport.exists())
+
+
+# ---------------------------------------------------------------------
+# Waiting past the first timeout while the daemon says it is busy
+# ---------------------------------------------------------------------
+
+
+class _Clock:
+    """A settable monotonic clock."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _patient(
+    monkeypatch: pytest.MonkeyPatch, answers: list[bool | None]
+) -> tuple[daemon._PatientWait, _Clock]:
+    """A ``_PatientWait`` whose probes return ``answers`` in order."""
+    replies = iter(answers)
+    monkeypatch.setattr(daemon, "_probe_busy", lambda transport: next(replies))
+    clock = _Clock()
+    return daemon._PatientWait(None, clock=clock), clock
+
+
+def test_a_busy_daemon_is_waited_for_one_slice_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wait, clock = _patient(monkeypatch, [True, True])
+    clock.now = 300.0
+    assert wait.next_timeout() == daemon._BUSY_WAIT_SLICE
+    clock.now = 310.0
+    assert wait.next_timeout() == daemon._BUSY_WAIT_SLICE
+
+
+def test_a_daemon_no_longer_busy_gets_one_last_short_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wait, clock = _patient(monkeypatch, [True, False])
+    clock.now = 300.0
+    assert wait.next_timeout() == daemon._BUSY_WAIT_SLICE
+    clock.now = 310.0
+    assert wait.next_timeout() == daemon._LAST_READ_GRACE
+    clock.now = 312.0
+    assert wait.next_timeout() is None
+    assert "no longer busy" in wait.reason
+
+
+def test_two_unanswered_probes_in_a_row_give_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unanswered probe can be a starved status thread; a busy
+    answer in between starts the count over."""
+    wait, clock = _patient(monkeypatch, [None, True, None, None])
+    clock.now = 300.0
+    assert wait.next_timeout() == daemon._BUSY_WAIT_SLICE
+    assert wait.next_timeout() == daemon._BUSY_WAIT_SLICE
+    assert wait.next_timeout() == daemon._BUSY_WAIT_SLICE
+    assert wait.next_timeout() == daemon._LAST_READ_GRACE
+    assert wait.next_timeout() is None
+    assert "stopped answering" in wait.reason
+
+
+def test_the_hard_cap_ends_the_wait_even_while_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wait, clock = _patient(monkeypatch, [True])
+    clock.now = daemon._REQUEST_WAIT_CAP - 4.0
+    assert wait.next_timeout() == 4.0
+    clock.now = daemon._REQUEST_WAIT_CAP
+    assert wait.next_timeout() is None
+    assert f"{daemon._REQUEST_WAIT_CAP:.0f} s limit" in wait.reason
+
+
+def test_the_still_working_note_prints_once_then_once_a_minute(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    wait, clock = _patient(monkeypatch, [True] * 8)
+    for now in (300.0, 310.0, 320.0, 350.0, 360.0, 370.0):
+        clock.now = now
+        wait.next_timeout()
+
+    notes = capsys.readouterr().err.splitlines()
+    assert notes == [
+        "note: the daemon is still working on this (300 s so far)",
+        "note: the daemon is still working on this (360 s so far)",
+    ]
+
+
+def test_no_note_while_the_daemon_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    wait, clock = _patient(monkeypatch, [None])
+    clock.now = 300.0
+    wait.next_timeout()
+    assert capsys.readouterr().err == ""
+
+
+def test_reply_bytes_before_a_timeout_are_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply split across a read timeout parses whole."""
+    monkeypatch.setattr(daemon, "_probe_busy", lambda transport: True)
+    monkeypatch.setattr(daemon, "_BUSY_WAIT_SLICE", 0.05)
+    client, server = socket.socketpair()
+    client.settimeout(0.05)
+    reply = _json.dumps({"exit_code": 3, "stdout": "out", "stderr": ""})
+
+    def send_in_two_parts() -> None:
+        server.sendall(reply[:10].encode())
+        time.sleep(0.2)
+        server.sendall((reply[10:] + "\n").encode())
+
+    sender = threading.Thread(target=send_in_two_parts, daemon=True)
+    sender.start()
+    try:
+        got = daemon._recv_daemon_response(client, daemon._PatientWait(None))
+    finally:
+        sender.join(timeout=2.0)
+        client.close()
+        server.close()
+
+    assert got == (3, "out", "")
+
+
+def test_a_daemon_that_is_not_busy_is_abandoned_with_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(daemon, "_probe_busy", lambda transport: False)
+    monkeypatch.setattr(daemon, "_LAST_READ_GRACE", 0.05)
+    client, server = socket.socketpair()
+    client.settimeout(0.05)
+    try:
+        with pytest.raises(daemon.DaemonRequestAbandonedError) as exc:
+            daemon._recv_daemon_response(client, daemon._PatientWait(None))
+    finally:
+        client.close()
+        server.close()
+
+    assert "no longer busy" in str(exc.value)
+
+
+def test_a_brief_status_probe_skips_the_cache_report(
+    daemon_thread_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The waiting client probes every few seconds; the full payload's
+    cache report runs a freshness check on the status thread."""
+
+    def forbidden(self: object) -> dict:
+        raise AssertionError("brief status must not snapshot the cache")
+
+    monkeypatch.setattr(daemon._WarmCache, "snapshot", forbidden)
+    transport = dt.default_transport_for(daemon_thread_root)
+
+    assert daemon._probe_busy(transport) is False
+
+
+def test_a_request_past_the_first_wait_is_waited_for_while_busy(
+    short_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """End to end through a real in-thread daemon: a request that
+    outlives the first wait still gets its reply, with the note."""
+    real_run_stats = cli.run_stats
+
+    def slow_run_stats(args: object) -> int:
+        time.sleep(1.0)
+        return real_run_stats(args)
+
+    monkeypatch.setattr(cli, "run_stats", slow_run_stats)
+    monkeypatch.setattr(daemon, "_scaled_client_timeout", lambda root: 0.2)
+    monkeypatch.setattr(daemon, "_BUSY_WAIT_SLICE", 0.2)
+    root = short_root
+    (root / "a.py").write_text("def f() -> int:\n    return 1\n")
+    assert cli.main(["map", str(root), "--quiet"]) == 0
+    capsys.readouterr()
+    transport = dt.default_transport_for(root)
+    thread = threading.Thread(
+        target=daemon.serve_daemon,
+        kwargs={"root": root, "idle_timeout": 30.0},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert _wait_until(transport.exists)
+        args = cli.build_subcommand_parser().parse_args(
+            ["stats", "--root", str(root)]
+        )
+        result = daemon.try_daemon(args)
+    finally:
+        daemon.stop(root)
+        thread.join(timeout=_POLL_DEADLINE)
+
+    assert result is not None
+    exit_code, out, err = result
+    assert exit_code == 0
+    assert out
+    # The daemon's in-process capture is process-global, so the note
+    # can land in either stream in this same-process test.
+    printed = err + capsys.readouterr().err
+    assert "note: the daemon is still working on this" in printed

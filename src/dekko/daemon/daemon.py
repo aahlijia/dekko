@@ -209,6 +209,32 @@ _SCALED_CLIENT_TIMEOUT_CAP = 300.0
 # follow-up validation, not a v1 blocker.
 _TIMEOUT_SECONDS_PER_TRACKED_FILE = 0.008
 
+# The scaled timeouts above are only the client's *first* wait for a
+# routed reply. They estimate how long the work takes, and an estimate
+# is wrong whenever the work changes shape (a cold diff whose new side
+# also has to resolve the whole repo ran past 292 s and failed with no
+# output while the daemon was still working). A daemon that died closes
+# the socket, which the client sees at once, so the only thing a timer
+# has to catch is a daemon that is alive and stuck. When the first wait
+# runs out, the client asks the status listener instead: while it says
+# busy, keep waiting, one slice at a time.
+_BUSY_WAIT_SLICE = 10.0
+
+# After the daemon says it is no longer busy, or two probes in a row get
+# no answer, one last read this long catches a reply already on its way
+# (the busy flag clears just before the reply is sent).
+_LAST_READ_GRACE = 2.0
+
+# Hard cap on the whole wait, from the moment the request is sent: the
+# same bound dekko gives a full map run in a child process
+# (``repo_ops``' delegated-regen timeout), so a wedged daemon can't hold
+# a client forever.
+_REQUEST_WAIT_CAP = 1800.0
+
+# How often the client says it is still waiting, once it is past the
+# first wait. Minutes of silence read as a hang.
+_BUSY_NOTE_INTERVAL = 60.0
+
 
 def _scaled_client_timeout(root: Path) -> float:
     """Repo-size-aware client timeout for a routed daemon request.
@@ -471,6 +497,7 @@ class _WarmCache:
                     mapfile.index_matches_disk(root, self._index)
                     and mapfile.check_freshness(root, self._index).fresh
                 ):
+                    mapfile.refresh_notes(root, self._index)
                     self.hits += 1
                     return self._index
             self.misses += 1
@@ -545,6 +572,7 @@ def _status_payload(
     start_time: float,
     cache: "_WarmCache",
     busy: bool,
+    brief: bool = False,
 ) -> dict:
     """Build the response body for a ``_status`` protocol request.
 
@@ -559,7 +587,15 @@ def _status_payload(
             definition), meaningfully ``True``/``False`` when built by
             the independent status-listener thread while the main loop
             may be busy elsewhere.
+        brief: Answer with ``running``, ``pid`` and ``busy`` only. A
+            client waiting on a slow request probes this every few
+            seconds, and the cache report runs a full freshness check
+            (most of a second on the largest repos) on the status
+            thread.
     """
+    if brief:
+        return {"running": True, "pid": os.getpid(), "busy": busy}
+
     return {
         "running": True,
         "pid": os.getpid(),
@@ -660,7 +696,11 @@ def _handle_connection(
             _send_line(
                 conn,
                 _status_payload(
-                    transport, start_time, cache, busy_event.is_set()
+                    transport,
+                    start_time,
+                    cache,
+                    busy_event.is_set(),
+                    brief=request.get("brief") is True,
                 ),
             )
             return True
@@ -770,7 +810,11 @@ def _serve_status_connection(
             )
             return
         payload = _status_payload(
-            transport, start_time, cache, busy_event.is_set()
+            transport,
+            start_time,
+            cache,
+            busy_event.is_set(),
+            brief=request.get("brief") is True,
         )
         _send_line(conn, payload)
     except OSError:
@@ -984,8 +1028,133 @@ def _send_daemon_request(
     return True
 
 
-def _recv_daemon_response(sock: socket.socket) -> tuple[int, str, str]:
+class _PatientWait:
+    """Decide, each time a routed reply's read times out, what to do next.
+
+    The socket's own timeout is the first wait (the scaled estimate).
+    Past it, each expiry probes the status listener: busy means wait
+    another ``_BUSY_WAIT_SLICE``; not busy, or no answer twice in a
+    row, means one last ``_LAST_READ_GRACE`` read and then give up;
+    ``_REQUEST_WAIT_CAP`` bounds the whole wait.
+
+    ``busy`` means the daemon is running *some* request, not this one:
+    its loop is single-threaded, so a request queued behind another
+    client's slow one waits for both. That is what happens inside the
+    first wait too.
+
+    Attributes:
+        reason: Why the wait gave up, for the abandoned-request error,
+            once :meth:`next_timeout` returned ``None``.
+    """
+
+    def __init__(
+        self,
+        transport: DaemonTransport,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Start the clock as the request is sent.
+
+        Args:
+            transport: The daemon's transport, for status probes.
+            clock: Monotonic clock, injectable for tests.
+        """
+        self._transport = transport
+        self._clock = clock
+        self._start = clock()
+        self._misses = 0
+        self._final = False
+        self._next_note: float | None = None
+        self.reason = "timed out"
+
+    def next_timeout(self) -> float | None:
+        """The next read timeout after one expired, or ``None`` to give up.
+
+        Returns:
+            Seconds to wait for the reply next, or ``None`` when the
+            wait is over (``reason`` says why).
+        """
+        elapsed = self._clock() - self._start
+        if self._final:
+            return None
+        remaining = _REQUEST_WAIT_CAP - elapsed
+        if remaining <= 0:
+            self.reason = (
+                f"no reply after {elapsed:.0f} s, the "
+                f"{_REQUEST_WAIT_CAP:.0f} s limit for one request"
+            )
+            return None
+
+        busy = _probe_busy(self._transport)
+        self._misses = 0 if busy is not None else self._misses + 1
+        if busy is False or self._misses >= 2:
+            self._final = True
+            self.reason = f"no reply after {elapsed:.0f} s and the daemon " + (
+                "is no longer busy"
+                if busy is False
+                else "stopped answering status probes"
+            )
+            return min(_LAST_READ_GRACE, remaining)
+
+        if busy:
+            self._maybe_note(elapsed)
+        return min(_BUSY_WAIT_SLICE, remaining)
+
+    def _maybe_note(self, elapsed: float) -> None:
+        """Say the wait goes on: the first time, then once a minute."""
+        if self._next_note is not None and elapsed < self._next_note:
+            return
+
+        print(
+            f"note: the daemon is still working on this "
+            f"({elapsed:.0f} s so far)",
+            file=sys.stderr,
+            flush=True,
+        )
+        self._next_note = elapsed + _BUSY_NOTE_INTERVAL
+
+
+def _recv_reply_line(sock: socket.socket, wait: _PatientWait) -> str | None:
+    """Read the daemon's one reply line, waiting as long as ``wait`` says.
+
+    Like :func:`_recv_line`, but a read timeout asks ``wait`` whether to
+    keep going instead of ending the read, and bytes received before a
+    timeout are kept.
+
+    Returns:
+        The decoded line, or ``None`` if the connection closed first.
+
+    Raises:
+        TimeoutError: When ``wait`` gives up.
+    """
+    chunks = bytearray()
+    while True:
+        try:
+            chunk = sock.recv(65536)
+        except TimeoutError:
+            timeout = wait.next_timeout()
+            if timeout is None:
+                raise
+            sock.settimeout(timeout)
+            continue
+        if not chunk:
+            return None
+        newline_at = chunk.find(b"\n")
+        if newline_at == -1:
+            chunks += chunk
+            continue
+        chunks += chunk[:newline_at]
+        return chunks.decode("utf-8", errors="replace")
+
+
+def _recv_daemon_response(
+    sock: socket.socket, wait: _PatientWait
+) -> tuple[int, str, str]:
     """Read and decode the daemon's response line on ``sock``.
+
+    Args:
+        sock: The connected request socket; its timeout is the first
+            wait.
+        wait: Decides whether to keep waiting past each expiry.
 
     Raises:
         DaemonRequestAbandonedError: on a timeout, a dropped connection, or
@@ -995,7 +1164,9 @@ def _recv_daemon_response(sock: socket.socket) -> tuple[int, str, str]:
             pre-send failure is.
     """
     try:
-        raw = _recv_line(sock)
+        raw = _recv_reply_line(sock, wait)
+    except TimeoutError as exc:
+        raise DaemonRequestAbandonedError(wait.reason) from exc
     except OSError as exc:
         raise DaemonRequestAbandonedError(str(exc)) from exc
     if raw is None:
@@ -1191,7 +1362,8 @@ def try_daemon(
     try:
         if not _send_daemon_request(sock, transport, command, args):
             return None
-        exit_code, stdout, stderr = _recv_daemon_response(sock)
+        wait = _PatientWait(transport)
+        exit_code, stdout, stderr = _recv_daemon_response(sock, wait)
     except DaemonRequestAbandonedError as exc:
         exc.jobs = getattr(args, "jobs", None)
         raise
@@ -1562,6 +1734,35 @@ def _probe_status(transport: DaemonTransport) -> tuple[dict | None, bool]:
         return None, False
     finally:
         sock.close()
+
+
+def _probe_busy(transport: DaemonTransport) -> bool | None:
+    """Ask the status listener whether the daemon is mid-request.
+
+    Sends a ``brief`` status request, so the probe skips the cache
+    report's freshness check. A daemon from before ``brief`` existed
+    sends its full payload, which carries ``busy`` too.
+
+    Returns:
+        The daemon's ``busy`` flag, or ``None`` when it didn't answer
+        within ``_STATUS_PROBE_TIMEOUT`` or answered without one.
+    """
+    sock = _status_connect(transport, _STATUS_PROBE_TIMEOUT)
+    if sock is None:
+        return None
+    try:
+        transport.send_auth_preamble(sock)
+        _send_line(sock, {"cmd": _STATUS_CMD, "brief": True})
+        raw = _recv_line(sock)
+        data = json.loads(raw) if raw is not None else None
+    except (OSError, ValueError):
+        return None
+    finally:
+        sock.close()
+    if not isinstance(data, dict) or "busy" not in data:
+        return None
+
+    return bool(data["busy"])
 
 
 def _print_unconfirmed_status(root: Path, as_json: bool) -> None:

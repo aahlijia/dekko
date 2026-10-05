@@ -556,8 +556,8 @@ def test_render_text_notes_ambiguous_in(
     pack = contextpack.build_pack(index, target, hops=1)
     text = contextpack.render_text(pack)
     assert (
-        "note: 1 additional call site(s) named 'target' resolved "
-        "ambiguously — not counted here" in text
+        "note: 1 more caller(s) call something named 'target' that "
+        "resolved ambiguously — not counted here" in text
     )
 
 
@@ -605,3 +605,40 @@ def test_context_pack_json_no_ambiguous_key_when_zero(
     doc = json.loads(capsys.readouterr().out)
     assert "ambiguous_in" not in doc
     assert "ambiguous_out" not in doc
+
+
+def test_constructor_pack_names_the_class_holding_tied_callers(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(
+        {
+            "web/ErrorPage.java": (
+                "package web;\n"
+                "public class ErrorPage {\n"
+                "    public ErrorPage(String path) { }\n"
+                "    public ErrorPage(HttpStatus status, String path) { }\n"
+                "    public ErrorPage(Class<?> exception, String path) { }\n"
+                "}\n"
+            ),
+            "app/Pages.java": (
+                "package app;\n"
+                "import web.ErrorPage;\n"
+                "public class Pages {\n"
+                "    Object make() {\n"
+                '        return new ErrorPage(HttpStatus.NOT_FOUND, "/404");\n'
+                "    }\n"
+                "}\n"
+            ),
+        }
+    )
+    index = mapfile.load_map(root)
+    ctor = index.symbols_by_id["web/ErrorPage.java::ErrorPage.ErrorPage#2"]
+    pack = contextpack.build_pack(index, ctor, hops=1)
+    assert "dekko query callers web/ErrorPage.java::ErrorPage" in (
+        contextpack.render_text(pack)
+    )
+    code = cli.main(["context", ctor.id, "--root", str(root), "--json"])
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["ambiguous_in"] == 1
+    assert doc["overload_ties"]["class"] == "web/ErrorPage.java::ErrorPage"

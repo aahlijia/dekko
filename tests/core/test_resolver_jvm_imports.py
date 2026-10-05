@@ -205,6 +205,60 @@ public class Outer {
     }
 
 
+def test_nested_class_import_picks_among_same_named_classes(
+    tmp_path: Path,
+) -> None:
+    # Two nested classes named ``Inner``; the import names the one in
+    # ``Outer``, so the construction resolves to it, not ambiguously.
+    nested = """package org.acme;
+public class {outer} {{
+\tpublic static class Inner {{
+\t\tpublic Inner() {{ }}
+\t}}
+}}
+"""
+    graph = _graph(
+        tmp_path,
+        {
+            f"{_MAIN}/Outer.java": nested.format(outer="Outer"),
+            f"{_MAIN}/Other.java": nested.format(outer="Other"),
+            f"{_TEST}/Tests.java": _test_class(
+                "Tests",
+                "import org.acme.Outer.Inner;",
+                "\t\tObject i = new Inner();\n",
+            ),
+        },
+    )
+    assert _callees(graph, _RUN) == {
+        f"{_MAIN}/Outer.java::Outer.Inner",
+        f"{_MAIN}/Outer.java::Outer.Inner.Inner",
+    }
+    assert "Inner" not in _ambiguous_names(graph, _RUN)
+
+
+def test_static_member_import_reaches_the_declaring_file(
+    tmp_path: Path,
+) -> None:
+    helper = """package org.acme;
+public class {outer} {{
+\tpublic static int helper() {{ return 1; }}
+}}
+"""
+    graph = _graph(
+        tmp_path,
+        {
+            f"{_MAIN}/Outer.java": helper.format(outer="Outer"),
+            f"{_MAIN}/Other.java": helper.format(outer="Other"),
+            f"{_TEST}/Tests.java": _test_class(
+                "Tests",
+                "import static org.acme.Outer.helper;",
+                "\t\thelper();\n",
+            ),
+        },
+    )
+    assert _callees(graph, _RUN) == {f"{_MAIN}/Outer.java::Outer.helper"}
+
+
 def test_kotlin_top_level_function_import_still_resolves(
     tmp_path: Path,
 ) -> None:

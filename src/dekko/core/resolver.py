@@ -36,7 +36,7 @@ resolves to a class-shaped symbol also credits that class's own
 explicit constructor method (JS/TS ``constructor``, Python
 ``__init__``, Java's and C++'s same-named constructors, which for C++
 may be defined out of line in another file) when one was extracted,
-via ``_constructors_of`` — without this, ``new ClassName(...)``
+via ``constructors_of`` — without this, ``new ClassName(...)``
 construction was invisible to the constructor method's fan-in even
 though it resolved fine to the class itself (or, for Java and C++,
 fell into ``ambiguous`` entirely, since such a constructor's own bare
@@ -105,6 +105,7 @@ import fnmatch
 import functools
 import gc
 import hashlib
+import itertools
 import json
 import multiprocessing
 import os
@@ -113,7 +114,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
@@ -140,6 +141,7 @@ from dekko.core.model import (
     RawHeritage,
     RawRef,
     ReadSite,
+    Reexport,
     Symbol,
     ThrowEdge,
 )
@@ -568,7 +570,7 @@ class NameDelta:
             or JS/TS's ``constructor``), its enclosing type's own bare
             name is added too. Without this, adding an ``__init__`` to
             an existing class would go undetected by any cached
-            caller's *own* name-scan: ``_constructors_of`` looks up the
+            caller's *own* name-scan: ``constructors_of`` looks up the
             new method by a name (``__init__``) that never appears in
             an already-cached ``MyClass()`` edge, whose callee id ends
             in ``MyClass``, not ``__init__``. Adding the class's own
@@ -588,6 +590,98 @@ class NameDelta:
     blocks_reuse: bool
     changed: frozenset[str]
     newly_defined: frozenset[str]
+
+
+def reexport_delta_names(
+    fm: FileMap,
+    old_reexports: list[dict] | None,
+    old_imports: list[dict] | None,
+) -> set[str] | None:
+    """Names one edited JS/TS file's exports and imports can re-point.
+
+    A name is followed from an import through every file that
+    re-exports it (``_OriginLookup``), and neither a re-export record
+    nor an import binding is part of any symbol. So an edit to either
+    changes what a call in an *unchanged* file resolves to, and the
+    symbol delta cannot see it.
+
+    Args:
+        fm: The file as extracted now.
+        old_reexports: Its cached re-export records, as dicts.
+        old_imports: Its cached import bindings, as dicts.
+
+    Returns:
+        Both names of every re-export record gained or lost, and the
+        local and original name of every import binding gained, lost
+        or re-pointed (a file's own import is a hop when it exports
+        the name again). An import of a bare package name leads
+        nowhere in the repo and is skipped. ``None`` when a star
+        re-export was gained or lost: what a star exposes is no
+        bounded set of names. Empty for a non-JS/TS file.
+    """
+    if not fm.path.endswith(_JS_TS_EXTENSIONS):
+        return set()
+    before = {
+        (d["name"], d["original"], d["source"]) for d in old_reexports or ()
+    }
+    now = {(r.name, r.original, r.source) for r in fm.reexports}
+    delta = before ^ now
+    if any(name == "*" for name, _, _ in delta):
+        return None
+    names = {n for name, original, _ in delta for n in (name, original)}
+    bound_before = {(d["name"], d["source"]) for d in old_imports or ()}
+    bound_now = {(i.name, i.source) for i in fm.imports}
+    for local, source in bound_before ^ bound_now:
+        probe = Import(path=fm.path, name=local, source=source)
+        if local and not _bare_package_import(probe):
+            names.update((local, alias_original_name(source)))
+    names.discard("*")
+
+    return names
+
+
+def reexport_closure(files: list[FileMap], names: set[str]) -> set[str]:
+    """``names``, plus every name a JS/TS file passes one of them on as.
+
+    ``export { helper as assist } from "./base"`` makes ``assist``
+    depend on ``helper``, and ``import { helper as h }`` does the same
+    for ``h``. A call resolved through such a hop is written under the
+    far name, so a change to ``helper`` has to reach the files that
+    say ``assist`` or ``h``. Which file each record sits in is
+    ignored: this over-approximates, and is only ever used to widen a
+    re-resolve.
+
+    Args:
+        files: Every mapped file.
+        names: The bare names that changed.
+
+    Returns:
+        The closure of ``names`` under renaming re-exports and import
+        aliases.
+    """
+    renames: list[tuple[str, str]] = []
+    for fm in files:
+        if not fm.path.endswith(_JS_TS_EXTENSIONS):
+            continue
+        renames.extend(
+            (rec.original, rec.name)
+            for rec in fm.reexports
+            if rec.name not in ("*", rec.original)
+        )
+        for imp in fm.imports:
+            original = alias_original_name(imp.source)
+            if imp.name and imp.name != original:
+                renames.append((original, imp.name))
+    out = set(names)
+    grew = bool(renames)
+    while grew:
+        grew = False
+        for original, name in renames:
+            if original in out and name not in out:
+                out.add(name)
+                grew = True
+
+    return out
 
 
 def name_delta(
@@ -1192,7 +1286,17 @@ def resolve(
     # directory) and the module graph (entry-point fields).
     manifests = _load_workspace_manifests(root) if root is not None else {}
     workspace_pkgs = {n: m.package_dir for n, m in manifests.items()}
-    imports_by_file = _imports_by_file(files, workspace_pkgs)
+    # One context serves the symbol-level passes (which file a JS/TS
+    # import names) and the module graph alike.
+    import_ctx = _import_resolve_context(files, root, manifests)
+    crates = load_cargo_crates(root) if root is not None else {}
+    _index_rust_crates(crates, index)
+    imports_by_file = _imports_by_file(
+        files,
+        workspace_pkgs,
+        _OriginLookup(import_ctx, by_name_path, files),
+        _rust_crates(files, crates),
+    )
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
 
@@ -1251,7 +1355,7 @@ def resolve(
         )
         _build_adjacency(graph)
         graph.referenced, graph.referenced_in, graph.referenced_out = (
-            resolve_refs(files, workers, workspace_pkgs)
+            resolve_refs(files, workers, workspace_pkgs, imports_by_file)
         )
         (
             graph.heritage,
@@ -1261,9 +1365,9 @@ def resolve(
             graph.heritage_external,
             graph.heritage_synthetic_tiebreak_count,
             graph.heritage_unplaced_subtype_count,
-        ) = resolve_heritage(files, workspace_pkgs)
+        ) = resolve_heritage(files, workspace_pkgs, imports_by_file, crates)
         graph.modules = resolve_imports(
-            files, root=root, workspace_manifests=manifests
+            files, root=root, workspace_manifests=manifests, ctx=import_ctx
         )
         (
             graph.throws,
@@ -1572,6 +1676,7 @@ def resolve_refs(
     files: list[FileMap],
     workers: int = 1,
     workspace_pkgs: dict[str, str] | None = None,
+    imports_by_file: dict[str, dict[str, Import]] | None = None,
 ) -> tuple[list[Edge], dict[str, list[str]], dict[str, list[str]]]:
     """Resolve every raw value reference across the repo.
 
@@ -1594,6 +1699,9 @@ def resolve_refs(
             ``load_workspace_packages``), or ``None``. Lets a
             workspace-package import narrow a colliding name to the
             package it was imported from.
+        imports_by_file: The per-file import table ``resolve()``
+            already built, so both passes read the same resolved
+            bindings. ``None`` builds one from ``workspace_pkgs``.
 
     Returns:
         ``(edges, referenced_in, referenced_out)``, the same shape
@@ -1601,7 +1709,8 @@ def resolve_refs(
     """
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files, workspace_pkgs)
+    if imports_by_file is None:
+        imports_by_file = _imports_by_file(files, workspace_pkgs)
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
 
@@ -1848,6 +1957,8 @@ def _ref_target_visible(
 def resolve_heritage(
     files: list[FileMap],
     workspace_pkgs: dict[str, str] | None = None,
+    imports_by_file: dict[str, dict[str, Import]] | None = None,
+    crates: dict[str, frozenset[str]] | None = None,
 ) -> tuple[
     list[HeritageEdge],
     dict[str, list[str]],
@@ -1909,6 +2020,11 @@ def resolve_heritage(
             clause whose base is imported by package name (``import
             type { ApiHandler } from "@cline/llms"``) is misfiled as
             external.
+        imports_by_file: The per-file import table ``resolve()``
+            already built. ``None`` builds one from ``workspace_pkgs``.
+        crates: ``load_cargo_crates``'s table, so ``impl
+            some_crate::Trait for X`` keeps that crate's ``Trait``
+            (``_rust_crate_path_narrowed``). ``None`` skips that.
 
     Returns:
         ``(heritage_edges, heritage_out, heritage_in,
@@ -1938,8 +2054,10 @@ def resolve_heritage(
         into "clause never happened."
     """
     index = _build_index(files)
+    _index_rust_crates(crates or {}, index)
     by_name_path = _build_name_path_index(files)
-    imports_by_file = _imports_by_file(files, workspace_pkgs)
+    if imports_by_file is None:
+        imports_by_file = _imports_by_file(files, workspace_pkgs)
     repo_stems = _repo_stems(files)
     crate_roots = _rust_crate_roots_index_all(
         frozenset(fm.path for fm in files)
@@ -2830,10 +2948,10 @@ def _ambiguous_candidates(
     ambiguous ``new`` rows, when ``Editor::new(..)`` could only mean
     the two ``Editor`` types' constructors. So the shape narrowing is
     run again here, on the ambiguous path only, and its result is what
-    the row records whenever it applied and left two or more. A
-    dot-call is not narrowed (the dot-call rule is a veto on the pick,
-    see ``_pick_candidate``), and nothing else about the ladder's
-    verdict changes: the call is ambiguous either way.
+    the row records whenever it applied and left two or more
+    (``_rust_row_narrowed`` adds the two shapes the ladder doesn't
+    narrow). Nothing about the ladder's verdict changes: the call is
+    ambiguous either way.
 
     Args:
         call: The raw call the ladder could not resolve.
@@ -2843,17 +2961,65 @@ def _ambiguous_candidates(
         repo_stems: Every repo file's matching stem.
 
     Returns:
-        The narrowed list when the Rust type-path shape applied and
-        left at least two candidates, else ``candidates`` unchanged.
+        The narrowed list when a Rust shape applied and left at least
+        two candidates, else ``candidates`` unchanged.
     """
     live = _without_own_constructors(_language_filtered(call, candidates))
     narrowed, _, applied = _rust_shape_narrowed_candidates(
         call, live, [], index, file_imports, repo_stems
     )
-    if applied and len(narrowed) >= 2:
+    if not applied or len(narrowed) < 2:
+        narrowed = candidates
+
+    return _rust_row_narrowed(call, candidates, narrowed, index)
+
+
+def _rust_row_narrowed(
+    call: RawCall,
+    candidates: list[Symbol],
+    narrowed: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> list[Symbol]:
+    """An ambiguous Rust row's candidates, down to what the call could
+    mean.
+
+    - A dot-call: the functions it can call with the count it wrote
+      (``_rust_call_excludes``). ``cx.new(|cx| ..)`` listed every
+      ``new`` in zed, free functions and associated ones included.
+    - A ``Type::name`` path on a type with no symbol, unnarrowed so
+      far: ``Type``'s members (``String::from`` with the repo's ``impl
+      From<X> for String``: 664 candidates each, on 185 calls).
+
+    Either applies only when it leaves two or more: one candidate left
+    is not a pick, and the ladder already declined to make it.
+
+    Args:
+        call: The raw call the ladder could not resolve.
+        candidates: The candidates it ran over.
+        narrowed: ``candidates`` after the shape narrowing.
+        index: Bare symbol name to every symbol sharing it.
+
+    Returns:
+        The narrower list, else ``narrowed``.
+    """
+    if not call.path.endswith(".rs"):
+        return narrowed
+    last = _rust_type_path_last_segment(call)
+    if last is not None:
+        if len(narrowed) != len(candidates) or index.get(last):
+            return narrowed
+        kept = [c for c in candidates if _container_name(c) == last]
+    elif _rust_is_dot_call(call):
+        kept = [
+            c
+            for c in candidates
+            if c.kind in ("function", "method")
+            and not _rust_call_excludes(call, c)
+        ]
+    else:
         return narrowed
 
-    return candidates
+    return kept if len(kept) >= 2 else narrowed
 
 
 def _add_edge(
@@ -2878,7 +3044,7 @@ def _add_call_and_constructor(
 ) -> None:
     """Record the resolved call edge, plus a constructor edge if any.
 
-    See ``_constructors_of`` (module docstring): a call or
+    See ``constructors_of`` (module docstring): a call or
     construction that resolves to a class-shaped symbol also counts
     toward that class's own explicit constructor method's fan-in, when
     the language extracted one as its own symbol. The class edge is
@@ -2900,7 +3066,7 @@ def _add_call_and_constructor(
             place.
     """
     _add_edge(caller_id, target.id, call.line, edges)
-    ctors = _constructors_of(target, by_name_path, index)
+    ctors = constructors_of(target, index, by_name_path)
     if not ctors:
         return
 
@@ -3363,13 +3529,131 @@ def _pick_candidate_ladder(
 
     if len(candidates) == 1:
         return _sole_candidate_match(
-            call, candidates[0], repo_stems is not None, index
+            call, candidates[0], repo_stems is not None, index, file_imports
         )
 
     return _last_resort_match(call, candidates)
 
 
 def _pick_candidate(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    file_imports: dict[str, Import],
+    caller: Symbol | None,
+    index: dict[str, list[Symbol]],
+    repo_stems: set[str] | None = None,
+    raw_imports: list[Import] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
+) -> Symbol | _Noise | None:
+    """Pick a candidate, skipping a Rust pick the call can't mean.
+
+    See ``_pick_candidate_vetoed`` for the ladder's own vetoes and
+    every parameter. A pick ``_rust_call_excludes`` rules out (a
+    shape or an argument count Rust has no syntax for) is taken out of
+    ``candidates`` and ``same_file`` and the ladder runs again, so a
+    wrapper's ``self.inner.set(a)`` reaches the wrapped type's
+    one-argument ``set`` instead of stopping at the wrapper's own
+    two-argument one. Only a candidate the ladder actually picked is
+    removed: a call that is ambiguous among possible candidates stays
+    ambiguous, and each new pick is held to the same rule. A call with
+    nothing left is noise.
+    """
+    excluded: set[str] = set()
+    while True:
+        picked = _pick_candidate_vetoed(
+            call,
+            candidates,
+            same_file,
+            file_imports,
+            caller,
+            index,
+            repo_stems,
+            raw_imports,
+            crate_roots,
+            tiebreak_hits,
+        )
+        if not isinstance(picked, Symbol) or not _rust_call_excludes(
+            call, picked
+        ):
+            return picked
+        if picked.id in excluded:
+            # The ladder can answer with a symbol from outside both
+            # lists; dropping it again would never end.
+            return _NOISE if repo_stems is not None else None
+        excluded.add(picked.id)
+        candidates = [c for c in candidates if c.id != picked.id]
+        same_file = [c for c in same_file if c.id != picked.id]
+        if not candidates:
+            return _NOISE if repo_stems is not None else None
+
+
+def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
+    """Whether a Rust call's shape or argument count rules out
+    ``candidate``.
+
+    Rust has no overloads, default arguments or optional parameters,
+    and writes ``self`` exactly when a method is called as a path
+    (``Type::method(obj, x)``), so a count that doesn't fit is code
+    that doesn't compile, not a guess. On zed, 6,039 sites picked such
+    a target: zero-argument ``x.clone()`` on ``Editor.clone(&self,
+    window, cx)``, ``a.min(b)`` on an associated ``fn min(a, b)``,
+    ``drop(x)`` on ``Terminal.drop(&mut self)``, ``zlog::init_test()``
+    on the same file's ``init_test(cx)``.
+
+    - A dot-call ``recv.name(..)`` needs a ``self`` parameter, and
+      writes every other parameter.
+    - A bare call ``name(..)`` can't reach a ``method`` (anything in an
+      ``impl`` or trait, with or without ``self``) or anything taking
+      ``self``, and writes every parameter.
+    - A path call ``a::name(..)`` writes every parameter, ``self``
+      included.
+
+    ``_candidate_arity`` strips ``self`` for any receiver, which is
+    wrong for a path call, but it is left alone: counting ``self``
+    there let the sole-candidate rung's trait-default allowance take
+    ``AppContext.new(&mut self, build)`` for an outside type's
+    ``Foo::new(a, b)``. The path count is read here only.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidate: The symbol the ladder picked.
+
+    Returns:
+        True for a ``RawCall`` in a ``.rs`` file and a Rust function or
+        method it can't mean. A call whose arguments the extractor
+        couldn't count (``arg_count is None``) is judged by shape only.
+    """
+    if (
+        not isinstance(call, RawCall)
+        or not call.path.endswith(".rs")
+        or candidate.language != "rust"
+        or candidate.kind not in ("function", "method")
+    ):
+        return False
+    params = candidate.params
+    has_self = bool(params) and _is_receiver_param(params[0], "rust")
+    if _rust_is_dot_call(call):
+        if not has_self:
+            return True
+        params = params[1:]
+    elif not call.receiver and (candidate.kind == "method" or has_self):
+        # ``has_self`` too: an ``impl`` inside a function body is
+        # extracted as plain functions.
+        return True
+
+    if call.arg_count is None:
+        return False
+
+    min_count, max_count = _param_arity(params)
+    if call.arg_count < min_count:
+        return True
+
+    return max_count is not None and call.arg_count > max_count
+
+
+def _pick_candidate_vetoed(
     call: _Referable,
     candidates: list[Symbol],
     same_file: list[Symbol],
@@ -3786,6 +4070,7 @@ def _sole_candidate_match(
     only: Symbol,
     noise_aware: bool,
     index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
 ) -> "Symbol | _Noise | None":
     """Resolve, or reject, the single remaining candidate for a call.
 
@@ -3810,6 +4095,11 @@ def _sole_candidate_match(
     1.0 candidates". Same defect class and same remedy as the ``_NOISE``
     split: no plausible repo target means external.
 
+    A class is not judged by its own symbol's parameters, which are
+    empty: it stands for its constructors. Java and C++ name them
+    after the class (``_class_named_constructors``); JS/TS and Python
+    don't, and are read by ``_constructed_by_count``.
+
     Args:
         call: The raw call/reference/heritage clause being resolved.
         only: The single language-filtered candidate.
@@ -3817,12 +4107,17 @@ def _sole_candidate_match(
             a non-``None`` ``repo_stems`` to ``_pick_candidate``).
             ``_resolve_ref`` doesn't, and has no external bucket to
             feed, so it keeps the plain ``None``.
+        index: The bare-name index, with its reserved entries.
+        file_imports: Local name to import record for the calling
+            file.
     """
     if (
-        only.kind in TYPE_KINDS and _class_named_constructors(only, index)
-    ) or (
-        _arity_plausible(only, call, index)
-        and not _rust_name_is_also_a_variant(call, only, index)
+        (only.kind in TYPE_KINDS and _class_named_constructors(only, index))
+        or _constructed_by_count(only, call, index, file_imports or {})
+        or (
+            _arity_plausible(only, call, index)
+            and not _rust_name_is_also_a_variant(call, only, index)
+        )
     ):
         # A class with named constructors stands for them after
         # ``_without_own_constructors``; its own symbol has no
@@ -3831,6 +4126,98 @@ def _sole_candidate_match(
     if noise_aware:
         return _NOISE
     return _last_resort_match(call, [])
+
+
+def _constructed_by_count(
+    only: Symbol,
+    call: _Referable,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+) -> bool:
+    """Whether ``call``'s argument count can construct the class ``only``.
+
+    For JS/TS and Python, where a class's parameters are on a method
+    not named after it. ``new AgentRuntime(config)`` read against the
+    class symbol is one argument for zero parameters, and the sole-
+    candidate rung threw out every construction with an argument that
+    no import tied to the class's file: an import through a barrel
+    (``./index``, a package ``__init__.py``), through an alias, a
+    receiver-qualified one, or none at all. cline kept 2 of 46
+    ``new AgentRuntime(..)`` sites; tensorflow lost 1,174 Python
+    construction sites.
+
+    Three cases:
+
+    - The class has constructors of its own: the count must fit one.
+    - It has none and its arity is knowable (a JS/TS class with no
+      ``extends`` clause takes no arguments): not decided here, the
+      class symbol's own empty parameter list is the right reading.
+    - It has none and its arity is unknowable (any Python class:
+      dataclass, ``NamedTuple``, metaclass, inherited ``__init__``; a
+      JS/TS class with an ``extends`` clause): there is no count to
+      check, so the call needs other evidence. Its receiver's head
+      is an import of the class's own file, or it is bare and a bare
+      name can mean this class (``_bare_name_reaches``). Without the
+      receiver test tensorflow gained 648 such sites and about half
+      were wrong: ``config_pb2.RunOptions(..)``, a generated protobuf
+      class, landed on the repo's one hand-written ``RunOptions``.
+
+    Args:
+        only: The sole remaining candidate.
+        call: The raw call being resolved. A reference or heritage
+            clause has no argument count and is never decided here.
+        index: The bare-name index, with the ``_OWN_CTOR_KEY`` and
+            ``_EXTENDS_KEY`` entries.
+        file_imports: Local name to import record for the calling
+            file.
+
+    Returns:
+        True when the construction is plausible by its constructor.
+        False leaves the decision to the class symbol's own arity.
+    """
+    arg_count = getattr(call, "arg_count", None)
+    if (
+        arg_count is None
+        or only.kind != "class"
+        or only.language not in _UNNAMED_CTOR_LANGUAGES
+    ):
+        return False
+    ctors = index.get(f"{_OWN_CTOR_KEY}{only.path}::{only.qualname}")
+    if ctors:
+        return any(_arity_fits(only, c, arg_count, index) for c in ctors)
+    if only.language != "python" and _EXTENDS_KEY + only.id not in index:
+        return False
+
+    receiver = getattr(call, "receiver", None)
+    if not receiver:
+        return _bare_name_reaches(only, call)
+
+    imp = file_imports.get(_PATH_SPLIT.split(receiver)[0])
+    return imp is not None and _module_matches(imp.source, only.path)
+
+
+def _bare_name_reaches(only: Symbol, call: _Referable) -> bool:
+    """Whether a bare ``Name(..)`` in another file can mean ``only``.
+
+    The call's own file binds the name to something the map has no
+    symbol for, or the same-file rung would have answered. That is an
+    alias of the class (``DoNotConvert = config_lib.DoNotConvert``) or
+    an unrelated local (``Car = collections.namedtuple("Car", ..)``),
+    and two things rule the class out: a class nested in another scope
+    has no bare name outside it, and code outside the tests does not
+    construct a class that lives in them.
+
+    Args:
+        only: The sole candidate, a class in another file.
+        call: The bare call being resolved.
+
+    Returns:
+        False when the bare name cannot be this class.
+    """
+    if "." in only.qualname:
+        return False
+
+    return not only.test or is_test_path(call.path)
 
 
 def _last_resort_match(
@@ -4495,8 +4882,12 @@ def _rust_shape_narrowed_candidates(
     """Narrow candidates by Rust call shape, before the rest of
     ``_pick_candidate``'s ladder runs.
 
-    Three shapes each rule out an entire class of candidate: a
-    ``Type::name`` path can only reach that type's own members
+    A path whose type is an alias or a renaming ``use`` is read as the
+    type it names (``_rust_alias_target``, ``_rust_rename_target``), and
+    a path through a workspace crate keeps that crate's candidates
+    (``_rust_crate_path_narrowed``). Then three shapes each rule out an
+    entire class of candidate: a ``Type::name`` path can only reach
+    that type's own members
     (``_owned_by_receiver_type``), the same path rooted at a type the
     repo doesn't define can reach nothing at all
     (``_rust_unknown_type_path``), and a ``recv.name`` dot-call can
@@ -4528,6 +4919,17 @@ def _rust_shape_narrowed_candidates(
         symbol" (worth a ``_NOISE``/external verdict) as opposed to
         merely having started out empty for an unrelated reason.
     """
+    owner = _rust_alias_target(call, index) or _rust_rename_target(
+        call, index, file_imports
+    )
+    if owner is not None:
+        return _rust_named_owner_narrowed(
+            call, candidates, same_file, index, owner
+        )
+    in_crate = _rust_crate_path_narrowed(call, candidates, index, file_imports)
+    if in_crate is not None:
+        keep = {c.id for c in in_crate}
+        return in_crate, [c for c in same_file if c.id in keep], True
     if _rust_type_path_receiver(call, index):
         return (
             _owned_by_receiver_type(call, candidates, index),
@@ -4546,6 +4948,189 @@ def _rust_shape_narrowed_candidates(
         # see ``_pick_candidate``'s veto.
         return [], [], True
     return candidates, same_file, False
+
+
+# The head type a Rust type's text names: ``FxHashMap`` for
+# ``FxHashMap<K, V>``, ``Point`` for ``&'a gpui::Point<Pixels>``.
+_RUST_TYPE_HEAD = re.compile(
+    r"^(?:&\s*(?:'\w+\s+)?(?:mut\s+)?)?((?:\w+::)*)(\w+)"
+)
+# How many aliases of aliases ``_rust_alias_target`` follows.
+_RUST_ALIAS_DEPTH = 4
+
+
+def _only_aliases(symbols: list[Symbol]) -> bool:
+    """Whether ``symbols`` is non-empty and every one is a type alias."""
+    return bool(symbols) and all(s.kind == "type_alias" for s in symbols)
+
+
+def _rust_alias_heads(name: str, index: dict[str, list[Symbol]]) -> set[str]:
+    """The head types the Rust aliases named ``name`` stand for."""
+    heads: set[str] = set()
+    for sym in index.get(name, []):
+        if sym.kind != "type_alias" or sym.language != "rust":
+            continue
+        found = _RUST_TYPE_HEAD.match((sym.returns or "").strip())
+        if found:
+            heads.add(found.group(2))
+    return heads
+
+
+def _rust_alias_target(
+    call: _Referable, index: dict[str, list[Symbol]]
+) -> str | None:
+    """The type a Rust ``Alias::name(..)`` path's alias stands for.
+
+    An alias has no members, so ``_rust_type_path_receiver`` skips it
+    and nothing followed it: ``collections::HashMap`` is ``type
+    HashMap<K, V> = FxHashMap<K, V>``, and 1,173 ``HashMap::..`` calls
+    on zed went to whichever ``default``/``new`` the ladder found.
+    Followed through aliases of aliases, when every symbol of each
+    name is an alias and they agree on what they name.
+
+    Returns:
+        The first name on the way that is not only an alias, or
+        ``None`` when the path's type isn't an alias, the aliases
+        disagree, or the chain loops or runs past
+        ``_RUST_ALIAS_DEPTH``.
+    """
+    last = _rust_type_path_last_segment(call)
+    if last is None or not _only_aliases(index.get(last, [])):
+        return None
+    seen = {last}
+    name = last
+    for _ in range(_RUST_ALIAS_DEPTH):
+        heads = _rust_alias_heads(name, index)
+        if len(heads) != 1:
+            return None
+        name = heads.pop()
+        if name in seen:
+            return None
+        seen.add(name)
+        if not _only_aliases(index.get(name, [])):
+            return name
+
+    return None
+
+
+def _rust_rename_target(
+    call: _Referable,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None,
+) -> str | None:
+    """The type a Rust ``Local::name(..)`` path's renaming ``use``
+    stands for.
+
+    ``use text::Buffer as TextBuffer`` here, or ``use
+    language::TextBuffer`` here where ``language`` did ``pub use
+    text::Buffer as TextBuffer``: either way ``TextBuffer::new(..)``
+    means ``Buffer.new``, which no lookup by ``TextBuffer`` finds.
+
+    Returns:
+        The original name, or ``None`` when the path's type has a
+        symbol of its own, isn't imported here, or the repo renames to
+        it from more than one name.
+    """
+    last = _rust_type_path_last_segment(call)
+    if last is None or index.get(last):
+        return None
+    binding = (file_imports or {}).get(last)
+    if binding is None:
+        return None
+    original = binding.source.rsplit("::", 1)[-1]
+    if original != last:
+        return original
+    originals = {s.name for s in index.get(_RUST_RENAMED_KEY + last, [])}
+
+    return originals.pop() if len(originals) == 1 else None
+
+
+def _rust_named_owner_narrowed(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    index: dict[str, list[Symbol]],
+    owner: str,
+) -> tuple[list[Symbol], list[Symbol], bool]:
+    """``_rust_shape_narrowed_candidates`` for a path whose type an
+    alias or a renaming ``use`` named: ``owner``'s own members, or
+    nothing at all when the repo has no ``owner`` type and no member of
+    one (``FxHashMap``: external)."""
+    in_repo = any(s.kind in TYPE_KINDS for s in index.get(owner, []))
+    if not in_repo and not any(
+        _container_name(c) == owner for c in candidates
+    ):
+        return [], [], True
+
+    return (
+        _owned_by_type(call, candidates, index, owner),
+        _owned_by_type(call, same_file, index, owner),
+        True,
+    )
+
+
+# A Rust path of lowercase module segments: ``release_channel``,
+# ``open_ai::batches``.
+_RUST_MODULE_PATH = re.compile(r"[a-z_][a-z0-9_]*(::[a-z_][a-z0-9_]*)*")
+_RUST_NOT_A_CRATE = frozenset(
+    {"crate", "self", "super", "std", "core", "alloc"}
+)
+
+
+def _rust_crate_path_dirs(
+    call: _Referable,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None,
+) -> set[str]:
+    """The directories of the workspace crate a ``some_crate::..::
+    name(..)`` call names, directly or through the file's ``use`` of
+    its first segment. Empty for any other call."""
+    receiver = getattr(call, "receiver", None)
+    if not receiver or not call.path.endswith(".rs"):
+        return set()
+    if getattr(call, "text", "") != f"{receiver}::{call.name}":
+        return set()
+    if not _RUST_MODULE_PATH.fullmatch(receiver):
+        return set()
+    first = receiver.split("::", 1)[0]
+    binding = (file_imports or {}).get(first)
+    if binding is not None:
+        first = binding.source.split("::", 1)[0]
+    if first in _RUST_NOT_A_CRATE:
+        return set()
+
+    return {s.path for s in index.get(_RUST_CRATE_KEY + first, [])}
+
+
+def _rust_crate_path_narrowed(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None,
+) -> list[Symbol] | None:
+    """The candidates inside the crate a ``some_crate::name(..)`` path
+    names, non-methods first.
+
+    ``release_channel::init(cx)`` from ``zed.rs`` went to ``zed.rs``'s
+    own ``init`` (the same-file rung) or stayed ambiguous among all 165
+    ``init`` functions: nothing narrowed a lowercase path. On zed this
+    rule gained 1,072 pairs, ``main`` and every ``init_test`` reaching
+    the crates they set up.
+
+    Returns:
+        The narrowed list, or ``None`` when the call isn't a crate
+        path, or no candidate is in the crate (it re-exports the
+        function from elsewhere: no evidence), or every candidate is.
+    """
+    dirs = _rust_crate_path_dirs(call, index, file_imports)
+    inside = [
+        c for c in candidates if any(c.path.startswith(d + "/") for d in dirs)
+    ]
+    free = [c for c in inside if c.kind != "method"] or inside
+    if free and len(free) < len(candidates):
+        return free
+
+    return None
 
 
 def _rust_is_dot_call(call: _Referable) -> bool:
@@ -4640,14 +5225,19 @@ def _rust_type_path_last_segment(call: _Referable) -> str | None:
 
     ``gpui::Point::<f32>::new`` gives ``Point``. Purely syntactic, no
     index lookup: ``None`` for a non-Rust call, a dot-call, ``Self``,
-    and a lowercase module path (``module::func``).
+    and a lowercase module path (``module::func``). Type arguments are
+    removed before the split: a turbofish receiver (``Vec::<T>``) ends
+    in ``::<T>``, and reading ``<T>`` as the last segment gave up on
+    the path (35 ambiguous ``new`` rows on zed over every ``new`` in
+    the repo).
     """
     receiver = getattr(call, "receiver", None)
     if not receiver or not call.path.endswith(".rs"):
         return None
     if f"{receiver}::" not in (getattr(call, "text", "") or ""):
         return None
-    last = receiver.rsplit("::", 1)[-1].split("<", 1)[0].strip()
+    bare = _strip_template_args(receiver).strip().rstrip(":")
+    last = bare.rsplit("::", 1)[-1].strip()
     if not last[:1].isupper() or last == "Self":
         return None
 
@@ -4684,12 +5274,14 @@ def _rust_unknown_type_path(
     - no candidate is a member of it. A macro-generated struct with a
       handwritten ``impl Foo { fn new() }`` has no ``Foo`` symbol but
       does have ``Foo.new``.
-    - the calling file doesn't ``use`` it from inside the repo. A
-      rename matches no symbol by design, and it needn't be written
-      in this file: ``pub use text::Buffer as TextBuffer;`` in one
-      crate, then ``use language::TextBuffer;`` here (live-testing on
-      zed: a same-file-only ``as`` check lost 2 real
-      ``TextBuffer::new_normalized`` edges).
+    - the calling file doesn't ``use`` it from inside the repo under a
+      name some ``use .. as`` in the repo binds. A rename matches no
+      symbol by design, and it needn't be written in this file: ``pub
+      use text::Buffer as TextBuffer;`` in one crate, then ``use
+      language::TextBuffer;`` here (live-testing on zed: a
+      same-file-only ``as`` check lost 2 real
+      ``TextBuffer::new_normalized`` edges). An in-repo ``use`` of a
+      name nothing renames is a re-exported outside type.
     - it isn't an associated-type path. ``T::ProtoRequest::stop()``
       and ``Self::Output::new()`` name a type only the trait solver
       knows; the ladder's trait-method guess was right on zed (3 of
@@ -4724,10 +5316,15 @@ def _rust_unknown_type_path(
     binding = (file_imports or {}).get(last)
     if binding is None:
         return True
+    if repo_stems is not None and not _import_is_in_repo(binding, repo_stems):
+        return True
 
-    return repo_stems is not None and not _import_is_in_repo(
-        binding, repo_stems
-    )
+    # Imported from inside the repo, yet no repo symbol carries the
+    # name: only a rename explains that. Anything else is an outside
+    # type a workspace crate re-exports (``collections::BTreeMap`` is
+    # ``pub use std::collections::*``) or a macro-made one with no
+    # handwritten members.
+    return _RUST_RENAMED_KEY + last not in index
 
 
 def _rust_is_associated_type_path(call: _Referable) -> bool:
@@ -4736,7 +5333,8 @@ def _rust_is_associated_type_path(call: _Referable) -> bool:
     ``T::ProtoRequest::name`` and ``Self::Output::name``: a segment
     before the last one is itself type-shaped (capitalized, or
     ``Self``), where a plain module path (``std::collections::
-    HashMap::name``) is lowercase all the way to the type.
+    HashMap::name``) is lowercase all the way to the type. A turbofish
+    is not a segment: ``Vec::<T>::name`` is a ``Vec`` path.
     """
     receiver = (getattr(call, "receiver", None) or "").strip()
     if receiver.startswith("<"):
@@ -4744,8 +5342,8 @@ def _rust_is_associated_type_path(call: _Referable) -> bool:
         # form of the same thing (live-testing on zed, 1 real edge).
         return True
 
-    qualifiers = receiver.split("<", 1)[0].split("::")[:-1]
-    return any(seg.strip()[:1].isupper() for seg in qualifiers)
+    bare = _strip_template_args(receiver).strip().rstrip(":")
+    return any(seg.strip()[:1].isupper() for seg in bare.split("::")[:-1])
 
 
 def _container_name(sym: Symbol) -> str | None:
@@ -4785,12 +5383,24 @@ def _owned_by_receiver_type(
     owner = _rust_type_path_receiver(call, index)
     if owner is None:
         return candidates
+
+    return _owned_by_type(call, candidates, index, owner)
+
+
+def _owned_by_type(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+    owner: str,
+) -> list[Symbol]:
+    """The candidates a path rooted at type ``owner`` could mean: its
+    own members, else a trait's (see ``_owned_by_receiver_type``)."""
     own: list[Symbol] = []
     via_trait: list[Symbol] = []
     for cand in candidates:
-        if "." not in cand.qualname:
+        container_name = _container_name(cand)
+        if container_name is None:
             continue
-        container_name = cand.qualname.rsplit(".", 1)[0].rsplit(".", 1)[-1]
         if container_name == owner:
             own.append(cand)
         elif any(sym.kind == "trait" for sym in index.get(container_name, [])):
@@ -5021,10 +5631,10 @@ _CONSTRUCTOR_NAMES = ("constructor", "__init__")
 _CONSTRUCTOR_NAME_SET = frozenset(_CONSTRUCTOR_NAMES)
 
 
-def _constructors_of(
+def constructors_of(
     cls: Symbol,
-    by_name_path: dict[tuple[str, str], list[Symbol]],
     index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]] | None = None,
 ) -> list[Symbol]:
     """The class's own explicit constructor methods, if extracted.
 
@@ -5049,12 +5659,19 @@ def _constructors_of(
     extractor builds an out-of-line definition's qualname from its
     ``Graph::`` scope, so it matches the class's own.
 
+    The read side asks the same question of a loaded map (a class and
+    its constructors are one thing to a caller), so it calls this with
+    ``MapIndex.symbols_by_name`` and gets exactly the relation the
+    resolver recorded edges by.
+
     Args:
         cls: A resolved symbol, checked only when it is class-shaped
             (``model.TYPE_KINDS``) — a plain function/method target
             returns an empty list immediately.
-        by_name_path: ``(bare name, file path)`` → same-file symbols.
         index: Bare name → every symbol with it.
+        by_name_path: ``(bare name, file path)`` → same-file symbols,
+            a faster lookup the resolver already holds. Without it the
+            same-file symbols are filtered out of ``index``.
 
     Returns:
         The constructor method symbols in declaration order, or an
@@ -5068,9 +5685,13 @@ def _constructors_of(
         return named
     for name in _CONSTRUCTOR_NAMES:
         qual = f"{cls.qualname}.{name}"
+        if by_name_path is None:
+            same_file = [s for s in index.get(name, []) if s.path == cls.path]
+        else:
+            same_file = by_name_path.get((name, cls.path), [])
         found = [
             sym
-            for sym in by_name_path.get((name, cls.path), [])
+            for sym in same_file
             if sym.kind == "method" and sym.qualname == qual
         ]
         if found:
@@ -5086,7 +5707,7 @@ def _class_named_constructors(
     Looked up in ``index[cls.name]``, the same small list the
     construction's own candidates came from. Java constructors live
     in the class's file; C++ ones anywhere in the family (see
-    ``_constructors_of``).
+    ``constructors_of``).
 
     Args:
         cls: A type-kind symbol.
@@ -5202,14 +5823,19 @@ def _pick_constructor(
     tries fixed-arity applicability before variable-arity: for
     ``SpringApplication(Class<?>...)`` and ``(ResourceLoader,
     Class<?>...)``, one argument picks the first and two the second,
-    though both fit either count. Overloads the count can't separate
-    (``ErrorPage(HttpStatus, String)`` vs ``(Class, String)``) are
-    returned undecided, never guessed: only argument types tell them
-    apart, and dekko has none.
+    though both fit either count. Before either tier, a literal
+    argument rules out every overload whose parameter it can't be
+    (``_literal_viable``): a class literal is never a
+    ``ResourceLoader``, so ``new SpringApplication(A.class, B.class)``
+    is the ``(Class<?>...)`` one, and ``new ErrorPage(X.class,
+    "/500")`` the ``(Class, String)`` one. Overloads nothing visible
+    separates (``new ErrorPage(HttpStatus.NOT_FOUND, "/404")``) are
+    returned undecided, never guessed: dekko has no types for other
+    expressions.
 
     Args:
         cls: The constructed class.
-        ctors: The class's constructors, from ``_constructors_of``.
+        ctors: The class's constructors, from ``constructors_of``.
         call: The construction call.
         index: The bare-name index, for each constructor's declared
             arity (``_arity_fits``).
@@ -5226,6 +5852,7 @@ def _pick_constructor(
             return ctors[0], []
         return None, ctors
     fitting = [c for c in ctors if _arity_fits(cls, c, n, index)]
+    fitting = _literal_viable(fitting, call.arg_kinds)
     exact = [c for c in fitting if _declared_param_count(c) == n]
     for tier in (exact, fitting):
         if len(tier) == 1:
@@ -5234,6 +5861,157 @@ def _pick_constructor(
             return None, tier
 
     return None, []
+
+
+# Java parameter types each literal kind can be passed to (JLS 5.3: a
+# method invocation has no user-defined conversions, so the lists are
+# closed). Every kind also fits a type variable and ``_JAVA_ANY``.
+_JAVA_PRIMITIVES = frozenset(
+    {"int", "long", "short", "byte", "char", "float", "double", "boolean"}
+)
+_JAVA_ANY = frozenset(
+    {"Object", "Serializable", "Comparable", "Constable", "ConstantDesc"}
+)
+_JAVA_ACCEPTS = {
+    "string": frozenset({"String", "CharSequence"}) | _JAVA_ANY,
+    "class": frozenset(
+        {
+            "Class",
+            "Type",
+            "AnnotatedElement",
+            "GenericDeclaration",
+            "TypeDescriptor",
+            "OfField",
+        }
+    )
+    | _JAVA_ANY,
+    "bool": frozenset({"boolean", "Boolean"}) | _JAVA_ANY,
+    "int": frozenset({"int", "long", "float", "double", "Integer", "Number"})
+    | _JAVA_ANY,
+    "char": frozenset({"char", "int", "long", "float", "double", "Character"})
+    | _JAVA_ANY,
+}
+# Types a freshly constructed object or a lambda is never an instance
+# of (unless it constructs that very type).
+_JAVA_NOT_OBJECTS = _JAVA_PRIMITIVES | frozenset(
+    {
+        "String",
+        "Class",
+        "Boolean",
+        "Integer",
+        "Long",
+        "Character",
+        "Double",
+        "Float",
+        "Short",
+        "Byte",
+    }
+)
+_JAVA_ANNOTATION = re.compile(r"@[\w.]+(\([^)]*\))?\s*")
+
+
+def _literal_viable(
+    fitting: list[Symbol],
+    arg_kinds: tuple[str, ...] | None,
+) -> list[Symbol]:
+    """Drop the overloads a literal argument can't be passed to.
+
+    Only a choice between 2+ overloads is narrowed, and when every
+    one is ruled out the count's choice stands: the literal evidence
+    is not trusted over it.
+
+    Args:
+        fitting: The constructors the written count fits.
+        arg_kinds: The construction's ``RawCall.arg_kinds``.
+
+    Returns:
+        The overloads no argument rules out, or ``fitting`` unchanged.
+    """
+    if arg_kinds is None or len(fitting) < 2:
+        return fitting
+    viable = [
+        ctor
+        for ctor in fitting
+        if not any(
+            _java_literal_rules_out(kind, *slot)
+            for kind, slot in zip(arg_kinds, _java_arg_slots(ctor, arg_kinds))
+        )
+    ]
+
+    return viable or fitting
+
+
+def _java_arg_slots(
+    ctor: Symbol,
+    arg_kinds: tuple[str, ...],
+) -> list[tuple[str | None, bool, bool]]:
+    """What each written argument binds to in ``ctor``.
+
+    Args:
+        ctor: A Java constructor.
+        arg_kinds: One kind per written argument.
+
+    Returns:
+        ``(base type, is array, may be the varargs array itself)``
+        per argument, the base ``None`` when the parameter has no
+        declared type. An argument in the varargs slot is checked
+        against the element type; when it is the slot's only
+        argument it may instead be the whole array.
+    """
+    params = [
+        p
+        for p in _constructor_params(ctor)
+        if p.name not in _ARITY_SYNTAX_MARKER_NAMES
+    ]
+    if not params:
+        return [(None, False, False)] * len(arg_kinds)
+
+    slots: list[tuple[str | None, bool, bool]] = []
+    for i in range(len(arg_kinds)):
+        param = params[min(i, len(params) - 1)]
+        text = _JAVA_ANNOTATION.sub("", param.type or "").strip()
+        whole_array = False
+        if param.variadic:
+            text = text.removesuffix("...").strip()
+            whole_array = i == len(params) - 1 == len(arg_kinds) - 1
+        array = "[" in text
+        base = re.sub(r"<.*", "", text).replace("[]", "").strip()
+        slots.append((base.rsplit(".", 1)[-1] or None, array, whole_array))
+
+    return slots
+
+
+def _java_literal_rules_out(
+    kind: str,
+    base: str | None,
+    array: bool,
+    whole_array: bool,
+) -> bool:
+    """Whether an argument of ``kind`` can't be passed as ``base``.
+
+    Args:
+        kind: The argument's ``RawCall.arg_kinds`` entry.
+        base: The parameter's type, generics and qualifier dropped.
+        array: Whether the parameter is an array.
+        whole_array: Whether the argument may be the varargs array.
+
+    Returns:
+        ``True`` only when Java would reject the argument.
+    """
+    if kind == "?" or not base:
+        return False
+    if len(base) <= 2 and base.isupper():
+        return False
+    if kind == "null":
+        return base in _JAVA_PRIMITIVES and not array and not whole_array
+    if array:
+        return True
+    if kind.startswith("new:"):
+        return base in _JAVA_NOT_OBJECTS and base != kind[4:]
+    if kind == "lambda":
+        return base in _JAVA_NOT_OBJECTS
+
+    return base not in _JAVA_ACCEPTS[kind]
 
 
 def _without_own_constructors(candidates: list[Symbol]) -> list[Symbol]:
@@ -5374,7 +6152,18 @@ def _import_match(
     how many resolved edges rest on that convention-based tiebreak
     rather than a structural match.
     """
-    # Workspace narrowing runs first on purpose: for a package-shaped
+    # The file the import's specifier resolves to answers before any
+    # hint below does: each of them tests a file *stem*, and where the
+    # two disagreed on cline and claude-code the stem was the wrong one
+    # every time (an alias matching another app's same-named file, an
+    # import alias bound to an unrelated symbol of the local name). The
+    # answer need not be among ``candidates``: an import alias ends at
+    # a symbol the call's own name never finds.
+    origin = _origin_match(call, file_imports)
+    if origin is not None:
+        return origin
+
+    # Workspace narrowing runs next on purpose: for a package-shaped
     # specifier, ``_module_matches``'s stem test below can only ever
     # hit by coincidence (``@cline/shared/Logger`` "matching" an
     # unrelated ``Logger.ts`` in another package), so the package
@@ -5407,15 +6196,87 @@ def _import_match(
     )
     if receiver_hint is not None:
         return receiver_hint
-    if raw_imports:
-        matched = [
-            c
-            for c in candidates
-            if any(_module_matches(i.source, c.path) for i in raw_imports)
-        ]
-        if len(matched) == 1:
-            return matched[0]
+
+    return _whole_file_include_match(candidates, raw_imports)
+
+
+def _whole_file_include_match(
+    candidates: list[Symbol], raw_imports: list[Import] | None
+) -> Symbol | None:
+    """The one candidate whose file some ``#include`` here names.
+
+    Args:
+        candidates: The candidates the per-name hints could not settle.
+        raw_imports: The calling file's full import list, for a
+            whole-file-include language; ``None`` otherwise.
+
+    Returns:
+        The single candidate in an included file, or ``None``.
+    """
+    if not raw_imports:
+        return None
+    matched = [
+        c
+        for c in candidates
+        if any(_module_matches(i.source, c.path) for i in raw_imports)
+    ]
+    if len(matched) == 1:
+        return matched[0]
+
     return None
+
+
+def _origin_match(
+    call: _Referable, file_imports: dict[str, Import]
+) -> Symbol | None:
+    """The one symbol the call's own import binding resolves to.
+
+    Args:
+        call: The raw call, reference or heritage clause.
+        file_imports: The calling file's import bindings by local name.
+
+    Returns:
+        The one symbol those bindings lead to (see
+        ``_origin_symbols``). ``None`` with no binding, no origin, or
+        two or more (a type and a value declared under one name),
+        which leaves the verdict to the rest of the ladder.
+    """
+    found = _origin_symbols(call, file_imports)
+    if len(found) == 1:
+        return found[0]
+
+    return None
+
+
+def _origin_symbols(
+    call: _Referable, file_imports: dict[str, Import]
+) -> list[Symbol]:
+    """Every symbol the call's import bindings lead to.
+
+    The call's own name as a binding, and, for ``Head.name(..)``, the
+    name as a member of ``Head``'s binding (see
+    ``_OriginLookup.members``).
+
+    Args:
+        call: The raw call, reference or heritage clause.
+        file_imports: The calling file's import bindings by local name.
+
+    Returns:
+        The distinct symbols, empty when no binding leads anywhere.
+    """
+    found: dict[str, Symbol] = {}
+    imp = file_imports.get(call.name)
+    if isinstance(imp, _OriginImport):
+        for sym in imp.origins:
+            found.setdefault(sym.id, sym)
+    receiver = getattr(call, "receiver", None)
+    if receiver:
+        head = file_imports.get(_PATH_SPLIT.split(receiver)[0])
+        if isinstance(head, _OriginImport):
+            for sym in head.members.get(call.name, ()):
+                found.setdefault(sym.id, sym)
+
+    return list(found.values())
 
 
 def _hint_match(
@@ -5606,15 +6467,23 @@ def _alias_candidates(
         file matches — e.g. an alias for a genuinely external
         package, which must keep resolving to ``external``.
     """
+    origins = _origin_symbols(call, file_imports)
+    if len(origins) == 1:
+        # The file the specifier resolves to settles it, as in
+        # ``_import_match``: the stem test below would tie on every
+        # same-named file behind a tsconfig alias.
+        return origins
     imp = file_imports.get(call.name)
     if imp is None:
-        return []
+        return origins
     original = alias_original_name(imp.source)
-    return [
+    found = [
         c
         for c in index.get(original, [])
         if _module_matches(imp.source, c.path)
     ]
+
+    return found or origins
 
 
 # Rust std/core/alloc namespace roots -- a fully-qualified inline path
@@ -6275,11 +7144,38 @@ _CPP_USING_KEY = "::cpp-using::"
 # from a ``.cc`` definition that can't repeat its header's defaults.
 _CPP_DECLARED_KEY = "::cpp-declared::"
 
+# Reserved ``index`` namespaces for a JS/TS or Python construction
+# (``_constructed_by_count``). ``_OWN_CTOR_KEY + "path::Qualname"``
+# holds the ``constructor`` / ``__init__`` methods of the class with
+# that qualname in that file. ``_EXTENDS_KEY + class id`` is present
+# when the class has an ``extends`` clause, so it may inherit a
+# constructor the map can't read off the class itself.
+_OWN_CTOR_KEY = "::own-ctor::"
+_EXTENDS_KEY = "::extends::"
+
+# Reserved ``index`` namespaces holding stand-ins (``_stand_in``), not
+# real symbols. ``_RUST_RENAMED_KEY + name`` is present when some Rust
+# ``use .. as Name`` in the repo binds ``name``, with one stand-in per
+# original name it renames (``_rust_unknown_type_path``,
+# ``_rust_rename_target``). ``_RUST_CRATE_KEY + crate`` holds one
+# stand-in per directory of that workspace crate, its ``path``
+# (``_rust_crate_path_dirs``).
+_RUST_RENAMED_KEY = "::rust-renamed::"
+_RUST_CRATE_KEY = "::rust-crate::"
+_UNNAMED_CTOR_NAMES = {
+    "python": "__init__",
+    "javascript": "constructor",
+    "typescript": "constructor",
+    "tsx": "constructor",
+}
+_UNNAMED_CTOR_LANGUAGES = frozenset(_UNNAMED_CTOR_NAMES)
+
 
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
-    ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY`` and
-    ``_CPP_DECLARED_KEY`` entries."""
+    ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY``,
+    ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY`` and
+    ``_RUST_RENAMED_KEY`` entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
@@ -6297,7 +7193,81 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
         for entry in fm.cpp_using:
             _index_cpp_using(entry, index)
     _index_cpp_declared(files, index)
+    _index_constructions(files, index)
+    for name, original in sorted(rust_renames(files)):
+        index.setdefault(_RUST_RENAMED_KEY + name, []).append(
+            _stand_in(original)
+        )
+
     return index
+
+
+def _stand_in(name: str, path: str = "") -> Symbol:
+    """A placeholder carrying a name or a directory through the index
+    to pool workers (see ``_RUST_RENAMED_KEY``); never a candidate."""
+    return Symbol(
+        id="",
+        name=name,
+        qualname=name,
+        kind="module",
+        path=path,
+        language="rust",
+    )
+
+
+def _index_rust_crates(
+    crates: dict[str, frozenset[str]], index: dict[str, list[Symbol]]
+) -> None:
+    """Record each workspace crate's directories (``_RUST_CRATE_KEY``).
+    The repo root is left out: a crate there contains every path."""
+    for name, dirs in crates.items():
+        stand_ins = [_stand_in(name, d) for d in sorted(dirs) if d]
+        if stand_ins:
+            index[_RUST_CRATE_KEY + name] = stand_ins
+
+
+def rust_renames(files: list[FileMap]) -> set[tuple[str, str]]:
+    """Every ``(Name, Original)`` a Rust ``use .. as Name`` binds,
+    across ``files``.
+
+    ``pub use text::Buffer as TextBuffer;`` gives ``("TextBuffer",
+    "Buffer")``.
+
+    Args:
+        files: The extracted files to read imports from.
+
+    Returns:
+        The local names whose ``use`` source ends in another name,
+        each with that name.
+    """
+    return {
+        (imp.name, imp.source.rsplit("::", 1)[-1])
+        for fm in files
+        if fm.path.endswith(".rs")
+        for imp in fm.imports
+        if imp.name and imp.source.rsplit("::", 1)[-1] != imp.name
+    }
+
+
+def _index_constructions(
+    files: list[FileMap], index: dict[str, list[Symbol]]
+) -> None:
+    """Record what a JS/TS or Python construction is checked against:
+    each class's own constructors and whether it extends anything (see
+    ``_OWN_CTOR_KEY`` and ``_EXTENDS_KEY``)."""
+    for fm in files:
+        if fm.language not in _UNNAMED_CTOR_LANGUAGES:
+            continue
+        ctor_name = _UNNAMED_CTOR_NAMES[fm.language]
+        for sym in fm.symbols:
+            if sym.kind == "method" and sym.name == ctor_name:
+                owner = sym.qualname.rpartition(".")[0]
+                index.setdefault(
+                    f"{_OWN_CTOR_KEY}{sym.path}::{owner}", []
+                ).append(sym)
+        for clause in fm.heritage:
+            if clause.subtype_id and clause.relation == "extends":
+                index.setdefault(_EXTENDS_KEY + clause.subtype_id, [])
 
 
 def _index_cpp_declared(
@@ -6474,7 +7444,25 @@ _WORKSPACE_MANIFESTS = frozenset({"package.json", "pnpm-workspace.yaml"})
 
 
 @dataclass
-class _WorkspaceImport(Import):
+class _OriginImport(Import):
+    """A JS/TS import binding whose specifier was resolved to a file.
+
+    Attributes:
+        origins: The top-level symbols the binding's name leads to:
+            what the resolved file declares under the binding's
+            original name, and what any re-export it passes through
+            ends at (see ``_OriginLookup``). Empty when the specifier
+            names no repo file or nothing declares the name.
+        members: The same, for each name this file uses *on* the
+            binding (``Ns.name(..)``): name → symbols.
+    """
+
+    origins: tuple[Symbol, ...] = ()
+    members: dict[str, tuple[Symbol, ...]] = field(default_factory=dict)
+
+
+@dataclass
+class _WorkspaceImport(_OriginImport):
     """An import binding whose source names an in-repo workspace package.
 
     Attributes:
@@ -6580,11 +7568,211 @@ def workspace_fingerprint(root: Path) -> str:
     Returns:
         A stable hex digest, or ``""`` for a repo with no workspaces.
     """
-    packages = load_workspace_packages(root)
-    if not packages:
+    manifests = _load_workspace_manifests(root)
+    if not manifests:
         return ""
-    payload = json.dumps(sorted(packages.items())).encode()
+    # The entry-point fields too: they decide which file a bare
+    # ``@scope/pkg`` import names, and so which symbol a call through
+    # that import resolves to.
+    table = [
+        [
+            name,
+            m.package_dir,
+            m.data.get("exports"),
+            [m.data.get(f) for f in _JS_ENTRY_FIELDS],
+        ]
+        for name, m in sorted(manifests.items())
+    ]
+    payload = json.dumps(table, sort_keys=True, default=str).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def tsconfig_fingerprint(root: Path) -> str:
+    """Digest of the tsconfig path-alias tables, for cache invalidation.
+
+    The cached call pass reads these to tell which file a JS/TS import
+    names. Editing ``compilerOptions.paths`` or ``baseUrl`` moves no
+    source file and no symbol, so nothing else in the reuse gate would
+    notice.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        A stable hex digest, or ``""`` for a repo with no path aliases.
+    """
+    tables = _load_tsconfig_alias_tables(root)
+    if not tables:
+        return ""
+    payload = json.dumps(
+        [[scope, t.base_dir, t.paths] for scope, t in sorted(tables.items())]
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+_CARGO_MANIFESTS = frozenset({"Cargo.toml"})
+_CARGO_SECTION = re.compile(r"^\[([^\]]+)\]\s*$", re.M)
+_CARGO_NAME = re.compile(r'^name\s*=\s*"([^"]+)"', re.M)
+_CARGO_PATH_DEP = re.compile(r"^([\w-]+)\s*=\s*\{[^}\n]*\bpath\s*=", re.M)
+
+
+def load_cargo_crates(root: Path) -> dict[str, frozenset[str]]:
+    """Every crate name the repo's ``Cargo.toml`` files declare, with
+    the directories of the manifests that declare it.
+
+    Each manifest's ``[package]`` name and directory name and its
+    ``[lib]`` name, each with that manifest's directory, and the local
+    name of every ``path =`` dependency with none (the dependency's
+    own manifest gives it one), with ``-`` read as ``_`` the way a
+    ``use`` spells it. The
+    directory-convention index (``_rust_crate_roots_index_all``)
+    misses crates whose directory differs from their name or whose
+    ``[lib] path`` isn't ``src/lib.rs`` (14 of zed's 261), and a
+    missed crate here would turn its imports external. Read with line
+    regexes: Python 3.10 has no TOML parser and dekko takes no
+    dependencies.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Crate name to directories (repo-relative, ``""`` for the
+        root), empty for a repo with no ``Cargo.toml``.
+    """
+    crates: dict[str, set[str]] = {}
+    for rel in walker.find_config_files(root, _CARGO_MANIFESTS):
+        try:
+            text = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        where = _dirname(rel)
+        marks = [
+            (m.start(), m.group(1)) for m in _CARGO_SECTION.finditer(text)
+        ]
+        marks.append((len(text), ""))
+        for (start, section), (end, _) in itertools.pairwise(marks):
+            body = text[start:end]
+            if section in ("package", "lib"):
+                found = _CARGO_NAME.search(body)
+                if found:
+                    crates.setdefault(
+                        found.group(1).replace("-", "_"), set()
+                    ).add(where)
+                crate_dir = where.rsplit("/", 1)[-1]
+                if section == "package" and crate_dir:
+                    crates.setdefault(crate_dir.replace("-", "_"), set()).add(
+                        where
+                    )
+            elif section.endswith("dependencies"):
+                for m in _CARGO_PATH_DEP.finditer(body):
+                    crates.setdefault(m.group(1).replace("-", "_"), set())
+
+    return {name: frozenset(dirs) for name, dirs in crates.items()}
+
+
+def cargo_fingerprint(root: Path) -> str:
+    """Digest of the repo's Rust crates, for cache invalidation.
+
+    The cached call pass reads them to tell a ``use`` of a workspace
+    crate from one of an outside crate, and to narrow a
+    ``some_crate::name(..)`` path to that crate's directories. Adding
+    a crate or a path dependency, or renaming one, moves no source
+    file and no symbol.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        A stable hex digest, or ``""`` for a repo with no crates.
+    """
+    crates = load_cargo_crates(root)
+    if not crates:
+        return ""
+    table = [[name, sorted(dirs)] for name, dirs in sorted(crates.items())]
+    return hashlib.sha256(json.dumps(table).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class _RustCrates:
+    """What a Rust ``use`` path may start with and still be in-repo.
+
+    Attributes:
+        names: Every crate name from the repo's ``Cargo.toml`` files
+            (see ``load_cargo_crates``).
+        top_modules: Every crate's top-level modules: a file or
+            directory directly under some crate's ``src/``.
+        own_modules: Crate directory → every file stem and directory
+            name inside that crate.
+    """
+
+    names: frozenset[str]
+    top_modules: frozenset[str]
+    own_modules: dict[str, frozenset[str]]
+
+    def outside(self, imp: Import) -> bool:
+        """Whether a Rust ``use`` is rooted at a crate the repo lacks.
+
+        A lowercase first segment that names no crate and no module
+        is an outside crate (``windows::core::HSTRING``,
+        ``smol::process::Command``), whatever file stems its segments
+        happen to match. A module counts when it is the importer's own
+        crate's, for 2018 uniform paths (``mod util; use
+        util::helper;``), or a top-level module of *any* crate: a
+        fixture copied out of its crate (``agent``'s copy of
+        ``editor.rs``) still ``use``s its old siblings.
+        """
+        first = imp.source.split("::", 1)[0]
+        if not first[:1].islower() or first in self.names:
+            return False
+        if first in self.top_modules:
+            return False
+
+        own = self.own_modules.get(_rust_crate_dir(imp.path), frozenset())
+        return first not in own
+
+
+def _rust_crates(
+    files: list[FileMap], crates: dict[str, frozenset[str]]
+) -> _RustCrates | None:
+    """The repo's ``_RustCrates``, or ``None`` with no crate list.
+
+    ``None`` when no ``Cargo.toml`` declares a crate (or there was no
+    root to read manifests from): without the list nothing can tell an
+    outside crate from an unconventional workspace one, so every
+    ``use`` keeps the stem test.
+
+    Args:
+        files: Every extracted file.
+        crates: ``load_cargo_crates``'s table.
+    """
+    if not crates:
+        return None
+
+    own: dict[str, set[str]] = {}
+    top: set[str] = set()
+    for fm in files:
+        if not fm.path.endswith(".rs"):
+            continue
+        crate = _rust_crate_dir(fm.path)
+        path = PurePosixPath(fm.path)
+        modules = own.setdefault(crate, set())
+        modules.add(path.stem)
+        modules.update(path.parts[:-1])
+        rel = fm.path[len(crate) :].strip("/").split("/")
+        if len(rel) >= 2 and rel[0] == "src":
+            top.add(rel[1].removesuffix(".rs"))
+
+    return _RustCrates(
+        names=frozenset(crates),
+        top_modules=frozenset(top),
+        own_modules={k: frozenset(v) for k, v in own.items()},
+    )
+
+
+@dataclass
+class _RustOutsideImport(Import):
+    """A Rust ``use`` rooted at a crate the repo doesn't have (see
+    ``_RustCrates.outside``): external, whatever its segments match."""
 
 
 def _package_json_workspace_globs(data: dict) -> list[str]:
@@ -6689,21 +7877,252 @@ def _workspace_package_name(source: str) -> str | None:
 
 
 def _workspace_tagged(
-    imp: Import, workspace_pkgs: dict[str, str] | None
+    imp: Import,
+    workspace_pkgs: dict[str, str] | None,
+    origins: tuple[Symbol, ...] = (),
+    members: dict[str, tuple[Symbol, ...]] | None = None,
 ) -> Import:
-    """``imp``, upgraded to a ``_WorkspaceImport`` when it names one."""
-    if not workspace_pkgs or not imp.path.endswith(_JS_TS_EXTENSIONS):
-        return imp
-    name = _workspace_package_name(imp.source)
-    package_dir = workspace_pkgs.get(name) if name else None
-    if package_dir is None:
-        return imp
-    return _WorkspaceImport(
-        path=imp.path,
-        name=imp.name,
-        source=imp.source,
-        package_dir=package_dir,
-    )
+    """``imp``, upgraded to the subclass carrying what is known of it.
+
+    A ``_WorkspaceImport`` when its source names a workspace package,
+    else an ``_OriginImport`` when ``origins`` or ``members`` is
+    non-empty, else ``imp`` itself.
+    """
+    members = members or {}
+    package_dir = None
+    if workspace_pkgs and imp.path.endswith(_JS_TS_EXTENSIONS):
+        name = _workspace_package_name(imp.source)
+        package_dir = workspace_pkgs.get(name) if name else None
+    if package_dir is not None:
+        return _WorkspaceImport(
+            path=imp.path,
+            name=imp.name,
+            source=imp.source,
+            origins=origins,
+            members=members,
+            package_dir=package_dir,
+        )
+    if origins or members:
+        return _OriginImport(
+            path=imp.path,
+            name=imp.name,
+            source=imp.source,
+            origins=origins,
+            members=members,
+        )
+
+    return imp
+
+
+# How many files a name is followed through before the walk gives up.
+# Real barrels nest two or three deep; the cap only bounds a
+# pathological chain.
+_REEXPORT_DEPTH = 8
+
+
+class _OriginLookup:
+    """Resolves JS/TS import bindings to the symbols they name.
+
+    ``_module_matches`` asks whether some segment of a specifier is a
+    candidate's file stem. For ``./errors`` that is nearly exact; for
+    a tsconfig alias (``@/lib/utils``) it matches every ``utils.ts``
+    in the repo, and for an import alias (``import { a as b }``) it
+    tests the wrong name altogether. The module graph resolves the
+    same specifier to one file (``_resolve_import_js``), so that is
+    done here, once per binding in the parent process, and the answer
+    rides to every ladder step on the import record itself.
+
+    From that file the name is followed through whatever re-exports
+    it (``model.Reexport``): a named or renamed item, a star, a
+    source-less rename, the file's default export, and the file's own
+    import of the name (``import { X } from "./x"; export { X }``).
+    Each hop's specifier is resolved from the re-exporting file's own
+    path, so a barrel's alias uses the barrel's tsconfig. Without it a
+    barrel was a dead end, and behind a renaming one
+    (``export { default as Text } from "./ThemedText"``) the stem test
+    bound every use to an unrelated file named like the import.
+
+    Attributes:
+        ctx: The import-resolution lookup structures.
+        by_name_path: ``(bare name, file path)`` → same-file symbols.
+    """
+
+    def __init__(
+        self,
+        ctx: "_ImportResolveContext",
+        by_name_path: dict[tuple[str, str], list[Symbol]],
+        files: list[FileMap] | None = None,
+    ) -> None:
+        self.ctx = ctx
+        self.by_name_path = by_name_path
+        self._files: dict[tuple[str, str], str | None] = {}
+        self._reexports: dict[str, list[Reexport]] = {}
+        self._imports: dict[str, list[Import]] = {}
+        self._bindings: dict[str, dict[str, Import]] = {}
+        self._reached: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
+        for fm in files or ():
+            if fm.reexports:
+                self._reexports[fm.path] = fm.reexports
+            if fm.path.endswith(_JS_TS_EXTENSIONS):
+                self._imports[fm.path] = fm.imports
+
+    def file_of(self, importer: str, module: str) -> str | None:
+        """The repo file ``module`` names when imported from ``importer``."""
+        key = (importer, module)
+        if key not in self._files:
+            probe = Import(path=importer, name="", source=module)
+            self._files[key] = _resolve_import_js(probe, importer, self.ctx)
+
+        return self._files[key]
+
+    def origins(self, imp: Import) -> tuple[Symbol, ...]:
+        """The top-level symbols ``imp`` binds.
+
+        Args:
+            imp: One import binding.
+
+        Returns:
+            Every top-level symbol declared under the binding's
+            original name (so an import alias is undone) in the file
+            its specifier resolves to, or in a file that name is
+            re-exported from. Empty for a non-JS/TS file, a
+            side-effect import, a specifier that names no repo file,
+            or a name nothing declares.
+        """
+        start = self._start(imp)
+        if start is None:
+            return ()
+
+        return self._symbols(self._reach(*start))
+
+    def members(self, imp: Import, name: str) -> tuple[Symbol, ...]:
+        """The top-level symbols ``Head.name`` can mean, ``imp`` being
+        the binding of ``Head``.
+
+        Two readings, both followed: ``name`` is exported by the
+        module ``Head`` was imported from (``import * as Head``, or
+        an object assembled from that module's own imports), and
+        ``Head`` is a namespace re-export (``export * as Head from
+        "./n"``), which makes ``name`` an export of ``./n``.
+
+        Args:
+            imp: The import binding of the receiver's leading segment.
+            name: The member name used on it.
+
+        Returns:
+            The symbols, as ``origins`` returns them.
+        """
+        start = self._start(imp)
+        if start is None:
+            return ()
+        first, original = start
+        pairs = list(self._reach(first, name))
+        for path, exported in self._reach(first, original):
+            for rec in self._reexports.get(path, ()):
+                if rec.name != exported or rec.original != "*":
+                    continue
+                target = self.file_of(path, rec.source)
+                if target is not None:
+                    pairs.extend(self._reach(target, name))
+
+        return self._symbols(pairs)
+
+    def _start(self, imp: Import) -> tuple[str, str] | None:
+        """``(resolved file, original name)`` for a JS/TS binding."""
+        if (
+            not imp.name
+            or "/" not in imp.source
+            or not imp.path.endswith(_JS_TS_EXTENSIONS)
+        ):
+            return None
+        module, original = imp.source.rsplit("/", 1)
+        target = self.file_of(imp.path, module)
+        if target is None:
+            return None
+
+        return target, original
+
+    def _symbols(self, pairs: Iterable[tuple[str, str]]) -> tuple[Symbol, ...]:
+        """The top-level symbols declared at ``(file, name)`` pairs."""
+        found: dict[str, Symbol] = {}
+        for path, name in pairs:
+            for sym in self.by_name_path.get((name, path), ()):
+                if "." not in sym.qualname:
+                    found.setdefault(sym.id, sym)
+
+        return tuple(found.values())
+
+    def _reach(self, path: str, name: str) -> tuple[tuple[str, str], ...]:
+        """Every ``(file, declared name)`` that ``name`` exported from
+        ``path`` can come from, ``path`` itself first."""
+        key = (path, name)
+        reached = self._reached.get(key)
+        if reached is None:
+            seen: dict[tuple[str, str], None] = {}
+            self._walk(path, name, seen, 0)
+            reached = self._reached[key] = tuple(seen)
+
+        return reached
+
+    def _walk(
+        self,
+        path: str,
+        name: str,
+        seen: dict[tuple[str, str], None],
+        depth: int,
+    ) -> None:
+        """Visit ``(path, name)`` and everything it is re-exported from."""
+        if (path, name) in seen or depth > _REEXPORT_DEPTH:
+            return
+        seen[(path, name)] = None
+        for rec in self._reexports.get(path, ()):
+            if rec.name == "*":
+                # A star never carries the default export.
+                if name != "default":
+                    self._hop(path, rec.source, name, seen, depth)
+            elif rec.name != name:
+                continue
+            elif not rec.source:
+                # ``export { a as b }`` / ``export default a``: the
+                # file's own ``a``, declared here or imported.
+                seen[(path, rec.original)] = None
+                self._follow_binding(path, rec.original, seen, depth)
+            elif rec.original != "*":
+                self._hop(path, rec.source, rec.original, seen, depth)
+        self._follow_binding(path, name, seen, depth)
+
+    def _hop(
+        self,
+        path: str,
+        module: str,
+        name: str,
+        seen: dict[tuple[str, str], None],
+        depth: int,
+    ) -> None:
+        """Continue the walk in the file ``module`` names from ``path``."""
+        target = self.file_of(path, module)
+        if target is not None:
+            self._walk(target, name, seen, depth + 1)
+
+    def _follow_binding(
+        self,
+        path: str,
+        name: str,
+        seen: dict[tuple[str, str], None],
+        depth: int,
+    ) -> None:
+        """Follow ``path``'s own import of ``name``, if it has one."""
+        bindings = self._bindings.get(path)
+        if bindings is None:
+            bindings = self._bindings[path] = {}
+            for imp in self._imports.get(path, ()):
+                if imp.name:
+                    bindings.setdefault(imp.name, imp)
+        imp = bindings.get(name)
+        if imp is None or "/" not in imp.source:
+            return
+        module, original = imp.source.rsplit("/", 1)
+        self._hop(path, module, original, seen, depth)
 
 
 _RUST_IN_CRATE_PREFIXES = ("crate::", "super::", "self::")
@@ -6728,6 +8147,33 @@ def _rust_std_import(imp: Import) -> bool:
     return imp.source.split("::", 1)[0] in _RUST_STD_NAMESPACE_ROOTS
 
 
+def _bare_package_import(imp: Import) -> bool:
+    """Whether ``imp`` is a JS/TS import of a one-segment bare specifier.
+
+    ``"vscode"``, ``"react"``, ``"zod"``, ``"node:fs"``: a specifier
+    with no slash that is not relative is a package name, the same
+    line ``_resolve_import_js`` draws for the module graph. Not
+    covered: ``@scope/name`` and anything with a slash, which can be
+    a tsconfig path alias (``@core/controller``, ``src/state``) that
+    this test has no table for, and ``#name``, a package's own
+    ``imports`` map.
+
+    Args:
+        imp: An import record; the file's language comes from its path.
+
+    Returns:
+        True for such an import in a JS/TS file.
+    """
+    if not imp.path.endswith(_JS_TS_EXTENSIONS):
+        return False
+    # Every binding's source carries its imported name as a last
+    # segment (``vscode/Uri``); a side-effect import has no name.
+    module = imp.source.rsplit("/", 1)[0] if imp.name else imp.source
+    return bool(module) and not (
+        "/" in module or module.startswith((".", "@", "#"))
+    )
+
+
 def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     """Whether an import binding plausibly points into this repo.
 
@@ -6737,10 +8183,27 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     pass by coincidence. A dotted filename's stem is never a single
     segment, hence the second, component-wise check (see
     ``_dotted_components``). A Java/Kotlin import is tested by its
-    qualified path instead (see ``_jvm_import_keys``).
+    qualified path instead (see ``_jvm_import_keys``), and a one-
+    segment bare JS/TS specifier is a package, never a repo file (see
+    ``_bare_package_import``).
     """
     if isinstance(imp, _WorkspaceImport):
         return True
+    if isinstance(imp, _RustOutsideImport):
+        # ``use windows::core::HSTRING;`` passed the stem test because
+        # zed has a ``windows.rs``, and ``HSTRING::new(..)`` ran the
+        # ladder over every ``new`` in the repo.
+        return False
+    if _bare_package_import(imp):
+        # ``import * as vscode from "vscode"`` names an npm package,
+        # whatever the repo's files are called. The stem test passed
+        # it on cline because of ``webview/src/vscode.ts``, so
+        # ``vscode.Uri.file(..)`` reached the sole-candidate rung and
+        # landed on a test stub of the VS Code API: 79 wrong caller/
+        # callee pairs there, and ``cwd()`` from ``"process"`` bound to
+        # a repo method on claude-code. A workspace package is told
+        # apart above.
+        return False
     if imp.path.endswith(_JVM_EXTENSIONS):
         # A qualified JVM name is a path, not a bag of words: the
         # import is in-repo iff it names a repo file, package or
@@ -6876,21 +8339,75 @@ def _rust_own_crate_narrowed(
 
 
 def _imports_by_file(
-    files: list[FileMap], workspace_pkgs: dict[str, str] | None = None
+    files: list[FileMap],
+    workspace_pkgs: dict[str, str] | None = None,
+    lookup: _OriginLookup | None = None,
+    rust_crates: _RustCrates | None = None,
 ) -> dict[str, dict[str, Import]]:
     """Map file path → local name → import record.
 
     ``workspace_pkgs`` (see ``load_workspace_packages``), when given,
     upgrades every JS/TS binding that names a workspace package to a
-    ``_WorkspaceImport``. ``None``/empty leaves every record as-is.
+    ``_WorkspaceImport``. ``lookup``, when given, attaches to every
+    JS/TS binding the symbols its specifier resolves to (see
+    ``_OriginLookup``). ``rust_crates``, when given, turns every Rust
+    ``use`` of an outside crate into a ``_RustOutsideImport``. With
+    none of them, every record is left as-is.
     """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
         table = out.setdefault(fm.path, {})
+        used = _member_names(fm) if lookup is not None else {}
         for imp in fm.imports:
-            if imp.name not in table:
-                table[imp.name] = _workspace_tagged(imp, workspace_pkgs)
+            if imp.name in table:
+                continue
+            origins: tuple[Symbol, ...] = ()
+            members: dict[str, tuple[Symbol, ...]] = {}
+            if lookup is not None:
+                origins = lookup.origins(imp)
+                for name in sorted(used.get(imp.name, ())):
+                    found = lookup.members(imp, name)
+                    if found:
+                        members[name] = found
+            if (
+                rust_crates is not None
+                and imp.path.endswith(".rs")
+                and not imp.source.startswith(_RUST_IN_CRATE_PREFIXES)
+                and rust_crates.outside(imp)
+            ):
+                table[imp.name] = _RustOutsideImport(
+                    path=imp.path, name=imp.name, source=imp.source
+                )
+                continue
+            table[imp.name] = _workspace_tagged(
+                imp, workspace_pkgs, origins, members
+            )
+
     return out
+
+
+def _member_names(fm: FileMap) -> dict[str, set[str]]:
+    """Receiver head → the names a JS/TS file uses on it.
+
+    ``LlmsModels.registerProvider(..)`` gives ``{"LlmsModels":
+    {"registerProvider"}}``. Read off the calls and heritage clauses,
+    the two usage kinds that carry a receiver.
+
+    Args:
+        fm: One extracted file.
+
+    Returns:
+        Empty for a non-JS/TS file.
+    """
+    used: dict[str, set[str]] = {}
+    if not fm.path.endswith(_JS_TS_EXTENSIONS):
+        return used
+    for site in (*fm.calls, *fm.heritage):
+        if site.receiver:
+            head = _PATH_SPLIT.split(site.receiver)[0]
+            used.setdefault(head, set()).add(site.name)
+
+    return used
 
 
 def _build_adjacency(graph: CallGraph) -> None:
@@ -8348,9 +9865,18 @@ def _resolve_import_java(
     both its raw path and its root-stripped suffix, so this is a
     single dict lookup, not a per-import scan. A class written in
     Kotlin is imported the same way, so ``C.kt`` is the fallback.
+
+    A nested type (``a.b.Outer.Inner``, any depth) or a static member
+    (``import static a.b.Outer.helper``) has no file of its own; it
+    resolves to the file of its enclosing type (see
+    ``_jvm_enclosing_type_file``).
     """
     del importer_path
-    return _jvm_type_file(imp.source, (".java", ".kt"), ctx)
+    found = _jvm_type_file(imp.source, (".java", ".kt"), ctx)
+    if found is not None:
+        return found
+
+    return _jvm_enclosing_type_file(imp.source, (".java", ".kt"), ctx)
 
 
 def _resolve_import_kotlin(
@@ -8366,8 +9892,9 @@ def _resolve_import_kotlin(
        samples ship as Java/Kotlin twins) gets the Kotlin one.
     2. A package member: a top-level function or property defined in
        exactly one Kotlin file of package ``a.b``.
-    3. A nested type or a static member (``a.b.Outer.Inner``): the
-       enclosing ``a.b.Outer`` once more, by step 1.
+    3. A nested type or a static member (``a.b.Outer.Inner``, any
+       depth): the enclosing type's file, by step 1's lookup (see
+       ``_jvm_enclosing_type_file``).
     """
     del importer_path
     found = _jvm_type_file(imp.source, (".kt", ".java"), ctx)
@@ -8377,10 +9904,8 @@ def _resolve_import_kotlin(
     members = ctx.kotlin_package_members.get((package.replace(".", "/"), name))
     if members is not None and len(members) == 1:
         return members[0]
-    if package:
-        return _jvm_type_file(package, (".kt", ".java"), ctx)
 
-    return None
+    return _jvm_enclosing_type_file(imp.source, (".kt", ".java"), ctx)
 
 
 def _jvm_type_file(
@@ -8397,6 +9922,43 @@ def _jvm_type_file(
             return matches[0]
         if matches:
             return None
+    return None
+
+
+def _jvm_enclosing_type_file(
+    source: str, extensions: tuple[str, ...], ctx: _ImportResolveContext
+) -> str | None:
+    """The file of the type enclosing a nested type or static member.
+
+    ``a.b.Outer.Mid.Inner`` and ``a.b.Outer.helper`` have no file of
+    their own: they live in ``a/b/Outer.java``. Strips one segment at a
+    time and looks the rest up as a type. The walk stops at a
+    lower-case segment, since that is a package and no type encloses a
+    package, at a single segment, and at a prefix that names more than
+    one file (ambiguous, so not guessed past). A lower-case segment
+    stripped *off* (``helper``) is fine: that's a member.
+
+    Args:
+        source: The import's dotted path.
+        extensions: File extensions to try, in preference order.
+        ctx: The import-resolution indexes.
+
+    Returns:
+        The one enclosing type's file, or ``None``.
+    """
+    head = source
+    while "." in head:
+        head = head.rpartition(".")[0]
+        last = head.rpartition(".")[2]
+        if "." not in head or not last[:1].isupper():
+            return None
+        found = _jvm_type_file(head, extensions, ctx)
+        if found is not None:
+            return found
+        stem = head.replace(".", "/")
+        if any(ctx.java_suffix_index.get(stem + ext) for ext in extensions):
+            return None
+
     return None
 
 
@@ -8676,10 +10238,69 @@ def _cpp_basename_index(paths: frozenset[str]) -> dict[str, list[str]]:
     return index
 
 
+def _import_resolve_context(
+    files: list[FileMap],
+    root: Path | None,
+    workspace_manifests: dict[str, _WorkspaceManifest] | None = None,
+) -> _ImportResolveContext:
+    """Build the import-resolution lookup structures for ``files``.
+
+    Args:
+        files: Per-file extraction results.
+        root: Repository root, for the tsconfig alias tables and the
+            workspace package table. ``None`` leaves both empty.
+        workspace_manifests: Already-loaded workspace manifests.
+            ``None`` loads them from ``root``.
+
+    Returns:
+        The context every ``_resolve_import_*`` function reads.
+    """
+    if workspace_manifests is None:
+        workspace_manifests = (
+            _load_workspace_manifests(root) if root is not None else {}
+        )
+    paths = frozenset(fm.path for fm in files)
+
+    return _ImportResolveContext(
+        paths=paths,
+        py_package_roots=_py_package_roots(paths),
+        java_suffix_index=_java_suffix_index(paths),
+        kotlin_package_members=_kotlin_package_members(files),
+        cpp_basename_index=_cpp_basename_index(paths),
+        crate_roots=_rust_crate_roots_index_all(paths),
+        ts_path_aliases=(
+            _load_tsconfig_alias_tables(root) if root is not None else {}
+        ),
+        workspace_manifests=workspace_manifests,
+    )
+
+
+def _module_dependencies(fm: FileMap) -> Iterator[tuple[Import, str]]:
+    """Every module ``fm`` depends on, with the name each one carries.
+
+    Its imports, then its re-exports: ``export { X } from "./x"``
+    depends on ``./x`` exactly as an import of it does, and names no
+    local binding, so it is given here as a side-effect-shaped import
+    carrying the exported name (``*`` for a star).
+
+    Args:
+        fm: One extracted file.
+
+    Yields:
+        ``(import record, name on the module-graph edge)``.
+    """
+    for imp in fm.imports:
+        yield imp, imp.name
+    for rec in fm.reexports:
+        if rec.source:
+            yield Import(path=fm.path, name="", source=rec.source), rec.name
+
+
 def resolve_imports(
     files: list[FileMap],
     root: Path | None = None,
     workspace_manifests: dict[str, _WorkspaceManifest] | None = None,
+    ctx: _ImportResolveContext | None = None,
 ) -> ModuleGraph:
     """Resolve every file's raw imports into a file-to-file dependency
     graph.
@@ -8722,41 +10343,28 @@ def resolve_imports(
             ``_load_workspace_manifests``), so ``resolve()`` pays for
             one discovery pass rather than two. ``None`` loads them
             from ``root`` (or nothing, without a root).
+        ctx: The lookup structures ``resolve()`` already built for
+            these same files (see ``_import_resolve_context``).
+            ``None`` builds them here.
 
     Returns:
         The resolved ``ModuleGraph``.
     """
-    if workspace_manifests is None:
-        workspace_manifests = (
-            _load_workspace_manifests(root) if root is not None else {}
-        )
-
-    paths = frozenset(fm.path for fm in files)
-    ctx = _ImportResolveContext(
-        paths=paths,
-        py_package_roots=_py_package_roots(paths),
-        java_suffix_index=_java_suffix_index(paths),
-        kotlin_package_members=_kotlin_package_members(files),
-        cpp_basename_index=_cpp_basename_index(paths),
-        crate_roots=_rust_crate_roots_index_all(paths),
-        ts_path_aliases=(
-            _load_tsconfig_alias_tables(root) if root is not None else {}
-        ),
-        workspace_manifests=workspace_manifests,
-    )
+    if ctx is None:
+        ctx = _import_resolve_context(files, root, workspace_manifests)
 
     edge_names: dict[tuple[str, str], set[str]] = {}
     external: dict[str, set[str]] = {}
     for fm in files:
         resolver = _IMPORT_RESOLVERS.get(fm.language)
-        for imp in fm.imports:
+        for imp, name in _module_dependencies(fm):
             target = resolver(imp, fm.path, ctx) if resolver else None
             if target is None:
                 external.setdefault(fm.path, set()).add(
                     bare_import_source(imp, fm.language)
                 )
                 continue
-            edge_names.setdefault((fm.path, target), set()).add(imp.name)
+            edge_names.setdefault((fm.path, target), set()).add(name)
 
     edges = [
         ModuleEdge(importer=i, imported=j, names=sorted(names))

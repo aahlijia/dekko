@@ -1014,6 +1014,13 @@ def load_or_regen(
     On a missing/stale map, the regen itself is coordinated with other
     concurrent processes via ``_locked_regen``.
 
+    Freshness is judged from the provenance sidecar first, as
+    ``load_current_side`` does, so a map stale from an edit is never
+    parsed just to be thrown away: a stale read used to parse
+    ``map.json`` three times, 12.8 s of a 52 s tensorflow read. A
+    missing or desynced sidecar, or a version-stale verdict (where
+    ``load_map``'s format check must still run), takes the full parse.
+
     Args:
         root: Repo root containing map.json.
         no_regen: Fail instead of regenerating.
@@ -1026,8 +1033,7 @@ def load_or_regen(
         if cached is not None:
             return cached, 0
 
-    index = mapfile.load_map(root)
-    fresh = mapfile.check_freshness(root, index) if index is not None else None
+    index, fresh, mapped = _judge_current_map(root)
     if index is not None and fresh is not None and fresh.fresh:
         if _daemon_cache_put is not None:
             _daemon_cache_put(root, index)
@@ -1041,13 +1047,18 @@ def load_or_regen(
         return None, 5
 
     _note_foreign_build(fresh)
-    _note_regen(root, index)
+    _note_regen(root, mapped)
     regenerated, code = _locked_regen(root)
-    if regenerated is None and index is not None and fresh.process_outdated:
+    if regenerated is None and fresh is not None and fresh.process_outdated:
         # An outdated long-lived process whose delegated regen failed
         # (broken install, timeout). It must not fall back to
         # extracting with its own stale code; the map on disk is the
-        # best honest answer it has.
+        # best honest answer it has. A sidecar-judged stale map was
+        # never parsed, so this one branch parses it.
+        index = index or mapfile.load_map(root)
+        if index is None:
+            return regenerated, code
+
         print(
             "note: could not regenerate via the installed dekko "
             f"(exit {code}) -- serving the existing map, which may be "
@@ -1059,6 +1070,37 @@ def load_or_regen(
     return regenerated, code
 
 
+def _judge_current_map(
+    root: Path,
+) -> tuple[mapfile.MapIndex | None, mapfile.Freshness | None, int | None]:
+    """``load_or_regen``'s verdict on the map on disk.
+
+    Returns:
+        ``(index, freshness, mapped)``. ``index`` is loaded when the
+        map is fresh or the sidecar couldn't judge it; it is ``None``
+        on a sidecar-judged stale map. ``freshness`` is ``None`` when
+        there is no usable map. ``mapped`` is the map's file count
+        (``None`` with no usable map), for ``_note_regen``.
+    """
+    prov = mapfile.load_sidecar_provenance(root)
+    if prov is not None:
+        fresh = mapfile.check_freshness_provenance(root, prov)
+        if not fresh.fresh and fresh.reason != "version":
+            return None, fresh, len(prov.get("files", {}))
+
+        index = mapfile.load_map(root)
+        if index is not None and fresh.fresh and index.provenance == prov:
+            return index, fresh, len(index.languages_by_path)
+
+    else:
+        index = mapfile.load_map(root)
+    if index is None:
+        return None, None, None
+
+    fresh = mapfile.check_freshness(root, index)
+    return index, fresh, len(index.languages_by_path)
+
+
 # Mapped-file count from which a stale-map regen is announced. A
 # one-file edit's regen measured ~15-20 s on spring-boot (9,942 files)
 # and ~45 s on tensorflow (14,285), silent both times; repos up to
@@ -1066,7 +1108,7 @@ def load_or_regen(
 _REGEN_DISCLOSURE_THRESHOLD = 5000
 
 
-def _note_regen(root: Path, index: mapfile.MapIndex | None) -> None:
+def _note_regen(root: Path, count: int | None) -> None:
     """Announce a regen before its wait, when the wait can be long.
 
     A missing (or unreadable) map is always announced: that build is a
@@ -1075,16 +1117,16 @@ def _note_regen(root: Path, index: mapfile.MapIndex | None) -> None:
 
     Args:
         root: Repository root about to be regenerated.
-        index: The stale map, or ``None`` when there is no usable one.
+        count: The stale map's mapped-file count, or ``None`` when
+            there is no usable map.
     """
-    if index is None:
+    if count is None:
         print(
             f"note: no usable map under {root}; building one first",
             file=sys.stderr,
         )
         return
 
-    count = len(index.languages_by_path)
     if count < _REGEN_DISCLOSURE_THRESHOLD:
         return
 
@@ -1324,8 +1366,9 @@ def regen_map(root: Path, full: bool = False, quiet: bool = True) -> int:
     if selfcheck.process_outdated():
         return _delegated_regen(root, full=full, quiet=quiet)
 
-    index = mapfile.load_map(root)
-    prov = (index.provenance if index else None) or {}
+    # The provenance alone: the options are four fields of it, and the
+    # sidecar holds them without parsing the whole map.
+    prov = mapfile.load_provenance(root) or {}
     regen_args = argparse.Namespace(
         map_dir=str(root),
         subpath=prov.get("subpath"),

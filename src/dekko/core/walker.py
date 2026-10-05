@@ -352,6 +352,8 @@ def discover(
     candidates: list[str] | None = None,
     *,
     follow_symlinks: bool = False,
+    known_stat: dict[str, list[int]] | None = None,
+    stat_out: dict[str, list[int]] | None = None,
 ) -> tuple[list[str], list[tuple[str, str]]]:
     """Find all mappable source files under a root directory.
 
@@ -376,6 +378,16 @@ def discover(
             symlink target's content a second time, producing a
             phantom duplicate of every symbol the target defines. Set
             ``True`` to restore indexing symlinked files as-is.
+        known_stat: ``[mtime_ns, size]`` per path from the map being
+            checked. A candidate that passes every path-based gate and
+            still has its recorded signature is ``"ok"`` without the
+            size check or a content read: the map admitted that file
+            with that content, and the freshness check already trusts
+            the same signature to skip re-hashing. ``dekko map`` never
+            passes it.
+        stat_out: When given, filled with the ``[mtime_ns, size]`` read
+            for each candidate that reached the size gate, so a caller
+            can reuse it instead of a second ``stat``.
 
     Returns:
         A pair ``(files, skipped)``: sorted repo-relative paths to
@@ -419,6 +431,8 @@ def discover(
             ignore_spec,
             max_file_size,
             follow_symlinks,
+            known_stat=known_stat,
+            stat_out=stat_out,
         )
         if verdict is None:
             continue
@@ -452,8 +466,13 @@ def _classify(
     ignore_spec: pathspec.PathSpec | None,
     max_file_size: int,
     follow_symlinks: bool = False,
+    *,
+    known_stat: dict[str, list[int]] | None = None,
+    stat_out: dict[str, list[int]] | None = None,
 ) -> str | None:
     """Categorize one candidate path.
+
+    ``known_stat``/``stat_out`` are ``discover``'s.
 
     Returns:
         ``"ok"`` to map the file, ``None`` to ignore it silently, or
@@ -487,7 +506,9 @@ def _classify(
         return "ignored"
     if not languages.is_supported(rel):
         return _unindexed_verdict(rel)
-    return _size_and_content_gate(root, rel, max_file_size)
+    return _size_and_content_gate(
+        root, rel, max_file_size, known_stat=known_stat, stat_out=stat_out
+    )
 
 
 def _unindexed_verdict(rel: str) -> str | None:
@@ -511,7 +532,12 @@ def _unindexed_verdict(rel: str) -> str | None:
 
 
 def _size_and_content_gate(
-    root: Path, rel: str, max_file_size: int
+    root: Path,
+    rel: str,
+    max_file_size: int,
+    *,
+    known_stat: dict[str, list[int]] | None = None,
+    stat_out: dict[str, list[int]] | None = None,
 ) -> str | None:
     """Final classification gate: file size, then what the file holds.
 
@@ -526,6 +552,8 @@ def _size_and_content_gate(
         root: Repository root.
         rel: Repo-relative candidate path.
         max_file_size: Files larger than this many bytes are skipped.
+        known_stat: See ``discover``; a matching signature is ``"ok"``.
+        stat_out: See ``discover``.
 
     Returns:
         ``"too large"``, ``"generated"`` (minified-content heuristic),
@@ -533,10 +561,15 @@ def _size_and_content_gate(
         ``"ok"``, or ``None`` when the file can't be stat'd.
     """
     try:
-        size = (root / rel).stat().st_size
+        st = (root / rel).stat()
     except OSError:
         return None
-    if size > max_file_size:
+    sig = [st.st_mtime_ns, st.st_size]
+    if stat_out is not None:
+        stat_out[rel] = sig
+    if known_stat is not None and known_stat.get(rel) == sig:
+        return "ok"
+    if st.st_size > max_file_size:
         return "too large"
     if _looks_minified(root / rel):
         return "generated"

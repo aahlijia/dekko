@@ -44,7 +44,11 @@ from dekko.textutil import (
     signature,
     token_footer,
 )
-from dekko.core.resolver import MODULE_CALLER_SUFFIX, bare_import_source
+from dekko.core.resolver import (
+    MODULE_CALLER_SUFFIX,
+    bare_import_source,
+)
+from dekko.core.resolver import constructors_of as _resolver_constructors_of
 
 EXIT_OK = 0
 EXIT_NOT_FOUND = 3
@@ -188,9 +192,20 @@ def resolve_target(
     ``Class.method`` reading before giving up — a dead-end here ejects
     an agent into grep/Read, the exact cost the map exists to avoid.
 
+    A symbol id (``path::qualname`` or ``path::qualname#N``, the form
+    every command prints) is looked up first, so an id always names
+    its own symbol, whatever the other readings of the string would
+    match.
+
+    A bare name shared only by one type and that type's own
+    constructors (Java's ``ErrorPage`` class and its three
+    ``ErrorPage`` constructors) resolves to the type, with a note on
+    stderr: the class's callers are every construction, whichever
+    overload each one picked.
+
     Args:
         index: Loaded map index.
-        target: Bare name, qualname, ``path:qualname``, or
+        target: Symbol id, bare name, qualname, ``path:qualname``, or
             ``path:qualname:line`` form — the trailing ``:line`` picks
             one candidate out of an overload set that shares the same
             ``(path, qualname)`` (see ``_resolve_exact``).
@@ -200,6 +215,10 @@ def resolve_target(
         candidates considered. No candidates means not found; several
         with no match means ambiguous.
     """
+    by_id = index.symbols_by_id.get(target)
+    if by_id is not None:
+        return by_id, [by_id]
+
     match, candidates = _resolve_exact(index, target)
     if not candidates and "::" in target:
         for variant in (
@@ -209,7 +228,64 @@ def resolve_target(
             match, candidates = _resolve_exact(index, variant)
             if candidates:
                 break
+
+    if match is None:
+        match = _type_over_own_constructors(index, target, candidates)
     return match, candidates
+
+
+def constructors_of(index: MapIndex, cls: Symbol) -> list[Symbol]:
+    """A type's own constructors, as the resolver pairs them.
+
+    The same relation the resolver credits constructions by, read off
+    the loaded map, so the read side can't drift from the edges it
+    is reading.
+
+    Args:
+        index: Loaded map index.
+        cls: Any symbol; only a type-kind one has constructors.
+
+    Returns:
+        The constructor symbols, or an empty list.
+    """
+    return _resolver_constructors_of(cls, index.symbols_by_name)
+
+
+def _type_over_own_constructors(
+    index: MapIndex, target: str, candidates: list[Symbol]
+) -> Symbol | None:
+    """The type among candidates that are one type plus its constructors.
+
+    Two types, or a type plus anything that isn't one of its own
+    constructors, stay ambiguous. The choice is disclosed on stderr,
+    never silent.
+
+    Args:
+        index: Loaded map index.
+        target: The target string, for the note.
+        candidates: An ambiguous target's candidates.
+
+    Returns:
+        The type, or ``None`` when the candidates aren't that shape.
+    """
+    types = [c for c in candidates if c.kind in TYPE_KINDS]
+    if len(types) != 1 or len(candidates) < 2:
+        return None
+
+    cls = types[0]
+    ctor_ids = {c.id for c in constructors_of(index, cls)}
+    others = [c for c in candidates if c is not cls]
+    if not all(c.id in ctor_ids for c in others):
+        return None
+
+    print(
+        f"dekko: note: '{target}' also names its {len(others)} "
+        f"constructor(s); using the {cls.kind} at {cls.path}:"
+        f"{cls.start_line}. For one constructor, pass its id or "
+        f"{others[0].path}:{others[0].qualname}:LINE",
+        file=sys.stderr,
+    )
+    return cls
 
 
 def _resolve_exact(
@@ -239,11 +315,17 @@ def _resolve_exact(
             body, line = head, int(tail)
     if ":" in body:
         path_part, _, qual = body.rpartition(":")
-        pool = [
+        in_files = [
             s
             for p in paths_matching(index, path_part)
             for s in index.symbols_by_path[p]
-            if s.qualname == qual or s.name == qual
+        ]
+        # An exact qualname outranks a bare-name match: ``File.java:
+        # ErrorPage`` is the class, not the class plus its same-named
+        # constructors. The bare name is the fallback when nothing in
+        # the file has that qualname.
+        pool = [s for s in in_files if s.qualname == qual] or [
+            s for s in in_files if s.name == qual
         ]
         candidates = pool
         if line is not None:
@@ -313,6 +395,190 @@ def ambiguous_counts(index: MapIndex, sym: Symbol) -> tuple[int, int]:
         len(index.ambiguous_in.get(sym.id, [])),
         len(index.ambiguous_out.get(sym.id, [])),
     )
+
+
+def constructed_class(index: MapIndex, sym: Symbol) -> Symbol | None:
+    """The type ``sym`` is a constructor of, if it is one.
+
+    The inverse of ``constructors_of``, looked up through the
+    constructor's container qualname, so it pairs exactly the symbols
+    the resolver pairs. C++ pairs by qualname repo-wide, so several
+    same-named classes (a ``DummyDevice`` in each of a dozen test
+    files) all claim the same constructors; the class in the
+    constructor's own file wins, then the header beside it
+    (``graph.cc`` → ``graph.h``).
+
+    Args:
+        index: Loaded map index.
+        sym: Any symbol.
+
+    Returns:
+        The type, or ``None`` when ``sym`` isn't a constructor.
+    """
+    container = sym.qualname.rpartition(".")[0]
+    if sym.kind != "method" or not container:
+        return None
+
+    owners = [
+        cls
+        for cls in index.symbols_by_qualname.get(container, [])
+        if cls.kind in TYPE_KINDS
+        and any(c.id == sym.id for c in constructors_of(index, cls))
+    ]
+    if not owners:
+        return None
+
+    stem = sym.path.rpartition(".")[0]
+    return min(
+        owners,
+        key=lambda c: (
+            c.path != sym.path,
+            c.path.rpartition(".")[0] != stem,
+            c.path,
+            c.start_line,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class OverloadTies:
+    """How a constructor's ambiguous callers split.
+
+    Attributes:
+        cls: The class the constructor belongs to.
+        siblings: The other overloads the tied calls could also mean.
+        callers: Callers whose call fits this constructor and a
+            sibling equally, so neither got the edge. The class did.
+        collisions: Every other ambiguous caller: the name could mean
+            something besides this class's constructors.
+    """
+
+    cls: Symbol
+    siblings: list[Symbol]
+    callers: int
+    collisions: int
+
+
+def overload_ties(index: MapIndex, sym: Symbol) -> OverloadTies | None:
+    """Split a constructor's ambiguous callers into ties and collisions.
+
+    A construction the resolver could place on the class but not on
+    one overload is recorded as ambiguous among those overloads, with
+    the class edge kept. That caller is answered by the class, unlike
+    a call whose name could mean an unrelated symbol. ``ambiguous_in``
+    keeps ``(caller, name)`` pairs per candidate, so a pair's full
+    candidate set is every same-named symbol (plus the class's own
+    constructors) holding that pair.
+
+    Args:
+        index: Loaded map index.
+        sym: Any symbol.
+
+    Returns:
+        The split, or ``None`` when ``sym`` isn't a constructor or no
+        ambiguous caller of it is an overload tie.
+    """
+    pairs = index.ambiguous_in.get(sym.id, [])
+    cls = constructed_class(index, sym) if pairs else None
+    if cls is None:
+        return None
+
+    ctors = {c.id: c for c in constructors_of(index, cls)}
+    pair_sets: dict[str, set[tuple[str, str]]] = {}
+    sibling_ids: set[str] = set()
+    ties = 0
+    for caller, name in pairs:
+        pool = {s.id for s in index.symbols_by_name.get(name, [])}
+        candidates = set()
+        for sid in pool | ctors.keys():
+            if sid not in pair_sets:
+                pair_sets[sid] = _pair_set(index, sid)
+            if (caller, name) in pair_sets[sid]:
+                candidates.add(sid)
+        if candidates <= ctors.keys():
+            ties += 1
+            sibling_ids |= candidates - {sym.id}
+    if not ties:
+        return None
+
+    siblings = sorted(
+        (ctors[sid] for sid in sibling_ids),
+        key=lambda s: (s.path, s.start_line),
+    )
+    return OverloadTies(cls, siblings, ties, len(pairs) - ties)
+
+
+def _pair_set(index: MapIndex, sid: str) -> set[tuple[str, str]]:
+    """A candidate's ambiguous ``(caller, name)`` pairs, as a set."""
+    return {tuple(p) for p in index.ambiguous_in.get(sid, [])}
+
+
+def ambiguous_in_notes(index: MapIndex, sym: Symbol) -> list[str]:
+    """The sentences that disclose ``sym``'s ambiguous callers.
+
+    A constructor's overload ties name the class that holds those
+    callers and the command that lists them; every other ambiguous
+    caller keeps the plain "not counted" disclosure. Shared by
+    ``query callers`` and the context pack, so both word it the same.
+
+    Args:
+        index: Loaded map index.
+        sym: Resolved symbol.
+
+    Returns:
+        Zero, one or two sentences, without a ``note:`` prefix.
+    """
+    total = len(index.ambiguous_in.get(sym.id, []))
+    if not total:
+        return []
+
+    ties = overload_ties(index, sym)
+    if ties is None:
+        return [
+            f"{total} more caller(s) call something named "
+            f"'{sym.name}' that resolved ambiguously — not counted here"
+        ]
+
+    cls = ties.cls
+    where = ", ".join(f"{s.path}:{s.start_line}" for s in ties.siblings[:3])
+    if len(ties.siblings) > 3:
+        where += ", …"
+    class_callers = len(index.calls_in.get(cls.id, []))
+    notes = [
+        f"{ties.callers} caller(s) construct {cls.name} with arguments "
+        f"that fit this constructor and {len(ties.siblings)} other(s) "
+        f"({where}); dekko can't tell which. Each is a caller of the "
+        f"class: dekko query callers {cls.id}  ({class_callers} callers)"
+    ]
+    if ties.collisions:
+        notes.append(
+            f"{ties.collisions} more caller(s) call something named "
+            f"'{sym.name}' that resolved ambiguously — not counted here"
+        )
+    return notes
+
+
+def overload_ties_json(index: MapIndex, sym: Symbol) -> dict | None:
+    """The ``overload_ties`` JSON object for ``sym``, if it has ties.
+
+    Args:
+        index: Loaded map index.
+        sym: Resolved symbol.
+
+    Returns:
+        ``callers``, ``class``, ``class_callers`` and ``siblings``, or
+        ``None``.
+    """
+    ties = overload_ties(index, sym)
+    if ties is None:
+        return None
+
+    return {
+        "callers": ties.callers,
+        "class": ties.cls.id,
+        "class_callers": len(index.calls_in.get(ties.cls.id, [])),
+        "siblings": [s.id for s in ties.siblings],
+    }
 
 
 def _sym_line(sym: Symbol) -> str:
@@ -588,11 +854,23 @@ def render_candidates(candidates: list[Symbol]) -> list[str]:
         # only escape hatch; point at it directly with a real
         # candidate's own line as an example.
         sample = ranked[0]
-        rows.append(
-            "  … path+qualname alone can't disambiguate these (same "
-            "file, same name) — append `:LINE` from a row above, e.g. "
-            f"`{sample.path}:{sample.qualname}:{sample.start_line}`"
-        )
+        if len({s.start_line for s in candidates}) == len(candidates):
+            rows.append(
+                "  … path+qualname alone can't disambiguate these (same "
+                "file, same name) — append `:LINE` from a row above, "
+                f"e.g. `{sample.path}:{sample.qualname}:"
+                f"{sample.start_line}`"
+            )
+        else:
+            # Two of them share a line too, so ``:LINE`` can't pick
+            # one either; an id always can.
+            rows.append(
+                "  … these share file, name and line — pass a symbol "
+                "id instead: "
+                + ", ".join(
+                    f"`{s.id}`" for s in ranked[:_MAX_AMBIGUOUS_CANDIDATES]
+                )
+            )
     return rows
 
 
@@ -912,17 +1190,70 @@ def _print_relation_json(
     }
     if coverage:
         doc["coverage_warning"] = coverage
+    doc.update(_ambiguous_json(index, sym, ambig_in, ambig_out))
+    referenced = (
+        _referenced_entries(index, sym, sites) if action == "callers" else []
+    )
+    if referenced:
+        kept_refs, ref_meter = _fit_entries(referenced, budget, limit)
+        doc["referenced_not_called"] = kept_refs
+        doc["referenced_meta"] = ref_meter.as_dict()
+    elif action == "callers" and not entries and not modules and build_logic:
+        doc["build_script_warning"] = build_logic
+    print(json.dumps(doc, indent=2))
+
+
+def _ambiguous_json(
+    index: MapIndex, sym: Symbol, ambig_in: int, ambig_out: int
+) -> dict:
+    """The ambiguity keys of a callers/callees JSON doc.
+
+    ``ambiguous_in`` stays the total; ``overload_ties`` says how much
+    of it the constructor's class answers.
+    """
+    doc: dict = {}
     if ambig_in:
         doc["ambiguous_in"] = ambig_in
+        ties = overload_ties_json(index, sym)
+        if ties is not None:
+            doc["overload_ties"] = ties
     if ambig_out:
         doc["ambiguous_out"] = ambig_out
-    if action == "callers" and not entries and not modules:
-        referenced = _referenced_entries(index, sym, sites)
-        if referenced:
-            doc["referenced_not_called"] = referenced
-        elif build_logic:
-            doc["build_script_warning"] = build_logic
-    print(json.dumps(doc, indent=2))
+    return doc
+
+
+def _print_ambiguous_notes(
+    index: MapIndex, sym: Symbol, ambig_in: int, ambig_out: int
+) -> None:
+    """Print the ambiguous-caller and -callee notes on stderr."""
+    if ambig_in:
+        for note in ambiguous_in_notes(index, sym):
+            print(f"  note: {note}", file=sys.stderr)
+    if ambig_out:
+        print(
+            f"  note: {ambig_out} outgoing call(s) from this symbol "
+            "resolved ambiguously (name matched 2+ candidates) — not "
+            "counted here",
+            file=sys.stderr,
+        )
+
+
+def _empty_relation_line(
+    index: MapIndex, sym: Symbol, action: str, ambig_in: int
+) -> str:
+    """The line for a callers/callees answer with no rows.
+
+    A constructor whose callers all tied between overloads isn't
+    uncalled: the class holds them, and the note says where.
+    """
+    ties = overload_ties(index, sym) if ambig_in else None
+    if ties is None:
+        return f"(no {action} of {sym.id})"
+
+    return (
+        f"(no caller resolved to this constructor of {ties.cls.name}: "
+        f"{sym.id})"
+    )
 
 
 def _run_relation(
@@ -978,45 +1309,71 @@ def _run_relation(
         lines += _site_rows(index, action, sym, s) if sites else [_sym_line(s)]
     for path in modules:
         lines += _module_rows(index, action, sym, path, sites)
-    if ambig_in:
-        print(
-            f"  note: {ambig_in} additional call site(s) named "
-            f"'{sym.name}' resolved ambiguously — not counted here",
-            file=sys.stderr,
-        )
-    if ambig_out:
-        print(
-            f"  note: {ambig_out} outgoing call(s) from this symbol "
-            "resolved ambiguously (name matched 2+ candidates) — not "
-            "counted here",
-            file=sys.stderr,
-        )
+    _print_ambiguous_notes(index, sym, ambig_in, ambig_out)
+    # A callback wired up by reference must not read as "nothing uses
+    # this" when calls_in is empty, and a reference beside real callers
+    # has no other command that lists it.
+    referenced = (
+        _referenced_rows(index, sym, sites) if action == "callers" else []
+    )
     if not lines:
-        referenced = (
-            _referenced_rows(index, sym, sites) if action == "callers" else []
-        )
         if referenced:
-            # A callback wired up by reference but never called (bug
-            # #2b) must not read as "nothing uses this" just because
-            # calls_in is empty.
-            print("referenced (not called):")
-            for row in referenced:
-                print(f"  {row}")
-            return EXIT_OK, None
-        print(f"(no {action} of {sym.id})")
+            return EXIT_OK, _emit_lines(
+                [f"  {row}" for row in referenced],
+                budget,
+                limit,
+                prefix=_REFERENCED_HEADER,
+            )
+        print(_empty_relation_line(index, sym, action, ambig_in))
         _print_notes(coverage, build_logic)
         return EXIT_OK, None
     related_total = caller_total if sites else 0
     related_label = (
         ("callers" if action == "callers" else "callees") if sites else ""
     )
-    return EXIT_OK, _emit_lines(
+    meter = _emit_lines(
         lines,
         budget,
         limit,
         related_total=related_total,
         related_label=related_label,
     )
+    if referenced:
+        _print_referenced_after_callers(referenced, budget, limit)
+
+    return EXIT_OK, meter
+
+
+_REFERENCED_HEADER = "referenced (not called):"
+
+
+def _print_referenced_after_callers(
+    referenced: list[str], budget: int | None, limit: int
+) -> None:
+    """Print the value-reference section below the caller rows.
+
+    Capped like the callers; the footer that follows belongs to the
+    callers, so a cut here is disclosed on its own line.
+
+    Args:
+        referenced: ``_referenced_rows`` output.
+        budget: Token budget, or ``None``.
+        limit: Row cap.
+    """
+    kept, meter = fit_to_budget(
+        [f"  {row}" for row in referenced],
+        budget,
+        limit,
+        prefix=_REFERENCED_HEADER,
+    )
+    print(_REFERENCED_HEADER)
+    for row in kept:
+        print(row)
+    if meter.omitted:
+        print(
+            f"  ({meter.omitted} of {meter.total} references omitted · "
+            f"raise --{meter.truncated_by})"
+        )
 
 
 def _peer_relevance_key(
@@ -2349,7 +2706,8 @@ def _run_uses_not_found(index: MapIndex, target: str) -> int:
             f"dekko: '{target}' is an internal symbol, not an "
             "external reference — 'uses'/'find_usages' only "
             "covers out-of-repo names; try `query callers "
-            f"{target}` (or the `get_callers` tool) instead",
+            f"{target}` (or the `get_callers` tool), which lists its "
+            "callers and its value references",
             file=sys.stderr,
         )
         return EXIT_NOT_FOUND
@@ -3114,9 +3472,10 @@ def _sole_type_candidate(
     """The one type-kind symbol among an ambiguous target's candidates.
 
     A heritage query can only ever be about a type, so a bare name
-    shared by a class and its own constructors/methods (Java's
-    ``ConfigDataEnvironmentPostProcessor``: one class, three ctors) is
-    not genuinely ambiguous *for this action* -- every non-type
+    shared by one class and unrelated same-named methods (a class
+    plus only its own constructors already resolves in
+    ``resolve_target``) is not genuinely ambiguous *for this action*
+    -- every non-type
     candidate would just hit ``_run_heritage_wrong_kind``. The generic
     candidate list used to send an agent off to
     copy a ``:LINE`` qualifier to say something the action already
@@ -3416,7 +3775,12 @@ _TYPE_ZERO_FAN_NOTE = (
 
 
 def _fan_line(
-    sym: Symbol, fan_in: int, fan_out: int, ambig_in: int, ambig_out: int
+    sym: Symbol,
+    fan_in: int,
+    fan_out: int,
+    ambig_in: int,
+    ambig_out: int,
+    ties: OverloadTies | None = None,
 ) -> str:
     """Build the ``fan-in: N, fan-out: M`` line with ambiguity notes.
 
@@ -3432,16 +3796,15 @@ def _fan_line(
         fan_out: Resolved outgoing call count.
         ambig_in: Additional ambiguous incoming call sites.
         ambig_out: Additional ambiguous outgoing calls.
+        ties: A constructor's overload ties, split out of ``ambig_in``
+            because its class counts them.
 
     Returns:
         The formatted fan-in/fan-out line, without a trailing newline.
     """
     line = f"  fan-in: {fan_in}"
     if ambig_in:
-        line += (
-            f" (+{ambig_in} additional call site(s) named "
-            f"'{sym.name}' resolved ambiguously — not counted)"
-        )
+        line += f" ({_fan_in_ambiguity(sym, ambig_in, ties)})"
     line += f", fan-out: {fan_out}"
     if ambig_out:
         line += (
@@ -3449,6 +3812,25 @@ def _fan_line(
             "— not counted)"
         )
     return line
+
+
+def _fan_in_ambiguity(
+    sym: Symbol, ambig_in: int, ties: OverloadTies | None
+) -> str:
+    """The parenthetical after ``fan-in: N`` for ambiguous callers."""
+    rest = ambig_in if ties is None else ties.collisions
+    parts = []
+    if ties is not None:
+        parts.append(
+            f"+{ties.callers} caller(s) tied with another constructor, "
+            f"counted on {ties.cls.id}"
+        )
+    if rest:
+        parts.append(
+            f"+{rest} caller(s) named '{sym.name}' resolved ambiguously "
+            "— not counted"
+        )
+    return "; ".join(parts)
 
 
 def _fan_in_note(sym_id: str) -> str:
@@ -3512,10 +3894,7 @@ def _sym_card_json(
             "fan_out": fan_out,
         }
     )
-    if ambig_in:
-        doc["ambiguous_in"] = ambig_in
-    if ambig_out:
-        doc["ambiguous_out"] = ambig_out
+    doc.update(_ambiguous_json(index, sym, ambig_in, ambig_out))
     if referenced_by:
         doc["referenced_by"] = referenced_by
     if type_zero_fan:
@@ -3534,6 +3913,7 @@ def _print_sym_card_text(
     referenced_by: int,
     type_zero_fan: bool,
     sym_notes: list[str],
+    ties: OverloadTies | None = None,
 ) -> None:
     """Print the ``query symbol`` text-mode card.
 
@@ -3546,11 +3926,12 @@ def _print_sym_card_text(
         referenced_by: Non-call reference count.
         type_zero_fan: Whether the zero-fan type caveat applies.
         sym_notes: Anchored notes to print, if any.
+        ties: A constructor's overload ties, if any.
     """
     print(signature(sym))
     print(f"  kind: {sym.kind} ({sym.language})")
     print(f"  at: {sym.path}:{sym.start_line}-{sym.end_line}")
-    print(_fan_line(sym, fan_in, fan_out, ambig_in, ambig_out))
+    print(_fan_line(sym, fan_in, fan_out, ambig_in, ambig_out, ties))
     if fan_in:
         print(_fan_in_note(sym.id))
     if referenced_by:
@@ -3606,6 +3987,7 @@ def _run_symbol(
         referenced_by,
         type_zero_fan,
         sym_notes,
+        overload_ties(index, sym) if ambig_in else None,
     )
     return EXIT_OK, None
 

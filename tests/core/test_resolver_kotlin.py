@@ -190,6 +190,28 @@ def test_nested_type_import_resolves_to_the_outer_file(tmp_path: Path) -> None:
     ]
 
 
+def test_deeply_nested_type_import_resolves_to_the_outer_file(
+    tmp_path: Path,
+) -> None:
+    # Kotlin's enclosing-type step used to go one level up only.
+    graph = _graph(
+        tmp_path,
+        {
+            f"{_JAVA}/web/Outer.java": (
+                "package web;\n\npublic class Outer {\n"
+                "    public static class Mid {\n"
+                "        public static class Inner {}\n    }\n}\n"
+            ),
+            f"{_KT}/app/Build.kt": _kotlin_user(
+                "Inner()", imports="import web.Outer.Mid.Inner"
+            ),
+        },
+    )
+    assert _imports(graph, f"{_KT}/app/Build.kt") == [
+        f"{_JAVA}/web/Outer.java",
+    ]
+
+
 def test_java_calls_kotlin_when_only_kotlin_defines_it(tmp_path: Path) -> None:
     graph = _graph(
         tmp_path,

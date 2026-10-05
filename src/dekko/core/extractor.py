@@ -19,6 +19,7 @@ from dekko.core.model import (
     RawRead,
     RawRef,
     RawThrow,
+    Reexport,
     Symbol,
     TypeUse,
 )
@@ -128,6 +129,11 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         if spec.name == "rust"
         else []
     )
+    reexports = (
+        _collect_reexports(tree.root_node)
+        if spec.name in _JS_FAMILY_SPECS
+        else []
+    )
     return FileMap(
         path=rel,
         language=spec.name,
@@ -146,6 +152,7 @@ def extract_file(root: Path, rel: str, spec: LanguageSpec) -> FileMap:
         cpp_decls=cpp_decls,
         type_uses=type_uses,
         submodules=submodules,
+        reexports=reexports,
         doc=_module_doc(spec.name, tree.root_node),
     )
 
@@ -226,7 +233,7 @@ def _collect_definitions(
                 _text(class_name),
                 kind,
                 params=_tuple_struct_fields(def_node),
-                returns=None,
+                returns=_rust_alias_target(def_node),
                 seen=seen,
             )
             defs.append((def_node, sym))
@@ -1044,6 +1051,38 @@ def _params_rust(params_node: Node) -> list[Param]:
     return out
 
 
+def _java_spread_param(node: Node) -> Param:
+    """A Java varargs parameter, split the way Java writes it.
+
+    ``Class<?>... sources`` is ``sources`` of type ``Class<?>...``:
+    the type keeps its ellipsis, the way an array parameter keeps its
+    ``[]``, so a construction's literal argument can be checked
+    against the element type. A shape missing either part keeps the
+    whole text as its name.
+    """
+    type_node = next(
+        (
+            c
+            for c in node.named_children
+            if c.type not in ("modifiers", "variable_declarator", "comment")
+        ),
+        None,
+    )
+    declarator = next(
+        (c for c in node.named_children if c.type == "variable_declarator"),
+        None,
+    )
+    if type_node is None or declarator is None:
+        return Param(name=_text(node), variadic=True)
+
+    name_node = declarator.child_by_field_name("name") or declarator
+    return Param(
+        name=_text(name_node),
+        type=_text(type_node) + "...",
+        variadic=True,
+    )
+
+
 def _params_generic(params_node: Node) -> list[Param]:
     """Best-effort parse: try name/type fields, else raw text.
 
@@ -1064,7 +1103,7 @@ def _params_generic(params_node: Node) -> list[Param]:
         if child.type == "comment":
             continue
         if child.type == "spread_parameter":
-            out.append(Param(name=_text(child), variadic=True))
+            out.append(_java_spread_param(child))
             continue
         if child.type == "ERROR" and "..." in _text(child):
             # tree-sitter-java can't parse a type annotation before
@@ -1345,6 +1384,12 @@ def _collect_calls(
         call = _raw_call(callee, rel, spans, arg_count, constructs=cpp_new)
         if call is None:
             continue
+        if (
+            spec.name == "java"
+            and call_node is not None
+            and call_node.type == "object_creation_expression"
+        ):
+            call.arg_kinds = _java_arg_kinds(args_node)
         calls.append(call)
         made = _cpp_factory_type(callee) if spec.name == "cpp" else None
         if made is not None:
@@ -2012,6 +2057,89 @@ def _call_arg_count(args_node: Node | None) -> int | None:
         return None
 
     return len(args)
+
+
+# What a Java argument visibly is, by node type, for the shapes whose
+# node alone says (see ``RawCall.arg_kinds``).
+_JAVA_ARG_KIND_BY_NODE = {
+    "string_literal": "string",
+    "class_literal": "class",
+    "true": "bool",
+    "false": "bool",
+    "character_literal": "char",
+    "null_literal": "null",
+    "lambda_expression": "lambda",
+    "method_reference": "lambda",
+}
+
+
+def _java_arg_kinds(args_node: Node | None) -> tuple[str, ...] | None:
+    """What each argument of a Java construction visibly is.
+
+    Args:
+        args_node: The construction's argument list, if any.
+
+    Returns:
+        One kind per argument (see ``RawCall.arg_kinds``), or ``None``
+        when there are no arguments or none is more than ``?``.
+    """
+    if args_node is None:
+        return None
+    kinds = tuple(
+        _java_arg_kind(a) for a in args_node.named_children if not a.is_extra
+    )
+    if all(k == "?" for k in kinds):
+        return None
+
+    return kinds
+
+
+def _java_arg_kind(arg: Node) -> str:
+    """One Java argument's kind: a literal's, or ``?``.
+
+    A plain decimal (``3``, ``-4``) is ``int``; a suffixed one
+    (``5L``) or any other radix is left ``?``, since its type is not
+    ``int``'s. A ``+`` with a string operand is a string, as Java
+    defines it.
+    """
+    kind = _JAVA_ARG_KIND_BY_NODE.get(arg.type)
+    if kind is not None:
+        return kind
+    if arg.type == "unary_expression" and _text(arg).startswith("-"):
+        operand = arg.child_by_field_name("operand")
+        if operand is not None and _java_arg_kind(operand) == "int":
+            return "int"
+    if arg.type == "decimal_integer_literal":
+        return "?" if _text(arg)[-1:] in "lL" else "int"
+    if arg.type == "binary_expression" and _java_is_string_concat(arg):
+        return "string"
+    if arg.type == "object_creation_expression":
+        type_node = arg.child_by_field_name("type")
+        if type_node is not None:
+            made = _strip_generics(_text(type_node)).rsplit(".", 1)[-1]
+            return "new:" + made.strip()
+
+    return "?"
+
+
+def _java_is_string_concat(node: Node) -> bool:
+    """Whether a ``+`` expression has a string operand somewhere."""
+    operator = node.child_by_field_name("operator")
+    if operator is None or _text(operator) != "+":
+        return False
+
+    for side in ("left", "right"):
+        operand = node.child_by_field_name(side)
+        if operand is None:
+            continue
+        if operand.type == "string_literal":
+            return True
+        if operand.type == "binary_expression" and _java_is_string_concat(
+            operand
+        ):
+            return True
+
+    return False
 
 
 def _rust_token_arg_count(args: Node) -> int | None:
@@ -2869,6 +2997,70 @@ def _callee_parts(node: Node) -> tuple[str, str, str | None]:
     paths (``a::b``), Java invocations, and falls back to splitting
     the raw text.
     """
+    text, name, receiver = _written_callee_parts(node)
+    lost = _bitfield_lost_scope(node)
+    if lost is None:
+        return text, name, receiver
+    receiver = lost if receiver is None else f"{lost}::{receiver}"
+
+    return f"{receiver}::{name}", name, receiver
+
+
+def _bitfield_lost_scope(callee: Node) -> str | None:
+    """The leading ``ns`` a C++ misparse cut off ``ns::F()``, if any.
+
+    When a macro before a method's return type (``static
+    EIGEN_ALWAYS_INLINE absl::Status Compute(..)``) keeps tree-sitter
+    from seeing a method, its body is read as a struct's field list,
+    and ``return absl::OkStatus();`` comes out as a bitfield: field
+    ``absl``, an ``ERROR`` holding one ``:``, then a bitfield clause
+    ``:OkStatus()``. The call node is a bare ``OkStatus()``, and with
+    nothing written the resolver took the one in-repo ``OkStatus`` in
+    another namespace.
+
+    Only that exact shape counts, with the field, the stray ``:`` and
+    the clause byte-adjacent so the source really reads ``absl::``.
+    In a correct parse a qualified callee is a ``qualified_identifier``,
+    so this never fires on valid code.
+
+    Args:
+        callee: A call's callee node.
+
+    Returns:
+        The cut-off scope (``absl``), or ``None``.
+    """
+    call = callee.parent
+    if call is None or call.type != "call_expression":
+        return None
+    clause = call.parent
+    if (
+        clause is None
+        or clause.type != "bitfield_clause"
+        or clause.named_child_count != 1
+    ):
+        return None
+    field = clause.parent
+    if field is None or field.type != "field_declaration":
+        return None
+    declarator = field.child_by_field_name("declarator")
+    gap = clause.prev_sibling
+    if (
+        declarator is None
+        or declarator.type != "field_identifier"
+        or gap is None
+        or gap.type != "ERROR"
+        or _text(gap) != ":"
+        or gap.prev_sibling != declarator
+        or declarator.end_byte != gap.start_byte
+        or gap.end_byte != clause.start_byte
+    ):
+        return None
+
+    return _text(declarator)
+
+
+def _written_callee_parts(node: Node) -> tuple[str, str, str | None]:
+    """``_callee_parts`` as the parse tree has it, before any repair."""
     special = _callee_java(node)
     if special is not None:
         return special
@@ -2882,7 +3074,7 @@ def _callee_parts(node: Node) -> tuple[str, str, str | None]:
     if node.type == "generic_function":
         inner = node.child_by_field_name("function")
         if inner is not None:
-            return _callee_parts(inner)
+            return _written_callee_parts(inner)
     name_node = _callee_name_node(node)
     if name_node is not None:
         text, name, receiver = _access_parts(node, name_node)
@@ -4175,6 +4367,20 @@ def _tuple_struct_fields(def_node: Node) -> list[Param]:
     ]
 
 
+def _rust_alias_target(def_node: Node) -> str | None:
+    """What a Rust ``type`` alias names: ``FxHashMap<K, V>`` for
+    ``type HashMap<K, V> = FxHashMap<K, V>;``.
+
+    An alias has no members of its own, so ``HashMap::default()`` can
+    only reach what it names. Kept in ``returns``, the one free text
+    slot a type symbol has.
+    """
+    if def_node.type != "type_item":
+        return None
+    target = def_node.child_by_field_name("type")
+    return _text(target) if target is not None else None
+
+
 def _collect_enum_variants(spec: LanguageSpec, root: Node) -> list[str]:
     """``"Owner::Variant"`` for every tuple enum variant in this file
     (see ``LanguageSpec.enum_variant_query``)."""
@@ -4737,6 +4943,85 @@ def _imports_generic(
         name = _text(alias) if alias else re.split(r"[./:]", source)[-1]
         out.append(Import(path=rel, name=name, source=source))
     return out
+
+
+_JS_FAMILY_SPECS = frozenset({"javascript", "typescript", "tsx"})
+
+
+def _collect_reexports(root: Node) -> list[Reexport]:
+    """Every re-export and named default export of a JS/TS file.
+
+    Only top-level ``export`` statements: one inside a ``declare
+    module`` or a namespace exports from that scope, not from the
+    file. See ``model.Reexport`` for the record each form becomes.
+    """
+    out: list[Reexport] = []
+    for node in root.children:
+        if node.type == "export_statement":
+            out.extend(_reexports_of(node))
+    return out
+
+
+def _reexports_of(node: Node) -> list[Reexport]:
+    """The records one top-level ``export`` statement contributes."""
+    source_node = node.child_by_field_name("source")
+    source = _strip_quotes(_text(source_node)) if source_node else ""
+    kinds = {child.type: child for child in node.children}
+    if "default" in kinds:
+        declared = _default_export_name(node)
+        return [Reexport("default", declared, "")] if declared else []
+    if "namespace_export" in kinds:
+        alias = kinds["namespace_export"].named_children[-1:]
+        if not alias or not source:
+            return []
+        return [Reexport(_strip_quotes(_text(alias[0])), "*", source)]
+    if "export_clause" in kinds:
+        return _clause_reexports(kinds["export_clause"], source)
+    if "*" in kinds and source:
+        return [Reexport("*", "*", source)]
+
+    return []
+
+
+def _clause_reexports(clause: Node, source: str) -> list[Reexport]:
+    """One record per item of an ``export { ... }`` clause.
+
+    A source-less item with no rename records nothing: the file's own
+    symbol, or its own import of the name, already says where the
+    name comes from.
+    """
+    out: list[Reexport] = []
+    for spec in clause.named_children:
+        if spec.type != "export_specifier":
+            continue
+        name = spec.child_by_field_name("name")
+        if name is None:
+            continue
+        alias = spec.child_by_field_name("alias")
+        original = _strip_quotes(_text(name))
+        exported = _strip_quotes(_text(alias)) if alias else original
+        if source or exported != original:
+            out.append(Reexport(exported, original, source))
+    return out
+
+
+def _default_export_name(node: Node) -> str | None:
+    """The name an ``export default`` statement's value is declared
+    under, or ``None`` for an anonymous or computed one.
+
+    ``export default function Foo``, ``export default class Foo`` and
+    ``export default Foo;`` name it; ``export default () => 1`` and
+    ``export default memo(Foo)`` do not.
+    """
+    declaration = node.child_by_field_name("declaration")
+    if declaration is not None:
+        name = declaration.child_by_field_name("name")
+        return _text(name) if name is not None else None
+    value = node.child_by_field_name("value")
+    if value is not None and value.type == "identifier":
+        return _text(value)
+
+    return None
 
 
 def _strip_quotes(text: str) -> str:

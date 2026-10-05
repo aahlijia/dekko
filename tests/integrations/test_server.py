@@ -418,6 +418,199 @@ def test_target_aliases_work_across_tools(
     assert "f" in text or "a.py" in text
 
 
+def _required_args(tool: str) -> dict:
+    """The smallest argument set a tool's schema calls complete."""
+    schema = server._TOOLS_BY_NAME[tool]["inputSchema"]
+    values = {"text": "t", "query": "f", "target": "a.py"}
+    return {k: values.get(k, "f") for k in schema.get("required", [])}
+
+
+@pytest.mark.parametrize("tool", sorted(server._HANDLERS))
+def test_every_tool_rejects_an_unknown_argument(
+    make_mapped_repo: RepoFactory, tool: str
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(ctx, tool, {**_required_args(tool), "bogus": 1})
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert f"unknown argument 'bogus' for {tool}" in text
+    assert "did you mean" not in text
+
+
+def test_impacted_tests_with_a_files_argument_is_an_error(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A misnamed argument used to be dropped and the call answered a
+    # question nobody asked: "no impacted tests" vs the default rev.
+    ctx = _ctx(make_mapped_repo(SRC))
+    result = _call(ctx, "impacted_tests", {"files": ["a.py"]})
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "unknown argument 'files' for impacted_tests" in text
+    assert "accepted: rev, limit, budget, root" in text
+    assert "no impacted tests" not in text
+
+
+def test_every_unknown_argument_is_named() -> None:
+    with pytest.raises(server.ToolError) as excinfo:
+        server._reject_unknown_args("summary", {"files": 1, "rev": "x"})
+    message = str(excinfo.value)
+    assert message.startswith("unknown arguments 'files', 'rev' for summary")
+    assert "accepted: budget, root" in message
+
+
+@pytest.mark.parametrize(
+    ("tool", "key", "suggestion"),
+    [
+        ("get_callers", "symbl", "symbol"),
+        ("get_callers", "include_test", "include_tests"),
+        ("impacted_tests", "budgets", "budget"),
+    ],
+)
+def test_near_miss_argument_suggests_the_real_one(
+    tool: str, key: str, suggestion: str
+) -> None:
+    with pytest.raises(server.ToolError) as excinfo:
+        server._reject_unknown_args(tool, {key: 1})
+    assert f"did you mean '{suggestion}'?" in str(excinfo.value)
+
+
+def test_several_near_misses_each_get_a_suggestion() -> None:
+    with pytest.raises(server.ToolError) as excinfo:
+        server._reject_unknown_args("get_callers", {"symbl": 1, "sitez": 1})
+    message = str(excinfo.value)
+    assert "did you mean 'symbl' -> 'symbol', 'sitez' -> 'sites'?" in message
+
+
+def test_null_unknown_argument_is_ignored(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A JSON null carries no intent, as with the target aliases.
+    ctx = _ctx(make_mapped_repo(SRC))
+    plain = _call(ctx, "query_symbol", {"symbol": "f"})
+    nulled = _call(ctx, "query_symbol", {"symbol": "f", "bogus": None})
+    assert nulled == plain
+
+
+@pytest.mark.parametrize(
+    ("tool", "key"),
+    [
+        (tool, key)
+        for tool, keys in sorted(server._UNADVERTISED_ARGS.items())
+        for key in keys
+    ],
+)
+def test_unadvertised_arguments_are_still_accepted(
+    tool: str, key: str
+) -> None:
+    value = 5 if key in ("limit", "budget") else True
+    server._reject_unknown_args(tool, {"symbol": "f", key: value})
+
+
+@pytest.mark.parametrize("tool", sorted(server._TARGET_PARAM))
+@pytest.mark.parametrize("alias", server._TARGET_ALIASES)
+def test_every_target_alias_is_an_accepted_argument(
+    tool: str, alias: str
+) -> None:
+    server._reject_unknown_args(tool, {alias: "f"})
+
+
+def test_workset_takes_a_target_alias(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(make_mapped_repo(SRC))
+    by_symbol = _call(ctx, "workset", {"symbol": "f"})
+    by_name = _call(ctx, "workset", {"name": "f"})
+    assert by_symbol["isError"] is False
+    assert by_name == by_symbol
+
+
+class _RecordingArgs(dict):
+    """A tool-arguments dict that records every key a handler reads."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self.read: set[str] = set()
+
+    def get(self, key: str, default: object = None) -> object:
+        self.read.add(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key: str) -> object:
+        self.read.add(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key: object) -> bool:
+        self.read.add(str(key))
+        return super().__contains__(key)
+
+
+# A valid value for every argument any tool advertises or honors, so a
+# handler gets past validation and reads all of its keys.
+_DRIFT_VALUES: dict[str, object] = {
+    "symbol": "f",
+    "name": "f",
+    "type": "f",
+    "target": "f",
+    "query": "f",
+    "text": "t",
+    "limit": 5,
+    "budget": 0,
+    "top": 3,
+    "hops": 1,
+    "packs": 1,
+    "kind": "function",
+    "scorer": "lexical",
+    "relation": "extends",
+    "task": "change f",
+    "rev": "HEAD",
+    "include_tests": True,
+    "sites": True,
+    "exact": True,
+    "transitive": True,
+    "with_source": True,
+    "type_impact": False,
+    "full": False,
+}
+
+# Arguments that can't be passed together get one call each.
+_DRIFT_EXCLUSIVE: dict[str, list[str]] = {"workset": ["rev", "symbol"]}
+
+
+@pytest.mark.parametrize("tool", sorted(server._HANDLERS))
+def test_handlers_read_only_accepted_arguments(
+    make_mapped_repo: RepoFactory, tool: str
+) -> None:
+    # A handler argument added without a schema property or an
+    # _UNADVERTISED_ARGS entry would be rejected before the handler
+    # ever saw it. Fail here instead of in an agent's session.
+    root = make_mapped_repo(SRC)
+    ctx = _ctx(root)
+    keys = [
+        *server._advertised_args(tool),
+        *server._UNADVERTISED_ARGS.get(tool, ()),
+    ]
+    exclusive = _DRIFT_EXCLUSIVE.get(tool, [])
+    variants = [
+        [k for k in keys if k not in exclusive or k == pick]
+        for pick in exclusive
+    ] or [keys]
+    read: set[str] = set()
+    for variant in variants:
+        args = _RecordingArgs(
+            {
+                k: str(root) if k == "root" else _DRIFT_VALUES[k]
+                for k in variant
+            }
+        )
+        server._handle_tools_call(ctx, 1, {"name": tool, "arguments": args})
+        read |= args.read
+    assert read <= server._allowed_args(tool)
+    # Every advertised argument was actually read, so the check above
+    # covered the whole handler and no schema property is dead.
+    assert set(server._advertised_args(tool)) <= read
+
+
 def test_find_type_usages_accepts_symbol(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -2038,8 +2231,8 @@ def test_get_callers_discloses_ambiguous_call_sites_over_mcp(
     make_mapped_repo: RepoFactory,
 ) -> None:
     """``query.run`` prints its
-    "N additional call site(s) ... resolved ambiguously — not counted
-    here" disclosure to stderr on an otherwise-successful (exit 0)
+    "N more caller(s) ... resolved ambiguously — not counted here"
+    disclosure to stderr on an otherwise-successful (exit 0)
     run. The CLI shows both streams to a human, but every
     ``_capture()``-based MCP tool handler used to return only
     ``out.strip()``, silently discarding that note — an MCP-only
@@ -2300,3 +2493,55 @@ def test_trace_path_needs_at_least_one_path(
     ctx = _ctx(make_mapped_repo(SRC))
     with pytest.raises(server.ToolError, match="'max_paths' must be 1"):
         server.tool_trace_path(ctx, {"from": "g", "to": "f", "max_paths": bad})
+
+
+def test_get_callers_on_a_tied_constructor_points_at_the_class_over_mcp(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    ctx = _ctx(
+        make_mapped_repo(
+            {
+                "web/ErrorPage.java": (
+                    "package web;\n"
+                    "public class ErrorPage {\n"
+                    "    public ErrorPage(HttpStatus status, String p) { }\n"
+                    "    public ErrorPage(Class<?> exception, String p) { }\n"
+                    "}\n"
+                ),
+                "app/Pages.java": (
+                    "package app;\n"
+                    "import web.ErrorPage;\n"
+                    "public class Pages {\n"
+                    "    Object make() {\n"
+                    "        return new ErrorPage(HttpStatus.A, null);\n"
+                    "    }\n"
+                    "}\n"
+                ),
+            }
+        )
+    )
+    text = _call(
+        ctx,
+        "get_callers",
+        {"symbol": "web/ErrorPage.java::ErrorPage.ErrorPage"},
+    )["content"][0]["text"]
+    assert "(no caller resolved to this constructor of ErrorPage" in text
+    assert "dekko query callers web/ErrorPage.java::ErrorPage" in text
+
+
+def test_a_note_added_in_a_session_shows_on_its_later_calls(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    ctx = _ctx(root)
+    _call(ctx, "query_symbol", {"symbol": "f"})
+    _call(ctx, "get_callers", {"symbol": "f", "include_tests": False})
+    _call(ctx, "add_note", {"symbol": "f", "text": "NOTE-AFTER-LOAD"})
+
+    for include_tests in (True, False):
+        text = _call(
+            ctx,
+            "query_symbol",
+            {"symbol": "f", "include_tests": include_tests},
+        )["content"][0]["text"]
+        assert "NOTE-AFTER-LOAD" in text

@@ -270,7 +270,9 @@ def test_deps_file_zero_symbol_barrel_file_still_resolves(
     code = cli.main(["deps", "--root", str(root), "--file", "index.js"])
     assert code == 0
     out = capsys.readouterr().out
-    assert "imports (0):" in out
+    # The re-export is the barrel's one dependency.
+    assert "imports (1):" in out
+    assert "sdk/SdkController.js" in out
     assert "imported by (0):" in out
 
 

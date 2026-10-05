@@ -1445,14 +1445,13 @@ def test_unused_dispatch_flag_adds_section(
     section = out.split("dispatch candidates:")[1]
     assert "DiscordConnector.createCommand" in section
     assert "SlackConnector.createCommand" in section
-    # The hint uses the full path:qualname:line
-    # target form so a copy-paste works even on an overloaded target,
-    # not the bare qualname alone.
+    # The hint passes the symbol's id, which always names exactly that
+    # symbol, so a copy-paste works even on an overloaded target.
     assert (
-        "dekko sanity --unused connectors.ts:DiscordConnector.createCommand:"
+        "dekko sanity --unused connectors.ts::DiscordConnector.createCommand"
     ) in section
     assert (
-        "dekko sanity --unused connectors.ts:SlackConnector.createCommand:"
+        "dekko sanity --unused connectors.ts::SlackConnector.createCommand"
     ) in section
 
 
@@ -1492,10 +1491,7 @@ def test_unused_dispatch_json_round_trip(
         for c in doc["dispatch_candidates"]
         if c["id"] == "connectors.ts::DiscordConnector.createCommand"
     )
-    assert entry["check_command"] == (
-        f"dekko sanity --unused connectors.ts:"
-        f"DiscordConnector.createCommand:{entry['line']}"
-    )
+    assert entry["check_command"] == f"dekko sanity --unused {entry['id']}"
 
 
 def test_unused_no_dispatch_json_omits_key_but_keeps_caveat(

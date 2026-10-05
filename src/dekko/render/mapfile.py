@@ -878,6 +878,9 @@ class MapIndex:
             → how many symbols it dropped from a file left with none,
             so ``query file`` can say the file holds only test code
             rather than that it isn't mapped.
+        notes_stat: ``[mtime_ns, size]`` of ``notes.json`` when
+            ``notes`` was read (``load_map`` only), for
+            ``refresh_notes``.
     """
 
     root_label: str
@@ -950,6 +953,13 @@ class MapIndex:
     # see ``index_matches_disk``.
     map_stat: list[int] | None = None
     hidden_test_symbols: dict[str, int] = field(default_factory=dict)
+    notes_stat: list[int] | None = None
+    # ``without_tests``'s result, kept for the next call. The view
+    # shares symbols and lists with this index, which no reader
+    # mutates; ``refresh_notes`` drops it when the notes change.
+    _without_tests: "MapIndex | None" = field(
+        default=None, repr=False, compare=False
+    )
 
     @cached_property
     def externals_by_head(self) -> dict[str, list[ExternalCall]]:
@@ -993,9 +1003,18 @@ class MapIndex:
         compiled only under test: ``#[cfg(test)]`` items and modules,
         including whole files declared ``#[cfg(test)] mod x;``).
 
+        The view is built once per index and reused: a warm server
+        filtered the whole index on every tool call, about 2 s on
+        tensorflow. A reloaded map is a new index with no view yet.
+
         Returns:
-            A new ``MapIndex``; ``self`` is left untouched.
+            A filtered ``MapIndex``; ``self`` is left untouched.
         """
+        if self._without_tests is None:
+            self._without_tests = self._build_without_tests()
+        return self._without_tests
+
+    def _build_without_tests(self) -> "MapIndex":
         out = MapIndex(
             root_label=self.root_label,
             provenance=self.provenance,
@@ -1549,10 +1568,12 @@ def load_map(root: Path) -> MapIndex | None:
 
     doc_version = _check_doc_version(doc.get("version", 1))
 
+    notes_stat = _stat_sig(root / _MAP_DIR / "notes.json")
     index = MapIndex(
         root_label=doc.get("root", root.name),
         provenance=doc.get("provenance"),
         notes=_load_notes(root),
+        notes_stat=notes_stat,
         doc_version=doc_version,
         map_stat=map_stat or None,
     )
@@ -2015,6 +2036,31 @@ def index_matches_disk(root: Path, index: MapIndex) -> bool:
     return index.map_stat == _stat_sig(root / _MAP_DIR / "map.json")
 
 
+def refresh_notes(root: Path, index: MapIndex) -> None:
+    """Reload a cached index's notes if ``notes.json`` changed.
+
+    Notes are read once at load, so a long-lived process holding an
+    index kept serving the notes it started with: a note added through
+    ``add_note`` never showed on that session's later calls. One
+    ``stat`` per call catches it. The stat is taken before the read
+    for the same reason ``load_map`` does it.
+
+    Args:
+        root: Repository root.
+        index: A cached index; one built in memory is left alone.
+    """
+    if index.map_stat is None:
+        return
+
+    sig = _stat_sig(root / _MAP_DIR / "notes.json")
+    if sig == index.notes_stat:
+        return
+
+    index.notes = _load_notes(root)
+    index.notes_stat = sig
+    index._without_tests = None
+
+
 def check_freshness(root: Path, index: MapIndex) -> Freshness:
     """Compare an index's provenance against the current tree.
 
@@ -2130,21 +2176,25 @@ def _content_freshness(root: Path, prov: dict) -> Freshness:
     """The source-content leg: were files added, removed, or changed?"""
     recorded: dict[str, str] = prov.get("files", {})
     recorded_stat: dict[str, list[int]] = prov.get("stat", {})
+    seen_stat: dict[str, list[int]] = {}
     current_paths, _ = walker.discover(
         root,
         subpath=prov.get("subpath"),
         excludes=tuple(prov.get("excludes", [])),
         max_file_size=prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE),
         follow_symlinks=prov.get("follow_symlinks", False),
+        known_stat=recorded_stat,
+        stat_out=seen_stat,
     )
     # Fast path: a file whose (mtime, size) signature is unchanged is
-    # assumed unchanged and not re-hashed. Files that are new, lack a
+    # assumed unchanged and not re-hashed (discovery skipped its
+    # content gates on the same signature). Files that are new, lack a
     # recorded signature, or whose stat moved fall back to hashing —
     # the content hash remains the decider for those.
     current: dict[str, str] = {}
     for rel in current_paths:
         sig = recorded_stat.get(rel)
-        if sig and sig == _stat_sig(root / rel):
+        if sig and sig == seen_stat.get(rel):
             current[rel] = recorded.get(rel, "")
         else:
             current[rel] = _file_hash(root / rel)

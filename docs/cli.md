@@ -6,7 +6,7 @@ dekko map src                        # ...restricted to a subtree
 dekko summary                        # repo digest: dirs, hotspots, entry points
 dekko outline src/server.py          # a file's signatures + docs, no bodies
 dekko query symbol run_map           # signature card: doc, location, fan-in/out
-dekko query callers resolve --sites  # who calls resolve, with call sites
+dekko query callers resolve --sites  # who calls resolve, with call sites, then who passes it as a value ('referenced (not called)')
 dekko query callers resolve --no-tests  # production callers only (the MCP get_callers default; the CLI includes tests)
 dekko query callees main             # what does main call?
 dekko query uses Path                # who references the external name Path?
@@ -52,9 +52,17 @@ dekko sanity --all                   # repo-wide sweep: every fan-in symbol, not
 dekko daemon start                   # warm-cache background process (see below)
 ```
 
-Symbol targets accept a bare `name`, `Class.method`, or a qualified
-`file.py:name` — ambiguous names list their candidates instead of
-guessing. Every read command takes `--json` for structured output.
+Symbol targets accept a bare `name`, `Class.method`, a qualified
+`file.py:name` or `file.py:Class.method`, a trailing `:LINE` to pick
+one overload (`Foo.java:Foo.run:12`), or a symbol id exactly as any
+command prints it (`Foo.java::Foo.run#2`). An id always names its own
+symbol. In `file:name`, a symbol whose full qualname is `name` wins
+over ones that only share the bare name, so `ErrorPage.java:ErrorPage`
+is the class, not the class plus its constructors. A bare name shared
+only by one class and that class's own constructors resolves to the
+class, with a note on stderr (its callers are every construction).
+Other ambiguous names list their candidates instead of guessing.
+Every read command takes `--json` for structured output.
 Most also regenerate a stale map automatically (`--no-regen` to fail
 instead) — `diff`, `affected`, `status`, and `ledger` don't accept
 `--no-regen` at all: `status`/`ledger` never regenerate regardless,
@@ -388,7 +396,9 @@ of `unexplained miss`:
   `process.on("exit", cleanup)`, `.map(Src::getSource)`: the map
   already holds that line as a reference edge to the target (Python,
   JS/TS, Go, Java), and the row says `passed or stored as a value,
-  not called — dekko has this as a reference`. Only when the file
+  not called — dekko has this as a reference (see: dekko query callers
+  <target>, 'referenced (not called)')`. `query callers` lists those
+  references below the callers since 1.6.11. Only when the file
   could really have made that reference: it defines the target,
   imports its name or its declaring type, or is a same-package
   sibling (Go/Java), and it binds no local of the same name. A
@@ -427,15 +437,35 @@ of `unexplained miss`:
   string or key. `export { X } from './x'` re-exports read as import
   statements.
 
-Two shapes are left unexplained on purpose. Outside JS/TS, a name
-*inside* a longer string (`"settings.json cleanup complete."`) also
-matches `eval("cleanup()")` and dispatch by string, which are real
-references, and Python f-strings, Go map keys and Kotlin/Ruby
-interpolation make "inside a string" mean something else. And a name in the middle of a multi-line Python docstring
-can't be told from code one line at a time. None of this moves a
+Two shapes are left unexplained on purpose. Outside JS/TS, Java and
+Kotlin, a name *inside* a longer string (`"settings.json cleanup
+complete."`) also matches `eval("cleanup()")` and dispatch by string,
+which are real references, and Python f-strings, Go map keys and Ruby
+interpolation make "inside a string" mean something else. And a name in
+the middle of a multi-line Python docstring can't be told from code one
+line at a time. None of this moves a
 count: `matches`, `dekko-only` and `grep-only` are untouched, only the
 cause on a grep-only row changes. `--fail-on-unexplained` will fail
 less often as a result.
+
+**Java and Kotlin type mentions, since 1.6.10.** On a type target, or
+a constructor of one, a Java or Kotlin line that names the type without
+constructing it reads `names the type without constructing it
+(declaration, parameter or return type, generic argument, static member
+access, cast or class literal) — not a call site`: `ConfigurationPropertyName
+oldName = property.getName();`, `List<Name> all`, `Name.of("a")`,
+`Name.class`, `(Name) o`, `o instanceof Name`, `new Name[3]`. It holds
+only when no occurrence of the name on the line could construct it:
+`Name(`, `Name<..>(` and `Name::new` (plus `::Name` and a trailing-lambda
+`Name {` in Kotlin) keep the row a miss, since a Java constructor can't
+run without one of them. `Name::new` is a construction dekko records no
+edge for, so it stays unexplained on purpose. A class and its own
+constructors count as one type for this, in single-target and `--all`
+mode alike; a name that is also an unrelated method gets no such label
+in `--all`. On spring-boot this took 17,589 of 18,349 unexplained rows.
+A name only inside a Java or Kotlin string or char literal reads
+`mention inside a string or template text` (a Kotlin `${...}` template
+is code and never does).
 
 **A site the map attributed to a same-named sibling, since 1.5.9.**
 When two unrelated symbols share a bare name (a 1-arg `errorMessage(e)`
@@ -456,6 +486,15 @@ elsewhere in the repo` cause remains for a call-shaped hit inside a
 sibling's own file that the map attributed to nobody, which is what an
 ambiguous site among several same-named candidates looks like.
 
+For a constructor target the class is not a rival: a construction is
+recorded on the class and on the overload its arguments pick. Since
+1.6.10 a row the map gave to another overload of the same class reads
+`resolved to another constructor of the same class (see resolved_to)`,
+and a row the map gave only to the class, from a caller whose
+arguments fit two or more overloads equally, reads `a construction
+whose arguments fit 2+ constructors of the class — recorded on the
+class, not on one overload (see: dekko query callers <class>)`.
+
 **Four more index facts, since 1.5.10.** Each is read off the map, not
 the line, and named as such:
 
@@ -470,7 +509,14 @@ the line, and named as such:
 - *A recursive self-call.* A bare `name(` inside the target's own span
   reads `recursive call inside the symbol's own body — dekko records
   no self edges by design`. Decided per target: the same line is a
-  plain call for a same-named sibling.
+  plain call for a same-named sibling. Since 1.6.11 a function or
+  method target's own name *mentioned* without a call inside its own
+  body (`setTimeout(doRefresh, 1000)` inside `doRefresh`, a same-named
+  field `self.blame` inside `fn blame`) reads `mention inside the
+  symbol's own body, not a call — never a missed caller (dekko records
+  no self edges by design)`. Only rows no more specific cause claimed;
+  a type's body holds methods that are callers of their own, so not
+  for types.
 - *A name bound to a different import in this file.* When the hit's
   file imports the bare name from a source the map could not place in
   the repo (`import { appendFileSync } from 'fs'`) or from a repo file
@@ -481,7 +527,10 @@ the line, and named as such:
   fs)` in text). Applied only to rows the ladder left `unexplained` or
   under one of its trailing causes (generic name, test filter, ...): a
   comment line that names `appendFileSync` is still best described as
-  a comment.
+  a comment. A repo file that re-exports the name out of the target's
+  own file (a barrel: `export { X } from`, `export * from`, up to
+  eight files deep) is not a different declaration, so an import
+  through it gets no such label and the row stays a miss.
 - *A heritage clause the map recorded.* `export class FocusEvent
   extends TerminalEvent {` on a type target whose subtype the map
   resolved reads `heritage clause (extends/implements) the map records
@@ -633,9 +682,35 @@ same-named method from a completely different library (e.g. AssertJ's
 grep-only miss when it isn't one. This is a cheap textual proxy, not
 real type inference (no alias tracking, no import resolution) — false
 positives (missing the real evidence) are the accepted failure mode,
-not false confidence. Gated to `sanity <target>`; `--all` does not
-apply this check (it has no single target to resolve a declaring type
-against).
+not false confidence. Since 1.6.11 it runs in `--all` too, per
+symbol, and only on a line that calls the name (`name(`): the label
+says "method", and a line with no call (`entries.length`, a regex,
+JSX text) is not one. It re-decides only rows the shared rules left
+unexplained or "generic name", so a same-named local stays a local
+and a test file's own helper stays with the test filter. And only for
+a hit in the target's own language family where an import names a
+type (Java/Kotlin/Scala, JS/TS, Python, C#): a C/C++ `#include` names
+a file, so on tensorflow a real `shape->AddDim(..)` miss read as a
+library method, as did a Python docstring naming a C++ method and a
+Rust closure sharing a method's name.
+
+**Both modes classify from the same facts, since 1.6.11.** `sanity
+<target>` and `sanity --all` share one classification of each grep
+hit, built from facts about the bare name only: every same-named
+symbol's definitions and recorded references, their kinds (a type's
+own constructors count as the type), and the name's recorded property
+reads. What depends on which same-named symbol is asked about runs
+afterwards, per target, in both modes: resolved elsewhere, a heritage
+clause, a self-call or self-mention, an import binding the name
+elsewhere, a call in a file declaring a same-named sibling (never the
+target's own file), and the receiver check. So a row reads the same
+in both. Before, `--all` blamed a call in the target's own file on a
+"cross-file collision", and single-target labelled 416 rows on
+claude-code and cline "external-library method" that `--all` (rightly)
+did not. One known cost: on a name that is both a type and a function
+(cline's `ClineFreeModelLimitError`, a class and a React component), a
+TypeScript type predicate `error is Name` is unexplained in both modes,
+where single-target used to call it a type position.
 
 The grep sweep itself has two safety caps: it stops reading raw grep
 output past 5,000 lines, and drops any single raw line over ~10,000
@@ -706,6 +781,18 @@ work `sanity <target>` already does, just amortized. `--jobs N`
 (default `4`; `0` = all cores, `1` = sequential) parallelizes the
 remaining per-name sweeps across a thread pool, since each is I/O-bound
 (waiting on a `grep` subprocess), not CPU-bound.
+
+The repo is walked only once per sweep. One `grep -rlI` lists every
+text file a per-name grep could print from, in grep's own walk order,
+and one read of each file finds which swept names it can contain.
+Each name's `grep -w -F` then runs over just those files, in that
+order, so its rows, their order and where the 5,000-line cap cuts are
+the same as `sanity <target>`'s. A file with a line over 10,000
+characters (a minified bundle, a one-line data file) is matched
+in-process instead, once for all names, keeping its short rows and
+counting the long ones the way the single-target sweep does. On
+spring-boot a 2,000-name sweep went from about 7 minutes of grep to
+about 10 seconds.
 
 Output is a triage summary, not a full per-symbol report: an aggregate
 histogram of grep-only causes across the whole sweep, then the symbols
@@ -1057,11 +1144,36 @@ written namespace is counted external. A one-scope call through a
 class (`TensorShape::IsValid()`, which may reach a base class, or
 `View<T>::Next()`) or through a name dekko never saw as a namespace (a
 namespace alias) resolves as before. A Rust `Type::name(..)` call
-only reaches `Type`'s own members, so its row lists only those (the
-same call written `x.name(..)` is not narrowed), and a Rust call
+only reaches `Type`'s own members, so its row lists only those. That
+holds through a turbofish (`Vec::<T>::new()`), a type alias (`type
+HashMap<K, V> = FxHashMap<K, V>` makes `HashMap::default()` a call on
+`FxHashMap`, external when the repo doesn't define it) and a renaming
+`use` (`use text::Buffer as TextBuffer` makes `TextBuffer::new(..)` a
+call on `Buffer`). A type with no symbol of its own but with members in
+the repo (`String` with the repo's `impl From<X> for String`) lists
+those members. A lowercase path through a workspace crate
+(`release_channel::init(cx)`, directly or through a `use` of the crate
+or one of its modules) keeps the candidates inside that crate's
+directory, functions before methods, when it has any. A Rust dot-call
+`x.name(..)` row lists only the methods that take `self` and the
+written count, when two or more do. A Rust call
 through a `use` rooted at `std`, `core` or `alloc` (`use std::path::
 Path; Path::new(..)`) is counted external even when the repo defines a
-type of that name. A low ambiguous rate
+type of that name. The same goes for a `use` rooted at any crate the
+repo's `Cargo.toml` files don't declare (`use windows::core::HSTRING`),
+unless its first segment is a module of a repo crate, and for a type
+imported from a workspace crate that only re-exports it from outside
+(`use collections::BTreeMap`): no repo symbol carries the name and no
+`use .. as` in the repo renames anything to it. A repo with no
+`Cargo.toml` keeps the older file-name test. One blind spot: a local
+variable or parameter named like such an import (`let fs =
+FakeFs::new(..)` after `use smol::fs`) is read as the import, so its
+calls count external. A Rust call never resolves to a function its shape
+or argument count rules out (Rust has no overloads or default
+arguments): `x.name(..)` needs a method taking `self` and the written
+count, a bare `name(..)` never reaches a method, and
+`Type::name(obj, ..)` counts `self` as an argument. The call goes to the
+next candidate that fits, or stays ambiguous or external. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output
@@ -1078,9 +1190,9 @@ Counts here are **distinct `(caller, name)` collisions, not physical
 call-site counts**: the resolver keys its ambiguous-call accumulator on
 `(caller, name)`, not `(caller, name, line)`, so a caller that
 references the same colliding name at 3 different lines counts once in
-this report — the same granularity limit `query symbol`'s
-"N additional call site(s) resolved ambiguously" disclosure already
-has. `--name` reuses `query`'s own ambiguous-candidate rendering, so a
+this report — the same granularity `query symbol`'s "+N caller(s)
+named 'X' resolved ambiguously" disclosure has, which is why it says
+callers, not call sites. `--name` reuses `query`'s own ambiguous-candidate rendering, so a
 very-high-cardinality collision (a bare `main`/`New`/`Generate`
 matched against dozens of same-named repo-wide candidates) truncates
 the same way an unresolved-target error does, rather than dumping every
@@ -1099,11 +1211,29 @@ with three shaded copies lists only a copy's own constructor overloads.
 **Constructor overloads.** `new X(...)` always resolves to the class
 `X`. When `X` declares several constructors, the call's argument count
 picks one: an exact declared-count match first, then a unique varargs
-or default-argument fit. Overloads with the same count (Java's
-`ErrorPage(HttpStatus, String)` and `ErrorPage(Class, String)`) can
-only be told apart by argument types, which dekko doesn't have, so the
-call shows under `ambiguous --name X` and as "resolved ambiguously" on
-each of those constructors rather than being credited to one.
+or default-argument fit. In Java, a literal argument comes first: an
+overload a string, class literal, boolean, plain int, char, `null`,
+`new T(..)` or lambda can't be passed to is dropped before the count
+decides, so `new SpringApplication(A.class, B.class)` is the
+`(Class<?>...)` constructor, not `(ResourceLoader, Class<?>...)`, and
+`new ErrorPage(Oops.class, "/500")` is `ErrorPage(Class, String)`.
+Overloads nothing visible tells apart (`new
+ErrorPage(HttpStatus.NOT_FOUND, "/404")` against
+`ErrorPage(HttpStatus, String)` and `ErrorPage(Class, String)`) need
+argument types, which dekko doesn't have, so the call shows under
+`ambiguous --name X` rather than being credited to one constructor.
+The class still gets the edge. `query callers` on one of those
+constructors says so: with no caller resolved to it, it prints `(no
+caller resolved to this constructor of ErrorPage: <id>)` instead of
+"no callers", and a note on stderr counts the callers whose
+arguments fit it and another overload, names the other overload, and
+gives the command that lists them all (`dekko query callers <class
+id>`, with the class's caller count). `--json` adds `overload_ties`
+(`callers`, `class`, `class_callers`, `siblings`) next to
+`ambiguous_in`, which stays the total. A call whose name could also
+mean an unrelated symbol is not a tie; it keeps the plain "resolved
+ambiguously — not counted here" note, counted separately. `query
+symbol` and `context` split the two the same way.
 
 In C++, `new X(...)`, `std::make_unique<X>(...)`/`make_shared` (and
 the `absl::` spellings) and a temporary `X(...)` all count as
@@ -1199,6 +1329,17 @@ isn't import-resolved by design, so entries listed under `external`
 may in fact be this repo's own packages, and `imported by` is always
 empty for that language — not "nothing depends on this file," which
 isn't a claim dekko can make there.
+
+**A JS/TS re-export is a dependency.** `export { X } from "./x"`,
+`export * from "./x"` and `export * as ns from "./x"` make the file
+depend on `./x` exactly as an import does, so a barrel file has an
+edge to every file it re-exports (carrying the exported name, or `*`
+for a star), and a re-export of a package is listed under `external`.
+A barrel that re-exports a file which imports back from the barrel is
+a real import cycle and is reported as one: on a monorepo whose
+packages each have an `index.ts`, expect `--cycles` to show fewer,
+larger clusters than it did before 1.6.3, when barrels had no
+outgoing edges at all.
 
 Cycle detection groups files into strongly-connected components
 (Tarjan's SCC): a reported cycle is every file mutually reachable from
@@ -1578,10 +1719,19 @@ re-validates its cached index on every read the same way a direct
 invocation would, so a working-tree edit or an out-of-band `dekko map`
 is never served stale.
 
+A slow request is waited for as long as the daemon is working on it.
+The client's first wait is an estimate from the repo's size; when it
+runs out, the client asks the daemon's status listener whether it is
+still busy and, while it is, keeps waiting, printing `note: the daemon
+is still working on this (N s so far)` once a minute. It gives up only
+when the daemon says it is no longer busy, stops answering, or one
+request passes 30 minutes. `busy` means busy with any request, so a
+request queued behind another client's slow one waits for both.
+
 One case is deliberately *not* a silent fallback: if a request has
-already been sent to the daemon and no response comes back in time
-(a slow request outlasting the connection's own timeout, or the
-connection dropping mid-wait), the CLI does **not** transparently
+already been sent to the daemon and no response comes back (the
+daemon stopped working on it or answering, the 30-minute limit
+passed, or the connection dropped mid-wait), the CLI does **not** transparently
 re-run the command locally — the daemon's accept loop is
 single-threaded and has no notion of "the client gave up," so it
 keeps computing the abandoned request in the background regardless;
@@ -1607,6 +1757,14 @@ a fresh map, which is what a bare `workset`/`affected`/`diff` sees
 right after a commit or checkout: the old side would only rebuild
 what's already on disk, so both sides come from the current map, no
 old-side reparse runs, and no rev-cache entry is written.
+
+When the old side does have to be built, it reuses the working tree's
+cached call resolution for every file the difference between the rev
+and the last `dekko map` can't reach, the way an incremental `map`
+does. Against the map's own commit or a nearby one, that makes the
+first comparison cost about an incremental map instead of a full one.
+A rev that adds, removes or renames a file relative to the map, or
+changes a type, still resolves in full.
 
 On a stale map the current-tree side is the in-memory re-map described
 under the read commands above. The daemon keeps the last one it built

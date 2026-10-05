@@ -9,6 +9,669 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-10-05
+
+Closes round 1.7's fix cycle. The code is 1.6.22; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.7 evaluated 1.5.13 on
+seven real repositories and found one High issue and eight Medium
+ones, mostly calls landing on the wrong same-named symbol across
+JS/TS, Rust and Java, plus cold-diff and warm-call cost. All 22 fixes:
+
+- **1.6.1**: a construction is checked against the class's
+  constructors, a bare npm package import is external, and an
+  `extends` clause edit re-resolves its constructions.
+- **1.6.2**: a JS/TS import resolves to its file, and that file
+  answers before a name guess (cline +1,333 right pairs).
+- **1.6.3**: JS/TS imports are followed through barrel re-exports
+  (claude-code: 1,122 wrong `Text`/`Box` pairs fixed), and `deps`
+  shows what a barrel re-exports.
+- **1.6.4**: a Rust call can't resolve to a function its shape or
+  argument count rules out.
+- **1.6.5**: a Rust `use` of a crate the repo doesn't have is
+  external.
+- **1.6.6**: a Rust path is read through its alias, renaming `use`,
+  turbofish or crate, and an ambiguous row lists only what the call
+  could mean.
+- **1.6.7**: a Java constructor overload a literal argument can't be
+  passed to is ruled out, and varargs parameters have a type.
+- **1.6.8**: every symbol id a command prints works as a target.
+- **1.6.9**: C++ classes that share a qualified name pick the
+  constructor in their own file.
+- **1.6.10**: `sanity` explains a Java/Kotlin line that only names a
+  type (spring-boot unexplained rows 18,349 -> 87).
+- **1.6.11**: `query callers` lists value references, and `sanity
+  <target>` and `sanity --all` agree on every row's cause.
+- **1.6.12**: the `prompt-submit` hook pins the file that defines a
+  code-shaped name in the prompt.
+- **1.6.13**: a cold `diff`/`affected`/`workset` reuses the map's
+  cached resolution for the old side (tensorflow cold diff 239 s ->
+  69 s).
+- **1.6.14**: a daemon-routed command waits while the daemon is busy.
+- **1.6.15**: `sanity --all` walks the repo once.
+- **1.6.16**: a warm call trusts a recorded file stat instead of
+  re-reading every source file (spring-boot 0.87 s -> 0.42 s).
+- **1.6.17**: test-excluding reads are memoized, and a note added
+  through `add_note` shows in the same session.
+- **1.6.18**: a stale read parses `map.json` once, not three times.
+- **1.6.19**: an MCP tool call with an argument the tool doesn't take
+  is an error.
+- **1.6.20**: an explicit rev is checked before the map loads, and an
+  option-shaped rev is rejected.
+- **1.6.21**: a C++ call keeps its `ns::` when a misparse cuts it off.
+- **1.6.22**: a Java/Kotlin import of a nested type or static member
+  reaches the file that declares it.
+
+## [1.6.22] — 2026-10-05
+
+### Fixed
+- **A Java import of a nested type or a static member reaches the
+  file that declares it.** `import a.b.Outer.Inner;` and `import
+  static a.b.Outer.helper;` were looked up as `a/b/Outer/Inner.java`
+  and `a/b/Outer/helper.java`, which don't exist, so they were listed
+  as external and the file edge to `Outer.java` was lost. On
+  spring-boot that was about 1,500 imports, and 169 files had no
+  in-repo import edge at all, which hid them from `deps` and from
+  `affected`'s import tier. Both now resolve to the enclosing type's
+  file, at any depth. Kotlin already went one level up and now goes
+  as deep as Java. The walk stops at a package (a lower-case
+  segment), so `x.y.z.Thing` never lands on an unrelated `x/y.java`.
+
+## [1.6.21] — 2026-10-05
+
+### Fixed
+- **A C++ call keeps its `ns::` when a macro breaks the method around
+  it.** With a macro before a method's return type (`static
+  EIGEN_ALWAYS_INLINE absl::Status Compute(..)`), tree-sitter can read
+  the body as a struct's field list, and `return absl::OkStatus();`
+  comes out as a bitfield named `absl` whose width is a bare
+  `OkStatus()`. With no scope written, the call resolved to the one
+  in-repo `tensorflow::OkStatus`. The extractor now puts the cut-off
+  scope back for exactly that shape, so the call reads
+  `absl::OkStatus` and goes external (3 sites on tensorflow, including
+  the two false `OkStatus` edges reported). Caches re-extract C++ files
+  once.
+
+## [1.6.20] — 2026-10-05
+
+### Fixed
+- **`workset` checks an explicit rev before regenerating a stale
+  map.** It loaded (and on a stale map, regenerated) the map first and
+  only looked at the rev afterwards, so `workset <a path>` on zed took
+  15.8 s and 2.6 GB to say "cannot export git rev". `diff`, `affected`
+  and `workset` now resolve an explicit rev up front and fail in a
+  `git rev-parse`: `dekko: unknown git rev 'X'`, plus `'X' is a path
+  in this repo, not a rev` when it is one, and for `workset` a pointer
+  to `--symbol`. Outside a git repo the message says so.
+- **An option-shaped rev no longer resolves to a pile of refs.** Rev
+  lookups ran `git rev-parse <rev>`, and `git rev-parse --all` exits 0
+  printing every ref, which then passed for a SHA. A rev starting with
+  `-` (only reachable through MCP's `rev`; the CLI's parser stops it)
+  is now unknown, and lookups use `--verify`, which demands exactly
+  one object.
+
+## [1.6.19] — 2026-10-05
+
+### Fixed
+- **An MCP tool call with an argument the tool doesn't take is an
+  error, not a silent answer to a different question.** Handlers read
+  only the keys they know, so `impacted_tests {"files": [..]}` dropped
+  `files` and reported "no impacted tests" against the default rev,
+  and `get_callers {"symbol": .., "bogus": 1}` just succeeded. Now the
+  reply is `isError`, names every unknown argument, lists the ones the
+  tool advertises, and adds `did you mean 'symbol'?` for a near miss
+  like `symbl`. A `null` value is ignored, as it already is for target
+  aliases. Knobs some tools honor without listing them (`limit` on
+  `get_callers`, `include_tests` on `get_callees`, ...) stay accepted.
+  `workset` now takes `name`, `target` or `type` for its `symbol`,
+  like every other target tool.
+
+## [1.6.18] — 2026-10-05
+
+### Performance
+- **A read on a stale map parses `map.json` once, not three times.**
+  Every read other than `diff`/`affected` rewrites a stale map before
+  answering, and on the way it parsed the old `map.json` in full just
+  to learn it was stale, then again to read four regen options, then
+  once more for the map it had just written: 12.8 s of a 52 s
+  tensorflow read after a one-line edit, 4.1 of 18 s on spring-boot.
+  The first two now read the few-KB provenance sidecar, the way
+  `diff` and `affected` already judge a map. A missing or desynced
+  sidecar, or a map stale by version (whose format check must still
+  run), takes the old path. An outdated long-lived process whose
+  delegated regen fails still serves the map it has, parsing it only
+  on that branch.
+
+## [1.6.17] — 2026-10-05
+
+### Performance
+- **A warm `get_callers` (and every other test-excluding call) no
+  longer rebuilds the test-free index each time.** The MCP server and
+  the daemon kept the loaded map between calls, but the test-free view
+  most tools use by default was rebuilt from it on every call: about
+  2 s of a 2.8 s tensorflow `get_callers`, 0.5 s on spring-boot. The
+  view is now built once per loaded map and reused; a reloaded map
+  starts a new one.
+
+### Fixed
+- **A note added through `add_note` shows on that session's later
+  calls.** Notes were read when the map loaded, so a long-running MCP
+  server or daemon kept serving the notes it started with until the
+  map itself reloaded. Each warm call now checks `notes.json`'s
+  `(mtime, size)` (one `stat`) and rereads the notes when it moved.
+
+## [1.6.16] — 2026-10-05
+
+### Performance
+- **A warm call no longer re-opens every source file to check the
+  map is fresh.** Every daemon or MCP call starts with a freshness
+  check, and that check ran full file discovery, which opened each
+  supported file to sample it for minified content. On spring-boot
+  that was 9,182 file opens per call, about 0.7 s of a 0.7 s
+  `query_symbol`. A file whose `(mtime, size)` still matches what the
+  map recorded is now admitted on that signature, the same signature
+  the check already trusted to skip re-hashing, and its `stat` is read
+  once instead of twice. New files, touched files and files the map
+  skipped take the full checks as before, and path rules
+  (`.dekkoignore`, `--exclude`) still apply to every file. On
+  spring-boot the content check went from 0.87 s to 0.42 s with the
+  same verdict. `dekko map`'s own discovery is unchanged.
+
+## [1.6.15] — 2026-10-05
+
+### Performance
+- **`sanity --all` walks the repo once instead of once per name.** It
+  ran a full `grep -rn` for every unique bare name, 2,000 by default,
+  so a sweep cost 2,000 walks: 879 s on spring-boot, and on zed it
+  never finished because an untracked 26 MB one-line cache file was
+  read and returned by nearly every grep. Now one `grep -rlI` lists
+  the text files in grep's walk order, one read of each file finds
+  which names it can hold, and each name's `grep -w -F` runs over only
+  those files, in that order. grep still decides every row, so the
+  rows, their order, the 5,000-line cap and `sanity <target>`'s output
+  are unchanged. A file with a line over 10,000 characters is matched
+  in-process once for all names, keeping its short rows and counting
+  the long ones as before. The prototype measured 10 s on spring-boot,
+  23 s on zed and 15 s on tensorflow for 2,000 names. If the one walk
+  fails, `--all` exits 2 as a failed per-name grep did.
+
+## [1.6.14] — 2026-10-05
+
+### Fixed
+- **A daemon-routed command waits for as long as the daemon is
+  working on it.** The client gave up after a wait estimated from the
+  repo's size (at most 300 s), so a request that outran the estimate
+  failed with exit 7 and no output while the daemon kept working: a
+  cold `diff` on tensorflow whose new side also had to resolve the
+  whole repo hit 293 s and lost a result the daemon finished about a
+  minute later. The estimate is now only the first wait. Past it, the
+  client asks the daemon's status listener whether it is still busy
+  and, while it is, keeps waiting, printing `note: the daemon is still
+  working on this (N s so far)` the first time and once a minute after.
+  It gives up when the daemon says it is no longer busy, two status
+  probes in a row go unanswered, or one request passes 30 minutes, and
+  the exit-7 message now says which. The probe asks for a brief status
+  (`running`, `pid`, `busy`) that skips the cache report's freshness
+  check; an older daemon sends its full status, which has `busy` too.
+
+## [1.6.13] — 2026-10-05
+
+### Fixed
+- **A cold `diff`, `affected` or `workset` no longer resolves the old
+  commit from scratch.** With no rev-cache entry, the old side exported
+  the rev and re-resolved every call in the repo, while the working
+  tree's `.dekko/` already held the resolution for a tree that was the
+  same commit or a few files off it. On tensorflow that was 186 s of a
+  239 s first `diff` on a dirty tree, and through the daemon it ran
+  past the client's 292 s wait, so the call failed with no output. The
+  old side now goes through the same reuse gate an incremental `map`
+  uses and re-resolves only what the difference can reach: 239 s to
+  69 s on tensorflow, 30 s to 13 s on zed. The gate still refuses a rev
+  that adds, removes or renames a file, changes a type, or has a
+  different `Cargo.toml`, tsconfig or workspace config, and those
+  resolve in full as before, with the same `no rev-cache` note. When
+  reuse engages the note no longer prints, since the wait is short.
+  The old side's symbols, callers, body hashes and imports are
+  identical either way.
+
+## [1.6.12] — 2026-10-04
+
+### Fixed
+- **The `prompt-submit` hook lists the file that defines a symbol the
+  prompt names.** A file was scored against its path, its doc line and
+  only its first 8 symbol names, so a function defined further down
+  was invisible: `who calls generateBones?` on a repo whose
+  `engine.ts` opens with constants listed three files that merely
+  mention "bones". Now a code-shaped identifier in the prompt
+  (camelCase, an inner underscore, `Foo.bar`/`Foo::bar`/`Foo#bar`,
+  `name(`, or anything in backticks) that exactly names a symbol puts
+  the defining file first, marked `(defines <name>)`, production files
+  before tests; word-relevant files fill the rest of the list. A plain
+  word never pins, a dotted filename like `server.ts` doesn't either,
+  and a name defined in more files than fit gets a `... N more define
+  <name>` line pointing at `dekko query symbol`. Asking `who calls
+  <name>?` for sampled names across seven real repos listed a defining
+  file 33-70% of the time before (33% on zed, 39% on tensorflow) and
+  100% after.
+
+## [1.6.11] — 2026-10-03
+
+### Fixed
+- **`query callers` lists value references next to callers, and
+  `sanity` points there.** The `referenced (not called):` section only
+  printed when a symbol had no callers at all, so a function with one
+  caller and one `setTimeout(fn)` reference had no command that showed
+  the reference; `sanity`'s value-reference cause pointed at `query
+  uses`, which refuses in-repo names. Now the section follows the
+  caller rows whenever the map holds references (JSON
+  `referenced_not_called` likewise, with its own `referenced_meta`),
+  and it obeys `--limit`/`--budget`, which it used to ignore on a
+  references-only answer. The `sanity` cause and the `uses` refusal
+  name `query callers`. A function's name mentioned without a call
+  inside its own body (`setTimeout(doRefresh, ..)` in `doRefresh`, a
+  same-named field in a Rust getter) reads `mention inside the
+  symbol's own body, not a call — never a missed caller` instead of
+  "unexplained" or "generic name".
+- **`sanity <target>` and `sanity --all` give a row the same cause.**
+  The two modes ran one classifier with four different inputs, so the
+  same line read differently: single-target called 416 rows on
+  claude-code and cline "likely an unrelated external-library method"
+  and was wrong on 415 (`entries.length`, a same-named local, a test
+  file's own helper), and `--all` blamed a call in the target's own
+  file on a "cross-file collision". Now both modes classify each grep
+  hit from facts about the bare name only, and run the
+  target-dependent rungs (the sibling-file collision, the receiver
+  check) per target afterwards. The receiver label needs a call of the
+  name on the line, a hit in the target's own language where imports
+  name types (Java/Kotlin/Scala, JS/TS, Python, C#; not C/C++, where
+  it called real `shape->AddDim(..)` misses library methods), and only
+  re-decides rows that were unexplained or "generic name". Single-target vs `--all` disagreement goes to 0 on
+  every repo measured (claude-code 197, cline 220, tensorflow 1,388,
+  zed 5,705 before). Every disagreeing row lands on `--all`'s cause,
+  except 43 tensorflow and 203 zed calls in the target's own file that
+  `--all` called a "cross-file collision". Unexplained rows go down
+  on every repo (spring-boot 87 to 79, tensorflow 10,109 to 10,060,
+  zed 11,889 to 11,812), as self-mentions are named.
+
+## [1.6.10] — 2026-10-03
+
+### Fixed
+- **`sanity` explains a Java or Kotlin line that names a type without
+  constructing it.** Java and Kotlin had no type-position rule, so
+  `ConfigurationPropertyName oldName = property.getName();` fell
+  through every rung and read "unexplained" on the class and on each
+  of its constructors. A class with an explicit constructor was also a
+  mixed `{class, method}` name, which switched off the type rules that
+  did exist. Now a class and its own constructors count as one type, in
+  single-target and `--all` mode alike, and a Java/Kotlin line that
+  names that type reads `names the type without constructing it
+  (declaration, parameter or return type, generic argument, static
+  member access, cast or class literal) — not a call site`. It never
+  fires while any occurrence of the name could construct it (`Name(`,
+  `Name<..>(`, `Name::new`; in Kotlin also `::Name` and `Name {`), so a
+  missed construction stays a miss. A name only inside a Java or
+  Kotlin string literal reads as a string mention (a Kotlin `${...}`
+  template is code and never does). On a constructor target, a
+  construction the map gave to a sibling overload reads `resolved to
+  another constructor of the same class`, and one it gave only to the
+  class because the arguments fit 2+ overloads reads as that tie,
+  instead of blaming "a different, same-named declaration". On
+  spring-boot (`sanity --all`, default 2,000 names) unexplained rows
+  go from 18,349 to 87 and flagged targets from 2,267 to 59; the
+  rows left are `Name::new` references dekko records no edge for, a
+  Java record constructed from another file, and text in JS and SQL
+  resources. `sanity ConfigurationPropertyName.ConfigurationPropertyName`:
+  311 unexplained to 0. No call graph change.
+
+## [1.6.9] — 2026-10-02
+
+### Fixed
+- **A constructor whose callers tied between two overloads no longer
+  reads "no callers".** When a construction's arguments fit two
+  overloads equally, the class gets the edge and no constructor does.
+  `query callers` on either constructor printed "(no callers of ..)",
+  the same line dead code gets, plus "N additional call site(s)
+  resolved ambiguously", which never said the class holds the
+  answer. `Graph::Graph` on tensorflow read zero while the class has
+  399 callers. Now it prints `(no caller resolved to this constructor
+  of Graph: <id>)` and a note: how many callers construct the class
+  with arguments that fit this constructor and another, which other
+  overloads, and `dekko query callers <class id>` with the class's
+  caller count. A call whose name could also mean an unrelated symbol
+  is not a tie and keeps its own count and the old "resolved
+  ambiguously" note. `--json` adds `overload_ties` (`callers`,
+  `class`, `class_callers`, `siblings`); `ambiguous_in` is still the
+  total. The `query symbol` fan-in line, `context` and MCP
+  `get_callers` split them the same way. These counts were always
+  distinct callers, not call sites, so the notes now say "caller(s)".
+  Applies to 197 constructors on spring-boot (152 that read zero on
+  ties alone) and 486 on tensorflow (365; 347 C++, 18 Java). Where
+  several C++ classes share a qualname (a `DummyDevice` in each of a
+  dozen test files), the note names the class in the constructor's
+  own file, or the header beside it. No call graph changes.
+
+## [1.6.8] — 2026-10-02
+
+### Fixed
+- **Every symbol id a command prints now works as a target, and a
+  class can be named apart from its constructors.** Ids were only
+  reachable by reading `::` as a separator, so an overload's `#N` id,
+  or any id whose plain reading was ambiguous, said "no symbol
+  matches": 272 of 3,000 sampled ids on spring-boot, 630 on
+  tensorflow, 49 on claude-code, 35 on cline. tensorflow's 3,575
+  symbols whose qualname holds `::` (`tensorflow.ClientSession::
+  Impl.Impl`) couldn't be named by any target string. Now an id is
+  looked up first and always names its own symbol; 0 failures across
+  every id on all seven eval repos. In `file:name`, a symbol whose
+  qualname is exactly `name` now wins over ones that only share the
+  bare name, so `ErrorPage.java:ErrorPage` is the class instead of
+  "ambiguous" between the class and its three constructors (2,218 of
+  2,219 such types on spring-boot, 245 of 676 on tensorflow; the rest
+  are true same-qualname duplicates). That includes Kotlin classes
+  with a primary constructor, which share the class's line, so even
+  `:LINE` couldn't pick them. `sanity --all` dropped those classes
+  from its sweep as ambiguous. A bare name shared only by one class
+  and that class's own constructors now resolves to the class, with a
+  note on stderr saying so and how to name one constructor: the
+  class's callers are every construction (2,950 names on spring-boot,
+  4,683 on tensorflow stop exiting 4). A class name that also names a
+  second class or an unrelated method stays ambiguous. `sanity`,
+  `sanity --all` and `unused`'s `sanity --unused` hint now pass the
+  symbol's id rather than a rebuilt `path:qualname:LINE` string, and
+  an ambiguous list whose candidates share file, name and line names
+  their ids, since `:LINE` can't help there. Targets that resolved
+  before resolve to the same symbol; no call graph changes.
+
+## [1.6.7] — 2026-10-02
+
+### Fixed
+- **A Java constructor overload a literal argument can't be passed to
+  is no longer picked.** Where a varargs overload also fit, the
+  argument count decided by "declares exactly this many", which says
+  nothing there: `new SpringApplication(A.class, B.class)` went to
+  `(ResourceLoader, Class<?>...)`, `new TestRestTemplate("user",
+  "password")` to `(RestTemplateBuilder, UriTemplateHandler)`, `new
+  ServletRegistrationBean<>(servlet, false)` to `(servlet,
+  String...)`. Now each construction records what its arguments
+  visibly are (a string, a class literal, a boolean, a plain int, a
+  char, `null`, a `new T(..)`, a lambda or method reference), and an
+  overload one of them can't be passed to is dropped before the count
+  decides. Java has no user-defined conversions, so a class literal is
+  never a `ResourceLoader`. When every overload is ruled out, the
+  count's choice stands. Measured against 1.6.6 on spring-boot: 318
+  caller/callee pairs gained and 27 removed. All 27 were read and all
+  were wrong. 26 of those sites move to the right overload, and one
+  (`new TestConfigurations(Sorter.instance, A.class, B.class)`, two
+  varargs overloads left) becomes ambiguous. 305 sites that were
+  ambiguous now resolve (`FilteredClassLoader` alone 197), including
+  `new ErrorPage(Oops.class, "/500")`. Ambiguous rows fall from
+  69,142 to 68,851, and 8 more list fewer overloads. `dekko unused`
+  loses 7 constructors that gained real callers. The other six eval
+  repos keep the same edges. Only Java constructions are read;
+  overloaded Java methods and other languages' constructors are
+  unchanged, and an argument that isn't a literal (`HttpStatus.
+  NOT_FOUND`, a local) tells nothing, so `new ErrorPage(HttpStatus.
+  NOT_FOUND, "/404")` stays ambiguous.
+- **A Java varargs parameter now has a type.** `Class<?>... sources`
+  was one parameter named `Class<?>... sources` with no type. It is
+  now `sources` of type `Class<?>...`. Signatures read `sources:
+  Class<?>...` like every other Java parameter, and `find_type_usages`
+  sees the type.
+
+## [1.6.6] — 2026-10-02
+
+### Fixed
+- **A Rust path through a type alias, a renaming `use`, a turbofish or
+  a workspace crate now reaches what it names.** Four shapes hid the
+  owner of a Rust call, so the ladder ran over every same-named
+  function in the repo. `HashMap::default()` through `collections`'
+  `type HashMap<K, V> = FxHashMap<K, V>` landed on whatever `default`
+  sat in the caller's file. `TextBuffer::new(..)` through `use
+  text::Buffer as TextBuffer` (here or re-exported from another crate)
+  never found `Buffer.new`. `Vec::<T>::new()` read `<T>` as the type
+  and gave up. And `release_channel::init(cx)` from `main.rs` went to
+  `main.rs`'s own `init`, or stayed ambiguous among all 165 `init`
+  functions: nothing narrowed a lowercase path to the crate it names.
+  Now an alias is followed (a Rust `type` alias records what it names
+  in its symbol's `returns`) and a rename read back to the original,
+  both landing on that type's members or going external when the repo
+  doesn't define it; a turbofish is skipped; and a `some_crate::..::
+  name(..)` path, written directly or through a `use` of the crate,
+  keeps the candidates in that crate's directories (from its
+  `Cargo.toml`), functions first, when it has any. The same crate rule
+  applies to `impl some_crate::Trait for X`.
+- **A Rust ambiguous row lists only what the call could mean.** A
+  dot-call row listed every same-named symbol, free functions and
+  associated functions included; it now lists the methods taking
+  `self` and the written count, when two or more do. A path on a type
+  with no symbol but with members (`String::from` with the repo's
+  `impl From<X> for String`) lists those members. Measured against
+  1.6.5 on zed: 1,046 caller/callee pairs gained and 167 removed. All
+  167 removed were read against the source and all were wrong (46
+  `HttpRequest::builder()` calls through `use http_client::Request as
+  HttpRequest` on `extension_api`'s `HttpRequest`, about 50
+  `HashMap`/`HashSet::default()` calls on a local type's `default`,
+  27 `agent_ui::test_support::init_test(cx)` calls on the caller's own
+  `init_test`, cross-crate `init`s). 120 of the gained were read, all
+  right: `release_channel::init` now has 55 callers (0 before) and
+  `text::Buffer.new` 73 (54). Ambiguous rows fall from 87,252 to
+  85,757 and the candidates they list from 2,560,667 to 1,425,651
+  (median 8 to 4); `new` rows over 1,000 candidates from 225 to 18.
+  1,039 calls go external. 5 `impl project::ProjectItem for X` clauses
+  move from `workspace`'s `ProjectItem` to `project`'s. `dekko unused`
+  on zed gains 3 rows (each kept alive only by a wrong edge) and loses
+  2. The other six eval repos are unchanged. Re-pointing a renaming
+  `use` (same name, another original) now invalidates the files that
+  write that name, and the resolve cache key reads each crate's
+  directories as well as its name.
+
+## [1.6.5] — 2026-10-02
+
+### Fixed
+- **A Rust `use` of a crate the repo doesn't have no longer counts as
+  in-repo because a file shares a segment's name.** Only `std`, `core`
+  and `alloc` were recognized as outside crates. Every other `use`
+  fell to the file-name test, and zed has `windows.rs`, `image.rs`,
+  `http.rs` and `process.rs`, so `windows::core::HSTRING`,
+  `image::Frame` and `smol::process::Command` all looked in-repo and
+  their calls ran the ladder over every same-named function in the
+  repo. Now a `use` whose first segment names no crate in the repo's
+  `Cargo.toml` files (package and `[lib]` names, directory names and
+  `path =` dependencies, `-` read as `_`) and no module of a repo crate
+  is external. A repo with no `Cargo.toml` keeps the old test. Editing
+  a `Cargo.toml` now invalidates the resolve cache.
+- **A type imported from a workspace crate that only re-exports it is
+  treated as an outside type.** `use collections::BTreeMap;` (where
+  `collections` is `pub use std::collections::*`) was kept in-repo so
+  that a rename like `pub use text::Buffer as TextBuffer` could still
+  resolve, and so `BTreeMap::new()` ran the ladder too. Now an in-repo
+  `use` of a name no repo symbol carries counts as a rename only when
+  some `use .. as` in the repo binds that name; otherwise the call is
+  external. Measured against 1.6.4 on zed: 141 caller/callee pairs
+  removed, all read against the source. 128 were wrong (65
+  `acp::SessionId::new` calls on `scheduler`'s `SessionId`, 22
+  macro-made `RoomId::from_proto` calls on another type's
+  `from_proto`, `oneshot::channel()` on a repo `channel` method, and
+  so on). 13 were right: a local variable or parameter named like an
+  imported outside module (`let fs = FakeFs::new(..)` after `use
+  smol::fs`, a `stream` parameter after `use futures::stream`) is read
+  as the import, so its calls now count external. No pair is gained.
+  928 calls go external, ambiguous rows fall from 87,934 to 87,252,
+  and `new` rows over 1,000 candidates from 324 to 225. `dekko unused`
+  on zed gains 2 rows (one through the shadowing gap above). The other
+  six eval repos are unchanged.
+
+## [1.6.4] — 2026-10-02
+
+### Fixed
+- **A Rust call no longer resolves to a function its shape or argument
+  count rules out.** Rust has no overloads, default arguments or
+  optional parameters, so a mismatched count is code that doesn't
+  compile. But only the sole-candidate rung read the count: the
+  same-file, typed-parameter, container and import rungs took whatever
+  matched the name. On zed, 6,039 call sites picked such a target:
+  every zero-argument `x.clone()` in the editor crate landed on
+  `Editor.clone(&self, window, cx)`, 1,002 `cx.simulate_keystrokes(..)`
+  calls landed on `TestAppContext`'s two-argument version, `a.min(b)` on an
+  associated `fn min(a, b)`, `drop(x)` on some type's `Drop::drop`, and
+  `zlog::init_test()` on the same file's `init_test(cx)`. Now a
+  dot-call needs a method with `self` that takes the written count, a
+  bare call can't reach a method (or anything taking `self`), and a
+  path call writes every parameter, `self` included
+  (`Type::method(obj, x)`). A call whose arguments couldn't be counted
+  (inside a macro) is judged by shape only. When a pick is ruled out,
+  the ladder runs again without it, so a wrapper's
+  `self.inner.set(a)` reaches the wrapped type's one-argument `set`
+  instead of the wrapper's own two-argument one. Only a candidate that
+  was actually picked is dropped, and a call that was ambiguous stays
+  ambiguous. Measured against 1.6.3 on zed: 3,151 wrong pairs removed
+  (a random 50 read, all wrong) and 320 gained, all 320 read against the source:
+  9 wrong (2.8%), mostly a std method (`Cell::update`, `SocketAddr::port`)
+  or an outside crate's type. 1,272 calls go external
+  and the ambiguous count grows from 85,406 to 87,934 rows, because a
+  wrong pick now becomes ambiguous among the candidates that remain.
+  `dekko unused` on zed gains 117 rows and loses 41. Of the new rows,
+  111 are trait impl methods (flagged as dispatch candidates) and 6
+  are structs built only by struct literals. Wrong edges used to hide
+  them. cline has one Rust call go external. The other five eval repos
+  (no Rust) are unchanged.
+
+## [1.6.3] — 2026-10-02
+
+### Fixed
+- **A JS/TS import that goes through a barrel file is followed to the
+  declaration.** `export { X } from "./x"`, `export * from "./x"`,
+  `export * as ns from "./x"` and a file's default export were not
+  extracted at all, so a barrel (`index.ts`, a package entry file)
+  was a dead end: the resolver knew the import named the barrel and
+  nothing about where the name came from. Three things followed. A
+  barrel that renames was bound to the wrong symbol: claude-code's
+  `ink.ts` has `export { default as Text } from
+  './components/design-system/ThemedText.js'`, and every `<Text>`
+  imported from it was attributed to an unrelated
+  `ink/components/Text.tsx`, because that file's name is the imported
+  name. That was 1,122 wrong reference pairs (4,160 sites): the base
+  component read as the most-used symbol in the repo and `ThemedText`
+  as nearly unused. A name with a namesake elsewhere was ambiguous or
+  bound to the namesake, and a renamed export with no namesake was
+  external. Now the name is followed from the import through named
+  and renamed re-exports, stars, namespace re-exports
+  (`Llms.getProvider(..)` after `export * as Llms from`), a file's
+  own `import { X }` that it exports again, source-less renames
+  (`export { a as b }`) and named default exports, up to eight files
+  deep, each hop resolved with the re-exporting file's own tsconfig.
+  As in 1.6.2, the walk answers only when it ends at exactly one
+  top-level symbol. Measured against 1.6.2: claude-code moves 1,122
+  reference pairs from `Text` / `Box` to `ThemedText` / `ThemedBox`,
+  gains 74 call pairs (134 sites) and loses none; cline gains 73 call
+  pairs (108 sites), 5 reference pairs and 3 heritage edges, 20 calls
+  leave `external`, and the 3 call pairs and 2 reference pairs it
+  loses were bound to a same-named file in another app. Five
+  repositories without JS/TS barrels are unchanged. Not followed: a
+  default import whose local name differs from the declared one
+  (`import Text from "./ThemedText"`), CommonJS `module.exports =
+  require(..)`, and Python `__init__.py` re-exports.
+- **`dekko deps` shows what a barrel re-exports.** Each re-export with
+  a source is a module-graph edge from the barrel to that file,
+  carrying the exported name (`*` for a star), and a re-exported
+  package is listed under the file's external modules. cline gains
+  508 edges (7,090 -> 7,598) and claude-code 65. These edges close
+  real import cycles (a package's `index.ts` re-exports a file that
+  imports from `index.ts`), so `deps --cycles` reports fewer, larger
+  clusters: cline goes from 27 clusters over 93 files (largest 14) to
+  15 clusters over 290 files (largest 138).
+- **`dekko sanity` no longer calls a barrel import "a different
+  declaration".** A grep hit in a file that imports the name through
+  a barrel was labelled as bound to another declaration, which is
+  false when the barrel re-exports the target itself. Such a row is
+  now left as a miss and counts toward `--fail-on-unexplained`.
+- **Editing a re-export or re-pointing an import re-resolves the
+  files that use the name.** Neither is part of a symbol, so the
+  incremental map did not see the edit. A star re-export gained or
+  lost re-resolves the whole repo.
+
+## [1.6.2] — 2026-10-02
+
+### Fixed
+- **A JS/TS import is resolved to its file, and that file answers
+  before any filename test.** When two symbols shared a name, the
+  resolver asked whether some segment of the import's specifier was a
+  candidate's file stem. For `./errors` that is nearly exact. For a
+  tsconfig path alias it is a coincidence test: `@/lib/utils` matches
+  every `utils.ts` in the repo, so in a monorepo where three apps each
+  carry their own copy of a file, `cn(..)` was ambiguous among the
+  three though each app's own `tsconfig.json` says which one it means.
+  For an import alias it tested the wrong name altogether: after
+  `import { isInsideTmux as checkTmux }`, a call to `checkTmux()` went
+  to whatever the repo happened to call `checkTmux`, on claude-code a
+  method of an unrelated class. The module graph (`dekko deps`)
+  already resolved the same specifiers exactly: relative paths,
+  tsconfig `paths` aliases, workspace package entry files and
+  root-relative paths. The call, reference and heritage passes now use
+  that resolution first. When the resolved file declares exactly one
+  top-level symbol under the imported name, that symbol is the answer;
+  when it declares none, or a type and a value under one name, the
+  rest of the ladder decides as before. Measured against 1.6.1: cline
+  gains 1,333 caller/callee pairs (1,525 call sites) and 1,677
+  reference pairs (2,237 sites), and its ambiguous rows fall from
+  5,450 to 4,118; the 3 reference pairs it loses were an import alias
+  bound to the wrong symbol. claude-code gains 8 call pairs and 4
+  reference pairs and loses the one wrong `checkTmux` edge. Five
+  repositories with no JS/TS aliases are unchanged. A re-export
+  (`export { X } from "./x"`) is still not followed: an import that
+  goes through a barrel file resolves as it did before.
+- **Editing a tsconfig `paths` table or a workspace package's entry
+  fields re-resolves the repo.** The incremental map now reads both
+  to resolve calls, and neither edit touches a source file.
+
+## [1.6.1] — 2026-10-02
+
+### Fixed
+- **A construction with arguments is checked against the class's
+  constructor, not against the class.** `new AgentRuntime(config)`
+  names the class, and a JS/TS or Python class symbol has no
+  parameters: they are on `constructor` / `__init__`. When the class
+  was the only candidate and no import named its file, the resolver
+  read the call as one argument for zero parameters and filed it as
+  external. That is every construction with an argument whose import
+  goes through a barrel (`./index`, a package `__init__.py`) or a path
+  alias, is written on a receiver (`linalg.LinearOperatorDiag(..)`),
+  or has no import at all. A zero-argument `new Plain()` passed, which
+  made it look like barrels sometimes worked. On cline `query callers
+  AgentRuntime` listed 2 of the 46 construction sites, and nothing
+  said 44 were missing. Now the argument count is read against the
+  class's own constructors, and a count none of them takes is still
+  external. A class with no constructor of its own whose argument
+  count can't be known (any Python class; a JS/TS class with an
+  `extends` clause) needs other evidence: the call's receiver is an
+  import of the class's own file, or the call is bare and the class is
+  a top-level one that the calling code could mean (a class in test
+  code is not what code outside the tests constructs). A JS/TS class
+  with no constructor and no `extends` clause still takes no
+  arguments. Measured against 1.6.0: cline 57 construction sites
+  gained (`AgentRuntime` 2 -> 46, `AgentTeamsRuntime` 26 -> 29),
+  tensorflow 1,170 sites and 1,779 caller/callee pairs gained, none
+  lost on any of seven repositories. Java, C++, Rust and Go maps are
+  unchanged. Not a regression: 1.0.0 gives the same wrong answer.
+- **An import of a bare npm package name is external, whatever the
+  repo's files are called.** `import * as vscode from "vscode"`
+  counted as an import of the repo on cline because a file there is
+  named `vscode.ts`, so `vscode.Uri.file(..)` was matched against repo
+  symbols and landed on a test stub of the VS Code API. The same test
+  bound `z.unknown()` (zod) to a local `unknown` helper,
+  `http.createServer(..)` to a repo method, and on claude-code `cwd()`
+  from `"process"` to a repo function. A JS/TS specifier with one
+  segment (`"vscode"`, `"react"`, `"node:fs"`) is now a package. A
+  workspace package is still recognized first, and `@scope/name`,
+  `#name` and anything with a slash are tested as before, since they
+  can be path aliases. cline loses 79 wrong caller/callee pairs (118
+  call sites) and 47 wrong reference pairs; claude-code loses 11
+  pairs.
+- **An `extends` clause added to or removed from a class re-resolves
+  the files that construct it.** The incremental map compared symbols
+  only, and the clause is not part of one.
+
+
 ## [1.6.0] — 2026-10-02
 
 Closes round 1.6's fix cycle. The code is 1.5.13; this release is the

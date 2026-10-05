@@ -1582,9 +1582,11 @@ _CPP_CONSTRUCTION_VERSION = 1
 
 # Bumped whenever the extractor changes how it splits a C++ path with
 # more than one scope, or one written from the root (``a::b::Name``,
-# ``::ns::Name``), into a name and a receiver. That walk lives in the
-# extractor, outside any query. Same blind spot as the constants above.
-_CPP_QUALIFIED_PATH_VERSION = 1
+# ``::ns::Name``), into a name and a receiver, or how it puts back a
+# scope a misparse cut off (``extractor._bitfield_lost_scope``). That
+# walk lives in the extractor, outside any query. Same blind spot as
+# the constants above.
+_CPP_QUALIFIED_PATH_VERSION = 2
 
 # Bump when the extractor changes how it records C++ namespace-scope
 # ``using``-declarations (``FileMap.cpp_using``). Another tree walk

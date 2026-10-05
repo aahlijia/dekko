@@ -410,7 +410,7 @@ def test_gate_widens_for_a_new_constructor_on_an_existing_class(
     """Constructor-collapse gap (dependency audit): adding
     ``__init__`` to a class never changes the class's own bare name, so
     a caller's already-cached ``Widget()`` edge doesn't literally
-    mention ``__init__`` anywhere. ``_constructors_of`` would now find
+    mention ``__init__`` anywhere. ``constructors_of`` would now find
     the new ``__init__`` and add a second edge to it, so the caller must
     be marked dirty even though nothing about its own call site's name
     changed -- ``name_delta`` folds the class's own name into
@@ -457,6 +457,196 @@ def test_gate_widens_for_an_import_alias_newly_resolving(
     reuse = _build(root)
     assert reuse is not None
     assert reuse.dirty == {"mod.py", "caller.py"}
+
+
+ALIASED_TS_SRC = {
+    "tsconfig.json": (
+        '{"compilerOptions": {"baseUrl": ".", '
+        '"paths": {"@lib/*": ["lib/*"]}}}\n'
+    ),
+    "lib/base.ts": "export function other(): number {\n  return 0;\n}\n",
+    "old/base.ts": "export function helper(): number {\n  return 2;\n}\n",
+    "app.ts": (
+        'import { helper as h } from "@lib/base";\n'
+        "export function run(): number {\n  return h();\n}\n"
+    ),
+}
+
+
+def test_aliased_import_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``h()`` resolves through the file its import names. When that
+    file gains the imported name, the unchanged caller's cached entry
+    names only ``h`` and must be re-resolved anyway."""
+    root = make_mapped_repo(ALIASED_TS_SRC)
+    (root / "lib/base.ts").write_text(
+        ALIASED_TS_SRC["lib/base.ts"]
+        + "export function helper(): number {\n  return 1;\n}\n"
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert "app.ts" in reuse.dirty
+
+    _map(root)
+    incremental = _graph_json(root)
+    _map(root, "--full")
+    assert incremental == _graph_json(root)
+    doc = json.loads((root / ".dekko" / "map.json").read_text())
+    assert [doc["ids"][e["callee"]] for e in doc["edges"]] == [
+        "lib/base.ts::helper"
+    ]
+
+
+BARREL_TS_SRC = {
+    "lib/a.ts": "export function make(): number {\n  return 1;\n}\n",
+    "lib/b.ts": "export function make(): number {\n  return 2;\n}\n",
+    "lib/index.ts": 'export { make as build } from "./a";\n',
+    "app.ts": (
+        'import { build } from "./lib/index";\n'
+        "export function run(): number {\n  return build();\n}\n"
+    ),
+    "ns.ts": (
+        'import * as lib from "./lib/index";\n'
+        "export function go(): number {\n  return lib.build();\n}\n"
+    ),
+    "bystander.ts": "export function idle(): number {\n  return 0;\n}\n",
+}
+
+
+def _callee_ids(root: Path) -> set[str]:
+    doc = json.loads((root / ".dekko" / "map.json").read_text())
+    return {doc["ids"][e["callee"]] for e in doc["edges"]}
+
+
+def test_gate_widens_to_importers_when_a_barrel_is_re_pointed(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The importers resolved ``build`` to ``a.ts::make``: their cached
+    entries name ``make``, the barrel's edit names only the source it
+    points at. They are found by the name they wrote."""
+    root = make_mapped_repo(BARREL_TS_SRC)
+    assert _callee_ids(root) == {"lib/a.ts::make"}
+    (root / "lib/index.ts").write_text(
+        'export { make as build } from "./b";\n'
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"lib/index.ts", "app.ts", "ns.ts"}
+
+    _map(root)
+    incremental = _graph_json(root)
+    assert _callee_ids(root) == {"lib/b.ts::make"}
+    _map(root, "--full")
+    assert incremental == _graph_json(root)
+
+
+def test_barrel_gaining_a_named_reexport_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    src = dict(BARREL_TS_SRC)
+    src["late.ts"] = (
+        'import { extra } from "./lib/index";\n'
+        "export function later(): number {\n  return extra();\n}\n"
+    )
+    src["lib/a.ts"] += "export function extra(): number {\n  return 3;\n}\n"
+    src["lib/b.ts"] += "export function extra(): number {\n  return 4;\n}\n"
+    root = make_mapped_repo(src)
+    (root / "lib/index.ts").write_text(
+        src["lib/index.ts"] + 'export { extra } from "./b";\n'
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert "late.ts" in reuse.dirty
+    assert "bystander.ts" not in reuse.dirty
+
+    _map(root)
+    incremental = _graph_json(root)
+    assert "lib/b.ts::extra" in _callee_ids(root)
+    _map(root, "--full")
+    assert incremental == _graph_json(root)
+
+
+def test_gate_finds_importers_by_the_name_they_wrote(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``Text()`` resolved to ``ThemedA``: the cached entry names
+    ``ThemedA``, the barrel's edit names ``Text`` and ``default``.
+    Nothing links the two but the call site's own spelling."""
+    src = {
+        "a.ts": (
+            "export default function ThemedA(): number {\n  return 1;\n}\n"
+        ),
+        "b.ts": (
+            "export default function ThemedB(): number {\n  return 2;\n}\n"
+        ),
+        "index.ts": 'export { default as Text } from "./a";\n',
+        "app.ts": (
+            'import { Text } from "./index";\n'
+            "export function run(): number {\n  return Text();\n}\n"
+        ),
+    }
+    root = make_mapped_repo(src)
+    assert _callee_ids(root) == {"a.ts::ThemedA"}
+    (root / "index.ts").write_text('export { default as Text } from "./b";\n')
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"index.ts", "app.ts"}
+
+    _map(root)
+    incremental = _graph_json(root)
+    assert _callee_ids(root) == {"b.ts::ThemedB"}
+    _map(root, "--full")
+    assert incremental == _graph_json(root)
+
+
+def test_gate_refuses_when_a_star_reexport_changes(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """What a star exposes is no bounded set of names."""
+    root = make_mapped_repo(BARREL_TS_SRC)
+    (root / "lib/index.ts").write_text(
+        BARREL_TS_SRC["lib/index.ts"] + 'export * from "./b";\n'
+    )
+    assert _build(root) is None
+
+
+def test_gate_widens_when_an_import_that_is_a_hop_is_re_pointed(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    src = dict(BARREL_TS_SRC)
+    src["lib/index.ts"] = 'import { make } from "./a";\nexport { make };\n'
+    src["app.ts"] = (
+        'import { make as build } from "./lib/index";\n'
+        "export function run(): number {\n  return build();\n}\n"
+    )
+    del src["ns.ts"]
+    root = make_mapped_repo(src)
+    assert _callee_ids(root) == {"lib/a.ts::make"}
+    (root / "lib/index.ts").write_text(
+        'import { make } from "./b";\nexport { make };\n'
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert "app.ts" in reuse.dirty
+
+    _map(root)
+    incremental = _graph_json(root)
+    assert _callee_ids(root) == {"lib/b.ts::make"}
+    _map(root, "--full")
+    assert incremental == _graph_json(root)
+
+
+def test_a_bare_package_import_edit_dirties_nothing_else(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(BARREL_TS_SRC)
+    (root / "bystander.ts").write_text(
+        'import { build } from "somepkg";\n' + BARREL_TS_SRC["bystander.ts"]
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"bystander.ts"}
 
 
 # --- invalidation keys ------------------------------------------------
@@ -738,3 +928,318 @@ def test_prototype_default_edit_keeps_incremental_equal_to_full(
     assert ("user.cc::app.Use", "shape.cc::tf.GetType") in {
         (ids[e["caller"]], ids[e["callee"]]) for e in incremental["edges"]
     }
+
+
+# An ``extends`` clause is not part of the class's symbol, and it
+# decides whether ``new Sub(1)`` in another file can construct it.
+EXTENDS_SRC = {
+    "base.ts": (
+        "export class Base {\n  constructor(a: number) {}\n}\n"
+        "export class Sub {}\n"
+    ),
+    "user.ts": "export function use() {\n  return new Sub(1);\n}\n",
+    "other.ts": "export function other() {\n  return 1;\n}\n",
+}
+_EXTENDED = EXTENDS_SRC["base.ts"].replace("Sub {}", "Sub extends Base {}")
+
+
+def test_gate_widens_to_constructions_when_an_extends_clause_appears(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(EXTENDS_SRC)
+    (root / "base.ts").write_text(_EXTENDED)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"base.ts", "user.ts"}
+
+
+def test_extends_clause_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(EXTENDS_SRC)
+    (root / "base.ts").write_text(_EXTENDED)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    assert ("user.ts::use", "base.ts::Sub") in {
+        (ids[e["caller"]], ids[e["callee"]]) for e in incremental["edges"]
+    }
+
+
+RUST_ARITY_SRC = {
+    "src/inner.rs": (
+        "pub struct Inner;\n"
+        "impl Inner {\n"
+        "    pub fn set(&mut self, a: u8, b: u8) {}\n"
+        "}\n"
+    ),
+    "src/user.rs": (
+        "pub fn use_it(x: crate::inner::Inner) {\n    x.set(1);\n}\n"
+    ),
+    "src/other.rs": "pub fn other() {}\n",
+}
+_FITS = RUST_ARITY_SRC["src/inner.rs"].replace(", b: u8", "")
+
+
+def test_gate_widens_to_dot_calls_when_a_rust_method_comes_to_fit(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The call was external because the method wanted two arguments;
+    its cached entry still names ``set`` by the text it wrote."""
+    root = make_mapped_repo(RUST_ARITY_SRC)
+    (root / "src/inner.rs").write_text(_FITS)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"src/inner.rs", "src/user.rs"}
+
+
+@pytest.mark.parametrize("before", ["wants_two", "fits"])
+def test_rust_method_arity_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    source = dict(RUST_ARITY_SRC)
+    after = RUST_ARITY_SRC["src/inner.rs"]
+    if before == "wants_two":
+        after = _FITS
+    else:
+        source["src/inner.rs"] = _FITS
+    root = make_mapped_repo(source)
+    (root / "src/inner.rs").write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    pair = ("src/user.rs::use_it", "src/inner.rs::Inner.set")
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    assert (pair in edges) == (before == "wants_two")
+
+
+def test_a_tsconfig_paths_edit_invalidates_the_cache(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The call pass reads the alias tables to tell which file an
+    aliased import names, and editing one moves no source file."""
+    root = make_mapped_repo(ALIASED_TS_SRC)
+    assert _fired(root)
+    (root / "tsconfig.json").write_text(
+        '{"compilerOptions": {"baseUrl": ".", '
+        '"paths": {"@lib/*": ["old/*"]}}}\n'
+    )
+    assert not _fired(root)
+
+
+RUST_CRATE_SRC = {
+    "Cargo.toml": '[package]\nname = "app"\n',
+    "src/source.rs": "pub fn play() {}\n",
+    "src/main.rs": (
+        "mod source;\n"
+        "use rodio::source as sound;\n"
+        "pub fn run() {\n"
+        "    sound::play();\n"
+        "}\n"
+    ),
+}
+
+
+def test_a_cargo_toml_edit_invalidates_the_cache(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The call pass reads the crate list to tell a workspace crate's
+    ``use`` from an outside one's, and editing it moves no source."""
+    root = make_mapped_repo(RUST_CRATE_SRC)
+    assert _fired(root)
+    (root / "Cargo.toml").write_text(
+        RUST_CRATE_SRC["Cargo.toml"]
+        + '\n[dependencies]\nrodio = { path = "../rodio" }\n'
+    )
+    assert not _fired(root)
+
+
+RUST_RENAME_SRC = {
+    "crates/text/src/text.rs": (
+        "pub struct Buffer;\n"
+        "impl Buffer {\n"
+        "    pub fn new(a: i32) -> Buffer {\n"
+        "        Buffer\n"
+        "    }\n"
+        "}\n"
+    ),
+    "crates/language/src/language.rs": "pub use text::Buffer;\n",
+    "crates/app/src/view.rs": (
+        "use language::TextBuffer;\n"
+        "pub fn build() {\n"
+        "    TextBuffer::new(1);\n"
+        "}\n"
+    ),
+}
+_RENAMED = "pub use text::Buffer as TextBuffer;\n"
+
+
+def test_gate_widens_to_files_writing_a_type_renamed_elsewhere(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``TextBuffer::new(..)`` was external because nothing renamed to
+    ``TextBuffer``. The call names ``new``, so the file is found by the
+    type it wrote."""
+    root = make_mapped_repo(RUST_RENAME_SRC)
+    (root / "crates/language/src/language.rs").write_text(_RENAMED)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {
+        "crates/language/src/language.rs",
+        "crates/app/src/view.rs",
+    }
+
+
+@pytest.mark.parametrize("before", ["plain", "renamed"])
+def test_rust_rename_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    source = dict(RUST_RENAME_SRC)
+    after = _RENAMED
+    if before == "renamed":
+        source["crates/language/src/language.rs"] = _RENAMED
+        after = RUST_RENAME_SRC["crates/language/src/language.rs"]
+    root = make_mapped_repo(source)
+    (root / "crates/language/src/language.rs").write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    external = {(ids[e["caller"]], ids[e["callee"]]) for e in full["external"]}
+    pair = ("crates/app/src/view.rs::build", "TextBuffer::new")
+    assert (pair in external) == (before == "renamed")
+
+
+def test_gate_widens_when_a_rename_points_at_another_type(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``TextBuffer::new(..)`` reaches what ``TextBuffer`` renames, so
+    re-pointing the rename moves it even though the renamed name stays
+    the same."""
+    source = dict(RUST_RENAME_SRC)
+    source["crates/language/src/language.rs"] = _RENAMED
+    root = make_mapped_repo(source)
+    (root / "crates/language/src/language.rs").write_text(
+        "pub use text::Rope as TextBuffer;\n"
+    )
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {
+        "crates/language/src/language.rs",
+        "crates/app/src/view.rs",
+    }
+
+
+RUST_ALIAS_SRC = {
+    "src/point.rs": (
+        "pub struct Point;\n"
+        "impl Point {\n"
+        "    pub fn new(a: i32) -> Point {\n"
+        "        Point\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/other.rs": (
+        "pub struct Other;\n"
+        "impl Other {\n"
+        "    pub fn new(a: i32) -> Other {\n"
+        "        Other\n"
+        "    }\n"
+        "}\n"
+    ),
+    "src/alias.rs": "pub type P = Point;\n",
+    "src/user.rs": "pub fn use_it() {\n    P::new(1);\n}\n",
+}
+
+
+@pytest.mark.parametrize("target", ["Other", "Missing"])
+def test_rust_alias_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    target: str,
+) -> None:
+    root = make_mapped_repo(RUST_ALIAS_SRC)
+    (root / "src/alias.rs").write_text(f"pub type P = {target};\n")
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    pair = ("src/user.rs::use_it", "src/other.rs::Other.new")
+    assert (pair in edges) == (target == "Other")
+
+
+# --- reusing another tree's cache --------------------------------------
+
+
+def _copy_sources(root: Path, dest: Path) -> Path:
+    """Copy ``root``'s files, minus ``.dekko/``, the way an export does."""
+    for path in root.rglob("*"):
+        rel = path.relative_to(root)
+        if rel.parts[0] == ".dekko" or not path.is_file():
+            continue
+        (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+        (dest / rel).write_bytes(path.read_bytes())
+    return dest
+
+
+def _build_from(
+    root: Path, cache_root: Path | None
+) -> resolver_mod.ResolveReuse | None:
+    """Plan for ``root`` over ``cache_root``'s two caches."""
+    cache = cache_mod.IncrementalCache(cache_mod.load(cache_root or root))
+    files, _ = repo_ops_map(root, cache)
+    return resolvecache.build_reuse(root, files, cache, cache_root=cache_root)
+
+
+def test_cache_root_supplies_the_cache_for_another_tree(
+    make_mapped_repo: RepoFactory, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """A diff's old side is an export with no ``.dekko/``; the cache
+    comes from the repo it was exported from."""
+    root = make_mapped_repo(RUST_CRATE_SRC)
+    other = _copy_sources(root, tmp_path_factory.mktemp("export"))
+
+    assert _build_from(other, None) is None
+    plan = _build_from(other, root)
+    assert plan is not None
+    assert plan.dirty == frozenset()
+
+
+def test_cache_root_checks_the_resolved_trees_config(
+    make_mapped_repo: RepoFactory, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """The config digests are the resolved tree's: a rev whose
+    ``Cargo.toml`` differs from the cached run's must miss."""
+    root = make_mapped_repo(RUST_CRATE_SRC)
+    other = _copy_sources(root, tmp_path_factory.mktemp("export"))
+    (other / "Cargo.toml").write_text(
+        RUST_CRATE_SRC["Cargo.toml"]
+        + '\n[dependencies]\nrodio = { path = "../rodio" }\n'
+    )
+
+    assert _build_from(other, root) is None
+    assert _build(root) is not None

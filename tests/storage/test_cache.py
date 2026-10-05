@@ -1,6 +1,7 @@
 """The .dekko incremental cache: creation, reuse, and --full."""
 
 import dataclasses
+import json
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from dekko.core.model import (
     RawRead,
     RawRef,
     RawThrow,
+    Reexport,
     Submodule,
     Symbol,
     TypeUse,
@@ -534,7 +536,8 @@ def _fully_populated_filemap() -> FileMap:
                 name="g",
                 receiver=None,
                 line=3,
-                arg_count=0,
+                arg_count=1,
+                arg_kinds=("string",),
             ),
         ],
         refs=[
@@ -615,6 +618,7 @@ def _fully_populated_filemap() -> FileMap:
                 candidates=["a/x.rs", "a/x/mod.rs"], test_only=True, line=2
             ),
         ],
+        reexports=[Reexport(name="C", original="B", source="./a")],
         error="parse error",
         doc="module docstring",
     )
@@ -786,3 +790,27 @@ def test_ref_bound_survives_a_cache_round_trip() -> None:
     )
     again = cache_mod._filemap_from_dict(cache_mod._filemap_to_dict(fm))
     assert again.refs[0].bound == "param"
+
+
+def test_call_arg_kinds_survive_a_json_round_trip() -> None:
+    # The cache file is JSON, which has no tuples: the kinds come back
+    # as a list and must be a tuple again, equal to a fresh extraction.
+    fm = FileMap(
+        "A.java",
+        "java",
+        calls=[
+            RawCall(
+                "A.java::A.f",
+                "A.java",
+                "new X",
+                "X",
+                line=3,
+                arg_count=2,
+                arg_kinds=("class", "?"),
+            ),
+        ],
+    )
+    text = json.dumps(cache_mod._filemap_to_dict(fm))
+    again = cache_mod._filemap_from_dict(json.loads(text))
+    assert again.calls[0].arg_kinds == ("class", "?")
+    assert again == fm
