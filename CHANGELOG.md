@@ -9,6 +9,59 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-10-05
+
+Closes round 1.7's fix cycle. The code is 1.6.22; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.7 evaluated 1.5.13 on
+seven real repositories and found one High issue and eight Medium
+ones, mostly calls landing on the wrong same-named symbol across
+JS/TS, Rust and Java, plus cold-diff and warm-call cost. All 22 fixes:
+
+- **1.6.1**: a construction is checked against the class's
+  constructors, a bare npm package import is external, and an
+  `extends` clause edit re-resolves its constructions.
+- **1.6.2**: a JS/TS import resolves to its file, and that file
+  answers before a name guess (cline +1,333 right pairs).
+- **1.6.3**: JS/TS imports are followed through barrel re-exports
+  (claude-code: 1,122 wrong `Text`/`Box` pairs fixed), and `deps`
+  shows what a barrel re-exports.
+- **1.6.4**: a Rust call can't resolve to a function its shape or
+  argument count rules out.
+- **1.6.5**: a Rust `use` of a crate the repo doesn't have is
+  external.
+- **1.6.6**: a Rust path is read through its alias, renaming `use`,
+  turbofish or crate, and an ambiguous row lists only what the call
+  could mean.
+- **1.6.7**: a Java constructor overload a literal argument can't be
+  passed to is ruled out, and varargs parameters have a type.
+- **1.6.8**: every symbol id a command prints works as a target.
+- **1.6.9**: C++ classes that share a qualified name pick the
+  constructor in their own file.
+- **1.6.10**: `sanity` explains a Java/Kotlin line that only names a
+  type (spring-boot unexplained rows 18,349 -> 87).
+- **1.6.11**: `query callers` lists value references, and `sanity
+  <target>` and `sanity --all` agree on every row's cause.
+- **1.6.12**: the `prompt-submit` hook pins the file that defines a
+  code-shaped name in the prompt.
+- **1.6.13**: a cold `diff`/`affected`/`workset` reuses the map's
+  cached resolution for the old side (tensorflow cold diff 239 s ->
+  69 s).
+- **1.6.14**: a daemon-routed command waits while the daemon is busy.
+- **1.6.15**: `sanity --all` walks the repo once.
+- **1.6.16**: a warm call trusts a recorded file stat instead of
+  re-reading every source file (spring-boot 0.87 s -> 0.42 s).
+- **1.6.17**: test-excluding reads are memoized, and a note added
+  through `add_note` shows in the same session.
+- **1.6.18**: a stale read parses `map.json` once, not three times.
+- **1.6.19**: an MCP tool call with an argument the tool doesn't take
+  is an error.
+- **1.6.20**: an explicit rev is checked before the map loads, and an
+  option-shaped rev is rejected.
+- **1.6.21**: a C++ call keeps its `ns::` when a misparse cuts it off.
+- **1.6.22**: a Java/Kotlin import of a nested type or static member
+  reaches the file that declares it.
+
 ## [1.6.22] — 2026-10-05
 
 ### Fixed
