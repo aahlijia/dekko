@@ -2334,3 +2334,21 @@ def test_get_callers_on_a_tied_constructor_points_at_the_class_over_mcp(
     )["content"][0]["text"]
     assert "(no caller resolved to this constructor of ErrorPage" in text
     assert "dekko query callers web/ErrorPage.java::ErrorPage" in text
+
+
+def test_a_note_added_in_a_session_shows_on_its_later_calls(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(SRC)
+    ctx = _ctx(root)
+    _call(ctx, "query_symbol", {"symbol": "f"})
+    _call(ctx, "get_callers", {"symbol": "f", "include_tests": False})
+    _call(ctx, "add_note", {"symbol": "f", "text": "NOTE-AFTER-LOAD"})
+
+    for include_tests in (True, False):
+        text = _call(
+            ctx,
+            "query_symbol",
+            {"symbol": "f", "include_tests": include_tests},
+        )["content"][0]["text"]
+        assert "NOTE-AFTER-LOAD" in text

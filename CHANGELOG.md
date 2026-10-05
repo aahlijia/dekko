@@ -9,6 +9,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.17] — 2026-10-05
+
+### Performance
+- **A warm `get_callers` (and every other test-excluding call) no
+  longer rebuilds the test-free index each time.** The MCP server and
+  the daemon kept the loaded map between calls, but the test-free view
+  most tools use by default was rebuilt from it on every call: about
+  2 s of a 2.8 s tensorflow `get_callers`, 0.5 s on spring-boot. The
+  view is now built once per loaded map and reused; a reloaded map
+  starts a new one.
+
+### Fixed
+- **A note added through `add_note` shows on that session's later
+  calls.** Notes were read when the map loaded, so a long-running MCP
+  server or daemon kept serving the notes it started with until the
+  map itself reloaded. Each warm call now checks `notes.json`'s
+  `(mtime, size)` (one `stat`) and rereads the notes when it moved.
+
 ## [1.6.16] — 2026-10-05
 
 ### Performance

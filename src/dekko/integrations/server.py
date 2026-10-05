@@ -442,9 +442,8 @@ def _index_for(
         include_tests: When false, apply ``MapIndex.without_tests()``
             (mirrors the CLI's ``--no-tests`` flag) so test-path
             symbols, edges, and external calls are dropped before the
-            tool sees the index. Applied fresh on every call — the
-            cache holds only the unfiltered index, since filtering is
-            already a cheap view rebuild, not a reload.
+            tool sees the index. The filtered view is built once per
+            cached index and kept on it (see ``without_tests``).
 
     Returns:
         The loaded (optionally filtered) map index.
@@ -457,6 +456,7 @@ def _index_for(
         and mapfile.check_freshness(root, cached).fresh
     ):
         index = cached
+        mapfile.refresh_notes(root, index)
     else:
         index, code = repo_ops.load_or_regen(root, ctx.no_regen)
         if index is None:

@@ -497,6 +497,7 @@ class _WarmCache:
                     mapfile.index_matches_disk(root, self._index)
                     and mapfile.check_freshness(root, self._index).fresh
                 ):
+                    mapfile.refresh_notes(root, self._index)
                     self.hits += 1
                     return self._index
             self.misses += 1

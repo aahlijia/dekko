@@ -8,6 +8,7 @@ import pytest
 
 from dekko.core import walker
 from dekko.render import mapfile
+from dekko.storage import notes as notes_mod
 from dekko.integrations import cli
 from dekko.core.model import (
     CallGraph,
@@ -1214,3 +1215,49 @@ def test_discover_still_gates_a_file_whose_signature_moved(
     assert skipped == [("big.py", "too large")]
     st = (tmp_path / "big.py").stat()
     assert seen == {"big.py": [st.st_mtime_ns, st.st_size]}
+
+
+# ``without_tests()`` used to rebuild the filtered index on every call;
+# a warm server called it per tool call (about 2 s on tensorflow).
+
+
+def test_without_tests_returns_the_same_view_twice(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    index = mapfile.load_map(root)
+    assert index.without_tests() is index.without_tests()
+
+
+def test_a_reloaded_index_does_not_share_the_view(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    first = mapfile.load_map(root).without_tests()
+    assert mapfile.load_map(root).without_tests() is not first
+
+
+def test_refresh_notes_picks_up_a_note_added_after_load(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    index = mapfile.load_map(root)
+    view = index.without_tests()
+    sym_id = next(iter(index.symbols_by_id))
+    notes_mod.add(root, sym_id, "added later")
+
+    mapfile.refresh_notes(root, index)
+
+    assert index.notes[sym_id] == ["added later"]
+    assert index.without_tests() is not view
+    assert index.without_tests().notes[sym_id] == ["added later"]
+
+
+def test_refresh_notes_keeps_the_view_when_notes_did_not_change(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    index = mapfile.load_map(root)
+    view = index.without_tests()
+    mapfile.refresh_notes(root, index)
+    assert index.without_tests() is view
