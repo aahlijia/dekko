@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.21] — 2026-10-05
+
+### Fixed
+- **A C++ call keeps its `ns::` when a macro breaks the method around
+  it.** With a macro before a method's return type (`static
+  EIGEN_ALWAYS_INLINE absl::Status Compute(..)`), tree-sitter can read
+  the body as a struct's field list, and `return absl::OkStatus();`
+  comes out as a bitfield named `absl` whose width is a bare
+  `OkStatus()`. With no scope written, the call resolved to the one
+  in-repo `tensorflow::OkStatus`. The extractor now puts the cut-off
+  scope back for exactly that shape, so the call reads
+  `absl::OkStatus` and goes external (3 sites on tensorflow, including
+  the two false `OkStatus` edges reported). Caches re-extract C++ files
+  once.
+
 ## [1.6.20] — 2026-10-05
 
 ### Fixed

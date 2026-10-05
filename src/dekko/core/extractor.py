@@ -2997,6 +2997,70 @@ def _callee_parts(node: Node) -> tuple[str, str, str | None]:
     paths (``a::b``), Java invocations, and falls back to splitting
     the raw text.
     """
+    text, name, receiver = _written_callee_parts(node)
+    lost = _bitfield_lost_scope(node)
+    if lost is None:
+        return text, name, receiver
+    receiver = lost if receiver is None else f"{lost}::{receiver}"
+
+    return f"{receiver}::{name}", name, receiver
+
+
+def _bitfield_lost_scope(callee: Node) -> str | None:
+    """The leading ``ns`` a C++ misparse cut off ``ns::F()``, if any.
+
+    When a macro before a method's return type (``static
+    EIGEN_ALWAYS_INLINE absl::Status Compute(..)``) keeps tree-sitter
+    from seeing a method, its body is read as a struct's field list,
+    and ``return absl::OkStatus();`` comes out as a bitfield: field
+    ``absl``, an ``ERROR`` holding one ``:``, then a bitfield clause
+    ``:OkStatus()``. The call node is a bare ``OkStatus()``, and with
+    nothing written the resolver took the one in-repo ``OkStatus`` in
+    another namespace.
+
+    Only that exact shape counts, with the field, the stray ``:`` and
+    the clause byte-adjacent so the source really reads ``absl::``.
+    In a correct parse a qualified callee is a ``qualified_identifier``,
+    so this never fires on valid code.
+
+    Args:
+        callee: A call's callee node.
+
+    Returns:
+        The cut-off scope (``absl``), or ``None``.
+    """
+    call = callee.parent
+    if call is None or call.type != "call_expression":
+        return None
+    clause = call.parent
+    if (
+        clause is None
+        or clause.type != "bitfield_clause"
+        or clause.named_child_count != 1
+    ):
+        return None
+    field = clause.parent
+    if field is None or field.type != "field_declaration":
+        return None
+    declarator = field.child_by_field_name("declarator")
+    gap = clause.prev_sibling
+    if (
+        declarator is None
+        or declarator.type != "field_identifier"
+        or gap is None
+        or gap.type != "ERROR"
+        or _text(gap) != ":"
+        or gap.prev_sibling != declarator
+        or declarator.end_byte != gap.start_byte
+        or gap.end_byte != clause.start_byte
+    ):
+        return None
+
+    return _text(declarator)
+
+
+def _written_callee_parts(node: Node) -> tuple[str, str, str | None]:
+    """``_callee_parts`` as the parse tree has it, before any repair."""
     special = _callee_java(node)
     if special is not None:
         return special
@@ -3010,7 +3074,7 @@ def _callee_parts(node: Node) -> tuple[str, str, str | None]:
     if node.type == "generic_function":
         inner = node.child_by_field_name("function")
         if inner is not None:
-            return _callee_parts(inner)
+            return _written_callee_parts(inner)
     name_node = _callee_name_node(node)
     if name_node is not None:
         text, name, receiver = _access_parts(node, name_node)
