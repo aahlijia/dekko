@@ -15,6 +15,8 @@ extractor actually produces, not just an assumed shape.
 import json
 from pathlib import Path
 
+import pytest
+
 from dekko.core.model import FileMap, Import
 from dekko.core.resolver import (
     _ImportResolveContext,
@@ -1066,6 +1068,60 @@ def test_java_stdlib_import_is_external() -> None:
     graph = resolve_imports(files)
     assert graph.deps_out == {}
     assert graph.external["com/example/Foo.java"] == ["java.util.List"]
+
+
+_OUTER = "src/main/java/a/b/Outer.java"
+_USER = "src/main/java/a/b/User.java"
+
+
+def _java_user(*sources: str) -> list[FileMap]:
+    imports = [_imp(_USER, src.rpartition(".")[2], src) for src in sources]
+    return [_fm(_USER, "java", imports), _fm(_OUTER, "java", [])]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "a.b.Outer.Inner",
+        "a.b.Outer.Mid.Inner",
+        "a.b.Outer.A.B.C",
+        # ``import static a.b.Outer.helper;``: a member, not a type.
+        "a.b.Outer.helper",
+        # ``import a.b.Outer.*;`` is recorded as the outer type itself.
+        "a.b.Outer",
+    ],
+)
+def test_java_nested_or_member_import_reaches_the_enclosing_file(
+    source: str,
+) -> None:
+    graph = resolve_imports(_java_user(source))
+    assert graph.deps_out[_USER] == [_OUTER]
+    assert _USER not in graph.external
+
+
+def test_java_enclosing_walk_stops_at_a_package() -> None:
+    # ``x.y.z.Thing``: ``z`` is a package, so the walk stops there
+    # rather than reaching the unrelated ``x/y.java``.
+    files = [
+        _fm(_USER, "java", [_imp(_USER, "Thing", "x.y.z.Thing")]),
+        _fm("src/main/java/x/y.java", "java", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
+    assert graph.external[_USER] == ["x.y.z.Thing"]
+
+
+def test_java_enclosing_walk_does_not_guess_past_an_ambiguous_type() -> None:
+    # Two source roots each declare ``a.b.Outer.Mid``; the walk must not
+    # skip over that ambiguity to the one ``a/b/Outer.java``.
+    files = [
+        _fm(_USER, "java", [_imp(_USER, "Inner", "a.b.Outer.Mid.Inner")]),
+        _fm(_OUTER, "java", []),
+        _fm("m1/src/main/java/a/b/Outer/Mid.java", "java", []),
+        _fm("m2/src/main/java/a/b/Outer/Mid.java", "java", []),
+    ]
+    graph = resolve_imports(files)
+    assert graph.deps_out == {}
 
 
 # ---------------------------------------------------------------------

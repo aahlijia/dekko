@@ -9,6 +9,21 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.22] — 2026-10-05
+
+### Fixed
+- **A Java import of a nested type or a static member reaches the
+  file that declares it.** `import a.b.Outer.Inner;` and `import
+  static a.b.Outer.helper;` were looked up as `a/b/Outer/Inner.java`
+  and `a/b/Outer/helper.java`, which don't exist, so they were listed
+  as external and the file edge to `Outer.java` was lost. On
+  spring-boot that was about 1,500 imports, and 169 files had no
+  in-repo import edge at all, which hid them from `deps` and from
+  `affected`'s import tier. Both now resolve to the enclosing type's
+  file, at any depth. Kotlin already went one level up and now goes
+  as deep as Java. The walk stops at a package (a lower-case
+  segment), so `x.y.z.Thing` never lands on an unrelated `x/y.java`.
+
 ## [1.6.21] — 2026-10-05
 
 ### Fixed

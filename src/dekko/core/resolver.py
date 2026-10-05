@@ -9865,9 +9865,18 @@ def _resolve_import_java(
     both its raw path and its root-stripped suffix, so this is a
     single dict lookup, not a per-import scan. A class written in
     Kotlin is imported the same way, so ``C.kt`` is the fallback.
+
+    A nested type (``a.b.Outer.Inner``, any depth) or a static member
+    (``import static a.b.Outer.helper``) has no file of its own; it
+    resolves to the file of its enclosing type (see
+    ``_jvm_enclosing_type_file``).
     """
     del importer_path
-    return _jvm_type_file(imp.source, (".java", ".kt"), ctx)
+    found = _jvm_type_file(imp.source, (".java", ".kt"), ctx)
+    if found is not None:
+        return found
+
+    return _jvm_enclosing_type_file(imp.source, (".java", ".kt"), ctx)
 
 
 def _resolve_import_kotlin(
@@ -9883,8 +9892,9 @@ def _resolve_import_kotlin(
        samples ship as Java/Kotlin twins) gets the Kotlin one.
     2. A package member: a top-level function or property defined in
        exactly one Kotlin file of package ``a.b``.
-    3. A nested type or a static member (``a.b.Outer.Inner``): the
-       enclosing ``a.b.Outer`` once more, by step 1.
+    3. A nested type or a static member (``a.b.Outer.Inner``, any
+       depth): the enclosing type's file, by step 1's lookup (see
+       ``_jvm_enclosing_type_file``).
     """
     del importer_path
     found = _jvm_type_file(imp.source, (".kt", ".java"), ctx)
@@ -9894,10 +9904,8 @@ def _resolve_import_kotlin(
     members = ctx.kotlin_package_members.get((package.replace(".", "/"), name))
     if members is not None and len(members) == 1:
         return members[0]
-    if package:
-        return _jvm_type_file(package, (".kt", ".java"), ctx)
 
-    return None
+    return _jvm_enclosing_type_file(imp.source, (".kt", ".java"), ctx)
 
 
 def _jvm_type_file(
@@ -9914,6 +9922,43 @@ def _jvm_type_file(
             return matches[0]
         if matches:
             return None
+    return None
+
+
+def _jvm_enclosing_type_file(
+    source: str, extensions: tuple[str, ...], ctx: _ImportResolveContext
+) -> str | None:
+    """The file of the type enclosing a nested type or static member.
+
+    ``a.b.Outer.Mid.Inner`` and ``a.b.Outer.helper`` have no file of
+    their own: they live in ``a/b/Outer.java``. Strips one segment at a
+    time and looks the rest up as a type. The walk stops at a
+    lower-case segment, since that is a package and no type encloses a
+    package, at a single segment, and at a prefix that names more than
+    one file (ambiguous, so not guessed past). A lower-case segment
+    stripped *off* (``helper``) is fine: that's a member.
+
+    Args:
+        source: The import's dotted path.
+        extensions: File extensions to try, in preference order.
+        ctx: The import-resolution indexes.
+
+    Returns:
+        The one enclosing type's file, or ``None``.
+    """
+    head = source
+    while "." in head:
+        head = head.rpartition(".")[0]
+        last = head.rpartition(".")[2]
+        if "." not in head or not last[:1].isupper():
+            return None
+        found = _jvm_type_file(head, extensions, ctx)
+        if found is not None:
+            return found
+        stem = head.replace(".", "/")
+        if any(ctx.java_suffix_index.get(stem + ext) for ext in extensions):
+            return None
+
     return None
 
 
