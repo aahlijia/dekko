@@ -109,11 +109,17 @@ def resolve_sha(root: Path, rev: str) -> str | None:
     Returns:
         The full 40-character commit SHA, or ``None`` if ``rev``
         cannot be resolved (unknown rev, not a git repo, ``git``
-        unavailable).
+        unavailable) or is option-shaped.
     """
+    # ``git rev-parse --all`` exits 0 printing every ref, so an
+    # option-shaped rev (which MCP's ``rev`` can carry; argparse stops
+    # it on the CLI) would come back as a multi-line "SHA". Checked
+    # here rather than with ``--end-of-options``, which needs git 2.24.
+    if rev.startswith("-"):
+        return None
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", rev],
+            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", rev],
             capture_output=True,
             text=True,
             timeout=10,

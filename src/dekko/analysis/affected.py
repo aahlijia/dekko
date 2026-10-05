@@ -800,6 +800,9 @@ def run(
         Possible impacts never change the code: they are leads, and
         ``1`` means a runner has confirmed tests to execute.
     """
+    if rev and not diff.check_rev(root, rev):
+        return EXIT_ERROR
+
     outcome = changes(root, rev, jobs=jobs)
     if outcome is None:
         return EXIT_ERROR

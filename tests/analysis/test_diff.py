@@ -16,6 +16,8 @@ from dekko.render import mapfile
 from dekko.storage import cache as cache_mod
 from dekko.core.model import Param, Symbol
 
+from conftest import RepoFactory
+
 BASE = {
     "a.py": "def f() -> int:\n    return 1\n",
     "b.py": "from a import f\n\n\ndef g() -> int:\n    return f()\n",
@@ -134,16 +136,28 @@ def test_diff_explicit_rev(
 def test_diff_bad_rev(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     root = _repo(tmp_path, BASE)
     assert cli.main(["diff", "nope-not-a-rev", "--root", str(root)]) == 2
-    assert "cannot export git rev" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.strip() == "dekko: unknown git rev 'nope-not-a-rev'"
 
 
-def test_diff_bad_rev_carries_gits_reason(
+def test_diff_export_failure_carries_gits_reason(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
+    # A blob resolves, so it passes the rev check, but can't be
+    # archived: git's own reason reaches the user.
     root = _repo(tmp_path, BASE)
-    assert cli.main(["diff", "nope-not-a-rev", "--root", str(root)]) == 2
+    assert cli.main(["diff", "HEAD:a.py", "--root", str(root)]) == 2
     err = capsys.readouterr().err
-    assert "cannot export git rev 'nope-not-a-rev': fatal:" in err
+    assert "cannot export git rev 'HEAD:a.py': fatal:" in err
+
+
+def test_diff_outside_a_git_repo_says_so(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.py": "def f() -> int:\n    return 1\n"})
+    assert cli.main(["diff", "HEAD", "--root", str(root)]) == 2
+    err = capsys.readouterr().err
+    assert "cannot resolve git rev 'HEAD': not a git repository" in err
 
 
 def test_diff_export_extraction_failure_is_not_called_a_bad_rev(

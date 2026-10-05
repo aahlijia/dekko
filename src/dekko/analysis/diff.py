@@ -432,6 +432,53 @@ def old_snapshot(
     )
 
 
+def _is_git_repo(root: Path) -> bool:
+    """Whether ``root`` is inside a git work tree."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-dir"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    return proc.returncode == 0
+
+
+def check_rev(root: Path, rev: str, hint: str = "") -> bool:
+    """Whether an explicit ``rev`` resolves, saying why on stderr if not.
+
+    Run before any map load or regen, so a bad rev fails in a
+    ``git rev-parse`` rather than after a stale map's full regen. A
+    defaulted rev (the map's commit or ``HEAD``) is not checked here.
+
+    Args:
+        root: Repository root.
+        rev: The rev the caller passed.
+        hint: A command-specific tail for the unknown-rev message,
+            e.g. how to seed from a symbol instead.
+
+    Returns:
+        ``True`` when ``rev`` resolves to an object; otherwise ``False``
+        after printing the reason.
+    """
+    if revcache.resolve_sha(root, rev) is not None:
+        return True
+    if not _is_git_repo(root):
+        message = f"cannot resolve git rev '{rev}': not a git repository"
+    else:
+        message = f"unknown git rev '{rev}'"
+        if not rev.startswith("-") and (root / rev).exists():
+            message += f"; '{rev}' is a path in this repo, not a rev"
+        if hint:
+            message += f" ({hint})"
+    print(f"dekko: {message}", file=sys.stderr)
+
+    return False
+
+
 def _worktree_clean(root: Path) -> bool:
     """Whether ``git status`` shows nothing outside dekko's own dir.
 
@@ -1162,6 +1209,9 @@ def run(
     Returns:
         Process exit code (0 no changes, 1 changes, 2 error).
     """
+    if rev and not check_rev(root, rev):
+        return EXIT_ERROR
+
     current = repo_ops.load_current_side(root)
     target_rev = rev or current.provenance.get("git_commit") or "HEAD"
     pair = snapshot_pair(root, target_rev, current, jobs=jobs)

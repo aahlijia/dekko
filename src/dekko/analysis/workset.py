@@ -20,6 +20,7 @@ from pathlib import Path
 
 from dekko import repo_ops
 from dekko.analysis import affected
+from dekko.analysis import diff
 from dekko.analysis import outline
 from dekko.analysis import query
 from dekko.analysis import relevance
@@ -643,6 +644,14 @@ def run(
         ``0`` ok, ``2`` bad rev, ``3`` symbol not found, ``4`` ambiguous,
         ``5`` stale map with ``--no-regen``.
     """
+    # Before the load: a stale map's regen can take seconds to minutes,
+    # and a typo'd rev (or a path passed where the rev goes) should not
+    # pay for it.
+    if symbol is None and rev:
+        hint = "to start from a symbol, use --symbol, or 'symbol' over MCP"
+        if not diff.check_rev(root, rev, hint=hint):
+            return EXIT_ERROR
+
     index, code = repo_ops.load_or_regen(root, no_regen)
     if index is None:
         return code

@@ -121,6 +121,24 @@ def test_resolve_sha_unknown_rev_returns_none(tmp_path: Path) -> None:
     assert revcache.resolve_sha(tmp_path, "not-a-real-rev") is None
 
 
+@pytest.mark.parametrize("rev", ["--all", "-x", "--branches"])
+def test_resolve_sha_option_shaped_rev_returns_none(
+    tmp_path: Path, rev: str
+) -> None:
+    # `git rev-parse --all` exits 0 printing every ref; it must not
+    # come back as a multi-line "SHA".
+    _repo_with_one_commit(tmp_path)
+    assert revcache.resolve_sha(tmp_path, rev) is None
+
+
+def test_resolve_sha_resolves_ordinary_revs(tmp_path: Path) -> None:
+    _repo_with_one_commit(tmp_path)
+    sha = revcache.resolve_sha(tmp_path, "HEAD")
+    assert sha is not None
+    assert len(sha) == 40
+    assert revcache.resolve_sha(tmp_path, sha[:8]) == sha
+
+
 # ---------------------------------------------------------------------
 # Entries are stamped with the extractor's
 # ``spec_fingerprint()`` and invalidated on mismatch, so a cache entry

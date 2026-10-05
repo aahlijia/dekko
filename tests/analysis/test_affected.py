@@ -434,7 +434,7 @@ def test_editing_a_test_marks_it_direct(
 def test_bad_rev(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     root = _repo(tmp_path, BASE)
     assert cli.main(["affected", "nope-not-a-rev", "--root", str(root)]) == 2
-    assert "cannot export git rev" in capsys.readouterr().err
+    assert "unknown git rev 'nope-not-a-rev'" in capsys.readouterr().err
 
 
 VENDORED_ONLY = {

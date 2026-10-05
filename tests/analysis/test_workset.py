@@ -229,7 +229,64 @@ def test_bad_rev(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     root = _repo(tmp_path, BASE)
     code = cli.main(["workset", "nope-not-a-rev", "--root", str(root)])
     assert code == 2
-    assert "cannot export git rev" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "unknown git rev 'nope-not-a-rev'" in err
+    assert "(to start from a symbol, use --symbol" in err
+
+
+def test_bad_rev_fails_before_a_stale_map_regen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # A stale map's regen can take minutes on a large repo; a typo'd
+    # rev must not pay for it.
+    root = _repo(tmp_path, BASE)
+    _change_core(root)
+
+    def no_regen(*args: object, **kwargs: object) -> None:
+        raise AssertionError("load_or_regen ran before the rev check")
+
+    monkeypatch.setattr(workset.repo_ops, "load_or_regen", no_regen)
+    code = workset.run(
+        root,
+        "nope-not-a-rev",
+        None,
+        budget=None,
+        packs=1,
+        as_json=False,
+        no_regen=False,
+    )
+    assert code == workset.EXIT_ERROR
+    assert "unknown git rev" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["diff", "affected", "workset"])
+def test_a_path_given_as_the_rev_is_named_as_a_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture, command: str
+) -> None:
+    root = _repo(tmp_path, BASE)
+    code = cli.main([command, "src/app.py", "--root", str(root)])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert (
+        "dekko: unknown git rev 'src/app.py'; 'src/app.py' is a path "
+        "in this repo, not a rev"
+    ) in err
+
+
+def test_mcp_workset_bad_rev_is_an_error(tmp_path: Path) -> None:
+    root = _repo(tmp_path, BASE)
+    ctx = server.Context(default_root=root, no_regen=False)
+    msg = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "workset", "arguments": {"rev": "nope"}},
+    }
+    result = server.handle(ctx, msg)["result"]
+    assert result["isError"]
+    assert "unknown git rev 'nope'" in result["content"][0]["text"]
 
 
 def test_packs_zero_skips_depth_tier(

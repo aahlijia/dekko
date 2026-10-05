@@ -9,6 +9,24 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.20] — 2026-10-05
+
+### Fixed
+- **`workset` checks an explicit rev before regenerating a stale
+  map.** It loaded (and on a stale map, regenerated) the map first and
+  only looked at the rev afterwards, so `workset <a path>` on zed took
+  15.8 s and 2.6 GB to say "cannot export git rev". `diff`, `affected`
+  and `workset` now resolve an explicit rev up front and fail in a
+  `git rev-parse`: `dekko: unknown git rev 'X'`, plus `'X' is a path
+  in this repo, not a rev` when it is one, and for `workset` a pointer
+  to `--symbol`. Outside a git repo the message says so.
+- **An option-shaped rev no longer resolves to a pile of refs.** Rev
+  lookups ran `git rev-parse <rev>`, and `git rev-parse --all` exits 0
+  printing every ref, which then passed for a SHA. A rev starting with
+  `-` (only reachable through MCP's `rev`; the CLI's parser stops it)
+  is now unknown, and lookups use `--verify`, which demands exactly
+  one object.
+
 ## [1.6.19] — 2026-10-05
 
 ### Fixed
