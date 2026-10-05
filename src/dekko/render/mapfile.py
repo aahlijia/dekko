@@ -2130,21 +2130,25 @@ def _content_freshness(root: Path, prov: dict) -> Freshness:
     """The source-content leg: were files added, removed, or changed?"""
     recorded: dict[str, str] = prov.get("files", {})
     recorded_stat: dict[str, list[int]] = prov.get("stat", {})
+    seen_stat: dict[str, list[int]] = {}
     current_paths, _ = walker.discover(
         root,
         subpath=prov.get("subpath"),
         excludes=tuple(prov.get("excludes", [])),
         max_file_size=prov.get("max_file_size", walker.DEFAULT_MAX_FILE_SIZE),
         follow_symlinks=prov.get("follow_symlinks", False),
+        known_stat=recorded_stat,
+        stat_out=seen_stat,
     )
     # Fast path: a file whose (mtime, size) signature is unchanged is
-    # assumed unchanged and not re-hashed. Files that are new, lack a
+    # assumed unchanged and not re-hashed (discovery skipped its
+    # content gates on the same signature). Files that are new, lack a
     # recorded signature, or whose stat moved fall back to hashing —
     # the content hash remains the decider for those.
     current: dict[str, str] = {}
     for rel in current_paths:
         sig = recorded_stat.get(rel)
-        if sig and sig == _stat_sig(root / rel):
+        if sig and sig == seen_stat.get(rel):
             current[rel] = recorded.get(rel, "")
         else:
             current[rel] = _file_hash(root / rel)

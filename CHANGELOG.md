@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.16] — 2026-10-05
+
+### Performance
+- **A warm call no longer re-opens every source file to check the
+  map is fresh.** Every daemon or MCP call starts with a freshness
+  check, and that check ran full file discovery, which opened each
+  supported file to sample it for minified content. On spring-boot
+  that was 9,182 file opens per call, about 0.7 s of a 0.7 s
+  `query_symbol`. A file whose `(mtime, size)` still matches what the
+  map recorded is now admitted on that signature, the same signature
+  the check already trusted to skip re-hashing, and its `stat` is read
+  once instead of twice. New files, touched files and files the map
+  skipped take the full checks as before, and path rules
+  (`.dekkoignore`, `--exclude`) still apply to every file. On
+  spring-boot the content check went from 0.87 s to 0.42 s with the
+  same verdict. `dekko map`'s own discovery is unchanged.
+
 ## [1.6.15] — 2026-10-05
 
 ### Performance

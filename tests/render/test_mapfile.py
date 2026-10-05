@@ -1,10 +1,12 @@
 """map.json round-trip, provenance, and freshness checks."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+from dekko.core import walker
 from dekko.render import mapfile
 from dekko.integrations import cli
 from dekko.core.model import (
@@ -1148,3 +1150,67 @@ def test_without_tests_drops_module_edges_touching_test_paths() -> None:
     assert filtered.module_deps_out == {}
     assert filtered.module_deps_in == {}
     assert filtered.module_external == {}
+
+
+# A warm freshness check used to re-open every mapped file for the
+# minified-content sample. A file whose recorded (mtime, size) still
+# matches is now admitted on that signature alone.
+
+
+def _no_content_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("freshness read a file it had a signature for")
+
+    monkeypatch.setattr(walker, "_looks_minified", boom)
+    monkeypatch.setattr(walker, "_looks_like_tree_sitter_query", boom)
+    monkeypatch.setattr(mapfile, "_file_hash", boom)
+
+
+def test_unchanged_tree_is_fresh_without_opening_a_file(
+    make_mapped_repo: RepoFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    prov = mapfile.load_provenance(root)
+    _no_content_reads(monkeypatch)
+    assert mapfile.check_freshness_provenance(root, prov).fresh
+
+
+def test_touched_file_with_same_content_is_fresh(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(CHAIN)
+    prov = mapfile.load_provenance(root)
+    path = root / "a.py"
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    assert mapfile.check_freshness_provenance(root, prov).fresh
+
+
+def test_file_that_turns_minified_is_stale(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(dict(CHAIN, **{"b.js": "function f() {}\n"}))
+    prov = mapfile.load_provenance(root)
+    (root / "b.js").write_text("var a=1;" * 400 + "\n")
+    fresh = mapfile.check_freshness_provenance(root, prov)
+    assert not fresh.fresh
+    assert fresh.removed == ["b.js"]
+
+
+def test_discover_still_gates_a_file_whose_signature_moved(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "big.py").write_text("x = 1\n" * 100)
+    known = {"big.py": [0, 1]}
+    seen: dict[str, list[int]] = {}
+    files, skipped = walker.discover(
+        tmp_path,
+        candidates=["big.py"],
+        max_file_size=10,
+        known_stat=known,
+        stat_out=seen,
+    )
+    assert files == []
+    assert skipped == [("big.py", "too large")]
+    st = (tmp_path / "big.py").stat()
+    assert seen == {"big.py": [st.st_mtime_ns, st.st_size]}
