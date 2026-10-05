@@ -9,6 +9,22 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.18] — 2026-10-05
+
+### Performance
+- **A read on a stale map parses `map.json` once, not three times.**
+  Every read other than `diff`/`affected` rewrites a stale map before
+  answering, and on the way it parsed the old `map.json` in full just
+  to learn it was stale, then again to read four regen options, then
+  once more for the map it had just written: 12.8 s of a 52 s
+  tensorflow read after a one-line edit, 4.1 of 18 s on spring-boot.
+  The first two now read the few-KB provenance sidecar, the way
+  `diff` and `affected` already judge a map. A missing or desynced
+  sidecar, or a map stale by version (whose format check must still
+  run), takes the old path. An outdated long-lived process whose
+  delegated regen fails still serves the map it has, parsing it only
+  on that branch.
+
 ## [1.6.17] — 2026-10-05
 
 ### Performance
