@@ -1707,10 +1707,19 @@ re-validates its cached index on every read the same way a direct
 invocation would, so a working-tree edit or an out-of-band `dekko map`
 is never served stale.
 
+A slow request is waited for as long as the daemon is working on it.
+The client's first wait is an estimate from the repo's size; when it
+runs out, the client asks the daemon's status listener whether it is
+still busy and, while it is, keeps waiting, printing `note: the daemon
+is still working on this (N s so far)` once a minute. It gives up only
+when the daemon says it is no longer busy, stops answering, or one
+request passes 30 minutes. `busy` means busy with any request, so a
+request queued behind another client's slow one waits for both.
+
 One case is deliberately *not* a silent fallback: if a request has
-already been sent to the daemon and no response comes back in time
-(a slow request outlasting the connection's own timeout, or the
-connection dropping mid-wait), the CLI does **not** transparently
+already been sent to the daemon and no response comes back (the
+daemon stopped working on it or answering, the 30-minute limit
+passed, or the connection dropped mid-wait), the CLI does **not** transparently
 re-run the command locally — the daemon's accept loop is
 single-threaded and has no notion of "the client gave up," so it
 keeps computing the abandoned request in the background regardless;

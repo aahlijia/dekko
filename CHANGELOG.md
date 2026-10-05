@@ -9,6 +9,25 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.6.14] — 2026-10-05
+
+### Fixed
+- **A daemon-routed command waits for as long as the daemon is
+  working on it.** The client gave up after a wait estimated from the
+  repo's size (at most 300 s), so a request that outran the estimate
+  failed with exit 7 and no output while the daemon kept working: a
+  cold `diff` on tensorflow whose new side also had to resolve the
+  whole repo hit 293 s and lost a result the daemon finished about a
+  minute later. The estimate is now only the first wait. Past it, the
+  client asks the daemon's status listener whether it is still busy
+  and, while it is, keeps waiting, printing `note: the daemon is still
+  working on this (N s so far)` the first time and once a minute after.
+  It gives up when the daemon says it is no longer busy, two status
+  probes in a row go unanswered, or one request passes 30 minutes, and
+  the exit-7 message now says which. The probe asks for a brief status
+  (`running`, `pid`, `busy`) that skips the cache report's freshness
+  check; an older daemon sends its full status, which has `busy` too.
+
 ## [1.6.13] — 2026-10-05
 
 ### Fixed
