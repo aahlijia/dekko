@@ -6837,6 +6837,135 @@ def test_relative_import_is_in_repo_even_when_no_stem_matches(
     assert graph.external == []
 
 
+def _py_call(
+    caller: Symbol, name: str, receiver: str | None = None
+) -> RawCall:
+    text = f"{receiver}.{name}" if receiver else name
+    return RawCall(
+        caller_id=caller.id,
+        path=caller.path,
+        text=text,
+        name=name,
+        receiver=receiver,
+        line=5,
+    )
+
+
+def test_python_import_named_like_a_cpp_file_is_external() -> None:
+    files = [
+        FileMap("third_party/numpy.cc", "cpp"),
+        FileMap("ops/np_array_ops.py", "python"),
+    ]
+    stems = resolver_mod._repo_stems(files)
+    imp = Import("model.py", "np", "numpy")
+    assert not resolver_mod._import_is_in_repo(imp, stems)
+
+
+@pytest.mark.parametrize(
+    "source", ["tensorflow.python.ops.array_ops", "ops.array_ops", "ops"]
+)
+def test_python_import_of_a_repo_package_is_in_repo(source: str) -> None:
+    files = [FileMap("tensorflow/python/ops/array_ops.py", "python")]
+    stems = resolver_mod._repo_stems(files)
+    imp = Import("model.py", source.split(".")[-1], source)
+    assert resolver_mod._import_is_in_repo(imp, stems)
+
+
+def test_python_module_call_through_an_outside_package_is_external() -> None:
+    # `import numpy as np` passed the stem test on tensorflow's own
+    # `numpy.cc`, so `np.array(..)` landed on the repo's `array`.
+    target = _fn("ops/np_array_ops.py", "array")
+    user = _fn("model.py", "build")
+    files = [
+        FileMap("third_party/numpy.cc", "cpp"),
+        FileMap("ops/np_array_ops.py", "python", symbols=[target]),
+        FileMap(
+            "model.py",
+            "python",
+            symbols=[user],
+            imports=[Import("model.py", "np", "numpy")],
+            calls=[_py_call(user, "array", "np")],
+        ),
+    ]
+    graph = resolve(files)
+    assert target.id not in graph.calls_in
+    assert len(graph.external) == 1
+
+
+def _gen_ops_files(user_imports: list[Import], call: str) -> list[FileMap]:
+    wrapper = _fn("pkg/ops/nn_ops.py", "conv2d")
+    user = _fn("model.py", "build")
+    receiver = "gen_nn_ops" if call == "receiver" else None
+    return [
+        FileMap(
+            "pkg/ops/__init__.py",
+            "python",
+            imports=[
+                Import("pkg/ops/__init__.py", "conv2d", ".nn_ops.conv2d")
+            ],
+        ),
+        FileMap("pkg/ops/nn_ops.py", "python", symbols=[wrapper]),
+        FileMap(
+            "model.py",
+            "python",
+            symbols=[user],
+            imports=user_imports,
+            calls=[_py_call(user, "conv2d", receiver)],
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "name", "call"),
+    [
+        ("pkg.ops.gen_nn_ops", "gen_nn_ops", "receiver"),
+        ("pkg.ops.gen_nn_ops.conv2d", "conv2d", "bare"),
+    ],
+)
+def test_python_call_through_a_generated_module_is_external(
+    source: str, name: str, call: str
+) -> None:
+    # `gen_nn_ops` is generated at build time: nothing in the repo is
+    # what the import binds, so `gen_nn_ops.conv2d(..)` must not land
+    # on the hand-written wrapper of the same name.
+    files = _gen_ops_files([Import("model.py", name, source)], call)
+    graph = resolve(files)
+    assert "pkg/ops/nn_ops.py::conv2d" not in graph.calls_in
+    assert len(graph.external) == 1
+
+
+def test_python_name_a_plain_module_may_assign_is_not_dangling() -> None:
+    # `tf_export = functools.partial(..)` is a module variable, not a
+    # symbol, so a plain module that seems to lack the name has it.
+    target = _fn("pkg/util/tf_export.py", "api_export")
+    user = _fn("model.py", "build")
+    files = [
+        FileMap("pkg/util/tf_export.py", "python", symbols=[target]),
+        FileMap(
+            "model.py",
+            "python",
+            symbols=[user],
+            imports=[
+                Import("model.py", "tf_export", "pkg.util.tf_export.tf_export")
+            ],
+        ),
+    ]
+    table = resolver_mod._imports_by_file(
+        files, python_modules=resolver_mod._python_modules(files)
+    )
+    imp = table["model.py"]["tf_export"]
+    assert not isinstance(imp, resolver_mod._DanglingImport)
+
+
+def test_python_name_a_package_reexports_is_not_dangling() -> None:
+    files = _gen_ops_files(
+        [Import("model.py", "conv2d", "pkg.ops.conv2d")], "bare"
+    )
+    graph = resolve(files)
+    assert graph.calls_in["pkg/ops/nn_ops.py::conv2d"] == ["model.py::build"]
+    assert graph.external == []
+
+
 def test_bare_package_import_still_shadows_a_repo_name() -> None:
     # The guard the relative-import fix must not loosen: `expect` from
     # "vitest" is external, whatever the repo happens to define.

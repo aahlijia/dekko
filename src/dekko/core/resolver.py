@@ -1296,6 +1296,7 @@ def resolve(
         workspace_pkgs,
         _OriginLookup(import_ctx, by_name_path, files),
         _rust_crates(files, crates),
+        _python_modules(files),
     )
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
@@ -6737,11 +6738,21 @@ def _jvm_import_keys(source: str) -> frozenset[str]:
     return frozenset(keys)
 
 
+# Prefix of a ``_repo_stems`` key naming a Python root: a module or
+# package an absolute Python import can start with. ``::`` never
+# appears in a file stem or a JVM key, so no other test can match one.
+_PY_ROOT_KEY = "::py-root::"
+
+_PY_EXTENSIONS = (".py", ".pyi")
+
+
 def _repo_stems(files: list[FileMap]) -> set[str]:
     """Every key an import is tested against to count as in-repo.
 
     The file stems every language's ``_import_is_in_repo`` test uses,
-    plus, for Java/Kotlin files, the path-shaped keys of
+    plus, for each Python file, its stem and every directory on its
+    path behind ``_PY_ROOT_KEY`` (the names an absolute Python import
+    may start with), plus, for Java/Kotlin files, the path-shaped keys of
     ``_jvm_file_keys`` and each Kotlin top-level function or property
     as ``package/dir/name`` (it is imported as a package member, so no
     file stem ever spells it). A stem never contains ``/`` and every
@@ -6757,6 +6768,10 @@ def _repo_stems(files: list[FileMap]) -> set[str]:
     """
     keys = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
     for fm in files:
+        if fm.path.endswith(_PY_EXTENSIONS):
+            path = PurePosixPath(fm.path)
+            keys.add(_PY_ROOT_KEY + _repo_stem(path))
+            keys.update(_PY_ROOT_KEY + part for part in path.parts[:-1])
         file_keys = _jvm_file_keys(fm.path)
         keys.update(file_keys)
         if fm.language != "kotlin" or not file_keys:
@@ -7775,6 +7790,122 @@ class _RustOutsideImport(Import):
     ``_RustCrates.outside``): external, whatever its segments match."""
 
 
+@dataclass
+class _DanglingImport(Import):
+    """A Python import of a module the repo doesn't have (see
+    ``_PythonModules.dangling``): external, whatever its segments
+    match."""
+
+
+def _python_module_path(path: str) -> str:
+    """A Python file's module as a ``/`` path: no extension, and a
+    package's ``__init__`` stands for its directory."""
+    module = path.rsplit(".", 1)[0]
+    return module.removesuffix("/__init__")
+
+
+@dataclass(frozen=True)
+class _PythonModules:
+    """Which Python modules the repo has, and what each one binds.
+
+    Attributes:
+        by_tail: Every ``/``-joined suffix of a module path (a file's,
+            or a directory's that holds Python) -> the full module
+            paths that end in it. An import is matched as a suffix
+            because the repo's import root is rarely the repo root.
+        names: Module path -> every name it defines or imports, with
+            ``*`` when it has a star import.
+        plain: The module paths of plain module files: not a
+            package's ``__init__``, not a directory.
+    """
+
+    by_tail: dict[str, tuple[str, ...]]
+    names: dict[str, frozenset[str]]
+    plain: frozenset[str]
+
+    def dangling(self, imp: Import) -> bool:
+        """Whether ``imp`` binds something no repo module has.
+
+        An absolute import is dangling when it names no module and
+        its parent module neither defines nor imports the last name.
+        ``from tensorflow.python.ops import gen_nn_ops`` is the shape
+        that matters: ``gen_nn_ops`` is generated at build time, so
+        nothing in the repo is what it binds, and every
+        ``gen_nn_ops.conv2d(..)`` used to land on ``nn_ops.py``'s own
+        ``conv2d`` wrapper by name. The parent check keeps a name an
+        ``__init__.py`` re-exports.
+
+        Only a package can leave a name dangling. A plain module file
+        that seems not to have the name most likely assigns it as a
+        variable (``tf_export = functools.partial(..)``), and module
+        variables aren't symbols.
+
+        A relative import is never dangling, and neither is a plain
+        ``import a.b.c``, which binds ``a``.
+
+        Args:
+            imp: A Python import record.
+
+        Returns:
+            True when nothing in the repo is what the import binds.
+        """
+        source = imp.source
+        if source.startswith("."):
+            return False
+        head, dot, _ = source.partition(".")
+        if dot and imp.name == head:
+            return False
+        if source.replace(".", "/") in self.by_tail:
+            return False
+        parent, _, leaf = source.rpartition(".")
+        if not parent:
+            return True
+        for home in self.by_tail.get(parent.replace(".", "/"), ()):
+            bound = self.names.get(home, frozenset())
+            if home in self.plain or leaf in bound or "*" in bound:
+                return False
+
+        return True
+
+
+def _python_modules(files: list[FileMap]) -> _PythonModules:
+    """Index the repo's Python modules for ``_PythonModules.dangling``.
+
+    Args:
+        files: Every mapped file.
+
+    Returns:
+        The index, empty when the repo has no Python.
+    """
+    tails: dict[str, set[str]] = {}
+    names: dict[str, frozenset[str]] = {}
+    plain: set[str] = set()
+    seen: set[str] = set()
+    for fm in files:
+        if not fm.path.endswith(_PY_EXTENSIONS):
+            continue
+        module = _python_module_path(fm.path)
+        if module == fm.path.rsplit(".", 1)[0]:
+            plain.add(module)
+        bound = {s.name for s in fm.symbols} | {i.name for i in fm.imports}
+        names[module] = names.get(module, frozenset()) | bound
+        parts = module.split("/")
+        for end in range(1, len(parts) + 1):
+            prefix = parts[:end]
+            full = "/".join(prefix)
+            if full in seen:
+                continue
+            seen.add(full)
+            for start in range(end):
+                tails.setdefault("/".join(prefix[start:]), set()).add(full)
+
+    return _PythonModules(
+        by_tail={k: tuple(sorted(v)) for k, v in tails.items()},
+        names=names,
+        plain=frozenset(plain),
+    )
+
+
 def _package_json_workspace_globs(data: dict) -> list[str]:
     """A ``package.json``'s ``workspaces`` globs, either spelling."""
     spec = data.get("workspaces")
@@ -8185,15 +8316,27 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     ``_dotted_components``). A Java/Kotlin import is tested by its
     qualified path instead (see ``_jvm_import_keys``), and a one-
     segment bare JS/TS specifier is a package, never a repo file (see
-    ``_bare_package_import``).
+    ``_bare_package_import``). An absolute Python import is tested by
+    its first segment against the repo's Python roots
+    (``_PY_ROOT_KEY``).
     """
     if isinstance(imp, _WorkspaceImport):
         return True
-    if isinstance(imp, _RustOutsideImport):
+    if isinstance(imp, (_RustOutsideImport, _DanglingImport)):
         # ``use windows::core::HSTRING;`` passed the stem test because
         # zed has a ``windows.rs``, and ``HSTRING::new(..)`` ran the
-        # ladder over every ``new`` in the repo.
+        # ladder over every ``new`` in the repo. A Python import of a
+        # generated module (``gen_nn_ops``) is the same: nothing in
+        # the repo is what it binds.
         return False
+    if imp.path.endswith(_PY_EXTENSIONS) and not imp.source.startswith("."):
+        # An absolute Python import is in-repo iff its first segment is
+        # a module or package the repo has in Python. The any-segment
+        # stem test called ``import numpy as np`` in-repo because
+        # tensorflow has a ``numpy.cc``, so every ``np.array(..)`` ran
+        # the ladder and 5,822 sites landed on the repo's own
+        # ``np_array_ops.py::array``.
+        return _PY_ROOT_KEY + imp.source.split(".")[0] in repo_stems
     if _bare_package_import(imp):
         # ``import * as vscode from "vscode"`` names an npm package,
         # whatever the repo's files are called. The stem test passed
@@ -8343,6 +8486,7 @@ def _imports_by_file(
     workspace_pkgs: dict[str, str] | None = None,
     lookup: _OriginLookup | None = None,
     rust_crates: _RustCrates | None = None,
+    python_modules: _PythonModules | None = None,
 ) -> dict[str, dict[str, Import]]:
     """Map file path → local name → import record.
 
@@ -8351,15 +8495,29 @@ def _imports_by_file(
     ``_WorkspaceImport``. ``lookup``, when given, attaches to every
     JS/TS binding the symbols its specifier resolves to (see
     ``_OriginLookup``). ``rust_crates``, when given, turns every Rust
-    ``use`` of an outside crate into a ``_RustOutsideImport``. With
+    ``use`` of an outside crate into a ``_RustOutsideImport``.
+    ``python_modules``, when given, turns every Python import of a
+    module the repo doesn't have into a ``_DanglingImport``. With
     none of them, every record is left as-is.
+
+    A Python star import binds no name, so it stays out of the table.
     """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
         table = out.setdefault(fm.path, {})
         used = _member_names(fm) if lookup is not None else {}
+        python = fm.path.endswith(_PY_EXTENSIONS)
         for imp in fm.imports:
-            if imp.name in table:
+            if imp.name in table or (python and imp.name == "*"):
+                continue
+            if (
+                python
+                and python_modules is not None
+                and python_modules.dangling(imp)
+            ):
+                table[imp.name] = _DanglingImport(
+                    path=imp.path, name=imp.name, source=imp.source
+                )
                 continue
             origins: tuple[Symbol, ...] = ()
             members: dict[str, tuple[Symbol, ...]] = {}

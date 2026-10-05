@@ -4813,13 +4813,35 @@ def _collect_imports(
 def _imports_python(
     matches: list[tuple[int, dict[str, list[Node]]]], rel: str
 ) -> list[Import]:
-    """Normalize Python import/from-import matches."""
+    """Normalize Python import/from-import matches.
+
+    Two shapes bind a name without an imported name of their own:
+
+    - ``from m import *`` is recorded with the name ``*`` and the
+      module as its source. It names no binding, but it is the only
+      thing that makes ``m``'s top-level names visible in the file.
+    - A module-level ``name = a.b.c`` (or ``name = a``) whose head is
+      one of the file's imports rebinds that import under a new name
+      (``floatx = backend_config.floatx``), so it is recorded as an
+      import of ``<a's source>.b.c``. Without it, ``floatx()`` reaches
+      its target only by luck, and any visibility rule cuts it.
+    """
     out: list[Import] = []
+    rebinds: list[tuple[str, str]] = []
     for _, caps in matches:
         alias = _one(caps, "alias")
         module = _one(caps, "module")
         from_module = _one(caps, "from_module")
         name = _one(caps, "name")
+        rebind = _one(caps, "rebind")
+        if rebind is not None:
+            rebound = _one(caps, "rebound")
+            if rebound is not None:
+                rebinds.append((_text(rebind), _text(rebound)))
+            continue
+        if from_module is not None and _one(caps, "star") is not None:
+            out.append(Import(path=rel, name="*", source=_text(from_module)))
+            continue
         if module is not None:
             source = _text(module)
             local = _text(alias) if alias else source.split(".")[0]
@@ -4834,6 +4856,40 @@ def _imports_python(
             out.append(
                 Import(path=rel, name=local, source=f"{base}{sep}{imported}")
             )
+    out.extend(_python_rebinds(rebinds, out, rel))
+
+    return out
+
+
+def _python_rebinds(
+    rebinds: list[tuple[str, str]], imports: list[Import], rel: str
+) -> list[Import]:
+    """Module-level ``name = a.b`` rebinds of an import, as imports.
+
+    Args:
+        rebinds: ``(name, right side)`` pairs, in source order.
+        imports: The file's real imports.
+        rel: The file's repo-relative path.
+
+    Returns:
+        One record per rebind whose head is an import binding or an
+        earlier rebind (``a = mod.x`` then ``b = a``). A rebind of a
+        name the file already binds is skipped: the first binding
+        wins, as it does for imports.
+    """
+    sources = {imp.name: imp.source for imp in imports if imp.name != "*"}
+    out: list[Import] = []
+    for local, value in rebinds:
+        head, _, rest = value.partition(".")
+        source = sources.get(head)
+        if source is None or local in sources:
+            continue
+        if rest:
+            sep = "" if source.endswith(".") else "."
+            source = f"{source}{sep}{rest}"
+        sources[local] = source
+        out.append(Import(path=rel, name=local, source=source))
+
     return out
 
 

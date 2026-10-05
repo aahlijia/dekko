@@ -9,6 +9,35 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-10-05
+
+### Fixed
+- **A Python import counts as in-repo only when its first segment is
+  Python the repo has.** Any segment matching any file's stem used to
+  be enough, so `import numpy as np` was in-repo on tensorflow because
+  of a C++ `numpy.cc`. Every `np.array(..)` then ran the ladder and
+  landed on the repo's own `np_array_ops.py::array`. Now an absolute
+  import has to start with a Python module or package of the repo.
+  Relative imports are unchanged.
+- **A Python import of a module the repo doesn't have binds nothing.**
+  `from tensorflow.python.ops import gen_nn_ops` names a module that's
+  generated at build time, so `gen_nn_ops.conv2d(..)` landed on the
+  hand-written `nn_ops.py::conv2d` wrapper. An import whose module
+  isn't in the repo, under a package that neither defines nor imports
+  the name, now goes external, for `gen_x.f(..)` and for a bare `f(..)`
+  imported from `gen_x` alike. A name an `__init__.py` re-exports
+  still resolves, and so does a name a plain module assigns as a
+  variable. TensorFlow's generated public API (`import
+  tensorflow.compat.v1 as tf`) is external the same way, so
+  `tf.Variable(..)` no longer lands on `variables.py` by name. On
+  tensorflow, with the change above: 4,480 edge pairs gone, 575 gained
+  from the rebinds below.
+- **A Python star import and a module-level rebind of an import are
+  recorded as imports.** `from m import *` is kept with the name `*`.
+  `floatx = backend_config.floatx` binds `floatx` to the import it
+  came from, so `floatx()` resolves on that evidence and not by luck.
+  Caches re-extract Python files once.
+
 ## [1.7.0] — 2026-10-05
 
 Closes round 1.7's fix cycle. The code is 1.6.22; this release is the

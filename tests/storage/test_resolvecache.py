@@ -1129,6 +1129,54 @@ def test_rust_rename_edit_keeps_incremental_equal_to_full(
     assert (pair in external) == (before == "renamed")
 
 
+PY_GENERATED_SRC = {
+    "pkg/__init__.py": "",
+    "pkg/ops/__init__.py": "",
+    "pkg/ops/nn_ops.py": "def conv2d(x):\n    return x\n",
+    "model.py": (
+        "from pkg.ops import gen_nn_ops\n"
+        "def build(x):\n"
+        "    return gen_nn_ops.conv2d(x)\n"
+    ),
+}
+_BINDS_GEN = "from . import nn_ops as gen_nn_ops\n"
+
+
+def test_gate_widens_to_files_importing_a_name_a_package_gained(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``from pkg.ops import gen_nn_ops`` bound nothing in the repo
+    until ``pkg/ops/__init__.py`` imported it, and an import is part of
+    no symbol, so the name delta alone can't see the edit."""
+    root = make_mapped_repo(PY_GENERATED_SRC)
+    (root / "pkg/ops/__init__.py").write_text(_BINDS_GEN)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"pkg/ops/__init__.py", "model.py"}
+
+
+@pytest.mark.parametrize("before", ["dangling", "bound"])
+def test_python_binding_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    source = dict(PY_GENERATED_SRC)
+    after = _BINDS_GEN
+    if before == "bound":
+        source["pkg/ops/__init__.py"] = _BINDS_GEN
+        after = ""
+    root = make_mapped_repo(source)
+    (root / "pkg/ops/__init__.py").write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+
+
 def test_gate_widens_when_a_rename_points_at_another_type(
     make_mapped_repo: RepoFactory,
 ) -> None:

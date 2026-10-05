@@ -302,6 +302,16 @@ PYTHON = LanguageSpec(
   name: (aliased_import
     name: (dotted_name) @name
     alias: (identifier) @alias))
+
+(import_from_statement
+  module_name: (_) @from_module
+  (wildcard_import) @star)
+
+(module
+  (expression_statement
+    (assignment
+      left: (identifier) @rebind
+      right: [(attribute) (identifier)] @rebound)))
 """,
     container_types={"class_definition": "name"},
     method_containers=("class_definition",),
@@ -1602,6 +1612,12 @@ _CPP_DECLS_VERSION = 1
 # so editing one needs no bump.
 _TIER2_ENGINE_VERSION = 1
 
+# Bump when ``extractor._imports_python`` changes how it turns a
+# module-level ``name = a.b`` into an import of ``a``'s source. The
+# query only finds the assignment; which ones count, and the source
+# they get, is decided outside it.
+_PY_IMPORT_REBIND_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every extraction spec, both tiers, into one invalidation key.
@@ -1617,8 +1633,8 @@ def spec_fingerprint() -> str:
     ``_CALLEE_TEXT_CANONICAL_VERSION``,
     ``_RUST_ERROR_ATTRIBUTE_RECOVERY_VERSION``,
     ``_CPP_CONSTRUCTION_VERSION``, ``_CPP_QUALIFIED_PATH_VERSION``,
-    ``_CPP_USING_VERSION``, ``_CPP_DECLS_VERSION`` and
-    ``_TIER2_ENGINE_VERSION``,
+    ``_CPP_USING_VERSION``, ``_CPP_DECLS_VERSION``,
+    ``_TIER2_ENGINE_VERSION`` and ``_PY_IMPORT_REBIND_VERSION``,
     which each cover
     one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments), plus every
@@ -1646,6 +1662,7 @@ def spec_fingerprint() -> str:
         f"cpp_using={_CPP_USING_VERSION}",
         f"cpp_decls={_CPP_DECLS_VERSION}",
         f"tier2_engine={_TIER2_ENGINE_VERSION}",
+        f"py_import_rebind={_PY_IMPORT_REBIND_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):
