@@ -2040,9 +2040,12 @@ def _call_arg_count(args_node: Node | None) -> int | None:
 
     Comments are named "extra" nodes that can sit between arguments
     (``undefined, // modelId``), so they don't count. An unpacking
-    argument makes the count unknowable, and ``None`` is the value the
-    resolver's arity checks read as "no signal" rather than as a
-    mismatch.
+    argument makes the count unknowable, and so does a Rust attribute
+    on an argument: ``AnyEntity::new(a, b, #[cfg(..)] c, d, e)``
+    writes five where a build without the ``cfg`` passes four, and
+    the parameter side reads the gated parameter as a plain one.
+    ``None`` is the value the resolver's arity checks read as "no
+    signal" rather than as a mismatch.
 
     Args:
         args_node: The call's captured argument list, if any.
@@ -2053,7 +2056,10 @@ def _call_arg_count(args_node: Node | None) -> int | None:
     if args_node is None:
         return None
     args = [a for a in args_node.named_children if not a.is_extra]
-    if any(a.type in _UNPACKING_ARGUMENT_TYPES for a in args):
+    if any(
+        a.type in _UNPACKING_ARGUMENT_TYPES or a.type == "attribute_item"
+        for a in args
+    ):
         return None
 
     return len(args)

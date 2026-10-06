@@ -5977,19 +5977,30 @@ def test_rust_macro_generated_type_with_a_handwritten_impl(
     ]
 
 
-def test_rust_generic_param_path_is_left_to_the_ladder(tmp_path: Path) -> None:
-    # `T::default()`: one or two characters is a generic parameter, not
-    # an unknown type. Behavior here must not change.
+def test_rust_generic_param_path_reaches_a_trait_not_another_type(
+    tmp_path: Path,
+) -> None:
+    # `T::name()`: one or two characters is a generic parameter, not an
+    # unknown type, so the ladder still runs. It can reach a trait's
+    # method (what `T` is bounded by), never the calling file's
+    # inherent `ScrollHandle.default`.
     graph = _rust_graph(
         tmp_path,
         {
             "crates/g/src/div.rs": (
                 f"{_SCROLL_HANDLE}"
-                "pub fn make<T: Default>() {\n    let _v = T::default();\n}\n"
+                "pub trait Flag {\n    fn enabled() -> bool { true }\n}\n"
+                "pub fn make<T: Default + Flag>() {\n"
+                "    let _v = T::default();\n"
+                "    let _e = T::enabled();\n"
+                "}\n"
             ),
         },
     )
-    assert [e.callee for e in graph.external] != ["T::default"]
+    assert graph.calls_out["crates/g/src/div.rs::make"] == [
+        "crates/g/src/div.rs::Flag.enabled"
+    ]
+    assert "T::default" in [e.callee for e in graph.external]
 
 
 # Calls recovered from `assert_eq!(..)` bodies used to

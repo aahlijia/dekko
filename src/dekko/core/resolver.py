@@ -3607,7 +3607,7 @@ def _pick_candidate_ladder(
     if len(same_file) == 1:
         only = same_file[0]
         if caller is None or only.id != caller.id:
-            return only
+            return _name_only_pick(call, only, index, file_imports, repo_stems)
         # same_file's sole match is the caller's own symbol -- a
         # coincidental bare-name collision between the call and its
         # own enclosing symbol, not a genuine same-file target (a
@@ -3636,11 +3636,18 @@ def _pick_candidate_ladder(
         return _NOISE
 
     if len(candidates) == 1:
-        return _sole_candidate_match(
+        sole = _sole_candidate_match(
             call, candidates[0], repo_stems is not None, index, file_imports
         )
+        return _name_only_pick(call, sole, index, file_imports, repo_stems)
 
-    return _last_resort_match(call, candidates)
+    return _name_only_pick(
+        call,
+        _last_resort_match(call, candidates),
+        index,
+        file_imports,
+        repo_stems,
+    )
 
 
 def _pick_candidate(
@@ -3667,7 +3674,8 @@ def _pick_candidate(
     two-argument one. Only a candidate the ladder actually picked is
     removed: a call that is ambiguous among possible candidates stays
     ambiguous, and each new pick is held to the same rule. A call with
-    nothing left is noise.
+    nothing left is noise, and so is a Rust path to a known type whose
+    own member was ruled out (``_rust_own_member_ruled_out``).
     """
     excluded: set[str] = set()
     while True:
@@ -3688,9 +3696,14 @@ def _pick_candidate(
             or _python_call_excludes(call, picked, file_imports)
         ):
             return picked
-        if picked.id in excluded:
-            # The ladder can answer with a symbol from outside both
-            # lists; dropping it again would never end.
+        if picked.id in excluded or _rust_own_member_ruled_out(
+            call, picked, index, file_imports
+        ):
+            # A path to a known type had its own member ruled out:
+            # Rust takes an inherent member over a trait's, so a rerun
+            # could only guess, and there is no second guess. And the
+            # ladder can answer with a symbol from outside both lists;
+            # dropping it again would never end.
             return _NOISE if repo_stems is not None else None
         excluded.add(picked.id)
         candidates = [c for c in candidates if c.id != picked.id]
@@ -3761,6 +3774,120 @@ def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
         return True
 
     return max_count is not None and call.arg_count > max_count
+
+
+def _rust_own_member_ruled_out(
+    call: _Referable,
+    picked: Symbol,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+) -> bool:
+    """Whether ``_rust_call_excludes`` just ruled out the own member of
+    the in-repo type a Rust ``Type::name`` call names as written.
+
+    Rust takes an inherent member over a trait's, so when the type's
+    own ``new`` can't take the call, the count is what's off
+    (``AnyEntity::new(.., #[cfg(..)] x, ..)``), not the choice of
+    ``new``; retrying hands the call to a trait's same-named method.
+    A ruled-out pick of some other type's member is still retried: on
+    zed, ``lsp::LanguageServerId::from_proto(id)`` first took the
+    calling file's ``LspCommand.from_proto`` and reached its own
+    ``from_proto`` on the rerun. An alias or a renaming ``use`` is
+    left to the retry too.
+
+    Args:
+        call: The raw call or reference being resolved.
+        picked: The pick ``_rust_call_excludes`` ruled out.
+        index: Bare symbol name to every symbol sharing it.
+        file_imports: The calling file's import bindings by local name.
+
+    Returns:
+        True for a ``RawCall`` path to an in-repo type and a pick that
+        is that type's member.
+    """
+    if not isinstance(call, RawCall):
+        return False
+    owner = _rust_type_path_receiver(call, index)
+
+    return (
+        owner is not None
+        and _container_name(picked) == owner
+        and _rust_alias_target(call, index) is None
+        and _rust_rename_target(call, index, file_imports) is None
+    )
+
+
+def _rust_foreign_member(
+    call: _Referable,
+    picked: Symbol,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+) -> bool:
+    """Whether a Rust ``Type::name`` call took another type's member.
+
+    A ``Type::name`` path reaches a member of ``Type`` (read through an
+    alias or a renaming ``use``: ``TextBuffer::new`` is ``Buffer.new``)
+    or a default method of a trait it implements. A name-only rung
+    knows none of that: on zed it took ``String::from("..")`` to the
+    calling file's ``impl From<anyhow::Error> for ThreadError`` (an
+    in-repo ``impl From<X> for String`` keeps ``String`` from counting
+    as an unknown type) and ``T::enabled_for_staff()`` to a test's
+    ``DemoFlag``. An associated-type path (``T::Output::new``) is left
+    to the ladder, see ``_rust_unknown_type_path``.
+
+    Args:
+        call: The raw call being resolved.
+        picked: What a name-only rung picked.
+        index: Bare symbol name to every symbol sharing it.
+        file_imports: The calling file's import bindings by local name.
+
+    Returns:
+        True for a Rust ``RawCall`` path whose pick is a Rust symbol
+        owned by neither the path's type nor a trait.
+    """
+    if (
+        not isinstance(call, RawCall)
+        or picked.language != "rust"
+        or _rust_is_associated_type_path(call)
+    ):
+        return False
+    written = _rust_type_path_last_segment(call)
+    if written is None:
+        return False
+    owner = (
+        _rust_alias_target(call, index)
+        or _rust_rename_target(call, index, file_imports)
+        or written
+    )
+    container = _container_name(picked)
+    if container == owner:
+        return False
+
+    return container is None or not any(
+        sym.kind == "trait" for sym in index.get(container, ())
+    )
+
+
+def _name_only_pick(
+    call: _Referable,
+    picked: Symbol | _Noise | None,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+    repo_stems: set[str] | None,
+) -> Symbol | _Noise | None:
+    """``picked`` from a name-only rung, unless the call rules it out.
+
+    The same-file, sole-candidate and last-resort rungs pick by name
+    alone, so a pick there gets ``_rust_foreign_member``'s test: a
+    member of another type is noise, not a retry, since any second
+    guess is just as blind.
+    """
+    if isinstance(picked, Symbol) and _rust_foreign_member(
+        call, picked, index, file_imports
+    ):
+        return _NOISE if repo_stems is not None else None
+
+    return picked
 
 
 def _python_call_excludes(

@@ -9,6 +9,33 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.7.4] — 2026-10-06
+
+### Fixed
+- **A Rust argument behind `#[cfg(..)]` leaves the argument count
+  unknown.** `AnyEntity::new(a, b, #[cfg(..)] c, d, e)` was counted as
+  five against four parameters, so the arity check ruled out
+  `AnyEntity.new` and a retry handed the call to `Client.new`. The
+  count now depends on the build, so only the call's shape is checked.
+  `crashes::init(..)` and `pty_options(..)` calls with a gated argument
+  reach their in-repo targets instead of going external.
+- **A Rust `Type::name(..)` call no longer takes another type's member
+  by name alone.** With no evidence beyond the name, the same-file,
+  sole-candidate and last-resort picks sent `String::from("..")` to
+  the calling file's `impl From<anyhow::Error> for ThreadError`,
+  `Vec::from(..)` to `CursorShape.from`, and a generic
+  `T::enabled_for_staff()` to a test's `DemoFlag`. Such a pick now
+  needs its owner to be the written type (read through an alias or a
+  renaming `use`, so `TextBuffer::new` still reaches `Buffer.new`) or
+  a trait; otherwise the call is external. On zed, 17 wrong edges go.
+- **A Rust path whose own type's member can't take the call has no
+  second guess.** Rust prefers an inherent member to a trait's, so
+  when the arity check rules out the type's own member, the call is
+  external rather than retried onto some trait's same-named method. A
+  ruled-out pick of another type's member is still retried, which is
+  how `lsp::LanguageServerId::from_proto(id)` reaches its own
+  `from_proto`.
+
 ## [1.7.3] — 2026-10-06
 
 ### Fixed
