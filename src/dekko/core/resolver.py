@@ -1455,10 +1455,14 @@ def _resolve_files_chunk(
     ambiguous: dict[tuple[str, str], list[str]] = {}
     external: dict[tuple[str, str], set[int]] = {}
     for fm in files:
-        file_imports = imports_by_file.get(fm.path, {})
-        raw_imports = (
-            fm.imports if fm.language in _WHOLE_FILE_IMPORT_LANGUAGES else None
-        )
+        # An ``#include`` binds no name: its header stem in the name
+        # table made a local called ``map`` "the import map" (external)
+        # and hinted ``status.ok()`` to any ``status.*`` file. The
+        # whole-file rung over ``raw_imports`` is C/C++'s only import
+        # evidence.
+        whole_file = fm.language in _WHOLE_FILE_IMPORT_LANGUAGES
+        file_imports = {} if whole_file else imports_by_file.get(fm.path, {})
+        raw_imports = fm.imports if whole_file else None
         stars = [i for i in fm.imports if i.name == "*"]
         for call in fm.calls:
             _resolve_call(
@@ -3615,7 +3619,13 @@ def _pick_candidate_ladder(
         # the real target.
 
     hinted = _import_match(
-        call, candidates, file_imports, raw_imports, crate_roots, tiebreak_hits
+        call,
+        candidates,
+        file_imports,
+        raw_imports,
+        crate_roots,
+        tiebreak_hits,
+        repo_stems,
     )
     if hinted is not None:
         return hinted
@@ -4585,6 +4595,25 @@ _RUST_STD_METHOD_NAMES = frozenset(
     }
 )  # fmt: skip
 
+# C++ standard-container, ``std::optional``/``std::pair`` and
+# ``absl::Status`` members. Consulted only for a call in a C/C++ file
+# (``size``/``status``/``message`` are everyday method names in every
+# other language). A sample of tensorflow's resolved calls under these
+# names was wrong every time: ``scope.status()`` on ``Input.status``,
+# ``vec.size()`` on ``AttrSlice.size``, ``s.ok()`` on the experimental
+# C API's ``Status.ok``. ``data``, ``get``, ``value``, ``at``,
+# ``reset``, ``release``, ``DebugString`` and ``ToString`` stay out:
+# ``Tensor.data()`` and the ``DebugString()`` family are real in-repo
+# API with real callers.
+_CPP_STD_METHOD_NAMES = frozenset(
+    {
+        "size", "begin", "end", "empty", "push_back", "emplace_back",
+        "insert", "erase", "clear", "front", "back", "swap", "reserve",
+        "resize", "c_str", "substr", "length", "first", "second",
+        "has_value", "value_or", "ok", "status", "message", "code",
+    }
+)  # fmt: skip
+
 # AssertJ/JUnit/Hamcrest fluent-assertion chain terminals
 # (``assertThat(x).isTrue()``, ``assertThat(list).hasSize(3)``). Same
 # false-positive shape as the three sets above, just for Java's
@@ -4677,19 +4706,23 @@ _AMBIENT_GLOBAL_RECEIVERS = frozenset(
 )  # fmt: skip
 
 
-def is_guarded_method_name(name: str) -> bool:
+def is_guarded_method_name(name: str, path: str = "") -> bool:
     """Whether a receiver call with this method name is never resolved.
 
     The five method-name denylists that ``_is_noise_call`` applies to a
     receiver call (``x.name(...)``, receiver not exactly ``self``/
-    ``this``): built-in methods, chain-builder methods, Rust std
-    methods, Java assertions and ``build``. Such a call goes external
-    however many same-named repo symbols exist, so it never shows up as
-    ambiguous either. ``unused``'s dispatch check reads this, the one
-    copy of the lists, to see those calls as possible dispatch sites.
+    ``this``) in any language: built-in methods, chain-builder methods,
+    Rust std methods, Java assertions and ``build``; plus, when
+    ``path`` is a C/C++ file, the C++ standard-library members. Such a
+    call goes external however many same-named repo symbols exist, so
+    it never shows up as ambiguous either. ``unused``'s dispatch check
+    reads this, the one copy of the lists, to see those calls as
+    possible dispatch sites.
 
     Args:
         name: A call's bare method name.
+        path: The call's (or the candidate symbol's) file; only a
+            C/C++ path adds the C++ list.
 
     Returns:
         True when the noise guard sends a receiver call with this name
@@ -4701,6 +4734,7 @@ def is_guarded_method_name(name: str) -> bool:
         or name in _RUST_STD_METHOD_NAMES
         or name in _JAVA_ASSERTION_METHOD_NAMES
         or name in _BUILDER_METHOD_NAMES
+        or (name in _CPP_STD_METHOD_NAMES and path.endswith(_CPP_EXTENSIONS))
     )
 
 
@@ -4748,7 +4782,7 @@ def _is_noise_call(
     first = _PATH_SPLIT.split(call.receiver)[0]
     if first in _AMBIENT_GLOBAL_RECEIVERS:
         return True
-    return is_guarded_method_name(call.name)
+    return is_guarded_method_name(call.name, call.path)
 
 
 def _shadowed_by_external_import(
@@ -6263,6 +6297,7 @@ def _import_match(
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
+    repo_stems: set[str] | None = None,
 ) -> Symbol | None:
     """Match candidates against import hints for this file.
 
@@ -6274,10 +6309,10 @@ def _import_match(
     binding* name) structurally can never hit for these languages,
     regardless of what the call's own name or receiver is. Instead,
     check every ``#include`` in the file against every candidate's
-    file — the same ``_module_matches`` check ``affected.py``'s
-    ``_import_hits`` already does for its diff-import evidence tier —
-    and resolve when exactly one candidate's file is actually included
-    here. Verified against a fixture reproducing tensorflow's
+    file by path (``_include_names_file``; ``repo_stems`` carries the
+    shared-stem keys a bare include needs) and resolve when exactly
+    one candidate's file is actually included here. Verified against
+    a fixture reproducing tensorflow's
     ``rewrite_utils.cc``/``rewrite_utils_test.cc`` gtest pair (same
     file paths, same symbol names, same header) — see
     ``tests/test_resolver.py::test_cpp_call_disambiguated_via_whole_file_include``.
@@ -6354,18 +6389,27 @@ def _import_match(
     if receiver_hint is not None:
         return receiver_hint
 
-    return _whole_file_include_match(candidates, raw_imports)
+    return _whole_file_include_match(candidates, raw_imports, repo_stems)
 
 
 def _whole_file_include_match(
-    candidates: list[Symbol], raw_imports: list[Import] | None
+    candidates: list[Symbol],
+    raw_imports: list[Import] | None,
+    repo_stems: set[str] | None = None,
 ) -> Symbol | None:
     """The one candidate whose file some ``#include`` here names.
+
+    An include names a file by path, not by stem: a shared stem
+    (``status.h`` in a dozen directories) sent every ``s.ok()`` to
+    whichever ``Status.ok`` happened to be the only same-stem match.
+    See ``_include_names_file`` for what counts.
 
     Args:
         candidates: The candidates the per-name hints could not settle.
         raw_imports: The calling file's full import list, for a
             whole-file-include language; ``None`` otherwise.
+        repo_stems: The repo's key set, for the shared-stem keys a
+            bare include needs; ``None`` treats every stem as shared.
 
     Returns:
         The single candidate in an included file, or ``None``.
@@ -6375,12 +6419,57 @@ def _whole_file_include_match(
     matched = [
         c
         for c in candidates
-        if any(_module_matches(i.source, c.path) for i in raw_imports)
+        if any(_include_names_file(i, c.path, repo_stems) for i in raw_imports)
     ]
     if len(matched) == 1:
         return matched[0]
 
     return None
+
+
+def _include_names_file(
+    imp: Import, candidate_path: str, repo_stems: set[str] | None
+) -> bool:
+    """Whether one ``#include`` names the file at ``candidate_path``.
+
+    A path include (``"x/y/foo.h"``, leading ``./``/``../`` dropped)
+    names a file whose path ends with it at a component boundary,
+    exactly or with both extensions dropped, so the header pairs with
+    its ``x/y/foo.cc``. A bare include (``"foo.h"``) names a file of
+    that stem in the including file's own directory, or anywhere when
+    no other directory has a C/C++ file of that stem.
+
+    Args:
+        imp: One ``#include`` of the calling file.
+        candidate_path: Repo-relative path of a candidate's file.
+        repo_stems: The repo's key set (``_C_SHARED_STEM_KEY``);
+            ``None`` treats every stem as shared.
+
+    Returns:
+        True when the include names the file.
+    """
+    source = imp.source
+    while source.startswith(("./", "../")):
+        source = source.split("/", 1)[1]
+    want = _without_extensions(source)
+    have = _without_extensions(candidate_path)
+    if "/" in want:
+        if candidate_path == source or candidate_path.endswith("/" + source):
+            return True
+        return have == want or have.endswith("/" + want)
+    if have.rpartition("/")[2] != want:
+        return False
+    if candidate_path.rpartition("/")[0] == imp.path.rpartition("/")[0]:
+        return True
+    return repo_stems is not None and (
+        _C_SHARED_STEM_KEY + want not in repo_stems
+    )
+
+
+def _without_extensions(path: str) -> str:
+    """``path`` with everything after its file name's first dot dropped."""
+    head, slash, base = path.rpartition("/")
+    return head + slash + base.split(".", 1)[0]
 
 
 def _origin_match(
@@ -6901,6 +6990,12 @@ _PY_ROOT_KEY = "::py-root::"
 
 _PY_EXTENSIONS = (".py", ".pyi")
 
+# Prefix of a ``_repo_stems`` key naming a C/C++ file stem (the name
+# up to its first dot) that sits in two or more directories. A bare
+# ``#include "util.h"`` names a file in another directory only when
+# its stem is not one of these.
+_C_SHARED_STEM_KEY = "::c-shared-stem::"
+
 
 def _repo_stems(files: list[FileMap]) -> set[str]:
     """Every key an import is tested against to count as in-repo.
@@ -6911,10 +7006,11 @@ def _repo_stems(files: list[FileMap]) -> set[str]:
     may start with), plus, for Java/Kotlin files, the path-shaped keys of
     ``_jvm_file_keys`` and each Kotlin top-level function or property
     as ``package/dir/name`` (it is imported as a package member, so no
-    file stem ever spells it). A stem never contains ``/`` and every
-    JVM key of a packaged file does, so neither test can see the
-    other's keys and one set travels through every resolve pass and
-    pool initializer unchanged.
+    file stem ever spells it), plus each C/C++ stem shared by several
+    directories behind ``_C_SHARED_STEM_KEY``. A stem never contains
+    ``/`` and every JVM key of a packaged file does, so neither test
+    can see the other's keys and one set travels through every resolve
+    pass and pool initializer unchanged.
 
     Args:
         files: Every mapped file.
@@ -6923,6 +7019,7 @@ def _repo_stems(files: list[FileMap]) -> set[str]:
         The combined key set.
     """
     keys = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+    keys.update(_c_shared_stem_keys(files))
     for fm in files:
         if fm.path.endswith(_PY_EXTENSIONS):
             path = PurePosixPath(fm.path)
@@ -6939,6 +7036,28 @@ def _repo_stems(files: list[FileMap]) -> set[str]:
             if "." not in sym.qualname:
                 keys.add(f"{package}/{sym.name}" if package else sym.name)
     return keys
+
+
+def _c_shared_stem_keys(files: list[FileMap]) -> set[str]:
+    """``_C_SHARED_STEM_KEY`` keys for C/C++ stems in 2+ directories.
+
+    Args:
+        files: Every mapped file.
+
+    Returns:
+        One key per shared stem.
+    """
+    dirs: dict[str, set[str]] = {}
+    for fm in files:
+        if fm.language not in _WHOLE_FILE_IMPORT_LANGUAGES:
+            continue
+        parent, _, base = fm.path.rpartition("/")
+        dirs.setdefault(base.split(".", 1)[0], set()).add(parent)
+    return {
+        _C_SHARED_STEM_KEY + stem
+        for stem, where in dirs.items()
+        if len(where) > 1
+    }
 
 
 def _module_matches(source: str, candidate_path: str) -> bool:

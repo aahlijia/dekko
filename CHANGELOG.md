@@ -9,6 +9,38 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.7.3] — 2026-10-06
+
+### Fixed
+- **A C/C++ `#include` names a file by path, not by stem.** The
+  include rung matched any candidate whose file shared the included
+  header's stem, so `#include "tensorflow/core/platform/status.h"`
+  sent `s.ok()` to whichever `status.*` file in the repo defined `ok`
+  (the experimental C API's `Status.ok`, about 1,500 sites on
+  tensorflow). A path include now names a file whose path ends with
+  it, or its same-stem pair (`foo.h` with `foo.cc`); a bare
+  `#include "util.h"` names a sibling of the including file, or a
+  file anywhere when no other directory has a C/C++ file of that
+  stem. On tensorflow this trades about 10,300 stem-only pairs for
+  about 10,250 the stem test had left ambiguous between two or more
+  same-stem files.
+- **A C/C++ include binds no name.** The header's stem was entered as
+  a local binding, so a variable named like a header (`map.begin()`
+  with `#include <map>`) went external as "the import `map`", and
+  `status.message()` was hinted to any `status.*` file. Calls in
+  C/C++ files now take their import evidence from the include rung
+  alone.
+- **C++ standard-library member names are noise from a C/C++ call.**
+  `vec.size()`, `it.begin()`, `opt.has_value()`, `scope.status()` and
+  the other `std::` container, `optional`, `pair` and `absl::Status`
+  members took whichever in-repo method shared the name
+  (`AttrSlice.size`, `Input.status`). With no structural or include
+  evidence such a call is now external. The list applies only to
+  calls in C/C++ files; `data()`, `get()`, `DebugString()` and the
+  like stay off it, being real in-repo API. `unused` reads the same
+  list, so a C++ `size` method those calls might reach is still a
+  dispatch candidate.
+
 ## [1.7.2] — 2026-10-06
 
 ### Fixed
