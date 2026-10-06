@@ -9,6 +9,40 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-10-06
+
+Closes round 1.8's fix cycle. The code is 1.7.7; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.8 evaluated 1.6.22 on
+seven real repositories and found two High issues and thirteen Medium
+ones, most of them calls landing on an in-repo symbol the call's shape,
+imports or access rules say it can't mean. All 7 fixes:
+
+- **1.7.1**: a Python import is in-repo only when its first segment is
+  Python the repo has, so `np.array(..)` no longer lands on the repo's
+  own `array` because of a C++ `numpy.cc`.
+- **1.7.2**: a Python call's shape and scope rule out picks: a bare
+  call can't reach a `self`/`cls` method (`list(x)` on tensorflow's
+  `Registry.list`), a module-qualified call prefers the import over a
+  same-file name, and a bare call needs the name visible in its file.
+  `affected` on a one-line `Registry.list` edit: 1,375 test files ->
+  87.
+- **1.7.3**: a C/C++ `#include` names a file by path, not by stem, and
+  calls named like standard-library members (`size`, `ok`, `first`)
+  don't fall back to the one in-repo match (`Status.ok` fan-in 2,242 ->
+  15, all right).
+- **1.7.4**: a Rust argument behind `#[cfg(..)]` leaves the count
+  unknown, and a `Type::name` path can't land on another type's member.
+- **1.7.5**: a Java or Kotlin call can't land on a method its file
+  can't reach (private, package-private, or inside a type that is).
+- **1.7.6**: a Java call is picked by the argument count it writes, a
+  call no candidate can answer is external, and an ambiguous Java row
+  lists only what the call could mean (spring-boot rows 68,764 ->
+  62,158).
+- **1.7.7**: a Java `new` keeps the type path it writes, and a package
+  or `Outer.Inner` path narrows the call to that type. `affected` on a
+  one-line `ItemMetadataAssert.extracting` edit: 204 test files -> 5.
+
 ## [1.7.7] — 2026-10-06
 
 ### Fixed
