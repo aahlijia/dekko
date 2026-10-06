@@ -99,7 +99,8 @@ from dekko.analysis import ambiguous, query
 from dekko.analysis import unused as unused_mod
 from dekko.classify import is_test_path
 from dekko.core import languages
-from dekko.core.model import TYPE_KINDS, ReadSite, Symbol
+from dekko.core.model import TYPE_KINDS, RawCall, ReadSite, Symbol
+from dekko.core.resolver import jvm_off_written_path, jvm_unreachable
 from dekko.core.walker import DEFAULT_EXCLUDE_DIRS
 from dekko.render.mapfile import MapIndex
 from dekko.source import read_lines
@@ -401,6 +402,24 @@ CAUSE_TYPE_MENTION = (
     "names the type without constructing it (declaration, parameter "
     "or return type, generic argument, static member access, cast or "
     "class literal) — not a call site"
+)
+# Java and Kotlin, per target: the target is private to its file or
+# package (``Symbol.visibility``) and the line is outside it, so the
+# call names another type's same-named method; the resolver vetoes the
+# pick (``resolver.jvm_unreachable``). Relabels a qualified-call row
+# too: "resolver blind spot" is false for a line that can't reach it.
+CAUSE_NOT_REACHABLE = (
+    "the target is private to its file or package (or sits in a "
+    "private type), so this line names some other type's same-named "
+    "method — not a miss"
+)
+# Java and Kotlin, per target: the line writes the name through a
+# package or outer-type path the target isn't on (``new a.b.ErrorPage()``
+# for the repo's own ``ErrorPage``); the resolver reads the same path
+# (``resolver.jvm_off_written_path``). Relabels a qualified-call row too.
+CAUSE_OTHER_PACKAGE = (
+    "written through another package's or type's qualified name, so it "
+    "names a different type — not a miss"
 )
 # Every cause at or below ``_classify_miss_remaining``: the rungs the
 # per-target tier-1 facts (self-recursion, import bound elsewhere) sit
@@ -3482,6 +3501,55 @@ def _shape_target_cause(
     return None
 
 
+def _jvm_target_cause(
+    sym: Symbol, path: str, snippet: str, cause: str | None
+) -> str | None:
+    """A Java or Kotlin line's reason it can't mean ``sym``: out of
+    the target's reach (``jvm_unreachable``), or written through a type
+    path the target isn't on (``_written_off_path``). Only for a row
+    under a qualified-call cause or one in ``_REMAINING_CAUSES``."""
+    if cause not in _REMAINING_CAUSES and cause != CAUSE_QUALIFIED_CALL:
+        return None
+    if jvm_unreachable(path, sym):
+        return CAUSE_NOT_REACHABLE
+    if _written_off_path(sym, path, snippet):
+        return CAUSE_OTHER_PACKAGE
+
+    return None
+
+
+_JVM_NEW_PATH = re.compile(r"\bnew\s+([A-Za-z_][\w.]*)")
+
+
+def _written_off_path(sym: Symbol, path: str, snippet: str) -> bool:
+    """Whether a JVM line reaches ``sym``'s name only through a written
+    type path ``sym`` isn't on.
+
+    Each ``new a.b.Name(`` and ``a.b.C.Name(`` on the line is read back
+    into the call the extractor records and judged by
+    ``jvm_off_written_path``. A line where any of them could mean
+    ``sym`` is left alone.
+    """
+    if not path.endswith((".java", ".kt")):
+        return False
+    name = sym.name
+    calls = [
+        RawCall(None, path, f"new {m.group(1)}", name)
+        for m in _JVM_NEW_PATH.finditer(snippet)
+        if m.group(1).split(".")[-1] == name
+    ]
+    member = re.compile(rf"([A-Za-z_][\w.]*)\.{re.escape(name)}\s*\(")
+    calls.extend(
+        RawCall(None, path, f"{m.group(1)}.{name}", name, m.group(1))
+        for m in member.finditer(snippet)
+        # ``new a.b.Name(`` is the construction above, not a call on
+        # ``a.b``.
+        if not snippet[: m.start()].rstrip().endswith("new")
+    )
+
+    return bool(calls) and all(jvm_off_written_path(c, sym) for c in calls)
+
+
 def _apply_target_facts(
     causes: dict[tuple[str, int], str],
     index: MapIndex,
@@ -3492,7 +3560,10 @@ def _apply_target_facts(
 ) -> dict[tuple[str, int], str]:
     """The per-target rungs, applied after the resolved-elsewhere
     relabel: a heritage clause naming the target (overrides any shape
-    cause), then, on rows the shared ladder left in
+    cause), a line the target's JVM access or a written type path
+    keeps out (over a qualified-call row or any in
+    ``_REMAINING_CAUSES``), then, on rows
+    the shared ladder left in
     ``_REMAINING_CAUSES``, in order: a recursive call or mention inside
     the target's own body, an import binding the name elsewhere, a
     call in a file declaring a same-named sibling, and a method call
@@ -3525,9 +3596,13 @@ def _apply_target_facts(
     facts = _target_facts(index, sym)
     for loc in locs:
         cause = causes.get(loc)
+        snippet = snippets.get(loc, "")
+        jvm = _jvm_target_cause(sym, loc[0], snippet, cause)
+        if jvm is not None:
+            causes[loc] = jvm
+            continue
         if cause not in _REMAINING_CAUSES:
             continue
-        snippet = snippets.get(loc, "")
         own = _self_cause(index, sym, loc, snippet)
         if own is not None:
             causes[loc] = own

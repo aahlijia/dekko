@@ -28,6 +28,7 @@ SRC = {
     ),
     "src/other.py": ("def go():\n    fetch()\n"),
     "tests/test_app.py": (
+        "from src.app import helper\n\n\n"
         "def fetch():\n    return 3\n\n\ndef test_main():\n    helper()\n"
     ),
 }
@@ -60,7 +61,7 @@ def test_callers_sites_rows(
     out = capsys.readouterr().out
     assert "src/app.py:10  main()" in out
     assert "src/app.py:11  main()" in out
-    assert "tests/test_app.py:6  test_main()" in out
+    assert "tests/test_app.py:9  test_main()" in out
 
 
 def test_callees_sites_locate_in_callers_file(

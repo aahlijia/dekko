@@ -635,7 +635,7 @@ def _has_guarded_receiver_call(sym: Symbol, index: MapIndex) -> bool:
     symbols share the name and a receiver call uses it, any of them
     might be the target. A lone definition is ordinary unused code.
     """
-    if not is_guarded_method_name(sym.name):
+    if not is_guarded_method_name(sym.name, sym.path):
         return False
     if len(index.symbols_by_name.get(sym.name, ())) < 2:
         return False

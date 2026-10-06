@@ -1296,6 +1296,7 @@ def resolve(
         workspace_pkgs,
         _OriginLookup(import_ctx, by_name_path, files),
         _rust_crates(files, crates),
+        _python_modules(files),
     )
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
@@ -1454,10 +1455,15 @@ def _resolve_files_chunk(
     ambiguous: dict[tuple[str, str], list[str]] = {}
     external: dict[tuple[str, str], set[int]] = {}
     for fm in files:
-        file_imports = imports_by_file.get(fm.path, {})
-        raw_imports = (
-            fm.imports if fm.language in _WHOLE_FILE_IMPORT_LANGUAGES else None
-        )
+        # An ``#include`` binds no name: its header stem in the name
+        # table made a local called ``map`` "the import map" (external)
+        # and hinted ``status.ok()`` to any ``status.*`` file. The
+        # whole-file rung over ``raw_imports`` is C/C++'s only import
+        # evidence.
+        whole_file = fm.language in _WHOLE_FILE_IMPORT_LANGUAGES
+        file_imports = {} if whole_file else imports_by_file.get(fm.path, {})
+        raw_imports = fm.imports if whole_file else None
+        stars = [i for i in fm.imports if i.name == "*"]
         for call in fm.calls:
             _resolve_call(
                 call,
@@ -1470,6 +1476,7 @@ def _resolve_files_chunk(
                 ambiguous=ambiguous,
                 external=external,
                 raw_imports=raw_imports,
+                stars=stars,
             )
     return edges, ambiguous, external
 
@@ -1887,11 +1894,12 @@ _CPP_FAMILY = _LANGUAGE_FAMILIES["cpp"]
 
 
 def _ref_target_visible(
-    ref: RawRef,
+    ref: RawRef | RawCall,
     target: Symbol,
     file_imports: dict[str, Import],
     repo_stems: set[str],
     file_exports: bool = False,
+    stars: list[Import] | None = None,
 ) -> bool:
     """Whether the file holding ``ref`` could name ``target`` at all.
 
@@ -1927,6 +1935,11 @@ def _ref_target_visible(
       sites on claude-code, 49 on cline).
     - A target declared in a ``.d.ts``: ambient types are global.
 
+    ``stars``, when given, is the file's Python star imports
+    (``from m import *``), which bind no name of their own: a target in
+    a file one of them names is in scope. ``_call_target_visible``
+    passes them; references don't, and keep the stricter rule.
+
     Not this function's job: a local that shadows a *same-file* or
     an *imported* symbol (claude-code ``utils/ide.ts`` imports
     ``errorMessage`` and rebinds it in a catch block), or any local in
@@ -1951,7 +1964,86 @@ def _ref_target_visible(
         is_script = not file_imports and not file_exports
         return is_script or target.path.endswith(".d.ts")
 
-    return False
+    return any(_module_matches(s.source, target.path) for s in stars or ())
+
+
+def _call_target_visible(
+    call: RawCall,
+    target: Symbol,
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+    stars: list[Import] | None,
+) -> bool:
+    """Whether a bare Python call could name ``target`` at all.
+
+    ``_ref_target_visible``'s Python rule, applied to calls. The
+    ladder's name-only rungs took ``tuple(x)`` to tensorflow's one
+    top-level ``control_flow_ops.py::tuple`` from files that never
+    import it: 1,405 bare cross-file picks, 846 of them builtins
+    (``tuple``, ``complex``, ``exit``, ``eval``) and most of the rest
+    parameters and locals. A Python name from another file is in scope
+    only through an import of it (a module-level rebind such as
+    ``floatx = backend_config.floatx`` is recorded as one) or a star
+    import of its file. A veto on the result with no second guess:
+    the same-file and import rungs already tried every visible
+    candidate.
+
+    JS/TS calls are left alone: object-literal members and functions a
+    factory returns are extracted as flat top-level functions, so a
+    bare cross-file call to one is often right.
+
+    Args:
+        call: The call the ladder resolved.
+        target: The symbol it picked.
+        file_imports: The calling file's import bindings by local name.
+        repo_stems: Every repo file's matching key (``_repo_stems``).
+        stars: The calling file's Python star imports.
+
+    Returns:
+        False for a bare call in a Python file to a Python symbol in
+        another file the call can't see, else True.
+    """
+    if (
+        target.language != "python"
+        or not call.path.endswith(_PY_EXTENSIONS)
+        or not _written_bare(call)
+        or _is_ancestor_conftest_fixture(call.path, target)
+    ):
+        return True
+
+    return _ref_target_visible(
+        call, target, file_imports, repo_stems, stars=stars
+    )
+
+
+def _is_ancestor_conftest_fixture(path: str, target: Symbol) -> bool:
+    """Whether ``target`` is a fixture pytest hands the file at ``path``.
+
+    A test calls the fixture it takes as a parameter
+    (``def test_x(make_repo): make_repo(..)``) with no import: pytest
+    injects it by name from a ``conftest.py`` in the test's directory
+    or an ancestor. The visibility veto cut 1,017 such edges from
+    dekko's own tests, and ``affected`` needs them to find the tests a
+    fixture change touches. Same evidence as ``_fixture_param_target``:
+    a decorated function in such a ``conftest.py``.
+
+    Args:
+        path: The calling file.
+        target: The symbol the ladder picked.
+
+    Returns:
+        True for a decorated function in a ``conftest.py`` whose
+        directory holds ``path``.
+    """
+    target_path = PurePosixPath(target.path)
+    if (
+        target_path.name != _CONFTEST
+        or target.kind != "function"
+        or not target.decorated
+    ):
+        return False
+
+    return target_path.parent in PurePosixPath(path).parents
 
 
 def resolve_heritage(
@@ -2852,8 +2944,13 @@ def _resolve_call(
     ambiguous: dict[tuple[str, str], list[str]],
     external: dict[tuple[str, str], set[int]],
     raw_imports: list[Import] | None = None,
+    stars: list[Import] | None = None,
 ) -> None:
-    """Resolve one call and record it in the right bucket."""
+    """Resolve one call and record it in the right bucket.
+
+    ``stars`` is the calling file's Python star imports, for
+    ``_call_target_visible``.
+    """
     caller_id = call.caller_id or f"{call.path}{MODULE_CALLER_SUFFIX}"
     if _receiver_is_external(call, file_imports, repo_stems):
         external.setdefault((caller_id, call.text), set()).add(call.line)
@@ -2912,7 +3009,12 @@ def _resolve_call(
             raw_imports,
         ),
     )
-    if target is _NOISE:
+    if target is _NOISE or (
+        isinstance(target, Symbol)
+        and not _call_target_visible(
+            call, target, file_imports, repo_stems, stars
+        )
+    ):
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
     if target is not None:
@@ -2950,8 +3052,9 @@ def _ambiguous_candidates(
     run again here, on the ambiguous path only, and its result is what
     the row records whenever it applied and left two or more
     (``_rust_row_narrowed`` adds the two shapes the ladder doesn't
-    narrow). Nothing about the ladder's verdict changes: the call is
-    ambiguous either way.
+    narrow). A Java row keeps the candidates the call can reach and
+    call with its count (``_java_row_narrowed``). Nothing about the
+    ladder's verdict changes: the call is ambiguous either way.
 
     Args:
         call: The raw call the ladder could not resolve.
@@ -2971,7 +3074,9 @@ def _ambiguous_candidates(
     if not applied or len(narrowed) < 2:
         narrowed = candidates
 
-    return _rust_row_narrowed(call, candidates, narrowed, index)
+    return _java_row_narrowed(
+        call, _rust_row_narrowed(call, candidates, narrowed, index)
+    )
 
 
 def _rust_row_narrowed(
@@ -3505,7 +3610,7 @@ def _pick_candidate_ladder(
     if len(same_file) == 1:
         only = same_file[0]
         if caller is None or only.id != caller.id:
-            return only
+            return _name_only_pick(call, only, index, file_imports, repo_stems)
         # same_file's sole match is the caller's own symbol -- a
         # coincidental bare-name collision between the call and its
         # own enclosing symbol, not a genuine same-file target (a
@@ -3517,7 +3622,13 @@ def _pick_candidate_ladder(
         # the real target.
 
     hinted = _import_match(
-        call, candidates, file_imports, raw_imports, crate_roots, tiebreak_hits
+        call,
+        candidates,
+        file_imports,
+        raw_imports,
+        crate_roots,
+        tiebreak_hits,
+        repo_stems,
     )
     if hinted is not None:
         return hinted
@@ -3527,12 +3638,23 @@ def _pick_candidate_ladder(
     ):
         return _NOISE
 
+    candidates = _java_overloads_by_count(call, candidates, index, repo_stems)
+    if not isinstance(candidates, list):
+        return candidates
+
     if len(candidates) == 1:
-        return _sole_candidate_match(
+        sole = _sole_candidate_match(
             call, candidates[0], repo_stems is not None, index, file_imports
         )
+        return _name_only_pick(call, sole, index, file_imports, repo_stems)
 
-    return _last_resort_match(call, candidates)
+    return _name_only_pick(
+        call,
+        _last_resort_match(call, candidates),
+        index,
+        file_imports,
+        repo_stems,
+    )
 
 
 def _pick_candidate(
@@ -3547,18 +3669,24 @@ def _pick_candidate(
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
 ) -> Symbol | _Noise | None:
-    """Pick a candidate, skipping a Rust pick the call can't mean.
+    """Pick a candidate, skipping a pick the call can't mean.
 
     See ``_pick_candidate_vetoed`` for the ladder's own vetoes and
-    every parameter. A pick ``_rust_call_excludes`` rules out (a
-    shape or an argument count Rust has no syntax for) is taken out of
+    every parameter. A pick ``_rust_call_excludes`` or
+    ``_python_call_excludes`` rules out (a shape or an argument count
+    the language has no syntax for), or one the site can't reach under
+    JVM access rules (``jvm_unreachable``), is taken out of
     ``candidates`` and ``same_file`` and the ladder runs again, so a
     wrapper's ``self.inner.set(a)`` reaches the wrapped type's
     one-argument ``set`` instead of stopping at the wrapper's own
-    two-argument one. Only a candidate the ladder actually picked is
-    removed: a call that is ambiguous among possible candidates stays
-    ambiguous, and each new pick is held to the same rule. A call with
-    nothing left is noise.
+    two-argument one. A Java pick whose count it can't take
+    (``_java_call_excludes``) is retried the same way. Only a candidate
+    the ladder actually picked is removed: a call that is ambiguous
+    among possible candidates stays ambiguous, and each new pick is
+    held to the same rule. A call with nothing left is noise, and so is
+    a Rust path to a known type whose own member was ruled out
+    (``_rust_own_member_ruled_out``) and an ambiguous Java call no
+    candidate can answer (``_java_unanswerable``).
     """
     excluded: set[str] = set()
     while True:
@@ -3574,13 +3702,23 @@ def _pick_candidate(
             crate_roots,
             tiebreak_hits,
         )
-        if not isinstance(picked, Symbol) or not _rust_call_excludes(
-            call, picked
+        if picked is None and _java_unanswerable(call, candidates):
+            return _NOISE if repo_stems is not None else None
+        if not isinstance(picked, Symbol) or not (
+            _rust_call_excludes(call, picked)
+            or _python_call_excludes(call, picked, file_imports)
+            or jvm_unreachable(call.path, picked)
+            or _java_call_excludes(call, picked)
         ):
             return picked
-        if picked.id in excluded:
-            # The ladder can answer with a symbol from outside both
-            # lists; dropping it again would never end.
+        if picked.id in excluded or _rust_own_member_ruled_out(
+            call, picked, index, file_imports
+        ):
+            # A path to a known type had its own member ruled out:
+            # Rust takes an inherent member over a trait's, so a rerun
+            # could only guess, and there is no second guess. And the
+            # ladder can answer with a symbol from outside both lists;
+            # dropping it again would never end.
             return _NOISE if repo_stems is not None else None
         excluded.add(picked.id)
         candidates = [c for c in candidates if c.id != picked.id]
@@ -3651,6 +3789,378 @@ def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
         return True
 
     return max_count is not None and call.arg_count > max_count
+
+
+def _rust_own_member_ruled_out(
+    call: _Referable,
+    picked: Symbol,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+) -> bool:
+    """Whether ``_rust_call_excludes`` just ruled out the own member of
+    the in-repo type a Rust ``Type::name`` call names as written.
+
+    Rust takes an inherent member over a trait's, so when the type's
+    own ``new`` can't take the call, the count is what's off
+    (``AnyEntity::new(.., #[cfg(..)] x, ..)``), not the choice of
+    ``new``; retrying hands the call to a trait's same-named method.
+    A ruled-out pick of some other type's member is still retried: on
+    zed, ``lsp::LanguageServerId::from_proto(id)`` first took the
+    calling file's ``LspCommand.from_proto`` and reached its own
+    ``from_proto`` on the rerun. An alias or a renaming ``use`` is
+    left to the retry too.
+
+    Args:
+        call: The raw call or reference being resolved.
+        picked: The pick ``_rust_call_excludes`` ruled out.
+        index: Bare symbol name to every symbol sharing it.
+        file_imports: The calling file's import bindings by local name.
+
+    Returns:
+        True for a ``RawCall`` path to an in-repo type and a pick that
+        is that type's member.
+    """
+    if not isinstance(call, RawCall):
+        return False
+    owner = _rust_type_path_receiver(call, index)
+
+    return (
+        owner is not None
+        and _container_name(picked) == owner
+        and _rust_alias_target(call, index) is None
+        and _rust_rename_target(call, index, file_imports) is None
+    )
+
+
+def _rust_foreign_member(
+    call: _Referable,
+    picked: Symbol,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+) -> bool:
+    """Whether a Rust ``Type::name`` call took another type's member.
+
+    A ``Type::name`` path reaches a member of ``Type`` (read through an
+    alias or a renaming ``use``: ``TextBuffer::new`` is ``Buffer.new``)
+    or a default method of a trait it implements. A name-only rung
+    knows none of that: on zed it took ``String::from("..")`` to the
+    calling file's ``impl From<anyhow::Error> for ThreadError`` (an
+    in-repo ``impl From<X> for String`` keeps ``String`` from counting
+    as an unknown type) and ``T::enabled_for_staff()`` to a test's
+    ``DemoFlag``. An associated-type path (``T::Output::new``) is left
+    to the ladder, see ``_rust_unknown_type_path``.
+
+    Args:
+        call: The raw call being resolved.
+        picked: What a name-only rung picked.
+        index: Bare symbol name to every symbol sharing it.
+        file_imports: The calling file's import bindings by local name.
+
+    Returns:
+        True for a Rust ``RawCall`` path whose pick is a Rust symbol
+        owned by neither the path's type nor a trait.
+    """
+    if (
+        not isinstance(call, RawCall)
+        or picked.language != "rust"
+        or _rust_is_associated_type_path(call)
+    ):
+        return False
+    written = _rust_type_path_last_segment(call)
+    if written is None:
+        return False
+    owner = (
+        _rust_alias_target(call, index)
+        or _rust_rename_target(call, index, file_imports)
+        or written
+    )
+    container = _container_name(picked)
+    if container == owner:
+        return False
+
+    return container is None or not any(
+        sym.kind == "trait" for sym in index.get(container, ())
+    )
+
+
+def _name_only_pick(
+    call: _Referable,
+    picked: Symbol | _Noise | None,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import],
+    repo_stems: set[str] | None,
+) -> Symbol | _Noise | None:
+    """``picked`` from a name-only rung, unless the call rules it out.
+
+    The same-file, sole-candidate and last-resort rungs pick by name
+    alone, so a pick there gets ``_rust_foreign_member``'s test: a
+    member of another type is noise, not a retry, since any second
+    guess is just as blind.
+    """
+    if isinstance(picked, Symbol) and _rust_foreign_member(
+        call, picked, index, file_imports
+    ):
+        return _NOISE if repo_stems is not None else None
+
+    return picked
+
+
+def _python_call_excludes(
+    call: _Referable, candidate: Symbol, file_imports: dict[str, Import]
+) -> bool:
+    """Whether a Python call's shape rules out ``candidate``.
+
+    - A bare call ``name(..)`` can't reach anything taking ``self`` or
+      ``cls``: that needs an instance or a class in front of it. On
+      tensorflow, 2,818 bare calls landed on one, ``list(x)`` on
+      ``Registry.list(self)`` and ``enumerate(..)`` on
+      ``DatasetV2.enumerate`` among them, because ``_candidate_arity``
+      strips ``self`` only for a receiver call and a one-argument bare
+      call then fits. The first parameter is the test, not the kind: a
+      function nested in a method is extracted as a method of the class
+      with no ``self``, and a bare call reaches it.
+    - A receiver call ``x.name(..)`` reaches a top-level function only
+      when ``x`` is a module, which in Python means an import binding of
+      the file (a rebind of one included), and an import never binds the
+      file's own function. On tensorflow, 518 calls such as
+      ``constant_op.constant(..)`` took the calling file's own
+      ``constant`` at the same-file rung, and ``layer.count_params()``
+      took a top-level ``count_params`` through a local. Dropping the
+      pick lets the import rung answer for the first kind.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidate: The symbol the ladder picked.
+        file_imports: The calling file's import bindings by local name.
+
+    Returns:
+        True for a ``RawCall`` in a Python file and a Python function
+        or method its shape can't mean.
+    """
+    if (
+        not isinstance(call, RawCall)
+        or not call.path.endswith(_PY_EXTENSIONS)
+        or candidate.language != "python"
+        or candidate.kind not in ("function", "method")
+    ):
+        return False
+    if _written_bare(call):
+        # A method only: a plain function may name its first parameter
+        # ``cls`` for a class it is handed.
+        params = candidate.params
+        return (
+            candidate.kind == "method"
+            and bool(params)
+            and _is_receiver_param(params[0], "python")
+        )
+    if candidate.kind != "function" or not call.receiver:
+        return False
+    head = _PATH_SPLIT.split(call.receiver)[0]
+    if head in _SELF_RECEIVERS:
+        return False
+
+    return head not in file_imports or candidate.path == call.path
+
+
+def jvm_unreachable(site_path: str, candidate: Symbol) -> bool:
+    """Whether JVM access rules keep a site from naming ``candidate``.
+
+    A private method or constructor (``Symbol.visibility``, already
+    narrowed by its enclosing types) is reachable from its own file
+    only, a package-private Java one from its own package only. The
+    name-only rungs took them from anywhere: on spring-boot, AssertJ's
+    ``assertThat(x).extracting("a")`` landed on the one in-repo
+    ``extracting``, a private test helper, from 494 callers. Counting access
+    took 1,541 such pairs off spring-boot, and every one read was an
+    external API's method. A file with no JVM source root has no
+    package dekko can read, so the package rule leaves it alone.
+
+    Args:
+        site_path: The file the call or reference is written in.
+        candidate: The symbol a pick would land on.
+
+    Returns:
+        True for a JVM site that can't reach ``candidate``.
+    """
+    visibility = candidate.visibility
+    if visibility is None or not site_path.endswith(_JVM_EXTENSIONS):
+        return False
+    if visibility == "private":
+        return site_path != candidate.path
+    if visibility != "package" or candidate.language != "java":
+        return False
+    site_package = _jvm_package_dir(site_path)
+    own_package = _jvm_package_dir(candidate.path)
+    return (
+        site_package is not None
+        and own_package is not None
+        and site_package != own_package
+    )
+
+
+def _java_counted_call(call: _Referable) -> bool:
+    """Whether ``call`` is a Java method call with a known count.
+
+    Only Java: Kotlin has default and named arguments, trailing lambdas
+    and extension receivers, and ``Param`` records none of them. A
+    ``new X(..)`` lands on a class, whose constructors
+    ``_pick_constructor`` already counts; a method called on one
+    (``new File(p).toURI()``, receiver ``new File()``) is counted here.
+    """
+    return (
+        isinstance(call, RawCall)
+        and call.path.endswith(".java")
+        and call.arg_count is not None
+        and not (call.receiver is None and call.text.startswith("new "))
+    )
+
+
+def _java_method(candidate: Symbol) -> bool:
+    """Whether ``candidate`` is a Java method (or function)."""
+    return candidate.language == "java" and candidate.kind in (
+        "method",
+        "function",
+    )
+
+
+def _java_call_excludes(call: _Referable, candidate: Symbol) -> bool:
+    """Whether a Java call's argument count rules out ``candidate``.
+
+    Java has no default arguments, so a method takes exactly its
+    parameter count, or at least its fixed ones with varargs. The
+    same-file and container rungs picked by name and file alone: on
+    spring-boot, ``this.repositories.get(0)`` landed on a test's own
+    ``get()`` and ``processRunner.run(a, b, c, d)`` on a one-parameter
+    ``DockerCli.run``. 878 sites took a pick their count can't call;
+    every one read was wrong.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidate: The symbol the ladder picked.
+
+    Returns:
+        True for a counted Java call (``_java_counted_call``) and a Java
+        method whose parameters can't take that count.
+    """
+    if not _java_counted_call(call) or not _java_method(candidate):
+        return False
+    count = getattr(call, "arg_count", 0)
+    min_count, max_count = _param_arity(candidate.params)
+    if count < min_count:
+        return True
+
+    return max_count is not None and count > max_count
+
+
+def _java_answers(call: _Referable, candidate: Symbol) -> bool:
+    """Whether a Java call could mean ``candidate``: it can reach it
+    and call it with the count it wrote."""
+    return not jvm_unreachable(
+        call.path, candidate
+    ) and not _java_call_excludes(call, candidate)
+
+
+def _java_overloads_by_count(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+    repo_stems: set[str] | None,
+) -> list[Symbol] | _Noise | None:
+    """Narrow one class's overload set to the overload a count fits.
+
+    The sole-candidate rung needs exactly one candidate, so a call
+    whose candidates are all overloads of one class gave up:
+    ``assertThat(ctx).hasSingleBean(X.class)`` had two, both
+    ``ApplicationContextAssert``'s, and spring-boot's 1,594 calls to it
+    were ambiguous. An overload set is one candidate as far as the
+    name goes, and the count picks within it:
+
+    - one fits: that one, for the sole-candidate rung (``jvm_unreachable``
+      still vetoes it, and the retry then finds nothing that fits);
+    - none fits: no in-repo method of that name takes the count, so
+      the call is external;
+    - two or more fit: ambiguous among them.
+
+    A receiver call by a JDK core-type method name
+    (``_JAVA_STD_METHOD_NAMES``) is left as it was: a class owning
+    every in-repo ``add`` is no reason ``list.add(x)`` means it.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidates: The ladder's live candidates.
+        index: The bare-name index, for ``_arity_plausible``.
+        repo_stems: Non-``None`` when the caller handles ``_NOISE``.
+
+    Returns:
+        ``candidates`` unchanged when the rule doesn't apply, a list of
+        the one fitting overload, ``_NOISE`` (``None`` when
+        ``repo_stems`` is ``None``) when none fits, and ``None`` when
+        several do.
+    """
+    if (
+        len(candidates) < 2
+        or not _java_counted_call(call)
+        or not all(_java_method(c) for c in candidates)
+        or len({(c.path, c.qualname.rpartition(".")[0]) for c in candidates})
+        != 1
+        or (
+            call.receiver
+            and call.receiver not in ("this", "super")
+            and call.name in _JAVA_STD_METHOD_NAMES
+        )
+    ):
+        return candidates
+    fits = [c for c in candidates if _arity_plausible(c, call, index)]
+    if not fits:
+        return _NOISE if repo_stems is not None else None
+    if len(fits) > 1:
+        return None
+
+    return fits
+
+
+def _java_unanswerable(call: _Referable, candidates: list[Symbol]) -> bool:
+    """Whether an ambiguous Java call has no candidate it could mean.
+
+    Every candidate is a Java method, and none is both reachable from
+    the site and callable with its count (``_java_answers``). On
+    spring-boot, 5,539 ambiguous sites were this shape and every one
+    read was an external API: ``context.getBeansOfType(X.class)`` on
+    Spring's ``ApplicationContext``, Mockito's ``given``,
+    ``System.setProperty``. They are external, not ambiguous.
+
+    Args:
+        call: The raw call the ladder left ambiguous.
+        candidates: The candidates it ran over.
+
+    Returns:
+        True for a counted Java call (``_java_counted_call``) none of
+        whose Java-method candidates it could mean.
+    """
+    if not _java_counted_call(call):
+        return False
+    live = _without_own_constructors(_language_filtered(call, candidates))
+
+    return (
+        bool(live)
+        and all(_java_method(c) for c in live)
+        and not any(_java_answers(call, c) for c in live)
+    )
+
+
+def _java_row_narrowed(call: RawCall, disclosed: list[Symbol]) -> list[Symbol]:
+    """An ambiguous Java row's candidates, down to what the call could
+    mean (``_java_answers``), when two or more are left.
+
+    One left is not a pick: the ladder already declined to make it.
+    spring-boot's rows listed 2,869,879 candidates; most were methods
+    the site can't reach or call with its count.
+    """
+    if not call.path.endswith(".java"):
+        return disclosed
+    kept = [c for c in disclosed if _java_answers(call, c)]
+
+    return kept if len(kept) >= 2 else disclosed
 
 
 def _pick_candidate_vetoed(
@@ -3932,9 +4442,17 @@ def _written_scope_match(
     narrows, the ladder still picks, and the pick has to be one the
     namespace allows.
 
+    A Java or Kotlin call through a written type path
+    (``_jvm_written_type_match``) narrows the same way: a package path
+    is trusted, an outer-type path is not, and either rules out a pick
+    off the path.
+
     Returns:
-        ``None`` when neither rule applies.
+        ``None`` when no rule applies.
     """
+    jvm = _jvm_written_type_match(call, candidates)
+    if jvm is not None:
+        return jvm
     on_path = _qualified_path_match(call, candidates)
     if on_path is not None:
         return _Scoped(on_path, None, True)
@@ -3944,6 +4462,209 @@ def _written_scope_match(
     allowed, confident = in_namespace
 
     return _Scoped(allowed if confident else candidates, allowed, False)
+
+
+@dataclass(frozen=True)
+class _JvmTypePath:
+    """The type path a JVM call writes.
+
+    Attributes:
+        package: The package directory (``org/apache/catalina``), or
+            ``None`` for an outer-type path (``new Outer.Inner()``).
+        types: The type path, from the top-level type down when a
+            package is written, else just the written segments.
+        member: Whether the call names a member of the last type
+            (``a.b.C.m()``) rather than constructing it.
+    """
+
+    package: str | None
+    types: list[str]
+    member: bool
+
+
+# First segments that make a one-segment lowercase qualifier a package
+# (``java.util.Collections.emptyList()``, ``org.Foo``); two or more
+# lowercase segments count without one. ``foo.Bar.m()`` on a local
+# ``foo`` stays the ladder's.
+_JVM_PACKAGE_ROOTS = frozenset(
+    {
+        "java", "javax", "jakarta", "org", "com", "io", "net", "kotlin",
+        "kotlinx", "reactor", "sun", "jdk", "oracle", "ch", "de",
+        "liquibase", "graphql", "okhttp3", "brave", "zipkin2",
+        "freemarker", "groovy",
+    }
+)  # fmt: skip
+_JVM_PACKAGE_SEGMENT = re.compile(r"[a-z_][a-z0-9_]*")
+_JVM_TYPE_SEGMENT = re.compile(r"[A-Z]\w*")
+_JVM_CONSTANT_SEGMENT = re.compile(r"[A-Z][A-Z0-9_]*")
+_JVM_DOTTED_RECEIVER = re.compile(r"[\w.]+")
+
+
+def _jvm_written_qualifier(call: _Referable) -> list[str] | None:
+    """The segments a JVM call writes before its name.
+
+    A ``new`` keeps its written type (``new a.b.C`` is ``[a, b]``); a
+    member call reads a receiver made of names only (``a.b.C.m()`` is
+    ``[a, b, C]``).
+    """
+    if not isinstance(call, RawCall) or not call.path.endswith(
+        _JVM_EXTENSIONS
+    ):
+        return None
+    if call.receiver is None and call.text.startswith("new "):
+        segments = call.text[len("new ") :].split(".")[:-1]
+    elif call.receiver and _JVM_DOTTED_RECEIVER.fullmatch(call.receiver):
+        segments = call.receiver.split(".")
+    else:
+        return None
+    if not segments or segments[0] in ("this", "super"):
+        return None
+
+    return segments
+
+
+def _jvm_package_type_path(
+    call: RawCall, segments: list[str], package_len: int
+) -> _JvmTypePath | None:
+    """The path a qualifier starting with ``package_len`` lowercase
+    segments names, when they are a package (see
+    ``_jvm_written_type_path``)."""
+    construction = call.receiver is None
+    if package_len == len(segments):
+        # ``new a.b.C()``, or Kotlin ``a.b.C()``, constructs ``C``;
+        # ``a.b.f()`` is a top-level function or a field chain.
+        if not construction and not (
+            call.path.endswith(".kt")
+            and _JVM_TYPE_SEGMENT.fullmatch(call.name)
+        ):
+            return None
+        types: list[str] = []
+    else:
+        types = segments[package_len:]
+        if not all(
+            _JVM_TYPE_SEGMENT.fullmatch(t)
+            and not _JVM_CONSTANT_SEGMENT.fullmatch(t)
+            for t in types
+        ):
+            return None
+    if package_len < 2 and segments[0] not in _JVM_PACKAGE_ROOTS:
+        return None
+    member = not construction and package_len < len(segments)
+    if not member:
+        types = [*types, call.name]
+
+    return _JvmTypePath("/".join(segments[:package_len]), types, member)
+
+
+def _jvm_written_type_path(call: _Referable) -> _JvmTypePath | None:
+    """The package and type path a JVM call is written through.
+
+    - ``new a.b.C.D()`` and ``a.b.C.m()``: the leading lowercase
+      segments are the package and the capitalized ones (not ALL_CAPS,
+      which are constants) the type path from the top-level type;
+    - Kotlin ``a.b.C()``: a lowercase receiver and a capitalized name
+      construct ``C``;
+    - ``new Outer.Inner()``: an outer-type path, no package.
+
+    A package needs two segments or a known first one
+    (``_JVM_PACKAGE_ROOTS``).
+
+    Args:
+        call: The raw call being resolved.
+
+    Returns:
+        The written path, or ``None`` when the call writes none of
+        these.
+    """
+    segments = _jvm_written_qualifier(call)
+    if segments is None or not isinstance(call, RawCall):
+        return None
+    package_len = 0
+    while package_len < len(segments) and _JVM_PACKAGE_SEGMENT.fullmatch(
+        segments[package_len]
+    ):
+        package_len += 1
+    if package_len:
+        return _jvm_package_type_path(call, segments, package_len)
+    if call.receiver is None and all(
+        _JVM_TYPE_SEGMENT.fullmatch(s) for s in segments
+    ):
+        return _JvmTypePath(None, [*segments, call.name], False)
+
+    return None
+
+
+def _on_jvm_type_path(candidate: Symbol, path: _JvmTypePath) -> bool:
+    """Whether ``candidate`` sits where ``path`` points.
+
+    A constructor (``C.C``) stands for its class. With a package, the
+    candidate's file is in it and its qualname is the whole type path
+    (a package path names a top-level type); without one, its
+    qualname ends with the written path.
+    """
+    qual = candidate.qualname.split(".")
+    if path.member:
+        qual = qual[:-1]
+    elif (
+        candidate.kind in ("method", "function")
+        and len(qual) >= 2
+        and qual[-1] == qual[-2]
+    ):
+        qual = qual[:-1]
+    if path.package is None:
+        return qual[-len(path.types) :] == path.types
+
+    return (
+        candidate.language in ("java", "kotlin")
+        and _jvm_package_dir(candidate.path) == path.package
+        and qual == path.types
+    )
+
+
+def _jvm_written_type_match(
+    call: _Referable, candidates: list[Symbol]
+) -> _Scoped | None:
+    """Narrow a JVM call to the type path it is written through.
+
+    The extractor kept only a ``new``'s last segment, so ``new org.
+    apache.tomcat.util.descriptor.web.ErrorPage()`` landed on the
+    repo's own ``ErrorPage``, ``java.util.Collections.emptyList()`` on
+    a test's ``emptyList``, and ``new DataRedisProperties.Sentinel()``
+    on ``DataRedisConnectionDetails.Sentinel``. A package path names
+    its target outright, so one candidate on it is trusted, like a full
+    C++ path; an outer-type path only narrows. Either way a pick off
+    the path is no pick, and a path with no candidate on it is
+    external.
+
+    Returns:
+        ``None`` when the call writes no type path
+        (``_jvm_written_type_path``).
+    """
+    path = _jvm_written_type_path(call)
+    if path is None:
+        return None
+    on_path = [c for c in candidates if _on_jvm_type_path(c, path)]
+
+    return _Scoped(on_path, on_path, path.package is not None)
+
+
+def jvm_off_written_path(call: RawCall, candidate: Symbol) -> bool:
+    """Whether a JVM call's written type path rules ``candidate`` out.
+
+    ``sanity`` reads a grep line back into a call this way, so its
+    verdict on ``new a.b.ErrorPage()`` is the resolver's own.
+
+    Args:
+        call: A call in a Java or Kotlin file.
+        candidate: A symbol of the call's name.
+
+    Returns:
+        True when the call writes a package or outer-type path
+        (``_jvm_written_type_path``) that ``candidate`` isn't on.
+    """
+    path = _jvm_written_type_path(call)
+
+    return path is not None and not _on_jvm_type_path(candidate, path)
 
 
 def _within_scope(
@@ -4428,6 +5149,25 @@ _RUST_STD_METHOD_NAMES = frozenset(
     }
 )  # fmt: skip
 
+# C++ standard-container, ``std::optional``/``std::pair`` and
+# ``absl::Status`` members. Consulted only for a call in a C/C++ file
+# (``size``/``status``/``message`` are everyday method names in every
+# other language). A sample of tensorflow's resolved calls under these
+# names was wrong every time: ``scope.status()`` on ``Input.status``,
+# ``vec.size()`` on ``AttrSlice.size``, ``s.ok()`` on the experimental
+# C API's ``Status.ok``. ``data``, ``get``, ``value``, ``at``,
+# ``reset``, ``release``, ``DebugString`` and ``ToString`` stay out:
+# ``Tensor.data()`` and the ``DebugString()`` family are real in-repo
+# API with real callers.
+_CPP_STD_METHOD_NAMES = frozenset(
+    {
+        "size", "begin", "end", "empty", "push_back", "emplace_back",
+        "insert", "erase", "clear", "front", "back", "swap", "reserve",
+        "resize", "c_str", "substr", "length", "first", "second",
+        "has_value", "value_or", "ok", "status", "message", "code",
+    }
+)  # fmt: skip
+
 # AssertJ/JUnit/Hamcrest fluent-assertion chain terminals
 # (``assertThat(x).isTrue()``, ``assertThat(list).hasSize(3)``). Same
 # false-positive shape as the three sets above, just for Java's
@@ -4444,6 +5184,61 @@ _JAVA_ASSERTION_METHOD_NAMES = frozenset(
         "isNull", "isEmpty", "isNotEmpty", "isPresent", "isAbsent",
         "hasSize", "contains", "containsExactly", "doesNotContain",
         "isInstanceOf", "isSameAs", "isNotSameAs",
+    }
+)  # fmt: skip
+
+# Methods of the JDK's core types: ``Object``, the collections and
+# ``Map.Entry``, ``Iterator``, ``Stream``, ``Optional``, ``String``/
+# ``StringBuilder``, the boxed numbers, threads and executors, IO
+# streams, ``Class`` and ``java.util.function``. Consulted by the Java
+# overload rung only (``_java_overloads_by_count``), never by the noise
+# guard: these repos define the names for real, and on spring-boot and
+# tensorflow a sole-rung guard lost more right edges (``docker.
+# container().wait(..)``, ``Shape.size(0)``) than wrong ones. The
+# overload rung is different: tensorflow's one class owning every
+# in-repo ``add`` turned 125 ``list.add(x)`` calls into edges.
+_JAVA_STD_METHOD_NAMES = frozenset(
+    {
+        # Object
+        "equals", "hashCode", "getClass", "wait", "notify", "notifyAll",
+        # Collection, List, Set, Queue, Deque
+        "add", "addAll", "remove", "removeAll", "removeIf", "retainAll",
+        "containsAll", "size", "clear", "iterator", "toArray", "stream",
+        "parallelStream", "set", "subList", "listIterator", "sort",
+        "offer", "poll", "peek", "addFirst", "addLast", "removeFirst",
+        "removeLast", "getFirst", "getLast",
+        # Map, Map.Entry
+        "put", "putAll", "putIfAbsent", "getOrDefault", "containsKey",
+        "containsValue", "keySet", "values", "entrySet",
+        "computeIfAbsent", "computeIfPresent", "compute", "merge",
+        "getKey", "getValue", "setValue",
+        # Iterator
+        "hasNext", "next",
+        # Stream
+        "flatMap", "collect", "findFirst", "findAny", "anyMatch",
+        "allMatch", "noneMatch", "sorted", "distinct", "limit", "skip",
+        "toList", "mapToInt", "mapToObj", "mapToLong", "boxed", "min",
+        "max",
+        # Optional
+        "ifPresent", "orElse", "orElseGet", "orElseThrow",
+        # String, StringBuilder, CharSequence, Comparable
+        "length", "append", "isBlank", "strip", "matches",
+        "equalsIgnoreCase", "toCharArray", "getBytes", "chars",
+        "compareTo",
+        # boxed numbers
+        "intValue", "longValue", "doubleValue", "floatValue",
+        "booleanValue",
+        # Thread, Executor, Future, CountDownLatch
+        "interrupt", "sleep", "submit", "shutdown", "shutdownNow",
+        "awaitTermination", "isDone", "countDown", "await",
+        # IO streams
+        "flush", "readLine", "readAllBytes", "transferTo", "available",
+        # Class
+        "getSimpleName", "isInstance", "isAssignableFrom", "cast",
+        "getResourceAsStream", "getResource", "getClassLoader",
+        "getDeclaredMethod", "getMethod", "newInstance",
+        # java.util.function
+        "apply", "accept", "andThen", "compose",
     }
 )  # fmt: skip
 
@@ -4520,19 +5315,23 @@ _AMBIENT_GLOBAL_RECEIVERS = frozenset(
 )  # fmt: skip
 
 
-def is_guarded_method_name(name: str) -> bool:
+def is_guarded_method_name(name: str, path: str = "") -> bool:
     """Whether a receiver call with this method name is never resolved.
 
     The five method-name denylists that ``_is_noise_call`` applies to a
     receiver call (``x.name(...)``, receiver not exactly ``self``/
-    ``this``): built-in methods, chain-builder methods, Rust std
-    methods, Java assertions and ``build``. Such a call goes external
-    however many same-named repo symbols exist, so it never shows up as
-    ambiguous either. ``unused``'s dispatch check reads this, the one
-    copy of the lists, to see those calls as possible dispatch sites.
+    ``this``) in any language: built-in methods, chain-builder methods,
+    Rust std methods, Java assertions and ``build``; plus, when
+    ``path`` is a C/C++ file, the C++ standard-library members. Such a
+    call goes external however many same-named repo symbols exist, so
+    it never shows up as ambiguous either. ``unused``'s dispatch check
+    reads this, the one copy of the lists, to see those calls as
+    possible dispatch sites.
 
     Args:
         name: A call's bare method name.
+        path: The call's (or the candidate symbol's) file; only a
+            C/C++ path adds the C++ list.
 
     Returns:
         True when the noise guard sends a receiver call with this name
@@ -4544,6 +5343,7 @@ def is_guarded_method_name(name: str) -> bool:
         or name in _RUST_STD_METHOD_NAMES
         or name in _JAVA_ASSERTION_METHOD_NAMES
         or name in _BUILDER_METHOD_NAMES
+        or (name in _CPP_STD_METHOD_NAMES and path.endswith(_CPP_EXTENSIONS))
     )
 
 
@@ -4591,7 +5391,7 @@ def _is_noise_call(
     first = _PATH_SPLIT.split(call.receiver)[0]
     if first in _AMBIENT_GLOBAL_RECEIVERS:
         return True
-    return is_guarded_method_name(call.name)
+    return is_guarded_method_name(call.name, call.path)
 
 
 def _shadowed_by_external_import(
@@ -5831,7 +6631,9 @@ def _pick_constructor(
     "/500")`` the ``(Class, String)`` one. Overloads nothing visible
     separates (``new ErrorPage(HttpStatus.NOT_FOUND, "/404")``) are
     returned undecided, never guessed: dekko has no types for other
-    expressions.
+    expressions. A constructor the call site can't reach
+    (``jvm_unreachable``, a private overload from another file) is no
+    overload of it at all.
 
     Args:
         cls: The constructed class.
@@ -5844,8 +6646,12 @@ def _pick_constructor(
         ``(ctor, [])`` when one constructor is selected;
         ``(None, overloads)`` when 2+ remain undecided; ``(None, [])``
         when none fits the written argument count, which points at a
-        wrong class match rather than at a constructor.
+        wrong class match rather than at a constructor, or none is
+        reachable.
     """
+    ctors = [c for c in ctors if not jvm_unreachable(call.path, c)]
+    if not ctors:
+        return None, []
     n = call.arg_count
     if n is None:
         if len(ctors) == 1:
@@ -6106,6 +6912,7 @@ def _import_match(
     raw_imports: list[Import] | None = None,
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
+    repo_stems: set[str] | None = None,
 ) -> Symbol | None:
     """Match candidates against import hints for this file.
 
@@ -6117,10 +6924,10 @@ def _import_match(
     binding* name) structurally can never hit for these languages,
     regardless of what the call's own name or receiver is. Instead,
     check every ``#include`` in the file against every candidate's
-    file — the same ``_module_matches`` check ``affected.py``'s
-    ``_import_hits`` already does for its diff-import evidence tier —
-    and resolve when exactly one candidate's file is actually included
-    here. Verified against a fixture reproducing tensorflow's
+    file by path (``_include_names_file``; ``repo_stems`` carries the
+    shared-stem keys a bare include needs) and resolve when exactly
+    one candidate's file is actually included here. Verified against
+    a fixture reproducing tensorflow's
     ``rewrite_utils.cc``/``rewrite_utils_test.cc`` gtest pair (same
     file paths, same symbol names, same header) — see
     ``tests/test_resolver.py::test_cpp_call_disambiguated_via_whole_file_include``.
@@ -6197,18 +7004,27 @@ def _import_match(
     if receiver_hint is not None:
         return receiver_hint
 
-    return _whole_file_include_match(candidates, raw_imports)
+    return _whole_file_include_match(candidates, raw_imports, repo_stems)
 
 
 def _whole_file_include_match(
-    candidates: list[Symbol], raw_imports: list[Import] | None
+    candidates: list[Symbol],
+    raw_imports: list[Import] | None,
+    repo_stems: set[str] | None = None,
 ) -> Symbol | None:
     """The one candidate whose file some ``#include`` here names.
+
+    An include names a file by path, not by stem: a shared stem
+    (``status.h`` in a dozen directories) sent every ``s.ok()`` to
+    whichever ``Status.ok`` happened to be the only same-stem match.
+    See ``_include_names_file`` for what counts.
 
     Args:
         candidates: The candidates the per-name hints could not settle.
         raw_imports: The calling file's full import list, for a
             whole-file-include language; ``None`` otherwise.
+        repo_stems: The repo's key set, for the shared-stem keys a
+            bare include needs; ``None`` treats every stem as shared.
 
     Returns:
         The single candidate in an included file, or ``None``.
@@ -6218,12 +7034,57 @@ def _whole_file_include_match(
     matched = [
         c
         for c in candidates
-        if any(_module_matches(i.source, c.path) for i in raw_imports)
+        if any(_include_names_file(i, c.path, repo_stems) for i in raw_imports)
     ]
     if len(matched) == 1:
         return matched[0]
 
     return None
+
+
+def _include_names_file(
+    imp: Import, candidate_path: str, repo_stems: set[str] | None
+) -> bool:
+    """Whether one ``#include`` names the file at ``candidate_path``.
+
+    A path include (``"x/y/foo.h"``, leading ``./``/``../`` dropped)
+    names a file whose path ends with it at a component boundary,
+    exactly or with both extensions dropped, so the header pairs with
+    its ``x/y/foo.cc``. A bare include (``"foo.h"``) names a file of
+    that stem in the including file's own directory, or anywhere when
+    no other directory has a C/C++ file of that stem.
+
+    Args:
+        imp: One ``#include`` of the calling file.
+        candidate_path: Repo-relative path of a candidate's file.
+        repo_stems: The repo's key set (``_C_SHARED_STEM_KEY``);
+            ``None`` treats every stem as shared.
+
+    Returns:
+        True when the include names the file.
+    """
+    source = imp.source
+    while source.startswith(("./", "../")):
+        source = source.split("/", 1)[1]
+    want = _without_extensions(source)
+    have = _without_extensions(candidate_path)
+    if "/" in want:
+        if candidate_path == source or candidate_path.endswith("/" + source):
+            return True
+        return have == want or have.endswith("/" + want)
+    if have.rpartition("/")[2] != want:
+        return False
+    if candidate_path.rpartition("/")[0] == imp.path.rpartition("/")[0]:
+        return True
+    return repo_stems is not None and (
+        _C_SHARED_STEM_KEY + want not in repo_stems
+    )
+
+
+def _without_extensions(path: str) -> str:
+    """``path`` with everything after its file name's first dot dropped."""
+    head, slash, base = path.rpartition("/")
+    return head + slash + base.split(".", 1)[0]
 
 
 def _origin_match(
@@ -6737,17 +7598,34 @@ def _jvm_import_keys(source: str) -> frozenset[str]:
     return frozenset(keys)
 
 
+# Prefix of a ``_repo_stems`` key naming a Python root: a module or
+# package an absolute Python import can start with. ``::`` never
+# appears in a file stem or a JVM key, so no other test can match one.
+_PY_ROOT_KEY = "::py-root::"
+
+_PY_EXTENSIONS = (".py", ".pyi")
+
+# Prefix of a ``_repo_stems`` key naming a C/C++ file stem (the name
+# up to its first dot) that sits in two or more directories. A bare
+# ``#include "util.h"`` names a file in another directory only when
+# its stem is not one of these.
+_C_SHARED_STEM_KEY = "::c-shared-stem::"
+
+
 def _repo_stems(files: list[FileMap]) -> set[str]:
     """Every key an import is tested against to count as in-repo.
 
     The file stems every language's ``_import_is_in_repo`` test uses,
-    plus, for Java/Kotlin files, the path-shaped keys of
+    plus, for each Python file, its stem and every directory on its
+    path behind ``_PY_ROOT_KEY`` (the names an absolute Python import
+    may start with), plus, for Java/Kotlin files, the path-shaped keys of
     ``_jvm_file_keys`` and each Kotlin top-level function or property
     as ``package/dir/name`` (it is imported as a package member, so no
-    file stem ever spells it). A stem never contains ``/`` and every
-    JVM key of a packaged file does, so neither test can see the
-    other's keys and one set travels through every resolve pass and
-    pool initializer unchanged.
+    file stem ever spells it), plus each C/C++ stem shared by several
+    directories behind ``_C_SHARED_STEM_KEY``. A stem never contains
+    ``/`` and every JVM key of a packaged file does, so neither test
+    can see the other's keys and one set travels through every resolve
+    pass and pool initializer unchanged.
 
     Args:
         files: Every mapped file.
@@ -6756,7 +7634,12 @@ def _repo_stems(files: list[FileMap]) -> set[str]:
         The combined key set.
     """
     keys = {_repo_stem(PurePosixPath(fm.path)) for fm in files}
+    keys.update(_c_shared_stem_keys(files))
     for fm in files:
+        if fm.path.endswith(_PY_EXTENSIONS):
+            path = PurePosixPath(fm.path)
+            keys.add(_PY_ROOT_KEY + _repo_stem(path))
+            keys.update(_PY_ROOT_KEY + part for part in path.parts[:-1])
         file_keys = _jvm_file_keys(fm.path)
         keys.update(file_keys)
         if fm.language != "kotlin" or not file_keys:
@@ -6768,6 +7651,28 @@ def _repo_stems(files: list[FileMap]) -> set[str]:
             if "." not in sym.qualname:
                 keys.add(f"{package}/{sym.name}" if package else sym.name)
     return keys
+
+
+def _c_shared_stem_keys(files: list[FileMap]) -> set[str]:
+    """``_C_SHARED_STEM_KEY`` keys for C/C++ stems in 2+ directories.
+
+    Args:
+        files: Every mapped file.
+
+    Returns:
+        One key per shared stem.
+    """
+    dirs: dict[str, set[str]] = {}
+    for fm in files:
+        if fm.language not in _WHOLE_FILE_IMPORT_LANGUAGES:
+            continue
+        parent, _, base = fm.path.rpartition("/")
+        dirs.setdefault(base.split(".", 1)[0], set()).add(parent)
+    return {
+        _C_SHARED_STEM_KEY + stem
+        for stem, where in dirs.items()
+        if len(where) > 1
+    }
 
 
 def _module_matches(source: str, candidate_path: str) -> bool:
@@ -7775,6 +8680,122 @@ class _RustOutsideImport(Import):
     ``_RustCrates.outside``): external, whatever its segments match."""
 
 
+@dataclass
+class _DanglingImport(Import):
+    """A Python import of a module the repo doesn't have (see
+    ``_PythonModules.dangling``): external, whatever its segments
+    match."""
+
+
+def _python_module_path(path: str) -> str:
+    """A Python file's module as a ``/`` path: no extension, and a
+    package's ``__init__`` stands for its directory."""
+    module = path.rsplit(".", 1)[0]
+    return module.removesuffix("/__init__")
+
+
+@dataclass(frozen=True)
+class _PythonModules:
+    """Which Python modules the repo has, and what each one binds.
+
+    Attributes:
+        by_tail: Every ``/``-joined suffix of a module path (a file's,
+            or a directory's that holds Python) -> the full module
+            paths that end in it. An import is matched as a suffix
+            because the repo's import root is rarely the repo root.
+        names: Module path -> every name it defines or imports, with
+            ``*`` when it has a star import.
+        plain: The module paths of plain module files: not a
+            package's ``__init__``, not a directory.
+    """
+
+    by_tail: dict[str, tuple[str, ...]]
+    names: dict[str, frozenset[str]]
+    plain: frozenset[str]
+
+    def dangling(self, imp: Import) -> bool:
+        """Whether ``imp`` binds something no repo module has.
+
+        An absolute import is dangling when it names no module and
+        its parent module neither defines nor imports the last name.
+        ``from tensorflow.python.ops import gen_nn_ops`` is the shape
+        that matters: ``gen_nn_ops`` is generated at build time, so
+        nothing in the repo is what it binds, and every
+        ``gen_nn_ops.conv2d(..)`` used to land on ``nn_ops.py``'s own
+        ``conv2d`` wrapper by name. The parent check keeps a name an
+        ``__init__.py`` re-exports.
+
+        Only a package can leave a name dangling. A plain module file
+        that seems not to have the name most likely assigns it as a
+        variable (``tf_export = functools.partial(..)``), and module
+        variables aren't symbols.
+
+        A relative import is never dangling, and neither is a plain
+        ``import a.b.c``, which binds ``a``.
+
+        Args:
+            imp: A Python import record.
+
+        Returns:
+            True when nothing in the repo is what the import binds.
+        """
+        source = imp.source
+        if source.startswith("."):
+            return False
+        head, dot, _ = source.partition(".")
+        if dot and imp.name == head:
+            return False
+        if source.replace(".", "/") in self.by_tail:
+            return False
+        parent, _, leaf = source.rpartition(".")
+        if not parent:
+            return True
+        for home in self.by_tail.get(parent.replace(".", "/"), ()):
+            bound = self.names.get(home, frozenset())
+            if home in self.plain or leaf in bound or "*" in bound:
+                return False
+
+        return True
+
+
+def _python_modules(files: list[FileMap]) -> _PythonModules:
+    """Index the repo's Python modules for ``_PythonModules.dangling``.
+
+    Args:
+        files: Every mapped file.
+
+    Returns:
+        The index, empty when the repo has no Python.
+    """
+    tails: dict[str, set[str]] = {}
+    names: dict[str, frozenset[str]] = {}
+    plain: set[str] = set()
+    seen: set[str] = set()
+    for fm in files:
+        if not fm.path.endswith(_PY_EXTENSIONS):
+            continue
+        module = _python_module_path(fm.path)
+        if module == fm.path.rsplit(".", 1)[0]:
+            plain.add(module)
+        bound = {s.name for s in fm.symbols} | {i.name for i in fm.imports}
+        names[module] = names.get(module, frozenset()) | bound
+        parts = module.split("/")
+        for end in range(1, len(parts) + 1):
+            prefix = parts[:end]
+            full = "/".join(prefix)
+            if full in seen:
+                continue
+            seen.add(full)
+            for start in range(end):
+                tails.setdefault("/".join(prefix[start:]), set()).add(full)
+
+    return _PythonModules(
+        by_tail={k: tuple(sorted(v)) for k, v in tails.items()},
+        names=names,
+        plain=frozenset(plain),
+    )
+
+
 def _package_json_workspace_globs(data: dict) -> list[str]:
     """A ``package.json``'s ``workspaces`` globs, either spelling."""
     spec = data.get("workspaces")
@@ -8185,15 +9206,27 @@ def _import_is_in_repo(imp: Import, repo_stems: set[str]) -> bool:
     ``_dotted_components``). A Java/Kotlin import is tested by its
     qualified path instead (see ``_jvm_import_keys``), and a one-
     segment bare JS/TS specifier is a package, never a repo file (see
-    ``_bare_package_import``).
+    ``_bare_package_import``). An absolute Python import is tested by
+    its first segment against the repo's Python roots
+    (``_PY_ROOT_KEY``).
     """
     if isinstance(imp, _WorkspaceImport):
         return True
-    if isinstance(imp, _RustOutsideImport):
+    if isinstance(imp, (_RustOutsideImport, _DanglingImport)):
         # ``use windows::core::HSTRING;`` passed the stem test because
         # zed has a ``windows.rs``, and ``HSTRING::new(..)`` ran the
-        # ladder over every ``new`` in the repo.
+        # ladder over every ``new`` in the repo. A Python import of a
+        # generated module (``gen_nn_ops``) is the same: nothing in
+        # the repo is what it binds.
         return False
+    if imp.path.endswith(_PY_EXTENSIONS) and not imp.source.startswith("."):
+        # An absolute Python import is in-repo iff its first segment is
+        # a module or package the repo has in Python. The any-segment
+        # stem test called ``import numpy as np`` in-repo because
+        # tensorflow has a ``numpy.cc``, so every ``np.array(..)`` ran
+        # the ladder and 5,822 sites landed on the repo's own
+        # ``np_array_ops.py::array``.
+        return _PY_ROOT_KEY + imp.source.split(".")[0] in repo_stems
     if _bare_package_import(imp):
         # ``import * as vscode from "vscode"`` names an npm package,
         # whatever the repo's files are called. The stem test passed
@@ -8343,6 +9376,7 @@ def _imports_by_file(
     workspace_pkgs: dict[str, str] | None = None,
     lookup: _OriginLookup | None = None,
     rust_crates: _RustCrates | None = None,
+    python_modules: _PythonModules | None = None,
 ) -> dict[str, dict[str, Import]]:
     """Map file path → local name → import record.
 
@@ -8351,15 +9385,29 @@ def _imports_by_file(
     ``_WorkspaceImport``. ``lookup``, when given, attaches to every
     JS/TS binding the symbols its specifier resolves to (see
     ``_OriginLookup``). ``rust_crates``, when given, turns every Rust
-    ``use`` of an outside crate into a ``_RustOutsideImport``. With
+    ``use`` of an outside crate into a ``_RustOutsideImport``.
+    ``python_modules``, when given, turns every Python import of a
+    module the repo doesn't have into a ``_DanglingImport``. With
     none of them, every record is left as-is.
+
+    A Python star import binds no name, so it stays out of the table.
     """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
         table = out.setdefault(fm.path, {})
         used = _member_names(fm) if lookup is not None else {}
+        python = fm.path.endswith(_PY_EXTENSIONS)
         for imp in fm.imports:
-            if imp.name in table:
+            if imp.name in table or (python and imp.name == "*"):
+                continue
+            if (
+                python
+                and python_modules is not None
+                and python_modules.dangling(imp)
+            ):
+                table[imp.name] = _DanglingImport(
+                    path=imp.path, name=imp.name, source=imp.source
+                )
                 continue
             origins: tuple[Symbol, ...] = ()
             members: dict[str, tuple[Symbol, ...]] = {}

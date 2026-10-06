@@ -125,6 +125,16 @@ class Symbol:
             otherwise. When the callee's head is a binding imported
             from outside the repo, the literal was handed to that
             package and its members are entry points, not dead code.
+        visibility: How far a JVM method or constructor can be named
+            from, after its enclosing types narrow it: ``"private"``
+            for its own file only (Java's narrowest is ``private``, or
+            Kotlin's declaration or an enclosing class or object is
+            ``private``), ``"package"`` for its own Java package only
+            (package-private, not an interface member), ``None`` for no
+            limit dekko applies (``public``, ``protected``, Kotlin
+            ``internal``, a member of an anonymous or local class, and
+            every other language and kind). The resolver vetoes a pick
+            the call site can't reach.
     """
 
     id: str
@@ -143,6 +153,7 @@ class Symbol:
     test: bool = False
     in_literal: bool = False
     literal_consumer: str | None = None
+    visibility: str | None = None
 
 
 @dataclass

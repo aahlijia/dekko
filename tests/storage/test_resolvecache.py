@@ -1026,6 +1026,120 @@ def test_rust_method_arity_edit_keeps_incremental_equal_to_full(
     assert (pair in edges) == (before == "wants_two")
 
 
+JVM_ACCESS_SRC = {
+    "src/main/java/app/Helper.java": (
+        "package app;\n"
+        "public class Helper {\n"
+        "    private void tidy(String a) { }\n"
+        "}\n"
+    ),
+    "src/main/java/app/User.java": (
+        "package app;\n"
+        "public class User {\n"
+        '    void go(Object h) { h.tidy("x"); }\n'
+        "}\n"
+    ),
+    "src/main/java/app/Other.java": "package app;\npublic class Other { }\n",
+}
+_OPENED = JVM_ACCESS_SRC["src/main/java/app/Helper.java"].replace(
+    "private", "public"
+)
+
+
+def test_gate_widens_to_calls_when_a_jvm_method_becomes_reachable(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """The call was external because ``tidy`` was private to its file;
+    its cached entry still names ``tidy`` by the text it wrote."""
+    root = make_mapped_repo(JVM_ACCESS_SRC)
+    (root / "src/main/java/app/Helper.java").write_text(_OPENED)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {
+        "src/main/java/app/Helper.java",
+        "src/main/java/app/User.java",
+    }
+
+
+@pytest.mark.parametrize("before", ["private", "public"])
+def test_jvm_visibility_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    helper = "src/main/java/app/Helper.java"
+    source = dict(JVM_ACCESS_SRC)
+    after = JVM_ACCESS_SRC[helper]
+    if before == "private":
+        after = _OPENED
+    else:
+        source[helper] = _OPENED
+    root = make_mapped_repo(source)
+    (root / helper).write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    pair = ("src/main/java/app/User.java::User.go", f"{helper}::Helper.tidy")
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    assert (pair in edges) == (before == "private")
+
+
+JAVA_OVERLOAD_SRC = {
+    "src/main/java/app/Helper.java": (
+        "package app;\n"
+        "public class Helper {\n"
+        "    public void tidy(String a, String b) { }\n"
+        "    public void tidy(String a, String b, String c) { }\n"
+        "}\n"
+    ),
+    "src/main/java/app/User.java": (
+        "package app;\n"
+        "public class User {\n"
+        '    void go(Object h) { h.tidy("x"); }\n'
+        "}\n"
+    ),
+    "src/main/java/app/Other.java": "package app;\npublic class Other { }\n",
+}
+_ONE_FITS = JAVA_OVERLOAD_SRC["src/main/java/app/Helper.java"].replace(
+    "tidy(String a, String b) {", "tidy(String a) {"
+)
+
+
+@pytest.mark.parametrize("before", ["none_fits", "one_fits"])
+def test_java_overload_count_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    """``h.tidy("x")`` is external while no overload takes one
+    argument, and picks the one that does once it exists."""
+    helper = "src/main/java/app/Helper.java"
+    source = dict(JAVA_OVERLOAD_SRC)
+    after = JAVA_OVERLOAD_SRC[helper]
+    if before == "none_fits":
+        after = _ONE_FITS
+    else:
+        source[helper] = _ONE_FITS
+    root = make_mapped_repo(source)
+    (root / helper).write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    pair = ("src/main/java/app/User.java::User.go", f"{helper}::Helper.tidy")
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    assert (pair in edges) == (before == "none_fits")
+
+
 def test_a_tsconfig_paths_edit_invalidates_the_cache(
     make_mapped_repo: RepoFactory,
 ) -> None:
@@ -1127,6 +1241,54 @@ def test_rust_rename_edit_keeps_incremental_equal_to_full(
     external = {(ids[e["caller"]], ids[e["callee"]]) for e in full["external"]}
     pair = ("crates/app/src/view.rs::build", "TextBuffer::new")
     assert (pair in external) == (before == "renamed")
+
+
+PY_GENERATED_SRC = {
+    "pkg/__init__.py": "",
+    "pkg/ops/__init__.py": "",
+    "pkg/ops/nn_ops.py": "def conv2d(x):\n    return x\n",
+    "model.py": (
+        "from pkg.ops import gen_nn_ops\n"
+        "def build(x):\n"
+        "    return gen_nn_ops.conv2d(x)\n"
+    ),
+}
+_BINDS_GEN = "from . import nn_ops as gen_nn_ops\n"
+
+
+def test_gate_widens_to_files_importing_a_name_a_package_gained(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    """``from pkg.ops import gen_nn_ops`` bound nothing in the repo
+    until ``pkg/ops/__init__.py`` imported it, and an import is part of
+    no symbol, so the name delta alone can't see the edit."""
+    root = make_mapped_repo(PY_GENERATED_SRC)
+    (root / "pkg/ops/__init__.py").write_text(_BINDS_GEN)
+    reuse = _build(root)
+    assert reuse is not None
+    assert reuse.dirty == {"pkg/ops/__init__.py", "model.py"}
+
+
+@pytest.mark.parametrize("before", ["dangling", "bound"])
+def test_python_binding_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    source = dict(PY_GENERATED_SRC)
+    after = _BINDS_GEN
+    if before == "bound":
+        source["pkg/ops/__init__.py"] = _BINDS_GEN
+        after = ""
+    root = make_mapped_repo(source)
+    (root / "pkg/ops/__init__.py").write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
 
 
 def test_gate_widens_when_a_rename_points_at_another_type(

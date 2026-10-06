@@ -9,6 +9,274 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-10-06
+
+Closes round 1.8's fix cycle. The code is 1.7.7; this release is the
+version line catching up with the round, per `CONTRIBUTING.md`'s
+"Testing rounds and the version line". Round 1.8 evaluated 1.6.22 on
+seven real repositories and found two High issues and thirteen Medium
+ones, most of them calls landing on an in-repo symbol the call's shape,
+imports or access rules say it can't mean. All 7 fixes:
+
+- **1.7.1**: a Python import is in-repo only when its first segment is
+  Python the repo has, so `np.array(..)` no longer lands on the repo's
+  own `array` because of a C++ `numpy.cc`.
+- **1.7.2**: a Python call's shape and scope rule out picks: a bare
+  call can't reach a `self`/`cls` method (`list(x)` on tensorflow's
+  `Registry.list`), a module-qualified call prefers the import over a
+  same-file name, and a bare call needs the name visible in its file.
+  `affected` on a one-line `Registry.list` edit: 1,375 test files ->
+  87.
+- **1.7.3**: a C/C++ `#include` names a file by path, not by stem, and
+  calls named like standard-library members (`size`, `ok`, `first`)
+  don't fall back to the one in-repo match (`Status.ok` fan-in 2,242 ->
+  15, all right).
+- **1.7.4**: a Rust argument behind `#[cfg(..)]` leaves the count
+  unknown, and a `Type::name` path can't land on another type's member.
+- **1.7.5**: a Java or Kotlin call can't land on a method its file
+  can't reach (private, package-private, or inside a type that is).
+- **1.7.6**: a Java call is picked by the argument count it writes, a
+  call no candidate can answer is external, and an ambiguous Java row
+  lists only what the call could mean (spring-boot rows 68,764 ->
+  62,158).
+- **1.7.7**: a Java `new` keeps the type path it writes, and a package
+  or `Outer.Inner` path narrows the call to that type. `affected` on a
+  one-line `ItemMetadataAssert.extracting` edit: 204 test files -> 5.
+
+## [1.7.7] — 2026-10-06
+
+### Fixed
+- **A Java `new` keeps the type path it writes.** The extractor kept
+  only the last segment, so `new org.apache.tomcat.util.descriptor.web.
+  ErrorPage()` was `new ErrorPage` and landed on the repo's own
+  `ErrorPage`, and `new Outer<String>.Inner()` was read as `Outer`. The
+  call text is now `new` plus the whole written path, type arguments,
+  type annotations and whitespace dropped, and its name is the last
+  segment. External rows name the real type (`new com.sun.jna.
+  LastErrorException`, `new SslContextFactory.Server`).
+- **A JVM call written through a package path reaches only that
+  package's type.** `new a.b.C()`, `a.b.C.m()` and Kotlin `a.b.C()`
+  name a package and a top-level type: one repo symbol on that path is
+  the target outright, several are picked among by the usual rules, and
+  none is external. On spring-boot, `new org.springframework.
+  integration.context.IntegrationProperties()` no longer reaches the
+  repo's `IntegrationProperties` (4 callers to 0), nor `new java.net.
+  Proxy(..)` `RemoteDevToolsProperties.Proxy`; the two
+  `ControllerEndpointHandlerMapping` classes are each constructed by
+  their own FQN.
+- **`new Outer.Inner()` reaches only a type nested that way.** `new
+  DataRedisProperties.Sentinel()` landed on `DataRedisConnectionDetails.
+  Sentinel`, and Jetty's `new HttpCookieStore.Empty()` on the repo's
+  `Empty`; calls that were ambiguous now resolve (`new Health.
+  Builder()`, `new DockerConnectionConfiguration.Host(..)`, `new Info.
+  Builder()`).
+- **`sanity` explains the lines this stops matching.** A grep hit that
+  names the target through another package or outer-type path reads
+  `written through another package's or type's qualified name, so it
+  names a different type — not a miss` instead of "qualified call —
+  known resolver blind spot".
+
+On spring-boot against 1.7.6, 151 call edges are gained and 11 go, and
+ambiguous rows drop from 62,158 to 62,045; a design simulation puts
+tensorflow at about +107 −1 (`new Interpreter.Options()`). Not judged:
+Kotlin `Outer.Inner()` (no `new` to tell a construction from a call), a
+one-segment lowercase head that isn't a known package root, and a
+single-letter type segment, which reads as a constant. The extraction
+cache refreshes on upgrade, so the first `dekko map` after it is a full
+one.
+
+## [1.7.6] — 2026-10-06
+
+### Fixed
+- **A Java call no longer lands on a method its argument count can't
+  call.** Java has no default arguments, so a method takes exactly its
+  parameter count, or at least its fixed ones with varargs. The
+  same-file and container picks went by name and file alone:
+  `this.deferredLog.debug(msg, t)` landed on a test's own `debug()`,
+  `this.repositories.get(0)` on another test's `get()`, `new
+  StringBuilder().reverse()` on a same-file `reverse(String)`. Such a
+  pick is dropped and the ladder runs again, so `debug(msg, t)` now
+  reaches `DeferredLog.debug(Object, Throwable)`.
+- **One class's overloads are picked by count.** A call whose
+  candidates are all overloads of one class was ambiguous, because the
+  sole-candidate pick needs exactly one: spring-boot's 1,594
+  `assertThat(ctx).hasSingleBean(X.class)` calls went nowhere, and
+  `ApplicationContextAssert.hasSingleBean` now has 1,186 callers. When
+  exactly one overload fits the count it is the target; when none does,
+  the call is external. A receiver call by a JDK core-type method name
+  (`list.add(x)`, `buffer.limit()`) is left ambiguous: one class owning
+  every in-repo `add` is no reason `list.add` means it.
+- **A Java call no candidate can answer is external, not ambiguous.**
+  When every candidate is a Java method and none is both reachable
+  from the call and callable with its count, the call goes external:
+  `context.getBeansOfType(X.class)` (131 rows to 1), Mockito's `given`,
+  `System.setProperty`.
+- **A Java ambiguous row lists only what the call could mean.** It
+  drops the candidates the call can't reach or call with its count,
+  when two or more are left. On spring-boot, ambiguous rows go from
+  68,764 to 62,158 and the candidates they list from 2.87 million to
+  1.22 million.
+
+On spring-boot against 1.7.5, 2,549 call edges are gained and 719 go;
+a design simulation puts tensorflow's small Java tree at about +100
+−23. Not judged:
+argument types (`s(int)` and `s(String)` stay ambiguous for `s(1)`) and
+Kotlin calls, whose default and named arguments `dekko` doesn't record.
+
+## [1.7.5] — 2026-10-06
+
+### Fixed
+- **A Java or Kotlin call no longer lands on a method its file can't
+  reach.** A `private` method is reachable from its own file only, a
+  package-private Java one from its own package only, and a member's
+  reach is the narrowest of its own and every enclosing type's, so a
+  public method of a `private static class` or a package-private class
+  counts too. The name-only picks ignored all of it: AssertJ's
+  `assertThat(x).extracting("a")` landed on spring-boot's one in-repo
+  `extracting`, a private test helper, from 494 callers (now its own
+  file's 12), and `map.keySet()`, Gradle's `getProject()` and
+  `Thread.sleep(..)` found same-named private methods across the repo.
+  Such a pick is dropped and the ladder runs again, for calls and for
+  method references (`X.class::isInstance`) alike. On spring-boot,
+  1,541 call edges and 148 reference edges go, and every one read was
+  an external API's method; tensorflow loses about 18. Not judged:
+  `protected`
+  (legal from a subclass), Kotlin `internal`, and the visibility of
+  types themselves.
+- **`new C(..)` never picks a private constructor from another file.**
+  An unreachable overload is no candidate, so a construction it tied
+  with now picks the reachable one: `new ApplicationContextRunner(
+  supplier)` reaches `ApplicationContextRunner(Supplier)` instead of
+  an ambiguous row. On spring-boot, 96 constructor edges are gained
+  and 3 go.
+- **`sanity` explains the lines this stops matching.** A grep hit
+  outside a private or package-private target's reach reads `the
+  target is private to its file or package (or sits in a private
+  type), so this line names some other type's same-named method — not
+  a miss` instead of "qualified call — known resolver blind spot" or
+  "unexplained".
+
+### Changed
+- map.json symbol rows carry `"visibility": "private"` or
+  `"package"` on JVM methods and constructors with that reach (absent
+  otherwise). The extraction cache refreshes on upgrade, so the first
+  `dekko map` after it is a full one.
+
+## [1.7.4] — 2026-10-06
+
+### Fixed
+- **A Rust argument behind `#[cfg(..)]` leaves the argument count
+  unknown.** `AnyEntity::new(a, b, #[cfg(..)] c, d, e)` was counted as
+  five against four parameters, so the arity check ruled out
+  `AnyEntity.new` and a retry handed the call to `Client.new`. The
+  count now depends on the build, so only the call's shape is checked.
+  `crashes::init(..)` and `pty_options(..)` calls with a gated argument
+  reach their in-repo targets instead of going external.
+- **A Rust `Type::name(..)` call no longer takes another type's member
+  by name alone.** With no evidence beyond the name, the same-file,
+  sole-candidate and last-resort picks sent `String::from("..")` to
+  the calling file's `impl From<anyhow::Error> for ThreadError`,
+  `Vec::from(..)` to `CursorShape.from`, and a generic
+  `T::enabled_for_staff()` to a test's `DemoFlag`. Such a pick now
+  needs its owner to be the written type (read through an alias or a
+  renaming `use`, so `TextBuffer::new` still reaches `Buffer.new`) or
+  a trait; otherwise the call is external. On zed, 17 wrong edges go.
+- **A Rust path whose own type's member can't take the call has no
+  second guess.** Rust prefers an inherent member to a trait's, so
+  when the arity check rules out the type's own member, the call is
+  external rather than retried onto some trait's same-named method. A
+  ruled-out pick of another type's member is still retried, which is
+  how `lsp::LanguageServerId::from_proto(id)` reaches its own
+  `from_proto`.
+
+## [1.7.3] — 2026-10-06
+
+### Fixed
+- **A C/C++ `#include` names a file by path, not by stem.** The
+  include rung matched any candidate whose file shared the included
+  header's stem, so `#include "tensorflow/core/platform/status.h"`
+  sent `s.ok()` to whichever `status.*` file in the repo defined `ok`
+  (the experimental C API's `Status.ok`, about 1,500 sites on
+  tensorflow). A path include now names a file whose path ends with
+  it, or its same-stem pair (`foo.h` with `foo.cc`); a bare
+  `#include "util.h"` names a sibling of the including file, or a
+  file anywhere when no other directory has a C/C++ file of that
+  stem. On tensorflow this trades about 10,300 stem-only pairs for
+  about 10,250 the stem test had left ambiguous between two or more
+  same-stem files.
+- **A C/C++ include binds no name.** The header's stem was entered as
+  a local binding, so a variable named like a header (`map.begin()`
+  with `#include <map>`) went external as "the import `map`", and
+  `status.message()` was hinted to any `status.*` file. Calls in
+  C/C++ files now take their import evidence from the include rung
+  alone.
+- **C++ standard-library member names are noise from a C/C++ call.**
+  `vec.size()`, `it.begin()`, `opt.has_value()`, `scope.status()` and
+  the other `std::` container, `optional`, `pair` and `absl::Status`
+  members took whichever in-repo method shared the name
+  (`AttrSlice.size`, `Input.status`). With no structural or include
+  evidence such a call is now external. The list applies only to
+  calls in C/C++ files; `data()`, `get()`, `DebugString()` and the
+  like stay off it, being real in-repo API. `unused` reads the same
+  list, so a C++ `size` method those calls might reach is still a
+  dispatch candidate.
+
+## [1.7.2] — 2026-10-06
+
+### Fixed
+- **A bare Python call can't reach a method that takes `self` or
+  `cls`.** A one-argument bare call "fit" `Registry.list(self)`
+  because `self` is only stripped from the count for a receiver call,
+  so every `list(x)` on tensorflow landed on it (and `enumerate(..)` on
+  `DatasetV2.enumerate`): about 2,800 sites. The pick is dropped and
+  the ladder runs again. A function nested in a method, which is
+  extracted as a method with no `self`, is still reached.
+- **A Python receiver call reaches a top-level function only through
+  an import.** `constant_op.constant(..)` took the calling file's own
+  `constant` at the same-file rung, and `layer.count_params()` on a
+  local took a top-level `count_params`. Now `x.f()` can mean a plain
+  function only when `x` is an import binding of the file (a rebind
+  counts) and the function isn't in the calling file, so
+  `constant_op.constant` reaches `constant_op.py`.
+- **A bare Python call to another file needs the name in scope.** The
+  name-only rungs took `tuple(x)` to tensorflow's lone
+  `control_flow_ops.py::tuple` from files that never import it, the
+  same for `complex`, `exit`, `eval` and for parameters and locals. A
+  Python target in another file now needs an in-repo import of the
+  name or a star import of its file; otherwise the call is external.
+  A pytest fixture from a `conftest.py` above the test still resolves
+  without one. References already had this rule. JS/TS calls keep
+  their picks.
+
+## [1.7.1] — 2026-10-05
+
+### Fixed
+- **A Python import counts as in-repo only when its first segment is
+  Python the repo has.** Any segment matching any file's stem used to
+  be enough, so `import numpy as np` was in-repo on tensorflow because
+  of a C++ `numpy.cc`. Every `np.array(..)` then ran the ladder and
+  landed on the repo's own `np_array_ops.py::array`. Now an absolute
+  import has to start with a Python module or package of the repo.
+  Relative imports are unchanged.
+- **A Python import of a module the repo doesn't have binds nothing.**
+  `from tensorflow.python.ops import gen_nn_ops` names a module that's
+  generated at build time, so `gen_nn_ops.conv2d(..)` landed on the
+  hand-written `nn_ops.py::conv2d` wrapper. An import whose module
+  isn't in the repo, under a package that neither defines nor imports
+  the name, now goes external, for `gen_x.f(..)` and for a bare `f(..)`
+  imported from `gen_x` alike. A name an `__init__.py` re-exports
+  still resolves, and so does a name a plain module assigns as a
+  variable. TensorFlow's generated public API (`import
+  tensorflow.compat.v1 as tf`) is external the same way, so
+  `tf.Variable(..)` no longer lands on `variables.py` by name. On
+  tensorflow, with the change above: 4,480 edge pairs gone, 575 gained
+  from the rebinds below.
+- **A Python star import and a module-level rebind of an import are
+  recorded as imports.** `from m import *` is kept with the name `*`.
+  `floatx = backend_config.floatx` binds `floatx` to the import it
+  came from, so `floatx()` resolves on that evidence and not by luck.
+  Caches re-extract Python files once.
+
 ## [1.7.0] — 2026-10-05
 
 Closes round 1.7's fix cycle. The code is 1.6.22; this release is the

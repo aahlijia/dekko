@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
 from concurrent.futures.process import BrokenProcessPool
+from dataclasses import replace
 from multiprocessing.context import BaseContext
 from pathlib import Path
 
@@ -873,6 +874,7 @@ def test_construction_without_explicit_constructor_unchanged() -> None:
             "main.py",
             "python",
             symbols=[caller],
+            imports=[Import("main.py", "*", "util")],
             calls=[
                 RawCall(
                     caller_id=caller.id,
@@ -913,6 +915,7 @@ def test_python_construction_credits_init() -> None:
             "main.py",
             "python",
             symbols=[caller],
+            imports=[Import("main.py", "*", "util")],
             calls=[
                 RawCall(
                     caller_id=caller.id,
@@ -2294,6 +2297,7 @@ def test_single_candidate_arity_within_variadic_range_still_resolves() -> None:
             "main.py",
             "python",
             symbols=[caller],
+            imports=[Import("main.py", "*", "mod")],
             calls=[
                 RawCall(
                     caller_id=caller.id,
@@ -2328,6 +2332,7 @@ def test_single_candidate_arity_within_default_param_still_resolves() -> None:
             "main.py",
             "python",
             symbols=[caller],
+            imports=[Import("main.py", "*", "mod")],
             calls=[
                 RawCall(
                     caller_id=caller.id,
@@ -2361,6 +2366,7 @@ def test_single_candidate_arity_gate_skipped_when_arg_count_missing() -> None:
             "main.py",
             "python",
             symbols=[caller],
+            imports=[Import("main.py", "*", "mod")],
             calls=[
                 RawCall(
                     caller_id=caller.id,
@@ -5971,19 +5977,30 @@ def test_rust_macro_generated_type_with_a_handwritten_impl(
     ]
 
 
-def test_rust_generic_param_path_is_left_to_the_ladder(tmp_path: Path) -> None:
-    # `T::default()`: one or two characters is a generic parameter, not
-    # an unknown type. Behavior here must not change.
+def test_rust_generic_param_path_reaches_a_trait_not_another_type(
+    tmp_path: Path,
+) -> None:
+    # `T::name()`: one or two characters is a generic parameter, not an
+    # unknown type, so the ladder still runs. It can reach a trait's
+    # method (what `T` is bounded by), never the calling file's
+    # inherent `ScrollHandle.default`.
     graph = _rust_graph(
         tmp_path,
         {
             "crates/g/src/div.rs": (
                 f"{_SCROLL_HANDLE}"
-                "pub fn make<T: Default>() {\n    let _v = T::default();\n}\n"
+                "pub trait Flag {\n    fn enabled() -> bool { true }\n}\n"
+                "pub fn make<T: Default + Flag>() {\n"
+                "    let _v = T::default();\n"
+                "    let _e = T::enabled();\n"
+                "}\n"
             ),
         },
     )
-    assert [e.callee for e in graph.external] != ["T::default"]
+    assert graph.calls_out["crates/g/src/div.rs::make"] == [
+        "crates/g/src/div.rs::Flag.enabled"
+    ]
+    assert "T::default" in [e.callee for e in graph.external]
 
 
 # Calls recovered from `assert_eq!(..)` bodies used to
@@ -6835,6 +6852,302 @@ def test_relative_import_is_in_repo_even_when_no_stem_matches(
     graph = resolve(files)
     assert graph.calls_in.get(target.id) == [user.id]
     assert graph.external == []
+
+
+def _py_call(
+    caller: Symbol, name: str, receiver: str | None = None
+) -> RawCall:
+    text = f"{receiver}.{name}" if receiver else name
+    return RawCall(
+        caller_id=caller.id,
+        path=caller.path,
+        text=text,
+        name=name,
+        receiver=receiver,
+        line=5,
+    )
+
+
+def test_python_import_named_like_a_cpp_file_is_external() -> None:
+    files = [
+        FileMap("third_party/numpy.cc", "cpp"),
+        FileMap("ops/np_array_ops.py", "python"),
+    ]
+    stems = resolver_mod._repo_stems(files)
+    imp = Import("model.py", "np", "numpy")
+    assert not resolver_mod._import_is_in_repo(imp, stems)
+
+
+@pytest.mark.parametrize(
+    "source", ["tensorflow.python.ops.array_ops", "ops.array_ops", "ops"]
+)
+def test_python_import_of_a_repo_package_is_in_repo(source: str) -> None:
+    files = [FileMap("tensorflow/python/ops/array_ops.py", "python")]
+    stems = resolver_mod._repo_stems(files)
+    imp = Import("model.py", source.split(".")[-1], source)
+    assert resolver_mod._import_is_in_repo(imp, stems)
+
+
+def test_python_module_call_through_an_outside_package_is_external() -> None:
+    # `import numpy as np` passed the stem test on tensorflow's own
+    # `numpy.cc`, so `np.array(..)` landed on the repo's `array`.
+    target = _fn("ops/np_array_ops.py", "array")
+    user = _fn("model.py", "build")
+    files = [
+        FileMap("third_party/numpy.cc", "cpp"),
+        FileMap("ops/np_array_ops.py", "python", symbols=[target]),
+        FileMap(
+            "model.py",
+            "python",
+            symbols=[user],
+            imports=[Import("model.py", "np", "numpy")],
+            calls=[_py_call(user, "array", "np")],
+        ),
+    ]
+    graph = resolve(files)
+    assert target.id not in graph.calls_in
+    assert len(graph.external) == 1
+
+
+def _gen_ops_files(user_imports: list[Import], call: str) -> list[FileMap]:
+    wrapper = _fn("pkg/ops/nn_ops.py", "conv2d")
+    user = _fn("model.py", "build")
+    receiver = "gen_nn_ops" if call == "receiver" else None
+    return [
+        FileMap(
+            "pkg/ops/__init__.py",
+            "python",
+            imports=[
+                Import("pkg/ops/__init__.py", "conv2d", ".nn_ops.conv2d")
+            ],
+        ),
+        FileMap("pkg/ops/nn_ops.py", "python", symbols=[wrapper]),
+        FileMap(
+            "model.py",
+            "python",
+            symbols=[user],
+            imports=user_imports,
+            calls=[_py_call(user, "conv2d", receiver)],
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "name", "call"),
+    [
+        ("pkg.ops.gen_nn_ops", "gen_nn_ops", "receiver"),
+        ("pkg.ops.gen_nn_ops.conv2d", "conv2d", "bare"),
+    ],
+)
+def test_python_call_through_a_generated_module_is_external(
+    source: str, name: str, call: str
+) -> None:
+    # `gen_nn_ops` is generated at build time: nothing in the repo is
+    # what the import binds, so `gen_nn_ops.conv2d(..)` must not land
+    # on the hand-written wrapper of the same name.
+    files = _gen_ops_files([Import("model.py", name, source)], call)
+    graph = resolve(files)
+    assert "pkg/ops/nn_ops.py::conv2d" not in graph.calls_in
+    assert len(graph.external) == 1
+
+
+def test_python_name_a_plain_module_may_assign_is_not_dangling() -> None:
+    # `tf_export = functools.partial(..)` is a module variable, not a
+    # symbol, so a plain module that seems to lack the name has it.
+    target = _fn("pkg/util/tf_export.py", "api_export")
+    user = _fn("model.py", "build")
+    files = [
+        FileMap("pkg/util/tf_export.py", "python", symbols=[target]),
+        FileMap(
+            "model.py",
+            "python",
+            symbols=[user],
+            imports=[
+                Import("model.py", "tf_export", "pkg.util.tf_export.tf_export")
+            ],
+        ),
+    ]
+    table = resolver_mod._imports_by_file(
+        files, python_modules=resolver_mod._python_modules(files)
+    )
+    imp = table["model.py"]["tf_export"]
+    assert not isinstance(imp, resolver_mod._DanglingImport)
+
+
+def test_python_name_a_package_reexports_is_not_dangling() -> None:
+    files = _gen_ops_files(
+        [Import("model.py", "conv2d", "pkg.ops.conv2d")], "bare"
+    )
+    graph = resolve(files)
+    assert graph.calls_in["pkg/ops/nn_ops.py::conv2d"] == ["model.py::build"]
+    assert graph.external == []
+
+
+def _with_params(sym: Symbol, *names: str) -> Symbol:
+    return replace(sym, params=[Param(name=n) for n in names])
+
+
+def test_bare_python_call_never_reaches_a_self_method() -> None:
+    # `list(x)` is the builtin. A one-argument bare call "fit"
+    # `Registry.list(self)` because `self` is stripped for receivers
+    # only, so every `list(..)` in tensorflow landed on it.
+    method = _with_params(_fn("registry.py", "list", "Registry.list"), "self")
+    user = _fn("model.py", "build")
+    files = [
+        FileMap("registry.py", "python", symbols=[method]),
+        FileMap(
+            "model.py",
+            "python",
+            symbols=[user],
+            calls=[replace(_py_call(user, "list"), arg_count=1)],
+        ),
+    ]
+    graph = resolve(files)
+    assert method.id not in graph.calls_in
+    assert len(graph.external) == 1
+
+
+def test_bare_python_call_reaches_a_nested_def_extracted_as_a_method() -> None:
+    # A def inside a test method is extracted as a method of the class,
+    # with no `self`; the bare call to it is right.
+    user = _fn("t.py", "test_it", "T.test_it")
+    helper = _with_params(_fn("t.py", "add_check", "T.add_check"), "x")
+    files = [
+        FileMap(
+            "t.py",
+            "python",
+            symbols=[user, helper],
+            calls=[_py_call(user, "add_check")],
+        )
+    ]
+    graph = resolve(files)
+    assert graph.calls_in[helper.id] == [user.id]
+
+
+def test_python_module_call_skips_the_files_own_function() -> None:
+    # `constant_op.constant(..)` took the calling file's own `constant`
+    # at the same-file rung; the import names another file.
+    own = _fn("backend.py", "constant")
+    user = _fn("backend.py", "build")
+    target = _fn("ops/constant_op.py", "constant")
+    files = [
+        FileMap("ops/constant_op.py", "python", symbols=[target]),
+        FileMap(
+            "backend.py",
+            "python",
+            symbols=[own, user],
+            imports=[Import("backend.py", "constant_op", "ops.constant_op")],
+            calls=[_py_call(user, "constant", "constant_op")],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.calls_in[target.id] == [user.id]
+    assert own.id not in graph.calls_in
+
+
+@pytest.mark.parametrize("target_path", ["model.py", "util.py"])
+def test_python_call_on_a_local_never_reaches_a_top_level_function(
+    target_path: str,
+) -> None:
+    target = _fn(target_path, "count_params")
+    user = _fn("model.py", "build")
+    symbols = [user, target] if target_path == "model.py" else [user]
+    files = [
+        FileMap(
+            "model.py",
+            "python",
+            symbols=symbols,
+            calls=[_py_call(user, "count_params", "layer")],
+        )
+    ]
+    if target_path != "model.py":
+        files.append(FileMap(target_path, "python", symbols=[target]))
+    graph = resolve(files)
+    assert target.id not in graph.calls_in
+
+
+def _bare_cross_file(imports: list[Import]) -> CallGraph:
+    target = _fn("ops/control_flow_ops.py", "tuple")
+    user = _fn("model.py", "build")
+    files = [
+        FileMap("ops/control_flow_ops.py", "python", symbols=[target]),
+        FileMap(
+            "model.py",
+            "python",
+            symbols=[user],
+            imports=imports,
+            calls=[_py_call(user, "tuple")],
+        ),
+    ]
+    return resolve(files)
+
+
+def test_bare_python_call_to_a_file_it_cant_see_is_external() -> None:
+    # `tuple(x)` is the builtin, not tensorflow's lone `tuple`.
+    graph = _bare_cross_file([])
+    assert "ops/control_flow_ops.py::tuple" not in graph.calls_in
+    assert len(graph.external) == 1
+
+
+@pytest.mark.parametrize(
+    "imp",
+    [
+        Import("model.py", "tuple", "ops.control_flow_ops.tuple"),
+        Import("model.py", "*", "ops.control_flow_ops"),
+    ],
+    ids=["rebind", "star"],
+)
+def test_bare_python_call_sees_a_rebind_or_star_import(imp: Import) -> None:
+    graph = _bare_cross_file([imp])
+    assert graph.calls_in["ops/control_flow_ops.py::tuple"] == [
+        "model.py::build"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fixture_path", "reached"),
+    [
+        ("tests/conftest.py", True),
+        ("conftest.py", True),
+        ("tests/other/conftest.py", False),
+    ],
+)
+def test_bare_python_call_sees_a_conftest_fixture_above_it(
+    fixture_path: str, reached: bool
+) -> None:
+    # `def test_x(make_repo): make_repo(..)`: pytest injects the
+    # fixture from an ancestor conftest.py, with no import.
+    fixture = replace(_fn(fixture_path, "make_repo"), decorated=True)
+    user = _fn("tests/test_x.py", "test_x")
+    files = [
+        FileMap(fixture_path, "python", symbols=[fixture]),
+        FileMap(
+            "tests/test_x.py",
+            "python",
+            symbols=[user],
+            calls=[_py_call(user, "make_repo")],
+        ),
+    ]
+    graph = resolve(files)
+    assert (fixture.id in graph.calls_in) is reached
+
+
+def test_bare_js_call_to_another_file_keeps_its_pick() -> None:
+    # JS object-literal members and factory-returned functions are
+    # extracted flat, so a bare cross-file pick is often right.
+    target = _fn("output.ts", "writeErr", language="typescript")
+    user = _fn("cli.ts", "main", language="typescript")
+    files = [
+        FileMap("output.ts", "typescript", symbols=[target]),
+        FileMap(
+            "cli.ts",
+            "typescript",
+            symbols=[user],
+            calls=[_py_call(user, "writeErr")],
+        ),
+    ]
+    graph = resolve(files)
+    assert graph.calls_in[target.id] == [user.id]
 
 
 def test_bare_package_import_still_shadows_a_repo_name() -> None:

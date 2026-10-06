@@ -234,14 +234,16 @@ def _symbol_row(sym: Symbol) -> dict:
     """One ``"symbols"`` row: ``asdict`` minus the flags at their defaults.
 
     ``in_literal``/``literal_consumer`` are set on a small minority of
-    symbols (object-literal members), so writing their defaults on
-    every row would grow the symbol table for nothing. The loader's
-    ``.get`` defaults make the absence mean the default.
+    symbols (object-literal members), and ``visibility`` on JVM
+    methods only, so writing their defaults on every row would grow
+    the symbol table for nothing. The loader's ``.get`` defaults make
+    the absence mean the default.
     """
     row = asdict(sym)
     if not row["in_literal"]:
         del row["in_literal"]
-    if row["literal_consumer"] is None:
-        del row["literal_consumer"]
+    for key in ("literal_consumer", "visibility"):
+        if row[key] is None:
+            del row[key]
 
     return row

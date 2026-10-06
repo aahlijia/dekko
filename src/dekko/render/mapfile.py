@@ -1442,6 +1442,7 @@ def _symbol_from_dict(d: dict) -> Symbol:
         test=d.get("test", False),
         in_literal=d.get("in_literal", False),
         literal_consumer=d.get("literal_consumer"),
+        visibility=d.get("visibility"),
     )
 
 

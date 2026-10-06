@@ -540,6 +540,75 @@ def _rust_rename_dirty(
     return _rust_files_using(files, dirty, renamed)
 
 
+def _python_bound_delta(
+    fm: FileMap,
+    old_symbols: list[dict] | None,
+    old_imports: list[dict] | None,
+) -> set[str]:
+    """Names one edited Python file gained or lost, as defined or
+    imported (``resolver._PythonModules.names``).
+
+    Args:
+        fm: The file as extracted now.
+        old_symbols: Its cached symbols, as dicts.
+        old_imports: Its cached import bindings, as dicts.
+
+    Returns:
+        The names, with ``*`` for a star import gained or lost. Empty
+        for a non-Python file.
+    """
+    if not fm.path.endswith((".py", ".pyi")):
+        return set()
+    before = {d["name"] for d in old_symbols or ()}
+    before |= {d["name"] for d in old_imports or ()}
+    now = {s.name for s in fm.symbols} | {i.name for i in fm.imports}
+
+    return before ^ now
+
+
+def _python_binding_dirty(
+    files: list[FileMap], cache: IncrementalCache, dirty: set[str]
+) -> set[str]:
+    """Clean Python files whose import a dirty file's edit can flip.
+
+    Whether ``from pkg import gen_ops`` binds anything in the repo
+    (``resolver._PythonModules.dangling``) depends on what ``pkg``
+    defines and imports, and an import binding is part of no symbol,
+    so the name delta can't see it. Over-invalidates on purpose: any
+    import whose last name was gained or lost anywhere, and every
+    Python file with an import when a star import came or went.
+
+    Args:
+        files: Every mapped file.
+        cache: This run's extraction cache.
+        dirty: Paths already known dirty.
+
+    Returns:
+        Additional paths (disjoint from ``dirty``).
+    """
+    names: set[str] = set()
+    for fm in files:
+        if fm.path in dirty:
+            names |= _python_bound_delta(
+                fm, cache.old_symbols(fm.path), cache.old_imports(fm.path)
+            )
+    if not names:
+        return set()
+
+    star = "*" in names
+    found: set[str] = set()
+    for fm in files:
+        if fm.path in dirty or not fm.path.endswith((".py", ".pyi")):
+            continue
+        if any(
+            star or alias_original_name(imp.source) in names
+            for imp in fm.imports
+        ):
+            found.add(fm.path)
+
+    return found
+
+
 def _cpp_decl_names(entries: set[str]) -> set[str]:
     """Bare names of ``FileMap.cpp_decls`` entries.
 
@@ -655,6 +724,9 @@ def _name_delta_dirty(
     # A Rust ``use .. as Name`` gained or lost decides whether
     # ``Name::f(..)`` can reach a repo symbol from any file.
     extra |= _rust_rename_dirty(files, cache, dirty)
+    # A Python module gaining or losing a name decides whether another
+    # file's import of that name is dangling.
+    extra |= _python_binding_dirty(files, cache, dirty)
 
     return extra
 

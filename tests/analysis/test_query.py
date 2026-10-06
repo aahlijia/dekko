@@ -1638,6 +1638,9 @@ def test_json_flag_has_no_effect_on_not_found_error_output(
 MULTI_SITE_CALLERS = {
     "target.py": ("def target(x: int) -> int:\n    return x + 1\n"),
     "caller.py": (
+        "from target import target\n"
+        "\n"
+        "\n"
         "def caller_a() -> int:\n"
         "    a = target(1)\n"
         "    b = target(2)\n"

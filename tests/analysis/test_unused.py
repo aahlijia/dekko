@@ -1683,6 +1683,33 @@ def test_unguarded_external_name_is_not_a_dispatch_candidate() -> None:
     assert unused.find_dispatch_candidates(idx, ()) == []
 
 
+@pytest.mark.parametrize(
+    ("path", "language", "candidate"),
+    [
+        ("lib/{}.h", "cpp", True),
+        ("lib/{}.ts", "typescript", False),
+    ],
+)
+def test_cpp_std_member_name_is_guarded_only_in_cpp(
+    path: str, language: str, candidate: bool
+) -> None:
+    # The noise guard sends `v.size()` external only from a C/C++ file,
+    # so only C/C++ definitions of `size` read that as dispatch.
+    spans = [
+        _sym(
+            "size",
+            path.format(owner),
+            qualname=f"{owner}.size",
+            kind="method",
+            language=language,
+        )
+        for owner in ("Span", "Slice")
+    ]
+    idx = _index(spans, externals_by_name={"size": [_external("v.size")]})
+    found = unused.find_dispatch_candidates(idx, ())
+    assert bool(found) is candidate
+
+
 def test_receiverless_guarded_call_is_not_dispatch_evidence() -> None:
     bash, grep = _tool_method("BashTool"), _tool_method("GrepTool")
     idx = _index(

@@ -72,6 +72,38 @@ def test_python_relative_import_sources(tmp_path: Path) -> None:
     assert ("other", "..pkg.other") in imports
 
 
+def test_python_star_import_and_module_level_rebinds(tmp_path: Path) -> None:
+    spec = languages.spec_for_path("mod.py")
+    assert spec is not None
+    (tmp_path / "mod.py").write_text(
+        "from pkg import backend_config\n"
+        "import distribution_util\n"
+        "from _pywrap_session import *\n"
+        "floatx = backend_config.floatx\n"
+        "du = distribution_util\n"
+        "again = floatx\n"
+        "count = 3\n"
+        "backend_config = None\n"
+        "class C:\n"
+        "    inner = backend_config.epsilon\n"
+        "def f():\n"
+        "    local = backend_config.epsilon\n"
+    )
+    fm = extract_file(tmp_path, "mod.py", spec)
+    imports = [(i.name, i.source) for i in fm.imports]
+    assert ("*", "_pywrap_session") in imports
+    assert ("floatx", "pkg.backend_config.floatx") in imports
+    assert ("du", "distribution_util") in imports
+    # A rebind of a rebind follows it to the import.
+    assert ("again", "pkg.backend_config.floatx") in imports
+    names = [name for name, _ in imports]
+    # Not an import's rebind, an already-bound name, or not module-level.
+    assert "count" not in names
+    assert names.count("backend_config") == 1
+    assert "inner" not in names
+    assert "local" not in names
+
+
 def test_python_calls_attributed_to_enclosing_function() -> None:
     spec = languages.spec_for_path("main.py")
     assert spec is not None

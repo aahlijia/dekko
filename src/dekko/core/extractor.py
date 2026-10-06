@@ -481,6 +481,138 @@ def _make_symbol(
         test=spec.name == "rust" and rust_cfg.in_test_scope(def_node),
         in_literal=in_literal,
         literal_consumer=literal_consumer,
+        visibility=_jvm_visibility(spec.name, def_node),
+    )
+
+
+# JVM declarations ``_jvm_visibility`` gives a value: the methods and
+# constructors a call can land on.
+_JAVA_VISIBILITY_MEMBERS = frozenset(
+    {
+        "method_declaration",
+        "constructor_declaration",
+        "compact_constructor_declaration",
+    }
+)
+_KOTLIN_VISIBILITY_MEMBERS = frozenset(
+    {"function_declaration", "secondary_constructor"}
+)
+# A Java type declaration's body, and the declarations that own one.
+_JAVA_TYPE_BODIES = frozenset(
+    {
+        "class_body",
+        "interface_body",
+        "enum_body",
+        "enum_body_declarations",
+        "annotation_type_body",
+    }
+)
+_JAVA_TYPE_DECLARATIONS = frozenset(
+    {
+        "class_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "record_declaration",
+        "annotation_type_declaration",
+    }
+)
+# Members of these are public unless written ``private``.
+_JAVA_IMPLICITLY_PUBLIC_OWNERS = frozenset(
+    {"interface_declaration", "annotation_type_declaration"}
+)
+# Java access levels, widest first; a member's reach is the narrowest
+# of its own and every enclosing type's.
+_JAVA_ACCESS_RANK = {"public": 0, "protected": 1, "package": 2, "private": 3}
+
+
+def _jvm_visibility(language: str, def_node: Node) -> str | None:
+    """``Symbol.visibility`` for a definition node.
+
+    Java: the narrowest of the member's own access and every enclosing
+    type's, walking up through type bodies to the file. A member of an
+    anonymous or local class (a type body that isn't reached that way)
+    gets ``None``. Kotlin: ``"private"`` when the declaration or any
+    enclosing class or object is ``private``.
+
+    Args:
+        language: The file's language name.
+        def_node: The definition node ``_make_symbol`` is building.
+
+    Returns:
+        ``"private"``, ``"package"`` or ``None``.
+    """
+    if language == "java" and def_node.type in _JAVA_VISIBILITY_MEMBERS:
+        access = _java_effective_access(def_node)
+        return access if access in ("private", "package") else None
+    if language == "kotlin" and def_node.type in _KOTLIN_VISIBILITY_MEMBERS:
+        return "private" if _kotlin_private_scope(def_node) else None
+    return None
+
+
+def _java_effective_access(def_node: Node) -> str | None:
+    """The narrowest Java access of ``def_node`` and its enclosing types,
+    or ``None`` when an enclosing type is anonymous or local."""
+    access = "public"
+    node = def_node
+    while True:
+        body = node.parent
+        if body is None or body.type == "program":
+            return _narrower_java_access(access, _java_own_access(node, False))
+        owner = body.parent
+        if body.type == "enum_body_declarations" and owner is not None:
+            owner = owner.parent
+        if (
+            body.type not in _JAVA_TYPE_BODIES
+            or owner is None
+            or owner.type not in _JAVA_TYPE_DECLARATIONS
+        ):
+            return None
+        own = _java_own_access(
+            node, owner.type in _JAVA_IMPLICITLY_PUBLIC_OWNERS
+        )
+        access = _narrower_java_access(access, own)
+        node = owner
+
+
+def _narrower_java_access(a: str, b: str) -> str:
+    """The narrower of two Java access levels."""
+    return a if _JAVA_ACCESS_RANK[a] >= _JAVA_ACCESS_RANK[b] else b
+
+
+def _java_own_access(node: Node, implicitly_public: bool) -> str:
+    """A Java declaration's own access: its keyword, else ``"public"``
+    in an interface or annotation type, else ``"package"``."""
+    if _modifiers_keyword(node, "private"):
+        return "private"
+    if _modifiers_keyword(node, "public") or implicitly_public:
+        return "public"
+    if _modifiers_keyword(node, "protected"):
+        return "protected"
+    return "package"
+
+
+def _kotlin_private_scope(def_node: Node) -> bool:
+    """Whether a Kotlin declaration, or a class or object around it, is
+    written ``private``."""
+    node: Node | None = def_node
+    while node is not None:
+        if (
+            node is def_node
+            or node.type in ("class_declaration", "object_declaration")
+        ) and _kotlin_visibility_is(node, "private"):
+            return True
+        node = node.parent
+    return False
+
+
+def _kotlin_visibility_is(def_node: Node, keyword: str) -> bool:
+    """Whether a Kotlin declaration's visibility modifier is ``keyword``."""
+    modifiers = _modifiers_node(def_node)
+    if modifiers is None:
+        return False
+    return any(
+        child.type == "visibility_modifier" and _text(child) == keyword
+        for child in modifiers.named_children
     )
 
 
@@ -2040,9 +2172,12 @@ def _call_arg_count(args_node: Node | None) -> int | None:
 
     Comments are named "extra" nodes that can sit between arguments
     (``undefined, // modelId``), so they don't count. An unpacking
-    argument makes the count unknowable, and ``None`` is the value the
-    resolver's arity checks read as "no signal" rather than as a
-    mismatch.
+    argument makes the count unknowable, and so does a Rust attribute
+    on an argument: ``AnyEntity::new(a, b, #[cfg(..)] c, d, e)``
+    writes five where a build without the ``cfg`` passes four, and
+    the parameter side reads the gated parameter as a plain one.
+    ``None`` is the value the resolver's arity checks read as "no
+    signal" rather than as a mismatch.
 
     Args:
         args_node: The call's captured argument list, if any.
@@ -2053,7 +2188,10 @@ def _call_arg_count(args_node: Node | None) -> int | None:
     if args_node is None:
         return None
     args = [a for a in args_node.named_children if not a.is_extra]
-    if any(a.type in _UNPACKING_ARGUMENT_TYPES for a in args):
+    if any(
+        a.type in _UNPACKING_ARGUMENT_TYPES or a.type == "attribute_item"
+        for a in args
+    ):
         return None
 
     return len(args)
@@ -3190,9 +3328,32 @@ def _callee_java(node: Node) -> tuple[str, str, str | None] | None:
         type_node = node.child_by_field_name("type")
         if type_node is None:
             return None
-        name = _strip_generics(_text(type_node)).split(".")[-1]
-        return f"new {name}", name, None
+        written = _java_written_type(type_node)
+        return f"new {written}", written.split(".")[-1], None
     return None
+
+
+_JAVA_TYPE_ANNOTATION = re.compile(r"@[\w.]+(?:\([^)]*\))?")
+_JAVA_TYPE_ARGUMENTS = re.compile(r"<[^<>]*>")
+
+
+def _java_written_type(type_node: Node) -> str:
+    """The type a Java ``new`` writes, as a dotted path.
+
+    ``new org.apache.tomcat.util.descriptor.web.ErrorPage()`` and ``new
+    Health.Builder()`` name a package and an outer type; the resolver
+    reads them (``_jvm_written_type_path``), and an external row names
+    the real type. Type arguments anywhere in the path (``new
+    Outer<String>.Inner()``), type annotations and whitespace are
+    dropped.
+    """
+    written = _JAVA_TYPE_ANNOTATION.sub("", _text(type_node))
+    stripped = _JAVA_TYPE_ARGUMENTS.sub("", written)
+    while stripped != written:
+        written = stripped
+        stripped = _JAVA_TYPE_ARGUMENTS.sub("", written)
+
+    return "".join(written.split())
 
 
 def _split_callee_text(text: str) -> tuple[str, str | None]:
@@ -4813,13 +4974,35 @@ def _collect_imports(
 def _imports_python(
     matches: list[tuple[int, dict[str, list[Node]]]], rel: str
 ) -> list[Import]:
-    """Normalize Python import/from-import matches."""
+    """Normalize Python import/from-import matches.
+
+    Two shapes bind a name without an imported name of their own:
+
+    - ``from m import *`` is recorded with the name ``*`` and the
+      module as its source. It names no binding, but it is the only
+      thing that makes ``m``'s top-level names visible in the file.
+    - A module-level ``name = a.b.c`` (or ``name = a``) whose head is
+      one of the file's imports rebinds that import under a new name
+      (``floatx = backend_config.floatx``), so it is recorded as an
+      import of ``<a's source>.b.c``. Without it, ``floatx()`` reaches
+      its target only by luck, and any visibility rule cuts it.
+    """
     out: list[Import] = []
+    rebinds: list[tuple[str, str]] = []
     for _, caps in matches:
         alias = _one(caps, "alias")
         module = _one(caps, "module")
         from_module = _one(caps, "from_module")
         name = _one(caps, "name")
+        rebind = _one(caps, "rebind")
+        if rebind is not None:
+            rebound = _one(caps, "rebound")
+            if rebound is not None:
+                rebinds.append((_text(rebind), _text(rebound)))
+            continue
+        if from_module is not None and _one(caps, "star") is not None:
+            out.append(Import(path=rel, name="*", source=_text(from_module)))
+            continue
         if module is not None:
             source = _text(module)
             local = _text(alias) if alias else source.split(".")[0]
@@ -4834,6 +5017,40 @@ def _imports_python(
             out.append(
                 Import(path=rel, name=local, source=f"{base}{sep}{imported}")
             )
+    out.extend(_python_rebinds(rebinds, out, rel))
+
+    return out
+
+
+def _python_rebinds(
+    rebinds: list[tuple[str, str]], imports: list[Import], rel: str
+) -> list[Import]:
+    """Module-level ``name = a.b`` rebinds of an import, as imports.
+
+    Args:
+        rebinds: ``(name, right side)`` pairs, in source order.
+        imports: The file's real imports.
+        rel: The file's repo-relative path.
+
+    Returns:
+        One record per rebind whose head is an import binding or an
+        earlier rebind (``a = mod.x`` then ``b = a``). A rebind of a
+        name the file already binds is skipped: the first binding
+        wins, as it does for imports.
+    """
+    sources = {imp.name: imp.source for imp in imports if imp.name != "*"}
+    out: list[Import] = []
+    for local, value in rebinds:
+        head, _, rest = value.partition(".")
+        source = sources.get(head)
+        if source is None or local in sources:
+            continue
+        if rest:
+            sep = "" if source.endswith(".") else "."
+            source = f"{source}{sep}{rest}"
+        sources[local] = source
+        out.append(Import(path=rel, name=local, source=source))
+
     return out
 
 

@@ -796,3 +796,88 @@ def test_type_with_only_members_row_lists_them(tmp_path: Path) -> None:
     assert _ambiguous_for(graph, _USER) == {
         "from": ["src/a.rs::String.from", "src/b.rs::String.from"]
     }
+
+
+def test_cfg_argument_leaves_the_count_unknown(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            **_POINTS,
+            **_user("Point::new(1, #[cfg(test)] 2, 3);"),
+        },
+    )
+    # Three written, two in a build without `test`: the count can't
+    # rule `Point.new(x, y)` out.
+    assert _pairs(graph, _USER) == {_POINT_NEW}
+
+
+def test_cfg_argument_call_has_no_arg_count(tmp_path: Path) -> None:
+    (tmp_path / "a.rs").write_text(
+        "fn f() {\n    g(1, #[cfg(test)] 2);\n    g(1, 2);\n}\n"
+    )
+    files, _ = map_repository(
+        tmp_path, subpath=None, excludes=(), max_file_size=1_000_000
+    )
+    assert [c.arg_count for c in files[0].calls] == [None, 2]
+
+
+def test_type_path_whose_own_member_fails_arity_has_no_second_guess(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            **_POINTS,
+            "src/wide.rs": (
+                "pub trait Wide {\n"
+                "    fn new(a: i32, b: i32, c: i32) -> Self\n"
+                "    where\n        Self: Sized,\n    {\n"
+                "        todo!()\n    }\n}\n"
+            ),
+            **_user("Point::new(1, 2, 3);"),
+        },
+    )
+    # Rust takes the inherent `Point::new` over any trait's, so a count
+    # it can't fit means the count is off, not that a trait's three-
+    # argument `new` is meant.
+    assert _pairs(graph, _USER) == set()
+    assert _externals(graph, _USER) == {"Point::new"}
+
+
+def test_type_path_does_not_take_a_same_file_member_of_another_type(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "src/a.rs": (
+                "pub struct Alpha;\nimpl From<Alpha> for String {\n"
+                "    fn from(x: Alpha) -> String {\n"
+                "        String::new()\n    }\n}\n"
+            ),
+            **_user(
+                'String::from("x");',
+                "pub struct ThreadError;\n"
+                "impl From<i32> for ThreadError {\n"
+                "    fn from(x: i32) -> Self {\n        ThreadError\n    }\n"
+                "}\n",
+            ),
+        },
+    )
+    assert "src/user.rs::ThreadError.from" not in _pairs(graph, _USER)
+
+
+def test_alias_in_the_same_file_keeps_its_targets_member(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "src/other.rs": _point_with_new("Other"),
+            **_user(
+                "Coverage::new(1, 2);",
+                "pub type Coverage = Point;\n" + _point_with_new(),
+            ),
+        },
+    )
+    assert _pairs(graph, _USER) == {"src/user.rs::Point.new"}
