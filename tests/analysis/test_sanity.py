@@ -2874,7 +2874,7 @@ def test_sanity_unused_json_reports_counts_and_meta(
 
 _LIVE_REPO = {
     "a.py": "def target():\n    return 1\n",
-    "b.py": "def other():\n    return target()\n",
+    "b.py": "from a import target\n\n\ndef other():\n    return target()\n",
 }
 
 
@@ -3466,7 +3466,10 @@ def test_sanity_all_fail_on_unexplained_exit_code(
     root = make_mapped_repo(
         {
             "a.py": "def distinctivelyuniquename():\n    return 1\n",
-            "b.py": ("def other():\n    return distinctivelyuniquename()\n"),
+            "b.py": (
+                "from a import *\n\n\n"
+                "def other():\n    return distinctivelyuniquename()\n"
+            ),
         }
     )
     _force_no_dekko_hits(monkeypatch)

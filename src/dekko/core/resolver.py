@@ -1459,6 +1459,7 @@ def _resolve_files_chunk(
         raw_imports = (
             fm.imports if fm.language in _WHOLE_FILE_IMPORT_LANGUAGES else None
         )
+        stars = [i for i in fm.imports if i.name == "*"]
         for call in fm.calls:
             _resolve_call(
                 call,
@@ -1471,6 +1472,7 @@ def _resolve_files_chunk(
                 ambiguous=ambiguous,
                 external=external,
                 raw_imports=raw_imports,
+                stars=stars,
             )
     return edges, ambiguous, external
 
@@ -1888,11 +1890,12 @@ _CPP_FAMILY = _LANGUAGE_FAMILIES["cpp"]
 
 
 def _ref_target_visible(
-    ref: RawRef,
+    ref: RawRef | RawCall,
     target: Symbol,
     file_imports: dict[str, Import],
     repo_stems: set[str],
     file_exports: bool = False,
+    stars: list[Import] | None = None,
 ) -> bool:
     """Whether the file holding ``ref`` could name ``target`` at all.
 
@@ -1928,6 +1931,11 @@ def _ref_target_visible(
       sites on claude-code, 49 on cline).
     - A target declared in a ``.d.ts``: ambient types are global.
 
+    ``stars``, when given, is the file's Python star imports
+    (``from m import *``), which bind no name of their own: a target in
+    a file one of them names is in scope. ``_call_target_visible``
+    passes them; references don't, and keep the stricter rule.
+
     Not this function's job: a local that shadows a *same-file* or
     an *imported* symbol (claude-code ``utils/ide.ts`` imports
     ``errorMessage`` and rebinds it in a catch block), or any local in
@@ -1952,7 +1960,86 @@ def _ref_target_visible(
         is_script = not file_imports and not file_exports
         return is_script or target.path.endswith(".d.ts")
 
-    return False
+    return any(_module_matches(s.source, target.path) for s in stars or ())
+
+
+def _call_target_visible(
+    call: RawCall,
+    target: Symbol,
+    file_imports: dict[str, Import],
+    repo_stems: set[str],
+    stars: list[Import] | None,
+) -> bool:
+    """Whether a bare Python call could name ``target`` at all.
+
+    ``_ref_target_visible``'s Python rule, applied to calls. The
+    ladder's name-only rungs took ``tuple(x)`` to tensorflow's one
+    top-level ``control_flow_ops.py::tuple`` from files that never
+    import it: 1,405 bare cross-file picks, 846 of them builtins
+    (``tuple``, ``complex``, ``exit``, ``eval``) and most of the rest
+    parameters and locals. A Python name from another file is in scope
+    only through an import of it (a module-level rebind such as
+    ``floatx = backend_config.floatx`` is recorded as one) or a star
+    import of its file. A veto on the result with no second guess:
+    the same-file and import rungs already tried every visible
+    candidate.
+
+    JS/TS calls are left alone: object-literal members and functions a
+    factory returns are extracted as flat top-level functions, so a
+    bare cross-file call to one is often right.
+
+    Args:
+        call: The call the ladder resolved.
+        target: The symbol it picked.
+        file_imports: The calling file's import bindings by local name.
+        repo_stems: Every repo file's matching key (``_repo_stems``).
+        stars: The calling file's Python star imports.
+
+    Returns:
+        False for a bare call in a Python file to a Python symbol in
+        another file the call can't see, else True.
+    """
+    if (
+        target.language != "python"
+        or not call.path.endswith(_PY_EXTENSIONS)
+        or not _written_bare(call)
+        or _is_ancestor_conftest_fixture(call.path, target)
+    ):
+        return True
+
+    return _ref_target_visible(
+        call, target, file_imports, repo_stems, stars=stars
+    )
+
+
+def _is_ancestor_conftest_fixture(path: str, target: Symbol) -> bool:
+    """Whether ``target`` is a fixture pytest hands the file at ``path``.
+
+    A test calls the fixture it takes as a parameter
+    (``def test_x(make_repo): make_repo(..)``) with no import: pytest
+    injects it by name from a ``conftest.py`` in the test's directory
+    or an ancestor. The visibility veto cut 1,017 such edges from
+    dekko's own tests, and ``affected`` needs them to find the tests a
+    fixture change touches. Same evidence as ``_fixture_param_target``:
+    a decorated function in such a ``conftest.py``.
+
+    Args:
+        path: The calling file.
+        target: The symbol the ladder picked.
+
+    Returns:
+        True for a decorated function in a ``conftest.py`` whose
+        directory holds ``path``.
+    """
+    target_path = PurePosixPath(target.path)
+    if (
+        target_path.name != _CONFTEST
+        or target.kind != "function"
+        or not target.decorated
+    ):
+        return False
+
+    return target_path.parent in PurePosixPath(path).parents
 
 
 def resolve_heritage(
@@ -2853,8 +2940,13 @@ def _resolve_call(
     ambiguous: dict[tuple[str, str], list[str]],
     external: dict[tuple[str, str], set[int]],
     raw_imports: list[Import] | None = None,
+    stars: list[Import] | None = None,
 ) -> None:
-    """Resolve one call and record it in the right bucket."""
+    """Resolve one call and record it in the right bucket.
+
+    ``stars`` is the calling file's Python star imports, for
+    ``_call_target_visible``.
+    """
     caller_id = call.caller_id or f"{call.path}{MODULE_CALLER_SUFFIX}"
     if _receiver_is_external(call, file_imports, repo_stems):
         external.setdefault((caller_id, call.text), set()).add(call.line)
@@ -2913,7 +3005,12 @@ def _resolve_call(
             raw_imports,
         ),
     )
-    if target is _NOISE:
+    if target is _NOISE or (
+        isinstance(target, Symbol)
+        and not _call_target_visible(
+            call, target, file_imports, repo_stems, stars
+        )
+    ):
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
     if target is not None:
@@ -3548,11 +3645,12 @@ def _pick_candidate(
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
 ) -> Symbol | _Noise | None:
-    """Pick a candidate, skipping a Rust pick the call can't mean.
+    """Pick a candidate, skipping a Rust or Python pick the call can't mean.
 
     See ``_pick_candidate_vetoed`` for the ladder's own vetoes and
-    every parameter. A pick ``_rust_call_excludes`` rules out (a
-    shape or an argument count Rust has no syntax for) is taken out of
+    every parameter. A pick ``_rust_call_excludes`` or
+    ``_python_call_excludes`` rules out (a shape or an argument count
+    the language has no syntax for) is taken out of
     ``candidates`` and ``same_file`` and the ladder runs again, so a
     wrapper's ``self.inner.set(a)`` reaches the wrapped type's
     one-argument ``set`` instead of stopping at the wrapper's own
@@ -3575,8 +3673,9 @@ def _pick_candidate(
             crate_roots,
             tiebreak_hits,
         )
-        if not isinstance(picked, Symbol) or not _rust_call_excludes(
-            call, picked
+        if not isinstance(picked, Symbol) or not (
+            _rust_call_excludes(call, picked)
+            or _python_call_excludes(call, picked, file_imports)
         ):
             return picked
         if picked.id in excluded:
@@ -3652,6 +3751,63 @@ def _rust_call_excludes(call: _Referable, candidate: Symbol) -> bool:
         return True
 
     return max_count is not None and call.arg_count > max_count
+
+
+def _python_call_excludes(
+    call: _Referable, candidate: Symbol, file_imports: dict[str, Import]
+) -> bool:
+    """Whether a Python call's shape rules out ``candidate``.
+
+    - A bare call ``name(..)`` can't reach anything taking ``self`` or
+      ``cls``: that needs an instance or a class in front of it. On
+      tensorflow, 2,818 bare calls landed on one, ``list(x)`` on
+      ``Registry.list(self)`` and ``enumerate(..)`` on
+      ``DatasetV2.enumerate`` among them, because ``_candidate_arity``
+      strips ``self`` only for a receiver call and a one-argument bare
+      call then fits. The first parameter is the test, not the kind: a
+      function nested in a method is extracted as a method of the class
+      with no ``self``, and a bare call reaches it.
+    - A receiver call ``x.name(..)`` reaches a top-level function only
+      when ``x`` is a module, which in Python means an import binding of
+      the file (a rebind of one included), and an import never binds the
+      file's own function. On tensorflow, 518 calls such as
+      ``constant_op.constant(..)`` took the calling file's own
+      ``constant`` at the same-file rung, and ``layer.count_params()``
+      took a top-level ``count_params`` through a local. Dropping the
+      pick lets the import rung answer for the first kind.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidate: The symbol the ladder picked.
+        file_imports: The calling file's import bindings by local name.
+
+    Returns:
+        True for a ``RawCall`` in a Python file and a Python function
+        or method its shape can't mean.
+    """
+    if (
+        not isinstance(call, RawCall)
+        or not call.path.endswith(_PY_EXTENSIONS)
+        or candidate.language != "python"
+        or candidate.kind not in ("function", "method")
+    ):
+        return False
+    if _written_bare(call):
+        # A method only: a plain function may name its first parameter
+        # ``cls`` for a class it is handed.
+        params = candidate.params
+        return (
+            candidate.kind == "method"
+            and bool(params)
+            and _is_receiver_param(params[0], "python")
+        )
+    if candidate.kind != "function" or not call.receiver:
+        return False
+    head = _PATH_SPLIT.split(call.receiver)[0]
+    if head in _SELF_RECEIVERS:
+        return False
+
+    return head not in file_imports or candidate.path == call.path
 
 
 def _pick_candidate_vetoed(

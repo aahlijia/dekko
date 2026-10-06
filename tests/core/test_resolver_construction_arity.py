@@ -273,10 +273,15 @@ def test_bare_local_name_does_not_reach_a_test_class(
     assert _callees(graph, _RUN_PY) == set()
     assert _externals(graph, _RUN_PY) == {"Wrapped"}
 
-    # From another test file the same class is a plausible target.
+    # From another test file that imports it, the same class is a
+    # plausible target.
     again = tmp_path / "from-tests"
     again.mkdir()
-    sources["tests/test_user.py"] = sources.pop("user.py")
+    sources.pop("user.py")
+    sources["tests/test_user.py"] = (
+        "from test_values import Wrapped\n\n\ndef run():\n"
+        "    return Wrapped(1)\n"
+    )
     graph = _graph(again, sources)
     assert _callees(graph, "tests/test_user.py::run") == {
         "tests/test_values.py::Wrapped"

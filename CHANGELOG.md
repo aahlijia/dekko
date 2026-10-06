@@ -9,6 +9,33 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.7.2] — 2026-10-06
+
+### Fixed
+- **A bare Python call can't reach a method that takes `self` or
+  `cls`.** A one-argument bare call "fit" `Registry.list(self)`
+  because `self` is only stripped from the count for a receiver call,
+  so every `list(x)` on tensorflow landed on it (and `enumerate(..)` on
+  `DatasetV2.enumerate`): about 2,800 sites. The pick is dropped and
+  the ladder runs again. A function nested in a method, which is
+  extracted as a method with no `self`, is still reached.
+- **A Python receiver call reaches a top-level function only through
+  an import.** `constant_op.constant(..)` took the calling file's own
+  `constant` at the same-file rung, and `layer.count_params()` on a
+  local took a top-level `count_params`. Now `x.f()` can mean a plain
+  function only when `x` is an import binding of the file (a rebind
+  counts) and the function isn't in the calling file, so
+  `constant_op.constant` reaches `constant_op.py`.
+- **A bare Python call to another file needs the name in scope.** The
+  name-only rungs took `tuple(x)` to tensorflow's lone
+  `control_flow_ops.py::tuple` from files that never import it, the
+  same for `complex`, `exit`, `eval` and for parameters and locals. A
+  Python target in another file now needs an in-repo import of the
+  name or a star import of its file; otherwise the call is external.
+  A pytest fixture from a `conftest.py` above the test still resolves
+  without one. References already had this rule. JS/TS calls keep
+  their picks.
+
 ## [1.7.1] — 2026-10-05
 
 ### Fixed
