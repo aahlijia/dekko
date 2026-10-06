@@ -9,6 +9,44 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.7.6] — 2026-10-06
+
+### Fixed
+- **A Java call no longer lands on a method its argument count can't
+  call.** Java has no default arguments, so a method takes exactly its
+  parameter count, or at least its fixed ones with varargs. The
+  same-file and container picks went by name and file alone:
+  `this.deferredLog.debug(msg, t)` landed on a test's own `debug()`,
+  `this.repositories.get(0)` on another test's `get()`, `new
+  StringBuilder().reverse()` on a same-file `reverse(String)`. Such a
+  pick is dropped and the ladder runs again, so `debug(msg, t)` now
+  reaches `DeferredLog.debug(Object, Throwable)`.
+- **One class's overloads are picked by count.** A call whose
+  candidates are all overloads of one class was ambiguous, because the
+  sole-candidate pick needs exactly one: spring-boot's 1,594
+  `assertThat(ctx).hasSingleBean(X.class)` calls went nowhere, and
+  `ApplicationContextAssert.hasSingleBean` now has 1,186 callers. When
+  exactly one overload fits the count it is the target; when none does,
+  the call is external. A receiver call by a JDK core-type method name
+  (`list.add(x)`, `buffer.limit()`) is left ambiguous: one class owning
+  every in-repo `add` is no reason `list.add` means it.
+- **A Java call no candidate can answer is external, not ambiguous.**
+  When every candidate is a Java method and none is both reachable
+  from the call and callable with its count, the call goes external:
+  `context.getBeansOfType(X.class)` (131 rows to 1), Mockito's `given`,
+  `System.setProperty`.
+- **A Java ambiguous row lists only what the call could mean.** It
+  drops the candidates the call can't reach or call with its count,
+  when two or more are left. On spring-boot, ambiguous rows go from
+  68,764 to 62,158 and the candidates they list from 2.87 million to
+  1.22 million.
+
+On spring-boot against 1.7.5, 2,549 call edges are gained and 719 go;
+a design simulation puts tensorflow's small Java tree at about +100
+−23. Not judged:
+argument types (`s(int)` and `s(String)` stay ambiguous for `s(1)`) and
+Kotlin calls, whose default and named arguments `dekko` doesn't record.
+
 ## [1.7.5] — 2026-10-06
 
 ### Fixed

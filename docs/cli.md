@@ -1184,7 +1184,18 @@ or argument count rules out (Rust has no overloads or default
 arguments): `x.name(..)` needs a method taking `self` and the written
 count, a bare `name(..)` never reaches a method, and
 `Type::name(obj, ..)` counts `self` as an argument. The call goes to the
-next candidate that fits, or stays ambiguous or external. A low ambiguous rate
+next candidate that fits, or stays ambiguous or external. A Java call
+works the same way with its argument count (Java has no default
+arguments, and varargs take any count from the fixed minimum): it never
+resolves to a method that can't take the count it wrote, and when every
+candidate is an overload of one class, the count picks the overload,
+unless it is a receiver call by a JDK core-type method name (`add`,
+`put`, `size`, `stream`, ...). A Java row lists only the candidates the
+call can reach (no `private` method in another file, no package-private
+one in another package) and call with its count, when two or more are
+left; a call none can answer is counted external. Argument types are not
+read, so two one-parameter overloads stay ambiguous, and Kotlin calls
+(default and named arguments) are not judged by count. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output

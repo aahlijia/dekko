@@ -3052,8 +3052,9 @@ def _ambiguous_candidates(
     run again here, on the ambiguous path only, and its result is what
     the row records whenever it applied and left two or more
     (``_rust_row_narrowed`` adds the two shapes the ladder doesn't
-    narrow). Nothing about the ladder's verdict changes: the call is
-    ambiguous either way.
+    narrow). A Java row keeps the candidates the call can reach and
+    call with its count (``_java_row_narrowed``). Nothing about the
+    ladder's verdict changes: the call is ambiguous either way.
 
     Args:
         call: The raw call the ladder could not resolve.
@@ -3073,7 +3074,9 @@ def _ambiguous_candidates(
     if not applied or len(narrowed) < 2:
         narrowed = candidates
 
-    return _rust_row_narrowed(call, candidates, narrowed, index)
+    return _java_row_narrowed(
+        call, _rust_row_narrowed(call, candidates, narrowed, index)
+    )
 
 
 def _rust_row_narrowed(
@@ -3635,6 +3638,10 @@ def _pick_candidate_ladder(
     ):
         return _NOISE
 
+    candidates = _java_overloads_by_count(call, candidates, index, repo_stems)
+    if not isinstance(candidates, list):
+        return candidates
+
     if len(candidates) == 1:
         sole = _sole_candidate_match(
             call, candidates[0], repo_stems is not None, index, file_imports
@@ -3672,11 +3679,14 @@ def _pick_candidate(
     ``candidates`` and ``same_file`` and the ladder runs again, so a
     wrapper's ``self.inner.set(a)`` reaches the wrapped type's
     one-argument ``set`` instead of stopping at the wrapper's own
-    two-argument one. Only a candidate the ladder actually picked is
-    removed: a call that is ambiguous among possible candidates stays
-    ambiguous, and each new pick is held to the same rule. A call with
-    nothing left is noise, and so is a Rust path to a known type whose
-    own member was ruled out (``_rust_own_member_ruled_out``).
+    two-argument one. A Java pick whose count it can't take
+    (``_java_call_excludes``) is retried the same way. Only a candidate
+    the ladder actually picked is removed: a call that is ambiguous
+    among possible candidates stays ambiguous, and each new pick is
+    held to the same rule. A call with nothing left is noise, and so is
+    a Rust path to a known type whose own member was ruled out
+    (``_rust_own_member_ruled_out``) and an ambiguous Java call no
+    candidate can answer (``_java_unanswerable``).
     """
     excluded: set[str] = set()
     while True:
@@ -3692,10 +3702,13 @@ def _pick_candidate(
             crate_roots,
             tiebreak_hits,
         )
+        if picked is None and _java_unanswerable(call, candidates):
+            return _NOISE if repo_stems is not None else None
         if not isinstance(picked, Symbol) or not (
             _rust_call_excludes(call, picked)
             or _python_call_excludes(call, picked, file_imports)
             or jvm_unreachable(call.path, picked)
+            or _java_call_excludes(call, picked)
         ):
             return picked
         if picked.id in excluded or _rust_own_member_ruled_out(
@@ -3983,6 +3996,171 @@ def jvm_unreachable(site_path: str, candidate: Symbol) -> bool:
         and own_package is not None
         and site_package != own_package
     )
+
+
+def _java_counted_call(call: _Referable) -> bool:
+    """Whether ``call`` is a Java method call with a known count.
+
+    Only Java: Kotlin has default and named arguments, trailing lambdas
+    and extension receivers, and ``Param`` records none of them. A
+    ``new X(..)`` lands on a class, whose constructors
+    ``_pick_constructor`` already counts; a method called on one
+    (``new File(p).toURI()``, receiver ``new File()``) is counted here.
+    """
+    return (
+        isinstance(call, RawCall)
+        and call.path.endswith(".java")
+        and call.arg_count is not None
+        and not (call.receiver is None and call.text.startswith("new "))
+    )
+
+
+def _java_method(candidate: Symbol) -> bool:
+    """Whether ``candidate`` is a Java method (or function)."""
+    return candidate.language == "java" and candidate.kind in (
+        "method",
+        "function",
+    )
+
+
+def _java_call_excludes(call: _Referable, candidate: Symbol) -> bool:
+    """Whether a Java call's argument count rules out ``candidate``.
+
+    Java has no default arguments, so a method takes exactly its
+    parameter count, or at least its fixed ones with varargs. The
+    same-file and container rungs picked by name and file alone: on
+    spring-boot, ``this.repositories.get(0)`` landed on a test's own
+    ``get()`` and ``processRunner.run(a, b, c, d)`` on a one-parameter
+    ``DockerCli.run``. 878 sites took a pick their count can't call;
+    every one read was wrong.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidate: The symbol the ladder picked.
+
+    Returns:
+        True for a counted Java call (``_java_counted_call``) and a Java
+        method whose parameters can't take that count.
+    """
+    if not _java_counted_call(call) or not _java_method(candidate):
+        return False
+    count = getattr(call, "arg_count", 0)
+    min_count, max_count = _param_arity(candidate.params)
+    if count < min_count:
+        return True
+
+    return max_count is not None and count > max_count
+
+
+def _java_answers(call: _Referable, candidate: Symbol) -> bool:
+    """Whether a Java call could mean ``candidate``: it can reach it
+    and call it with the count it wrote."""
+    return not jvm_unreachable(
+        call.path, candidate
+    ) and not _java_call_excludes(call, candidate)
+
+
+def _java_overloads_by_count(
+    call: _Referable,
+    candidates: list[Symbol],
+    index: dict[str, list[Symbol]],
+    repo_stems: set[str] | None,
+) -> list[Symbol] | _Noise | None:
+    """Narrow one class's overload set to the overload a count fits.
+
+    The sole-candidate rung needs exactly one candidate, so a call
+    whose candidates are all overloads of one class gave up:
+    ``assertThat(ctx).hasSingleBean(X.class)`` had two, both
+    ``ApplicationContextAssert``'s, and spring-boot's 1,594 calls to it
+    were ambiguous. An overload set is one candidate as far as the
+    name goes, and the count picks within it:
+
+    - one fits: that one, for the sole-candidate rung (``jvm_unreachable``
+      still vetoes it, and the retry then finds nothing that fits);
+    - none fits: no in-repo method of that name takes the count, so
+      the call is external;
+    - two or more fit: ambiguous among them.
+
+    A receiver call by a JDK core-type method name
+    (``_JAVA_STD_METHOD_NAMES``) is left as it was: a class owning
+    every in-repo ``add`` is no reason ``list.add(x)`` means it.
+
+    Args:
+        call: The raw call or reference being resolved.
+        candidates: The ladder's live candidates.
+        index: The bare-name index, for ``_arity_plausible``.
+        repo_stems: Non-``None`` when the caller handles ``_NOISE``.
+
+    Returns:
+        ``candidates`` unchanged when the rule doesn't apply, a list of
+        the one fitting overload, ``_NOISE`` (``None`` when
+        ``repo_stems`` is ``None``) when none fits, and ``None`` when
+        several do.
+    """
+    if (
+        len(candidates) < 2
+        or not _java_counted_call(call)
+        or not all(_java_method(c) for c in candidates)
+        or len({(c.path, c.qualname.rpartition(".")[0]) for c in candidates})
+        != 1
+        or (
+            call.receiver
+            and call.receiver not in ("this", "super")
+            and call.name in _JAVA_STD_METHOD_NAMES
+        )
+    ):
+        return candidates
+    fits = [c for c in candidates if _arity_plausible(c, call, index)]
+    if not fits:
+        return _NOISE if repo_stems is not None else None
+    if len(fits) > 1:
+        return None
+
+    return fits
+
+
+def _java_unanswerable(call: _Referable, candidates: list[Symbol]) -> bool:
+    """Whether an ambiguous Java call has no candidate it could mean.
+
+    Every candidate is a Java method, and none is both reachable from
+    the site and callable with its count (``_java_answers``). On
+    spring-boot, 5,539 ambiguous sites were this shape and every one
+    read was an external API: ``context.getBeansOfType(X.class)`` on
+    Spring's ``ApplicationContext``, Mockito's ``given``,
+    ``System.setProperty``. They are external, not ambiguous.
+
+    Args:
+        call: The raw call the ladder left ambiguous.
+        candidates: The candidates it ran over.
+
+    Returns:
+        True for a counted Java call (``_java_counted_call``) none of
+        whose Java-method candidates it could mean.
+    """
+    if not _java_counted_call(call):
+        return False
+    live = _without_own_constructors(_language_filtered(call, candidates))
+
+    return (
+        bool(live)
+        and all(_java_method(c) for c in live)
+        and not any(_java_answers(call, c) for c in live)
+    )
+
+
+def _java_row_narrowed(call: RawCall, disclosed: list[Symbol]) -> list[Symbol]:
+    """An ambiguous Java row's candidates, down to what the call could
+    mean (``_java_answers``), when two or more are left.
+
+    One left is not a pick: the ladder already declined to make it.
+    spring-boot's rows listed 2,869,879 candidates; most were methods
+    the site can't reach or call with its count.
+    """
+    if not call.path.endswith(".java"):
+        return disclosed
+    kept = [c for c in disclosed if _java_answers(call, c)]
+
+    return kept if len(kept) >= 2 else disclosed
 
 
 def _pick_candidate_vetoed(
@@ -4795,6 +4973,61 @@ _JAVA_ASSERTION_METHOD_NAMES = frozenset(
         "isNull", "isEmpty", "isNotEmpty", "isPresent", "isAbsent",
         "hasSize", "contains", "containsExactly", "doesNotContain",
         "isInstanceOf", "isSameAs", "isNotSameAs",
+    }
+)  # fmt: skip
+
+# Methods of the JDK's core types: ``Object``, the collections and
+# ``Map.Entry``, ``Iterator``, ``Stream``, ``Optional``, ``String``/
+# ``StringBuilder``, the boxed numbers, threads and executors, IO
+# streams, ``Class`` and ``java.util.function``. Consulted by the Java
+# overload rung only (``_java_overloads_by_count``), never by the noise
+# guard: these repos define the names for real, and on spring-boot and
+# tensorflow a sole-rung guard lost more right edges (``docker.
+# container().wait(..)``, ``Shape.size(0)``) than wrong ones. The
+# overload rung is different: tensorflow's one class owning every
+# in-repo ``add`` turned 125 ``list.add(x)`` calls into edges.
+_JAVA_STD_METHOD_NAMES = frozenset(
+    {
+        # Object
+        "equals", "hashCode", "getClass", "wait", "notify", "notifyAll",
+        # Collection, List, Set, Queue, Deque
+        "add", "addAll", "remove", "removeAll", "removeIf", "retainAll",
+        "containsAll", "size", "clear", "iterator", "toArray", "stream",
+        "parallelStream", "set", "subList", "listIterator", "sort",
+        "offer", "poll", "peek", "addFirst", "addLast", "removeFirst",
+        "removeLast", "getFirst", "getLast",
+        # Map, Map.Entry
+        "put", "putAll", "putIfAbsent", "getOrDefault", "containsKey",
+        "containsValue", "keySet", "values", "entrySet",
+        "computeIfAbsent", "computeIfPresent", "compute", "merge",
+        "getKey", "getValue", "setValue",
+        # Iterator
+        "hasNext", "next",
+        # Stream
+        "flatMap", "collect", "findFirst", "findAny", "anyMatch",
+        "allMatch", "noneMatch", "sorted", "distinct", "limit", "skip",
+        "toList", "mapToInt", "mapToObj", "mapToLong", "boxed", "min",
+        "max",
+        # Optional
+        "ifPresent", "orElse", "orElseGet", "orElseThrow",
+        # String, StringBuilder, CharSequence, Comparable
+        "length", "append", "isBlank", "strip", "matches",
+        "equalsIgnoreCase", "toCharArray", "getBytes", "chars",
+        "compareTo",
+        # boxed numbers
+        "intValue", "longValue", "doubleValue", "floatValue",
+        "booleanValue",
+        # Thread, Executor, Future, CountDownLatch
+        "interrupt", "sleep", "submit", "shutdown", "shutdownNow",
+        "awaitTermination", "isDone", "countDown", "await",
+        # IO streams
+        "flush", "readLine", "readAllBytes", "transferTo", "available",
+        # Class
+        "getSimpleName", "isInstance", "isAssignableFrom", "cast",
+        "getResourceAsStream", "getResource", "getClassLoader",
+        "getDeclaredMethod", "getMethod", "newInstance",
+        # java.util.function
+        "apply", "accept", "andThen", "compose",
     }
 )  # fmt: skip
 

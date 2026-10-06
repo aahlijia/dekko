@@ -1089,6 +1089,57 @@ def test_jvm_visibility_edit_keeps_incremental_equal_to_full(
     assert (pair in edges) == (before == "private")
 
 
+JAVA_OVERLOAD_SRC = {
+    "src/main/java/app/Helper.java": (
+        "package app;\n"
+        "public class Helper {\n"
+        "    public void tidy(String a, String b) { }\n"
+        "    public void tidy(String a, String b, String c) { }\n"
+        "}\n"
+    ),
+    "src/main/java/app/User.java": (
+        "package app;\n"
+        "public class User {\n"
+        '    void go(Object h) { h.tidy("x"); }\n'
+        "}\n"
+    ),
+    "src/main/java/app/Other.java": "package app;\npublic class Other { }\n",
+}
+_ONE_FITS = JAVA_OVERLOAD_SRC["src/main/java/app/Helper.java"].replace(
+    "tidy(String a, String b) {", "tidy(String a) {"
+)
+
+
+@pytest.mark.parametrize("before", ["none_fits", "one_fits"])
+def test_java_overload_count_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    """``h.tidy("x")`` is external while no overload takes one
+    argument, and picks the one that does once it exists."""
+    helper = "src/main/java/app/Helper.java"
+    source = dict(JAVA_OVERLOAD_SRC)
+    after = JAVA_OVERLOAD_SRC[helper]
+    if before == "none_fits":
+        after = _ONE_FITS
+    else:
+        source[helper] = _ONE_FITS
+    root = make_mapped_repo(source)
+    (root / helper).write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = incremental["ids"]
+    pair = ("src/main/java/app/User.java::User.go", f"{helper}::Helper.tidy")
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    assert (pair in edges) == (before == "none_fits")
+
+
 def test_a_tsconfig_paths_edit_invalidates_the_cache(
     make_mapped_repo: RepoFactory,
 ) -> None:
