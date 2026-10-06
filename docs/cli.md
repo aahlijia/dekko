@@ -478,6 +478,15 @@ a `x.name(` line that would otherwise read as a qualified call. On
 spring-boot, every one of the 729 other-file `.extracting(` lines for
 the private `ItemMetadataAssert.extracting` reads this way.
 
+**A Java or Kotlin line that names the target through another type
+path, since 1.7.7.** `new org.apache.catalina.ErrorPage()` can't be the
+repo's own `ErrorPage` in another package, `org.other.Tool.m(..)` can't
+be the repo's `Tool.m`, and `new Other.Inner()` can't be `Outer.Inner`;
+the resolver reads the written path the same way. Such a line reads
+`written through another package's or type's qualified name, so it
+names a different type — not a miss`, instead of `cross-package/
+qualified call — known resolver blind spot`.
+
 **A site the map attributed to a same-named sibling, since 1.5.9.**
 When two unrelated symbols share a bare name (a 1-arg `errorMessage(e)`
 helper and a 2-arg one elsewhere), a grep-only row for one of them
@@ -1195,7 +1204,16 @@ call can reach (no `private` method in another file, no package-private
 one in another package) and call with its count, when two or more are
 left; a call none can answer is counted external. Argument types are not
 read, so two one-parameter overloads stay ambiguous, and Kotlin calls
-(default and named arguments) are not judged by count. A low ambiguous rate
+(default and named arguments) are not judged by count. A Java or
+Kotlin call written through a package path (`new org.apache.catalina.
+ErrorPage()`, `java.util.Collections.emptyList()`, Kotlin
+`org.a.C()`) only reaches the type with that package and top-level
+type path, and `new Outer.Inner()` only a type whose qualified name
+ends `Outer.Inner`; a path no repo type is on is counted external. A
+package needs two lowercase segments or a known first one (`java`,
+`javax`, `jakarta`, `org`, `com`, `io`, `net`, `kotlin`, ...), so
+`foo.Bar.m()` on a local `foo` is left to the ladder, and an ALL_CAPS
+segment is read as a constant, not a type. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output

@@ -3328,9 +3328,32 @@ def _callee_java(node: Node) -> tuple[str, str, str | None] | None:
         type_node = node.child_by_field_name("type")
         if type_node is None:
             return None
-        name = _strip_generics(_text(type_node)).split(".")[-1]
-        return f"new {name}", name, None
+        written = _java_written_type(type_node)
+        return f"new {written}", written.split(".")[-1], None
     return None
+
+
+_JAVA_TYPE_ANNOTATION = re.compile(r"@[\w.]+(?:\([^)]*\))?")
+_JAVA_TYPE_ARGUMENTS = re.compile(r"<[^<>]*>")
+
+
+def _java_written_type(type_node: Node) -> str:
+    """The type a Java ``new`` writes, as a dotted path.
+
+    ``new org.apache.tomcat.util.descriptor.web.ErrorPage()`` and ``new
+    Health.Builder()`` name a package and an outer type; the resolver
+    reads them (``_jvm_written_type_path``), and an external row names
+    the real type. Type arguments anywhere in the path (``new
+    Outer<String>.Inner()``), type annotations and whitespace are
+    dropped.
+    """
+    written = _JAVA_TYPE_ANNOTATION.sub("", _text(type_node))
+    stripped = _JAVA_TYPE_ARGUMENTS.sub("", written)
+    while stripped != written:
+        written = stripped
+        stripped = _JAVA_TYPE_ARGUMENTS.sub("", written)
+
+    return "".join(written.split())
 
 
 def _split_callee_text(text: str) -> tuple[str, str | None]:

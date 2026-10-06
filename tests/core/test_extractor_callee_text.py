@@ -186,6 +186,33 @@ def test_go_java_receiver_shapes(tmp_path: Path) -> None:
     assert java["c"] == "a().b().c"
 
 
+def test_java_new_keeps_the_type_path_it_writes(tmp_path: Path) -> None:
+    """The package and outer types stay in the text, for the resolver
+    and for the external row; type arguments anywhere in the path, type
+    annotations and whitespace go. The name is the last segment."""
+    (tmp_path / "E.java").write_text(
+        "class E { void f() {\n"
+        "  new Foo<String>(1);\n"
+        "  new org.apache.catalina.ErrorPage();\n"
+        "  new Outer.Inner();\n"
+        "  new Outer<String>.Inner();\n"
+        "  new @Ann Outer . Inner();\n"
+        "  new java.util.HashMap<String, java.util.List<Integer>>();\n"
+        "} }\n"
+    )
+    spec = languages.spec_for_path("E.java")
+    assert spec is not None
+    fm = extract_file(tmp_path, "E.java", spec)
+    assert [(c.text, c.name, c.receiver) for c in fm.calls] == [
+        ("new Foo", "Foo", None),
+        ("new org.apache.catalina.ErrorPage", "ErrorPage", None),
+        ("new Outer.Inner", "Inner", None),
+        ("new Outer.Inner", "Inner", None),
+        ("new Outer.Inner", "Inner", None),
+        ("new java.util.HashMap", "HashMap", None),
+    ]
+
+
 def test_cpp_template_member_name_elides_its_arguments(
     tmp_path: Path,
 ) -> None:

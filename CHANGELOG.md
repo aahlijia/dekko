@@ -9,6 +9,48 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.7.7] — 2026-10-06
+
+### Fixed
+- **A Java `new` keeps the type path it writes.** The extractor kept
+  only the last segment, so `new org.apache.tomcat.util.descriptor.web.
+  ErrorPage()` was `new ErrorPage` and landed on the repo's own
+  `ErrorPage`, and `new Outer<String>.Inner()` was read as `Outer`. The
+  call text is now `new` plus the whole written path, type arguments,
+  type annotations and whitespace dropped, and its name is the last
+  segment. External rows name the real type (`new com.sun.jna.
+  LastErrorException`, `new SslContextFactory.Server`).
+- **A JVM call written through a package path reaches only that
+  package's type.** `new a.b.C()`, `a.b.C.m()` and Kotlin `a.b.C()`
+  name a package and a top-level type: one repo symbol on that path is
+  the target outright, several are picked among by the usual rules, and
+  none is external. On spring-boot, `new org.springframework.
+  integration.context.IntegrationProperties()` no longer reaches the
+  repo's `IntegrationProperties` (4 callers to 0), nor `new java.net.
+  Proxy(..)` `RemoteDevToolsProperties.Proxy`; the two
+  `ControllerEndpointHandlerMapping` classes are each constructed by
+  their own FQN.
+- **`new Outer.Inner()` reaches only a type nested that way.** `new
+  DataRedisProperties.Sentinel()` landed on `DataRedisConnectionDetails.
+  Sentinel`, and Jetty's `new HttpCookieStore.Empty()` on the repo's
+  `Empty`; calls that were ambiguous now resolve (`new Health.
+  Builder()`, `new DockerConnectionConfiguration.Host(..)`, `new Info.
+  Builder()`).
+- **`sanity` explains the lines this stops matching.** A grep hit that
+  names the target through another package or outer-type path reads
+  `written through another package's or type's qualified name, so it
+  names a different type — not a miss` instead of "qualified call —
+  known resolver blind spot".
+
+On spring-boot against 1.7.6, 151 call edges are gained and 11 go, and
+ambiguous rows drop from 62,158 to 62,045; a design simulation puts
+tensorflow at about +107 −1 (`new Interpreter.Options()`). Not judged:
+Kotlin `Outer.Inner()` (no `new` to tell a construction from a call), a
+one-segment lowercase head that isn't a known package root, and a
+single-letter type segment, which reads as a constant. The extraction
+cache refreshes on upgrade, so the first `dekko map` after it is a full
+one.
+
 ## [1.7.6] — 2026-10-06
 
 ### Fixed

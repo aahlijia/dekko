@@ -4442,9 +4442,17 @@ def _written_scope_match(
     narrows, the ladder still picks, and the pick has to be one the
     namespace allows.
 
+    A Java or Kotlin call through a written type path
+    (``_jvm_written_type_match``) narrows the same way: a package path
+    is trusted, an outer-type path is not, and either rules out a pick
+    off the path.
+
     Returns:
-        ``None`` when neither rule applies.
+        ``None`` when no rule applies.
     """
+    jvm = _jvm_written_type_match(call, candidates)
+    if jvm is not None:
+        return jvm
     on_path = _qualified_path_match(call, candidates)
     if on_path is not None:
         return _Scoped(on_path, None, True)
@@ -4454,6 +4462,209 @@ def _written_scope_match(
     allowed, confident = in_namespace
 
     return _Scoped(allowed if confident else candidates, allowed, False)
+
+
+@dataclass(frozen=True)
+class _JvmTypePath:
+    """The type path a JVM call writes.
+
+    Attributes:
+        package: The package directory (``org/apache/catalina``), or
+            ``None`` for an outer-type path (``new Outer.Inner()``).
+        types: The type path, from the top-level type down when a
+            package is written, else just the written segments.
+        member: Whether the call names a member of the last type
+            (``a.b.C.m()``) rather than constructing it.
+    """
+
+    package: str | None
+    types: list[str]
+    member: bool
+
+
+# First segments that make a one-segment lowercase qualifier a package
+# (``java.util.Collections.emptyList()``, ``org.Foo``); two or more
+# lowercase segments count without one. ``foo.Bar.m()`` on a local
+# ``foo`` stays the ladder's.
+_JVM_PACKAGE_ROOTS = frozenset(
+    {
+        "java", "javax", "jakarta", "org", "com", "io", "net", "kotlin",
+        "kotlinx", "reactor", "sun", "jdk", "oracle", "ch", "de",
+        "liquibase", "graphql", "okhttp3", "brave", "zipkin2",
+        "freemarker", "groovy",
+    }
+)  # fmt: skip
+_JVM_PACKAGE_SEGMENT = re.compile(r"[a-z_][a-z0-9_]*")
+_JVM_TYPE_SEGMENT = re.compile(r"[A-Z]\w*")
+_JVM_CONSTANT_SEGMENT = re.compile(r"[A-Z][A-Z0-9_]*")
+_JVM_DOTTED_RECEIVER = re.compile(r"[\w.]+")
+
+
+def _jvm_written_qualifier(call: _Referable) -> list[str] | None:
+    """The segments a JVM call writes before its name.
+
+    A ``new`` keeps its written type (``new a.b.C`` is ``[a, b]``); a
+    member call reads a receiver made of names only (``a.b.C.m()`` is
+    ``[a, b, C]``).
+    """
+    if not isinstance(call, RawCall) or not call.path.endswith(
+        _JVM_EXTENSIONS
+    ):
+        return None
+    if call.receiver is None and call.text.startswith("new "):
+        segments = call.text[len("new ") :].split(".")[:-1]
+    elif call.receiver and _JVM_DOTTED_RECEIVER.fullmatch(call.receiver):
+        segments = call.receiver.split(".")
+    else:
+        return None
+    if not segments or segments[0] in ("this", "super"):
+        return None
+
+    return segments
+
+
+def _jvm_package_type_path(
+    call: RawCall, segments: list[str], package_len: int
+) -> _JvmTypePath | None:
+    """The path a qualifier starting with ``package_len`` lowercase
+    segments names, when they are a package (see
+    ``_jvm_written_type_path``)."""
+    construction = call.receiver is None
+    if package_len == len(segments):
+        # ``new a.b.C()``, or Kotlin ``a.b.C()``, constructs ``C``;
+        # ``a.b.f()`` is a top-level function or a field chain.
+        if not construction and not (
+            call.path.endswith(".kt")
+            and _JVM_TYPE_SEGMENT.fullmatch(call.name)
+        ):
+            return None
+        types: list[str] = []
+    else:
+        types = segments[package_len:]
+        if not all(
+            _JVM_TYPE_SEGMENT.fullmatch(t)
+            and not _JVM_CONSTANT_SEGMENT.fullmatch(t)
+            for t in types
+        ):
+            return None
+    if package_len < 2 and segments[0] not in _JVM_PACKAGE_ROOTS:
+        return None
+    member = not construction and package_len < len(segments)
+    if not member:
+        types = [*types, call.name]
+
+    return _JvmTypePath("/".join(segments[:package_len]), types, member)
+
+
+def _jvm_written_type_path(call: _Referable) -> _JvmTypePath | None:
+    """The package and type path a JVM call is written through.
+
+    - ``new a.b.C.D()`` and ``a.b.C.m()``: the leading lowercase
+      segments are the package and the capitalized ones (not ALL_CAPS,
+      which are constants) the type path from the top-level type;
+    - Kotlin ``a.b.C()``: a lowercase receiver and a capitalized name
+      construct ``C``;
+    - ``new Outer.Inner()``: an outer-type path, no package.
+
+    A package needs two segments or a known first one
+    (``_JVM_PACKAGE_ROOTS``).
+
+    Args:
+        call: The raw call being resolved.
+
+    Returns:
+        The written path, or ``None`` when the call writes none of
+        these.
+    """
+    segments = _jvm_written_qualifier(call)
+    if segments is None or not isinstance(call, RawCall):
+        return None
+    package_len = 0
+    while package_len < len(segments) and _JVM_PACKAGE_SEGMENT.fullmatch(
+        segments[package_len]
+    ):
+        package_len += 1
+    if package_len:
+        return _jvm_package_type_path(call, segments, package_len)
+    if call.receiver is None and all(
+        _JVM_TYPE_SEGMENT.fullmatch(s) for s in segments
+    ):
+        return _JvmTypePath(None, [*segments, call.name], False)
+
+    return None
+
+
+def _on_jvm_type_path(candidate: Symbol, path: _JvmTypePath) -> bool:
+    """Whether ``candidate`` sits where ``path`` points.
+
+    A constructor (``C.C``) stands for its class. With a package, the
+    candidate's file is in it and its qualname is the whole type path
+    (a package path names a top-level type); without one, its
+    qualname ends with the written path.
+    """
+    qual = candidate.qualname.split(".")
+    if path.member:
+        qual = qual[:-1]
+    elif (
+        candidate.kind in ("method", "function")
+        and len(qual) >= 2
+        and qual[-1] == qual[-2]
+    ):
+        qual = qual[:-1]
+    if path.package is None:
+        return qual[-len(path.types) :] == path.types
+
+    return (
+        candidate.language in ("java", "kotlin")
+        and _jvm_package_dir(candidate.path) == path.package
+        and qual == path.types
+    )
+
+
+def _jvm_written_type_match(
+    call: _Referable, candidates: list[Symbol]
+) -> _Scoped | None:
+    """Narrow a JVM call to the type path it is written through.
+
+    The extractor kept only a ``new``'s last segment, so ``new org.
+    apache.tomcat.util.descriptor.web.ErrorPage()`` landed on the
+    repo's own ``ErrorPage``, ``java.util.Collections.emptyList()`` on
+    a test's ``emptyList``, and ``new DataRedisProperties.Sentinel()``
+    on ``DataRedisConnectionDetails.Sentinel``. A package path names
+    its target outright, so one candidate on it is trusted, like a full
+    C++ path; an outer-type path only narrows. Either way a pick off
+    the path is no pick, and a path with no candidate on it is
+    external.
+
+    Returns:
+        ``None`` when the call writes no type path
+        (``_jvm_written_type_path``).
+    """
+    path = _jvm_written_type_path(call)
+    if path is None:
+        return None
+    on_path = [c for c in candidates if _on_jvm_type_path(c, path)]
+
+    return _Scoped(on_path, on_path, path.package is not None)
+
+
+def jvm_off_written_path(call: RawCall, candidate: Symbol) -> bool:
+    """Whether a JVM call's written type path rules ``candidate`` out.
+
+    ``sanity`` reads a grep line back into a call this way, so its
+    verdict on ``new a.b.ErrorPage()`` is the resolver's own.
+
+    Args:
+        call: A call in a Java or Kotlin file.
+        candidate: A symbol of the call's name.
+
+    Returns:
+        True when the call writes a package or outer-type path
+        (``_jvm_written_type_path``) that ``candidate`` isn't on.
+    """
+    path = _jvm_written_type_path(call)
+
+    return path is not None and not _on_jvm_type_path(candidate, path)
 
 
 def _within_scope(
