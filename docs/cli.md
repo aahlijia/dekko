@@ -467,6 +467,17 @@ A name only inside a Java or Kotlin string or char literal reads
 `mention inside a string or template text` (a Kotlin `${...}` template
 is code and never does).
 
+**A Java or Kotlin line a private target can't be named from, since
+1.7.5.** The resolver never puts a call on a method its file can't
+reach (`private` outside its own file, Java package-private outside
+its own package, or a member of a private or package-private type), so
+a grep hit there names some other type's method. It reads `the target
+is private to its file or package (or sits in a private type), so this
+line names some other type's same-named method — not a miss`, even on
+a `x.name(` line that would otherwise read as a qualified call. On
+spring-boot, every one of the 729 other-file `.extracting(` lines for
+the private `ItemMetadataAssert.extracting` reads this way.
+
 **A site the map attributed to a same-named sibling, since 1.5.9.**
 When two unrelated symbols share a bare name (a 1-arg `errorMessage(e)`
 helper and a 2-arg one elsewhere), a grep-only row for one of them

@@ -100,6 +100,7 @@ from dekko.analysis import unused as unused_mod
 from dekko.classify import is_test_path
 from dekko.core import languages
 from dekko.core.model import TYPE_KINDS, ReadSite, Symbol
+from dekko.core.resolver import jvm_unreachable
 from dekko.core.walker import DEFAULT_EXCLUDE_DIRS
 from dekko.render.mapfile import MapIndex
 from dekko.source import read_lines
@@ -401,6 +402,16 @@ CAUSE_TYPE_MENTION = (
     "names the type without constructing it (declaration, parameter "
     "or return type, generic argument, static member access, cast or "
     "class literal) — not a call site"
+)
+# Java and Kotlin, per target: the target is private to its file or
+# package (``Symbol.visibility``) and the line is outside it, so the
+# call names another type's same-named method; the resolver vetoes the
+# pick (``resolver.jvm_unreachable``). Relabels a qualified-call row
+# too: "resolver blind spot" is false for a line that can't reach it.
+CAUSE_NOT_REACHABLE = (
+    "the target is private to its file or package (or sits in a "
+    "private type), so this line names some other type's same-named "
+    "method — not a miss"
 )
 # Every cause at or below ``_classify_miss_remaining``: the rungs the
 # per-target tier-1 facts (self-recursion, import bound elsewhere) sit
@@ -3492,7 +3503,9 @@ def _apply_target_facts(
 ) -> dict[tuple[str, int], str]:
     """The per-target rungs, applied after the resolved-elsewhere
     relabel: a heritage clause naming the target (overrides any shape
-    cause), then, on rows the shared ladder left in
+    cause), a line the target's JVM access keeps out (over a
+    qualified-call row or any in ``_REMAINING_CAUSES``), then, on rows
+    the shared ladder left in
     ``_REMAINING_CAUSES``, in order: a recursive call or mention inside
     the target's own body, an import binding the name elsewhere, a
     call in a file declaring a same-named sibling, and a method call
@@ -3525,6 +3538,11 @@ def _apply_target_facts(
     facts = _target_facts(index, sym)
     for loc in locs:
         cause = causes.get(loc)
+        if (
+            cause in _REMAINING_CAUSES or cause == CAUSE_QUALIFIED_CALL
+        ) and jvm_unreachable(loc[0], sym):
+            causes[loc] = CAUSE_NOT_REACHABLE
+            continue
         if cause not in _REMAINING_CAUSES:
             continue
         snippet = snippets.get(loc, "")

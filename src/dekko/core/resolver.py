@@ -3662,12 +3662,13 @@ def _pick_candidate(
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
 ) -> Symbol | _Noise | None:
-    """Pick a candidate, skipping a Rust or Python pick the call can't mean.
+    """Pick a candidate, skipping a pick the call can't mean.
 
     See ``_pick_candidate_vetoed`` for the ladder's own vetoes and
     every parameter. A pick ``_rust_call_excludes`` or
     ``_python_call_excludes`` rules out (a shape or an argument count
-    the language has no syntax for) is taken out of
+    the language has no syntax for), or one the site can't reach under
+    JVM access rules (``jvm_unreachable``), is taken out of
     ``candidates`` and ``same_file`` and the ladder runs again, so a
     wrapper's ``self.inner.set(a)`` reaches the wrapped type's
     one-argument ``set`` instead of stopping at the wrapper's own
@@ -3694,6 +3695,7 @@ def _pick_candidate(
         if not isinstance(picked, Symbol) or not (
             _rust_call_excludes(call, picked)
             or _python_call_excludes(call, picked, file_imports)
+            or jvm_unreachable(call.path, picked)
         ):
             return picked
         if picked.id in excluded or _rust_own_member_ruled_out(
@@ -3945,6 +3947,42 @@ def _python_call_excludes(
         return False
 
     return head not in file_imports or candidate.path == call.path
+
+
+def jvm_unreachable(site_path: str, candidate: Symbol) -> bool:
+    """Whether JVM access rules keep a site from naming ``candidate``.
+
+    A private method or constructor (``Symbol.visibility``, already
+    narrowed by its enclosing types) is reachable from its own file
+    only, a package-private Java one from its own package only. The
+    name-only rungs took them from anywhere: on spring-boot, AssertJ's
+    ``assertThat(x).extracting("a")`` landed on the one in-repo
+    ``extracting``, a private test helper, from 494 callers. Counting access
+    took 1,541 such pairs off spring-boot, and every one read was an
+    external API's method. A file with no JVM source root has no
+    package dekko can read, so the package rule leaves it alone.
+
+    Args:
+        site_path: The file the call or reference is written in.
+        candidate: The symbol a pick would land on.
+
+    Returns:
+        True for a JVM site that can't reach ``candidate``.
+    """
+    visibility = candidate.visibility
+    if visibility is None or not site_path.endswith(_JVM_EXTENSIONS):
+        return False
+    if visibility == "private":
+        return site_path != candidate.path
+    if visibility != "package" or candidate.language != "java":
+        return False
+    site_package = _jvm_package_dir(site_path)
+    own_package = _jvm_package_dir(candidate.path)
+    return (
+        site_package is not None
+        and own_package is not None
+        and site_package != own_package
+    )
 
 
 def _pick_candidate_vetoed(
@@ -6149,7 +6187,9 @@ def _pick_constructor(
     "/500")`` the ``(Class, String)`` one. Overloads nothing visible
     separates (``new ErrorPage(HttpStatus.NOT_FOUND, "/404")``) are
     returned undecided, never guessed: dekko has no types for other
-    expressions.
+    expressions. A constructor the call site can't reach
+    (``jvm_unreachable``, a private overload from another file) is no
+    overload of it at all.
 
     Args:
         cls: The constructed class.
@@ -6162,8 +6202,12 @@ def _pick_constructor(
         ``(ctor, [])`` when one constructor is selected;
         ``(None, overloads)`` when 2+ remain undecided; ``(None, [])``
         when none fits the written argument count, which points at a
-        wrong class match rather than at a constructor.
+        wrong class match rather than at a constructor, or none is
+        reachable.
     """
+    ctors = [c for c in ctors if not jvm_unreachable(call.path, c)]
+    if not ctors:
+        return None, []
     n = call.arg_count
     if n is None:
         if len(ctors) == 1:

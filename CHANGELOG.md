@@ -9,6 +9,45 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.7.5] — 2026-10-06
+
+### Fixed
+- **A Java or Kotlin call no longer lands on a method its file can't
+  reach.** A `private` method is reachable from its own file only, a
+  package-private Java one from its own package only, and a member's
+  reach is the narrowest of its own and every enclosing type's, so a
+  public method of a `private static class` or a package-private class
+  counts too. The name-only picks ignored all of it: AssertJ's
+  `assertThat(x).extracting("a")` landed on spring-boot's one in-repo
+  `extracting`, a private test helper, from 494 callers (now its own
+  file's 12), and `map.keySet()`, Gradle's `getProject()` and
+  `Thread.sleep(..)` found same-named private methods across the repo.
+  Such a pick is dropped and the ladder runs again, for calls and for
+  method references (`X.class::isInstance`) alike. On spring-boot,
+  1,541 call edges and 148 reference edges go, and every one read was
+  an external API's method; tensorflow loses about 18. Not judged:
+  `protected`
+  (legal from a subclass), Kotlin `internal`, and the visibility of
+  types themselves.
+- **`new C(..)` never picks a private constructor from another file.**
+  An unreachable overload is no candidate, so a construction it tied
+  with now picks the reachable one: `new ApplicationContextRunner(
+  supplier)` reaches `ApplicationContextRunner(Supplier)` instead of
+  an ambiguous row. On spring-boot, 96 constructor edges are gained
+  and 3 go.
+- **`sanity` explains the lines this stops matching.** A grep hit
+  outside a private or package-private target's reach reads `the
+  target is private to its file or package (or sits in a private
+  type), so this line names some other type's same-named method — not
+  a miss` instead of "qualified call — known resolver blind spot" or
+  "unexplained".
+
+### Changed
+- map.json symbol rows carry `"visibility": "private"` or
+  `"package"` on JVM methods and constructors with that reach (absent
+  otherwise). The extraction cache refreshes on upgrade, so the first
+  `dekko map` after it is a full one.
+
 ## [1.7.4] — 2026-10-06
 
 ### Fixed

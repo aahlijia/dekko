@@ -481,6 +481,138 @@ def _make_symbol(
         test=spec.name == "rust" and rust_cfg.in_test_scope(def_node),
         in_literal=in_literal,
         literal_consumer=literal_consumer,
+        visibility=_jvm_visibility(spec.name, def_node),
+    )
+
+
+# JVM declarations ``_jvm_visibility`` gives a value: the methods and
+# constructors a call can land on.
+_JAVA_VISIBILITY_MEMBERS = frozenset(
+    {
+        "method_declaration",
+        "constructor_declaration",
+        "compact_constructor_declaration",
+    }
+)
+_KOTLIN_VISIBILITY_MEMBERS = frozenset(
+    {"function_declaration", "secondary_constructor"}
+)
+# A Java type declaration's body, and the declarations that own one.
+_JAVA_TYPE_BODIES = frozenset(
+    {
+        "class_body",
+        "interface_body",
+        "enum_body",
+        "enum_body_declarations",
+        "annotation_type_body",
+    }
+)
+_JAVA_TYPE_DECLARATIONS = frozenset(
+    {
+        "class_declaration",
+        "interface_declaration",
+        "enum_declaration",
+        "record_declaration",
+        "annotation_type_declaration",
+    }
+)
+# Members of these are public unless written ``private``.
+_JAVA_IMPLICITLY_PUBLIC_OWNERS = frozenset(
+    {"interface_declaration", "annotation_type_declaration"}
+)
+# Java access levels, widest first; a member's reach is the narrowest
+# of its own and every enclosing type's.
+_JAVA_ACCESS_RANK = {"public": 0, "protected": 1, "package": 2, "private": 3}
+
+
+def _jvm_visibility(language: str, def_node: Node) -> str | None:
+    """``Symbol.visibility`` for a definition node.
+
+    Java: the narrowest of the member's own access and every enclosing
+    type's, walking up through type bodies to the file. A member of an
+    anonymous or local class (a type body that isn't reached that way)
+    gets ``None``. Kotlin: ``"private"`` when the declaration or any
+    enclosing class or object is ``private``.
+
+    Args:
+        language: The file's language name.
+        def_node: The definition node ``_make_symbol`` is building.
+
+    Returns:
+        ``"private"``, ``"package"`` or ``None``.
+    """
+    if language == "java" and def_node.type in _JAVA_VISIBILITY_MEMBERS:
+        access = _java_effective_access(def_node)
+        return access if access in ("private", "package") else None
+    if language == "kotlin" and def_node.type in _KOTLIN_VISIBILITY_MEMBERS:
+        return "private" if _kotlin_private_scope(def_node) else None
+    return None
+
+
+def _java_effective_access(def_node: Node) -> str | None:
+    """The narrowest Java access of ``def_node`` and its enclosing types,
+    or ``None`` when an enclosing type is anonymous or local."""
+    access = "public"
+    node = def_node
+    while True:
+        body = node.parent
+        if body is None or body.type == "program":
+            return _narrower_java_access(access, _java_own_access(node, False))
+        owner = body.parent
+        if body.type == "enum_body_declarations" and owner is not None:
+            owner = owner.parent
+        if (
+            body.type not in _JAVA_TYPE_BODIES
+            or owner is None
+            or owner.type not in _JAVA_TYPE_DECLARATIONS
+        ):
+            return None
+        own = _java_own_access(
+            node, owner.type in _JAVA_IMPLICITLY_PUBLIC_OWNERS
+        )
+        access = _narrower_java_access(access, own)
+        node = owner
+
+
+def _narrower_java_access(a: str, b: str) -> str:
+    """The narrower of two Java access levels."""
+    return a if _JAVA_ACCESS_RANK[a] >= _JAVA_ACCESS_RANK[b] else b
+
+
+def _java_own_access(node: Node, implicitly_public: bool) -> str:
+    """A Java declaration's own access: its keyword, else ``"public"``
+    in an interface or annotation type, else ``"package"``."""
+    if _modifiers_keyword(node, "private"):
+        return "private"
+    if _modifiers_keyword(node, "public") or implicitly_public:
+        return "public"
+    if _modifiers_keyword(node, "protected"):
+        return "protected"
+    return "package"
+
+
+def _kotlin_private_scope(def_node: Node) -> bool:
+    """Whether a Kotlin declaration, or a class or object around it, is
+    written ``private``."""
+    node: Node | None = def_node
+    while node is not None:
+        if (
+            node is def_node
+            or node.type in ("class_declaration", "object_declaration")
+        ) and _kotlin_visibility_is(node, "private"):
+            return True
+        node = node.parent
+    return False
+
+
+def _kotlin_visibility_is(def_node: Node, keyword: str) -> bool:
+    """Whether a Kotlin declaration's visibility modifier is ``keyword``."""
+    modifiers = _modifiers_node(def_node)
+    if modifiers is None:
+        return False
+    return any(
+        child.type == "visibility_modifier" and _text(child) == keyword
+        for child in modifiers.named_children
     )
 
 
