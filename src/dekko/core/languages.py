@@ -1426,6 +1426,14 @@ JAVA = LanguageSpec(
 # ``call_expression`` that must not count as another call. An object
 # expression with a superclass (``object : Base(x) { ... }``) constructs
 # ``Base``, the way Java's ``new Base(x) { ... }`` does.
+#
+# tree-sitter-kotlin reads a generic call with exactly one argument and
+# a plain or dotted type argument, ``runApplication<App>(*args)``, as
+# the comparison ``(runApplication < App) > (*args)``. Zero or several
+# arguments, a trailing lambda, a chained call or a generic type
+# argument all parse as calls. Kotlin's compiler reads the shape as a
+# call, and as a comparison it would compare a ``Boolean`` with ``>``,
+# so the ``@gcall`` pattern records it as one.
 KOTLIN = LanguageSpec(
     name="kotlin",
     grammar="kotlin",
@@ -1459,6 +1467,13 @@ KOTLIN = LanguageSpec(
 (object_literal
   (delegation_specifiers
     (delegation_specifier (constructor_invocation) @ctor)))
+(binary_expression
+  (binary_expression
+    [(identifier) (navigation_expression)] @gfn
+    "<"
+    [(identifier) (navigation_expression)])
+  ">"
+  (parenthesized_expression) @garg) @gcall
 """,
     import_query="""
 (import (qualified_identifier) @module (identifier)? @alias)
@@ -1670,6 +1685,12 @@ _JAVA_RECORD_CANONICAL_VERSION = 1
 # it skips (arrays, package paths). Read off the node outside the query.
 _JAVA_CTOR_REF_VERSION = 1
 
+# Bump when ``extractor._collect_kotlin_calls`` changes the ``RawCall``
+# it builds from a Kotlin ``f<T>(x)`` misparsed as a comparison (its
+# head, receiver, or the one-or-unknown argument count). Code outside
+# the query.
+_KOTLIN_GENERIC_CALL_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every extraction spec, both tiers, into one invalidation key.
@@ -1688,8 +1709,9 @@ def spec_fingerprint() -> str:
     ``_CPP_USING_VERSION``, ``_CPP_DECLS_VERSION``,
     ``_TIER2_ENGINE_VERSION``, ``_PY_IMPORT_REBIND_VERSION``,
     ``_CALL_ARG_COUNT_VERSION``, ``_JVM_VISIBILITY_VERSION``,
-    ``_JAVA_NEW_QUALIFIER_VERSION``, ``_JAVA_RECORD_CANONICAL_VERSION``
-    and ``_JAVA_CTOR_REF_VERSION``, which
+    ``_JAVA_NEW_QUALIFIER_VERSION``, ``_JAVA_RECORD_CANONICAL_VERSION``,
+    ``_JAVA_CTOR_REF_VERSION`` and ``_KOTLIN_GENERIC_CALL_VERSION``,
+    which
     each cover one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments), plus every
     Tier-2 row (``tier2.TIER2_SPECS``), so editing a row re-extracts
@@ -1722,6 +1744,7 @@ def spec_fingerprint() -> str:
         f"java_new_qualifier={_JAVA_NEW_QUALIFIER_VERSION}",
         f"java_record_canonical={_JAVA_RECORD_CANONICAL_VERSION}",
         f"java_ctor_ref={_JAVA_CTOR_REF_VERSION}",
+        f"kotlin_generic_call={_KOTLIN_GENERIC_CALL_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):

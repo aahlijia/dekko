@@ -9,6 +9,30 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.4] — 2026-10-07
+
+### Fixed
+- **A Kotlin `f<T>(x)` is a call.** tree-sitter-kotlin parses a
+  generic call with exactly one argument and a plain or dotted type
+  argument, `runApplication<App>(*args)`, as the comparison
+  `(runApplication < App) > (*args)`, so dekko recorded no call: a
+  Spring Boot `main` showed nothing calling `runApplication`. That
+  shape is now recorded as the call it is, with its receiver
+  (`json.decodeFromString<Foo>(text)` → `json`) and one argument, or
+  an unknown count for a spread. Kotlin's compiler reads it as a call,
+  and as a comparison it would compare a `Boolean` with `>`. Zero or
+  several arguments, a trailing lambda, a chained call and a generic
+  type argument already parsed as calls and are unchanged.
+
+On spring-boot against 1.8.3: the 33 such sites are recorded. 3 reach
+the repo's `TestEntityManager` extensions (`getPage`, `getId`,
+`persistAndGetId`), 9 are external (`decodeFromString`,
+`testEntityManager.find`), and 21 `runApplication` calls join the 6
+already ambiguous between its two overloads (with a spread the count
+is unknown, and Kotlin calls aren't judged by count). Tensorflow has
+no Kotlin. The extraction cache refreshes on upgrade, so the first
+`dekko map` after it is a full one.
+
 ## [1.8.3] — 2026-10-07
 
 ### Fixed

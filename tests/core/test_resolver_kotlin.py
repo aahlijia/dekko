@@ -246,3 +246,17 @@ def test_kotlin_supertype_in_java_resolves(tmp_path: Path) -> None:
     assert graph.heritage_out[f"{_KT}/app/Child.kt::Child"] == [
         f"{_JAVA}/base/Base.java::Base",
     ]
+
+
+def test_a_one_argument_generic_call_resolves(tmp_path: Path) -> None:
+    # tree-sitter-kotlin parses ``gen<App>(1)`` as ``(gen < App) > (1)``.
+    gen = f"{_KT}/app/Gen.kt"
+    use = f"{_KT}/app/Use.kt"
+    graph = _graph(
+        tmp_path,
+        {
+            gen: "package app\n\ninline fun <reified T> gen(x: Int) = x\n",
+            use: "package app\n\nfun use() {\n    gen<String>(1)\n}\n",
+        },
+    )
+    assert _callees(graph, f"{use}::use") == {f"{gen}::gen"}

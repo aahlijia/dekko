@@ -142,6 +142,52 @@ def test_call_shapes(
     assert len([c for c in fm.calls if c.name == expected[0]]) == 1
 
 
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # tree-sitter-kotlin parses these as ``(f < T) > (x)``.
+        ("gen<App>(1)", ("gen", None, 1)),
+        ("gen<App>(k)", ("gen", None, 1)),
+        ("id<Int>(3)", ("id", None, 1)),
+        ("runApplication<App>(*args)", ("runApplication", None, None)),
+        ("x.f<T>(y)", ("f", "x", 1)),
+        ("json.decodeFromString<Foo>(text)", ("decodeFromString", "json", 1)),
+        ("f<a.B>(x)", ("f", None, 1)),
+        # These already parse as calls; recorded once, as before.
+        ("gen<App>(1, 2)", ("gen", None, 2)),
+        ("gen<App>()", ("gen", None, 0)),
+        ("gen<App>(1) { }", ("gen", None, 2)),
+        ("gen<List<X>>(y)", ("gen", None, 1)),
+    ],
+)
+def test_one_argument_generic_calls(
+    tmp_path: Path,
+    body: str,
+    expected: tuple[str, str | None, int | None],
+) -> None:
+    fm = _extract(tmp_path, f"fun t() {{\n    {body}\n}}\n")
+    named = [c for c in fm.calls if c.name == expected[0]]
+    assert [(c.name, c.receiver, c.arg_count) for c in named] == [expected]
+    assert named[0].line == 2
+    assert named[0].caller_id == "Sample.kt::t"
+
+
+def test_a_chained_generic_call_is_counted_once(tmp_path: Path) -> None:
+    fm = _extract(tmp_path, "fun t() {\n    gen<App>(1).length\n}\n")
+    assert [(c.name, c.arg_count) for c in fm.calls] == [("gen", 1)]
+
+
+def test_comparisons_are_not_calls(tmp_path: Path) -> None:
+    fm = _extract(
+        tmp_path,
+        "fun t(a: Int, b: Int, c: Int, d: Int) {\n"
+        "    if (a < b && c > (d)) { }\n"
+        "    val e = (a < b) == (c > d)\n"
+        "}\n",
+    )
+    assert fm.calls == []
+
+
 def test_invoked_call_result_has_no_name(tmp_path: Path) -> None:
     fm = _extract(tmp_path, "fun t() {\n    f()()\n}\n")
     assert [c.name for c in fm.calls] == ["f"]

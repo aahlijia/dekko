@@ -1617,6 +1617,10 @@ def _collect_kotlin_calls(
     spans = [(node.start_byte, node.end_byte, sym) for node, sym in defs]
     calls: list[RawCall] = []
     for _, caps in _run_query(spec.grammar, spec.call_query, root):
+        generic = _kotlin_generic_call(caps, rel, spans)
+        if generic is not None:
+            calls.append(generic)
+            continue
         ctor = _one(caps, "ctor")
         call_node = ctor or _one(caps, "call")
         if call_node is None:
@@ -1655,6 +1659,13 @@ def _kotlin_callee_parts(call: Node) -> tuple[str, str, str | None] | None:
     head = call.named_children[0] if call.named_children else None
     if head is None:
         return None
+
+    return _kotlin_head_parts(head)
+
+
+def _kotlin_head_parts(head: Node) -> tuple[str, str, str | None] | None:
+    """``(text, name, receiver)`` of a Kotlin callee: ``f`` or
+    ``a.b.f``, ``None`` for any other shape."""
     if head.type == "identifier":
         name = _text(head)
         return name, name, None
@@ -1666,6 +1677,49 @@ def _kotlin_callee_parts(call: Node) -> tuple[str, str, str | None] | None:
     name = _text(member)
     receiver = _kotlin_canonical(head.named_children[0])
     return f"{receiver}.{name}", name, receiver
+
+
+def _kotlin_generic_call(
+    caps: dict[str, list[Node]],
+    rel: str,
+    spans: list[tuple[int, int, Symbol]],
+) -> RawCall | None:
+    """The call a ``@gcall`` match stands for: ``f<T>(x)`` that
+    tree-sitter-kotlin parsed as ``(f < T) > (x)``.
+
+    One argument, or an unknown count when it is a spread
+    (``*args``). Calls inside the argument are found on their own.
+
+    Args:
+        caps: One ``call_query`` match.
+        rel: Repo-relative file path.
+        spans: ``(start_byte, end_byte, symbol)`` of every definition.
+
+    Returns:
+        The call, or ``None`` for any other match.
+    """
+    node = _one(caps, "gcall")
+    head = _one(caps, "gfn")
+    arg = _one(caps, "garg")
+    if node is None or head is None or arg is None:
+        return None
+    parts = _kotlin_head_parts(head)
+    if parts is None:
+        return None
+
+    text, name, receiver = parts
+    text, receiver = _cap_callee(text, name, receiver)
+    spread = any(c.type == "spread_expression" for c in arg.named_children)
+    caller = _enclosing(spans, node.start_byte)
+    return RawCall(
+        caller_id=caller.id if caller else None,
+        path=rel,
+        text=text,
+        name=name,
+        receiver=receiver,
+        line=node.start_point[0] + 1,
+        arg_count=None if spread else 1,
+    )
 
 
 def _kotlin_constructed_type(
