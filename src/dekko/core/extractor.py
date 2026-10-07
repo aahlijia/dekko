@@ -274,6 +274,11 @@ def _collect_definitions(
         if name_node is None or def_node is None:
             continue
 
+        if _is_record_header(def_node) and _record_declares_canonical(
+            def_node.parent
+        ):
+            continue
+
         params_node = _one(caps, "params")
 
         if _looks_like_c_macro_invocation(
@@ -352,6 +357,68 @@ def _is_deleted_function(def_node: Node) -> bool:
     default`` is callable and stays.
     """
     return any(c.type == "delete_method_clause" for c in def_node.children)
+
+
+def _is_record_header(def_node: Node) -> bool:
+    """Whether a definition node is a Java record's component list,
+    standing for the record's implicit canonical constructor."""
+    parent = def_node.parent
+    return (
+        def_node.type == "formal_parameters"
+        and parent is not None
+        and parent.type == "record_declaration"
+    )
+
+
+# A type annotation inside a Java parameter's type text
+# (``java.lang.@Nullable String``, ``String @NonNull []``).
+_JAVA_TYPE_ANNOTATION = re.compile(r"@[\w.]+(\([^)]*\))?\s*")
+
+
+def _record_declares_canonical(record: Node) -> bool:
+    """Whether a Java record's body declares its canonical constructor.
+
+    A compact constructor always is it. An explicit constructor is it
+    when its parameter types are the components' types (JLS 8.10.4),
+    compared with annotations and whitespace dropped: the header may
+    annotate a component its constructor's parameter leaves bare.
+    """
+    header = record.child_by_field_name("parameters")
+    body = record.child_by_field_name("body")
+    if header is None or body is None:
+        return False
+
+    components = _java_param_types(header)
+    for member in body.named_children:
+        if member.type == "compact_constructor_declaration":
+            return True
+        if member.type != "constructor_declaration":
+            continue
+        params = member.child_by_field_name("parameters")
+        if params is not None and _java_param_types(params) == components:
+            return True
+
+    return False
+
+
+def _java_param_types(params_node: Node) -> list[str]:
+    """A Java parameter list's types, annotations and whitespace
+    dropped. A varargs type keeps its ``...``, and ``int a[]`` reads
+    as ``int[]``, the type it declares."""
+    types: list[str] = []
+    for param in params_node.named_children:
+        if param.type == "comment":
+            continue
+        if param.type == "spread_parameter":
+            text = _java_spread_param(param).type or _text(param)
+        else:
+            type_node = param.child_by_field_name("type")
+            text = _text(type_node) if type_node is not None else _text(param)
+            text += "".join(
+                _text(c) for c in param.children if c.type == "dimensions"
+            )
+        types.append(re.sub(r"\s+", "", _JAVA_TYPE_ANNOTATION.sub("", text)))
+    return types
 
 
 # ALL-CAPS-with-underscores is the near-universal C/C++ convention for
@@ -531,8 +598,10 @@ def _jvm_visibility(language: str, def_node: Node) -> str | None:
     Java: the narrowest of the member's own access and every enclosing
     type's, walking up through type bodies to the file. A member of an
     anonymous or local class (a type body that isn't reached that way)
-    gets ``None``. Kotlin: ``"private"`` when the declaration or any
-    enclosing class or object is ``private``.
+    gets ``None``. A record's header, standing for its implicit
+    canonical constructor, has the record's own access (JLS 8.10.4).
+    Kotlin: ``"private"`` when the declaration or any enclosing class
+    or object is ``private``.
 
     Args:
         language: The file's language name.
@@ -541,6 +610,9 @@ def _jvm_visibility(language: str, def_node: Node) -> str | None:
     Returns:
         ``"private"``, ``"package"`` or ``None``.
     """
+    if language == "java" and _is_record_header(def_node):
+        access = _java_effective_access(def_node.parent)
+        return access if access in ("private", "package") else None
     if language == "java" and def_node.type in _JAVA_VISIBILITY_MEMBERS:
         access = _java_effective_access(def_node)
         return access if access in ("private", "package") else None

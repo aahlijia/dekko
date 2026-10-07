@@ -9,6 +9,40 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-10-07
+
+### Fixed
+- **A Java record's canonical constructor is a symbol.** `record
+  R(int a, String b)` has a constructor `R(int, String)` whether or not
+  its body writes one, but dekko only extracted the constructors a body
+  declares. A construction from another file was judged against the
+  record's own empty parameter list, so `new BundleContentProperty("n",
+  f)` read as two arguments for none and went external. The canonical
+  constructor is now `R.R`, its parameters the record's components, on
+  the header line, or on the compact constructor when the body has one
+  (that body's calls are now the constructor's, not the record's). An
+  explicit constructor with the components' types is the canonical one,
+  so a record never has two. It has the record's access, so a private
+  nested record's constructor gets the same access veto as a private
+  method.
+
+On spring-boot against 1.8.0: 599 call sites gained and 6 lost (5 are
+compact-constructor bodies changing owner), external sites −157/+21.
+`BundleContentProperty`'s 16 constructions and
+`DockerCliContextResponse`'s 14 had no edge and now reach both the
+record and its constructor, and records that also declare other
+constructors get a real overload pick. One honest tie appears:
+`Instantiator`'s canonical `(ClassLoader, Class<?>)` and explicit
+`(ClassLoader, String)` both take the two arguments `new
+Instantiator<>(parent, name)` writes, so that row is ambiguous.
+Tensorflow has no records and is unchanged. Limits: a declared
+constructor that sits after the header in source shifts from `R.R` to
+`R.R#2`, so a note anchored to it orphans (`dekko note` sweeps it); a
+class's implicit no-argument constructor still has no symbol; records
+Spring binds by reflection can now show up in `unused` as uncalled
+constructors. The extraction cache refreshes on upgrade, so the first
+`dekko map` after it is a full one.
+
 ## [1.8.0] — 2026-10-06
 
 Closes round 1.8's fix cycle. The code is 1.7.7; this release is the

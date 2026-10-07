@@ -1286,6 +1286,16 @@ _JAVA_REFERENCE_QUERY = """
 (method_reference "::" (identifier) @ref)
 """
 
+# A record is the one Java type whose implicit constructor takes
+# arguments: ``record R(int a, int b)`` has a canonical ``R(int, int)``
+# whether or not its body writes one. The two ``record_declaration``
+# patterns in the definition query below make that constructor the
+# symbol ``R.R``, its parameters the header's components, the way a
+# Kotlin primary constructor is one: on the header when nothing in the
+# body declares it, on a compact constructor (whose body is then its
+# own) when one does. ``extractor._collect_definitions`` drops the
+# header match when the body already declares the canonical
+# constructor, so a record never has two.
 JAVA = LanguageSpec(
     name="java",
     grammar="java",
@@ -1304,6 +1314,15 @@ JAVA = LanguageSpec(
 (interface_declaration name: (identifier) @classname) @classdef
 (enum_declaration name: (identifier) @classname) @classdef
 (record_declaration name: (identifier) @classname) @classdef
+
+(record_declaration
+  name: (identifier) @name
+  parameters: (formal_parameters) @params @def)
+
+(record_declaration
+  name: (identifier) @name
+  parameters: (formal_parameters) @params
+  body: (class_body (compact_constructor_declaration) @def))
 """,
     call_query="""
 (method_invocation arguments: (_)? @args) @callee @call
@@ -1634,6 +1653,12 @@ _JVM_VISIBILITY_VERSION = 1
 # query.
 _JAVA_NEW_QUALIFIER_VERSION = 1
 
+# Bump when ``extractor._collect_definitions`` changes when a Java
+# record's header stands for its canonical constructor (the body
+# declaring one drops it), or ``extractor._jvm_visibility`` changes the
+# access that header constructor gets. Code outside the query.
+_JAVA_RECORD_CANONICAL_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every extraction spec, both tiers, into one invalidation key.
@@ -1651,8 +1676,9 @@ def spec_fingerprint() -> str:
     ``_CPP_CONSTRUCTION_VERSION``, ``_CPP_QUALIFIED_PATH_VERSION``,
     ``_CPP_USING_VERSION``, ``_CPP_DECLS_VERSION``,
     ``_TIER2_ENGINE_VERSION``, ``_PY_IMPORT_REBIND_VERSION``,
-    ``_CALL_ARG_COUNT_VERSION``, ``_JVM_VISIBILITY_VERSION`` and
-    ``_JAVA_NEW_QUALIFIER_VERSION``, which
+    ``_CALL_ARG_COUNT_VERSION``, ``_JVM_VISIBILITY_VERSION``,
+    ``_JAVA_NEW_QUALIFIER_VERSION`` and
+    ``_JAVA_RECORD_CANONICAL_VERSION``, which
     each cover one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments), plus every
     Tier-2 row (``tier2.TIER2_SPECS``), so editing a row re-extracts
@@ -1683,6 +1709,7 @@ def spec_fingerprint() -> str:
         f"call_arg_count={_CALL_ARG_COUNT_VERSION}",
         f"jvm_visibility={_JVM_VISIBILITY_VERSION}",
         f"java_new_qualifier={_JAVA_NEW_QUALIFIER_VERSION}",
+        f"java_record_canonical={_JAVA_RECORD_CANONICAL_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):
