@@ -1222,7 +1222,12 @@ ends `Outer.Inner`; a path no repo type is on is counted external. A
 package needs two lowercase segments or a known first one (`java`,
 `javax`, `jakarta`, `org`, `com`, `io`, `net`, `kotlin`, ...), so
 `foo.Bar.m()` on a local `foo` is left to the ladder, and an ALL_CAPS
-segment is read as a constant, not a type. A low ambiguous rate
+segment is read as a constant, not a type. Since 1.8.3 a Java `new
+X(..)` or `X::new` that is still ambiguous, with no import of `X` in
+the file, takes the one top-level `X` in the file's own package, as
+Java does (the package is the directory under the source root, so
+`src/test/java/org/x` and `src/main/java/org/x` are one package). Two
+`X` in that package, or none, leave it ambiguous. A low ambiguous rate
 means the call graph is trustworthy as-is; a high one concentrated in
 a few files or names means those spots are worth a manual check before
 trusting `query callers`/`callees`/`workset`/`impacted_tests` output

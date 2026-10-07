@@ -3706,6 +3706,95 @@ def _pick_candidate(
     crate_roots: dict[str, list[str]] | None = None,
     tiebreak_hits: list[int] | None = None,
 ) -> Symbol | _Noise | None:
+    """Pick a candidate, then let Java's package scope settle a tie.
+
+    ``_pick_candidate_retried`` runs the ladder. When it can't decide,
+    a Java construction or reference may still name its own package's
+    type (``_java_same_package_type``). See ``_pick_candidate_vetoed``
+    for every parameter.
+    """
+    picked = _pick_candidate_retried(
+        call,
+        candidates,
+        same_file,
+        file_imports,
+        caller,
+        index,
+        repo_stems,
+        raw_imports,
+        crate_roots,
+        tiebreak_hits,
+    )
+    if picked is not None:
+        return picked
+
+    return _java_same_package_type(call, candidates, file_imports)
+
+
+def _java_same_package_type(
+    call: _Referable,
+    candidates: list[Symbol],
+    file_imports: dict[str, Import],
+) -> Symbol | None:
+    """The one top-level type a Java ``new X(..)`` or reference names
+    through its own package, when the ladder left it undecided.
+
+    A simple type name in Java is, in order, a type in scope from the
+    enclosing classes, a single-type import, a type in the file's own
+    package, then an on-demand import (JLS 6.4.1, 7.5). No rung read
+    the third, so spring-boot's duplicated module copies (the ``jdbc``
+    and ``r2dbc`` ``MySqlEnvironment``, two ``JSONException``) left
+    785 constructions ambiguous between a type in the caller's package
+    and one elsewhere. Only a tie is settled: no pick the ladder makes
+    contradicts the rule, so a rung would decide nothing more. An
+    import of the name means the import rung already had its say.
+
+    Args:
+        call: The raw call or reference.
+        candidates: The candidates the ladder was given.
+        file_imports: The file's bound import names.
+
+    Returns:
+        The type, or ``None`` when the call isn't a Java construction
+        or reference, its file has no package dekko can read, or not
+        exactly one top-level Java type of the name is in its package.
+    """
+    if not call.path.endswith(".java") or call.name in file_imports:
+        return None
+    construction = (
+        isinstance(call, RawCall)
+        and call.receiver is None
+        and call.text.startswith("new ")
+    )
+    if not (construction or isinstance(call, RawRef)):
+        return None
+    package = jvm_package_dir(call.path)
+    if package is None:
+        return None
+    types = [
+        c
+        for c in candidates
+        if c.kind in TYPE_KINDS
+        and c.language == "java"
+        and "." not in c.qualname
+        and jvm_package_dir(c.path) == package
+    ]
+
+    return types[0] if len(types) == 1 else None
+
+
+def _pick_candidate_retried(
+    call: _Referable,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    file_imports: dict[str, Import],
+    caller: Symbol | None,
+    index: dict[str, list[Symbol]],
+    repo_stems: set[str] | None = None,
+    raw_imports: list[Import] | None = None,
+    crate_roots: dict[str, list[str]] | None = None,
+    tiebreak_hits: list[int] | None = None,
+) -> Symbol | _Noise | None:
     """Pick a candidate, skipping a pick the call can't mean.
 
     See ``_pick_candidate_vetoed`` for the ladder's own vetoes and

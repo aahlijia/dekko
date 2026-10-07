@@ -9,6 +9,35 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.3] — 2026-10-07
+
+### Fixed
+- **A Java type name the ladder can't decide is its own package's.**
+  Java finds a simple type name in the enclosing classes, then the
+  single-type imports, then the file's own package, then the on-demand
+  imports. No rung read the package, so `new ColorConverter()` with
+  one `ColorConverter` beside the caller and another in a different
+  package was ambiguous, and so were most constructions in
+  spring-boot's duplicated module copies (the `jdbc` and `r2dbc`
+  `MySqlEnvironment`, the two `JSONException`). Now a `new X(..)` or
+  `X::new` the ladder leaves ambiguous, in a file that imports no `X`,
+  takes the one top-level `X` in the caller's package (the directory
+  under the source root, so a test's package is its class's). The
+  constructor is then picked by count as usual.
+
+On spring-boot against 1.8.2: 1,495 call sites gained, none lost, 4
+reference sites gained; ambiguous rows 62,046 → 61,278. Checked over
+every pick when this was designed: no in-repo rival is a nested type
+inherited from the caller's supertypes (the one way Java's scope
+could beat the package), and none of the 3,333 existing cross-package
+type edges contradicts the rule, so it only settles ties. `sanity` on
+every type a `::new` names, with tests: 0 unexplained rows (3 at
+1.8.2). Limits: Java only (Kotlin has the same rule; 19 rows on
+spring-boot); a type nested in a supertype the repo can't see could in
+principle shadow the package's; a file with no source root has no
+package and is not judged. Tensorflow is unchanged in the design
+simulation.
+
 ## [1.8.2] — 2026-10-07
 
 ### Fixed
