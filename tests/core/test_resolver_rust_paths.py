@@ -587,3 +587,235 @@ def test_a_turbofish_head_is_no_path(tmp_path: Path) -> None:
         ),
     )
     assert "crates/app/src/app.rs::find" in _callees(graph, _RUN)
+
+
+def _others() -> dict[str, str]:
+    """Two more crates with a ``Point.new``, and a free ``new``."""
+    return (
+        _crate("gfx", _point())
+        | _crate("term", _point())
+        | _crate("util", "pub fn new() {}\n")
+    )
+
+
+def test_self_in_a_trait_impl_is_the_impl_type(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _others()
+        | _crate("app", "mod p;\nmod conv;\n")
+        | {
+            "crates/app/src/p.rs": (
+                "pub struct P;\n"
+                "impl P {\n"
+                "    pub fn new(a: u8) -> P {\n"
+                "        P\n"
+                "    }\n"
+                "}\n"
+            ),
+            "crates/app/src/conv.rs": (
+                "use crate::p::P;\n"
+                "pub struct A(pub u8);\n"
+                "impl From<A> for P {\n"
+                "    fn from(a: A) -> Self {\n"
+                "        Self::new(a.0)\n"
+                "    }\n"
+                "}\n"
+            ),
+        },
+    )
+    assert _callees(graph, "crates/app/src/conv.rs::P.from") == {
+        "crates/app/src/p.rs::P.new"
+    }
+
+
+def test_self_of_an_outside_type_is_external(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _others()
+        | _crate(
+            "app",
+            "pub struct A(pub u8);\n"
+            "impl From<A> for ext::P {\n"
+            "    fn from(a: A) -> Self {\n"
+            "        Self::new(a.0)\n"
+            "    }\n"
+            "}\n",
+        ),
+    )
+    caller = "crates/app/src/app.rs::ext::P.from"
+    assert _callees(graph, caller) == set()
+    assert _ambiguous(graph, caller) == {}
+    assert _externals(graph, caller) == {"ext::P::new"}
+
+
+def test_self_variant_is_not_a_same_named_struct(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "app",
+            "mod other;\n"
+            "pub enum E {\n"
+            "    Variant(u8),\n"
+            "}\n"
+            "impl E {\n"
+            "    pub fn make() -> E {\n"
+            "        Self::Variant(1)\n"
+            "    }\n"
+            "}\n",
+        )
+        | {"crates/app/src/other.rs": "pub struct Variant(pub u8);\n"},
+    )
+    assert _callees(graph, "crates/app/src/app.rs::E.make") == set()
+
+
+def test_self_in_a_trait_default_is_the_trait(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "app",
+            "pub trait Tr {\n"
+            "    fn other() {}\n"
+            "    fn go() {\n"
+            "        Self::other();\n"
+            "    }\n"
+            "}\n"
+            "pub struct X;\n"
+            "impl X {\n"
+            "    pub fn other() {}\n"
+            "}\n",
+        ),
+    )
+    assert _callees(graph, "crates/app/src/app.rs::Tr.go") == {
+        "crates/app/src/app.rs::Tr.other"
+    }
+
+
+def test_a_qualified_self_type_reads_as_its_type(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _others()
+        | _crate(
+            "app",
+            "pub trait Tr {\n"
+            "    fn new() -> Self;\n"
+            "}\n"
+            "pub struct T;\n"
+            "impl T {\n"
+            "    pub fn new() -> T {\n"
+            "        T\n"
+            "    }\n"
+            "}\n"
+            "pub fn run() {\n"
+            "    <Vec<u8>>::new();\n"
+            "    <T as Tr>::new();\n"
+            "}\n",
+        ),
+    )
+    assert _callees(graph, _RUN) == {"crates/app/src/app.rs::T.new"}
+    assert _ambiguous(graph, _RUN) == {}
+    assert _externals(graph, _RUN) == {"Vec<u8>::new"}
+
+
+def test_a_written_path_to_a_same_file_macro_type(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "app",
+            "mod other;\n"
+            "mod sys {\n"
+            "    impl DisplayLink {\n"
+            "        pub fn new() {}\n"
+            "    }\n"
+            "}\n"
+            "pub fn run() {\n"
+            "    sys::DisplayLink::new();\n"
+            "}\n",
+        )
+        | {
+            "crates/app/src/other.rs": (
+                "impl DisplayLink {\n    pub fn new() {}\n}\n"
+            )
+        },
+    )
+    assert _callees(graph, _RUN) == {
+        "crates/app/src/app.rs::sys.DisplayLink.new"
+    }
+
+
+def test_a_test_module_type_shadows_only_inside_it(tmp_path: Path) -> None:
+    stub = "pub struct Stub;\nimpl Stub {\n    pub fn make() {}\n}\n"
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "app",
+            "mod support;\n"
+            "use support::Stub;\n"
+            "pub fn run() {\n"
+            "    Stub::make();\n"
+            "}\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    pub struct Stub;\n"
+            "    impl Stub {\n"
+            "        pub fn make() {}\n"
+            "    }\n"
+            "    fn t() {\n"
+            "        Stub::make();\n"
+            "    }\n"
+            "}\n",
+        )
+        | {"crates/app/src/support.rs": stub},
+    )
+    assert _callees(graph, "crates/app/src/app.rs::tests.t") == {
+        "crates/app/src/app.rs::tests.Stub.make"
+    }
+    assert _callees(graph, _RUN) == {"crates/app/src/support.rs::Stub.make"}
+
+
+def test_a_bare_call_never_names_a_method(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _others()
+        | _crate(
+            "app",
+            "pub struct X;\n"
+            "impl X {\n"
+            "    pub fn new() -> X {\n"
+            "        X\n"
+            "    }\n"
+            "    pub fn handler() {}\n"
+            "}\n"
+            "fn new() {}\n"
+            "pub fn run() {\n"
+            "    new();\n"
+            "    handler();\n"
+            "}\n",
+        ),
+    )
+    assert _callees(graph, _RUN) == {"crates/app/src/app.rs::new"}
+    assert _externals(graph, _RUN) == {"handler"}
+
+
+def test_a_one_segment_path_to_a_same_file_impl_of_std_is_std(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "app",
+            "pub struct Name(u8);\n"
+            "impl From<Name> for String {\n"
+            "    fn from(n: Name) -> String {\n"
+            "        String::new()\n"
+            "    }\n"
+            "}\n"
+            "mod util {\n"
+            "    pub fn from(a: u8) {}\n"
+            "}\n"
+            "pub fn run() {\n"
+            '    String::from("x");\n'
+            "    util::from(1);\n"
+            "}\n",
+        ),
+    )
+    assert _callees(graph, _RUN) == {"crates/app/src/app.rs::util.from"}

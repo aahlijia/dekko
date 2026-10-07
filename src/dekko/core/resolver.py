@@ -3016,6 +3016,7 @@ def _resolve_call(
     ``_call_target_visible``.
     """
     caller_id = call.caller_id or f"{call.path}{MODULE_CALLER_SUFFIX}"
+    call = _rust_call_rewritten(call, symbols_by_id)
     if _receiver_is_external(call, file_imports, repo_stems):
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
@@ -3043,7 +3044,7 @@ def _resolve_call(
         return
 
     same_file = by_name_path.get((call.name, call.path), [])
-    scoped = _written_scope_match(call, candidates, index)
+    scoped = _written_scope_match(call, candidates, index, same_file)
     if scoped is not None:
         if scoped.trusted and len(scoped.candidates) == 1:
             # The written path names the target's scopes outright; see
@@ -4621,10 +4622,113 @@ class _Scoped:
     trusted: bool
 
 
+def _rust_inline_scope(caller_id: str | None) -> str:
+    """The inline modules a caller sits in, ``.``-joined: ``tests``
+    for ``app.rs::tests.t`` and ``app.rs::tests.Stub.make``; empty at
+    file level."""
+    qualname = (caller_id or "").split("::", 1)[-1] if caller_id else ""
+    scope: list[str] = []
+    for seg in qualname.split(".")[:-1]:
+        if not (seg.isidentifier() and seg[:1].islower()):
+            break
+        scope.append(seg)
+
+    return ".".join(scope)
+
+
+def _rust_written_path(call: _Referable) -> list[str] | None:
+    """The segments of a Rust ``a::B::name(..)`` call's written path
+    (``["a", "B"]``), or ``None`` for any other shape, or one rooted
+    at ``crate``/``self``/``super``/``Self``."""
+    receiver = getattr(call, "receiver", None)
+    if not receiver or not call.path.endswith(".rs"):
+        return None
+    if getattr(call, "text", None) != f"{receiver}::{call.name}":
+        return None
+    segs = receiver.split("::")
+    if segs[0] in ("crate", "self", "super", "Self"):
+        return None
+    if not all(_RUST_IDENT.fullmatch(seg) for seg in segs):
+        return None
+
+    return segs
+
+
+def _qualname_rest(qualname: str, tail: str) -> str | None:
+    """What precedes ``tail`` in ``qualname`` (``tests`` of
+    ``tests.Stub.make`` for ``Stub.make``), ``""`` when they are equal,
+    ``None`` when ``qualname`` doesn't end in ``tail``."""
+    if qualname == tail:
+        return ""
+    if qualname.endswith("." + tail):
+        return qualname[: -len(tail) - 1]
+
+    return None
+
+
+def _rust_same_file_path_match(
+    call: _Referable,
+    same_file: list[Symbol],
+    index: dict[str, list[Symbol]],
+) -> Symbol | None:
+    """The symbol of the caller's own file a Rust ``a::B::name`` path
+    names, among ``same_file`` (its same-named symbols).
+
+    A written path whose segments, plus the name, end a qualname in
+    the calling file names that symbol when the rest of the qualname
+    is an inline module the caller sits in (or nothing):
+    ``sys::DisplayLink::new`` is ``sys.DisplayLink.new`` though a macro
+    made ``DisplayLink`` and no type symbol carries it, and inside
+    ``mod tests`` a ``StubAgentServer::new`` is the test module's own
+    ``tests.StubAgentServer.new``. The innermost such symbol wins, as
+    an item shadows a glob import of its name. A one-segment type path
+    counts only when the file declares the type: ``String::from(..)``
+    next to the file's own ``impl From<X> for String`` is std's.
+
+    Returns:
+        The one symbol, or ``None``.
+    """
+    segs = _rust_written_path(call)
+    if segs is None:
+        return None
+    tail = ".".join([*segs, call.name])
+    scope = _rust_inline_scope(getattr(call, "caller_id", None))
+    found: dict[int, list[Symbol]] = {}
+    for cand in same_file:
+        rest = _qualname_rest(cand.qualname, tail)
+        if rest is None:
+            continue
+        if rest and scope != rest and not scope.startswith(rest + "."):
+            continue
+        one_type = len(segs) == 1 and segs[0][:1].isupper()
+        if one_type and not _rust_file_declares(
+            call.path, rest, segs[0], index
+        ):
+            continue
+        found.setdefault(len(rest), []).append(cand)
+    innermost = found[max(found)] if found else []
+
+    return innermost[0] if len(innermost) == 1 else None
+
+
+def _rust_file_declares(
+    path: str, scope: str, name: str, index: dict[str, list[Symbol]]
+) -> bool:
+    """Whether the file at ``path`` declares a type ``name`` in the
+    inline module ``scope`` (``""`` for file level)."""
+    qualname = f"{scope}.{name}" if scope else name
+
+    return any(
+        s.path == path and s.qualname == qualname and s.kind in TYPE_KINDS
+        for s in index.get(name, [])
+    )
+
+
 def _written_scope_match(
     call: _Referable,
     candidates: list[Symbol],
     index: dict[str, list[Symbol]],
+    same_file: list[Symbol] | None = None,
 ) -> _Scoped | None:
     """Narrow a C/C++ call by the scopes it's written through.
 
@@ -4638,9 +4742,16 @@ def _written_scope_match(
     is trusted, an outer-type path is not, and either rules out a pick
     off the path.
 
+    A Rust path that names a symbol of the caller's own file
+    (``_rust_same_file_path_match``, over ``same_file``: the
+    candidates in the calling file) is trusted too.
+
     Returns:
         ``None`` when no rule applies.
     """
+    local = _rust_same_file_path_match(call, same_file or [], index)
+    if local is not None:
+        return _Scoped([local], None, True)
     jvm = _jvm_written_type_match(call, candidates)
     if jvm is not None:
         return jvm
@@ -5946,6 +6057,13 @@ def _rust_shape_narrowed_candidates(
         # mean. Anything less than that is left alone here on purpose,
         # see ``_pick_candidate``'s veto.
         return [], [], True
+    if _rust_is_bare_call(call):
+        # A method or associated function needs ``x.`` or ``Type::``;
+        # a bare ``new(cx)`` can only be a free function (or a
+        # closure, a macro-local: nothing in the repo).
+        kept = [c for c in candidates if c.kind != "method"]
+        if len(kept) < len(candidates):
+            return kept, [c for c in same_file if c.kind != "method"], True
     return candidates, same_file, False
 
 
@@ -6170,6 +6288,15 @@ def _rust_is_dot_call(call: _Referable) -> bool:
         return False
     text = getattr(call, "text", "") or ""
     return text.endswith(f".{call.name}")
+
+
+def _rust_is_bare_call(call: _Referable) -> bool:
+    """Whether ``call`` is a Rust call with no receiver: ``new(cx)``."""
+    return (
+        isinstance(call, RawCall)
+        and not call.receiver
+        and call.path.endswith(".rs")
+    )
 
 
 def _drop_free_functions(symbols: list[Symbol]) -> list[Symbol]:
@@ -9525,6 +9652,82 @@ def _rust_path_key(receiver: str) -> str:
     return "::".join(segs)
 
 
+# A type as a ``<T>`` or ``<T as Tr>`` receiver writes it: ``Vec<u8>``,
+# ``notify::RecommendedWatcher``.
+_RUST_WRITTEN_TYPE = re.compile(r"(?:\w+::)*\w+(?:<.*>)?")
+
+
+def _rust_qualified_type(receiver: str) -> str | None:
+    """The type of a whole ``<T>`` or ``<T as Tr>`` receiver: ``T``.
+
+    ``None`` unless the receiver is one ``<..>`` from end to end, and
+    for an associated type inside one (``<T::Summary as Summary>``):
+    ``<Cmd as LspCommand>::ProtoRequest`` names an associated type,
+    which only the trait solver knows.
+    """
+    receiver = receiver.strip()
+    if not receiver.startswith("<"):
+        return None
+    depth = 0
+    for i, char in enumerate(receiver):
+        depth += {"<": 1, ">": -1}.get(char, 0)
+        if depth == 0:
+            if i != len(receiver) - 1:
+                return None
+            break
+    inner = receiver[1:-1].strip()
+    written = inner.split(" as ", 1)[0].strip()
+    if not _RUST_WRITTEN_TYPE.fullmatch(written):
+        return None
+    segs = _strip_template_args(written).split("::")
+    if any(seg.strip()[:1].isupper() for seg in segs[:-1]):
+        # ``<T::Summary as Summary>``: an associated type, as above.
+        return None
+
+    return written
+
+
+def _rust_self_type(caller: Symbol | None) -> str | None:
+    """The type ``Self`` names inside ``caller``: its container as the
+    impl wrote it (``P`` of ``P.from``, ``ext::P`` of ``ext::P.from``,
+    the trait of a default method). ``None`` outside a type."""
+    if caller is None or "." not in caller.qualname:
+        return None
+    container = caller.qualname.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+    if not container.rsplit("::", 1)[-1][:1].isupper():
+        return None
+
+    return container
+
+
+def _rust_call_rewritten(
+    call: RawCall, symbols_by_id: dict[str, Symbol]
+) -> RawCall:
+    """A Rust ``Self::name`` or ``<T>::name`` call written as the
+    ``T::name`` it means.
+
+    Neither shape reached the type narrowing: ``Self::new`` inside
+    ``impl From<..> for P`` and ``<Vec<_>>::new()`` carried every
+    ``new`` in the repo. Read as ``P::new`` and ``Vec<_>::new``, the
+    owner step, the walk and the unknown-type rule apply as they do to
+    a written ``Type::name``, and a ``Self::Variant(..)`` no longer
+    lands on a same-named struct. Anything else is returned as-is.
+    """
+    receiver = call.receiver
+    if not receiver or not call.path.endswith(".rs"):
+        return call
+    if call.text != f"{receiver}::{call.name}":
+        return call
+    if receiver == "Self":
+        written = _rust_self_type(symbols_by_id.get(call.caller_id or ""))
+    else:
+        written = _rust_qualified_type(receiver)
+    if written is None:
+        return call
+
+    return replace(call, receiver=written, text=f"{written}::{call.name}")
+
+
 class _Unbound:
     """Sentinel: no module or ``use`` in scope binds a path's head."""
 
@@ -9906,6 +10109,13 @@ class _RustPaths:
         )
 
 
+def _rust_written_calls(fm: FileMap) -> list[RawCall]:
+    """One Rust file's calls, each as ``_rust_call_rewritten`` reads it."""
+    symbols = {sym.id: sym for sym in fm.symbols}
+
+    return [_rust_call_rewritten(call, symbols) for call in fm.calls]
+
+
 def _rust_path_entries(
     fm: FileMap, rust_paths: _RustPaths
 ) -> dict[str, _RustOriginImport]:
@@ -9914,7 +10124,7 @@ def _rust_path_entries(
     finds. A path the walk can't place gets no entry."""
     out: dict[str, _RustOriginImport] = {}
     tried: set[str] = set()
-    for call in fm.calls:
+    for call in _rust_written_calls(fm):
         receiver = call.receiver
         if not receiver or receiver in tried:
             continue
@@ -9982,7 +10192,7 @@ def _rust_path_heads(fm: FileMap) -> set[str]:
     clauses."""
     return {
         head
-        for site in (*fm.calls, *fm.heritage)
+        for site in (*_rust_written_calls(fm), *fm.heritage)
         if (head := _rust_path_head(site)) is not None
     }
 

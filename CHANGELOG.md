@@ -9,6 +9,47 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.8] — 2026-10-07
+
+### Fixed
+- **Rust `Self::name`, `<T>::name`, same-file paths and bare calls get
+  the type narrowing.** These shapes skipped the rule that keeps a
+  `Type::name(..)` path to `Type`'s own members, so a row could carry
+  every `new` in the repo. Now:
+  - `Self::name` reads as the impl's type: `Self::new(..)` inside
+    `impl From<..> for ProcessIdGetter` reaches `ProcessIdGetter.new`,
+    a trait default method's `Self::get_global(cx)` reaches the
+    trait's, and `Self::Variant(..)` no longer lands on a struct of
+    the same name elsewhere.
+  - A whole `<T>` or `<T as Tr>` receiver reads as `T`:
+    `<Vec<_>>::new()` is external, `<SharedString as
+    Element>::paint(..)` reaches `SharedString.paint`.
+  - A written path that ends a qualname in the caller's own file names
+    that symbol when the rest of the qualname is an inline module the
+    caller sits in: `sys::DisplayLink::new` reaches the
+    macro-made type's `new` in `mod sys`, and inside `mod tests` a
+    `StubAgentServer::default_response()` is the test module's own
+    `StubAgentServer`, not `test_support.rs`'s.
+  - A bare call never names a method: `new(cx)` next to the file's own
+    `fn new` and an `impl X { fn new }` is the free function, and a
+    bare `handler()` with only methods of that name is external.
+
+On zed against 1.8.7: edge sites +268 −40, ambiguous rows 83,891 →
+83,424; 464 bare call sites that were ambiguous among methods go
+external. Of the 15 rows that carried all 1,386 `new` candidates, 4
+are left: two cfg-gated aliases of one name, `Rc::new`, and
+`NotificationResponseDelegate::new`, whose type `define_class!` makes.
+The 40 edges lost are 16 `Self::Variant(..)` and derived
+`Self::default()` calls that had landed on an unrelated struct or
+`default`, 23 `StubAgentServer::default_response()` calls that moved to
+the test module's own type, and one `<fs::Permissions as
+..>::from_mode` that had reached terminal's `MouseFormat.from_mode`.
+cline is identical; map time unchanged. Limits: a `<T>` whose type is
+an associated type (`<T::Summary as Summary>`) stays with the ladder,
+and a one-segment type path settles on a same-file member only when
+the file declares the type (`String::from(..)` next to the file's
+`impl From<X> for String` is std's).
+
 ## [1.8.7] — 2026-10-07
 
 ### Fixed
