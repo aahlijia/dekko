@@ -597,13 +597,15 @@ def reexport_delta_names(
     old_reexports: list[dict] | None,
     old_imports: list[dict] | None,
 ) -> set[str] | None:
-    """Names one edited JS/TS file's exports and imports can re-point.
+    """Names one edited JS/TS or Rust file's exports and imports can
+    re-point.
 
     A name is followed from an import through every file that
-    re-exports it (``_OriginLookup``), and neither a re-export record
-    nor an import binding is part of any symbol. So an edit to either
-    changes what a call in an *unchanged* file resolves to, and the
-    symbol delta cannot see it.
+    re-exports it (``_OriginLookup``, and ``_RustPaths`` through a
+    Rust ``pub use``), and neither a re-export record nor an import
+    binding is part of any symbol. So an edit to either changes what a
+    call in an *unchanged* file resolves to, and the symbol delta
+    cannot see it.
 
     Args:
         fm: The file as extracted now.
@@ -616,9 +618,11 @@ def reexport_delta_names(
         or re-pointed (a file's own import is a hop when it exports
         the name again). An import of a bare package name leads
         nowhere in the repo and is skipped. ``None`` when a star
-        re-export was gained or lost: what a star exposes is no
-        bounded set of names. Empty for a non-JS/TS file.
+        re-export (or a Rust glob) was gained or lost: what a star
+        exposes is no bounded set of names. Empty for any other file.
     """
+    if fm.path.endswith(".rs"):
+        return _rust_use_delta_names(fm, old_imports)
     if not fm.path.endswith(_JS_TS_EXTENSIONS):
         return set()
     before = {
@@ -640,6 +644,24 @@ def reexport_delta_names(
     return names
 
 
+def _rust_use_delta_names(
+    fm: FileMap, old_imports: list[dict] | None
+) -> set[str] | None:
+    """``reexport_delta_names`` for a Rust file: the local and original
+    name of every ``use`` binding gained, lost or re-pointed, or
+    ``None`` when a glob was gained or lost."""
+    before = {(d["name"], d["source"]) for d in old_imports or ()}
+    now = {(i.name, i.source) for i in fm.imports}
+    names: set[str] = set()
+    for local, source in before ^ now:
+        if local == "*":
+            return None
+        names.update((local, source.rsplit("::", 1)[-1]))
+    names.discard("")
+
+    return names
+
+
 def reexport_closure(files: list[FileMap], names: set[str]) -> set[str]:
     """``names``, plus every name a JS/TS file passes one of them on as.
 
@@ -647,9 +669,9 @@ def reexport_closure(files: list[FileMap], names: set[str]) -> set[str]:
     depend on ``helper``, and ``import { helper as h }`` does the same
     for ``h``. A call resolved through such a hop is written under the
     far name, so a change to ``helper`` has to reach the files that
-    say ``assist`` or ``h``. Which file each record sits in is
-    ignored: this over-approximates, and is only ever used to widen a
-    re-resolve.
+    say ``assist`` or ``h``; so does a Rust ``pub use point::Point as
+    P``. Which file each record sits in is ignored: this
+    over-approximates, and is only ever used to widen a re-resolve.
 
     Args:
         files: Every mapped file.
@@ -659,7 +681,9 @@ def reexport_closure(files: list[FileMap], names: set[str]) -> set[str]:
         The closure of ``names`` under renaming re-exports and import
         aliases.
     """
-    renames: list[tuple[str, str]] = []
+    renames: list[tuple[str, str]] = [
+        (original, name) for name, original in rust_renames(files)
+    ]
     for fm in files:
         if not fm.path.endswith(_JS_TS_EXTENSIONS):
             continue
@@ -1297,6 +1321,9 @@ def resolve(
         _OriginLookup(import_ctx, by_name_path, files),
         _rust_crates(files, crates),
         _python_modules(files),
+        _RustPaths(
+            files, load_cargo_lib_roots(root) if root is not None else {}
+        ),
     )
     symbols_by_id = {sym.id: sym for fm in files for sym in fm.symbols}
     repo_stems = _repo_stems(files)
@@ -3532,6 +3559,44 @@ def _arity_plausible(
     return max_count is None or arg_count <= max_count
 
 
+def _rust_ufcs_arity_fits(candidate: Symbol, call: _Referable) -> bool:
+    """Whether a Rust path call's argument count fits ``candidate`` with
+    its ``self`` passed as the first argument.
+
+    ``_candidate_arity`` reads ``Type::name(..)`` as an associated
+    function, dropping a method's ``self``. That is the common case and
+    the reading that tells ``Store::update_global(cx, f)`` (an
+    associated fn) from a same-named ``&self`` method. A sole candidate
+    has no rival to tell apart, and a trait path passes ``self``
+    explicitly: ``text::ToOffset::to_offset(&anchor, snapshot)`` is two
+    arguments for ``to_offset(&self, snapshot)``.
+
+    Args:
+        candidate: The one remaining candidate.
+        call: The raw call being resolved.
+
+    Returns:
+        True for a Rust ``::`` path call whose count fits the
+        candidate's parameters, ``self`` included.
+    """
+    arg_count = getattr(call, "arg_count", None)
+    params = candidate.params
+    if (
+        arg_count is None
+        or candidate.language != "rust"
+        or not getattr(call, "receiver", None)
+        or _rust_is_dot_call(call)
+        or not params
+        or not _is_receiver_param(params[0], "rust")
+    ):
+        return False
+    min_count, max_count = _param_arity(params)
+
+    return min_count <= arg_count and (
+        max_count is None or arg_count <= max_count
+    )
+
+
 class _Noise:
     """Sentinel: ``_pick_candidate`` determined this call is noise
     (``_is_noise_call`` fired), not a genuine multi-candidate collision
@@ -4962,7 +5027,10 @@ def _sole_candidate_match(
         (only.kind in TYPE_KINDS and _class_named_constructors(only, index))
         or _constructed_by_count(only, call, index, file_imports or {})
         or (
-            _arity_plausible(only, call, index)
+            (
+                _arity_plausible(only, call, index)
+                or _rust_ufcs_arity_fits(only, call)
+            )
             and not _rust_name_is_also_a_variant(call, only, index)
         )
     ):
@@ -5850,7 +5918,12 @@ def _rust_shape_narrowed_candidates(
     )
     if owner is not None:
         return _rust_named_owner_narrowed(
-            call, candidates, same_file, index, owner
+            call,
+            candidates,
+            same_file,
+            index,
+            owner,
+            _rust_foreign_owner_crates(call, index, file_imports, owner),
         )
     in_crate = _rust_crate_path_narrowed(call, candidates, index, file_imports)
     if in_crate is not None:
@@ -5858,8 +5931,8 @@ def _rust_shape_narrowed_candidates(
         return in_crate, [c for c in same_file if c.id in keep], True
     if _rust_type_path_receiver(call, index):
         return (
-            _owned_by_receiver_type(call, candidates, index),
-            _owned_by_receiver_type(call, same_file, index),
+            _owned_by_receiver_type(call, candidates, index, file_imports),
+            _owned_by_receiver_type(call, same_file, index, file_imports),
             True,
         )
     if _rust_unknown_type_path(
@@ -5977,11 +6050,13 @@ def _rust_named_owner_narrowed(
     same_file: list[Symbol],
     index: dict[str, list[Symbol]],
     owner: str,
+    foreign: frozenset[str] = frozenset(),
 ) -> tuple[list[Symbol], list[Symbol], bool]:
     """``_rust_shape_narrowed_candidates`` for a path whose type an
     alias or a renaming ``use`` named: ``owner``'s own members, or
     nothing at all when the repo has no ``owner`` type and no member of
-    one (``FxHashMap``: external)."""
+    one (``FxHashMap``: external). ``foreign`` is as in
+    ``_owned_by_type``."""
     in_repo = any(s.kind in TYPE_KINDS for s in index.get(owner, []))
     if not in_repo and not any(
         _container_name(c) == owner for c in candidates
@@ -5989,8 +6064,8 @@ def _rust_named_owner_narrowed(
         return [], [], True
 
     return (
-        _owned_by_type(call, candidates, index, owner),
-        _owned_by_type(call, same_file, index, owner),
+        _owned_by_type(call, candidates, index, owner, foreign),
+        _owned_by_type(call, same_file, index, owner, foreign),
         True,
     )
 
@@ -6284,6 +6359,7 @@ def _owned_by_receiver_type(
     call: _Referable,
     candidates: list[Symbol],
     index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None = None,
 ) -> list[Symbol]:
     """Keep only candidates a ``Type::name`` path could actually mean.
 
@@ -6304,13 +6380,16 @@ def _owned_by_receiver_type(
     survives when its container is ``Type`` itself, or is a trait. A
     free function, an unrelated struct (``Enum::Variant(..)`` landing
     on a same-named struct), or another type's method cannot be the
-    target. Nothing left means no plausible repo target.
+    target. Nothing left means no plausible repo target. Neither can
+    a member of another type of that name
+    (``_rust_foreign_owner_crates``).
     """
     owner = _rust_type_path_receiver(call, index)
     if owner is None:
         return candidates
+    foreign = _rust_foreign_owner_crates(call, index, file_imports, owner)
 
-    return _owned_by_type(call, candidates, index, owner)
+    return _owned_by_type(call, candidates, index, owner, foreign)
 
 
 def _owned_by_type(
@@ -6318,9 +6397,15 @@ def _owned_by_type(
     candidates: list[Symbol],
     index: dict[str, list[Symbol]],
     owner: str,
+    foreign: frozenset[str] = frozenset(),
 ) -> list[Symbol]:
     """The candidates a path rooted at type ``owner`` could mean: its
-    own members, else a trait's (see ``_owned_by_receiver_type``)."""
+    own members, else a trait's (see ``_owned_by_receiver_type``).
+
+    A member of ``owner`` in a crate in ``foreign`` is another type
+    that happens to share the name (``_rust_foreign_owner_crates``),
+    so it is no member of this one.
+    """
     own: list[Symbol] = []
     via_trait: list[Symbol] = []
     for cand in candidates:
@@ -6328,7 +6413,8 @@ def _owned_by_type(
         if container_name is None:
             continue
         if container_name == owner:
-            own.append(cand)
+            if _rust_crate_dir(cand.path) not in foreign:
+                own.append(cand)
         elif any(sym.kind == "trait" for sym in index.get(container_name, [])):
             via_trait.append(cand)
     # The type's own members outrank another trait's defaults: the
@@ -6348,6 +6434,52 @@ def _owned_by_type(
     # impl sitting in the caller's own file).
     plausible = [c for c in kept if _arity_plausible(c, call, index)]
     return plausible or kept
+
+
+def _rust_foreign_owner_crates(
+    call: _Referable,
+    index: dict[str, list[Symbol]],
+    file_imports: dict[str, Import] | None,
+    owner: str,
+) -> frozenset[str]:
+    """The crates whose own ``owner`` type is not the one a Rust
+    ``Type::name`` path names.
+
+    The path's walk (``_RustPaths``, recorded on the file's import
+    table under ``_RUST_PATH_KEY``) finds the type it means, through
+    ``use`` bindings, ``pub use`` re-exports and globs: ``use
+    rope::Point;`` reaches ``rope/src/point.rs``'s ``Point`` through
+    ``rope.rs``'s ``pub use point::Point;``. A member of a type named
+    ``owner`` sitting in a crate that declares an ``owner`` of its own
+    is then a member of that other type (gpui's and terminal's
+    ``Point.new``: 1,909 ambiguous ``Point::new`` rows on zed), and
+    so is a derived member the path's type lacks (``sandbox``'s own
+    ``SandboxPermissions::default()`` landed on ``agent_settings``'s).
+    A member in a crate that declares no ``owner`` is an ``impl`` of
+    a foreign type and stays (``language``'s ``impl ToTsPoint for
+    rope::Point``), and trait members are never touched.
+
+    Returns:
+        Every crate (``_rust_crate_dir``) that declares a type named
+        ``owner`` and holds none of the path's types; empty when the
+        walk found nothing, or found an alias (whose type lives where
+        it points).
+    """
+    receiver = getattr(call, "receiver", None) or ""
+    key = _rust_path_key(receiver)
+    found = (file_imports or {}).get(_RUST_PATH_KEY + key) if key else None
+    if not isinstance(found, _RustOriginImport) or any(
+        o.kind == "type_alias" for o in found.origins
+    ):
+        return frozenset()
+    meant = {_rust_crate_dir(o.path) for o in found.origins}
+    declaring = {
+        _rust_crate_dir(s.path)
+        for s in index.get(owner, [])
+        if s.kind in TYPE_KINDS and s.language == "rust"
+    }
+
+    return frozenset(declaring - meant)
 
 
 def _typed_param_match(
@@ -8193,6 +8325,10 @@ _EXTENDS_KEY = "::extends::"
 # (``_rust_crate_path_dirs``).
 _RUST_RENAMED_KEY = "::rust-renamed::"
 _RUST_CRATE_KEY = "::rust-crate::"
+# Reserved import-table namespace: ``_RUST_PATH_KEY + "a::Type"`` holds
+# the ``_RustOriginImport`` of a type path the file's calls write
+# (``_RustPaths``, ``_rust_foreign_owner_crates``).
+_RUST_PATH_KEY = "::rust-path::"
 _UNNAMED_CTOR_NAMES = {
     "python": "__init__",
     "javascript": "constructor",
@@ -8645,6 +8781,41 @@ _CARGO_MANIFESTS = frozenset({"Cargo.toml"})
 _CARGO_SECTION = re.compile(r"^\[([^\]]+)\]\s*$", re.M)
 _CARGO_NAME = re.compile(r'^name\s*=\s*"([^"]+)"', re.M)
 _CARGO_PATH_DEP = re.compile(r"^([\w-]+)\s*=\s*\{[^}\n]*\bpath\s*=", re.M)
+_CARGO_LIB_PATH = re.compile(r'^path\s*=\s*"([^"]+)"', re.M)
+
+
+def _cargo_manifests(
+    root: Path,
+) -> Iterator[tuple[str, list[tuple[str, str]]]]:
+    """Every ``Cargo.toml`` in the repo, as its directory and its
+    ``(section header, section body)`` pairs in file order.
+
+    Read with line regexes: Python 3.10 has no TOML parser and dekko
+    takes no dependencies.
+
+    Args:
+        root: Repository root.
+
+    Yields:
+        ``(manifest directory, sections)``, the directory repo-relative
+        (``""`` for the root).
+    """
+    for rel in walker.find_config_files(root, _CARGO_MANIFESTS):
+        try:
+            text = (root / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        marks = [
+            (m.start(), m.group(1)) for m in _CARGO_SECTION.finditer(text)
+        ]
+        marks.append((len(text), ""))
+        yield (
+            _dirname(rel),
+            [
+                (section, text[start:end])
+                for (start, section), (end, _) in itertools.pairwise(marks)
+            ],
+        )
 
 
 def load_cargo_crates(root: Path) -> dict[str, frozenset[str]]:
@@ -8659,9 +8830,7 @@ def load_cargo_crates(root: Path) -> dict[str, frozenset[str]]:
     directory-convention index (``_rust_crate_roots_index_all``)
     misses crates whose directory differs from their name or whose
     ``[lib] path`` isn't ``src/lib.rs`` (14 of zed's 261), and a
-    missed crate here would turn its imports external. Read with line
-    regexes: Python 3.10 has no TOML parser and dekko takes no
-    dependencies.
+    missed crate here would turn its imports external.
 
     Args:
         root: Repository root.
@@ -8671,18 +8840,8 @@ def load_cargo_crates(root: Path) -> dict[str, frozenset[str]]:
         root), empty for a repo with no ``Cargo.toml``.
     """
     crates: dict[str, set[str]] = {}
-    for rel in walker.find_config_files(root, _CARGO_MANIFESTS):
-        try:
-            text = (root / rel).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        where = _dirname(rel)
-        marks = [
-            (m.start(), m.group(1)) for m in _CARGO_SECTION.finditer(text)
-        ]
-        marks.append((len(text), ""))
-        for (start, section), (end, _) in itertools.pairwise(marks):
-            body = text[start:end]
+    for where, sections in _cargo_manifests(root):
+        for section, body in sections:
             if section in ("package", "lib"):
                 found = _CARGO_NAME.search(body)
                 if found:
@@ -8701,13 +8860,54 @@ def load_cargo_crates(root: Path) -> dict[str, frozenset[str]]:
     return {name: frozenset(dirs) for name, dirs in crates.items()}
 
 
+def load_cargo_lib_roots(root: Path) -> dict[str, frozenset[str]]:
+    """Every library crate's name with the root file of its lib target.
+
+    The name is the ``[lib]`` name, else the ``[package]`` name, with
+    ``-`` read as ``_``; the root is ``[lib] path``, else
+    ``src/lib.rs``, beside the manifest. A crate path is walked from
+    its root (``_RustPaths``), and the directory convention can't find
+    a root outside ``src/``: zed's ``gpui_shared_string`` declares
+    ``path = "gpui_shared_string.rs"``, and the convention knew only a
+    lint fixture of that name, so 176 ``SharedString::new`` sites
+    walked into the fixture.
+
+    Args:
+        root: Repository root.
+
+    Returns:
+        Crate name to root files (repo-relative, whether or not they
+        exist), empty for a repo with no library crate.
+    """
+    roots: dict[str, set[str]] = {}
+    for where, sections in _cargo_manifests(root):
+        named = dict(sections)
+        if "package" not in named and "lib" not in named:
+            continue
+        lib = named.get("lib", "")
+        found = _CARGO_NAME.search(lib) or _CARGO_NAME.search(
+            named.get("package", "")
+        )
+        if found is None:
+            continue
+        path = _CARGO_LIB_PATH.search(lib)
+        rel = path.group(1) if path else "src/lib.rs"
+        rel = rel.removeprefix("./")
+        roots.setdefault(found.group(1).replace("-", "_"), set()).add(
+            f"{where}/{rel}" if where else rel
+        )
+
+    return {name: frozenset(files) for name, files in roots.items()}
+
+
 def cargo_fingerprint(root: Path) -> str:
     """Digest of the repo's Rust crates, for cache invalidation.
 
     The cached call pass reads them to tell a ``use`` of a workspace
-    crate from one of an outside crate, and to narrow a
-    ``some_crate::name(..)`` path to that crate's directories. Adding
-    a crate or a path dependency, or renaming one, moves no source
+    crate from one of an outside crate, to narrow a
+    ``some_crate::name(..)`` path to that crate's directories, and to
+    walk a crate path from its lib root. Adding a crate or a path
+    dependency, renaming one, or moving a lib root moves no source
     file and no symbol.
 
     Args:
@@ -8720,7 +8920,11 @@ def cargo_fingerprint(root: Path) -> str:
     if not crates:
         return ""
     table = [[name, sorted(dirs)] for name, dirs in sorted(crates.items())]
-    return hashlib.sha256(json.dumps(table).encode()).hexdigest()
+    libs = [
+        [name, sorted(files)]
+        for name, files in sorted(load_cargo_lib_roots(root).items())
+    ]
+    return hashlib.sha256(json.dumps([table, libs]).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -8804,6 +9008,19 @@ def _rust_crates(
 class _RustOutsideImport(Import):
     """A Rust ``use`` rooted at a crate the repo doesn't have (see
     ``_RustCrates.outside``): external, whatever its segments match."""
+
+
+@dataclass
+class _RustOriginImport(Import):
+    """A Rust type path a file writes, with the types it names.
+
+    Attributes:
+        origins: The top-level type symbols the path reaches through
+            ``use`` bindings, ``pub use`` re-exports and globs (see
+            ``_RustPaths``).
+    """
+
+    origins: tuple[Symbol, ...] = ()
 
 
 @dataclass
@@ -9272,6 +9489,388 @@ class _OriginLookup:
         self._hop(path, module, original, seen, depth)
 
 
+# A plain Rust path segment.
+_RUST_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _rust_path_key(receiver: str) -> str:
+    """A Rust ``Type::name`` receiver as the path ``_RustPaths`` walks.
+
+    ``gpui::Point::<f32>`` gives ``gpui::Point``. Empty for anything
+    else: no type at the end, ``Self``, a qualified ``<T as Tr>`` form,
+    or an associated type (a type-shaped segment before the last).
+    """
+    receiver = receiver.strip()
+    if not receiver or receiver.startswith("<"):
+        return ""
+    segs = [
+        seg.strip()
+        for seg in _strip_template_args(receiver).split("::")
+        if seg.strip()
+    ]
+    if not segs or not segs[-1][:1].isupper() or segs[-1] == "Self":
+        return ""
+    if any(seg[:1].isupper() for seg in segs[:-1]):
+        return ""
+    if not all(_RUST_IDENT.fullmatch(seg) for seg in segs):
+        return ""
+
+    return "::".join(segs)
+
+
+class _Unbound:
+    """Sentinel: no module or ``use`` in scope binds a path's head."""
+
+
+_UNBOUND = _Unbound()
+
+
+class _RustPaths:
+    """Walks a Rust path to the items it names.
+
+    A path is followed module by module, the way rustc reads it: a
+    crate (its lib root from ``Cargo.toml``, else the directory
+    convention), ``crate``/``self``/``super``, a child module's file,
+    and finally the item, looked up in that module's own top level,
+    else through its ``use`` binding of the name (a ``pub use``
+    re-export, a rename undone), else through each of its globs. The
+    file-stem test the ladder runs instead reads ``rope::Point`` as a
+    bag of words; nothing followed ``rope.rs``'s ``pub use
+    point::Point;`` to the one ``Point`` it means.
+
+    Built once per resolve in the parent process; what it finds rides
+    to the pool workers on the import table (``_RUST_PATH_KEY``).
+
+    Attributes:
+        paths: Every mapped ``.rs`` file.
+    """
+
+    def __init__(
+        self,
+        files: list[FileMap],
+        lib_roots: dict[str, frozenset[str]] | None = None,
+    ) -> None:
+        self.paths = frozenset(
+            fm.path for fm in files if fm.path.endswith(".rs")
+        )
+        self._top: dict[tuple[str, str], list[Symbol]] = {}
+        self._inline: dict[str, set[str]] = {}
+        self._named: dict[str, dict[str, str]] = {}
+        self._globs: dict[str, list[str]] = {}
+        for fm in files:
+            if fm.path.endswith(".rs"):
+                self._add_file(fm)
+        self._libs = {
+            name: sorted(f for f in roots if f in self.paths)
+            for name, roots in (lib_roots or {}).items()
+        }
+        self._lib_files = sorted({f for v in self._libs.values() for f in v})
+        self._convention = _rust_crate_roots_index_all(self.paths)
+        self._roots: dict[str, str | None] = {}
+        self._scope: dict[tuple[str, str], str | None | _Unbound] = {}
+        self._pending: set[tuple[str, str]] = set()
+        self._found: dict[tuple[str, tuple[str, ...]], tuple[Symbol, ...]] = {}
+
+    def _add_file(self, fm: FileMap) -> None:
+        """Index one Rust file's top-level items, bindings and globs."""
+        inline = self._inline.setdefault(fm.path, set())
+        for sym in fm.symbols:
+            if "." not in sym.qualname:
+                self._top.setdefault((fm.path, sym.name), []).append(sym)
+            elif sym.qualname[:1].islower():
+                inline.add(sym.qualname.split(".", 1)[0])
+        named = self._named.setdefault(fm.path, {})
+        for imp in fm.imports:
+            if imp.name == "*":
+                self._globs.setdefault(fm.path, []).append(
+                    imp.source.removesuffix("::*")
+                )
+            elif imp.name and imp.name != "_":
+                named.setdefault(imp.name, imp.source)
+
+    def types_at(
+        self, importer: str, segs: tuple[str, ...]
+    ) -> tuple[Symbol, ...]:
+        """The type symbols the path ``segs`` names from ``importer``.
+
+        Args:
+            importer: The file the path is written in.
+            segs: The path's segments (``("rope", "Point")``).
+
+        Returns:
+            The top-level type-kind symbols found, empty when the path
+            leaves the repo or names nothing the walk can place.
+        """
+        key = (importer, segs)
+        found = self._found.get(key)
+        if found is None:
+            seen: dict[str, Symbol] = {}
+            for sym in self._at(importer, list(segs), 0, set()):
+                if sym.kind in TYPE_KINDS:
+                    seen.setdefault(sym.id, sym)
+            found = self._found[key] = tuple(seen.values())
+
+        return found
+
+    def _at(
+        self,
+        importer: str,
+        segs: list[str],
+        depth: int,
+        seen: set[tuple[str, str]],
+    ) -> list[Symbol]:
+        """The items a written path names from ``importer``."""
+        segs = [seg for seg in segs if seg]
+        if not segs:
+            return []
+        if len(segs) == 1:
+            return self._items(importer, segs[0], depth, seen)
+        module = self._module(importer, segs[:-1], depth)
+        if module is None:
+            return []
+
+        return self._items(module, segs[-1], depth, seen)
+
+    def _items(
+        self,
+        module: str,
+        name: str,
+        depth: int,
+        seen: set[tuple[str, str]],
+    ) -> list[Symbol]:
+        """What ``name`` means in the module file ``module``."""
+        if depth > _REEXPORT_DEPTH or (module, name) in seen:
+            return []
+        seen.add((module, name))
+        found = self._top.get((module, name))
+        if found:
+            return list(found)
+        source = self._named.get(module, {}).get(name)
+        if source is not None:
+            return self._at(module, source.split("::"), depth + 1, seen)
+        out: list[Symbol] = []
+        for glob in self._globs.get(module, ()):
+            target = self._module(module, glob.split("::"), depth + 1)
+            if target is not None and target != module:
+                out.extend(self._items(target, name, depth + 1, seen))
+
+        return out
+
+    def _module(
+        self, importer: str, segs: list[str], depth: int = 0
+    ) -> str | None:
+        """The file of the module ``segs`` names from ``importer``."""
+        if not segs:
+            return importer
+        current = self._head(importer, segs[0], depth)
+        for seg in segs[1:]:
+            if current is None:
+                return None
+            if seg == "super":
+                current = self._parent(current)
+            elif seg != "self":
+                current = self._child(current, seg)
+
+        return current
+
+    def _head(self, importer: str, head: str, depth: int) -> str | None:
+        """The module file a path's first segment names from
+        ``importer``, in Rust's order: ``crate``/``self``/``super``; a
+        module or ``use`` of the name in the file; the same reached
+        through its globs; last, a crate of that name.
+
+        Globs shadow crate names: collab's ``use super::*`` reaches
+        its ``extension`` table module, and ``extension::Entity`` is
+        that module's, not zed's ``extension`` crate's. An inline
+        ``mod m { .. }`` has no file to walk, so a head naming one
+        ends the walk.
+        """
+        if head == "crate":
+            return self._crate_root(importer)
+        if head == "self":
+            return importer
+        if head == "super":
+            return self._parent(importer)
+        found = self._scoped(importer, head, depth)
+        if found is not _UNBOUND:
+            return found
+
+        return self._crate_file(head, importer)
+
+    def _scoped(
+        self, module: str, head: str, depth: int
+    ) -> "str | None | _Unbound":
+        """What ``head`` names in ``module``'s scope, globs included;
+        ``_UNBOUND`` when nothing there binds it.
+
+        Memoized: every glob's own head is looked up the same way, so
+        without it the lookups fan out once per glob at every level. A
+        lookup already in progress (a glob cycle) reads as unbound.
+        """
+        key = (module, head)
+        if key in self._scope:
+            return self._scope[key]
+        if depth > _REEXPORT_DEPTH or key in self._pending:
+            return _UNBOUND
+        self._pending.add(key)
+        found = self._scoped_here(module, head, depth)
+        self._pending.discard(key)
+        self._scope[key] = found
+
+        return found
+
+    def _scoped_here(
+        self, module: str, head: str, depth: int
+    ) -> "str | None | _Unbound":
+        """``_scoped``'s lookup, unmemoized."""
+        if head in self._inline.get(module, ()):
+            return None
+        child = self._child(module, head)
+        if child is not None:
+            return child
+        bound = self._named.get(module, {}).get(head)
+        if bound is not None:
+            return self._module(module, bound.split("::"), depth + 1)
+        for glob in self._globs.get(module, ()):
+            target = self._module(module, glob.split("::"), depth + 1)
+            if target is None or target == module:
+                continue
+            found = self._scoped(target, head, depth + 1)
+            if found is not _UNBOUND:
+                return found
+
+        return _UNBOUND
+
+    def _crate_root(self, path: str) -> str | None:
+        """The root file of the crate ``path`` belongs to: the nearer of
+        the convention's (``_rust_crate_root``) and a ``Cargo.toml`` lib
+        root above it."""
+        if path in self._roots:
+            return self._roots[path]
+        best = None
+        base = _rust_crate_root(path, self.paths)
+        if base is not None:
+            best = next(
+                (
+                    f"{base}/{n}"
+                    for n in _rust_crate_root_index_names(base, self.paths)
+                    if f"{base}/{n}" in self.paths
+                ),
+                None,
+            )
+        for root in self._lib_files:
+            where = _dirname(root)
+            inside = not where or path.startswith(where + "/")
+            if inside and (best is None or len(where) > len(_dirname(best))):
+                best = root
+        self._roots[path] = best
+
+        return best
+
+    def _parent(self, path: str) -> str | None:
+        """The file of ``path``'s parent module."""
+        root = self._crate_root(path)
+        if root == path:
+            return None
+        directory, _, name = path.rpartition("/")
+        if name == "mod.rs":
+            directory = _dirname(directory)
+        if directory:
+            for cand in (f"{directory}.rs", f"{directory}/mod.rs"):
+                if cand in self.paths:
+                    return cand
+        if root is not None and _dirname(root) == directory:
+            return root
+
+        return None
+
+    def _child(self, path: str, seg: str) -> str | None:
+        """The file of module ``seg`` declared in the module at ``path``."""
+        if (
+            self._crate_root(path) == path
+            or path.rpartition("/")[2] == "mod.rs"
+        ):
+            directory = _dirname(path)
+        else:
+            directory = path.removesuffix(".rs")
+        prefix = f"{directory}/" if directory else ""
+        for cand in (f"{prefix}{seg}.rs", f"{prefix}{seg}/mod.rs"):
+            if cand in self.paths:
+                return cand
+
+        return None
+
+    def _crate_file(self, name: str, importer: str) -> str | None:
+        """The root file of the crate ``name``, seen from ``importer``.
+
+        ``Cargo.toml``'s lib root first. Two crates of one name (a real
+        one and a lint fixture copy) take the importer's own, else the
+        one sole root that doesn't look synthetic
+        (``_looks_like_synthetic_crate_root``); with no manifest, the
+        directory convention.
+        """
+        roots = self._libs.get(name)
+        if roots:
+            if len(roots) == 1:
+                return roots[0]
+            own = _rust_crate_dir(importer)
+            mine = [r for r in roots if _rust_crate_dir(r) == own]
+            if len(mine) == 1:
+                return mine[0]
+            real = [
+                r
+                for r in roots
+                if not _looks_like_synthetic_crate_root(_rust_crate_dir(r))
+            ]
+            return real[0] if len(real) == 1 else None
+        dirs = self._convention.get(name) or []
+        base = (
+            dirs[0]
+            if len(dirs) == 1
+            else _prefer_non_synthetic_crate_root(dirs, importer)
+            if dirs
+            else None
+        )
+        if base is None:
+            return None
+
+        return next(
+            (
+                f"{base}/{n}"
+                for n in _rust_crate_root_index_names(base, self.paths)
+                if f"{base}/{n}" in self.paths
+            ),
+            None,
+        )
+
+
+def _rust_path_entries(
+    fm: FileMap, rust_paths: _RustPaths
+) -> dict[str, _RustOriginImport]:
+    """The ``_RUST_PATH_KEY`` entries of one Rust file's import table:
+    each ``Type::name`` path its calls write, with the types the walk
+    finds. A path the walk can't place gets no entry."""
+    out: dict[str, _RustOriginImport] = {}
+    tried: set[str] = set()
+    for call in fm.calls:
+        receiver = call.receiver
+        if not receiver or receiver in tried:
+            continue
+        if f"{receiver}::" not in (call.text or ""):
+            continue
+        tried.add(receiver)
+        key = _rust_path_key(receiver)
+        if not key or _RUST_PATH_KEY + key in out:
+            continue
+        origins = rust_paths.types_at(fm.path, tuple(key.split("::")))
+        if origins:
+            out[_RUST_PATH_KEY + key] = _RustOriginImport(
+                path=fm.path, name=key, source=key, origins=origins
+            )
+
+    return out
+
+
 _RUST_IN_CRATE_PREFIXES = ("crate::", "super::", "self::")
 
 
@@ -9503,6 +10102,7 @@ def _imports_by_file(
     lookup: _OriginLookup | None = None,
     rust_crates: _RustCrates | None = None,
     python_modules: _PythonModules | None = None,
+    rust_paths: _RustPaths | None = None,
 ) -> dict[str, dict[str, Import]]:
     """Map file path → local name → import record.
 
@@ -9513,18 +10113,21 @@ def _imports_by_file(
     ``_OriginLookup``). ``rust_crates``, when given, turns every Rust
     ``use`` of an outside crate into a ``_RustOutsideImport``.
     ``python_modules``, when given, turns every Python import of a
-    module the repo doesn't have into a ``_DanglingImport``. With
-    none of them, every record is left as-is.
+    module the repo doesn't have into a ``_DanglingImport``.
+    ``rust_paths``, when given, adds each Rust file's walked type paths
+    (``_rust_path_entries``). With none of them, every record is left
+    as-is.
 
-    A Python star import binds no name, so it stays out of the table.
+    A Python or Rust glob binds no name, so it stays out of the table.
     """
     out: dict[str, dict[str, Import]] = {}
     for fm in files:
         table = out.setdefault(fm.path, {})
         used = _member_names(fm) if lookup is not None else {}
         python = fm.path.endswith(_PY_EXTENSIONS)
+        rust = fm.path.endswith(".rs")
         for imp in fm.imports:
-            if imp.name in table or (python and imp.name == "*"):
+            if imp.name in table or ((python or rust) and imp.name == "*"):
                 continue
             if (
                 python
@@ -9556,6 +10159,8 @@ def _imports_by_file(
             table[imp.name] = _workspace_tagged(
                 imp, workspace_pkgs, origins, members
             )
+        if rust and rust_paths is not None:
+            table.update(_rust_path_entries(fm, rust_paths))
 
     return out
 
@@ -10968,18 +11573,62 @@ def _resolve_import_rust(
     ``_rust_local_module_base``'s plain file-existence test — no
     ``mod``-declaration parsing, so an inline ``mod x { ... }`` (no
     file) is correctly untouched.
+
+    A glob (``a::*``) names module ``a`` itself, so only the full-path
+    reading applies (``_rust_glob_module``). A glob or ``self::`` path
+    that lands on the importing file is no dependency: the extractor
+    writes a ``use super::*`` inside ``mod tests {}`` as ``self::``.
     """
     segs = imp.source.split("::")
+    glob = segs[-1] == "*"
+    if glob:
+        segs = segs[:-1]
     if not segs:
         return None
+    base, rest, at_crate_root = _rust_use_base(segs, importer_path, ctx)
+    if glob:
+        found = _rust_glob_module(base, rest, ctx.paths)
+        return None if found == importer_path else found
+    if base is None or not rest:
+        return None
+    # A nested package directory's own index file is always mod.rs —
+    # lib.rs/main.rs (or a custom-named crate root, see
+    # _rust_crate_root_index_names) only ever names the crate root
+    # itself, reached here when ``base`` is a crate root (``crate::``
+    # or a cross-crate import) and ``rest``/``rest[:-1]`` is empty.
+    # Trying every applicable index name whenever the remaining
+    # segment list is empty covers both shapes without needing to
+    # track "is base the crate root" separately.
+    index_names = (
+        _rust_crate_root_index_names(base, ctx.paths)
+        if at_crate_root
+        else _RUST_INDEX_NAMES
+    )
+    full = _dir_module_candidates(base, rest, ".rs", index_names)
+    dropped = _dir_module_candidates(base, rest[:-1], ".rs", index_names)
+    found = _resolve_two_candidate_lists(ctx.paths, full, dropped)
+    if found == importer_path and segs[0] == "self":
+        return None
 
+    return found
+
+
+def _rust_use_base(
+    segs: list[str], importer_path: str, ctx: _ImportResolveContext
+) -> tuple[str | None, list[str], bool]:
+    """Where a Rust ``use`` path's head puts it.
+
+    Returns:
+        ``(base directory, segments left under it, whether the base is
+        a crate root)``; the base is ``None`` for an outside crate.
+    """
     at_crate_root = False
     if segs[0] == "crate":
         base = _rust_crate_root(importer_path, ctx.paths)
         rest = segs[1:]
         at_crate_root = True
     elif segs[0] in ("self", "super"):
-        base = _rust_self_base(importer_path)
+        base = _rust_path_self_base(segs[0], importer_path, ctx.paths)
         i = 0
         while i < len(segs) and segs[i] == "super":
             base = _dirname(base)
@@ -11005,24 +11654,50 @@ def _resolve_import_rust(
         rest = segs[1:]
         at_crate_root = True
 
-    if base is None or not rest:
+    return base, rest, at_crate_root
+
+
+def _rust_path_self_base(
+    head: str, importer_path: str, paths: frozenset[str]
+) -> str:
+    """The directory a ``self::``/``super::`` path starts from.
+
+    ``_rust_self_base``, except that ``self`` in a crate root named
+    after its crate (``src/auto_update_helper.rs``) is the root's own
+    directory, as for ``lib.rs``. The extractor writes ``use
+    super::dialog::f`` inside the root's ``mod windows_impl {}`` as
+    ``self::dialog::f``, which has to reach ``src/dialog.rs``.
+    """
+    own_dir = _dirname(importer_path)
+    own_name = importer_path.rsplit("/", 1)[-1]
+    if (
+        head == "self"
+        and own_dir
+        and own_name in _rust_crate_root_index_names(own_dir, paths)
+    ):
+        return own_dir
+
+    return _rust_self_base(importer_path)
+
+
+def _rust_glob_module(
+    base: str | None, rest: list[str], paths: frozenset[str]
+) -> str | None:
+    """The file of the module a Rust glob names: ``rest`` under
+    ``base``, or ``base``'s own module when ``rest`` is empty (``use
+    super::*``: ``a.rs``, ``a/mod.rs``, or the crate root in ``a``)."""
+    if base is None:
         return None
-    # A nested package directory's own index file is always mod.rs —
-    # lib.rs/main.rs (or a custom-named crate root, see
-    # _rust_crate_root_index_names) only ever names the crate root
-    # itself, reached here when ``base`` is a crate root (``crate::``
-    # or a cross-crate import) and ``rest``/``rest[:-1]`` is empty.
-    # Trying every applicable index name whenever the remaining
-    # segment list is empty covers both shapes without needing to
-    # track "is base the crate root" separately.
-    index_names = (
-        _rust_crate_root_index_names(base, ctx.paths)
-        if at_crate_root
-        else _RUST_INDEX_NAMES
+    if rest:
+        return _first_match(
+            paths, _dir_module_candidates(base, rest, ".rs", _RUST_INDEX_NAMES)
+        )
+    names = _rust_crate_root_index_names(base, paths)
+    own = [f"{base}.rs"] if base else []
+
+    return _first_match(
+        paths, own + _dir_module_candidates(base, [], ".rs", names)
     )
-    full = _dir_module_candidates(base, rest, ".rs", index_names)
-    dropped = _dir_module_candidates(base, rest[:-1], ".rs", index_names)
-    return _resolve_two_candidate_lists(ctx.paths, full, dropped)
 
 
 def _resolve_import_java(

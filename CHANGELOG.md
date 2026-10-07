@@ -9,6 +9,57 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.5] — 2026-10-07
+
+### Fixed
+- **A Rust type path is walked to the type it names.** `use
+  rope::Point;` then `Point::new(..)` means the `Point` that `rope`'s
+  root re-exports (`pub use point::Point;`), but dekko tested the
+  path's segments as file stems, so the call stayed ambiguous among
+  every `Point.new` in the workspace (gpui's, rope's and terminal's).
+  The path is now followed module by module: a crate (its lib root
+  from `Cargo.toml`, including a `[lib] path` outside `src/`), a
+  module file, then the item, through `pub use` re-exports, renames
+  and globs. A path's first segment is looked up in the file's own
+  modules and `use`s, then through its globs, before any crate name,
+  as rustc does. A member of a type of that name in a crate that
+  declares a type of that name of its own is then ruled out. Trait
+  members, and
+  impls in a crate that declares no such type (`impl ToTsPoint for
+  rope::Point`), stay candidates. A derived member the named type
+  lacks no longer lands on another crate's type of the same name
+  (`sandbox`'s own `SandboxPermissions::default()` reached
+  `agent_settings`'s).
+- **Rust globs are recorded.** `use a::*;` was dropped at extraction;
+  it is now an import (`*`, `a::*`) and a module-graph edge to `a`. A
+  `use` written inside an inline `mod tests { .. }` is re-based to the
+  file's own module (`use super::*;` there is the file itself, so it
+  binds nothing new, and `use super::X;` is `self::X`). Before, a
+  `use super::X;` in a test module pointed one module too high.
+- **A sole Rust candidate reached through a trait path counts its
+  `self`.** `text::ToOffset::to_offset(&anchor, snapshot)` passes the
+  receiver as its first argument; read as an associated function it
+  had two arguments for one parameter and went external. The
+  associated-function reading is still preferred wherever it tells two
+  candidates apart.
+
+On zed against 1.8.4: edge sites +1,957 −36, ambiguous rows 85,752 →
+84,858. Callers of `rope`'s `Point.new` went from 16 to 569 (617
+ambiguous rows named it, 29 still do). The 36 lost are 34 derived
+`default()` calls that now go external, plus two moves to the right
+target (`RenderOnce::render(self, ..)`, and `GpuiPoint::new` through
+`gpui::Point as GpuiPoint`). The module graph gains 955 glob edges
+and drops 6, which were wrong (a test module's `use super::X` read as
+the parent file's, and one self-edge). `deps --cycles` finds 112
+cycles (90 before), each still inside one crate: a root that globs its
+modules while they glob it back. Map time unchanged. cline's Rust is
+unchanged; spring-boot, tensorflow, claude-code and awesome-go have
+none. Limits: only `Type::name(..)` paths use the walk (a bare
+call through a re-exported function is unchanged), and an overload set
+within one type (several `impl From<X> for T`) stays ambiguous. The
+extraction cache refreshes on upgrade, so the first `dekko map` after
+it is a full one.
+
 ## [1.8.4] — 2026-10-07
 
 ### Fixed

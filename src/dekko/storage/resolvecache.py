@@ -468,7 +468,9 @@ def _rust_files_using(
     Args:
         files: Every mapped file.
         dirty: Paths already known dirty -- skipped.
-        names: The names whose renaming ``use`` was gained or lost.
+        names: The names whose renaming ``use`` was gained or lost, or
+            that a ``use`` or ``pub use`` re-points (a ``Type::name``
+            path is walked through them).
 
     Returns:
         Additional paths (disjoint from ``dirty``) whose cached entry
@@ -693,9 +695,9 @@ def _name_delta_dirty(
         changed |= _extended_names(
             cache.old_heritage(fm.path) or []
         ) ^ _extended_names(fm.heritage)
-        # And a JS/TS re-export or import binding gained, lost or
-        # re-pointed: it changes where a name leads from any file that
-        # imports it through this one.
+        # And a JS/TS re-export or a JS/TS or Rust import binding
+        # gained, lost or re-pointed: it changes where a name leads from
+        # any file that imports it through this one.
         passed_on = reexport_delta_names(
             fm, cache.old_reexports(fm.path), cache.old_imports(fm.path)
         )
@@ -719,6 +721,9 @@ def _name_delta_dirty(
         reach = reexport_closure(files, changed)
         extra |= _files_naming(cached, dirty, reach)
         extra |= _files_using(files, dirty, reach)
+        # A Rust ``Type::name`` path is walked through ``pub use``s, and
+        # its call names ``name``, not ``Type``.
+        extra |= _rust_files_using(files, dirty, reach)
     if changed or newly_defined:
         extra |= _files_importing(files, dirty, newly_defined, changed)
     # A Rust ``use .. as Name`` gained or lost decides whether

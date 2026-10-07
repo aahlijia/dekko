@@ -1305,7 +1305,7 @@ def test_parse_rust_use() -> None:
         ("b", "a::b"),
         ("d", "a::c"),
     ]
-    assert _parse_rust_use("a::*") == []
+    assert _parse_rust_use("a::*") == [("*", "a::*")]
     assert ("e", "x::e") in _parse_rust_use("x::{y::{z}, e}")
 
 

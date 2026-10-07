@@ -5226,15 +5226,68 @@ def _python_rebinds(
 def _imports_rust(
     matches: list[tuple[int, dict[str, list[Node]]]], rel: str
 ) -> list[Import]:
-    """Flatten Rust ``use`` declarations into imported names."""
+    """Flatten Rust ``use`` declarations into imported names.
+
+    A glob is kept as ``("*", "<prefix>::*")``. A ``use`` inside an
+    inline ``mod m { .. }`` is recorded at file level like every other,
+    so its ``super`` is re-based onto the file's own module first (see
+    ``_rust_rebased_use``).
+    """
     out: list[Import] = []
     for _, caps in matches:
         use = _one(caps, "use")
         if use is None:
             continue
+        depth = _rust_inline_mod_depth(use)
         for name, source in _parse_rust_use(_text(use)):
-            out.append(Import(path=rel, name=name, source=source))
+            rebased = _rust_rebased_use(source, depth)
+            if name == "*" and rebased == "self::*":
+                # The file's own module: it binds nothing new.
+                continue
+            out.append(Import(path=rel, name=name, source=rebased))
     return out
+
+
+def _rust_inline_mod_depth(node: Node) -> int:
+    """How many inline ``mod m { .. }`` blocks enclose ``node``.
+
+    A function body is no module, so a ``use`` inside a ``fn`` inside
+    ``mod tests`` is one level deep.
+    """
+    depth = 0
+    parent = node.parent
+    while parent is not None:
+        if parent.type == "mod_item":
+            depth += 1
+        parent = parent.parent
+    return depth
+
+
+def _rust_rebased_use(source: str, depth: int) -> str:
+    """A ``use`` source written ``depth`` inline modules deep, as the
+    file's own module would write it.
+
+    Inside ``mod tests { use super::*; }`` the ``super`` is the file
+    itself, so read at file level it is ``self::*``; zed has 516 of its
+    566 ``use super::*`` in such a block. One leading ``super`` is
+    dropped per level, and a path left pointing into the file's own
+    module is written ``self::..``. A path that climbs fewer levels
+    than it is deep names an inline module's item, which the file's
+    top level doesn't hold either; it gets ``self::`` too, so nothing
+    reads it as the parent file's. A path with no leading ``super`` is
+    left as written.
+    """
+    segs = source.split("::")
+    climbs = 0
+    while climbs < len(segs) and segs[climbs] == "super":
+        climbs += 1
+    if not depth or not climbs:
+        return source
+    rest = segs[min(climbs, depth) :]
+    if not rest or rest[0] != "super":
+        rest = ["self", *rest]
+
+    return "::".join(rest)
 
 
 def _imports_js(
@@ -5418,8 +5471,8 @@ def _strip_quotes(text: str) -> str:
 def _parse_rust_use(text: str) -> list[tuple[str, str]]:
     """Expand a ``use`` argument into ``(local_name, source)`` pairs.
 
-    Handles plain paths, ``as`` renames, nested ``{...}`` groups, and
-    skips glob imports.
+    Handles plain paths, ``as`` renames and nested ``{...}`` groups. A
+    glob gives ``("*", "<prefix>::*")``.
 
     Args:
         text: The argument of a ``use`` declaration, e.g.
@@ -5444,7 +5497,10 @@ def _parse_rust_use(text: str) -> list[tuple[str, str]]:
 def _rust_use_leaf(path: str) -> list[tuple[str, str]]:
     """Resolve a brace-free use path to its local binding."""
     path = path.strip()
-    if not path or path.endswith("*"):
+    if path.endswith("*"):
+        prefix = path[:-1].strip().rstrip(":").strip()
+        return [("*", f"{prefix}::*")] if prefix else []
+    if not path:
         return []
     if " as " in path:
         source, local = path.rsplit(" as ", 1)

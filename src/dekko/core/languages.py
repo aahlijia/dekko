@@ -1691,6 +1691,11 @@ _JAVA_CTOR_REF_VERSION = 1
 # the query.
 _KOTLIN_GENERIC_CALL_VERSION = 1
 
+# Bump when ``extractor._imports_rust`` changes which Rust ``use``
+# records it keeps (globs) or how it re-bases a ``use`` written inside
+# an inline ``mod``. Code outside the query.
+_RUST_USE_SCOPE_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every extraction spec, both tiers, into one invalidation key.
@@ -1710,8 +1715,8 @@ def spec_fingerprint() -> str:
     ``_TIER2_ENGINE_VERSION``, ``_PY_IMPORT_REBIND_VERSION``,
     ``_CALL_ARG_COUNT_VERSION``, ``_JVM_VISIBILITY_VERSION``,
     ``_JAVA_NEW_QUALIFIER_VERSION``, ``_JAVA_RECORD_CANONICAL_VERSION``,
-    ``_JAVA_CTOR_REF_VERSION`` and ``_KOTLIN_GENERIC_CALL_VERSION``,
-    which
+    ``_JAVA_CTOR_REF_VERSION``, ``_KOTLIN_GENERIC_CALL_VERSION`` and
+    ``_RUST_USE_SCOPE_VERSION``, which
     each cover one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments), plus every
     Tier-2 row (``tier2.TIER2_SPECS``), so editing a row re-extracts
@@ -1745,6 +1750,7 @@ def spec_fingerprint() -> str:
         f"java_record_canonical={_JAVA_RECORD_CANONICAL_VERSION}",
         f"java_ctor_ref={_JAVA_CTOR_REF_VERSION}",
         f"kotlin_generic_call={_KOTLIN_GENERIC_CALL_VERSION}",
+        f"rust_use_scope={_RUST_USE_SCOPE_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):
