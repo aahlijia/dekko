@@ -393,7 +393,8 @@ of `unexplained miss`:
   (`# "tfrun" commands can't include pipes`) is a comment, not a
   string literal.
 - *A recorded value reference.* `names.some(isChrome)`,
-  `process.on("exit", cleanup)`, `.map(Src::getSource)`: the map
+  `process.on("exit", cleanup)`, `.map(Src::getSource)`, and since
+  1.8.2 a Java constructor reference `.map(Entry::new)`: the map
   already holds that line as a reference edge to the target (Python,
   JS/TS, Go, Java), and the row says `passed or stored as a value,
   not called — dekko has this as a reference (see: dekko query callers
@@ -401,7 +402,10 @@ of `unexplained miss`:
   references below the callers since 1.6.11. Only when the file
   could really have made that reference: it defines the target,
   imports its name or its declaring type, or is a same-package
-  sibling (Go/Java), and it binds no local of the same name. A
+  sibling, and it binds no local of the same name. Go's package is
+  the directory; a Java or Kotlin package is the directory under the
+  source root, so since 1.8.2 a test in `src/test/java/org/x/` sees
+  `src/main/java/org/x/` without an import. A
   `const count = ...; if (count >= 3)` in a file that never imports
   `count` stays unexplained.
 - *A path-qualified function value in Rust or C++*, where dekko
@@ -513,7 +517,12 @@ recorded on the class and on the overload its arguments pick. Since
 and a row the map gave only to the class, from a caller whose
 arguments fit two or more overloads equally, reads `a construction
 whose arguments fit 2+ constructors of the class — recorded on the
-class, not on one overload (see: dekko query callers <class>)`.
+class, not on one overload (see: dekko query callers <class>)`. Since
+1.8.2 a Java `X::new` line the map recorded as a reference to the
+class reads ``a constructor reference (`X::new`) — recorded on the
+class, since the functional interface it is passed to picks the
+overload``: the reference names a constructor only when the class has
+exactly one the line can reach.
 
 **Four more index facts, since 1.5.10.** Each is read off the map, not
 the line, and named as such:
@@ -1274,6 +1283,16 @@ id>`, with the class's caller count). `--json` adds `overload_ties`
 mean an unrelated symbol is not a tie; it keeps the plain "resolved
 ambiguously — not counted here" note, counted separately. `query
 symbol` and `context` split the two the same way.
+
+A Java constructor reference, `X::new` (also `X<T>::new` and
+`Outer.X::new`), is a reference, not a call, since 1.8.2: the
+constructor runs when the functional interface it is passed to is
+invoked, and that interface picks the overload. `query callers X`
+lists the line under "referenced (not called)", and so does `query
+callers` on `X`'s constructor when it is the only one the line can
+reach (a record's included). An array constructor (`X[]::new`) and a
+package-qualified one (`a.b.X::new`) are not recorded. Like `Foo::bar`,
+it is not followed by `affected`, which walks calls.
 
 In C++, `new X(...)`, `std::make_unique<X>(...)`/`make_shared` (and
 the `absl::` spellings) and a temporary `X(...)` all count as

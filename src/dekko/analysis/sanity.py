@@ -100,7 +100,11 @@ from dekko.analysis import unused as unused_mod
 from dekko.classify import is_test_path
 from dekko.core import languages
 from dekko.core.model import TYPE_KINDS, RawCall, ReadSite, Symbol
-from dekko.core.resolver import jvm_off_written_path, jvm_unreachable
+from dekko.core.resolver import (
+    jvm_off_written_path,
+    jvm_package_dir,
+    jvm_unreachable,
+)
 from dekko.core.walker import DEFAULT_EXCLUDE_DIRS
 from dekko.render.mapfile import MapIndex
 from dekko.source import read_lines
@@ -309,6 +313,15 @@ CAUSE_CONSTRUCTOR_TIE = (
 # the same class for this construction.
 CAUSE_SIBLING_CONSTRUCTOR = (
     "resolved to another constructor of the same class (see resolved_to)"
+)
+# Tier 1, per Java constructor target: the line is a recorded reference
+# to the target's class, which a Java reference only is through
+# ``X::new``. With 2+ reachable constructors the reference stays on the
+# class, so ``CAUSE_RESOLVED_ELSEWHERE`` misread it as a rival.
+CAUSE_CONSTRUCTOR_REFERENCE = (
+    "a constructor reference (`X::new`) — recorded on the class, since "
+    "the functional interface it is passed to picks the overload (see: "
+    "dekko query callers <class>, 'referenced (not called)')"
 )
 CAUSE_UNEXPLAINED = "unexplained miss — inspect manually"
 # Tier 2: a value-position use of a same-named local declared earlier
@@ -3686,10 +3699,11 @@ def _resolved_elsewhere_causes(
 
     A construction is recorded on the class and on the overload its
     arguments pick, so for a constructor target the class is not a
-    rival declaration. A row the map gave only to the class, from a
-    caller holding one of ``sym``'s overload ties, is a tie; a row the
-    map gave to the class and another of its constructors went to that
-    sibling. Anything else keeps ``CAUSE_RESOLVED_ELSEWHERE``.
+    rival declaration. A row the map gave to the class and another of
+    its constructors went to that sibling. A row the map gave only to
+    the class is a Java ``X::new`` when it is a reference to the class,
+    else a tie when its caller holds one of ``sym``'s overload ties.
+    Anything else keeps ``CAUSE_RESOLVED_ELSEWHERE``.
 
     Args:
         index: The query index.
@@ -3706,12 +3720,19 @@ def _resolved_elsewhere_causes(
 
     siblings = {c.id for c in query.constructors_of(index, cls)} - {sym.id}
     tie_callers = {caller for caller, _ in index.ambiguous_in.get(sym.id, [])}
+    ctor_refs = (
+        _reference_sites(index, [cls])
+        if sym.language == "java"
+        else frozenset()
+    )
     for loc, ids in resolved.items():
         others = set(ids) - {cls.id}
         if cls.id not in ids:
             continue
         if others and others <= siblings:
             out[loc] = CAUSE_SIBLING_CONSTRUCTOR
+        elif not others and loc in ctor_refs:
+            out[loc] = CAUSE_CONSTRUCTOR_REFERENCE
         elif not others and _caller_covers(index, tie_callers, loc):
             out[loc] = CAUSE_CONSTRUCTOR_TIE
 
@@ -3829,8 +3850,13 @@ _SAME_DIR_PACKAGE_GRAMMARS = frozenset({"go", "java", "kotlin"})
 def _can_see(index: MapIndex, path: str, sym: Symbol) -> bool:
     """Whether code in ``path`` could name ``sym`` at all: same file,
     an import binding the symbol's own name or its outermost declaring
-    type (``Src`` for ``Src::getSource``), or a same-directory sibling
+    type (``Src`` for ``Src::getSource``), or a same-package sibling
     in a package-scoped language.
+
+    A Java or Kotlin package is the directory under the source root
+    (``resolver.jvm_package_dir``), so a test in ``src/test/java/org/x``
+    sees ``src/main/java/org/x`` without an import. Go, and a JVM file
+    with no source root dekko can find, go by directory.
 
     An index fact (``MapIndex.imports_by_path``), no file I/O. Errs
     toward ``False``: a namespace import (``import * as u``) or a
@@ -3841,10 +3867,16 @@ def _can_see(index: MapIndex, path: str, sym: Symbol) -> bool:
     visible = {sym.name, sym.qualname.split(".", 1)[0]}
     if any(imp.name in visible for imp in index.imports_by_path.get(path, [])):
         return True
-    return (
-        _grammar_for_path(path) in _SAME_DIR_PACKAGE_GRAMMARS
-        and Path(path).parent == Path(sym.path).parent
-    )
+    grammar = _grammar_for_path(path)
+    if grammar not in _SAME_DIR_PACKAGE_GRAMMARS:
+        return False
+    if grammar in ("java", "kotlin"):
+        site_package = jvm_package_dir(path)
+        own_package = jvm_package_dir(sym.path)
+        if site_package is not None and own_package is not None:
+            return site_package == own_package
+
+    return Path(path).parent == Path(sym.path).parent
 
 
 @dataclass(frozen=True)

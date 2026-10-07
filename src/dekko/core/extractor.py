@@ -2528,6 +2528,22 @@ def _collect_refs(
     bindings = _local_bindings(spec, root, defs, import_bytes)
     refs: list[RawRef] = []
     for _, caps in _run_query(spec.grammar, spec.reference_query, root):
+        ctor_ref = _one(caps, "ctorref")
+        if ctor_ref is not None:
+            # A type name is never a local, so the reference is a plain
+            # one, never ``bound``.
+            type_name = _java_constructor_ref_type(ctor_ref)
+            if type_name is not None:
+                caller = _enclosing(spans, ctor_ref.start_byte)
+                refs.append(
+                    RawRef(
+                        caller_id=caller.id if caller else None,
+                        path=rel,
+                        name=type_name,
+                        line=ctor_ref.start_point[0] + 1,
+                    )
+                )
+            continue
         ref_node = _one(caps, "ref")
         if ref_node is None:
             continue
@@ -2545,6 +2561,33 @@ def _collect_refs(
             )
         )
     return refs
+
+
+def _java_constructor_ref_type(node: Node) -> str | None:
+    """The type a Java ``X::new`` constructor reference names, or
+    ``None`` when it names no constructor dekko can look up.
+
+    ``X::new``, ``X<T>::new`` and ``Outer.X::new`` (a capitalized first
+    segment is a nesting) name ``X``. ``a.b.X::new`` starts with a
+    package, which a reference has no written path to carry, so it is
+    skipped rather than taken by its last segment. An array constructor
+    (``int[]::new``, ``X[]::new``) builds an array and runs no
+    constructor of ``X``.
+    """
+    head = node.children[0] if node.children else None
+    if head is not None and head.type == "generic_type":
+        head = head.named_children[0] if head.named_children else None
+    if head is None:
+        return None
+    if head.type in ("identifier", "type_identifier"):
+        return _text(head)
+    if head.type not in ("field_access", "scoped_type_identifier"):
+        return None
+    text = _text(head)
+    if not text[:1].isupper():
+        return None
+
+    return text.rpartition(".")[2]
 
 
 def _collect_reads(

@@ -9,6 +9,47 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-10-07
+
+### Fixed
+- **A Java `X::new` is recorded.** The method-reference pattern needs
+  an identifier after `::`, and `new` is a keyword token, so a
+  constructor reference left nothing in the map: a class built only
+  through `.map(TestContentsFilter::new)` had no inbound edge and read
+  as dead. `X::new`, `X<T>::new` and `Outer.X::new` are now a
+  reference to `X`, the way `Foo::bar` is a reference to `bar`: the
+  constructor runs when the functional interface is invoked, and that
+  interface picks the overload. When `X` has exactly one constructor
+  the line can reach (a record's canonical one included), the
+  reference reaches it too. `X[]::new` builds an array and runs no
+  constructor of `X`; `a.b.X::new` names a package path a reference
+  can't carry. Neither is recorded.
+- **`sanity` reads a Java or Kotlin package from the source root.** A
+  reference was credited from a same-package sibling only in the same
+  directory, so a test in `src/test/java/org/x/` referencing its class
+  in `src/main/java/org/x/` read "unexplained". The package is now the
+  directory under the source root, for every JVM reference, not just
+  `::new`. Go, and a JVM file with no source root, keep the directory.
+- **`sanity` names a constructor's own `X::new` lines.** Swept as a
+  target, a constructor of a class with several constructors saw its
+  class's `X::new` lines as "attributed to a different, same-named
+  declaration". They now read `a constructor reference (X::new) —
+  recorded on the class, since the functional interface it is passed
+  to picks the overload`.
+
+On spring-boot against 1.8.1: 310 reference sites gained, none lost;
+call edges, external calls and ambiguous rows unchanged.
+`IncludeExcludeContentSelectorTests.TestContentsFilter` has 7
+references (was 0), `AnnotationConfigServletWebServerApplicationContext`
+28. `sanity` on every type a `::new` names, with tests: `::new` rows
+"unexplained" 306 on 1.8.0 → 3 (a same-package tie between same-named types
+the reference can't settle yet); on their constructors, 0 unexplained
+and 254 rows under the new cause. Limits: a reference is not a call,
+so `affected` doesn't follow `X::new`, as it doesn't follow
+`Foo::bar`. Tensorflow has no `::new` and is unchanged. The extraction
+cache refreshes on upgrade, so the first `dekko map` after it is a full
+one.
+
 ## [1.8.1] — 2026-10-07
 
 ### Fixed

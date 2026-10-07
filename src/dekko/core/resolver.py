@@ -1836,6 +1836,43 @@ def _resolve_ref(
         )
     ):
         edges.setdefault((caller_id, target.id), set()).add(ref.line)
+        ctor = _sole_referenced_constructor(ref, target, index, by_name_path)
+        if ctor is not None and ctor.id != caller_id:
+            edges.setdefault((caller_id, ctor.id), set()).add(ref.line)
+
+
+def _sole_referenced_constructor(
+    ref: RawRef,
+    target: Symbol,
+    index: dict[str, list[Symbol]],
+    by_name_path: dict[tuple[str, str], list[Symbol]],
+) -> Symbol | None:
+    """The one constructor a Java ``X::new`` reference can mean.
+
+    A Java reference lands on a type only from ``X::new`` (``Foo::bar``
+    names a method). When ``X`` has exactly one constructor the site
+    can reach (an explicit one, or a record's canonical one), that is
+    the constructor the reference runs; with several, the functional
+    interface it is passed to picks, so only the type is referenced.
+
+    Args:
+        ref: The reference.
+        target: The symbol it resolved to.
+        index: Bare name → every symbol with it.
+        by_name_path: ``(bare name, file path)`` → same-file symbols.
+
+    Returns:
+        The constructor, or ``None``.
+    """
+    if target.language != "java" or not ref.path.endswith(".java"):
+        return None
+    ctors = [
+        c
+        for c in constructors_of(target, index, by_name_path)
+        if not jvm_unreachable(ref.path, c)
+    ]
+
+    return ctors[0] if len(ctors) == 1 else None
 
 
 _CONFTEST = "conftest.py"
@@ -3989,8 +4026,8 @@ def jvm_unreachable(site_path: str, candidate: Symbol) -> bool:
         return site_path != candidate.path
     if visibility != "package" or candidate.language != "java":
         return False
-    site_package = _jvm_package_dir(site_path)
-    own_package = _jvm_package_dir(candidate.path)
+    site_package = jvm_package_dir(site_path)
+    own_package = jvm_package_dir(candidate.path)
     return (
         site_package is not None
         and own_package is not None
@@ -4616,7 +4653,7 @@ def _on_jvm_type_path(candidate: Symbol, path: _JvmTypePath) -> bool:
 
     return (
         candidate.language in ("java", "kotlin")
-        and _jvm_package_dir(candidate.path) == path.package
+        and jvm_package_dir(candidate.path) == path.package
         and qual == path.types
     )
 
@@ -7210,7 +7247,7 @@ def _kotlin_member_matches(source: str, candidate: Symbol) -> bool:
     if name != candidate.name or not package:
         return False
 
-    return _jvm_package_dir(candidate.path) == package.replace(".", "/")
+    return jvm_package_dir(candidate.path) == package.replace(".", "/")
 
 
 def _relative_js_tiebreak(
@@ -7644,7 +7681,7 @@ def _repo_stems(files: list[FileMap]) -> set[str]:
         keys.update(file_keys)
         if fm.language != "kotlin" or not file_keys:
             continue
-        package = _jvm_package_dir(fm.path)
+        package = jvm_package_dir(fm.path)
         if package is None:
             continue
         for sym in fm.symbols:
@@ -11232,7 +11269,7 @@ def _kotlin_package_members(
     for fm in files:
         if fm.language != "kotlin":
             continue
-        package = _jvm_package_dir(fm.path)
+        package = jvm_package_dir(fm.path)
         if package is None:
             continue
         for name in {s.name for s in fm.symbols if "." not in s.qualname}:
@@ -11240,7 +11277,7 @@ def _kotlin_package_members(
     return index
 
 
-def _jvm_package_dir(path: str) -> str | None:
+def jvm_package_dir(path: str) -> str | None:
     """A JVM file's directory under its source root: its package path.
 
     ``core/x/src/main/kotlin/org/a/F.kt`` → ``org/a``; ``""`` for the

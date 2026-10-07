@@ -1276,14 +1276,20 @@ GO = LanguageSpec(
 # passed to a functional-interface parameter) was indistinguishable
 # from dead code to ``dekko unused``. The ``"::"`` anchor requires the
 # captured ``@ref`` node to immediately follow the literal ``::``
-# token; Java's ``Class::new`` constructor-reference form has ``new``
-# as an anonymous keyword token in that position, not an
-# ``identifier`` node, so it never matches this pattern -- no separate
-# exclusion predicate needed. Verified live against the pinned
-# tree-sitter-java grammar for ``this::baz``/``Foo::staticMethod``/
-# ``java.util.Objects::requireNonNull``/``Class::new``.
+# token. Verified live against the pinned tree-sitter-java grammar for
+# ``this::baz``/``Foo::staticMethod``/``java.util.Objects::
+# requireNonNull``.
+#
+# A constructor reference, ``Class::new``, has ``new`` as an anonymous
+# keyword token where the first pattern wants an ``identifier``, so it
+# needs its own: ``@ctorref`` hands the whole node to
+# ``extractor._java_constructor_ref_type``, which reads the type it
+# names off the head. Like ``Foo::bar`` it is a reference, not a call:
+# the constructor runs when the functional interface is invoked, and
+# that interface, not the site, picks the overload.
 _JAVA_REFERENCE_QUERY = """
 (method_reference "::" (identifier) @ref)
+(method_reference "new") @ctorref
 """
 
 # A record is the one Java type whose implicit constructor takes
@@ -1659,6 +1665,11 @@ _JAVA_NEW_QUALIFIER_VERSION = 1
 # access that header constructor gets. Code outside the query.
 _JAVA_RECORD_CANONICAL_VERSION = 1
 
+# Bump when ``extractor._java_constructor_ref_type`` changes which
+# ``X::new`` heads name a type (simple, generic, ``Outer.X``) and which
+# it skips (arrays, package paths). Read off the node outside the query.
+_JAVA_CTOR_REF_VERSION = 1
+
 
 def spec_fingerprint() -> str:
     """Hash every extraction spec, both tiers, into one invalidation key.
@@ -1677,8 +1688,8 @@ def spec_fingerprint() -> str:
     ``_CPP_USING_VERSION``, ``_CPP_DECLS_VERSION``,
     ``_TIER2_ENGINE_VERSION``, ``_PY_IMPORT_REBIND_VERSION``,
     ``_CALL_ARG_COUNT_VERSION``, ``_JVM_VISIBILITY_VERSION``,
-    ``_JAVA_NEW_QUALIFIER_VERSION`` and
-    ``_JAVA_RECORD_CANONICAL_VERSION``, which
+    ``_JAVA_NEW_QUALIFIER_VERSION``, ``_JAVA_RECORD_CANONICAL_VERSION``
+    and ``_JAVA_CTOR_REF_VERSION``, which
     each cover one piece of dispatch/recovery logic that lives outside any
     ``LanguageSpec`` (see those constants' own comments), plus every
     Tier-2 row (``tier2.TIER2_SPECS``), so editing a row re-extracts
@@ -1710,6 +1721,7 @@ def spec_fingerprint() -> str:
         f"jvm_visibility={_JVM_VISIBILITY_VERSION}",
         f"java_new_qualifier={_JAVA_NEW_QUALIFIER_VERSION}",
         f"java_record_canonical={_JAVA_RECORD_CANONICAL_VERSION}",
+        f"java_ctor_ref={_JAVA_CTOR_REF_VERSION}",
     ]
     for spec in TIER1_SPECS:
         for f in fields(spec):

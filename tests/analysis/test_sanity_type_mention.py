@@ -109,6 +109,7 @@ def test_constructor_tie_and_sibling_overload_rows(
 ) -> None:
     root = make_mapped_repo(JAVA_REPO)
     rows = _in(_rows(root, TICKET_CTOR, capsys), USE)
+    assert rows[13] == sanity.CAUSE_CONSTRUCTOR_REFERENCE
     assert rows[14] == sanity.CAUSE_SIBLING_CONSTRUCTOR
     assert rows[15] == sanity.CAUSE_CONSTRUCTOR_TIE
 
