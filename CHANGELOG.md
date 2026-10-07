@@ -9,6 +9,38 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.6] — 2026-10-07
+
+### Fixed
+- **A Rust path whose head the repo doesn't have is external.**
+  `serde_json::from_value(..)` with no `use serde_json` in the file
+  ran the resolver's ladder over every `from_value` in the repo and
+  landed on `repl`'s `JsonView.from_value`. A path head with no
+  binding in the file is now looked up the way rustc does: an inline
+  `mod` or child module of the file, or a `use` reached through its
+  globs, keeps it in the repo. A `use super::*` that reaches the
+  parent's `use agent_client_protocol::schema::v1 as acp` makes
+  `acp::SessionId::new(..)` external, where it had landed on
+  `scheduler`'s `SessionId.new`. A head nothing binds that is a
+  primitive type (`f32::from(..)`) or names no crate and no module of
+  the repo is external. A head naming a crate or module of the repo is
+  unchanged, and so is a local variable that shares a crate's name
+  (`regex.is_match(..)`).
+
+On zed against 1.8.5: edge sites −374 (serde_json 229, `acp` 85,
+primitives 12, the rest single extern crates such as `regex::escape`
+landing on `Markdown.escape`), none gained; ambiguous rows 84,858 →
+83,891; 1,680 call sites go external across 107 heads (serde_json
+636, smol 149, futures 116, `f32` 103). Callers of `scheduler`'s
+`SessionId.new` went from 63 to the 1 real one; rows carrying every
+`from` in the repo went from 107 to 22. Seven Rust `impl` clauses go
+external, five of them `bindgen!`-generated `common::Host`-style
+traits that had landed on `recent_projects`' `Host`. The module graph
+is unchanged and map time is unchanged. cline is identical; the other
+eval repos have no Rust. Limits: only lowercase heads are tested, and
+an inline module with no symbols of its own (one a macro fills) reads
+as outside.
+
 ## [1.8.5] — 2026-10-07
 
 ### Fixed

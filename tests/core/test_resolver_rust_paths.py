@@ -354,3 +354,236 @@ def test_a_module_reached_by_a_glob_shadows_a_crate_of_its_name(
     assert _callees(graph, "crates/collab/src/queries/rooms.rs::run") == {
         "crates/collab/src/tables/extension.rs::Entity.update"
     }
+
+
+def _session_ids() -> dict[str, str]:
+    """A crate with a ``SessionId.new`` and a ``from_value`` method:
+    what an outside path's last segment would land on."""
+    return _crate(
+        "ids",
+        "pub struct SessionId;\n"
+        "impl SessionId {\n"
+        "    pub fn new() -> SessionId {\n"
+        "        SessionId\n"
+        "    }\n"
+        "    pub fn from_value(v: u32) -> SessionId {\n"
+        "        SessionId\n"
+        "    }\n"
+        "}\n"
+        "pub fn channel() {}\n",
+    )
+
+
+def test_an_extern_crate_head_with_no_use_is_external(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _session_ids()
+        | _crate(
+            "app", "pub fn run(x: u32) {\n    serde_json::from_value(x);\n}\n"
+        ),
+    )
+    assert _callees(graph, _RUN) == set()
+    assert _externals(graph, _RUN) == {"serde_json::from_value"}
+
+
+def test_a_multi_segment_extern_path_is_external(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _session_ids()
+        | _crate(
+            "app",
+            "pub fn run() {\n    futures::channel::oneshot::channel();\n}\n",
+        ),
+    )
+    assert _callees(graph, _RUN) == set()
+    assert _ambiguous(graph, _RUN) == {}
+
+
+_SIDEBAR_RUN = "crates/app/src/sidebar.rs::run"
+_SIDEBAR = "use super::*;\npub fn run() {\n    acp::SessionId::new();\n}\n"
+
+
+def test_an_outside_alias_reached_by_a_glob_is_external(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        _session_ids()
+        | _crate("app", "mod sidebar;\nuse ext::v1 as acp;\n")
+        | {"crates/app/src/sidebar.rs": _SIDEBAR},
+    )
+    assert _callees(graph, _SIDEBAR_RUN) == set()
+    assert _externals(graph, _SIDEBAR_RUN) == {"acp::SessionId::new"}
+
+
+def test_an_in_repo_alias_reached_by_a_glob_resolves(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _session_ids()
+        | _crate("app", "mod ids;\nmod sidebar;\nuse crate::ids as acp;\n")
+        | {
+            "crates/app/src/ids.rs": (
+                "pub struct SessionId;\n"
+                "impl SessionId {\n"
+                "    pub fn new() -> SessionId {\n"
+                "        SessionId\n"
+                "    }\n"
+                "}\n"
+            ),
+            "crates/app/src/sidebar.rs": _SIDEBAR,
+        },
+    )
+    assert _callees(graph, _SIDEBAR_RUN) == {
+        "crates/app/src/ids.rs::SessionId.new"
+    }
+
+
+def test_a_primitive_head_is_external(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "app",
+            "pub struct Meters;\n"
+            "impl From<u8> for Meters {\n"
+            "    fn from(v: u8) -> Meters {\n"
+            "        Meters\n"
+            "    }\n"
+            "}\n"
+            "pub fn run(x: u8) {\n"
+            "    f32::from(x);\n"
+            "}\n",
+        ),
+    )
+    assert _callees(graph, _RUN) == set()
+    assert _externals(graph, _RUN) == {"f32::from"}
+
+
+def test_an_inline_module_head_resolves(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _session_ids()
+        | _crate(
+            "app",
+            "mod persistence {\n"
+            "    pub struct Db;\n"
+            "    impl Db {\n"
+            "        pub fn new() -> Db {\n"
+            "            Db\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "pub fn run() {\n"
+            "    persistence::Db::new();\n"
+            "}\n",
+        ),
+    )
+    assert _callees(graph, _RUN) == {
+        "crates/app/src/app.rs::persistence.Db.new"
+    }
+
+
+def test_an_inline_module_reached_by_a_glob_resolves(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _session_ids()
+        | _crate(
+            "app",
+            "mod sidebar;\n"
+            "mod test_mocks {\n"
+            "    pub struct SessionId;\n"
+            "    impl SessionId {\n"
+            "        pub fn new() -> SessionId {\n"
+            "            SessionId\n"
+            "        }\n"
+            "    }\n"
+            "}\n",
+        )
+        | {
+            "crates/app/src/sidebar.rs": (
+                "use super::*;\n"
+                "pub fn run() {\n"
+                "    test_mocks::SessionId::new();\n"
+                "}\n"
+            )
+        },
+    )
+    assert _externals(graph, _SIDEBAR_RUN) == set()
+
+
+def test_a_sibling_crate_head_is_unchanged(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _session_ids()
+        | _crate("release_channel", "pub fn init() {}\n")
+        | _crate("app", "pub fn run() {\n    release_channel::init();\n}\n"),
+    )
+    assert _callees(graph, _RUN) == {
+        "crates/release_channel/src/release_channel.rs::init"
+    }
+
+
+def test_a_primitive_head_is_external_with_no_manifest(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        {
+            "src/meters.rs": (
+                "pub struct Meters;\n"
+                "impl From<u8> for Meters {\n"
+                "    fn from(v: u8) -> Meters {\n"
+                "        Meters\n"
+                "    }\n"
+                "}\n"
+            ),
+            "src/app.rs": "pub fn run(x: u8) {\n    u32::from(x);\n}\n",
+        },
+    )
+    assert _callees(graph, "src/app.rs::run") == set()
+    assert _externals(graph, "src/app.rs::run") == {"u32::from"}
+
+
+_MATCHER = (
+    "pub struct Matcher;\n"
+    "impl Matcher {\n"
+    "    pub fn is_match(&self, s: &str) -> bool {\n"
+    "        true\n"
+    "    }\n"
+    "}\n"
+)
+
+
+def test_a_local_named_like_an_outside_head_keeps_its_edge(
+    tmp_path: Path,
+) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "app",
+            f"{_MATCHER}"
+            "pub fn run(regex: Matcher) {\n"
+            '    regex::escape("x");\n'
+            '    regex.is_match("x");\n'
+            "}\n",
+        ),
+    )
+    assert _callees(graph, _RUN) == {"crates/app/src/app.rs::Matcher.is_match"}
+    assert _externals(graph, _RUN) == {"regex::escape"}
+
+
+def test_a_turbofish_head_is_no_path(tmp_path: Path) -> None:
+    graph = _graph(
+        tmp_path,
+        _crate(
+            "app",
+            f"{_MATCHER}"
+            "pub fn find<T>() -> Matcher {\n"
+            "    Matcher\n"
+            "}\n"
+            "pub fn run() {\n"
+            '    find::<u8>().is_match("x");\n'
+            "    find::<u8>();\n"
+            "}\n",
+        ),
+    )
+    assert "crates/app/src/app.rs::find" in _callees(graph, _RUN)

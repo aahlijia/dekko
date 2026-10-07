@@ -1426,6 +1426,59 @@ def test_rust_alias_edit_keeps_incremental_equal_to_full(
     assert (pair in edges) == (target == "Other")
 
 
+_SESSION_ID = (
+    "pub struct SessionId;\n"
+    "impl SessionId {\n"
+    "    pub fn new() -> SessionId {\n"
+    "        SessionId\n"
+    "    }\n"
+    "}\n"
+)
+_OUTSIDE_ACP = "mod ids;\nmod sidebar;\nuse ext::v1 as acp;\n"
+_IN_REPO_ACP = "mod ids;\nmod sidebar;\nuse crate::ids as acp;\n"
+RUST_GLOB_ALIAS_SRC = {
+    "crates/other/Cargo.toml": '[package]\nname = "other"\n',
+    "crates/other/src/lib.rs": _SESSION_ID,
+    "crates/app/Cargo.toml": (
+        '[package]\nname = "app"\n\n[lib]\npath = "src/app.rs"\n'
+    ),
+    "crates/app/src/ids.rs": _SESSION_ID,
+    "crates/app/src/sidebar.rs": (
+        "use super::*;\npub fn run() {\n    acp::SessionId::new();\n}\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("before", [_OUTSIDE_ACP, _IN_REPO_ACP])
+def test_rust_glob_alias_edit_keeps_incremental_equal_to_full(
+    make_mapped_repo: RepoFactory,
+    before: str,
+) -> None:
+    """``acp::SessionId::new()`` reaches the parent's ``use .. as acp``
+    through ``use super::*``; re-pointing it from an outside crate to a
+    repo module, or back, moves the unchanged child's call."""
+    root = make_mapped_repo(
+        RUST_GLOB_ALIAS_SRC | {"crates/app/src/app.rs": before}
+    )
+    after = _IN_REPO_ACP if before == _OUTSIDE_ACP else _OUTSIDE_ACP
+    (root / "crates/app/src/app.rs").write_text(after)
+
+    _map(root)
+    incremental = _graph_json(root)
+
+    _map(root, "--full")
+    full = _graph_json(root)
+
+    assert incremental == full
+    ids = full["ids"]
+    edges = {(ids[e["caller"]], ids[e["callee"]]) for e in full["edges"]}
+    pair = (
+        "crates/app/src/sidebar.rs::run",
+        "crates/app/src/ids.rs::SessionId.new",
+    )
+    assert (pair in edges) == (after == _IN_REPO_ACP)
+
+
 # --- reusing another tree's cache --------------------------------------
 
 

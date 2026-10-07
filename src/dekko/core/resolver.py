@@ -7703,6 +7703,8 @@ def _receiver_is_external(
         return True
     first = _PATH_SPLIT.split(call.receiver)[0]
     imp = file_imports.get(first)
+    if imp is None and _rust_path_head(call) == first:
+        imp = file_imports.get(_RUST_HEAD_KEY + first)
     if imp is None:
         return False
     return not _import_is_in_repo(imp, repo_stems)
@@ -8329,6 +8331,11 @@ _RUST_CRATE_KEY = "::rust-crate::"
 # the ``_RustOriginImport`` of a type path the file's calls write
 # (``_RustPaths``, ``_rust_foreign_owner_crates``).
 _RUST_PATH_KEY = "::rust-path::"
+# Reserved import-table namespace: ``_RUST_HEAD_KEY + "serde_json"``
+# holds the ``_RustOutsideImport`` of a path head the file has no
+# binding for (``_rust_head_entries``). Only a call written
+# ``serde_json::..`` reads it, never a local ``serde_json.f()``.
+_RUST_HEAD_KEY = "::rust-head::"
 _UNNAMED_CTOR_NAMES = {
     "python": "__init__",
     "javascript": "constructor",
@@ -9569,6 +9576,8 @@ class _RustPaths:
         self._roots: dict[str, str | None] = {}
         self._scope: dict[tuple[str, str], str | None | _Unbound] = {}
         self._pending: set[tuple[str, str]] = set()
+        self._binders: dict[tuple[str, str], str | None | _Unbound] = {}
+        self._binding: set[tuple[str, str]] = set()
         self._found: dict[tuple[str, tuple[str, ...]], tuple[Symbol, ...]] = {}
 
     def _add_file(self, fm: FileMap) -> None:
@@ -9741,6 +9750,59 @@ class _RustPaths:
 
         return _UNBOUND
 
+    def binder(self, importer: str, head: str) -> "str | None | _Unbound":
+        """Where a path head is bound in ``importer``'s scope.
+
+        Args:
+            importer: The file the path is written in.
+            head: The path's first segment.
+
+        Returns:
+            The file whose named ``use`` binds ``head``: ``importer``
+            itself, or one its globs reach (``use super::*`` reaching
+            the parent's ``use .. as acp``). ``None`` when a module of
+            the repo does: a child module's file, or an inline ``mod``
+            of a file on the way. ``_UNBOUND`` when nothing in scope
+            binds it.
+        """
+        return self._binder(importer, head, 0)
+
+    def _binder(
+        self, module: str, head: str, depth: int
+    ) -> "str | None | _Unbound":
+        """``binder``, memoized the way ``_scoped`` is."""
+        key = (module, head)
+        if key in self._binders:
+            return self._binders[key]
+        if depth > _REEXPORT_DEPTH or key in self._binding:
+            return _UNBOUND
+        self._binding.add(key)
+        found = self._binder_here(module, head, depth)
+        self._binding.discard(key)
+        self._binders[key] = found
+
+        return found
+
+    def _binder_here(
+        self, module: str, head: str, depth: int
+    ) -> "str | None | _Unbound":
+        """``_binder``'s lookup, unmemoized."""
+        if head in self._inline.get(module, ()):
+            return None
+        if self._child(module, head) is not None:
+            return None
+        if head in self._named.get(module, {}):
+            return module
+        for glob in self._globs.get(module, ()):
+            target = self._module(module, glob.split("::"), depth + 1)
+            if target is None or target == module:
+                continue
+            found = self._binder(target, head, depth + 1)
+            if found is not _UNBOUND:
+                return found
+
+        return _UNBOUND
+
     def _crate_root(self, path: str) -> str | None:
         """The root file of the crate ``path`` belongs to: the nearer of
         the convention's (``_rust_crate_root``) and a ``Cargo.toml`` lib
@@ -9867,6 +9929,105 @@ def _rust_path_entries(
             out[_RUST_PATH_KEY + key] = _RustOriginImport(
                 path=fm.path, name=key, source=key, origins=origins
             )
+
+    return out
+
+
+_RUST_PRIMITIVES = frozenset(
+    {
+        "bool",
+        "char",
+        "str",
+        "f32",
+        "f64",
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "isize",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+    }
+)
+
+
+def _rust_path_head(site: RawCall | RawHeritage) -> str | None:
+    """The lowercase head of a call or heritage clause written as a
+    path: ``serde_json`` of ``serde_json::from_value(..)``.
+
+    ``None`` for ``crate``/``self``/``super``, for a turbofish
+    (``find_method::<T>(..)`` names a function, not a module) and for
+    anything not written ``head::..``: a local ``regex.is_match(..)``
+    is no path, whatever crate shares its name.
+    """
+    head = (site.receiver or "").split("::", 1)[0]
+    if not (head[:1].islower() and head.isidentifier()):
+        return None
+    if head in ("crate", "self", "super"):
+        return None
+    text = (site.text or "").lstrip()
+    if not text.startswith(f"{head}::") or text.startswith(f"{head}::<"):
+        return None
+
+    return head
+
+
+def _rust_path_heads(fm: FileMap) -> set[str]:
+    """Every ``_rust_path_head`` of one Rust file's calls and heritage
+    clauses."""
+    return {
+        head
+        for site in (*fm.calls, *fm.heritage)
+        if (head := _rust_path_head(site)) is not None
+    }
+
+
+def _rust_head_entries(
+    fm: FileMap,
+    tables: dict[str, dict[str, Import]],
+    rust_paths: _RustPaths,
+    rust_crates: _RustCrates | None,
+) -> dict[str, _RustOutsideImport]:
+    """A ``_RustOutsideImport`` for each path head of one Rust file
+    that names nothing in the repo.
+
+    The file's own ``use`` of an outside crate is already one (see
+    ``_imports_by_file``). A head with no binding in the file is
+    outside when what binds it through the file's globs is (``use
+    super::*`` reaching the parent's ``use ext::v1 as acp``), or when
+    nothing in scope binds it and it is a primitive type or names no
+    crate and no module (``_RustCrates.outside``). An inline ``mod``,
+    a child module or an in-repo binding keeps the head in-repo, and
+    nothing is added for it.
+    """
+    table = tables.get(fm.path, {})
+    out: dict[str, _RustOutsideImport] = {}
+    for head in sorted(_rust_path_heads(fm)):
+        if head in table:
+            continue
+        where = rust_paths.binder(fm.path, head)
+        if where is None:
+            continue
+        probe = Import(path=fm.path, name=head, source=head)
+        if isinstance(where, str):
+            found = tables.get(where, {}).get(head)
+            if not isinstance(found, _RustOutsideImport):
+                continue
+            probe = Import(path=found.path, name=head, source=found.source)
+        elif not (
+            rust_crates.outside(probe)
+            if rust_crates is not None
+            else head in _RUST_PRIMITIVES
+        ):
+            continue
+        out[_RUST_HEAD_KEY + head] = _RustOutsideImport(
+            path=probe.path, name=head, source=probe.source
+        )
 
     return out
 
@@ -10115,8 +10276,9 @@ def _imports_by_file(
     ``python_modules``, when given, turns every Python import of a
     module the repo doesn't have into a ``_DanglingImport``.
     ``rust_paths``, when given, adds each Rust file's walked type paths
-    (``_rust_path_entries``). With none of them, every record is left
-    as-is.
+    (``_rust_path_entries``) and its path heads that name nothing in
+    the repo (``_rust_head_entries``). With none of them, every record
+    is left as-is.
 
     A Python or Rust glob binds no name, so it stays out of the table.
     """
@@ -10159,10 +10321,33 @@ def _imports_by_file(
             table[imp.name] = _workspace_tagged(
                 imp, workspace_pkgs, origins, members
             )
-        if rust and rust_paths is not None:
-            table.update(_rust_path_entries(fm, rust_paths))
+    if rust_paths is not None:
+        _add_rust_path_entries(files, out, rust_paths, rust_crates)
 
     return out
+
+
+def _add_rust_path_entries(
+    files: list[FileMap],
+    tables: dict[str, dict[str, Import]],
+    rust_paths: _RustPaths,
+    rust_crates: _RustCrates | None,
+) -> None:
+    """Add every Rust file's ``_rust_path_entries`` and
+    ``_rust_head_entries`` to its table.
+
+    A pass of its own, after every table is built: a head bound
+    through a glob is looked up in the table of the file that binds
+    it.
+    """
+    rust = [fm for fm in files if fm.path.endswith(".rs")]
+    heads = {
+        fm.path: _rust_head_entries(fm, tables, rust_paths, rust_crates)
+        for fm in rust
+    }
+    for fm in rust:
+        tables[fm.path].update(_rust_path_entries(fm, rust_paths))
+        tables[fm.path].update(heads[fm.path])
 
 
 def _member_names(fm: FileMap) -> dict[str, set[str]]:
