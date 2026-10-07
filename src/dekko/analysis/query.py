@@ -2534,6 +2534,7 @@ def _shadow_note(index: MapIndex, target: str) -> str | None:
 MATCH_BASE = "base"
 MATCH_BINDING = "binding"
 MATCH_MODULE = "module"
+MATCH_PATH = "path"
 _NODE_PREFIX = "node:"
 _TOP_MEMBERS = 5
 
@@ -2549,7 +2550,7 @@ def _uses_matches(
 ) -> tuple[list[ExternalCall], dict[tuple[str, str], str]]:
     """Every external call that ``uses <target>`` should list, and how.
 
-    Three match kinds, first one wins per row:
+    Four match kinds, first one wins per row:
 
     - ``base``: last segment == target (``uses run`` -> ``subprocess.
       run``; the original behavior, unchanged).
@@ -2559,6 +2560,10 @@ def _uses_matches(
       local variables named ``path`` (42% of the ungated hits on
       claude-code): the same test ``resolver._receiver_is_external``
       applies at resolve time, re-run here against ``imports_by_path``.
+    - ``path``: a Rust row written ``target::..`` (``uses serde_json``
+      -> ``serde_json::from_value``). A crate is called by path with
+      no ``use`` of its own name, and a ``::`` head is never a local
+      variable, so no import gate is needed.
     - ``module``: the calling file imports some binding ``b`` from a
       source whose bare form == target, and the row's first segment (or
       its only segment) == ``b`` (``uses numpy`` -> ``np.array``;
@@ -2589,9 +2594,17 @@ def _uses_matches(
         path = ext.caller.split("::", 1)[0]
         if any(i.name == target for i in index.imports_by_path.get(path, [])):
             take(ext, MATCH_BINDING)
+        elif _rust_path_row(ext, target):
+            take(ext, MATCH_PATH)
     for ext in _module_bound_externals(index, want):
         take(ext, MATCH_MODULE)
     return rows, kinds
+
+
+def _rust_path_row(ext: ExternalCall, head: str) -> bool:
+    """Whether ``ext`` is a Rust call written ``head::..``."""
+    path = ext.caller.split("::", 1)[0]
+    return path.endswith(".rs") and ext.callee.lstrip().startswith(f"{head}::")
 
 
 def _module_bindings(index: MapIndex, source: str) -> dict[str, set[str]]:
@@ -2638,16 +2651,26 @@ def _uses_numbers(
         parts = callee_segments(e.callee)
         if len(parts) >= 2:
             members[parts[1].split("(", 1)[0]] += len(e.lines) or 1
-    want = target.removeprefix(_NODE_PREFIX)
     importing = sum(
         1
         for path, imps in index.imports_by_path.items()
-        if any(
-            i.name == target or _bare_source(index, path, i) == want
-            for i in imps
-        )
+        if any(_imports_target(index, path, i, target) for i in imps)
     )
     return sites, len(files), importing, members
+
+
+def _imports_target(
+    index: MapIndex, path: str, imp: Import, target: str
+) -> bool:
+    """Whether one import of the file at ``path`` brings in ``target``:
+    as its binding, from a source whose bare form is ``target``, or, in
+    Rust, a ``use`` rooted at it (``use serde_json::Value;``)."""
+    if imp.name == target:
+        return True
+    if _bare_source(index, path, imp) == target.removeprefix(_NODE_PREFIX):
+        return True
+
+    return path.endswith(".rs") and imp.source.split("::", 1)[0] == target
 
 
 def _uses_summary(
@@ -2712,7 +2735,12 @@ def _run_uses_not_found(index: MapIndex, target: str) -> int:
         )
         return EXIT_NOT_FOUND
     print(f"dekko: no external reference matches '{target}'", file=sys.stderr)
-    unbound = index.externals_by_head.get(target, [])
+    # A ``ns::f`` head (a C++ namespace) is never a local variable.
+    unbound = [
+        e
+        for e in index.externals_by_head.get(target, [])
+        if not e.callee.lstrip().startswith(f"{target}::")
+    ]
     if unbound:
         n = sum(len(e.lines) or 1 for e in unbound)
         print(

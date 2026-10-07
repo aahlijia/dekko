@@ -9,6 +9,29 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.7] — 2026-10-07
+
+### Fixed
+- **`uses <crate>` finds a Rust crate called by path.** `dekko query
+  uses serde_json` (and MCP `find_usages`) counted a row only when
+  `serde_json` was an import binding of the calling file, and a crate
+  called as `serde_json::from_value(..)` never is: zed showed 36 sites
+  in 3 files. `uses futures` said "not found" and called the 350
+  `futures::` sites "local variables, not a module". A Rust row written
+  `<crate>::..` now matches as the new `path` kind, a Rust file counts
+  as importing the crate when any `use` starts with it (`use
+  serde_json::Value;`), and the "local variables" note no longer fires
+  on a `::` head (a C++ namespace isn't a local either).
+
+On zed (1.8.6 map): `serde_json` 36 sites in 3 files → 1,963 in 263
+(importing 6 → 238); `futures` not found → 341 sites in 129 files;
+`smol` not found → 302 in 47; `itertools` not found → 16 in 10;
+`anyhow` 231 in 56 → 517 in 171. Every listed site is on a line `git
+grep '<crate>::'` finds; a chained call counts each link
+(`smol::process::Command::new(..).output()`), as JS chains already
+did. `uses` on claude-code (`chalk`, `React`, `path`, `fs`) and
+tensorflow (`numpy`, `np`, `absl`) is unchanged row for row.
+
 ## [1.8.6] — 2026-10-07
 
 ### Fixed

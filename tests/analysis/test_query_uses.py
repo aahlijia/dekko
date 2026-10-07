@@ -333,3 +333,80 @@ def test_suggestable_floor() -> None:
     assert not _suggestable('""')
     assert not _suggestable("z .object")
     assert not _suggestable("a" * 41)
+
+
+# --- a Rust crate called by path -------------------------------------
+
+RUST = {
+    "Cargo.toml": '[package]\nname = "app"\n',
+    "src/lib.rs": (
+        "mod other;\n"
+        "pub fn go(x: u32) {\n"
+        "    serde_json::to_string(&x);\n"
+        '    serde_json::from_str("1");\n'
+        "}\n"
+    ),
+    "src/other.rs": (
+        "use serde_json::Value;\npub fn keep(v: Value) -> Value {\n    v\n}\n"
+    ),
+    # a JS local named like a module, never imported
+    "web.ts": (
+        "export function f(chalk: any): string {\n  return chalk.red('x')\n}\n"
+    ),
+}
+
+
+def test_a_rust_crate_path_matches_as_path(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(RUST)
+    assert _uses(root, "serde_json", "--json") == 0
+    doc = _json(capsys)
+    assert sorted(e["callee"] for e in doc["results"]) == [
+        "serde_json::from_str",
+        "serde_json::to_string",
+    ]
+    assert {e["match"] for e in doc["results"]} == {"path"}
+    assert doc["summary"]["files"] == 1
+    # other.rs writes ``use serde_json::Value;`` and calls nothing.
+    assert doc["summary"]["importing_files"] == 1
+
+
+def test_a_js_local_head_is_still_no_path(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo(RUST)
+    assert _uses(root, "chalk") == 3
+    assert "local variables, not a module" in capsys.readouterr().err
+
+
+def test_a_namespace_path_head_is_not_called_a_local(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    root = make_mapped_repo({"a.cc": "void f() {\n  absl::StrCat(1);\n}\n"})
+    assert _uses(root, "absl") == 3
+    err = capsys.readouterr().err
+    assert "no external reference matches 'absl'" in err
+    assert "local variables" not in err
+
+
+def test_mcp_find_usages_reads_a_rust_crate_path(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    root = make_mapped_repo(RUST)
+    ctx = server.Context(default_root=root, no_regen=False)
+    msg = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "find_usages",
+            "arguments": {"name": "serde_json"},
+        },
+    }
+    result = server.handle(ctx, msg)["result"]
+    assert result["isError"] is False
+    text = result["content"][0]["text"]
+    assert "serde_json: 2 call sites in 1 files" in text
+    assert "imported by 1 files" in text
+    assert "[serde_json::to_string]" in text
