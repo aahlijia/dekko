@@ -9,6 +9,79 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.9] — 2026-10-07
+
+### Added
+- **`map.json` records each type's fields.** Every class, struct,
+  interface, enum, record and trait symbol carries `fields`: each
+  field's `name`, declared `type`, `line`, and whether the type was
+  `inferred` from a construction call or literal initializer
+  (`this.client = new Client()`, `self.items = []`). TS parameter
+  properties and interface members, Python `self.x` assignments in any
+  method, Rust tuple-struct fields (`"0"`, `"1"`), Go embedded fields,
+  Java record components and enum constants, Kotlin `val`/`var`
+  constructor parameters and C/C++ members are all read. A Go method's
+  receiver is now a leading parameter with `receiver: true`; signatures,
+  `outline`, arity and `query type` skip it as before.
+
+### Fixed
+- **A call through a field reaches the field's type.** `this.mcpHub.callTool()`
+  with `constructor(private readonly mcpHub: McpHub)` now has
+  `McpHub.callTool` as its target, where it used to have no edge at
+  all; so does `controller.mcpHub.getServers()` through a typed
+  parameter, `Type.FIELD.m()`, a Go receiver's `s.store.Get()`, an
+  inline object-type parameter's `input.client.getSchedule()`, and a
+  field declared on a supertype. The walk goes on through a call's
+  declared return type (`cx.executor().run_until_parked()` is
+  `BackgroundExecutor`'s), through calls that hand back what they're
+  called on (`lock()`, `read(cx)`, `borrow()`, `unwrap()`, `.await`),
+  through fluent builders returning `Self`, `this` or `SELF`, nested
+  types (`ConfigData.Options.of()`), enum constants
+  (`PeriodStyle.SIMPLE.parse(..)`) and Java's `Outer.this`.
+- **A chained receiver never lands on the enclosing type's own method.**
+  `self.center.panes()` inside a type with its own `panes` used to pick
+  that `panes`; it now goes to the field's type, and an untyped field
+  leaves the call to the rest of the resolver without that pick.
+- **A field whose type is outside the repo sends the call external.**
+  `this.subscriptions.delete(id)` on a `Map` and `self.items.len()` on a
+  `Vec` no longer land on a repo method named `delete` or `len`. A repo
+  type with no such member is external too (a Spring repository's
+  `findAll()` from `JpaRepository`), except where the type can reach
+  members the map doesn't list: a Rust `Deref`, a Python `__getattr__`,
+  C/C++, a TS interface an object literal can fill, or a field that is
+  itself a callback slot (`this.options.postStateToWebview()`).
+- **An interface-typed field dispatches to its implementors**: one is
+  the edge, several are an ambiguous row naming only them.
+- **An aliased type import types a parameter or field.** `function
+  f(v: WD)` with `import { Widget as WD }`, and Python's `from w import
+  Widget as WD`, reach `Widget`'s methods.
+- **`sanity` names three more causes** for a call through a field: a
+  receiver whose declared type is outside the repo, a field with no
+  type, and an interface member nothing implements. They replace the
+  "cross-package/qualified call" label on those lines.
+
+Against 1.8.8, edge sites and ambiguous rows:
+
+| Repo | Edge sites | Ambiguous rows |
+|---|---|---|
+| zed | +14,883 −2,516 | 83,424 → 75,139 |
+| spring-boot | +13,338 −418 | 61,299 → 45,821 |
+| tensorflow | +2,061 −854 | 192,069 → 190,447 |
+| cline | +443 −114 | 4,070 → 3,671 |
+
+Most lost sites are calls on std or library types that had landed on a
+same-named repo method; on zed about 1,650 moved to another target
+(`TestAppContext.run_until_parked` to `BackgroundExecutor`'s).
+`McpHub.callTool` gains its caller on cline. Depth-zero calls resolve
+as before (`Point.new` keeps 569 callers on zed). Map time and peak
+memory stay within 5% of 1.8.8. Limits: extension traits implemented
+for every type (`with_rotate_animation` on any element) and a local's
+type read off its initializer are not followed yet, and a Python field
+built by a native extension (pybind) no longer reaches the C++ class of
+the same name. An older dekko can't read a map with a Go receiver in
+it (`unexpected keyword argument 'receiver'`): restart long-running
+`dekko serve`/daemon processes after upgrading.
+
 ## [1.8.8] — 2026-10-07
 
 ### Fixed

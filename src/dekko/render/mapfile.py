@@ -26,6 +26,7 @@ from dekko.core.model import (
     CatchSite,
     EnvRead,
     ExternalCall,
+    Field,
     FileMap,
     Import,
     Param,
@@ -1443,6 +1444,7 @@ def _symbol_from_dict(d: dict) -> Symbol:
         in_literal=d.get("in_literal", False),
         literal_consumer=d.get("literal_consumer"),
         visibility=d.get("visibility"),
+        fields=[Field(**f) for f in d.get("fields", [])],
     )
 
 

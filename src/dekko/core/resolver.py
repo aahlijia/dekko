@@ -121,7 +121,7 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict, dataclass, field, fields, replace
 from multiprocessing.context import BaseContext
 from pathlib import Path, PurePosixPath
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from dekko.classify import is_test_path
 from dekko.core import languages, walker
@@ -131,6 +131,7 @@ from dekko.core.model import (
     CatchSite,
     Edge,
     ExternalCall,
+    Field,
     FileMap,
     HeritageEdge,
     Import,
@@ -144,6 +145,7 @@ from dekko.core.model import (
     Reexport,
     Symbol,
     ThrowEdge,
+    go_embedded_name,
 )
 
 _SELF_RECEIVERS = {"self", "this", "Self", "cls"}
@@ -1265,6 +1267,7 @@ def _init_resolve_worker(
     _worker_imports_by_file = imports_by_file
     _worker_repo_stems = repo_stems
     _worker_symbols_by_id = symbols_by_id
+    _reset_walk_memo()
 
 
 def resolve(
@@ -1304,6 +1307,7 @@ def resolve(
     Returns:
         The resolved ``CallGraph`` with bidirectional adjacency.
     """
+    _reset_walk_memo()
     index = _build_index(files)
     by_name_path = _build_name_path_index(files)
     # One discovery pass feeds both the symbol-level passes (name ->
@@ -1504,6 +1508,7 @@ def _resolve_files_chunk(
                 external=external,
                 raw_imports=raw_imports,
                 stars=stars,
+                imports_by_file=imports_by_file,
             )
     return edges, ambiguous, external
 
@@ -3009,15 +3014,23 @@ def _resolve_call(
     external: dict[tuple[str, str], set[int]],
     raw_imports: list[Import] | None = None,
     stars: list[Import] | None = None,
+    imports_by_file: dict[str, dict[str, Import]] | None = None,
 ) -> None:
     """Resolve one call and record it in the right bucket.
 
     ``stars`` is the calling file's Python star imports, for
-    ``_call_target_visible``.
+    ``_call_target_visible``. ``imports_by_file`` is every file's
+    import table, read by the receiver walk (``_call_walk``) to type a
+    field declared in another file.
     """
     caller_id = call.caller_id or f"{call.path}{MODULE_CALLER_SUFFIX}"
     call = _rust_call_rewritten(call, symbols_by_id)
-    if _receiver_is_external(call, file_imports, repo_stems):
+    caller = symbols_by_id.get(call.caller_id or "")
+    ctx = _WalkCtx(index, by_name_path, imports_by_file or {}, repo_stems)
+    walk = _call_walk(call, caller, ctx)
+    if walk.kind == "foreign" or _receiver_is_external(
+        call, file_imports, repo_stems
+    ):
         external.setdefault((caller_id, call.text), set()).add(call.line)
         return
 
@@ -3061,14 +3074,17 @@ def _resolve_call(
             return
         candidates = scoped.candidates
         same_file = [s for s in same_file if s in candidates]
-    target = _within_scope(
+    walked, candidates, same_file = _walk_verdict(
+        walk, call, caller, candidates, same_file, ctx
+    )
+    target = walked or _within_scope(
         scoped,
         _pick_candidate(
             call,
             candidates,
             same_file,
             file_imports,
-            symbols_by_id.get(call.caller_id or ""),
+            caller,
             index,
             repo_stems,
             raw_imports,
@@ -3480,9 +3496,15 @@ def _param_arity(params: list[Param]) -> tuple[int, int | None]:
         A parameter with ``has_default=True`` lowers the minimum
         without affecting the maximum; a plain required parameter
         raises both. Python's bare ``*``/``/`` syntax-marker params
-        are excluded entirely (see ``_ARITY_SYNTAX_MARKER_NAMES``).
+        are excluded entirely (see ``_ARITY_SYNTAX_MARKER_NAMES``), and so
+        is a Go receiver (``Param.receiver``): it is never written as an
+        argument.
     """
-    relevant = [p for p in params if p.name not in _ARITY_SYNTAX_MARKER_NAMES]
+    relevant = [
+        p
+        for p in params
+        if p.name not in _ARITY_SYNTAX_MARKER_NAMES and not p.receiver
+    ]
     min_count = sum(
         1 for p in relevant if not p.has_default and not p.variadic
     )
@@ -5907,6 +5929,1084 @@ def _typed_param_token_candidates(
     return tokens
 
 
+# ---------------------------------------------------------------------
+# The receiver walk
+#
+# The structural rungs type a receiver at depth zero only: ``self`` is
+# the caller's container, a typed parameter is its annotation, a
+# written ``Type`` is that type. A chained receiver (``self.hub.call()``,
+# ``ctl.hub.call()``, ``Type.field.call()``) is typed here by walking
+# its segments: hop zero is that same evidence, and each later segment
+# is a field (``Symbol.fields``) of the type reached so far. The walk
+# says ``typed`` (the types the receiver can be, outermost wrapper
+# first), ``foreign`` (a type outside the repo: the call is external)
+# or ``unknown`` (the ladder decides, as it did before).
+
+
+@dataclass(frozen=True)
+class WalkResult:
+    """What walking a chained receiver found.
+
+    Attributes:
+        kind: ``"typed"``, ``"foreign"`` or ``"unknown"``.
+        layers: For ``typed``, the in-repo types the receiver can be,
+            one tuple per layer of a wrapper chain (``Entity<View>`` is
+            ``Entity`` then ``View``), outermost first; each tuple holds
+            the same-named types the name could mean.
+        open: Whether a deeper layer is a type the walk can't read (a
+            type parameter), so a member missing from ``layers`` may
+            still be there.
+    """
+
+    kind: str
+    layers: tuple[tuple[Symbol, ...], ...] = ()
+    open: bool = False
+
+
+_WALK_UNKNOWN = WalkResult("unknown")
+_WALK_FOREIGN = WalkResult("foreign")
+
+_WALK_SEGMENT_SPLIT = re.compile(r"->|::|\.")
+_WALK_SEGMENT = re.compile(r"[A-Za-z_$][\w$]*(?:\(\))?\Z|\d+\Z")
+# Calls that hand back what they're called on (a lock guard, a cell
+# borrow, an unwrap, an awaited future), so the type walks through.
+_WALK_TRANSPARENT_CALLS = frozenset(
+    {
+        "lock",
+        "read",
+        "write",
+        "borrow",
+        "borrow_mut",
+        "unwrap",
+        "expect",
+        "as_ref",
+        "as_mut",
+        "clone",
+        "deref",
+        "deref_mut",
+        "get_mut",
+        "unwrap_or_default",
+        "as_deref",
+    }
+)
+# A declared return type meaning "the type it's called on": Rust
+# ``Self``, TS ``this``, and the conventional self-bound type
+# parameter of a Java fluent builder.
+_WALK_SELF_RETURN = re.compile(r"\b(?:Self|this|SELF)\b")
+# A field type named by a nested-type path, ``ZipContent.Entry``.
+_WALK_DOTTED_TYPE = re.compile(r"[A-Z]\w*(?:\.[A-Z]\w*)+\Z")
+# The first generic or indexed head in a type text: ``list[`` /
+# ``std::vector<`` / ``map[``.
+_WALK_GENERIC_HEAD = re.compile(r"([A-Za-z_]\w*)\s*[<\[]")
+# A TS/JS/Python/Go type under a module binding, ``vscode.Uri``.
+_WALK_MODULE_HEAD = re.compile(r"([a-z_]\w*)\.([A-Z]\w*)")
+# A Rust type under a path, ``serde_json::Value``.
+_WALK_RUST_HEAD = re.compile(r"([a-z_]\w*)::(?:[a-z_]\w*::)*([A-Z]\w*)")
+_WALK_RUST_LOCAL_HEADS = frozenset({"crate", "self", "super"})
+_WALK_MODULE_HEAD_LANGUAGES = frozenset(
+    {"python", "go", "javascript", "typescript", "tsx"}
+)
+# Lowercase smart pointers whose methods are reached through ``->``.
+_WALK_LOWER_WRAPPERS = frozenset(
+    {"unique_ptr", "shared_ptr", "optional", "reference_wrapper"}
+)
+# Type texts that say nothing: the receiver could be anything.
+_WALK_OPEN_TEXTS = frozenset({"any", "unknown", "object", "Any", "dyn"})
+_WALK_SUPER_DEPTH = 4
+# The names a method's own receiver goes by, per language. ``this`` is
+# an ordinary identifier in Rust and Python (zed names closure
+# parameters ``this``), and Go names its receiver like a parameter.
+_WALK_SELF_NAMES: dict[str, frozenset[str]] = {
+    "python": frozenset({"self", "cls"}),
+    "rust": frozenset({"self", "Self"}),
+    "go": frozenset(),
+}
+_WALK_DEFAULT_SELF_NAMES = frozenset({"this"})
+# Members can live outside their type's file in these languages: a
+# Rust ``impl`` or Go method anywhere in the crate or package, a C++
+# out-of-line definition, a Kotlin extension.
+_WALK_SPREAD_MEMBER_LANGUAGES = frozenset({"c", "cpp", "kotlin"})
+
+# Reserved ``index`` namespace: ``_SUPERS_KEY + type id`` holds one
+# stand-in per supertype name the type declares, and ``_SUPERS_KEY +
+# "@" + name`` the same for a Rust ``impl Trait for Name`` the extractor
+# couldn't attach to a symbol (``RawHeritage.subtype_name``).
+_SUPERS_KEY = "::supers::"
+# Reserved ``index`` namespace: ``_SUBS_KEY + name`` holds every type
+# that declares a supertype called ``name`` (its implementors).
+_SUBS_KEY = "::subs::"
+
+# Per-process memos for the walk's lookups. Cleared at the start of
+# every ``resolve()`` and in each pool worker (``_reset_walk_memo``), so
+# none outlives the index it read.
+_WALK_FIELDS: dict[tuple[str, str], list[tuple[Field, Symbol]]] = {}
+_WALK_SUPERS: dict[str, list[Symbol]] = {}
+_WALK_TEXTS: dict[tuple[str, str], WalkResult] = {}
+_WALK_TOKENS: dict[tuple[str, str], tuple[Symbol, ...] | None] = {}
+_WALK_MEMBERS: dict[tuple[str, str, bool], list[Symbol]] = {}
+
+
+def _reset_walk_memo() -> None:
+    """Forget every walk lookup; the index they read is being replaced."""
+    for memo in (
+        _WALK_FIELDS,
+        _WALK_SUPERS,
+        _WALK_TEXTS,
+        _WALK_TOKENS,
+        _WALK_MEMBERS,
+    ):
+        memo.clear()
+
+
+class _WalkCtx(NamedTuple):
+    """The repo-wide tables the walk reads."""
+
+    index: dict[str, list[Symbol]]
+    by_name_path: dict[tuple[str, str], list[Symbol]]
+    imports_by_file: dict[str, dict[str, Import]]
+    repo_stems: set[str]
+
+
+def _index_supertypes(
+    files: list[FileMap], index: dict[str, list[Symbol]]
+) -> None:
+    """Record each type's declared supertype names and each name's
+    implementors (see ``_SUPERS_KEY``, ``_SUBS_KEY``)."""
+    for fm in files:
+        by_id = {sym.id: sym for sym in fm.symbols}
+        for clause in fm.heritage:
+            owner = clause.subtype_id or (
+                "@" + clause.subtype_name if clause.subtype_name else ""
+            )
+            if owner:
+                index.setdefault(_SUPERS_KEY + owner, []).append(
+                    _stand_in(clause.name, fm.path)
+                )
+            sub = by_id.get(clause.subtype_id)
+            if sub is not None:
+                index.setdefault(_SUBS_KEY + clause.name, []).append(sub)
+
+
+def _call_walk(
+    call: RawCall,
+    caller: Symbol | None,
+    ctx: _WalkCtx,
+) -> WalkResult:
+    """Type a call's chained receiver by walking its segments.
+
+    A receiver of one segment (``self``, ``w``, ``Type``) is left to
+    the structural rungs, which already read it: the walk changes
+    nothing about a depth-zero call.
+
+    Args:
+        call: The raw call being resolved.
+        caller: Its enclosing symbol, or ``None`` at module level.
+        ctx: The repo-wide tables.
+
+    Returns:
+        The walk's verdict on the whole receiver; ``unknown`` when the
+        call has no chained receiver or its language has no fields.
+    """
+    segments = _walk_segments(call.receiver)
+    if segments is None:
+        return _WALK_UNKNOWN
+    spec = languages.spec_for_path(call.path)
+    if spec is None or spec.field_query is None:
+        return _WALK_UNKNOWN
+    nxt = segments[1] if len(segments) > 1 else None
+    result, at = _walk_hop_zero(segments[0], nxt, call.path, caller, ctx)
+    while at < len(segments) and result.kind == "typed":
+        nxt = segments[at + 1] if at + 1 < len(segments) else None
+        result, used = _walk_step(result, segments[at], nxt, ctx)
+        at += used
+    if result.kind == "foreign" and not _walk_only_transparent(segments[at:]):
+        # ``this.tasks.get(id).abort()`` on a ``Map``: the foreign hop
+        # hands back something the walk can't name, not something
+        # foreign.
+        return _WALK_UNKNOWN
+
+    return result
+
+
+def _walk_only_transparent(segments: list[str]) -> bool:
+    """Whether every segment hands back what it's called on."""
+    return all(
+        seg == "await" or seg[:-2] in _WALK_TRANSPARENT_CALLS
+        for seg in segments
+    )
+
+
+def _walk_step(
+    result: WalkResult,
+    segment: str,
+    nxt: str | None,
+    ctx: _WalkCtx,
+) -> tuple[WalkResult, int]:
+    """Step through one segment after hop zero.
+
+    A call goes through its declared return type, or keeps the type
+    when it hands back what it's called on (``lock()``, ``.await``).
+    ``X.this`` is ``X``; ``X.class`` is a ``Class`` object, outside the
+    repo. Any other name is a field, else a nested type.
+    """
+    if segment.endswith("()"):
+        name = segment[:-2]
+        if name in _WALK_TRANSPARENT_CALLS:
+            return result, 1
+        return _walk_call(result, name, ctx), 1
+    if segment in ("await", "this"):
+        return result, 1
+    if segment == "class":
+        return _WALK_FOREIGN, 1
+    stepped, used = _walk_field(result, segment, nxt, ctx)
+    if stepped.kind != "unknown" or not segment[:1].isupper():
+        return stepped, used
+
+    return _walk_nested(result, segment, ctx), 1
+
+
+def _walk_call(result: WalkResult, name: str, ctx: _WalkCtx) -> WalkResult:
+    """The type a call segment ``name()`` returns, or ``unknown``.
+
+    The member must be the walked type's (own, else a supertype's) and
+    carry a declared return type; same-named members must agree on it.
+    """
+    members = _walk_find_members(result, name, ctx) or []
+    texts = {m.returns for m in members}
+    if len(texts) != 1 or None in texts:
+        return _WALK_UNKNOWN
+    member = members[0]
+    text = member.returns or ""
+    if _WALK_SELF_RETURN.search(text):
+        owner = _walk_owner_layer(result, member)
+        return WalkResult("typed", (owner,)) if owner else _WALK_UNKNOWN
+
+    return _walk_type_text(text, member.path, ctx)
+
+
+def _walk_owner_layer(
+    result: WalkResult, member: Symbol
+) -> tuple[Symbol, ...]:
+    """The layer types ``member`` belongs to, for a ``Self`` return.
+
+    The walked type, not the supertype that declares the method: a
+    fluent builder's ``withX()`` inherited from its base still returns
+    the subtype the walk is on.
+    """
+    owner = member.qualname.rpartition(".")[0]
+    for layer in result.layers:
+        if any(t.qualname == owner for t in layer):
+            return layer
+
+    return result.layers[0] if result.layers else ()
+
+
+def _walk_nested(
+    result: WalkResult, segment: str, ctx: _WalkCtx
+) -> WalkResult:
+    """A nested type ``segment`` of the walked type (``Outer.Inner``)."""
+    for layer in result.layers:
+        quals = {f"{t.qualname}.{segment}" for t in layer}
+        found = tuple(
+            s
+            for s in ctx.index.get(segment, ())
+            if s.kind in TYPE_KINDS
+            and s.qualname in quals
+            and s.language == layer[0].language
+        )
+        if found:
+            return WalkResult("typed", (found,))
+
+    return _WALK_UNKNOWN
+
+
+def _walk_segments(receiver: str | None) -> list[str] | None:
+    """A chained receiver's segments, ``?``/``!`` dropped; else ``None``.
+
+    ``None`` for a one-segment receiver other than a bare call
+    (``getRepo()``), and for one with a segment the walk can't read (an
+    index, a call with arguments left in, a construction): those stay
+    with the ladder.
+    """
+    if not receiver:
+        return None
+    parts = [p.rstrip("?!") for p in _WALK_SEGMENT_SPLIT.split(receiver)]
+    if not all(_WALK_SEGMENT.match(p) for p in parts):
+        return None
+    if len(parts) < 2 and not parts[0].endswith("()"):
+        return None
+
+    return parts
+
+
+def _walk_hop_zero(
+    first: str,
+    nxt: str | None,
+    path: str,
+    caller: Symbol | None,
+    ctx: _WalkCtx,
+) -> tuple[WalkResult, int]:
+    """Type a receiver's first segment: self, a parameter, or a type.
+
+    Returns the result and how many segments it used: two for a
+    parameter with an inline object type (``input: { client: Client }``),
+    whose next segment names the member.
+    """
+    if _walk_is_self(first, path):
+        return _walk_container(caller, ctx), 1
+    if first.endswith("()"):
+        return _walk_bare_call(first[:-2], path, caller, ctx), 1
+    param = _walk_param(caller, first)
+    if param is not None:
+        return _walk_param_type(param, nxt, caller, ctx)
+    found = _walk_type_token(first, path, ctx)
+    if not found:
+        # A name the repo has no type for is a local or a module
+        # alias, not a type outside the repo.
+        return _WALK_UNKNOWN, 1
+
+    return WalkResult("typed", (found,)), 1
+
+
+def _walk_param_type(
+    param: Param,
+    nxt: str | None,
+    caller: Symbol | None,
+    ctx: _WalkCtx,
+) -> tuple[WalkResult, int]:
+    """A typed parameter at hop zero, an inline object type included."""
+    if param.type is None or caller is None:
+        return _WALK_UNKNOWN, 1
+    tokens = _object_type_field_tokens(param.type, f"{param.name}.{nxt}")
+    if tokens is None:
+        return _walk_type_text(param.type, caller.path, ctx), 1
+    if not tokens:
+        return _WALK_UNKNOWN, 2
+
+    return _walk_type_text(tokens[0][0], caller.path, ctx), 2
+
+
+def _walk_bare_call(
+    name: str,
+    path: str,
+    caller: Symbol | None,
+    ctx: _WalkCtx,
+) -> WalkResult:
+    """A bare call at hop zero: a method of the caller's container, else
+    a same-file function, typed by its declared return type."""
+    container = _walk_container(caller, ctx)
+    if container.kind == "typed":
+        result = _walk_call(container, name, ctx)
+        if result.kind != "unknown":
+            return result
+    local = [
+        s
+        for s in ctx.by_name_path.get((name, path), ())
+        if s.kind == "function" and s.returns
+    ]
+    if len(local) != 1:
+        return _WALK_UNKNOWN
+
+    return _walk_type_text(local[0].returns or "", path, ctx)
+
+
+def _walk_is_self(name: str, path: str) -> bool:
+    """Whether ``name`` is the method's own receiver in ``path``'s language."""
+    language = _site_language(path) or ""
+
+    return name in _WALK_SELF_NAMES.get(language, _WALK_DEFAULT_SELF_NAMES)
+
+
+def _walk_param(caller: Symbol | None, name: str) -> Param | None:
+    """The caller's parameter called ``name`` (a TS ``x?`` included)."""
+    if caller is None:
+        return None
+    for param in caller.params:
+        if param.name.rstrip("?") == name:
+            return param
+    return None
+
+
+def _walk_container(caller: Symbol | None, ctx: _WalkCtx) -> WalkResult:
+    """The type ``self``/``this`` is inside ``caller``.
+
+    The nearest type up the caller's qualname: in the caller's file
+    first (a method in a nested function still finds its class), else
+    by name the way a type token is found (a Rust ``impl`` or C++
+    out-of-line method away from its type).
+    """
+    if caller is None:
+        return _WALK_UNKNOWN
+    parts = caller.qualname.split(".")
+    for cut in range(len(parts) - 1, 0, -1):
+        qual = ".".join(parts[:cut])
+        same = tuple(
+            s
+            for s in ctx.by_name_path.get((parts[cut - 1], caller.path), ())
+            if s.kind in TYPE_KINDS and s.qualname == qual
+        )
+        if same:
+            return WalkResult("typed", (same,))
+        found = _walk_type_token(parts[cut - 1], caller.path, ctx)
+        if found:
+            return WalkResult("typed", (found,))
+
+    return _WALK_UNKNOWN
+
+
+def _walk_field(
+    result: WalkResult,
+    segment: str,
+    nxt: str | None,
+    ctx: _WalkCtx,
+) -> tuple[WalkResult, int]:
+    """Step through one field segment; returns the result and segments used.
+
+    The field is looked up on the outermost layer that declares it
+    (own fields, then supertypes'). Same-named types must agree on the
+    field's type text, and a field without one is ``unknown``. An
+    inline object type (``opts: { client: Foo }``) is resolved through
+    the next segment, which it consumes.
+    """
+    found: list[tuple[Field, Symbol]] = []
+    for layer in result.layers:
+        found = [
+            hit
+            for owner in layer
+            for hit in _walk_type_fields(owner, segment, ctx)
+        ]
+        if found:
+            break
+    texts = {f.type for f, _ in found}
+    if len(texts) != 1 or None in texts:
+        return _WALK_UNKNOWN, 1
+    field_row, owner = found[0]
+    text = field_row.type or ""
+    if not text.lstrip().startswith("{"):
+        return _walk_type_text(text, owner.path, ctx), 1
+    member = dict(_OBJECT_TYPE_FIELD.findall(text)).get(nxt or "")
+    if member is None:
+        return _WALK_UNKNOWN, 2
+
+    return _walk_type_text(member, owner.path, ctx), 2
+
+
+def _walk_type_fields(
+    owner: Symbol, name: str, ctx: _WalkCtx
+) -> list[tuple[Field, Symbol]]:
+    """``owner``'s field ``name``, else the nearest supertypes' (memoized)."""
+    key = (owner.id, name)
+    hit = _WALK_FIELDS.get(key)
+    if hit is None:
+        hit = _walk_type_fields_uncached(owner, name, ctx)
+        _WALK_FIELDS[key] = hit
+    return hit
+
+
+def _walk_type_fields_uncached(
+    owner: Symbol, name: str, ctx: _WalkCtx
+) -> list[tuple[Field, Symbol]]:
+    """``_walk_type_fields`` without the memo: breadth-first up supertypes."""
+    level = [owner]
+    seen = {owner.id}
+    for _ in range(_WALK_SUPER_DEPTH + 1):
+        found = [(f, t) for t in level for f in t.fields if f.name == name]
+        if found:
+            return found
+        level = [
+            s
+            for t in level
+            for s in _walk_supertypes(t, ctx)
+            if s.id not in seen
+        ]
+        seen.update(s.id for s in level)
+        if not level:
+            break
+    return []
+
+
+def _walk_supertypes(owner: Symbol, ctx: _WalkCtx) -> list[Symbol]:
+    """The in-repo types ``owner`` declares as its supertypes (memoized)."""
+    hit = _WALK_SUPERS.get(owner.id)
+    if hit is None:
+        names = [
+            s.name
+            for s in ctx.index.get(_SUPERS_KEY + owner.id, [])
+            + ctx.index.get(_SUPERS_KEY + "@" + owner.name, [])
+        ]
+        names += _go_embedded_types(owner)
+        hit = [
+            t
+            for name in names
+            for t in _walk_type_token(name, owner.path, ctx) or ()
+        ]
+        _WALK_SUPERS[owner.id] = hit
+    return hit
+
+
+def _go_embedded_types(owner: Symbol) -> list[str]:
+    """The types a Go struct embeds: their methods are its own."""
+    if owner.language != "go":
+        return []
+    return [
+        f.type
+        for f in owner.fields
+        if f.type and f.name == go_embedded_name(f.type)
+    ]
+
+
+def _walk_type_text(text: str, path: str, ctx: _WalkCtx) -> WalkResult:
+    """The types a declared type text names, read in ``path`` (memoized)."""
+    key = (path, text)
+    hit = _WALK_TEXTS.get(key)
+    if hit is None:
+        hit = _walk_type_text_uncached(text, path, ctx)
+        _WALK_TEXTS[key] = hit
+    return hit
+
+
+def _walk_type_text_uncached(
+    text: str, path: str, ctx: _WalkCtx
+) -> WalkResult:
+    """``_walk_type_text`` without the memo.
+
+    A sequence (``X[]``, ``[X]``, ``&[X]``), a lowercase generic head
+    (``list[X]``, ``std::vector<X>``, ``map[K]V``), a type under a
+    module or crate outside the repo, or a text with no in-repo token
+    is ``foreign``. A text that says nothing (``any``) is ``unknown``.
+    Otherwise each token of the wrapper chain
+    (``_typed_param_token_candidates``) that names an in-repo type
+    becomes a layer.
+    """
+    stripped = _walk_unwrapped(text.strip().lstrip("&*").strip())
+    if stripped is None:
+        return _WALK_FOREIGN
+    if stripped in _WALK_OPEN_TEXTS or not stripped:
+        return _WALK_UNKNOWN
+    if _WALK_DOTTED_TYPE.match(stripped):
+        return _walk_nested_type(stripped, path, ctx)
+    if _walk_head_is_foreign(stripped, path, ctx):
+        return _WALK_FOREIGN
+    layers: list[tuple[Symbol, ...]] = []
+    is_open = False
+    for token, _ in _typed_param_token_candidates(stripped):
+        found = _walk_type_token(token, path, ctx)
+        if found:
+            layers.append(found)
+        elif found is not None or _walk_is_type_parameter(token):
+            is_open = True
+    if layers:
+        return WalkResult("typed", tuple(layers), is_open)
+
+    return _WALK_UNKNOWN if is_open else _WALK_FOREIGN
+
+
+def _walk_unwrapped(text: str) -> str | None:
+    """``text`` past any lowercase smart pointer; ``None`` for a sequence.
+
+    ``None`` means the text is a sequence or a lowercase generic
+    container, whose methods are never the element type's.
+    """
+    while True:
+        if text.endswith("]") or text.startswith(("[", "&[")):
+            return None
+        head = _WALK_GENERIC_HEAD.search(text)
+        if head is None or not head.group(1)[:1].islower():
+            return text
+        if head.group(1) not in _WALK_LOWER_WRAPPERS:
+            return None
+        text = text[head.end() :].rstrip(">").strip()
+
+
+def _walk_head_is_foreign(text: str, path: str, ctx: _WalkCtx) -> bool:
+    """Whether ``text`` names its type through a module outside the repo.
+
+    ``vscode.Uri``, ``http.Client``, ``serde_json::Value``: the head is
+    an import from outside the repo, or (Rust) a crate the workspace
+    doesn't define. A transparent wrapper after the head
+    (``typing.Optional[Foo]``, ``std::sync::Arc<Foo>``) isn't judged:
+    its argument is the type.
+    """
+    language = _site_language(path)
+    if language == "rust":
+        head = _WALK_RUST_HEAD.match(text)
+        if head is None or head.group(2) in _TRANSPARENT_TYPE_WRAPPERS:
+            return False
+        name = head.group(1)
+        return not (
+            name in _WALK_RUST_LOCAL_HEADS
+            or _RUST_CRATE_KEY + name in ctx.index
+            or name in ctx.repo_stems
+        )
+    if language not in _WALK_MODULE_HEAD_LANGUAGES:
+        return False
+    head = _WALK_MODULE_HEAD.match(text)
+    if head is None or head.group(2) in _TRANSPARENT_TYPE_WRAPPERS:
+        return False
+    imp = ctx.imports_by_file.get(path, {}).get(head.group(1))
+
+    return imp is None or not _import_is_in_repo(imp, ctx.repo_stems)
+
+
+def _walk_nested_type(text: str, path: str, ctx: _WalkCtx) -> WalkResult:
+    """A dotted nested-type text (``ZipContent.Entry``), by qualname."""
+    last = text.rsplit(".", 1)[-1]
+    found = tuple(
+        s
+        for s in ctx.index.get(last, ())
+        if s.kind in TYPE_KINDS
+        and (s.qualname == text or s.qualname.endswith("." + text))
+    )
+    if not found:
+        return _WALK_FOREIGN
+    near = _walk_nearest(list(found), path)
+
+    return WalkResult("typed", (tuple(near),))
+
+
+def _walk_is_type_parameter(token: str) -> bool:
+    """``T``, ``K``, ``SELF``: a type parameter, never a foreign type."""
+    return len(token) == 1 or (token.isupper() and len(token) <= 5)
+
+
+def _walk_type_token(
+    token: str, path: str, ctx: _WalkCtx
+) -> tuple[Symbol, ...] | None:
+    """The in-repo types a bare type name means in ``path`` (memoized).
+
+    ``None`` when it names none: an import from outside the repo, a
+    name no repo type has, or (JS/TS) a name the file neither imports
+    nor defines, which is a global like the DOM's ``Request``. ``()``
+    when it names only a Rust ``type`` alias, which the walk can't see
+    through. Otherwise the types the import was followed to, else the
+    same-file types, else those nearest ``path``.
+    """
+    key = (path, token)
+    if key not in _WALK_TOKENS:
+        _WALK_TOKENS[key] = _walk_type_token_uncached(token, path, ctx)
+    return _WALK_TOKENS[key]
+
+
+def _walk_type_token_uncached(
+    token: str, path: str, ctx: _WalkCtx
+) -> tuple[Symbol, ...] | None:
+    """``_walk_type_token`` without the memo."""
+    language = _site_language(path)
+    imports = (
+        {}
+        if language in _WHOLE_FILE_IMPORT_LANGUAGES
+        else ctx.imports_by_file.get(path, {})
+    )
+    imp = imports.get(token)
+    if imp is not None and not _import_is_in_repo(imp, ctx.repo_stems):
+        return None
+    origins = tuple(
+        s for s in getattr(imp, "origins", ()) if s.kind in TYPE_KINDS
+    )
+    if origins:
+        # The import was followed to the file that declares it (JS/TS
+        # specifiers, Rust ``use`` paths): no guessing by name.
+        return origins
+    name = _imported_original_name(token, imp)
+    types = _language_filtered_at(
+        path,
+        [s for s in ctx.index.get(name, ()) if s.kind in TYPE_KINDS],
+        bare=False,
+    )
+    real = [
+        s
+        for s in types
+        if not (s.kind == "type_alias" and s.language == "rust")
+    ]
+    if not real:
+        return () if types else None
+    if language == "rust" and imp is not None:
+        real = _walk_in_import_crate(real, imp, path, ctx)
+    same = tuple(s for s in real if s.path == path)
+    if same:
+        return same
+    if language in _JS_FAMILY and imp is None:
+        return None
+
+    return tuple(_walk_nearest(real, path))
+
+
+def _walk_in_import_crate(
+    types: list[Symbol], imp: Import, path: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """The types in the crate a Rust ``use`` names (``language::Buffer``
+    is ``language``'s, not ``text``'s); all of them when none is there
+    (a re-export from a crate further down)."""
+    head = imp.source.split("::", 1)[0]
+    if head in _WALK_RUST_LOCAL_HEADS:
+        dirs = [_rust_crate_dir(path)]
+    else:
+        dirs = [s.path for s in ctx.index.get(_RUST_CRATE_KEY + head, ())]
+    kept = [
+        t
+        for t in types
+        if any(t.path.startswith(d.rstrip("/") + "/") for d in dirs if d)
+    ]
+
+    return kept or types
+
+
+def _imported_original_name(token: str, imp: Import | None) -> str:
+    """The name ``token`` was imported under, for a renaming import.
+
+    ``import { Widget as WD }`` binds ``WD`` to a type the repo calls
+    ``Widget``; the import's source ends in that original name.
+    """
+    if imp is None or not imp.source:
+        return token
+    original = _PATH_SPLIT.split(imp.source)[-1]
+    if original == token or not original[:1].isupper():
+        return token
+
+    return original
+
+
+def _walk_nearest(types: list[Symbol], path: str) -> list[Symbol]:
+    """The types sharing the longest directory prefix with ``path``."""
+    if len(types) < 2:
+        return types
+    here = path.split("/")
+
+    def shared(sym: Symbol) -> int:
+        n = 0
+        for a, b in zip(here, sym.path.split("/")):
+            if a != b:
+                break
+            n += 1
+        return n
+
+    best = max(shared(s) for s in types)
+
+    return [s for s in types if shared(s) == best]
+
+
+def _walk_find_members(
+    result: WalkResult,
+    name: str,
+    ctx: _WalkCtx,
+    implementors: bool = False,
+) -> list[Symbol] | None:
+    """The members a call ``name`` on ``result`` can reach, nearest first.
+
+    Each step runs over every layer, outermost first, before the next
+    step starts: the type's own members; then, unless a layer derefs
+    to a type the walk can't name (``None``), the members other crates
+    give it (``impl Trait for Type`` there), its supertypes' members,
+    and with ``implementors`` its implementors'. A wrapper's blanket
+    trait impl elsewhere (``impl ItemHandle for Entity<T>``) so never
+    beats the type it holds. Nothing found is ``None`` when the type
+    may still reach a member the walk can't see
+    (``_walk_may_reach_more``), else ``[]``.
+    """
+    found = _walk_members(result, name, ctx)
+    if found:
+        return found
+    if _walk_derefs(result, ctx):
+        return None
+    found = _walk_members(result, name, ctx, loose=True)
+    if not found:
+        found = _walk_climbed_members(result, name, ctx)
+    if not found and implementors:
+        found = _walk_implementor_members(result, name, ctx)
+    if not found and _walk_may_reach_more(result, name, ctx):
+        return None
+
+    return found
+
+
+def _walk_members(
+    result: WalkResult,
+    name: str,
+    ctx: _WalkCtx,
+    loose: bool = False,
+) -> list[Symbol]:
+    """Own members called ``name`` of the outermost layer that has any.
+
+    ``loose`` searches the members other crates give each layer instead
+    (see ``_walk_own_members``).
+    """
+    for layer in result.layers:
+        found = _walk_unique(
+            m
+            for owner in layer
+            for m in _walk_own_members(owner, name, ctx, loose)
+        )
+        if found:
+            return found
+    return []
+
+
+def _walk_unique(symbols: Iterable[Symbol]) -> list[Symbol]:
+    """``symbols`` without repeats: one impl reached through two
+    same-named types is still one member."""
+    seen: set[str] = set()
+    out: list[Symbol] = []
+    for sym in symbols:
+        if sym.id not in seen:
+            seen.add(sym.id)
+            out.append(sym)
+    return out
+
+
+def _walk_climbed_members(
+    result: WalkResult, name: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """Supertype members called ``name``, outermost layer first."""
+    for layer in result.layers:
+        found = _walk_inherited_members(layer, name, ctx)
+        if found:
+            return found
+    return []
+
+
+def _walk_inherited_members(
+    layer: tuple[Symbol, ...], name: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """``name`` on the nearest supertypes of ``layer`` that declare it."""
+    seen = {t.id for t in layer}
+    level = list(layer)
+    for _ in range(_WALK_SUPER_DEPTH):
+        level = [
+            s
+            for t in level
+            for s in _walk_supertypes(t, ctx)
+            if s.id not in seen
+        ]
+        if not level:
+            break
+        seen.update(s.id for s in level)
+        found = _walk_unique(
+            m for t in level for m in _walk_own_members(t, name, ctx)
+        )
+        if found:
+            return found
+    return []
+
+
+def _walk_own_members(
+    owner: Symbol,
+    name: str,
+    ctx: _WalkCtx,
+    loose: bool = False,
+) -> list[Symbol]:
+    """``owner``'s own members called ``name`` (memoized per type).
+
+    A member is ``<owner qualname>.<name>`` in ``owner``'s file, or
+    where its language puts members: anywhere in the crate (Rust), in
+    the package directory (Go), anywhere (C/C++, Kotlin). ``loose``
+    asks instead for the Rust members other crates give the type
+    (``_walk_is_trait_impl``).
+    """
+    key = (owner.id, name, loose)
+    hit = _WALK_MEMBERS.get(key)
+    if hit is None:
+        qual = f"{owner.qualname}.{name}"
+        local = _walk_is_trait_impl if loose else _walk_member_is_local
+        hit = [
+            c
+            for c in ctx.index.get(name, ())
+            if c.qualname == qual
+            and c.kind not in TYPE_KINDS
+            and local(c, owner, ctx)
+        ]
+        _WALK_MEMBERS[key] = hit
+    return hit
+
+
+def _walk_is_trait_impl(member: Symbol, owner: Symbol, ctx: _WalkCtx) -> bool:
+    """Whether a Rust ``member`` in another crate is a trait it implements
+    for ``owner`` there (``impl ToDisplayPoint for Point`` in
+    ``editor``), not a member of that crate's own same-named type."""
+    if owner.language != "rust" or member.language != "rust":
+        return False
+    crate = _rust_crate_dir(member.path)
+    if crate == _rust_crate_dir(owner.path):
+        return False
+
+    return not any(
+        t.kind in TYPE_KINDS
+        and t.language == "rust"
+        and _rust_crate_dir(t.path) == crate
+        for t in ctx.index.get(owner.name, ())
+    )
+
+
+def _walk_member_is_local(
+    member: Symbol, owner: Symbol, ctx: _WalkCtx
+) -> bool:
+    """Whether ``member`` can belong to ``owner`` given where both live."""
+    del ctx
+    if member.path == owner.path:
+        return True
+    if _resolution_language(member.language) != _resolution_language(
+        owner.language
+    ):
+        return False
+    if owner.language == "rust":
+        return _rust_crate_dir(member.path) == _rust_crate_dir(owner.path)
+    if owner.language == "go":
+        return posixpath.dirname(member.path) == posixpath.dirname(owner.path)
+
+    return owner.language in _WALK_SPREAD_MEMBER_LANGUAGES
+
+
+def _walk_verdict(
+    walk: WalkResult,
+    call: RawCall,
+    caller: Symbol | None,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    ctx: _WalkCtx,
+) -> tuple[Symbol | _Noise | None, list[Symbol], list[Symbol]]:
+    """Apply a walk to the ladder's inputs.
+
+    ``typed``: see ``_walk_typed_verdict``. ``unknown`` on a
+    ``self.field.name(..)`` chain: the caller's own container's ``name``
+    is dropped from the candidates, since a field of a type is not,
+    without a declared type saying so, the type itself.
+
+    Returns:
+        ``(target, candidates, same_file)``: the target is a symbol, the
+        ``_NOISE`` sentinel for "external", or ``None`` for the ladder
+        to decide among the (possibly narrowed) candidates.
+    """
+    if walk.kind == "typed":
+        return _walk_typed_verdict(walk, call, candidates, same_file, ctx)
+    own = _walk_self_field_members(call, caller, ctx)
+    if not own:
+        return None, candidates, same_file
+    ids = {m.id for m in own}
+
+    return (
+        None,
+        [c for c in candidates if c.id not in ids],
+        [s for s in same_file if s.id not in ids],
+    )
+
+
+def _walk_typed_verdict(
+    walk: WalkResult,
+    call: RawCall,
+    candidates: list[Symbol],
+    same_file: list[Symbol],
+    ctx: _WalkCtx,
+) -> tuple[Symbol | _Noise | None, list[Symbol], list[Symbol]]:
+    """A typed receiver's members decide the call.
+
+    The members ``_walk_find_members`` reaches (an interface-typed
+    field dispatches to its implementors). One member is the target;
+    several go to the ladder as the only candidates, so its tiebreaks
+    pick among them and an ambiguous row names only them. None anywhere
+    means the method isn't in the repo: external, unless the type could
+    still reach one the walk can't see (the ladder decides then).
+    """
+    members = _walk_find_members(walk, call.name, ctx, implementors=True)
+    if members is None:
+        return None, candidates, same_file
+    if len(members) == 1:
+        return members[0], candidates, same_file
+    if members:
+        ids = {m.id for m in members}
+        return None, members, [s for s in same_file if s.id in ids]
+
+    return _NOISE, candidates, same_file
+
+
+def _walk_implementor_members(
+    walk: WalkResult, name: str, ctx: _WalkCtx
+) -> list[Symbol]:
+    """``name`` on the types that implement the walked layer's types."""
+    for layer in walk.layers:
+        found = _walk_unique(
+            [
+                m
+                for owner in layer
+                for sub in ctx.index.get(_SUBS_KEY + owner.name, ())
+                if _resolution_language(sub.language)
+                == _resolution_language(owner.language)
+                for m in _walk_own_members(sub, name, ctx)
+            ]
+        )
+        if found:
+            return found
+    return []
+
+
+# Ways a type reaches methods it doesn't declare, which the walk can't
+# follow: a Rust ``Deref`` target, a Python ``__getattr__``, C/C++
+# (``operator->``, templates and macros fill members in), and a TS/JS
+# interface (``_walk_is_structural``).
+_WALK_DEREF_TRAITS = frozenset({"Deref", "DerefMut"})
+
+
+def _walk_may_reach_more(walk: WalkResult, name: str, ctx: _WalkCtx) -> bool:
+    """Whether a missing member may still be in the repo.
+
+    Besides a type that reaches members it doesn't declare, a ``name``
+    that is a *field* of the type is a callback slot
+    (``options.postStateToWebview()``): whatever fills it, often a repo
+    function of that name, is the callee, so the ladder decides.
+    """
+    if _walk_derefs(walk, ctx):
+        return True
+    for layer in walk.layers:
+        if any(_walk_type_fields(owner, name, ctx) for owner in layer):
+            return True
+        for owner in layer:
+            if owner.language in _CPP_FAMILY or _walk_is_structural(owner):
+                return True
+            if _walk_own_members(owner, "__getattr__", ctx):
+                return True
+    return False
+
+
+def _walk_derefs(walk: WalkResult, ctx: _WalkCtx) -> bool:
+    """Whether a layer is open or derefs to a type the walk can't name
+    (Rust ``impl Deref``: ``type Target`` isn't recorded)."""
+    if walk.open:
+        return True
+
+    return any(
+        s.name in _WALK_DEREF_TRAITS
+        for layer in walk.layers
+        for owner in layer
+        for s in ctx.index.get(_SUPERS_KEY + owner.id, [])
+    )
+
+
+def _walk_is_structural(owner: Symbol) -> bool:
+    """A TS/JS interface or type alias: any object of the right shape is
+    one, so an object literal can fill it and no ``implements`` names
+    it. Its members aren't symbols either."""
+    return owner.language in _JS_FAMILY and owner.kind in (
+        "interface",
+        "type_alias",
+    )
+
+
+def _walk_self_field_members(
+    call: RawCall, caller: Symbol | None, ctx: _WalkCtx
+) -> list[Symbol]:
+    """The container's own ``call.name`` when ``call`` is ``self.f.name()``."""
+    segments = _walk_segments(call.receiver)
+    if (
+        segments is None
+        or len(segments) < 2
+        or segments[1].endswith("()")
+        or not _walk_is_self(segments[0], call.path)
+    ):
+        # ``self.f().g()`` may well be fluent: ``f`` returning self.
+        return []
+    container = _walk_container(caller, ctx)
+
+    return _walk_members(container, call.name, ctx)
+
+
 def _receiver_type_match(
     call: _Referable,
     candidates: list[Symbol],
@@ -6689,7 +7789,17 @@ def _typed_param_match(
     tokens = _object_type_field_tokens(param_type, call.receiver)
     if tokens is None:
         tokens = _typed_param_token_candidates(param_type)
+    rust = call.path.endswith(".rs")
     for token, is_parameterized in tokens:
+        # ``import { Widget as WD }``: the parameter says ``WD``, the
+        # type is ``Widget``. Rust renames go through its own path rules.
+        name = (
+            token
+            if rust
+            else _imported_original_name(
+                token, (file_imports or {}).get(token)
+            )
+        )
         # A Rust ``type`` alias doesn't open the gate:
         # ``type Result<T> = std::result::Result<T, Error>;`` is the
         # foreign generic container this gate exists to keep out, under
@@ -6697,15 +7807,15 @@ def _typed_param_match(
         if is_parameterized and not any(
             sym.kind in TYPE_KINDS
             and not (sym.kind == "type_alias" and sym.path.endswith(".rs"))
-            for sym in index.get(token, [])
+            for sym in index.get(name, [])
         ):
             continue
-        target_qual = f"{token}.{call.name}"
+        target_qual = f"{name}.{call.name}"
         matched = [c for c in candidates if c.qualname == target_qual]
         if len(matched) != 1:
             continue
         only = matched[0]
-        if call.path.endswith(".rs") and _rust_typed_match_looks_cross_crate(
+        if rust and _rust_typed_match_looks_cross_crate(
             call, only, token, index, file_imports, param_type
         ):
             continue
@@ -7280,6 +8390,10 @@ def _container_match(
         ``None`` when the receiver isn't self/this or the container
         doesn't narrow to exactly one candidate.
     """
+    if call.receiver not in _SELF_RECEIVERS:
+        # A chained ``self.field.name(..)`` is a call on the field, not
+        # on the container; the receiver walk types it.
+        return None
     container = _self_container(call, caller)
     if container is None:
         return None
@@ -8475,8 +9589,8 @@ _UNNAMED_CTOR_LANGUAGES = frozenset(_UNNAMED_CTOR_NAMES)
 def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
     """Map bare symbol name → all symbols with that name, plus the
     ``_RUST_VARIANT_KEY``, ``_CPP_SCOPE_KEY``, ``_CPP_USING_KEY``,
-    ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY`` and
-    ``_RUST_RENAMED_KEY`` entries."""
+    ``_CPP_DECLARED_KEY``, ``_OWN_CTOR_KEY``, ``_EXTENDS_KEY``,
+    ``_RUST_RENAMED_KEY`` and ``_SUPERS_KEY`` entries."""
     index: dict[str, list[Symbol]] = {}
     for fm in files:
         for sym in fm.symbols:
@@ -8495,6 +9609,7 @@ def _build_index(files: list[FileMap]) -> dict[str, list[Symbol]]:
             _index_cpp_using(entry, index)
     _index_cpp_declared(files, index)
     _index_constructions(files, index)
+    _index_supertypes(files, index)
     for name, original in sorted(rust_renames(files)):
         index.setdefault(_RUST_RENAMED_KEY + name, []).append(
             _stand_in(original)

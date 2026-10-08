@@ -189,6 +189,15 @@ class LanguageSpec:
             (see ``model.TypeUse``). ``None`` for languages whose
             parameter lists carry no annotations the read side could
             match (plain JS) or that have no measurement yet.
+        field_query: Query capturing each field a type declares, read
+            by ``extractor._collect_fields`` into ``Symbol.fields``.
+            Captures: ``@field`` (the declaration), ``@name``, and
+            optionally ``@type`` (the declared type), ``@init`` (an
+            initializer to infer a type from), ``@self`` (the receiver
+            of a ``this.x = ..`` / ``self.x = ..`` assignment), ``@decl``
+            (a C/C++ declarator to dig the name out of) or ``@tuple``
+            (a Rust tuple-struct body, one field per type). ``None``
+            for languages without one.
     """
 
     name: str
@@ -209,6 +218,7 @@ class LanguageSpec:
     env_read_query: str | None = None
     type_alias_query: str | None = None
     type_use_query: str | None = None
+    field_query: str | None = None
     enum_variant_query: str | None = None
     binding_query: str | None = None
     binding_function_scopes: tuple[str, ...] = ()
@@ -268,8 +278,29 @@ _PY_BINDING_QUERY = """
 (import_from_statement) @import
 """
 
+# Fields a Python class declares: a class-body assignment (annotated or
+# not), and a ``self.x = ..`` / ``cls.x = ..`` assignment in any method
+# (``extractor._collect_fields`` checks the receiver's name).
+_PY_FIELD_QUERY = """
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment
+        left: (identifier) @name
+        type: (type)? @type
+        right: (_)? @init) @field)))
+
+(assignment
+  left: (attribute
+    object: (identifier) @self
+    attribute: (identifier) @name)
+  type: (type)? @type
+  right: (_)? @init) @field
+"""
+
 PYTHON = LanguageSpec(
     name="python",
+    field_query=_PY_FIELD_QUERY,
     grammar="python",
     extensions=(".py", ".pyi"),
     definition_query="""
@@ -390,8 +421,19 @@ _RUST_ENUM_VARIANT_QUERY = """
       body: (ordered_field_declaration_list))))
 """
 
+# A Rust struct's named fields, and a tuple struct's positional ones.
+_RUST_FIELD_QUERY = """
+(field_declaration
+  name: (field_identifier) @name
+  type: (_) @type) @field
+
+(struct_item
+  body: (ordered_field_declaration_list) @tuple) @field
+"""
+
 RUST = LanguageSpec(
     name="rust",
+    field_query=_RUST_FIELD_QUERY,
     grammar="rust",
     extensions=(".rs",),
     definition_query="""
@@ -504,8 +546,17 @@ _C_ENV_READ_QUERY = """
   arguments: (argument_list . (string_literal) @key)) @call
 """
 
+# A C/C++ struct or class member; the extractor digs the declarator
+# for the name and drops a method declaration.
+_C_FIELD_QUERY = """
+(field_declaration
+  type: (_) @type
+  declarator: (_) @decl) @field
+"""
+
 C = LanguageSpec(
     name="c",
+    field_query=_C_FIELD_QUERY,
     grammar="c",
     extensions=(".c", ".h"),
     definition_query=_C_DEFINITIONS,
@@ -521,6 +572,7 @@ C = LanguageSpec(
 
 CPP = LanguageSpec(
     name="cpp",
+    field_query=_C_FIELD_QUERY,
     grammar="cpp",
     extensions=(".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"),
     definition_query="""
@@ -838,6 +890,54 @@ _JS_ENV_READ_QUERY = """
   index: (string) @key) @call
 """
 
+# Fields a JS class declares: a class-body field, and a ``this.x = ..``
+# assignment in any method (``extractor._collect_fields`` keeps the
+# latter only inside a method of a class).
+_JS_THIS_ASSIGN_FIELD = """
+(assignment_expression
+  left: (member_expression
+    object: (this) @self
+    property: (property_identifier) @name)
+  right: (_) @init) @field
+"""
+
+_JS_FIELD_QUERY = (
+    """
+(field_definition
+  property: (property_identifier) @name
+  value: (_)? @init) @field
+"""
+    + _JS_THIS_ASSIGN_FIELD
+)
+
+# TS adds the annotated class field, a constructor parameter property
+# (a parameter carrying ``private``/``public``/``protected``,
+# ``readonly`` or ``override``), and an interface member.
+_TS_FIELD_QUERY = (
+    """
+(public_field_definition
+  name: (property_identifier) @name
+  type: (type_annotation)? @type
+  value: (_)? @init) @field
+
+(required_parameter
+  [(accessibility_modifier) "readonly" (override_modifier)]
+  pattern: (identifier) @name
+  type: (type_annotation)? @type) @field
+
+(optional_parameter
+  [(accessibility_modifier) "readonly" (override_modifier)]
+  pattern: (identifier) @name
+  type: (type_annotation)? @type) @field
+
+(interface_body
+  (property_signature
+    name: (property_identifier) @name
+    type: (type_annotation)? @type) @field)
+"""
+    + _JS_THIS_ASSIGN_FIELD
+)
+
 JAVASCRIPT = LanguageSpec(
     name="javascript",
     grammar="javascript",
@@ -958,6 +1058,7 @@ JAVASCRIPT = LanguageSpec(
     throw_query=_JS_THROW_QUERY,
     catch_query=_JS_CATCH_QUERY,
     env_read_query=_JS_ENV_READ_QUERY,
+    field_query=_JS_FIELD_QUERY,
 )
 
 _TS_DEFINITIONS = """
@@ -1143,6 +1244,7 @@ TYPESCRIPT = LanguageSpec(
     env_read_query=_JS_ENV_READ_QUERY,
     type_alias_query=_TS_TYPE_ALIAS_QUERY,
     type_use_query=_TS_TYPE_USE_QUERY,
+    field_query=_TS_FIELD_QUERY,
 )
 
 TSX = LanguageSpec(
@@ -1167,6 +1269,7 @@ TSX = LanguageSpec(
     env_read_query=_JS_ENV_READ_QUERY,
     type_alias_query=_TS_TYPE_ALIAS_QUERY,
     type_use_query=_TS_TYPE_USE_QUERY,
+    field_query=_TS_FIELD_QUERY,
 )
 
 # Type-reference edges: a struct/interface type used only
@@ -1214,8 +1317,21 @@ _GO_REFERENCE_QUERY = """
 (channel_type value: (type_identifier) @ref)
 """
 
+# A Go struct's named fields, and its embedded ones (no name: the
+# extractor names them after their type, as Go does).
+_GO_FIELD_QUERY = """
+(field_declaration
+  name: (field_identifier) @name
+  type: (_) @type) @field
+
+(field_declaration
+  !name
+  type: (_) @type) @field
+"""
+
 GO = LanguageSpec(
     name="go",
+    field_query=_GO_FIELD_QUERY,
     grammar="go",
     extensions=(".go",),
     definition_query="""
@@ -1302,8 +1418,29 @@ _JAVA_REFERENCE_QUERY = """
 # own) when one does. ``extractor._collect_definitions`` drops the
 # header match when the body already declares the canonical
 # constructor, so a record never has two.
+# Java fields (one per declarator), record components, and enum
+# constants (typed as their enum by the extractor).
+_JAVA_FIELD_QUERY = """
+(field_declaration
+  type: (_) @type
+  declarator: (variable_declarator
+    name: (identifier) @name
+    value: (_)? @init)) @field
+
+(record_declaration
+  parameters: (formal_parameters
+    (formal_parameter
+      type: (_) @type
+      name: (identifier) @name) @field))
+
+(enum_body
+  (enum_constant
+    name: (identifier) @name) @field)
+"""
+
 JAVA = LanguageSpec(
     name="java",
+    field_query=_JAVA_FIELD_QUERY,
     grammar="java",
     extensions=(".java",),
     definition_query="""
@@ -1434,8 +1571,28 @@ JAVA = LanguageSpec(
 # argument all parse as calls. Kotlin's compiler reads the shape as a
 # call, and as a comparison it would compare a ``Boolean`` with ``>``,
 # so the ``@gcall`` pattern records it as one.
+# Kotlin class-body properties, primary-constructor ``val``/``var``
+# parameters, and enum entries; the extractor checks the first two
+# shapes (a class body, a ``val``/``var``).
+_KOTLIN_FIELD_QUERY = """
+(property_declaration
+  (variable_declaration
+    (identifier) @name
+    (_)? @type)
+  (_)? @init) @field
+
+(class_parameter
+  (identifier) @name
+  (_) @type) @field
+
+(enum_class_body
+  (enum_entry
+    (identifier) @name) @field)
+"""
+
 KOTLIN = LanguageSpec(
     name="kotlin",
+    field_query=_KOTLIN_FIELD_QUERY,
     grammar="kotlin",
     extensions=(".kt", ".kts"),
     definition_query="""

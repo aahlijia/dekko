@@ -102,7 +102,11 @@ def _outline_sig(sym: Symbol) -> str:
         return f"{sym.kind} {sym.name}"
     if sym.kind == "variable":
         return sym.name
-    parts = [f"{p.name}: {p.type}" if p.type else p.name for p in sym.params]
+    parts = [
+        f"{p.name}: {p.type}" if p.type else p.name
+        for p in sym.params
+        if not p.receiver
+    ]
     sig = f"{sym.name}({', '.join(parts)})"
     if sym.returns:
         sig += f" -> {sym.returns}"

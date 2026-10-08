@@ -91,7 +91,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dekko import repo_ops
@@ -99,7 +99,7 @@ from dekko.analysis import ambiguous, query
 from dekko.analysis import unused as unused_mod
 from dekko.classify import is_test_path
 from dekko.core import languages
-from dekko.core.model import TYPE_KINDS, RawCall, ReadSite, Symbol
+from dekko.core.model import TYPE_KINDS, Field, RawCall, ReadSite, Symbol
 from dekko.core.resolver import (
     jvm_off_written_path,
     jvm_package_dir,
@@ -196,6 +196,25 @@ DEFAULT_REPORT_LIMIT = 200
 CAUSE_QUALIFIED_CALL = (
     "cross-package/qualified call — known resolver blind spot"
 )
+# A call through a field (``this.client.get(..)``), told apart by what
+# the field's declared type says (``receiver_field_state``).
+CAUSE_FOREIGN_RECEIVER_TYPE = (
+    "call on a receiver whose declared type is outside the repo — "
+    "nothing to resolve to"
+)
+CAUSE_UNTYPED_FIELD = (
+    "call through a field with no declared or inferred type — "
+    "the resolver cannot type the receiver"
+)
+CAUSE_INTERFACE_MEMBER_UNIMPLEMENTED = (
+    "call on an interface member no repo type implements — "
+    "nothing to resolve to"
+)
+_FIELD_STATE_CAUSES = {
+    "foreign": CAUSE_FOREIGN_RECEIVER_TYPE,
+    "untyped": CAUSE_UNTYPED_FIELD,
+    "interface": CAUSE_INTERFACE_MEMBER_UNIMPLEMENTED,
+}
 CAUSE_UNSUPPORTED_LANGUAGE = (
     "unparsed-language file — dekko can't parse this file at all"
 )
@@ -2431,6 +2450,7 @@ def classify_miss(
     looks_like_property_access: bool = False,
     looks_like_signature: bool = False,
     looks_like_type_mention: bool = False,
+    receiver_field_state: str | None = None,
 ) -> str:
     """Name the likely cause of one grep-only hit.
 
@@ -2534,6 +2554,11 @@ def classify_miss(
             of the name used as a value in a language dekko records no
             reference edges for (``_looks_like_value_reference``).
             Callers leave it ``False`` for a type target.
+        receiver_field_state: For a ``self.field.name(..)`` hit, what
+            the field's type says (``receiver_field_state``):
+            ``"foreign"``, ``"untyped"`` or ``"interface"``; ``None``
+            otherwise. Checked right before the qualified-call rung,
+            which it refines.
         not_mapped: Whether the hit's file is in a supported language
             but absent from the map (skipped or excluded). An index
             fact computed by the caller, and checked before every
@@ -2601,7 +2626,9 @@ def classify_miss(
         return CAUSE_STRING_MENTION
     if in_block_comment:
         return CAUSE_COMMENT_ELSEWHERE
-    binding = _binding_cause(
+    binding = _FIELD_STATE_CAUSES.get(
+        receiver_field_state or ""
+    ) or _binding_cause(
         snippet,
         bare_name,
         looks_like_import_member=looks_like_import_member,
@@ -3897,10 +3924,16 @@ class _MapScope:
             test code (a Rust inline ``mod tests``). Empty for every
             language whose extractor sets no such flag.
         mapped_paths: Every file the map holds, symbols or not.
+        types_by_name: Bare name -> every type-kind symbol of it, for
+            reading a field's declared type (``receiver_field_state``).
+        implemented: Ids of the types some repo type extends or
+            implements.
     """
 
     test_spans: dict[str, tuple[tuple[int, int], ...]]
     mapped_paths: frozenset[str]
+    types_by_name: dict[str, tuple[Symbol, ...]] = field(default_factory=dict)
+    implemented: frozenset[str] = frozenset()
 
     def is_test_line(self, path: str, line: int) -> bool:
         """Whether ``path:line`` is test code by path or enclosing span."""
@@ -3917,14 +3950,105 @@ class _MapScope:
 def _map_scope(index: MapIndex) -> _MapScope:
     """Build a ``_MapScope`` from the full (test-inclusive) ``index``."""
     spans: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    types: dict[str, list[Symbol]] = defaultdict(list)
     for sym in index.symbols_by_id.values():
         if sym.test and not is_test_path(sym.path):
             spans[sym.path].append((sym.start_line, sym.end_line))
+        if sym.kind in TYPE_KINDS:
+            types[sym.name].append(sym)
 
     return _MapScope(
         test_spans={path: tuple(v) for path, v in spans.items()},
         mapped_paths=frozenset(index.languages_by_path),
+        types_by_name={name: tuple(v) for name, v in types.items()},
+        implemented=frozenset(
+            sid for sid, subs in index.heritage_in.items() if subs
+        ),
     )
+
+
+# ``this.client.get(`` / ``self.client?.get(``: a call through one
+# field of the method's own type. The name is formatted in.
+_FIELD_CALL_TEMPLATE = (
+    r"\b(?:this|self)\s*(?:\.|->)\s*([A-Za-z_$][\w$]*)[?!]?\s*"
+    r"(?:\.|->|\?\.)\s*{name}\s*\("
+)
+_TYPE_NAME = re.compile(r"\b[A-Z][A-Za-z0-9_]*")
+_INTERFACE_KINDS = frozenset({"interface", "trait"})
+
+
+def receiver_field_state(
+    snippet: str,
+    bare_name: str,
+    chain: list[Symbol],
+    scope: _MapScope | None,
+) -> str | None:
+    """What a ``self.field.name(..)`` hit's field type says about it.
+
+    Only the first field hop is judged; a deeper chain is ``None``.
+
+    Args:
+        snippet: The grep-matched line.
+        bare_name: The name being searched for.
+        chain: The symbols enclosing the hit, innermost first.
+        scope: The full map's facts; ``None`` reads nothing.
+
+    Returns:
+        ``"untyped"`` when the field has no declared or inferred type,
+        ``"foreign"`` when its type names no repo type, ``"interface"``
+        when it names a repo interface or trait nothing implements,
+        else ``None`` (no such field, or a repo type the resolver can
+        reach).
+    """
+    found = re.search(
+        _FIELD_CALL_TEMPLATE.format(name=re.escape(bare_name)), snippet
+    )
+    if found is None or scope is None:
+        return None
+    field_row = _own_field(chain, found.group(1), scope)
+    if field_row is None:
+        return None
+    if field_row.type is None:
+        return "untyped"
+    named = [
+        scope.types_by_name[t]
+        for t in _TYPE_NAME.findall(field_row.type)
+        if t in scope.types_by_name
+    ]
+    if not named:
+        return "foreign"
+    if all(
+        t.kind in _INTERFACE_KINDS and t.id not in scope.implemented
+        for t in named[0]
+    ):
+        return "interface"
+
+    return None
+
+
+def _own_field(
+    chain: list[Symbol], name: str, scope: _MapScope
+) -> Field | None:
+    """Field ``name`` of the type the innermost method in ``chain``
+    belongs to: an enclosing type, else the type its qualname names."""
+    for sym in chain:
+        owners: Iterable[Symbol] = ()
+        if sym.kind in TYPE_KINDS:
+            owners = (sym,)
+        elif "." in sym.qualname:
+            container = sym.qualname.rsplit(".", 1)[0]
+            owners = (
+                t
+                for t in scope.types_by_name.get(
+                    container.rsplit(".", 1)[-1], ()
+                )
+                if t.qualname == container
+            )
+        for owner in owners:
+            for f in owner.fields:
+                if f.name == name:
+                    return f
+    return None
 
 
 def _classify_grep_hits(
@@ -4085,6 +4209,9 @@ def _classify_grep_hits(
             looks_like_jsx_text=shapes.jsx_text,
             looks_like_property_access=shapes.property_access,
             looks_like_signature=shapes.signature,
+            receiver_field_state=receiver_field_state(
+                h.snippet, bare_name, chain, scope
+            ),
             in_leading_header_comment=(
                 _looks_like_comment_line(h.snippet, h.path)
                 and _in_leading_header_comment(root, h)

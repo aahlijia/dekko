@@ -3210,7 +3210,7 @@ def type_usage_rows(
                 sym, "param", p.name, p.type, sym.path, sym.start_line
             )
             for p in sym.params
-            if _type_matches(p.type, needle, exact)
+            if not p.receiver and _type_matches(p.type, needle, exact)
         )
     for use in index.type_uses:
         if not _type_matches(use.type, needle, exact):
@@ -3274,7 +3274,7 @@ def type_usage_name_index(index: MapIndex) -> frozenset[str]:
         if sym.returns:
             names.update(_IDENT_RE.findall(sym.returns))
         for p in sym.params:
-            if p.type:
+            if p.type and not p.receiver:
                 names.update(_IDENT_RE.findall(p.type))
     for use in index.type_uses:
         names.update(_IDENT_RE.findall(use.type))

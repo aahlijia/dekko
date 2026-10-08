@@ -26,7 +26,11 @@ def signature(sym: Symbol) -> str:
         # promoted out of contextpack's module-caller bucket; it has no
         # real params/returns to render.
         return f"<anonymous> ({sym.path})"
-    parts = [f"{p.name}: {p.type}" if p.type else p.name for p in sym.params]
+    parts = [
+        f"{p.name}: {p.type}" if p.type else p.name
+        for p in sym.params
+        if not p.receiver
+    ]
     sig = f"{sym.qualname}({', '.join(parts)})"
     if sym.returns:
         sig += f" -> {sym.returns}"

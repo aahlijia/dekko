@@ -6,7 +6,7 @@ import pytest
 
 from dekko.integrations import cli
 from dekko.analysis import query
-from dekko.render.mapfile import MapIndex
+from dekko.render.mapfile import MapIndex, load_map
 from dekko.core.model import Param, Symbol
 
 from conftest import RepoFactory
@@ -536,3 +536,50 @@ def test_workset_type_impact_counts_sites_and_bundles_owners(
     assert doc["seed"]["blast_radius"]["type_usage"] == 3
     assert doc["seed"]["touched_symbols"] == 3
     assert "app.ts" in doc["seed"]["touched_files"]
+
+
+def test_type_go_receiver_is_not_a_param_usage(
+    make_mapped_repo: RepoFactory, capsys: pytest.CaptureFixture
+) -> None:
+    # A method's receiver says where the method lives, not that it takes
+    # the type as an argument; listing it would add one row per method.
+    files = {
+        "main.go": (
+            "package main\n"
+            "\n"
+            "type Config struct{}\n"
+            "\n"
+            "func (c *Config) Load() {\n"
+            "}\n"
+            "\n"
+            "func start(cfg *Config) {\n"
+            "}\n"
+        ),
+    }
+    root = make_mapped_repo(files)
+    code = cli.main(["query", "type", "Config", "--root", str(root)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "start" in out
+    assert "Load" not in out
+
+
+def test_go_receiver_alone_does_not_make_a_type_used(
+    make_mapped_repo: RepoFactory,
+) -> None:
+    # A struct whose only mentions are its own methods' receivers is
+    # still an unused type.
+    root = make_mapped_repo(
+        {
+            "main.go": (
+                "package main\n"
+                "\n"
+                "type Config struct{}\n"
+                "\n"
+                "func (c *Config) Load() {\n"
+                "}\n"
+            ),
+        }
+    )
+    names = query.type_usage_name_index(load_map(root))
+    assert "Config" not in names
