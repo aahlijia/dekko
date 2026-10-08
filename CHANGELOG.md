@@ -9,6 +9,23 @@ Dates are when the work landed on `develop`; releases are cut by pushing a
 
 ## [Unreleased]
 
+## [1.8.11] — 2026-10-08
+
+### Fixed
+- **`dekko map` no longer hangs at exit after writing the map.** A run
+  that built several process pools in a row (adding a file makes every
+  resolve pass run pooled) could fork the next pool's workers while the
+  previous pool's manager thread still held a lock. Each worker
+  inherited the lock held and blocked on it at its own exit, and the
+  parent then waited on that worker forever at interpreter exit. Every
+  pool is now closed with a bounded join of its manager thread and
+  workers (a wedged worker is killed after 30 s), so the process is
+  single-threaded again before the next fork. Python 3.12 and newer.
+- **The fork-or-spawn choice is made at every pool build.** It used to
+  be made once per process, so a later pool forked even with threads
+  alive. A thread still alive at a build now sends that pool to
+  `spawn`. The CLI keeps `fork` everywhere it had it.
+
 ## [1.8.10] — 2026-10-08
 
 ### Fixed

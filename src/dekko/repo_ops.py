@@ -154,7 +154,7 @@ def _extract_misses(
             results = _run_pool_bounded(pool, futures)
             return dict(zip(misses, results))
         finally:
-            pool.shutdown(wait=False)
+            resolver_mod.close_pool(pool)
 
     return run_pooled_with_retry(_run, workers, "file extraction")
 

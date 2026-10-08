@@ -36,7 +36,7 @@ def _flaky_pool_factory(fail_times: int) -> type:
 
     ``_extract_misses`` now owns its pool via
     ``pool = ProcessPoolExecutor(...)`` / ``try``/``finally:
-    pool.shutdown(wait=False)`` instead of ``with ProcessPoolExecutor(
+    resolver.close_pool(pool)`` instead of ``with ProcessPoolExecutor(
     ...) as pool:`` (see ``resolver._run_pool_bounded``'s docstring
     for why) -- so the failure trigger point moves from ``__enter__``
     to ``__init__``, and ``submit``/``shutdown`` delegate straight to
@@ -55,6 +55,9 @@ def _flaky_pool_factory(fail_times: int) -> type:
             if state["calls"] <= fail_times:
                 raise BrokenProcessPool("simulated: process pool broken")
             self._real = ThreadPoolExecutor(max_workers=max_workers)
+            # Read by ``close_pool``; a thread pool has neither.
+            self._executor_manager_thread = None
+            self._processes = None
 
         def submit(self, fn: object, *args: object) -> object:
             return self._real.submit(fn, *args)
@@ -144,6 +147,8 @@ def test_extract_misses_raises_pool_stalled_error_on_stalled_worker(
             # empty here since this fake never launches a real
             # subprocess.
             self._processes: dict = {}
+            # Read by ``close_pool``; nothing ever started one.
+            self._executor_manager_thread = None
 
         def __enter__(self) -> "_StalledPool":
             return self

@@ -338,6 +338,14 @@ _POOL_RETRY_DELAY_S = 1.5
 # ``.result(timeout=POOL_RESULT_TIMEOUT_S)`` usage.
 POOL_RESULT_TIMEOUT_S = 600
 
+# How long ``close_pool`` waits for a finished pool's manager thread
+# (which itself joins every worker) before killing the workers, and
+# how long it then waits for the manager to notice. A healthy pool has
+# already handed back every result, so its workers only have to exit;
+# the first bound is only ever reached by a wedged worker.
+POOL_CLOSE_TIMEOUT_S = 30
+POOL_CLOSE_KILL_GRACE_S = 5
+
 _PoolResultT = TypeVar("_PoolResultT")
 
 # Symbol fields the resolution ladder can never read, so a change to one
@@ -926,40 +934,7 @@ def _pool_workers(workers: int, items: int) -> int:
     return chosen if chosen >= 2 else 1
 
 
-# Process-wide cached verdict of ``_choose_pool_mp_context`` -- see
-# ``_pool_mp_context`` for why the decision is made exactly once.
-_pool_ctx_cache: BaseContext | None = None
-
-
 def _pool_mp_context() -> BaseContext:
-    """The (cached) start method for dekko's process pools.
-
-    Decided once per process, at the first pool build, and reused for
-    every later one. The cache is not an optimization -- it is what
-    makes the thread gate sound: ``ProcessPoolExecutor.shutdown(
-    wait=False)`` (every call site's teardown, deliberately) can
-    leave the executor's manager/feeder threads alive
-    for a moment after a pool finishes, so a naive per-pool check
-    would see the *extraction* pool's harmless ghost threads and
-    silently downgrade every *resolve* pass to ``spawn`` in the exact
-    single-threaded CLI path fork exists for. At first-pool time the
-    check is honest: the CLI/MCP parent has one thread, and the daemon
-    has already started its status thread before any request can
-    build a pool, so each process caches the verdict that is correct
-    for its whole lifetime.
-
-    Returns:
-        The multiprocessing context every pool build should pass as
-        ``mp_context=``.
-    """
-    global _pool_ctx_cache
-    if _pool_ctx_cache is None:
-        _pool_ctx_cache = _choose_pool_mp_context()
-
-    return _pool_ctx_cache
-
-
-def _choose_pool_mp_context() -> BaseContext:
     """Start method for dekko's process pools: ``fork`` when provably safe.
 
     ``fork`` gives workers copy-on-write access to the parent's memory:
@@ -973,22 +948,26 @@ def _choose_pool_mp_context() -> BaseContext:
     (``forkserver`` re-pickles initargs per worker, so it has
     ``spawn``'s transfer cost -- it buys nothing here).
 
-    ``fork`` is only safe from a single-threaded parent, so the gate is
-    a runtime thread-count check at pool-build time -- the daemon (its
-    status thread is always running while a request executes) can never
-    pass it, with no plumbing to forget. Windows has no ``fork`` at
-    all. ``DEKKO_POOL_START_METHOD`` is the escape hatch, consulted
-    only when the safety gates would allow ``fork``: ``spawn`` opts a
-    problem host back out, ``fork`` is an explicit default. A
-    first-attempt failure under ``fork`` is retried under ``spawn`` by
-    ``run_pooled_with_retry``, so a host where ``fork`` misbehaves
-    degrades to exactly the spawn-only behavior at the cost of one
-    wasted attempt.
+    ``fork`` is only safe from a single-threaded parent: a child
+    inherits every lock another thread held at the fork, held, with
+    no thread left to release it. So the gate is a thread-count check
+    at every pool build. It is not cached: ``close_pool`` joins each
+    pool's threads before the next build, so the CLI/MCP parent is
+    single-threaded at every build and keeps ``fork``, while a pool
+    whose teardown timed out leaves a thread behind and sends the next
+    build to ``spawn`` instead of into an inherited lock. The daemon
+    (its status thread runs for the whole request) never passes the
+    gate. Windows has no ``fork`` at all. ``DEKKO_POOL_START_METHOD``
+    is the escape hatch, consulted only when the safety gates would
+    allow ``fork``: ``spawn`` opts a problem host back out, ``fork`` is
+    an explicit default. A first-attempt failure under ``fork`` is
+    retried under ``spawn`` by ``run_pooled_with_retry``, so a host
+    where ``fork`` misbehaves degrades to exactly the spawn-only
+    behavior at the cost of one wasted attempt.
 
     Returns:
-        The freshly chosen context. Callers go through
-        ``_pool_mp_context``, which caches the first verdict for the
-        life of the process -- including this function's env-var read.
+        The multiprocessing context the next pool build should pass as
+        ``mp_context=``.
     """
     if sys.platform == "win32":
         return multiprocessing.get_context("spawn")
@@ -1209,6 +1188,52 @@ def _run_pool_bounded(
             if proc.is_alive():
                 proc.kill()
         raise
+
+
+def close_pool(pool: ProcessPoolExecutor) -> None:
+    """Shut a pool down and wait, bounded, for its threads and workers.
+
+    Every pool call site's ``finally``. A bare ``shutdown(wait=False)``
+    returns while the pool's manager thread is still joining workers
+    and closing its wakeup pipe under ``_ThreadWakeup._lock``; if the
+    next pool forks inside that window, each child inherits the lock
+    held and blocks on it forever at its own exit (``_python_exit``
+    wakes every manager it inherited). The new manager then waits on
+    that child, and the parent hangs at interpreter exit, after its
+    work is done. Joining the manager here leaves the parent
+    single-threaded before the next fork, and leaves nothing for
+    interpreter exit to wait on.
+
+    Not ``shutdown(wait=True)``: that is unbounded, and a wedged worker
+    would trade the exit hang for a mid-run one. Past
+    ``POOL_CLOSE_TIMEOUT_S`` the workers are killed, which ends the
+    manager's ``waitpid``; if the manager still lives after
+    ``POOL_CLOSE_KILL_GRACE_S``, it is left behind and
+    ``_pool_mp_context``'s thread gate sends the next pool to
+    ``spawn``. Never raises, since it runs in a ``finally`` that must
+    not mask the pass's own exception.
+
+    The manager thread and worker handles are read before
+    ``shutdown()``, which sets both attributes to ``None`` whatever
+    ``wait`` is. They are private ``concurrent.futures.process``
+    attributes, read without a fallback so a rename fails the real-pool
+    tests loudly instead of silently restoring the hang.
+
+    Args:
+        pool: The pool to close; it may have run nothing at all.
+    """
+    manager = pool._executor_manager_thread
+    procs = list((pool._processes or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    if manager is None:
+        return
+    manager.join(timeout=POOL_CLOSE_TIMEOUT_S)
+    if not manager.is_alive():
+        return
+    for proc in procs:
+        if proc.is_alive():
+            proc.kill()
+    manager.join(timeout=POOL_CLOSE_KILL_GRACE_S)
 
 
 # Worker-process-local copies of the shared, read-only indices every
@@ -1656,7 +1681,7 @@ def _resolve_all(
                 for key, lines in chunk_external.items():
                     external.setdefault(key, set()).update(lines)
         finally:
-            pool.shutdown(wait=False)
+            close_pool(pool)
         return edges, ambiguous, external
 
     return run_pooled_with_retry(_run, pool_workers, "call resolution")
@@ -1795,7 +1820,7 @@ def resolve_refs(
                 for key, lines in result.items():
                     edges.setdefault(key, set()).update(lines)
         finally:
-            pool.shutdown(wait=False)
+            close_pool(pool)
         return edges
 
     edges = run_pooled_with_retry(_run, pool_workers, "reference resolution")
@@ -2897,7 +2922,7 @@ def resolve_throws(
                     external.setdefault(key, set()).update(lines)
                 bare.extend(c_bare)
         finally:
-            pool.shutdown(wait=False)
+            close_pool(pool)
         return edges, ambiguous, external, bare
 
     edges, ambiguous, external, bare = run_pooled_with_retry(
@@ -3033,7 +3058,7 @@ def resolve_catches(files: list[FileMap], workers: int = 1) -> list[CatchSite]:
             for chunk_sites in _run_pool_bounded(pool, futures):
                 sites.extend(chunk_sites)
         finally:
-            pool.shutdown(wait=False)
+            close_pool(pool)
         return sites
 
     sites = run_pooled_with_retry(_run, pool_workers, "catch resolution")

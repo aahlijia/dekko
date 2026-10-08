@@ -2,7 +2,11 @@
 
 import gc
 import multiprocessing
+import os
+import subprocess
 import sys
+import textwrap
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as PoolTimeoutError
@@ -3185,7 +3189,7 @@ def _flaky_pool_factory(fail_times: int) -> type:
 
     Every call site now owns its pool via
     ``pool = ProcessPoolExecutor(...)`` / ``try``/``finally:
-    pool.shutdown(wait=False)`` instead of ``with ProcessPoolExecutor(
+    close_pool(pool)`` instead of ``with ProcessPoolExecutor(
     ...) as pool:`` (see ``_run_pool_bounded``'s docstring for why) --
     so the failure trigger point moves from ``__enter__`` to
     ``__init__``, and ``submit``/``shutdown`` delegate straight to the
@@ -3222,6 +3226,9 @@ def _flaky_pool_factory(fail_times: int) -> type:
                 initializer=initializer,
                 initargs=initargs,
             )
+            # Read by ``close_pool``; a thread pool has neither.
+            self._executor_manager_thread = None
+            self._processes = None
 
         def submit(self, fn: object, *args: object) -> object:
             return self._real.submit(fn, *args)
@@ -3466,7 +3473,7 @@ def test_pool_mp_context_defaults_to_fork_on_posix(
 ) -> None:
     _single_threaded(monkeypatch)
     monkeypatch.delenv("DEKKO_POOL_START_METHOD", raising=False)
-    assert resolver_mod._choose_pool_mp_context().get_start_method() == "fork"
+    assert resolver_mod._pool_mp_context().get_start_method() == "fork"
 
 
 def test_pool_mp_context_is_spawn_on_windows(
@@ -3475,7 +3482,7 @@ def test_pool_mp_context_is_spawn_on_windows(
     _single_threaded(monkeypatch)
     monkeypatch.delenv("DEKKO_POOL_START_METHOD", raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
-    assert resolver_mod._choose_pool_mp_context().get_start_method() == "spawn"
+    assert resolver_mod._pool_mp_context().get_start_method() == "spawn"
 
 
 def test_pool_mp_context_is_spawn_in_a_threaded_parent(
@@ -3486,7 +3493,7 @@ def test_pool_mp_context_is_spawn_in_a_threaded_parent(
     mechanism (thread count) rather than by spinning up a daemon."""
     monkeypatch.delenv("DEKKO_POOL_START_METHOD", raising=False)
     monkeypatch.setattr(resolver_mod.threading, "active_count", lambda: 2)
-    assert resolver_mod._choose_pool_mp_context().get_start_method() == "spawn"
+    assert resolver_mod._pool_mp_context().get_start_method() == "spawn"
 
 
 def test_pool_mp_context_env_var_opts_back_out_to_spawn(
@@ -3494,7 +3501,7 @@ def test_pool_mp_context_env_var_opts_back_out_to_spawn(
 ) -> None:
     _single_threaded(monkeypatch)
     monkeypatch.setenv("DEKKO_POOL_START_METHOD", "spawn")
-    assert resolver_mod._choose_pool_mp_context().get_start_method() == "spawn"
+    assert resolver_mod._pool_mp_context().get_start_method() == "spawn"
 
 
 @_NO_FORK_ON_WINDOWS
@@ -3507,47 +3514,25 @@ def test_pool_mp_context_env_var_never_forces_fork_past_the_gates(
     footgun the gate exists to prevent."""
     monkeypatch.setenv("DEKKO_POOL_START_METHOD", "fork")
     monkeypatch.setattr(resolver_mod.threading, "active_count", lambda: 2)
-    assert resolver_mod._choose_pool_mp_context().get_start_method() == "spawn"
-
-
-def test_pool_mp_context_caches_its_first_verdict(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[None] = []
-    spawn_ctx = multiprocessing.get_context("spawn")
-
-    def counting_chooser() -> object:
-        calls.append(None)
-        return spawn_ctx
-
-    monkeypatch.setattr(
-        resolver_mod, "_choose_pool_mp_context", counting_chooser
-    )
-
-    first = resolver_mod._pool_mp_context()
-    second = resolver_mod._pool_mp_context()
-
-    assert first is spawn_ctx
-    assert second is spawn_ctx
-    assert len(calls) == 1
+    assert resolver_mod._pool_mp_context().get_start_method() == "spawn"
 
 
 @_NO_FORK_ON_WINDOWS
-def test_pool_mp_context_verdict_survives_later_ghost_threads(
+def test_pool_mp_context_checks_threads_at_every_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The regression the cache exists for: ``shutdown(wait=False)``
-    can leave a finished pool's manager/feeder threads alive for a
-    moment, so a per-pool thread check would see the *extraction*
-    pool's ghost threads and silently downgrade every *resolve* pass
-    to ``spawn`` in the exact single-threaded CLI path fork exists
-    for. The first (honestly single-threaded) verdict must hold."""
+    """A thread alive at a later build must send that build to
+    ``spawn``: a forked child inherits any lock that thread holds,
+    held. ``close_pool`` joins each pool's threads, so the CLI is back
+    to one thread by the next build and keeps ``fork``."""
     monkeypatch.delenv("DEKKO_POOL_START_METHOD", raising=False)
     monkeypatch.setattr(resolver_mod.threading, "active_count", lambda: 1)
     assert resolver_mod._pool_mp_context().get_start_method() == "fork"
 
-    # A finished executor's helper threads linger past shutdown.
     monkeypatch.setattr(resolver_mod.threading, "active_count", lambda: 2)
+    assert resolver_mod._pool_mp_context().get_start_method() == "spawn"
+
+    monkeypatch.setattr(resolver_mod.threading, "active_count", lambda: 1)
     assert resolver_mod._pool_mp_context().get_start_method() == "fork"
 
 
@@ -3747,6 +3732,8 @@ def test_resolve_parallel_raises_pool_stalled_error_on_stalled_worker(
             # still-wedged worker after a timeout -- empty here since
             # this fake never launches a real subprocess.
             self._processes: dict = {}
+            # Read by ``close_pool``; nothing ever started one.
+            self._executor_manager_thread = None
 
         def __enter__(self) -> "_StalledPool":
             return self
@@ -3850,6 +3837,125 @@ def test_run_pool_bounded_kills_wedged_worker_after_timeout(
         assert not any(p.is_alive() for p in procs)
     finally:
         pool.shutdown(wait=False)
+
+
+def test_close_pool_joins_the_manager_and_every_worker() -> None:
+    pool = ProcessPoolExecutor(max_workers=2)
+    futures = [pool.submit(abs, -i) for i in range(8)]
+    assert resolver_mod._run_pool_bounded(pool, futures) == list(range(8))
+    manager = pool._executor_manager_thread
+    procs = list(pool._processes.values())
+
+    resolver_mod.close_pool(pool)
+
+    assert manager is not None
+    assert not manager.is_alive()
+    assert not any(p.is_alive() for p in procs)
+
+
+def test_close_pool_on_an_unused_pool_is_a_no_op() -> None:
+    resolver_mod.close_pool(ProcessPoolExecutor(max_workers=1))
+
+
+def test_close_pool_kills_a_wedged_worker_and_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_mod, "POOL_CLOSE_TIMEOUT_S", 0.5)
+    pool = ProcessPoolExecutor(max_workers=1)
+    pool.submit(_sleep_worker)
+    while not pool._processes:
+        time.sleep(0.01)
+    procs = list(pool._processes.values())
+    manager = pool._executor_manager_thread
+
+    start = time.monotonic()
+    resolver_mod.close_pool(pool)
+
+    assert time.monotonic() - start < 15.0
+    assert not any(p.is_alive() for p in procs)
+    assert manager is not None
+    assert not manager.is_alive()
+
+
+# A child forked while another thread holds a lock inherits it held.
+# The script below runs two back-to-back fork pools through the real
+# call-site shape with ``_ThreadWakeup.close`` holding its lock 50 ms,
+# standing in for a descheduled manager thread: with a bare
+# ``shutdown(wait=False)`` teardown the second pool's children block
+# in ``_python_exit`` at their exit and the process never ends (10 of
+# 10 runs); ``close_pool`` joins the first manager before the second
+# fork. The widening is what makes the race deterministic; without it
+# this test would pass before the fix too. With the old cached fork
+# gate restored as well, the script hangs on 3.13; with only the
+# teardown reverted, the per-build gate refuses fork and the assert
+# fails instead.
+_BACK_TO_BACK_FORK_POOLS = textwrap.dedent(
+    """
+    import time
+    from concurrent.futures import ProcessPoolExecutor
+    import concurrent.futures.process as cfp
+
+    from dekko.core import resolver
+
+    _close = cfp._ThreadWakeup.close
+
+    def _slow_close(self):
+        with self._lock:
+            time.sleep(0.05)
+        _close(self)
+
+    cfp._ThreadWakeup.close = _slow_close
+
+    def _run(w, ctx):
+        assert ctx.get_start_method() == "fork"
+        pool = ProcessPoolExecutor(max_workers=w, mp_context=ctx)
+        try:
+            futures = [pool.submit(abs, -i) for i in range(w * 4)]
+            return resolver._run_pool_bounded(pool, futures)
+        finally:
+            resolver.close_pool(pool)
+
+    for _ in range(4):
+        resolver.run_pooled_with_retry(_run, 4, "test")
+    """
+)
+
+
+@_NO_FORK_ON_WINDOWS
+@pytest.mark.skipif(
+    sys.version_info < (3, 12),
+    reason="the inherited lock, ``_ThreadWakeup._lock``, is new in 3.12",
+)
+def test_back_to_back_fork_pools_exit_cleanly(tmp_path: Path) -> None:
+    script = tmp_path / "pools.py"
+    script.write_text(_BACK_TO_BACK_FORK_POOLS)
+    env = {
+        k: v for k, v in os.environ.items() if k != "DEKKO_POOL_START_METHOD"
+    }
+    proc = subprocess.Popen([sys.executable, str(script)], env=env)
+    try:
+        assert proc.wait(timeout=60) == 0
+    finally:
+        if proc.poll() is None:
+            subprocess.run(["pkill", "-9", "-P", str(proc.pid)], check=False)
+            proc.kill()
+            proc.wait()
+
+
+def test_extract_misses_leaves_no_pool_thread_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dekko import repo_ops
+
+    root = Path(__file__).resolve().parents[1] / "fixtures" / "python"
+    rels = sorted(p.name for p in root.glob("*.py"))
+    assert len(rels) >= 2
+    monkeypatch.setattr(repo_ops, "_PARALLEL_MIN", 0)
+    before = threading.active_count()
+
+    repo_ops._extract_misses(root, rels, 2)
+
+    assert threading.active_count() == before
 
 
 def test_resolve_parallel_retries_once_on_broken_pool(
